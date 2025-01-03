@@ -1,0 +1,16 @@
+[tool.poetry]
+name = "tensorlake"
+version = "0.1.0"
+description = "Petabyte scale data framework for unstructured data of any modality"
+authors = ["Tensorlake Devs <info@tensorlake.ai>"]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+indexify = "^0.2.48"
+
+[tool.poetry.scripts]
+tensorlake = "tensorlake.cli:tensorlake"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
