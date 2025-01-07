@@ -9,24 +9,23 @@ from indexify.functions_sdk.image import Build
 import time
 from typing import Dict, List
 
-
 @click.group()
 def tensorlake():
     pass
 
 @click.command()
-@click.argument('graph_file', type=click.File('r'))
-def deploy(graph_file: click.File):
+@click.argument('workflow_file', type=click.File('r'))
+def deploy(workflow_file: click.File):
     """Deploy a workflow to tensorlake."""
     
-    click.echo(f'Preparing deployment for {graph_file.name}')
+    click.echo(f'Preparing deployment for {workflow_file.name}')
     client = ImageBuilderClient.from_env()
     seen_images:Dict[Image,str] = {}
     deployed_graphs:List[Graph] = []
 
     # Read the graph file and build the images
     workflow_globals = {}
-    with open(graph_file.name, 'r') as f:
+    with open(workflow_file.name, 'r') as f:
         exec(f.read(), workflow_globals)
     
     for name, obj in workflow_globals.items():
@@ -124,20 +123,20 @@ def _prepare_images(builder: ImageBuilderClient, images:Dict[Image,str]):
         raise click.Abort
 
 @click.command()
-@click.argument('graph_file', type=click.File('r'))
-def prepare(graph_file: click.File):
+@click.argument('workflow_file', type=click.File('r'))
+def prepare(workflow_file: click.File):
     """Prepare a workflow and it's artifacts for deployment."""
     
-    click.echo(f'Preparing deployment for {graph_file.name}')
+    click.echo(f'Preparing deployment for {workflow_file.name}')
     client = ImageBuilderClient.from_env()
     seen_images:Dict[Image,str] = {}
 
     # Read the graph file and build the images
-    graph_globals = {}
-    with open(graph_file.name, 'r') as f:
-        exec(f.read(), graph_globals)
+    workflow_globals = {}
+    with open(workflow_file.name, 'r') as f:
+        exec(f.read(), workflow_globals)
     
-    for name, obj in graph_globals.items():
+    for name, obj in workflow_globals.items():
         if isinstance(obj, Graph):
             click.echo(f'Found graph {name}')                
             for node_name, node_obj in obj.nodes.items():
