@@ -14,7 +14,7 @@ on:
 
 jobs:
   lint_python_packages:
-    name: Lint Python packages
+    name: Lint and test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -33,3 +33,6 @@ jobs:
 
       - name: Build and lint tensorlake
         run: make build && make check
+
+      - name: Run tests
+        run: make tests
