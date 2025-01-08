@@ -1,0 +1,29 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - 'main'
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    branches:
+      - 'main'
+    paths:
+      - 'tensorlake/**'
+      - '.github/workflows/tests.yaml'
+
+jobs:
+  lint_python_packages:
+    name: Lint Python packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install poetry
+        run: pipx install --force 'poetry==2.0.0'
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.11
+          cache: 'poetry'
+      - name: Build and lint tensorlake      
+        run: make build && make check

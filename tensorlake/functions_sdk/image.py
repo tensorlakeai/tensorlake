@@ -26,9 +26,7 @@ class ImageInformation(BaseModel):
     tag: str | None = ""
     base_image: str | None = ""
 
-
 HASH_BUFF_SIZE = 1024**2
-
 
 class BuildOp(BaseModel):
     op_type: str
@@ -172,9 +170,8 @@ class Image:
             docker_contents.append("RUN (cd /app/python-sdk && pip install .)")
         else:
             docker_contents.append(
-                f"RUN pip install tensorlake=={self._sdk_version}"
-            )  # TODO: Publish tensorlake package to make this work
-
+                f"RUN pip install indexify") # TODO: Update this to specify our local tensorlake version
+            
         docker_file = "\n".join(docker_contents)
         return docker_file
 
@@ -210,10 +207,8 @@ class Image:
 
         return hash.hexdigest()
 
-
 LOCAL_PYTHON_VERSION = f"{sys.version_info.major}.{sys.version_info.minor}"
 BASE_IMAGE_NAME = f"python:{LOCAL_PYTHON_VERSION}-slim-bookworm"
-
 
 def GetDefaultPythonImage(python_version: str):
     return (
