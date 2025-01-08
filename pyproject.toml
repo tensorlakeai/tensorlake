@@ -6,7 +6,6 @@ authors = ["Tensorlake Devs <info@tensorlake.ai>"]
 
 [tool.poetry.dependencies]
 python = "^3.10"
-indexify = "^0.2.48"
 
 [tool.poetry.scripts]
 tensorlake = "tensorlake.cli:tensorlake"

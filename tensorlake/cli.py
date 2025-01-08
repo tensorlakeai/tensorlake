@@ -4,8 +4,8 @@ import click
 import tempfile
 
 from tensorlake.builder.client import ImageBuilderClient
-from indexify import Image, Graph, RemoteGraph, IndexifyClient
-from indexify.functions_sdk.image import Build
+from tensorlake import Image, Graph, RemoteGraph, TensorlakeClient
+from tensorlake.functions_sdk.image import Build
 import time
 from typing import Dict, List
 
@@ -47,7 +47,7 @@ def deploy(workflow_file: click.File):
     introspect_response.raise_for_status()
     project_id = introspect_response.json()['projectId']
 
-    client = IndexifyClient(namespace=project_id, service_url="http://localhost:8900")
+    client = TensorlakeClient(namespace=project_id, service_url="http://localhost:8900")
     click.secho("Everything looks good, deploying now", fg="green")
     for graph in deployed_graphs: 
         # TODO: Every time we post we get a new version, is that expected or the client should do the checks?

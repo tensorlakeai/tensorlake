@@ -1,8 +1,7 @@
 
 from typing import Dict, Optional
 import os
-from indexify import Image
-from indexify.functions_sdk.image import Build, Image
+from tensorlake.functions_sdk.image import Build
 
 import httpx
 
