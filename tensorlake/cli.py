@@ -1,33 +1,35 @@
-
 import os
-import click
 import tempfile
-
-from tensorlake.builder.client import ImageBuilderClient
-from tensorlake import Image, Graph, RemoteGraph, TensorlakeClient
-from tensorlake.functions_sdk.image import Build
 import time
 from typing import Dict, List
+
+import click
+
+from tensorlake import Graph, Image, RemoteGraph, TensorlakeClient
+from tensorlake.builder.client import ImageBuilderClient
+from tensorlake.functions_sdk.image import Build
+
 
 @click.group()
 def tensorlake():
     pass
 
+
 @click.command()
-@click.argument('workflow_file', type=click.File('r'))
+@click.argument("workflow_file", type=click.File("r"))
 def deploy(workflow_file: click.File):
     """Deploy a workflow to tensorlake."""
-    
-    click.echo(f'Preparing deployment for {workflow_file.name}')
+
+    click.echo(f"Preparing deployment for {workflow_file.name}")
     builder = ImageBuilderClient.from_env()
-    seen_images:Dict[Image,str] = {}
-    deployed_graphs:List[Graph] = []
+    seen_images: Dict[Image, str] = {}
+    deployed_graphs: List[Graph] = []
 
     # Read the graph file and build the images
     workflow_globals = {}
-    with open(workflow_file.name, 'r') as f:
+    with open(workflow_file.name, "r") as f:
         exec(f.read(), workflow_globals)
-    
+
     for name, obj in workflow_globals.items():
         if isinstance(obj, Graph):
             deployed_graphs.append(obj)
@@ -38,20 +40,23 @@ def deploy(workflow_file: click.File):
                 seen_images[image] = image.hash()
 
     _prepare_images(builder, seen_images)
-    
+
     # If we are still here then our images should all have URIs
 
     # TODO: Fold calls to the platform API into a client class.
-    indexify_addr  =os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")    
-    introspect_response = builder.client.post(f"{indexify_addr}/platform/v1/keys/introspect", headers=builder.headers)
+    indexify_addr = os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")
+    introspect_response = builder.client.post(
+        f"{indexify_addr}/platform/v1/keys/introspect", headers=builder.headers
+    )
     introspect_response.raise_for_status()
-    project_id = introspect_response.json()['projectId']
+    project_id = introspect_response.json()["projectId"]
 
     client = TensorlakeClient(namespace=project_id, service_url="http://localhost:8900")
     click.secho("Everything looks good, deploying now", fg="green")
-    for graph in deployed_graphs: 
+    for graph in deployed_graphs:
         # TODO: Every time we post we get a new version, is that expected or the client should do the checks?
         remote = RemoteGraph.deploy(graph, client=client)
+
 
 def _wait_for_build(builder: ImageBuilderClient, build: Build):
     click.echo(f"Waiting for {build.image_name} to build")
@@ -64,27 +69,42 @@ def _wait_for_build(builder: ImageBuilderClient, build: Build):
         click.echo(f"Building completed in {build.image_name} {build_duration.seconds}")
     return build
 
-def _build_image(builder:ImageBuilderClient, image:Image, image_hash:str="") -> Build:
+
+def _build_image(
+    builder: ImageBuilderClient, image: Image, image_hash: str = ""
+) -> Build:
     click.echo(f"Building {image._image_name}")
     fd, context_file = tempfile.mkstemp()
     image.build_context(context_file)
 
-    click.echo(f"{image._image_name}: Posting {os.path.getsize(context_file)} bytes of context to build service....")
+    click.echo(
+        f"{image._image_name}: Posting {os.path.getsize(context_file)} bytes of context to build service...."
+    )
     files = {"context": open(context_file, "rb")}
     data = {"name": image._image_name, "hash": image_hash}
 
     res = builder.client.post(
-        f"{builder.build_service}/v1/builds", data=data, files=files, headers=builder.headers, timeout=60
+        f"{builder.build_service}/v1/builds",
+        data=data,
+        files=files,
+        headers=builder.headers,
+        timeout=60,
     )
     res.raise_for_status()
-    build = Build.model_validate(res.json())  
+    build = Build.model_validate(res.json())
 
     return _wait_for_build(builder, build)
 
-def _show_failed_summary(builder: ImageBuilderClient, build:Build):
-    click.secho(f"Building {build.image_name} failed with error message: {build.error_message}", fg="red")
 
-    log_response = builder.client.get(f"{builder.build_service}/v1/builds/{build.id}/log", headers=builder.headers)
+def _show_failed_summary(builder: ImageBuilderClient, build: Build):
+    click.secho(
+        f"Building {build.image_name} failed with error message: {build.error_message}",
+        fg="red",
+    )
+
+    log_response = builder.client.get(
+        f"{builder.build_service}/v1/builds/{build.id}/log", headers=builder.headers
+    )
     if log_response.status_code == 200:
         log = log_response.content.decode("utf-8")
         click.echo(log)
@@ -93,15 +113,16 @@ def _show_failed_summary(builder: ImageBuilderClient, build:Build):
     else:
         log_response.raise_for_status()
 
-def _prepare_images(builder: ImageBuilderClient, images:Dict[Image,str]):
-    ready_builds:Dict[Image,Build] = {}
+
+def _prepare_images(builder: ImageBuilderClient, images: Dict[Image, str]):
+    ready_builds: Dict[Image, Build] = {}
     # Go through the images and build anything that hasn't been built
     for image, image_hash in images.items():
         builds = builder.find_build(image._image_name, image_hash)
 
         if builds:
             build = builds[0]
-            if build.status == 'completed':
+            if build.status == "completed":
                 if build.result == "failed":
                     _show_failed_summary(builder, build)
                 else:
@@ -123,43 +144,50 @@ def _prepare_images(builder: ImageBuilderClient, images:Dict[Image,str]):
     for image in images:
         if image not in ready_builds:
             blockers.append(image)
-            click.secho(f"Image {image._image_name} could not be built, this is blocking deployment", fg="red")
+            click.secho(
+                f"Image {image._image_name} could not be built, this is blocking deployment",
+                fg="red",
+            )
         else:
-            build  = ready_builds[image]
+            build = ready_builds[image]
             image.uri = build.uri
     if blockers:
         raise click.Abort
 
+
 @click.command()
-@click.argument('workflow_file', type=click.File('r'))
+@click.argument("workflow_file", type=click.File("r"))
 def prepare(workflow_file: click.File):
     """Prepare a workflow and it's artifacts for deployment."""
-    
-    click.echo(f'Preparing deployment for {workflow_file.name}')
+
+    click.echo(f"Preparing deployment for {workflow_file.name}")
     client = ImageBuilderClient.from_env()
-    seen_images:Dict[Image,str] = {}
+    seen_images: Dict[Image, str] = {}
 
     # Read the graph file and build the images
     workflow_globals = {}
-    with open(workflow_file.name, 'r') as f:
+    with open(workflow_file.name, "r") as f:
         exec(f.read(), workflow_globals)
-    
+
     for name, obj in workflow_globals.items():
         if isinstance(obj, Graph):
-            click.echo(f'Found graph {name}')                
+            click.echo(f"Found graph {name}")
             for node_name, node_obj in obj.nodes.items():
                 image = node_obj.image
-                click.echo(f"graph function {node_name} uses image '{image._image_name}'")
+                click.echo(
+                    f"graph function {node_name} uses image '{image._image_name}'"
+                )
                 if image in seen_images:
                     continue
                 seen_images[image] = image.hash()
-    
+
     click.echo(f"Found {len(seen_images)} images in this workflow")
     _prepare_images(client, seen_images)
 
+
 @click.command(help="Extract and display logs from tensorlake")
-@click.option('--image', '-i')
-def show_logs(image:str):
+@click.option("--image", "-i")
+def show_logs(image: str):
     if image:
         builder = ImageBuilderClient.from_env()
         if ":" in image:
@@ -167,11 +195,14 @@ def show_logs(image:str):
             build = builder.find_build(image, image_hash)[0]
         else:
             build = builder.get_latest_build(image)
-        
-        log_response = builder.client.get(f"{builder.build_service}/v1/builds/{build.id}/log", headers=builder.headers)    
+
+        log_response = builder.client.get(
+            f"{builder.build_service}/v1/builds/{build.id}/log", headers=builder.headers
+        )
         if log_response.status_code == 200:
             log = log_response.content.decode("utf-8")
             print(log)
+
 
 tensorlake.add_command(deploy)
 tensorlake.add_command(prepare)

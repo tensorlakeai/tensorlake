@@ -16,6 +16,7 @@ from tensorlake.functions_sdk.indexify_functions import IndexifyFunction
 from tensorlake.functions_sdk.object_serializer import get_serializer
 from tensorlake.settings import DEFAULT_SERVICE_URL
 
+
 class InvocationEventPayload(BaseModel):
     invocation_id: str
     fn_name: str

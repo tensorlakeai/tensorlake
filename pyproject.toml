@@ -2,10 +2,16 @@
 name = "tensorlake"
 version = "0.1.0"
 description = "Petabyte scale data framework for unstructured data of any modality"
-authors = ["Tensorlake Devs <info@tensorlake.ai>"]
+authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
+homepage = "https://github.com/tensorlakeai/tensorlake"
+repository = "https://github.com/tensorlakeai/tensorlake"
 
 [tool.poetry.dependencies]
 python = "^3.10"
+httpx = { version = "^0.28.1", extras = ["http2"] }
+pydantic = "2.10.4"
+cloudpickle = "^3.1.0"
+docker = "^7.1.0"
 
 [tool.poetry.scripts]
 tensorlake = "tensorlake.cli:tensorlake"
@@ -13,3 +19,7 @@ tensorlake = "tensorlake.cli:tensorlake"
 [build-system]
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.group.dev.dependencies]
+black = "^24.10.0"
+pylint = "^3.3.0"

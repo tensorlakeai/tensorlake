@@ -153,11 +153,11 @@ class Image:
         docker_contents = [
             f"FROM {self._base_image}",
             "RUN mkdir -p ~/.indexify",
-            f"RUN echo {self._image_name} > ~/.indexify/image_name", # TODO: Do we still use this in executors?
-            f"RUN echo {self.hash()} > ~/.indexify/image_hash",      # TODO: Do we still use this in executors?
+            f"RUN echo {self._image_name} > ~/.indexify/image_name",  # TODO: Do we still use this in executors?
+            f"RUN echo {self.hash()} > ~/.indexify/image_hash",  # TODO: Do we still use this in executors?
             "WORKDIR /app",
         ]
-        
+
         for build_op in self._build_ops:
             docker_contents.append(build_op.render())
 
@@ -171,7 +171,9 @@ class Image:
             docker_contents.append(f"COPY {python_sdk_path} /app/python-sdk")
             docker_contents.append("RUN (cd /app/python-sdk && pip install .)")
         else:
-            docker_contents.append(f"RUN pip install tensorlake=={self._sdk_version}")
+            docker_contents.append(
+                f"RUN pip install tensorlake=={self._sdk_version}"
+            )  # TODO: Publish tensorlake package to make this work
 
         docker_file = "\n".join(docker_contents)
         return docker_file

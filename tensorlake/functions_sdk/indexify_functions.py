@@ -1,17 +1,7 @@
 import inspect
 import traceback
 from inspect import Parameter
-from typing import (
-    Any,
-    Dict,
-    List,
-    Optional,
-    Tuple,
-    Type,
-    Union,
-    get_args,
-    get_origin,
-)
+from typing import Any, Dict, List, Optional, Tuple, Type, Union, get_args, get_origin
 
 from pydantic import BaseModel
 from typing_extensions import get_type_hints

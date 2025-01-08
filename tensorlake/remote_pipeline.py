@@ -5,6 +5,7 @@ from tensorlake.functions_sdk.pipeline import Pipeline
 from .http_client import TensorlakeClient
 from .remote_graph import RemoteGraph
 
+
 class RemotePipeline(RemoteGraph):
     @classmethod
     def deploy(

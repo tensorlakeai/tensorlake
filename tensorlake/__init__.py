@@ -5,8 +5,8 @@ from .functions_sdk.indexify_functions import (
     IndexifyFunction,
     IndexifyRouter,
     get_ctx,
-    tensorlake_function,
     indexify_router,
+    tensorlake_function,
 )
 from .functions_sdk.pipeline import Pipeline
 from .http_client import TensorlakeClient

@@ -1,9 +1,6 @@
 from typing import Union
 
-from tensorlake.functions_sdk.indexify_functions import (
-    IndexifyFunction,
-    IndexifyRouter,
-)
+from tensorlake.functions_sdk.indexify_functions import IndexifyFunction, IndexifyRouter
 
 from .graph import Graph
 
