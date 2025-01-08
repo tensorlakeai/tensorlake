@@ -139,7 +139,7 @@ def _process_dict_arg(dict_arg: dict, sig: inspect.Signature) -> Tuple[list, dic
     return new_args, new_kwargs
 
 
-def indexify_router(
+def tensorlake_router(
     name: Optional[str] = None,
     description: Optional[str] = "",
     image: Optional[Image] = DEFAULT_IMAGE,

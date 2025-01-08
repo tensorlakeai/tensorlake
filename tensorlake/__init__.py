@@ -5,8 +5,8 @@ from .functions_sdk.indexify_functions import (
     IndexifyFunction,
     IndexifyRouter,
     get_ctx,
-    indexify_router,
     tensorlake_function,
+    tensorlake_router,
 )
 from .functions_sdk.pipeline import Pipeline
 from .http_client import TensorlakeClient
@@ -25,7 +25,7 @@ __all__ = [
     "get_ctx",
     "IndexifyFunction",
     "IndexifyRouter",
-    "indexify_router",
+    "tensorlake_router",
     "DEFAULT_SERVICE_URL",
     "TensorlakeClient",
 ]
