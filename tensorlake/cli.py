@@ -4,7 +4,7 @@ import click
 import tempfile
 
 from tensorlake.builder.client import ImageBuilderClient
-from indexify import Image, Graph, RemoteGraph
+from indexify import Image, Graph, RemoteGraph, IndexifyClient
 from indexify.functions_sdk.image import Build
 import time
 from typing import Dict, List
@@ -19,7 +19,7 @@ def deploy(workflow_file: click.File):
     """Deploy a workflow to tensorlake."""
     
     click.echo(f'Preparing deployment for {workflow_file.name}')
-    client = ImageBuilderClient.from_env()
+    builder = ImageBuilderClient.from_env()
     seen_images:Dict[Image,str] = {}
     deployed_graphs:List[Graph] = []
 
@@ -37,13 +37,21 @@ def deploy(workflow_file: click.File):
                     continue
                 seen_images[image] = image.hash()
 
-    _prepare_images(client, seen_images)
-
+    _prepare_images(builder, seen_images)
+    
     # If we are still here then our images should all have URIs
-    click.secho("Everything looks good, deploying now", fg="green")
-    for graph in deployed_graphs: # TODO: We need to make the client aware of the namespace
-        remote = RemoteGraph.deploy(graph)
 
+    # TODO: Fold calls to the platform API into a client class.
+    indexify_addr  =os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")    
+    introspect_response = builder.client.post(f"{indexify_addr}/platform/v1/keys/introspect", headers=builder.headers)
+    introspect_response.raise_for_status()
+    project_id = introspect_response.json()['projectId']
+
+    client = IndexifyClient(namespace=project_id, service_url="http://localhost:8900")
+    click.secho("Everything looks good, deploying now", fg="green")
+    for graph in deployed_graphs: 
+        # TODO: Every time we post we get a new version, is that expected or the client should do the checks?
+        remote = RemoteGraph.deploy(graph, client=client)
 
 def _wait_for_build(builder: ImageBuilderClient, build: Build):
     click.echo(f"Waiting for {build.image_name} to build")
