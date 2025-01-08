@@ -35,4 +35,4 @@ jobs:
         run: make build && make check
 
       - name: Run tests
-        run: make tests
+        run: make test
