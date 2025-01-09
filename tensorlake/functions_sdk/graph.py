@@ -106,7 +106,8 @@ class Graph:
             return self
 
         if issubclass(indexify_fn, IndexifyFunction) and indexify_fn.accumulate:
-            self.accumulator_zero_values[indexify_fn.name] = indexify_fn.accumulate()
+            self.accumulator_zero_values[indexify_fn.name] = indexify_fn.accumulate(
+            )
 
         self.nodes[indexify_fn.name] = indexify_fn
         return self
@@ -118,7 +119,8 @@ class Graph:
         validate_route(from_node=from_node, to_nodes=to_nodes)
 
         print(
-            f"Adding router {from_node.name} to nodes {[node.name for node in to_nodes]}"
+            f"Adding router {from_node.name} to nodes {
+                [node.name for node in to_nodes]}"
         )
         self.add_node(from_node)
         for node in to_nodes:
@@ -135,7 +137,8 @@ class Graph:
             cloudpickle.register_pickle_by_value(sys.modules[node.__module__])
             pickled_functions[node.name] = cloudpickle.dumps(node)
             if not sys.modules[node.__module__] in additional_modules:
-                cloudpickle.unregister_pickle_by_value(sys.modules[node.__module__])
+                cloudpickle.unregister_pickle_by_value(
+                    sys.modules[node.__module__])
         return pickled_functions
 
     def add_edge(
@@ -215,7 +218,7 @@ class Graph:
             runtime_information=RuntimeInformation(
                 major_version=sys.version_info.major,
                 minor_version=sys.version_info.minor,
-                sdk_version=importlib.metadata.version("indexify-python-sdk"),
+                sdk_version=importlib.metadata.version("tensorlake"),
             ),
         )
 
@@ -276,7 +279,8 @@ class Graph:
 
         if total_number_of_nodes != len(visited):
             # all the nodes are not reachable from the start_node.
-            raise Exception("Some nodes in the graph are not reachable from start node")
+            raise Exception(
+                "Some nodes in the graph are not reachable from start node")
 
     def _run(
         self,
@@ -306,7 +310,8 @@ class Graph:
                 outputs[node_name].extend(fn_outputs)
             if self._accumulator_values.get(node_name, None) is not None and queue:
                 print(
-                    f"accumulator not none for {node_name}, continuing, len queue: {len(queue)}"
+                    f"accumulator not none for {
+                        node_name}, continuing, len queue: {len(queue)}"
                 )
                 continue
 
@@ -324,7 +329,8 @@ class Graph:
             )
             for dynamic_edge in result.edges:
                 if dynamic_edge in self.nodes:
-                    print(f"[bold]dynamic router returned node: {dynamic_edge}[/bold]")
+                    print(f"[bold]dynamic router returned node: {
+                          dynamic_edge}[/bold]")
             return result
 
         acc_value = self._accumulator_values.get(node_name, None)
@@ -349,7 +355,8 @@ class Graph:
     ) -> List[Any]:
         results = self._results[invocation_id]
         if fn_name not in results:
-            raise ValueError(f"no results found for fn {fn_name} on graph {self.name}")
+            raise ValueError(f"no results found for fn {
+                             fn_name} on graph {self.name}")
         fn = self.nodes[fn_name]
         fn_model = self.get_function(fn_name).get_output_model()
         serializer = get_serializer(fn.output_encoder)
