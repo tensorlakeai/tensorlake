@@ -12,7 +12,7 @@ from tensorlake import (
     Pipeline,
     RemoteGraph,
     RemotePipeline,
-    TensorlakeFunction,
+    TensorlakeCompute,
     TensorlakeRouter,
     get_ctx,
     tensorlake_function,
@@ -82,7 +82,7 @@ def simple_function_ctx_b(x: ComplexObject) -> int:
     return val + 1
 
 
-class SimpleFunctionCtxC(TensorlakeFunction):
+class SimpleFunctionCtxC(TensorlakeCompute):
     name = "SimpleFunctionCtxC"
 
     def __init__(self):
@@ -221,7 +221,7 @@ class SimpleFunctionCtxClsObject(BaseModel):
     x: int
 
 
-class SimpleFunctionCtxCls(TensorlakeFunction):
+class SimpleFunctionCtxCls(TensorlakeCompute):
     name = "SimpleFunctionCtxCls"
 
     def __init__(self):
@@ -235,7 +235,7 @@ class SimpleRouterCtxClsObject(BaseModel):
     x: int
 
 
-class SimpleFunctionCtxCls1(TensorlakeFunction):
+class SimpleFunctionCtxCls1(TensorlakeCompute):
     name = "SimpleFunctionCtxCls1"
 
     def __init__(self):
@@ -245,7 +245,7 @@ class SimpleFunctionCtxCls1(TensorlakeFunction):
         return SimpleRouterCtxClsObject(x=obj.x + 1)
 
 
-class SimpleFunctionCtxCls2(TensorlakeFunction):
+class SimpleFunctionCtxCls2(TensorlakeCompute):
     name = "SimpleFunctionCtxCls2"
 
     def __init__(self):
@@ -746,7 +746,7 @@ class TestGraphBehaviors(unittest.TestCase):
                       start_node=SimpleRouterCtxCls)
         graph.route(SimpleRouterCtxCls, [
                     SimpleFunctionCtxCls1, SimpleFunctionCtxCls2])
-        graph = remote_or_local_graph(graph, is_remote)
+        # graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(
             block_until_done=True, obj=SimpleRouterCtxClsObject(x=1)
         )

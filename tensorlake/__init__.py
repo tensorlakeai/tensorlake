@@ -3,7 +3,7 @@ from .functions_sdk.graph import Graph
 from .functions_sdk.image import Image
 from .functions_sdk.pipeline import Pipeline
 from .functions_sdk.tensorlake_functions import (
-    TensorlakeFunction,
+    TensorlakeCompute,
     TensorlakeRouter,
     get_ctx,
     tensorlake_function,
@@ -23,7 +23,7 @@ __all__ = [
     "Image",
     "tensorlake_function",
     "get_ctx",
-    "TensorlakeFunction",
+    "TensorlakeCompute",
     "TensorlakeRouter",
     "tensorlake_router",
     "DEFAULT_SERVICE_URL",

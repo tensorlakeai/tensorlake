@@ -14,7 +14,7 @@ class RouterOutput(BaseModel):
     edges: List[str]
 
 
-class IndexifyData(BaseModel):
+class TensorlakeData(BaseModel):
     id: Optional[str] = None
     payload: Union[bytes, str]
     encoder: Literal["cloudpickle", "json"] = "cloudpickle"

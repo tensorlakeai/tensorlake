@@ -2,17 +2,17 @@ import inspect
 import re
 from typing import List, Type, Union
 
-from .tensorlake_functions import TensorlakeFunction, TensorlakeRouter
+from .tensorlake_functions import TensorlakeCompute, TensorlakeRouter
 
 
-def validate_node(indexify_fn: Union[Type[TensorlakeFunction], Type[TensorlakeRouter]]):
+def validate_node(indexify_fn: Union[Type[TensorlakeCompute], Type[TensorlakeRouter]]):
     if inspect.isfunction(indexify_fn):
         raise Exception(
             f"Unable to add node of type `{type(indexify_fn)}`. "
             f"Required, `IndexifyFunction` or `IndexifyRouter`"
         )
     if not (
-        issubclass(indexify_fn, TensorlakeFunction)
+        issubclass(indexify_fn, TensorlakeCompute)
         or issubclass(indexify_fn, TensorlakeRouter)
     ):
         raise Exception(
@@ -37,7 +37,7 @@ def validate_node(indexify_fn: Union[Type[TensorlakeFunction], Type[TensorlakeRo
 
 
 def validate_route(
-    from_node: Type[TensorlakeRouter], to_nodes: List[Type[TensorlakeFunction]]
+    from_node: Type[TensorlakeRouter], to_nodes: List[Type[TensorlakeCompute]]
 ):
     signature = inspect.signature(from_node.run)
 

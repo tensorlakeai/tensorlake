@@ -1,7 +1,7 @@
 from typing import Union
 
 from tensorlake.functions_sdk.tensorlake_functions import (
-    TensorlakeFunction,
+    TensorlakeCompute,
     TensorlakeRouter,
 )
 
@@ -15,7 +15,7 @@ class Pipeline:
         self._graph: Graph = None
         self._last_step = None
 
-    def add_step(self, function: Union[TensorlakeFunction, TensorlakeRouter]):
+    def add_step(self, function: Union[TensorlakeCompute, TensorlakeRouter]):
         if self._graph is None:
             self._graph = Graph(
                 name=self.name, description=self.description, start_node=function

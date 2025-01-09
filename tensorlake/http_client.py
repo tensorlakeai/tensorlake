@@ -9,10 +9,10 @@ from pydantic import BaseModel, Json
 from rich import print
 
 from tensorlake.error import ApiException, GraphStillProcessing
-from tensorlake.functions_sdk.data_objects import IndexifyData
+from tensorlake.functions_sdk.data_objects import TensorlakeData
 from tensorlake.functions_sdk.graph import ComputeGraphMetadata, Graph
 from tensorlake.functions_sdk.object_serializer import get_serializer
-from tensorlake.functions_sdk.tensorlake_functions import TensorlakeFunction
+from tensorlake.functions_sdk.tensorlake_functions import TensorlakeCompute
 from tensorlake.settings import DEFAULT_SERVICE_URL
 from tensorlake.utils.http_client import get_httpx_client, get_sync_or_async_client
 
@@ -333,7 +333,7 @@ class TensorlakeClient:
         invocation_id: str,
         fn_name: str,
         output_id: str,
-    ) -> IndexifyData:
+    ) -> TensorlakeData:
         response = self._get(
             f"namespaces/{namespace}/compute_graphs/{graph}/invocations/{
                 invocation_id}/fn/{fn_name}/output/{output_id}",
@@ -344,7 +344,7 @@ class TensorlakeClient:
             encoding = "json"
         else:
             encoding = "cloudpickle"
-        return IndexifyData(id=output_id, payload=response.content, encoder=encoding)
+        return TensorlakeData(id=output_id, payload=response.content, encoder=encoding)
 
     def graph_outputs(
         self,
