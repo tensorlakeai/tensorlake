@@ -6,7 +6,7 @@ import cloudpickle
 import httpx
 from httpx_sse import connect_sse
 from pydantic import BaseModel, Json
-from python_utils.http_client import get_httpx_client, get_sync_or_async_client
+from tensorlake.utils.http_client import get_httpx_client, get_sync_or_async_client
 from rich import print
 
 from tensorlake.error import ApiException, GraphStillProcessing
@@ -73,7 +73,8 @@ class TensorlakeClient:
 
     def _request(self, method: str, **kwargs) -> httpx.Response:
         try:
-            response = self._client.request(method, timeout=self._timeout, **kwargs)
+            response = self._client.request(
+                method, timeout=self._timeout, **kwargs)
             status_code = str(response.status_code)
             if status_code.startswith("4"):
                 raise ApiException(
@@ -83,7 +84,8 @@ class TensorlakeClient:
                 raise ApiException(response.text)
         except httpx.ConnectError:
             message = (
-                f"Make sure the server is running and accessible at {self._service_url}"
+                f"Make sure the server is running and accessible at {
+                    self._service_url}"
             )
             ex = ApiException(message=message)
             raise ex
@@ -165,11 +167,13 @@ class TensorlakeClient:
 
     def register_compute_graph(self, graph: Graph, additional_modules):
         graph_metadata = graph.definition()
-        serialized_code = cloudpickle.dumps(graph.serialize(additional_modules))
+        serialized_code = cloudpickle.dumps(
+            graph.serialize(additional_modules))
         response = self._post(
             f"namespaces/{self.namespace}/compute_graphs",
             files={"code": serialized_code},
-            data={"compute_graph": graph_metadata.model_dump_json(exclude_none=True)},
+            data={"compute_graph": graph_metadata.model_dump_json(
+                exclude_none=True)},
         )
         response.raise_for_status()
         self._graphs[graph.name] = graph
@@ -197,7 +201,8 @@ class TensorlakeClient:
         return graphs
 
     def graph(self, name: str) -> ComputeGraphMetadata:
-        response = self._get(f"namespaces/{self.namespace}/compute_graphs/{name}")
+        response = self._get(
+            f"namespaces/{self.namespace}/compute_graphs/{name}")
         return ComputeGraphMetadata(**response.json())
 
     def namespaces(self) -> List[str]:
@@ -236,7 +241,8 @@ class TensorlakeClient:
     ) -> Optional[str]:
         try:
             response = self._get(
-                f"namespaces/{self.namespace}/compute_graphs/{cg_name}/invocations/{invocation_id}/fn/{fn_name}/tasks/{task_id}/logs/{file}"
+                f"namespaces/{self.namespace}/compute_graphs/{cg_name}/invocations/{
+                    invocation_id}/fn/{fn_name}/tasks/{task_id}/logs/{file}"
             )
             response.raise_for_status()
             return response.content.decode("utf-8")
@@ -245,7 +251,8 @@ class TensorlakeClient:
             return None
 
     def replay_invocations(self, graph: str):
-        self._post(f"namespaces/{self.namespace}/compute_graphs/{graph}/replay")
+        self._post(
+            f"namespaces/{self.namespace}/compute_graphs/{graph}/replay")
 
     def invoke_graph_with_object(
         self,
@@ -283,11 +290,14 @@ class TensorlakeClient:
                         if k == "DiagnosticMessage":
                             message = v.get("message", None)
                             print(
-                                f"[bold red]scheduler diagnostic: [/bold red]{message}"
+                                f"[bold red]scheduler diagnostic: [/bold red]{
+                                    message}"
                             )
                             continue
-                        event_payload = InvocationEventPayload.model_validate(v)
-                        event = InvocationEvent(event_name=k, payload=event_payload)
+                        event_payload = InvocationEventPayload.model_validate(
+                            v)
+                        event = InvocationEvent(
+                            event_name=k, payload=event_payload)
                         if (
                             event.event_name == "TaskCompleted"
                             and event.payload.outcome == "Failure"
@@ -307,11 +317,14 @@ class TensorlakeClient:
                                 "stderr",
                             )
                             if stdout:
-                                print(f"[bold red]stdout[/bold red]: \n {stdout}")
+                                print(
+                                    f"[bold red]stdout[/bold red]: \n {stdout}")
                             if stderr:
-                                print(f"[bold red]stderr[/bold red]: \n {stderr}")
+                                print(
+                                    f"[bold red]stderr[/bold red]: \n {stderr}")
                         print(
-                            f"[bold green]{event.event_name}[/bold green]: {event.payload}"
+                            f"[bold green]{
+                                event.event_name}[/bold green]: {event.payload}"
                         )
         raise Exception("invocation ID not returned")
 
@@ -324,7 +337,8 @@ class TensorlakeClient:
         output_id: str,
     ) -> IndexifyData:
         response = self._get(
-            f"namespaces/{namespace}/compute_graphs/{graph}/invocations/{invocation_id}/fn/{fn_name}/output/{output_id}",
+            f"namespaces/{namespace}/compute_graphs/{graph}/invocations/{
+                invocation_id}/fn/{fn_name}/output/{output_id}",
         )
         response.raise_for_status()
         content_type = response.headers.get("Content-Type")
@@ -350,7 +364,8 @@ class TensorlakeClient:
         """
         fn_key = f"{graph}/{fn_name}"
         response = self._get(
-            f"namespaces/{self.namespace}/compute_graphs/{graph}/invocations/{invocation_id}/outputs",
+            f"namespaces/{self.namespace}/compute_graphs/{
+                graph}/invocations/{invocation_id}/outputs",
         )
         response.raise_for_status()
         graph_outputs = GraphOutputs(**response.json())
