@@ -6,7 +6,6 @@ import cloudpickle
 import httpx
 from httpx_sse import connect_sse
 from pydantic import BaseModel, Json
-from tensorlake.utils.http_client import get_httpx_client, get_sync_or_async_client
 from rich import print
 
 from tensorlake.error import ApiException, GraphStillProcessing
@@ -15,6 +14,7 @@ from tensorlake.functions_sdk.graph import ComputeGraphMetadata, Graph
 from tensorlake.functions_sdk.indexify_functions import IndexifyFunction
 from tensorlake.functions_sdk.object_serializer import get_serializer
 from tensorlake.settings import DEFAULT_SERVICE_URL
+from tensorlake.utils.http_client import get_httpx_client, get_sync_or_async_client
 
 
 class InvocationEventPayload(BaseModel):
@@ -73,8 +73,7 @@ class TensorlakeClient:
 
     def _request(self, method: str, **kwargs) -> httpx.Response:
         try:
-            response = self._client.request(
-                method, timeout=self._timeout, **kwargs)
+            response = self._client.request(method, timeout=self._timeout, **kwargs)
             status_code = str(response.status_code)
             if status_code.startswith("4"):
                 raise ApiException(
@@ -83,10 +82,8 @@ class TensorlakeClient:
             if status_code.startswith("5"):
                 raise ApiException(response.text)
         except httpx.ConnectError:
-            message = (
-                f"Make sure the server is running and accessible at {
+            message = f"Make sure the server is running and accessible at {
                     self._service_url}"
-            )
             ex = ApiException(message=message)
             raise ex
         return response
@@ -167,13 +164,11 @@ class TensorlakeClient:
 
     def register_compute_graph(self, graph: Graph, additional_modules):
         graph_metadata = graph.definition()
-        serialized_code = cloudpickle.dumps(
-            graph.serialize(additional_modules))
+        serialized_code = cloudpickle.dumps(graph.serialize(additional_modules))
         response = self._post(
             f"namespaces/{self.namespace}/compute_graphs",
             files={"code": serialized_code},
-            data={"compute_graph": graph_metadata.model_dump_json(
-                exclude_none=True)},
+            data={"compute_graph": graph_metadata.model_dump_json(exclude_none=True)},
         )
         response.raise_for_status()
         self._graphs[graph.name] = graph
@@ -201,8 +196,7 @@ class TensorlakeClient:
         return graphs
 
     def graph(self, name: str) -> ComputeGraphMetadata:
-        response = self._get(
-            f"namespaces/{self.namespace}/compute_graphs/{name}")
+        response = self._get(f"namespaces/{self.namespace}/compute_graphs/{name}")
         return ComputeGraphMetadata(**response.json())
 
     def namespaces(self) -> List[str]:
@@ -251,8 +245,7 @@ class TensorlakeClient:
             return None
 
     def replay_invocations(self, graph: str):
-        self._post(
-            f"namespaces/{self.namespace}/compute_graphs/{graph}/replay")
+        self._post(f"namespaces/{self.namespace}/compute_graphs/{graph}/replay")
 
     def invoke_graph_with_object(
         self,
@@ -294,10 +287,8 @@ class TensorlakeClient:
                                     message}"
                             )
                             continue
-                        event_payload = InvocationEventPayload.model_validate(
-                            v)
-                        event = InvocationEvent(
-                            event_name=k, payload=event_payload)
+                        event_payload = InvocationEventPayload.model_validate(v)
+                        event = InvocationEvent(event_name=k, payload=event_payload)
                         if (
                             event.event_name == "TaskCompleted"
                             and event.payload.outcome == "Failure"
@@ -317,11 +308,9 @@ class TensorlakeClient:
                                 "stderr",
                             )
                             if stdout:
-                                print(
-                                    f"[bold red]stdout[/bold red]: \n {stdout}")
+                                print(f"[bold red]stdout[/bold red]: \n {stdout}")
                             if stderr:
-                                print(
-                                    f"[bold red]stderr[/bold red]: \n {stderr}")
+                                print(f"[bold red]stderr[/bold red]: \n {stderr}")
                         print(
                             f"[bold green]{
                                 event.event_name}[/bold green]: {event.payload}"
