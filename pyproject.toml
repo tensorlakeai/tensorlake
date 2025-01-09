@@ -12,6 +12,8 @@ httpx = { version = "^0.28.1", extras = ["http2"] }
 pydantic = "2.10.4"
 cloudpickle = "^3.1.0"
 docker = "^7.1.0"
+nanoid = "^2.0.0"
+httpx-sse = "^0.4.0"
 
 [tool.poetry.scripts]
 tensorlake = "tensorlake.cli:tensorlake"
