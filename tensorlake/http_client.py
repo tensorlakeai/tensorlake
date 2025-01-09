@@ -6,7 +6,6 @@ import cloudpickle
 import httpx
 from httpx_sse import connect_sse
 from pydantic import BaseModel, Json
-from python_utils.http_client import get_httpx_client, get_sync_or_async_client
 from rich import print
 
 from tensorlake.error import ApiException, GraphStillProcessing
@@ -15,6 +14,7 @@ from tensorlake.functions_sdk.graph import ComputeGraphMetadata, Graph
 from tensorlake.functions_sdk.indexify_functions import IndexifyFunction
 from tensorlake.functions_sdk.object_serializer import get_serializer
 from tensorlake.settings import DEFAULT_SERVICE_URL
+from tensorlake.utils.http_client import get_httpx_client, get_sync_or_async_client
 
 
 class InvocationEventPayload(BaseModel):
@@ -82,9 +82,8 @@ class TensorlakeClient:
             if status_code.startswith("5"):
                 raise ApiException(response.text)
         except httpx.ConnectError:
-            message = (
-                f"Make sure the server is running and accessible at {self._service_url}"
-            )
+            message = f"Make sure the server is running and accessible at {
+                    self._service_url}"
             ex = ApiException(message=message)
             raise ex
         return response
@@ -236,7 +235,8 @@ class TensorlakeClient:
     ) -> Optional[str]:
         try:
             response = self._get(
-                f"namespaces/{self.namespace}/compute_graphs/{cg_name}/invocations/{invocation_id}/fn/{fn_name}/tasks/{task_id}/logs/{file}"
+                f"namespaces/{self.namespace}/compute_graphs/{cg_name}/invocations/{
+                    invocation_id}/fn/{fn_name}/tasks/{task_id}/logs/{file}"
             )
             response.raise_for_status()
             return response.content.decode("utf-8")
@@ -283,7 +283,8 @@ class TensorlakeClient:
                         if k == "DiagnosticMessage":
                             message = v.get("message", None)
                             print(
-                                f"[bold red]scheduler diagnostic: [/bold red]{message}"
+                                f"[bold red]scheduler diagnostic: [/bold red]{
+                                    message}"
                             )
                             continue
                         event_payload = InvocationEventPayload.model_validate(v)
@@ -311,7 +312,8 @@ class TensorlakeClient:
                             if stderr:
                                 print(f"[bold red]stderr[/bold red]: \n {stderr}")
                         print(
-                            f"[bold green]{event.event_name}[/bold green]: {event.payload}"
+                            f"[bold green]{
+                                event.event_name}[/bold green]: {event.payload}"
                         )
         raise Exception("invocation ID not returned")
 
@@ -324,7 +326,8 @@ class TensorlakeClient:
         output_id: str,
     ) -> IndexifyData:
         response = self._get(
-            f"namespaces/{namespace}/compute_graphs/{graph}/invocations/{invocation_id}/fn/{fn_name}/output/{output_id}",
+            f"namespaces/{namespace}/compute_graphs/{graph}/invocations/{
+                invocation_id}/fn/{fn_name}/output/{output_id}",
         )
         response.raise_for_status()
         content_type = response.headers.get("Content-Type")
@@ -350,7 +353,8 @@ class TensorlakeClient:
         """
         fn_key = f"{graph}/{fn_name}"
         response = self._get(
-            f"namespaces/{self.namespace}/compute_graphs/{graph}/invocations/{invocation_id}/outputs",
+            f"namespaces/{self.namespace}/compute_graphs/{
+                graph}/invocations/{invocation_id}/outputs",
         )
         response.raise_for_status()
         graph_outputs = GraphOutputs(**response.json())
