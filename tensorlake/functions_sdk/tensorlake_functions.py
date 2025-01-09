@@ -60,7 +60,7 @@ class PlacementConstraints(BaseModel):
     image_name: Optional[str] = None
 
 
-class IndexifyFunction:
+class TensorlakeFunction:
     name: str = ""
     description: str = ""
     image: Optional[Image] = DEFAULT_IMAGE
@@ -95,15 +95,16 @@ class IndexifyFunction:
         return serializer.deserialize(output.payload)
 
 
-class IndexifyRouter:
+class TensorlakeRouter:
     name: str = ""
     description: str = ""
     image: Optional[Image] = DEFAULT_IMAGE
     placement_constraints: List[PlacementConstraints] = []
+    accumulate: Optional[Type[BaseModel]] = None,
     input_encoder: Optional[str] = "cloudpickle"
     output_encoder: Optional[str] = "cloudpickle"
 
-    def run(self, *args, **kwargs) -> Optional[List[IndexifyFunction]]:
+    def run(self, *args, **kwargs) -> Optional[List[TensorlakeFunction]]:
         pass
 
     # Create run method that preserves signature
@@ -162,7 +163,7 @@ def tensorlake_router(
             "run": staticmethod(fn),
         }
 
-        return type("IndexifyRouter", (IndexifyRouter,), attrs)
+        return type("TensorlakeRouter", (TensorlakeRouter,), attrs)
 
     return construct
 
@@ -192,7 +193,7 @@ def tensorlake_function(
             "run": staticmethod(fn),
         }
 
-        return type("IndexifyFunction", (IndexifyFunction,), attrs)
+        return type("TensorlakeFunction", (TensorlakeFunction,), attrs)
 
     return construct
 
@@ -207,19 +208,19 @@ class RouterCallResult(BaseModel):
     traceback_msg: Optional[str] = None
 
 
-class IndexifyFunctionWrapper:
+class TensorlakeFunctionWrapper:
     def __init__(
         self,
-        indexify_function: Union[IndexifyFunction, IndexifyRouter],
+        indexify_function: Union[TensorlakeFunction, TensorlakeRouter],
         context: GraphInvocationContext,
     ):
-        self.indexify_function: Union[IndexifyFunction, IndexifyRouter] = (
+        self.indexify_function: Union[TensorlakeFunction, TensorlakeRouter] = (
             indexify_function()
         )
         self.indexify_function._ctx = context
 
     def get_output_model(self) -> Any:
-        if not isinstance(self.indexify_function, IndexifyFunction):
+        if not isinstance(self.indexify_function, TensorlakeFunction):
             raise TypeError("Input must be an instance of IndexifyFunction")
 
         extract_method = self.indexify_function.run
@@ -231,12 +232,13 @@ class IndexifyFunctionWrapper:
             inner_types = get_args(return_type)
             if len(inner_types) == 2 and type(None) in inner_types:
                 return_type = (
-                    inner_types[0] if inner_types[1] is type(None) else inner_types[1]
+                    inner_types[0] if inner_types[1] is type(
+                        None) else inner_types[1]
                 )
         return return_type
 
     def get_input_types(self) -> Dict[str, Any]:
-        if not isinstance(self.indexify_function, IndexifyFunction):
+        if not isinstance(self.indexify_function, TensorlakeFunction):
             raise TypeError("Input must be an instance of IndexifyFunction")
 
         extract_method = self.indexify_function.run
@@ -297,7 +299,8 @@ class IndexifyFunctionWrapper:
             return [], None
 
         output = (
-            extracted_data if isinstance(extracted_data, list) else [extracted_data]
+            extracted_data if isinstance(extracted_data, list) else [
+                extracted_data]
         )
         return output, None
 
@@ -306,7 +309,8 @@ class IndexifyFunctionWrapper:
     ) -> FunctionCallResult:
         input = self.deserialize_input(name, input)
         input_serializer = get_serializer(self.indexify_function.input_encoder)
-        output_serializer = get_serializer(self.indexify_function.output_encoder)
+        output_serializer = get_serializer(
+            self.indexify_function.output_encoder)
         if acc is not None:
             acc = input_serializer.deserialize(acc.payload)
         if acc is None and self.indexify_function.accumulate is not None:
@@ -339,6 +343,6 @@ def get_ctx() -> GraphInvocationContext:
     function_instance = caller_frame.f_locals["self"]
     del frame
     del caller_frame
-    if isinstance(function_instance, IndexifyFunctionWrapper):
+    if isinstance(function_instance, TensorlakeFunctionWrapper):
         return function_instance.indexify_function._ctx
     return function_instance._ctx

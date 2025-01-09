@@ -2,18 +2,18 @@ import inspect
 import re
 from typing import List, Type, Union
 
-from .indexify_functions import IndexifyFunction, IndexifyRouter
+from .tensorlake_functions import TensorlakeFunction, TensorlakeRouter
 
 
-def validate_node(indexify_fn: Union[Type[IndexifyFunction], Type[IndexifyRouter]]):
+def validate_node(indexify_fn: Union[Type[TensorlakeFunction], Type[TensorlakeRouter]]):
     if inspect.isfunction(indexify_fn):
         raise Exception(
             f"Unable to add node of type `{type(indexify_fn)}`. "
             f"Required, `IndexifyFunction` or `IndexifyRouter`"
         )
     if not (
-        issubclass(indexify_fn, IndexifyFunction)
-        or issubclass(indexify_fn, IndexifyRouter)
+        issubclass(indexify_fn, TensorlakeFunction)
+        or issubclass(indexify_fn, TensorlakeRouter)
     ):
         raise Exception(
             f"Unable to add node of type `{indexify_fn.__name__}`. "
@@ -32,16 +32,18 @@ def validate_node(indexify_fn: Union[Type[IndexifyFunction], Type[IndexifyRouter
             )
 
     if signature.return_annotation == inspect.Signature.empty:
-        raise Exception(f"Function {indexify_fn.name} has empty return type annotation")
+        raise Exception(
+            f"Function {indexify_fn.name} has empty return type annotation")
 
 
 def validate_route(
-    from_node: Type[IndexifyRouter], to_nodes: List[Type[IndexifyFunction]]
+    from_node: Type[TensorlakeRouter], to_nodes: List[Type[TensorlakeFunction]]
 ):
     signature = inspect.signature(from_node.run)
 
     if signature.return_annotation == inspect.Signature.empty:
-        raise Exception(f"Function {from_node.name} has empty return type annotation")
+        raise Exception(
+            f"Function {from_node.name} has empty return type annotation")
 
     return_annotation = signature.return_annotation
 
@@ -53,7 +55,8 @@ def validate_route(
             if hasattr(arg, "name"):
                 if arg not in to_nodes:
                     raise Exception(
-                        f"Unable to find {arg.name} in to_nodes {[node.name for node in to_nodes]}"
+                        f"Unable to find {arg.name} in to_nodes {
+                            [node.name for node in to_nodes]}"
                     )
     elif (
         hasattr(return_annotation, "__origin__")
@@ -64,7 +67,8 @@ def validate_route(
             if hasattr(arg, "name"):
                 if arg not in to_nodes:
                     raise Exception(
-                        f"Unable to find {arg.name} in to_nodes {[node.name for node in to_nodes]}"
+                        f"Unable to find {arg.name} in to_nodes {
+                            [node.name for node in to_nodes]}"
                     )
     else:
         raise Exception(f"Return type of {from_node.name} is not a Union")

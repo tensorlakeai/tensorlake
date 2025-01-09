@@ -4,7 +4,7 @@ from typing import List, Union
 from pydantic import BaseModel
 
 from tensorlake.functions_sdk.graph import Graph
-from tensorlake.functions_sdk.indexify_functions import (
+from tensorlake.functions_sdk.tensorlake_functions import (
     tensorlake_function,
     tensorlake_router,
 )
@@ -78,7 +78,7 @@ class TestValidations(unittest.TestCase):
 
             g.add_edge(node1, node2)
 
-        msg = "Unable to add node of type `<class 'function'>`. Required, `IndexifyFunction` or `IndexifyRouter`"
+        msg = "Unable to add node of type `<class 'function'>`. Required, `tensorlakeFunction` or `tensorlakeRouter`"
         self.assertEqual(msg, str(cm.exception))
 
     def test_router_callables_are_in_added_nodes_union(self):

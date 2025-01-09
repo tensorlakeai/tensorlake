@@ -1,6 +1,9 @@
 from typing import Union
 
-from tensorlake.functions_sdk.indexify_functions import IndexifyFunction, IndexifyRouter
+from tensorlake.functions_sdk.tensorlake_functions import (
+    TensorlakeFunction,
+    TensorlakeRouter,
+)
 
 from .graph import Graph
 
@@ -12,7 +15,7 @@ class Pipeline:
         self._graph: Graph = None
         self._last_step = None
 
-    def add_step(self, function: Union[IndexifyFunction, IndexifyRouter]):
+    def add_step(self, function: Union[TensorlakeFunction, TensorlakeRouter]):
         if self._graph is None:
             self._graph = Graph(
                 name=self.name, description=self.description, start_node=function
