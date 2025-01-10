@@ -2,7 +2,6 @@ import sys
 import unittest
 
 from first_p_dep import return_x
-
 from indexify import RemoteGraph
 from indexify.functions_sdk.data_objects import File
 from indexify.functions_sdk.graph import Graph

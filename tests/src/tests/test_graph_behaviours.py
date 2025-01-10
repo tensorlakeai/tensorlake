@@ -175,8 +175,7 @@ def create_pipeline_graph_with_map():
 
 
 def create_pipeline_graph_with_map_reduce():
-    graph = Graph(name="test_map_reduce", description="test",
-                  start_node=generate_seq)
+    graph = Graph(name="test_map_reduce", description="test", start_node=generate_seq)
     graph.add_edge(generate_seq, square)
     graph.add_edge(square, sum_of_squares)
     graph.add_edge(sum_of_squares, make_it_string)
@@ -206,8 +205,7 @@ def create_pipeline_graph_with_different_encoders():
 
 
 def create_router_graph():
-    graph = Graph(name="test_router", description="test",
-                  start_node=generate_seq)
+    graph = Graph(name="test_router", description="test", start_node=generate_seq)
     graph.add_edge(generate_seq, square)
     graph.add_edge(square, sum_of_squares)
     graph.add_edge(sum_of_squares, route_if_even)
@@ -298,8 +296,7 @@ class TestGraphBehaviors(unittest.TestCase):
 
     @parameterized.parameterized.expand([(False), (True)])
     def test_simple_function_cls(self, is_remote):
-        graph = Graph(name="test_simple_function_cls",
-                      start_node=SimpleFunctionCtxCls)
+        graph = Graph(name="test_simple_function_cls", start_node=SimpleFunctionCtxCls)
         graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(
             block_until_done=True, obj=SimpleFunctionCtxClsObject(x=1)
@@ -316,8 +313,7 @@ class TestGraphBehaviors(unittest.TestCase):
         )
         graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(block_until_done=True, x="a")
-        output = graph.output(
-            invocation_id, "simple_function_with_json_encoder")
+        output = graph.output(invocation_id, "simple_function_with_json_encoder")
         self.assertEqual(output, ["ab"])
 
     @parameterized.parameterized.expand([(True)])
@@ -341,8 +337,7 @@ class TestGraphBehaviors(unittest.TestCase):
             start_node=simple_function_multiple_inputs,
         )
         graph = remote_or_local_graph(graph, is_remote)
-        invocation_id = graph.run(
-            block_until_done=True, x=MyObject(x="a"), y=10)
+        invocation_id = graph.run(block_until_done=True, x=MyObject(x="a"), y=10)
         output = graph.output(invocation_id, "simple_function_multiple_inputs")
         self.assertEqual(output, [MyObject(x="abbbbbbbbbb")])
 
@@ -355,8 +350,7 @@ class TestGraphBehaviors(unittest.TestCase):
         )
         graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(block_until_done=True, x="a", y=10)
-        output = graph.output(
-            invocation_id, "simple_function_multiple_inputs_json")
+        output = graph.output(invocation_id, "simple_function_multiple_inputs_json")
         self.assertEqual(output, ["abbbbbbbbbb"])
 
     @parameterized.parameterized.expand([(False), (True)])
@@ -742,10 +736,8 @@ class TestGraphBehaviors(unittest.TestCase):
 
     @parameterized.parameterized.expand([(False), (True)])
     def test_router_graph_behavior_cls(self, is_remote):
-        graph = Graph(name="test_simple_function_cls",
-                      start_node=SimpleRouterCtxCls)
-        graph.route(SimpleRouterCtxCls, [
-                    SimpleFunctionCtxCls1, SimpleFunctionCtxCls2])
+        graph = Graph(name="test_simple_function_cls", start_node=SimpleRouterCtxCls)
+        graph.route(SimpleRouterCtxCls, [SimpleFunctionCtxCls1, SimpleFunctionCtxCls2])
         # graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(
             block_until_done=True, obj=SimpleRouterCtxClsObject(x=1)
@@ -796,8 +788,7 @@ class TestGraphBehaviors(unittest.TestCase):
         def add_two(x: int) -> int:
             return x + 2
 
-        graph = Graph(name="test_ignore_none",
-                      description="test", start_node=gen_seq)
+        graph = Graph(name="test_ignore_none", description="test", start_node=gen_seq)
         graph.add_edge(gen_seq, ignore_none)
         graph.add_edge(ignore_none, add_two)
         graph = remote_or_local_graph(
@@ -829,8 +820,7 @@ class TestGraphBehaviors(unittest.TestCase):
 
     @parameterized.parameterized.expand([(False), (True)])
     def test_graph_router_start_node(self, is_remote):
-        graph = Graph(name="test_router", description="test",
-                      start_node=route_if_even)
+        graph = Graph(name="test_router", description="test", start_node=route_if_even)
         graph.route(route_if_even, [add_two, add_three])
         graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(block_until_done=True, x=Sum(val=2))
@@ -878,8 +868,7 @@ class TestGraphBehaviors(unittest.TestCase):
         )
         graph.add_edge(add_two, add_three)
         if is_remote:
-            self.assertRaises(
-                Exception, remote_or_local_graph, graph, is_remote)
+            self.assertRaises(Exception, remote_or_local_graph, graph, is_remote)
         else:
             graph = remote_or_local_graph(graph, is_remote)
             self.assertRaises(

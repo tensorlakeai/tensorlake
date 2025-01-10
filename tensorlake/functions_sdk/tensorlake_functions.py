@@ -100,7 +100,6 @@ class TensorlakeRouter:
     description: str = ""
     image: Optional[Image] = DEFAULT_IMAGE
     placement_constraints: List[PlacementConstraints] = []
-    accumulate: Optional[Type[BaseModel]] = None,
     input_encoder: Optional[str] = "cloudpickle"
     output_encoder: Optional[str] = "cloudpickle"
 

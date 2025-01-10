@@ -3,7 +3,6 @@ import unittest
 from contextlib import redirect_stdout
 
 from extractors import extractor_a, extractor_c
-
 from indexify import RemoteGraph
 from indexify.functions_sdk.graph import Graph
 

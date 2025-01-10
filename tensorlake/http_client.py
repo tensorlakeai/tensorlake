@@ -6,7 +6,7 @@ import cloudpickle
 import httpx
 from httpx_sse import connect_sse
 from pydantic import BaseModel, Json
-from rich import print
+from rich import print  # TODO: Migrate to use click.echo
 
 from tensorlake.error import ApiException, GraphStillProcessing
 from tensorlake.functions_sdk.data_objects import TensorlakeData

@@ -1,4 +1,3 @@
-from rich import print
 import importlib
 import sys
 from collections import defaultdict
@@ -19,9 +18,10 @@ from typing import (
 import cloudpickle
 from nanoid import generate
 from pydantic import BaseModel
+from rich import print  # TODO: Migrate to use click.echo
 from typing_extensions import get_args, get_origin
 
-from .data_objects import TensorlakeData, RouterOutput
+from .data_objects import RouterOutput, TensorlakeData
 from .graph_definition import (
     ComputeGraphMetadata,
     FunctionMetadata,

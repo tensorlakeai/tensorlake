@@ -32,8 +32,7 @@ def validate_node(indexify_fn: Union[Type[TensorlakeCompute], Type[TensorlakeRou
             )
 
     if signature.return_annotation == inspect.Signature.empty:
-        raise Exception(
-            f"Function {indexify_fn.name} has empty return type annotation")
+        raise Exception(f"Function {indexify_fn.name} has empty return type annotation")
 
 
 def validate_route(
@@ -42,8 +41,7 @@ def validate_route(
     signature = inspect.signature(from_node.run)
 
     if signature.return_annotation == inspect.Signature.empty:
-        raise Exception(
-            f"Function {from_node.name} has empty return type annotation")
+        raise Exception(f"Function {from_node.name} has empty return type annotation")
 
     return_annotation = signature.return_annotation
 
