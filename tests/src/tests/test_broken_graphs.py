@@ -4,7 +4,7 @@ import unittest
 from tensorlake import RemoteGraph
 from tensorlake.functions_sdk.data_objects import File
 from tensorlake.functions_sdk.graph import Graph
-from tensorlake.functions_sdk.tensorlake_functions import tensorlake_function
+from tensorlake.functions_sdk.functions import tensorlake_function
 
 
 @tensorlake_function()

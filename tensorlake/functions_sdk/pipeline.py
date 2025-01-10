@@ -1,6 +1,6 @@
 from typing import Union
 
-from tensorlake.functions_sdk.tensorlake_functions import (
+from tensorlake.functions_sdk.functions import (
     TensorlakeCompute,
     TensorlakeRouter,
 )

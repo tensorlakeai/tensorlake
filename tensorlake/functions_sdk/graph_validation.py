@@ -2,7 +2,7 @@ import inspect
 import re
 from typing import List, Type, Union
 
-from .tensorlake_functions import TensorlakeCompute, TensorlakeRouter
+from .functions import TensorlakeCompute, TensorlakeRouter
 
 
 def validate_node(indexify_fn: Union[Type[TensorlakeCompute], Type[TensorlakeRouter]]):

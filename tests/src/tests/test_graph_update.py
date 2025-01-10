@@ -8,7 +8,7 @@ import tests.testing
 from tensorlake import RemoteGraph
 from tensorlake.error import GraphStillProcessing
 from tensorlake.functions_sdk.graph import Graph
-from tensorlake.functions_sdk.tensorlake_functions import tensorlake_function
+from tensorlake.functions_sdk.functions import tensorlake_function
 from tests.testing import test_graph_name
 
 

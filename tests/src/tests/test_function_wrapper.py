@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from tensorlake.functions_sdk.invocation_state.local_invocation_state import (
     LocalInvocationState,
 )
-from tensorlake.functions_sdk.tensorlake_functions import (
+from tensorlake.functions_sdk.functions import (
     GraphInvocationContext,
     TensorlakeFunctionWrapper,
     get_ctx,

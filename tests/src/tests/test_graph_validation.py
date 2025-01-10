@@ -4,7 +4,7 @@ from typing import List, Union
 from pydantic import BaseModel
 
 from tensorlake.functions_sdk.graph import Graph
-from tensorlake.functions_sdk.tensorlake_functions import (
+from tensorlake.functions_sdk.functions import (
     tensorlake_function,
     tensorlake_router,
 )

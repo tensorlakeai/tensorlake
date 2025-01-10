@@ -32,7 +32,7 @@ from .graph_definition import (
 from .graph_validation import validate_node, validate_route
 from .invocation_state.local_invocation_state import LocalInvocationState
 from .object_serializer import get_serializer
-from .tensorlake_functions import (
+from .functions import (
     FunctionCallResult,
     GraphInvocationContext,
     RouterCallResult,

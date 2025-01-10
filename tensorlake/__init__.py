@@ -2,7 +2,7 @@ from . import data_loaders
 from .functions_sdk.graph import Graph
 from .functions_sdk.image import Image
 from .functions_sdk.pipeline import Pipeline
-from .functions_sdk.tensorlake_functions import (
+from .functions_sdk.functions import (
     TensorlakeCompute,
     TensorlakeRouter,
     get_ctx,

@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 import tests
 from tensorlake import Graph
-from tensorlake.functions_sdk.tensorlake_functions import tensorlake_function
+from tensorlake.functions_sdk.functions import tensorlake_function
 from tests.testing import remote_or_local_graph, test_graph_name
 
 
