@@ -1,6 +1,8 @@
-from pydantic import BaseModel
-from tensorlake import tensorlake_function, Graph
 from typing import List
+
+from pydantic import BaseModel
+
+from tensorlake import Graph, tensorlake_function
 
 
 class Total(BaseModel):
@@ -14,7 +16,7 @@ def generate_numbers(a: int) -> List[int]:
 
 @tensorlake_function()
 def square(x: int) -> int:
-    return x ** 2
+    return x**2
 
 
 @tensorlake_function(accumulate=Total)
@@ -23,8 +25,11 @@ def add(total: Total, new: int) -> Total:
     return total
 
 
-g = Graph(name="sequence_summer", start_node=generate_numbers,
-          description="Simple Sequence Summer")
+g = Graph(
+    name="sequence_summer",
+    start_node=generate_numbers,
+    description="Simple Sequence Summer",
+)
 g.add_edge(generate_numbers, square)
 g.add_edge(square, add)
 
@@ -34,6 +39,7 @@ if __name__ == "__main__":
     # print(result)
 
     from tensorlake import RemoteGraph
+
     graph = RemoteGraph.deploy(g)
     invocation_id = graph.run(block_until_done=True, a=10)
     result = graph.output(invocation_id, "add")
