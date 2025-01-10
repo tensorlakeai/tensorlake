@@ -1,14 +1,14 @@
 from . import data_loaders
+from .functions_sdk.functions import (
+    TensorlakeCompute,
+    TensorlakeRouter,
+    get_ctx,
+    tensorlake_function,
+    tensorlake_router,
+)
 from .functions_sdk.graph import Graph
 from .functions_sdk.image import Image
-from .functions_sdk.indexify_functions import (
-    IndexifyFunction,
-    IndexifyRouter,
-    get_ctx,
-    indexify_function,
-    indexify_router,
-)
-from .http_client import IndexifyClient
+from .http_client import TensorlakeClient
 from .remote_graph import RemoteGraph
 from .settings import DEFAULT_SERVICE_URL
 
@@ -19,11 +19,11 @@ __all__ = [
     "Pipeline",
     "RemotePipeline",
     "Image",
-    "indexify_function",
+    "tensorlake_function",
     "get_ctx",
-    "IndexifyFunction",
-    "IndexifyRouter",
-    "indexify_router",
+    "TensorlakeCompute",
+    "TensorlakeRouter",
+    "tensorlake_router",
     "DEFAULT_SERVICE_URL",
-    "IndexifyClient",
+    "TensorlakeClient",
 ]
