@@ -3,17 +3,23 @@ name: Build and Publish to PyPI
 on:
   workflow_dispatch:
 
+
+permissions:
+  contents: write
+  actions: write
+  packages: write
+
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/${{ github.event.repository.name }}
+      url: https://pypi.org/p/tensorlake
     permissions:
       id-token: write  # Required for OIDC authentication to PyPI
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -23,7 +29,7 @@ jobs:
       - name: Install Poetry
         uses: snok/install-poetry@v1
         with:
-          version: 1.8.5
+          version: 2.0.0
           virtualenvs-create: true
           virtualenvs-in-project: true
 
