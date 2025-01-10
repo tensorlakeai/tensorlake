@@ -13,8 +13,7 @@ jobs:
       id-token: write  # Required for OIDC authentication to PyPI
 
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@v3
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
