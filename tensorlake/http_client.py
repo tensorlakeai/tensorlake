@@ -10,9 +10,9 @@ from rich import print  # TODO: Migrate to use click.echo
 
 from tensorlake.error import ApiException, GraphStillProcessing
 from tensorlake.functions_sdk.data_objects import TensorlakeData
+from tensorlake.functions_sdk.functions import TensorlakeCompute
 from tensorlake.functions_sdk.graph import ComputeGraphMetadata, Graph
 from tensorlake.functions_sdk.object_serializer import get_serializer
-from tensorlake.functions_sdk.functions import TensorlakeCompute
 from tensorlake.settings import DEFAULT_SERVICE_URL
 from tensorlake.utils.http_client import get_httpx_client, get_sync_or_async_client
 

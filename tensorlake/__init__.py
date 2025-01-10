@@ -1,7 +1,4 @@
 from . import data_loaders
-from .functions_sdk.graph import Graph
-from .functions_sdk.image import Image
-from .functions_sdk.pipeline import Pipeline
 from .functions_sdk.functions import (
     TensorlakeCompute,
     TensorlakeRouter,
@@ -9,6 +6,9 @@ from .functions_sdk.functions import (
     tensorlake_function,
     tensorlake_router,
 )
+from .functions_sdk.graph import Graph
+from .functions_sdk.image import Image
+from .functions_sdk.pipeline import Pipeline
 from .http_client import TensorlakeClient
 from .remote_graph import RemoteGraph
 from .remote_pipeline import RemotePipeline

@@ -22,6 +22,14 @@ from rich import print  # TODO: Migrate to use click.echo
 from typing_extensions import get_args, get_origin
 
 from .data_objects import RouterOutput, TensorlakeData
+from .functions import (
+    FunctionCallResult,
+    GraphInvocationContext,
+    RouterCallResult,
+    TensorlakeCompute,
+    TensorlakeFunctionWrapper,
+    TensorlakeRouter,
+)
 from .graph_definition import (
     ComputeGraphMetadata,
     FunctionMetadata,
@@ -32,14 +40,6 @@ from .graph_definition import (
 from .graph_validation import validate_node, validate_route
 from .invocation_state.local_invocation_state import LocalInvocationState
 from .object_serializer import get_serializer
-from .functions import (
-    FunctionCallResult,
-    GraphInvocationContext,
-    RouterCallResult,
-    TensorlakeCompute,
-    TensorlakeFunctionWrapper,
-    TensorlakeRouter,
-)
 
 RouterFn = Annotated[
     Callable[[TensorlakeData], Optional[List[TensorlakeCompute]]], "RouterFn"

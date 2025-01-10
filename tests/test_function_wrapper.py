@@ -3,15 +3,15 @@ from typing import List, Union
 
 from pydantic import BaseModel
 
-from tensorlake.functions_sdk.invocation_state.local_invocation_state import (
-    LocalInvocationState,
-)
 from tensorlake.functions_sdk.functions import (
     GraphInvocationContext,
     TensorlakeFunctionWrapper,
     get_ctx,
     tensorlake_function,
     tensorlake_router,
+)
+from tensorlake.functions_sdk.invocation_state.local_invocation_state import (
+    LocalInvocationState,
 )
 
 TEST_GRAPH_CTX = GraphInvocationContext(

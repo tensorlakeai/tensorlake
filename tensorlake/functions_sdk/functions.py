@@ -231,8 +231,7 @@ class TensorlakeFunctionWrapper:
             inner_types = get_args(return_type)
             if len(inner_types) == 2 and type(None) in inner_types:
                 return_type = (
-                    inner_types[0] if inner_types[1] is type(
-                        None) else inner_types[1]
+                    inner_types[0] if inner_types[1] is type(None) else inner_types[1]
                 )
         return return_type
 
@@ -298,8 +297,7 @@ class TensorlakeFunctionWrapper:
             return [], None
 
         output = (
-            extracted_data if isinstance(extracted_data, list) else [
-                extracted_data]
+            extracted_data if isinstance(extracted_data, list) else [extracted_data]
         )
         return output, None
 
@@ -308,8 +306,7 @@ class TensorlakeFunctionWrapper:
     ) -> FunctionCallResult:
         input = self.deserialize_input(name, input)
         input_serializer = get_serializer(self.indexify_function.input_encoder)
-        output_serializer = get_serializer(
-            self.indexify_function.output_encoder)
+        output_serializer = get_serializer(self.indexify_function.output_encoder)
         if acc is not None:
             acc = input_serializer.deserialize(acc.payload)
         if acc is None and self.indexify_function.accumulate is not None:
