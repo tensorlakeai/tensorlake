@@ -33,7 +33,7 @@ if __name__ == "__main__":
     # result = g.get_output(invocation_id, "add")
     # print(result)
 
-    from indexify import RemoteGraph
+    from tensorlake import RemoteGraph
     graph = RemoteGraph.deploy(g)
     invocation_id = graph.run(block_until_done=True, a=10)
     result = graph.output(invocation_id, "add")
