@@ -1,4 +1,5 @@
 import importlib
+import re
 import sys
 from collections import defaultdict
 from queue import deque
@@ -16,6 +17,7 @@ from typing import (
 )
 
 import cloudpickle
+import nanoid
 from nanoid import generate
 from pydantic import BaseModel
 from rich import print  # TODO: Migrate to use click.echo
@@ -71,7 +73,11 @@ class Graph:
         start_node: TensorlakeCompute,
         description: Optional[str] = None,
         tags: Dict[str, str] = {},
+        # Update graph on every deployment unless user wants to manage the version manually.
+        version: str = nanoid.generate(),
     ):
+        _validate_identifier(version, "version")
+        _validate_identifier(name, "name")
         self.name = name
         self.description = description
         self.nodes: Dict[str, Union[TensorlakeCompute, TensorlakeRouter]] = {}
@@ -79,6 +85,7 @@ class Graph:
         self.edges: Dict[str, List[str]] = defaultdict(list)
         self.accumulator_zero_values: Dict[str, Any] = {}
         self.tags = tags
+        self.version = version
 
         self.add_node(start_node)
         if issubclass(start_node, TensorlakeRouter):
@@ -221,6 +228,7 @@ class Graph:
                 minor_version=sys.version_info.minor,
                 sdk_version=importlib.metadata.version("tensorlake"),
             ),
+            version=self.version,
         )
 
     def run(self, block_until_done: bool = False, **kwargs) -> str:
@@ -244,7 +252,7 @@ class Graph:
         self._local_graph_ctx = GraphInvocationContext(
             invocation_id=input.id,
             graph_name=self.name,
-            graph_version="1",
+            graph_version=self.version,
             invocation_state=LocalInvocationState(),
         )
         self._run(input, outputs)
@@ -373,3 +381,13 @@ class Graph:
                 payload = payload_dict
             outputs.append(payload)
         return outputs
+
+
+def _validate_identifier(value: str, name: str) -> None:
+    if len(value) > 200:
+        raise ValueError(f"{name} must be at most 200 characters")
+    # Following S3 object key naming restrictions.
+    if not re.match(r"^[a-zA-Z0-9!_\-.*'()]+$", value):
+        raise ValueError(
+            f"{name} must only contain alphanumeric characters or ! - _ . * ' ( )"
+        )
