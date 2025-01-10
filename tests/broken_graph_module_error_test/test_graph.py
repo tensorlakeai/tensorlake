@@ -2,9 +2,9 @@ import io
 import unittest
 from contextlib import redirect_stdout
 
-from extractors import extractor_a, extractor_c
-from indexify import RemoteGraph
-from indexify.functions_sdk.graph import Graph
+from .extractors import extractor_a, extractor_c
+from tensorlake import RemoteGraph
+from tensorlake.functions_sdk.graph import Graph
 
 
 def create_broken_graph():
@@ -33,7 +33,8 @@ class TestBrokenGraphs(unittest.TestCase):
                 a=10,
             )
         # Use regex because rich formatting characters are present in the output.
-        self.assertRegex(func_stdout.getvalue(), r"No module named.*'first_p_dep'")
+        self.assertRegex(func_stdout.getvalue(),
+                         r"No module named.*'first_p_dep'")
 
 
 if __name__ == "__main__":
