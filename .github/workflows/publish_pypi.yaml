@@ -17,7 +17,7 @@ jobs:
       url: https://pypi.org/p/tensorlake
     permissions:
       id-token: write  # Required for OIDC authentication to PyPI
-
+      contents: read   # Required for private repository access
     steps:
       - uses: actions/checkout@v4
         with:
