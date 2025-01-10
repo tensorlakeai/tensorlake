@@ -34,11 +34,12 @@ jobs:
 
       - name: Run tests
         run: |
-          poetry run pytest
-
-      - name: Build package
-        run: |
-          poetry build
+          make test
+        
+      # TODO: Re-enable once executor has been migrated
+      # - name: Build package
+      #   run: |
+      #     poetry build
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

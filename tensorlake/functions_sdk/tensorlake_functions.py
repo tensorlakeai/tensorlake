@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union, get_args, get_
 from pydantic import BaseModel
 from typing_extensions import get_type_hints
 
-from .data_objects import IndexifyData
+from .data_objects import TensorlakeData
 from .image import DEFAULT_IMAGE, Image
 from .invocation_state.invocation_state import InvocationState
 from .object_serializer import get_serializer
@@ -60,7 +60,7 @@ class PlacementConstraints(BaseModel):
     image_name: Optional[str] = None
 
 
-class IndexifyFunction:
+class TensorlakeCompute:
     name: str = ""
     description: str = ""
     image: Optional[Image] = DEFAULT_IMAGE
@@ -90,12 +90,12 @@ class IndexifyFunction:
         return self.run(*args, **kwargs)
 
     @classmethod
-    def deserialize_output(cls, output: IndexifyData) -> Any:
+    def deserialize_output(cls, output: TensorlakeData) -> Any:
         serializer = get_serializer(cls.output_encoder)
         return serializer.deserialize(output.payload)
 
 
-class IndexifyRouter:
+class TensorlakeRouter:
     name: str = ""
     description: str = ""
     image: Optional[Image] = DEFAULT_IMAGE
@@ -103,7 +103,7 @@ class IndexifyRouter:
     input_encoder: Optional[str] = "cloudpickle"
     output_encoder: Optional[str] = "cloudpickle"
 
-    def run(self, *args, **kwargs) -> Optional[List[IndexifyFunction]]:
+    def run(self, *args, **kwargs) -> Optional[List[TensorlakeCompute]]:
         pass
 
     # Create run method that preserves signature
@@ -162,7 +162,7 @@ def tensorlake_router(
             "run": staticmethod(fn),
         }
 
-        return type("IndexifyRouter", (IndexifyRouter,), attrs)
+        return type("TensorlakeRouter", (TensorlakeRouter,), attrs)
 
     return construct
 
@@ -192,13 +192,13 @@ def tensorlake_function(
             "run": staticmethod(fn),
         }
 
-        return type("IndexifyFunction", (IndexifyFunction,), attrs)
+        return type("TensorlakeCompute", (TensorlakeCompute,), attrs)
 
     return construct
 
 
 class FunctionCallResult(BaseModel):
-    ser_outputs: List[IndexifyData]
+    ser_outputs: List[TensorlakeData]
     traceback_msg: Optional[str] = None
 
 
@@ -207,19 +207,19 @@ class RouterCallResult(BaseModel):
     traceback_msg: Optional[str] = None
 
 
-class IndexifyFunctionWrapper:
+class TensorlakeFunctionWrapper:
     def __init__(
         self,
-        indexify_function: Union[IndexifyFunction, IndexifyRouter],
+        indexify_function: Union[TensorlakeCompute, TensorlakeRouter],
         context: GraphInvocationContext,
     ):
-        self.indexify_function: Union[IndexifyFunction, IndexifyRouter] = (
+        self.indexify_function: Union[TensorlakeCompute, TensorlakeRouter] = (
             indexify_function()
         )
         self.indexify_function._ctx = context
 
     def get_output_model(self) -> Any:
-        if not isinstance(self.indexify_function, IndexifyFunction):
+        if not isinstance(self.indexify_function, TensorlakeCompute):
             raise TypeError("Input must be an instance of IndexifyFunction")
 
         extract_method = self.indexify_function.run
@@ -236,7 +236,7 @@ class IndexifyFunctionWrapper:
         return return_type
 
     def get_input_types(self) -> Dict[str, Any]:
-        if not isinstance(self.indexify_function, IndexifyFunction):
+        if not isinstance(self.indexify_function, TensorlakeCompute):
             raise TypeError("Input must be an instance of IndexifyFunction")
 
         extract_method = self.indexify_function.run
@@ -302,7 +302,7 @@ class IndexifyFunctionWrapper:
         return output, None
 
     def invoke_fn_ser(
-        self, name: str, input: IndexifyData, acc: Optional[Any] = None
+        self, name: str, input: TensorlakeData, acc: Optional[Any] = None
     ) -> FunctionCallResult:
         input = self.deserialize_input(name, input)
         input_serializer = get_serializer(self.indexify_function.input_encoder)
@@ -313,7 +313,7 @@ class IndexifyFunctionWrapper:
             acc = self.indexify_function.accumulate()
         outputs, err = self.run_fn(input, acc=acc)
         ser_outputs = [
-            IndexifyData(
+            TensorlakeData(
                 payload=output_serializer.serialize(output),
                 encoder=self.indexify_function.output_encoder,
             )
@@ -321,12 +321,12 @@ class IndexifyFunctionWrapper:
         ]
         return FunctionCallResult(ser_outputs=ser_outputs, traceback_msg=err)
 
-    def invoke_router(self, name: str, input: IndexifyData) -> RouterCallResult:
+    def invoke_router(self, name: str, input: TensorlakeData) -> RouterCallResult:
         input = self.deserialize_input(name, input)
         edges, err = self.run_router(input)
         return RouterCallResult(edges=edges, traceback_msg=err)
 
-    def deserialize_input(self, compute_fn: str, indexify_data: IndexifyData) -> Any:
+    def deserialize_input(self, compute_fn: str, indexify_data: TensorlakeData) -> Any:
         encoder = indexify_data.encoder
         payload = indexify_data.payload
         serializer = get_serializer(encoder)
@@ -339,6 +339,6 @@ def get_ctx() -> GraphInvocationContext:
     function_instance = caller_frame.f_locals["self"]
     del frame
     del caller_frame
-    if isinstance(function_instance, IndexifyFunctionWrapper):
+    if isinstance(function_instance, TensorlakeFunctionWrapper):
         return function_instance.indexify_function._ctx
     return function_instance._ctx

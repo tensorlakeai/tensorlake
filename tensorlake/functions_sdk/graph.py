@@ -18,9 +18,10 @@ from typing import (
 import cloudpickle
 from nanoid import generate
 from pydantic import BaseModel
+from rich import print  # TODO: Migrate to use click.echo
 from typing_extensions import get_args, get_origin
 
-from .data_objects import IndexifyData, RouterOutput
+from .data_objects import RouterOutput, TensorlakeData
 from .graph_definition import (
     ComputeGraphMetadata,
     FunctionMetadata,
@@ -29,21 +30,21 @@ from .graph_definition import (
     RuntimeInformation,
 )
 from .graph_validation import validate_node, validate_route
-from .indexify_functions import (
-    FunctionCallResult,
-    GraphInvocationContext,
-    IndexifyFunction,
-    IndexifyFunctionWrapper,
-    IndexifyRouter,
-    RouterCallResult,
-)
 from .invocation_state.local_invocation_state import LocalInvocationState
 from .object_serializer import get_serializer
+from .tensorlake_functions import (
+    FunctionCallResult,
+    GraphInvocationContext,
+    RouterCallResult,
+    TensorlakeCompute,
+    TensorlakeFunctionWrapper,
+    TensorlakeRouter,
+)
 
 RouterFn = Annotated[
-    Callable[[IndexifyData], Optional[List[IndexifyFunction]]], "RouterFn"
+    Callable[[TensorlakeData], Optional[List[TensorlakeCompute]]], "RouterFn"
 ]
-GraphNode = Annotated[Union[IndexifyFunctionWrapper, RouterFn], "GraphNode"]
+GraphNode = Annotated[Union[TensorlakeFunctionWrapper, RouterFn], "GraphNode"]
 
 
 def is_pydantic_model_from_annotation(type_annotation):
@@ -67,52 +68,54 @@ class Graph:
     def __init__(
         self,
         name: str,
-        start_node: IndexifyFunction,
+        start_node: TensorlakeCompute,
         description: Optional[str] = None,
         tags: Dict[str, str] = {},
     ):
         self.name = name
         self.description = description
-        self.nodes: Dict[str, Union[IndexifyFunction, IndexifyRouter]] = {}
+        self.nodes: Dict[str, Union[TensorlakeCompute, TensorlakeRouter]] = {}
         self.routers: Dict[str, List[str]] = defaultdict(list)
         self.edges: Dict[str, List[str]] = defaultdict(list)
         self.accumulator_zero_values: Dict[str, Any] = {}
         self.tags = tags
 
         self.add_node(start_node)
-        if issubclass(start_node, IndexifyRouter):
+        if issubclass(start_node, TensorlakeRouter):
             self.routers[start_node.name] = []
         self._start_node: str = start_node.name
 
         # Storage for local execution
-        self._results: Dict[str, Dict[str, List[IndexifyData]]] = {}
-        self._accumulator_values: Dict[str, IndexifyData] = {}
+        self._results: Dict[str, Dict[str, List[TensorlakeData]]] = {}
+        self._accumulator_values: Dict[str, TensorlakeData] = {}
         self._local_graph_ctx: Optional[GraphInvocationContext] = None
 
-    def get_function(self, name: str) -> IndexifyFunctionWrapper:
+    def get_function(self, name: str) -> TensorlakeFunctionWrapper:
         if name not in self.nodes:
             raise ValueError(f"Function {name} not found in graph")
-        return IndexifyFunctionWrapper(self.nodes[name], self._local_graph_ctx)
+        return TensorlakeFunctionWrapper(self.nodes[name], self._local_graph_ctx)
 
     def get_accumulators(self) -> Dict[str, Any]:
         return self.accumulator_zero_values
 
     def add_node(
-        self, indexify_fn: Union[Type[IndexifyFunction], Type[IndexifyRouter]]
+        self, indexify_fn: Union[Type[TensorlakeCompute], Type[TensorlakeRouter]]
     ) -> "Graph":
         validate_node(indexify_fn=indexify_fn)
 
         if indexify_fn.name in self.nodes:
             return self
 
-        if issubclass(indexify_fn, IndexifyFunction) and indexify_fn.accumulate:
+        if issubclass(indexify_fn, TensorlakeCompute) and indexify_fn.accumulate:
             self.accumulator_zero_values[indexify_fn.name] = indexify_fn.accumulate()
 
         self.nodes[indexify_fn.name] = indexify_fn
         return self
 
     def route(
-        self, from_node: Type[IndexifyRouter], to_nodes: List[Type[IndexifyFunction]]
+        self,
+        from_node: Type[TensorlakeRouter],
+        to_nodes: List[Type[TensorlakeCompute]],
     ) -> "Graph":
 
         validate_route(from_node=from_node, to_nodes=to_nodes)
@@ -141,18 +144,18 @@ class Graph:
 
     def add_edge(
         self,
-        from_node: Type[IndexifyFunction],
-        to_node: Union[Type[IndexifyFunction], RouterFn],
+        from_node: Type[TensorlakeCompute],
+        to_node: Union[Type[TensorlakeCompute], RouterFn],
     ) -> "Graph":
         self.add_edges(from_node, [to_node])
         return self
 
     def add_edges(
         self,
-        from_node: Union[Type[IndexifyFunction], Type[IndexifyRouter]],
-        to_node: List[Union[Type[IndexifyFunction], Type[IndexifyRouter]]],
+        from_node: Union[Type[TensorlakeCompute], Type[TensorlakeRouter]],
+        to_node: List[Union[Type[TensorlakeCompute], Type[TensorlakeRouter]]],
     ) -> "Graph":
-        if issubclass(from_node, IndexifyRouter):
+        if issubclass(from_node, TensorlakeRouter):
             raise ValueError(
                 "Cannot add edges from a router node, use route method instead"
             )
@@ -224,7 +227,7 @@ class Graph:
         self.validate_graph()
         start_node = self.nodes[self._start_node]
         serializer = get_serializer(start_node.input_encoder)
-        input = IndexifyData(
+        input = TensorlakeData(
             id=generate(),
             payload=serializer.serialize(kwargs),
             encoder=start_node.input_encoder,
@@ -234,7 +237,7 @@ class Graph:
         for k, v in self.accumulator_zero_values.items():
             node = self.nodes[k]
             serializer = get_serializer(node.input_encoder)
-            self._accumulator_values[k] = IndexifyData(
+            self._accumulator_values[k] = TensorlakeData(
                 payload=serializer.serialize(v), encoder=node.input_encoder
             )
         self._results[input.id] = outputs
@@ -281,7 +284,7 @@ class Graph:
 
     def _run(
         self,
-        initial_input: IndexifyData,
+        initial_input: TensorlakeData,
         outputs: Dict[str, List[bytes]],
     ):
         queue = deque([(self._start_node, initial_input)])
@@ -317,23 +320,23 @@ class Graph:
                     queue.append((out_edge, output))
 
     def _invoke_fn(
-        self, node_name: str, input: IndexifyData
+        self, node_name: str, input: TensorlakeData
     ) -> Optional[Union[RouterCallResult, FunctionCallResult]]:
         node = self.nodes[node_name]
         if node_name in self.routers and len(self.routers[node_name]) > 0:
-            result = IndexifyFunctionWrapper(node, self._local_graph_ctx).invoke_router(
-                node_name, input
-            )
+            result = TensorlakeFunctionWrapper(
+                node, self._local_graph_ctx
+            ).invoke_router(node_name, input)
             for dynamic_edge in result.edges:
                 if dynamic_edge in self.nodes:
                     print(
                         f"[bold]dynamic router returned node: {
-                          dynamic_edge}[/bold]"
+                            dynamic_edge}[/bold]"
                     )
             return result
 
         acc_value = self._accumulator_values.get(node_name, None)
-        return IndexifyFunctionWrapper(
+        return TensorlakeFunctionWrapper(
             node, context=self._local_graph_ctx
         ).invoke_fn_ser(node_name, input, acc_value)
 
@@ -356,7 +359,7 @@ class Graph:
         if fn_name not in results:
             raise ValueError(
                 f"no results found for fn {
-                             fn_name} on graph {self.name}"
+                    fn_name} on graph {self.name}"
             )
         fn = self.nodes[fn_name]
         fn_model = self.get_function(fn_name).get_output_model()
