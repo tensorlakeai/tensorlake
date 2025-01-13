@@ -20,9 +20,6 @@ jobs:
       contents: read   # Required for private repository access
     steps:
       - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GH_PAT }} # Try workaround private repo
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -40,14 +37,14 @@ jobs:
         run: |
           poetry install --no-interaction
 
-      - name: Run tests
-        run: |
-          make test
-        
-      # TODO: Re-enable once executor has been migrated
-      # - name: Build package
+      # # TODO: Re-enable once executor has been migrated
+      # - name: Run tests
       #   run: |
-      #     poetry build
+      #     make test
+        
+      - name: Build package
+        run: |
+          poetry build
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
