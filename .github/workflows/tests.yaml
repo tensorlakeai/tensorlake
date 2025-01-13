@@ -19,6 +19,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      
+      # TODO: Needed for compose, remove when compose is migrated to use public images
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: github-actions-platform-api
+          aws-region: ${{ vars.AWS_REGION }}
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -35,13 +44,7 @@ jobs:
       - name: Build and lint tensorlake
         run: make build && make check
 
-        # TODO: Needed for compose, remove when compose is migrated to use public images
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          role-session-name: github-actions-platform-api
-          aws-region: ${{ vars.AWS_REGION }}
+
 
         # TODO: Needed for compose, remove when compose is migrated to use public images          
       - name: Login to Amazon ECR
