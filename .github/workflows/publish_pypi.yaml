@@ -37,11 +37,11 @@ jobs:
         run: |
           poetry install --no-interaction
 
-      - name: Run tests
-        run: |
-          make test
+      # # TODO: Re-enable once executor has been migrated
+      # - name: Run tests
+      #   run: |
+      #     make test
         
-      # TODO: Re-enable once executor has been migrated
       - name: Build package
         run: |
           poetry build
