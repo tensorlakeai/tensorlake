@@ -19,6 +19,6 @@ lint:
 	@poetry run black --check .
 
 test:
-	cd tests && ./run_tests.sh
+	cd tests && poetry run ./run_tests.sh
 	
 .PHONY: build format lint test version
