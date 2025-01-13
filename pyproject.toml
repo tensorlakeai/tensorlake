@@ -18,6 +18,7 @@ rich = "^13.9.4" # TODO: Look into consolidating this with click
 structlog = "^24.4.0"
 pyyaml = "^6.0.2"
 click = "^8.1.8"
+parameterized = "^0.9.0"
 
 [tool.poetry.scripts]
 tensorlake = "tensorlake.cli:tensorlake"
