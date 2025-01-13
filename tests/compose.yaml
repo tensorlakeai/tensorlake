@@ -1,0 +1,36 @@
+networks:
+  server:
+services:
+  indexify:
+    # TODO: Switch to using public version of the server it's up to date 
+    #image: tensorlake/indexify-server
+    image: 127537880326.dkr.ecr.us-east-1.amazonaws.com/indexify:latest
+    ports:
+      - 8900:8900
+    networks:
+      server:
+        aliases:
+          - indexify-server
+    volumes:
+      - data:/tmp/indexify-blob-storage
+  executor:
+    # TODO: Switch to using public version of the executor once it's up to date 
+    #image: tensorlake/indexify-executor-default:3.13
+    image: 127537880326.dkr.ecr.us-east-1.amazonaws.com/indexify-executor:latest
+    environment:
+      - INDEXIFY_URL=http://indexify:8900
+    command:
+      [
+        "indexify-cli",
+        "executor",
+        "--dev",
+        "--server-addr",
+        "indexify:8900"
+      ]
+    networks:
+      server:
+    deploy:
+      mode: replicated
+      replicas: 2
+volumes:
+  data:

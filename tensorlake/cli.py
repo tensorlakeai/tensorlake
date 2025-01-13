@@ -14,7 +14,6 @@ from tensorlake.functions_sdk.image import Build
 def tensorlake():
     pass
 
-
 @click.command()
 @click.argument("workflow_file", type=click.File("r"))
 def deploy(workflow_file: click.File):

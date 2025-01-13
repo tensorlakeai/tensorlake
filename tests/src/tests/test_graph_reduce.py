@@ -46,7 +46,7 @@ class TestGraphReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([(True)])
     def test_failure_in_parent(self, is_remote: bool):
-        # Not runnning this with local graph because local execution currently
+        # Not running this with local graph because local execution currently
         # raises an exception on function error and fails the test case.
         class AccumulatedSate(BaseModel):
             sum: int = 0
@@ -87,7 +87,7 @@ class TestGraphReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([(True)])
     def test_failure_start_node(self, is_remote: bool):
-        # Not runnning this with local graph because local execution currently
+        # Not running this with local graph because local execution currently
         # raises an exception on function error and fails the test case.
         class AccumulatedSate(BaseModel):
             sum: int = 0

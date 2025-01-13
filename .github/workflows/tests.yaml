@@ -10,6 +10,7 @@ on:
       - 'main'
     paths:
       - 'tensorlake/**'
+      - 'tests/**'
       - '.github/workflows/tests.yaml'
 
 jobs:
@@ -21,7 +22,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: 3.12
+          python-version: 3.13
           cache: 'pip'
 
       - name: Install Poetry
@@ -34,6 +35,24 @@ jobs:
       - name: Build and lint tensorlake
         run: make build && make check
 
-      # TODO: Enable tests once the executor is ported and they can pass.
-      # - name: Run tests
-      #   run: make test
+        # TODO: Needed for compose, remove when compose is migrated to use public images
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: github-actions-platform-api
+          aws-region: ${{ vars.AWS_REGION }}
+
+        # TODO: Needed for compose, remove when compose is migrated to use public images          
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: hoverkraft-tech/compose-action@v2.0.1
+        with:
+          compose-file: "./tests/compose.yaml"
+
+      - name: Run tests
+        env:
+          INDEXIFY_URL: http://127.0.0.1:8900
+        run: make test
