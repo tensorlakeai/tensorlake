@@ -9,7 +9,7 @@ def validate_node(indexify_fn: Union[Type[TensorlakeCompute], Type[TensorlakeRou
     if inspect.isfunction(indexify_fn):
         raise Exception(
             f"Unable to add node of type `{type(indexify_fn)}`. "
-            f"Required, `IndexifyFunction` or `IndexifyRouter`"
+            f"Required, `TensorlakeCompute` or `TensorlakeRouter`"
         )
     if not (
         issubclass(indexify_fn, TensorlakeCompute)
@@ -17,7 +17,7 @@ def validate_node(indexify_fn: Union[Type[TensorlakeCompute], Type[TensorlakeRou
     ):
         raise Exception(
             f"Unable to add node of type `{indexify_fn.__name__}`. "
-            f"Required, `IndexifyFunction` or `IndexifyRouter`"
+            f"Required, `TensorlakeCompute` or `TensorlakeRouter`"
         )
 
     signature = inspect.signature(indexify_fn.run)

@@ -75,7 +75,7 @@ class TestValidations(unittest.TestCase):
 
             g.add_edge(node1, node2)
 
-        msg = "Unable to add node of type `<class 'function'>`. Required, `tensorlakeFunction` or `tensorlakeRouter`"
+        msg = "Unable to add node of type `<class 'function'>`. Required, `TensorlakeCompute` or `TensorlakeRouter`"
         self.assertEqual(msg, str(cm.exception))
 
     def test_router_callables_are_in_added_nodes_union(self):
