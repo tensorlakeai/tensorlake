@@ -2,10 +2,10 @@ import io
 import unittest
 from contextlib import redirect_stdout
 
+from extractors import extractor_a, extractor_c
+
 from tensorlake import RemoteGraph
 from tensorlake.functions_sdk.graph import Graph
-
-from .extractors import extractor_a, extractor_c
 
 
 def create_broken_graph():

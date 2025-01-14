@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tensorlake"
-version = "0.1.2"
+version = "0.1.3"
 description = "Petabyte scale data framework for unstructured data of any modality"
 authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
 homepage = "https://github.com/tensorlakeai/tensorlake"
@@ -15,7 +15,6 @@ docker = "^7.1.0"
 nanoid = "^2.0.0"
 httpx-sse = "^0.4.0"
 rich = "^13.9.4" # TODO: Look into consolidating this with click
-structlog = "^24.4.0"
 pyyaml = "^6.0.2"
 click = "^8.1.8"
 
