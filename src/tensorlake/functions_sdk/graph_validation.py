@@ -53,8 +53,7 @@ def validate_route(
             if hasattr(arg, "name"):
                 if arg not in to_nodes:
                     raise Exception(
-                        f"Unable to find {arg.name} in to_nodes {
-                            [node.name for node in to_nodes]}"
+                        f"Unable to find {arg.name} in to_nodes {[node.name for node in to_nodes]}"
                     )
     elif (
         hasattr(return_annotation, "__origin__")
@@ -65,8 +64,7 @@ def validate_route(
             if hasattr(arg, "name"):
                 if arg not in to_nodes:
                     raise Exception(
-                        f"Unable to find {arg.name} in to_nodes {
-                            [node.name for node in to_nodes]}"
+                        f"Unable to find {arg.name} in to_nodes {[node.name for node in to_nodes]}"
                     )
     else:
         raise Exception(f"Return type of {from_node.name} is not a Union")

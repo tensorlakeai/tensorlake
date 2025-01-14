@@ -317,8 +317,7 @@ class Graph:
                 outputs[node_name].extend(fn_outputs)
             if self._accumulator_values.get(node_name, None) is not None and queue:
                 print(
-                    f"accumulator not none for {
-                        node_name}, continuing, len queue: {len(queue)}"
+                    f"accumulator not none for {node_name}, continuing, len queue: {len(queue)}"
                 )
                 continue
 
@@ -336,10 +335,7 @@ class Graph:
             ).invoke_router(node_name, input)
             for dynamic_edge in result.edges:
                 if dynamic_edge in self.nodes:
-                    print(
-                        f"[bold]dynamic router returned node: {
-                            dynamic_edge}[/bold]"
-                    )
+                    print(f"[bold]dynamic router returned node: {dynamic_edge}[/bold]")
             return result
 
         acc_value = self._accumulator_values.get(node_name, None)
@@ -364,10 +360,7 @@ class Graph:
     ) -> List[Any]:
         results = self._results[invocation_id]
         if fn_name not in results:
-            raise ValueError(
-                f"no results found for fn {
-                    fn_name} on graph {self.name}"
-            )
+            raise ValueError(f"no results found for fn {fn_name} on graph {self.name}")
         fn = self.nodes[fn_name]
         fn_model = self.get_function(fn_name).get_output_model()
         serializer = get_serializer(fn.output_encoder)
