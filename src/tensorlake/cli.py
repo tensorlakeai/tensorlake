@@ -66,10 +66,7 @@ def _wait_for_build(builder: ImageBuilderClient, build: Build):
 
     if build.push_completed_at:
         build_duration = build.build_completed_at - build.push_completed_at
-        click.echo(
-            f"Building completed in {
-                   build.image_name} {build_duration.seconds}"
-        )
+        click.echo(f"Building completed in {build.image_name} {build_duration.seconds}")
     return build
 
 
@@ -81,8 +78,7 @@ def _build_image(
     image.build_context(context_file)
 
     click.echo(
-        f"{image._image_name}: Posting {os.path.getsize(
-            context_file)} bytes of context to build service...."
+        f"{image._image_name}: Posting {os.path.getsize(context_file)} bytes of context to build service...."
     )
     files = {"context": open(context_file, "rb")}
     data = {"name": image._image_name, "hash": image_hash}
@@ -102,8 +98,7 @@ def _build_image(
 
 def _show_failed_summary(builder: ImageBuilderClient, build: Build):
     click.secho(
-        f"Building {build.image_name} failed with error message: {
-            build.error_message}",
+        f"Building {build.image_name} failed with error message: {build.error_message}",
         fg="red",
     )
 
@@ -150,8 +145,7 @@ def _prepare_images(builder: ImageBuilderClient, images: Dict[Image, str]):
         if image not in ready_builds:
             blockers.append(image)
             click.secho(
-                f"Image {
-                    image._image_name} could not be built, this is blocking deployment",
+                f"Image {image._image_name} could not be built, this is blocking deployment",
                 fg="red",
             )
         else:
@@ -181,8 +175,7 @@ def prepare(workflow_file: click.File):
             for node_name, node_obj in obj.nodes.items():
                 image = node_obj.image
                 click.echo(
-                    f"graph function {node_name} uses image '{
-                        image._image_name}'"
+                    f"graph function {node_name} uses image '{image._image_name}'"
                 )
                 if image in seen_images:
                     continue
