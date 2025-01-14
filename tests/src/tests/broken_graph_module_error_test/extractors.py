@@ -1,12 +1,6 @@
-import sys
-import unittest
+from first_p_dep import return_x
 
-from tensorlake import RemoteGraph
-from tensorlake.functions_sdk.data_objects import File
 from tensorlake.functions_sdk.functions import tensorlake_function
-from tensorlake.functions_sdk.graph import Graph
-
-from .first_p_dep import return_x
 
 
 @tensorlake_function()
