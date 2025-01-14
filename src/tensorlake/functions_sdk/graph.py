@@ -128,8 +128,7 @@ class Graph:
         validate_route(from_node=from_node, to_nodes=to_nodes)
 
         print(
-            f"Adding router {from_node.name} to nodes {
-                [node.name for node in to_nodes]}"
+            f"Adding router {from_node.name} to nodes {[node.name for node in to_nodes]}"
         )
         self.add_node(from_node)
         for node in to_nodes:
