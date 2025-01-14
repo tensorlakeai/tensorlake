@@ -3,20 +3,20 @@ from pathlib import Path
 from typing import List, Tuple, Union
 
 import parameterized
-from indexify import (
-    Graph,
-    IndexifyFunction,
-    IndexifyRouter,
-    RemoteGraph,
-    get_ctx,
-    indexify_function,
-    indexify_router,
-)
-from indexify.functions_sdk.data_objects import File
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 
 import tests
+from tensorlake import (
+    Graph,
+    RemoteGraph,
+    TensorlakeCompute,
+    TensorlakeRouter,
+    get_ctx,
+    tensorlake_function,
+    tensorlake_router,
+)
+from tensorlake.functions_sdk.data_objects import File
 from tests.testing import remote_or_local_graph, test_graph_name
 
 
@@ -24,34 +24,34 @@ class MyObject(BaseModel):
     x: str
 
 
-@indexify_function()
+@tensorlake_function()
 def simple_function(x: MyObject) -> MyObject:
     return MyObject(x=x.x + "b")
 
 
-@indexify_function()
+@tensorlake_function()
 def simple_function_multiple_inputs(x: MyObject, y: int) -> MyObject:
     suf = "".join(["b" for _ in range(y)])
     return MyObject(x=x.x + suf)
 
 
-@indexify_function(input_encoder="json", output_encoder="json")
+@tensorlake_function(input_encoder="json", output_encoder="json")
 def simple_function_with_json_encoder(x: str) -> str:
     return x + "b"
 
 
-@indexify_function(input_encoder="json", output_encoder="json")
+@tensorlake_function(input_encoder="json", output_encoder="json")
 def simple_function_multiple_inputs_json(x: str, y: int) -> str:
     suf = "".join(["b" for _ in range(y)])
     return x + suf
 
 
-@indexify_function()
+@tensorlake_function()
 def simple_function_with_str_as_input(x: str) -> str:
     return x + "cc"
 
 
-@indexify_function(input_encoder="invalid")
+@tensorlake_function(input_encoder="invalid")
 def simple_function_with_invalid_encoder(x: MyObject) -> MyObject:
     return MyObject(x=x.x + "b")
 
@@ -62,7 +62,7 @@ class ComplexObject(BaseModel):
     graph_version: str
 
 
-@indexify_function()
+@tensorlake_function()
 def simple_function_ctx(x: MyObject) -> ComplexObject:
     ctx = get_ctx()
     ctx.invocation_state.set("my_key", 10)
@@ -73,14 +73,14 @@ def simple_function_ctx(x: MyObject) -> ComplexObject:
     )
 
 
-@indexify_function()
+@tensorlake_function()
 def simple_function_ctx_b(x: ComplexObject) -> int:
     ctx = get_ctx()
     val = ctx.invocation_state.get("my_key")
     return val + 1
 
 
-class SimpleFunctionCtxC(IndexifyFunction):
+class SimpleFunctionCtxC(TensorlakeCompute):
     name = "SimpleFunctionCtxC"
 
     def __init__(self):
@@ -96,17 +96,17 @@ class SimpleFunctionCtxC(IndexifyFunction):
         return val + 1
 
 
-@indexify_function()
+@tensorlake_function()
 def generate_seq(x: int) -> List[int]:
     return list(range(x))
 
 
-@indexify_function()
+@tensorlake_function()
 def square(x: int) -> int:
     return x * x
 
 
-@indexify_function(input_encoder="json", output_encoder="json")
+@tensorlake_function(input_encoder="json", output_encoder="json")
 def square_with_json_encoder(x: int) -> int:
     return x * x
 
@@ -115,7 +115,7 @@ class Sum(BaseModel):
     val: int = 0
 
 
-@indexify_function(accumulate=Sum)
+@tensorlake_function(accumulate=Sum)
 def sum_of_squares(init_value: Sum, x: int) -> Sum:
     init_value.val += x
     return init_value
@@ -125,29 +125,29 @@ class JsonSum(TypedDict):
     val: int
 
 
-@indexify_function(accumulate=JsonSum, input_encoder="json")
+@tensorlake_function(accumulate=JsonSum, input_encoder="json")
 def sum_of_squares_with_json_encoding(init_value: JsonSum, x: int) -> JsonSum:
     val = init_value.get("val", 0)
     init_value["val"] = val + x
     return init_value
 
 
-@indexify_function()
+@tensorlake_function()
 def make_it_string(x: Sum) -> str:
     return str(x.val)
 
 
-@indexify_function()
+@tensorlake_function()
 def add_two(x: Sum) -> int:
     return x.val + 2
 
 
-@indexify_function()
+@tensorlake_function()
 def add_three(x: Sum) -> int:
     return x.val + 3
 
 
-@indexify_router()
+@tensorlake_router()
 def route_if_even(x: Sum) -> List[Union[add_two, add_three]]:
     print(f"routing input {x}")
     if x.val % 2 == 0:
@@ -156,12 +156,12 @@ def route_if_even(x: Sum) -> List[Union[add_two, add_three]]:
         return add_two
 
 
-@indexify_function()
+@tensorlake_function()
 def make_it_string_from_int(x: int) -> str:
     return str(x)
 
 
-@indexify_function()
+@tensorlake_function()
 def handle_file(f: File) -> int:
     return len(f.data)
 
@@ -244,7 +244,7 @@ class SimpleFunctionCtxClsObject(BaseModel):
         return False
 
 
-class SimpleFunctionCtxCls(IndexifyFunction):
+class SimpleFunctionCtxCls(TensorlakeCompute):
     name = "SimpleFunctionCtxCls"
 
     def __init__(self):
@@ -258,7 +258,7 @@ class SimpleRouterCtxClsObject(BaseModel):
     x: int
 
 
-class SimpleFunctionCtxCls1(IndexifyFunction):
+class SimpleFunctionCtxCls1(TensorlakeCompute):
     name = "SimpleFunctionCtxCls1"
 
     def __init__(self):
@@ -268,7 +268,7 @@ class SimpleFunctionCtxCls1(IndexifyFunction):
         return SimpleRouterCtxClsObject(x=obj.x + 1)
 
 
-class SimpleFunctionCtxCls2(IndexifyFunction):
+class SimpleFunctionCtxCls2(TensorlakeCompute):
     name = "SimpleFunctionCtxCls2"
 
     def __init__(self):
@@ -278,7 +278,7 @@ class SimpleFunctionCtxCls2(IndexifyFunction):
         return SimpleRouterCtxClsObject(x=obj.x + 2)
 
 
-class SimpleRouterCtxCls(IndexifyRouter):
+class SimpleRouterCtxCls(TensorlakeRouter):
     name = "SimpleRouterCtxCls"
 
     def __init__(self):
@@ -386,11 +386,11 @@ class TestGraphBehaviors(unittest.TestCase):
 
     @parameterized.parameterized.expand([(False), (True)])
     def test_multiple_return_values(self, is_remote):
-        @indexify_function()
+        @tensorlake_function()
         def my_func(x: int) -> tuple:
             return 1, 2, 3
 
-        @indexify_function()
+        @tensorlake_function()
         def my_func_2(x: int, y: int, z: int) -> int:
             return x + y + z
 
@@ -408,19 +408,19 @@ class TestGraphBehaviors(unittest.TestCase):
 
     @parameterized.parameterized.expand([(False), (True)])
     def test_multiple_return_values_router(self, is_remote):
-        @indexify_function()
+        @tensorlake_function()
         def my_func(x: int) -> tuple:
             return 1, 2, 3
 
-        @indexify_function()
+        @tensorlake_function()
         def my_func_2(x: int, y: int, z: int) -> int:
             return x + y + z
 
-        @indexify_function()
+        @tensorlake_function()
         def my_func_3(x: int, y: int, z: int) -> int:
             raise Exception("Should not be called")
 
-        @indexify_router()
+        @tensorlake_router()
         def my_router(x: int, y: int, z: int) -> List[Union[my_func_2, my_func_3]]:
             if x + y + z == 0:
                 return my_func_3
@@ -444,11 +444,11 @@ class TestGraphBehaviors(unittest.TestCase):
 
     @parameterized.parameterized.expand([(False), (True)])
     def test_return_dict_as_args(self, is_remote):
-        @indexify_function()
+        @tensorlake_function()
         def my_func(x: int) -> dict:
             return {"input": dict(x=1, y=2, z=3)}
 
-        @indexify_function()
+        @tensorlake_function()
         def my_func_2(input: dict) -> int:
             return input["x"] + input["y"] + input["z"]
 
@@ -468,11 +468,11 @@ class TestGraphBehaviors(unittest.TestCase):
 
     @parameterized.parameterized.expand([(False), (True)])
     def test_return_multiple_dict_as_args(self, is_remote):
-        @indexify_function()
+        @tensorlake_function()
         def my_func(x: int) -> dict:
             return {"input1": dict(x=1, y=2, z=3), "input2": dict(x=1, y=2, z=3)}
 
-        @indexify_function()
+        @tensorlake_function()
         def my_func_2(input1: dict, input2: dict) -> int:
             return (
                 input1["x"]
@@ -499,11 +499,11 @@ class TestGraphBehaviors(unittest.TestCase):
 
     @parameterized.parameterized.expand([(False), (True)])
     def test_return_dict_as_kwargs(self, is_remote):
-        @indexify_function()
+        @tensorlake_function()
         def my_func(x: int) -> dict:
             return dict(x=1, y=2, z=3)
 
-        @indexify_function()
+        @tensorlake_function()
         def my_func_2(x: int, y: int, z: int) -> int:
             return x + y + z
 
@@ -523,11 +523,11 @@ class TestGraphBehaviors(unittest.TestCase):
 
     @parameterized.parameterized.expand([(False), (True)])
     def test_multiple_return_values_json(self, is_remote):
-        @indexify_function(input_encoder="json", output_encoder="json")
+        @tensorlake_function(input_encoder="json", output_encoder="json")
         def my_func(x: int) -> tuple:
             return 1, 2, 3
 
-        @indexify_function(input_encoder="json", output_encoder="json")
+        @tensorlake_function(input_encoder="json", output_encoder="json")
         def my_func_2(x: int, y: int, z: int) -> int:
             return x + y + z
 
@@ -547,11 +547,11 @@ class TestGraphBehaviors(unittest.TestCase):
 
     @parameterized.parameterized.expand([(False), (True)])
     def test_return_dict_args_json(self, is_remote):
-        @indexify_function(input_encoder="json", output_encoder="json")
+        @tensorlake_function(input_encoder="json", output_encoder="json")
         def my_func(x: int) -> dict:
             return {"input": dict(x=1, y=2, z=3)}
 
-        @indexify_function(input_encoder="json", output_encoder="json")
+        @tensorlake_function(input_encoder="json", output_encoder="json")
         def my_func_2(input: dict) -> int:
             return input["x"] + input["y"] + input["z"]
 
@@ -575,11 +575,11 @@ class TestGraphBehaviors(unittest.TestCase):
 
     @parameterized.parameterized.expand([(False), (True)])
     def test_return_dict_args_as_kwargs_in_list(self, is_remote):
-        @indexify_function()
+        @tensorlake_function()
         def my_func(text: str) -> List[dict]:
             return [dict(index=index, char=char) for index, char in enumerate(text)]
 
-        @indexify_function()
+        @tensorlake_function()
         def my_func_2(index: int, char: str) -> str:
             return f"{char}={index}"
 
@@ -601,14 +601,14 @@ class TestGraphBehaviors(unittest.TestCase):
 
     @parameterized.parameterized.expand([(False), (True)])
     def test_return_dict_args_as_dict_in_list(self, is_remote):
-        @indexify_function()
+        @tensorlake_function()
         def my_func(text: str) -> List[dict]:
             return [
                 {"data": {"index": index, "char": char}}
                 for index, char in enumerate(text)
             ]
 
-        @indexify_function()
+        @tensorlake_function()
         def my_func_2(data: dict) -> str:
             return f"{data['char']}={data['index']}"
 
@@ -630,11 +630,11 @@ class TestGraphBehaviors(unittest.TestCase):
 
     @parameterized.parameterized.expand([(False), (True)])
     def test_return_multiple_dict_as_args(self, is_remote):
-        @indexify_function(input_encoder="json", output_encoder="json")
+        @tensorlake_function(input_encoder="json", output_encoder="json")
         def my_func(x: int) -> dict:
             return dict(x=1, y=2, z=3), dict(x=1, y=2, z=3)
 
-        @indexify_function(input_encoder="json", output_encoder="json")
+        @tensorlake_function(input_encoder="json", output_encoder="json")
         def my_func_2(input1: dict, input2: dict) -> int:
             return (
                 input1["x"]
@@ -661,11 +661,11 @@ class TestGraphBehaviors(unittest.TestCase):
 
     @parameterized.parameterized.expand([(False), (True)])
     def test_return_dict_as_kwargs_json(self, is_remote):
-        @indexify_function(input_encoder="json", output_encoder="json")
+        @tensorlake_function(input_encoder="json", output_encoder="json")
         def my_func(x: int) -> dict:
             return dict(x=1, y=2, z=3)
 
-        @indexify_function(input_encoder="json", output_encoder="json")
+        @tensorlake_function(input_encoder="json", output_encoder="json")
         def my_func_2(x: int, y: int, z: int) -> int:
             return x + y + z
 
@@ -793,17 +793,17 @@ class TestGraphBehaviors(unittest.TestCase):
 
     @parameterized.parameterized.expand([(False), (True)])
     def test_ignore_none_in_map(self, is_remote):
-        @indexify_function()
+        @tensorlake_function()
         def gen_seq(x: int) -> List[int]:
             return list(range(x))
 
-        @indexify_function()
+        @tensorlake_function()
         def ignore_none(x: int) -> int:
             if x % 2 == 0:
                 return x
             return None
 
-        @indexify_function()
+        @tensorlake_function()
         def add_two(x: int) -> int:
             return x + 2
 
@@ -861,11 +861,11 @@ class TestGraphBehaviors(unittest.TestCase):
         class P1(BaseModel):
             a: int
 
-        @indexify_function(input_encoder="json", output_encoder="json")
+        @tensorlake_function(input_encoder="json", output_encoder="json")
         def my_func1(x: int) -> dict:
             return {"input": P1(a=x).model_dump()}
 
-        @indexify_function(input_encoder="json", output_encoder="json")
+        @tensorlake_function(input_encoder="json", output_encoder="json")
         def my_func_2(input: dict) -> int:
             p = P1.model_validate(input)
             return p.a

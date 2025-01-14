@@ -8,8 +8,7 @@ from typing import List
 
 from pydantic import BaseModel
 
-import tensorlake
-from tensorlake import Client, Graph, Image, tensorlake_function
+from tensorlake import Graph, Image, tensorlake_function
 
 mapper_image = Image().name("generator").run("pip install httpx")
 process_image = Image().name("process").run("pip install numpy")
@@ -25,7 +24,7 @@ def map_function(a: int) -> List[int]:
     return [i for i in range(a)]
 
 
-@tensorlake_function()
+@tensorlake_function(image=process_image)
 def process_function(x: int) -> int:
     return x**2
 
@@ -43,6 +42,7 @@ summer = Graph(
 )
 summer.add_edge(map_function, process_function)
 summer.add_edge(process_function, reduce_function)
+
 
 # if __name__ == "__main__":
 #     # For serverless

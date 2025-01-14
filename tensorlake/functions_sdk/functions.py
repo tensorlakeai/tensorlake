@@ -220,7 +220,7 @@ class TensorlakeFunctionWrapper:
 
     def get_output_model(self) -> Any:
         if not isinstance(self.indexify_function, TensorlakeCompute):
-            raise TypeError("Input must be an instance of IndexifyFunction")
+            raise TypeError("Input must be an instance of TensorlakeCompute")
 
         extract_method = self.indexify_function.run
         type_hints = get_type_hints(extract_method)
@@ -237,7 +237,7 @@ class TensorlakeFunctionWrapper:
 
     def get_input_types(self) -> Dict[str, Any]:
         if not isinstance(self.indexify_function, TensorlakeCompute):
-            raise TypeError("Input must be an instance of IndexifyFunction")
+            raise TypeError("Input must be an instance of TensorlakeCompute")
 
         extract_method = self.indexify_function.run
         type_hints = get_type_hints(extract_method)
