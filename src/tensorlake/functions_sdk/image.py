@@ -22,9 +22,9 @@ class ImageInformation(BaseModel):
     sdk_version: str
 
     # These are deprecated and here for backwards compatibility
-    run_strs: List[str] | None = []
-    tag: str | None = ""
-    base_image: str | None = ""
+    run_strs: Optional[List[str]] = []
+    tag: Optional[str] = ""
+    base_image: Optional[str] = ""
 
 
 HASH_BUFF_SIZE = 1024**2
@@ -36,36 +36,36 @@ class BuildOp(BaseModel):
     args: List[str]
 
     def hash(self, hash):
-        match self.op_type:
-            case "RUN" | "ADD":
-                hash.update(self.op_type.encode())
-                for a in self.args:
-                    hash.update(a.encode())
+        if self.op_type in ("RUN", "ADD"):
 
-            case "COPY":
-                hash.update("COPY".encode())
-                for root, dirs, files in os.walk(self.args[0]):
-                    for file in files:
-                        filename = pathlib.Path(root, file)
-                        with open(filename, "rb") as fp:
+            hash.update(self.op_type.encode())
+            for a in self.args:
+                hash.update(a.encode())
+
+        elif self.op_type == "COPY":
+            hash.update("COPY".encode())
+            for root, dirs, files in os.walk(self.args[0]):
+                for file in files:
+                    filename = pathlib.Path(root, file)
+                    with open(filename, "rb") as fp:
+                        data = fp.read(HASH_BUFF_SIZE)
+                        while data:
+                            hash.update(data)
                             data = fp.read(HASH_BUFF_SIZE)
-                            while data:
-                                hash.update(data)
-                                data = fp.read(HASH_BUFF_SIZE)
 
-            case _:
-                raise ValueError(f"Unsupported build op type {self.op_type}")
+        else:
+            raise ValueError(f"Unsupported build op type {self.op_type}")
 
     def render(self):
-        match self.op_type:
-            case "RUN" | "ADD":
-                options = [f"--{k}={v}" for k, v in self.options.items()]
-                return f"{self.op_type} {' '.join(options)} {' '.join(self.args)}"
+        if self.op_type in ("RUN", "ADD"):
+            options = [f"--{k}={v}" for k, v in self.options.items()]
+            return f"{self.op_type} {' '.join(options)} {' '.join(self.args)}"
 
-            case "COPY":
-                return f"COPY {self.args[0]} {self.args[1]}"
-            case _:
-                raise ValueError(f"Unsupported build op type {self.op_type}")
+        elif self.op_type == "COPY":
+            return f"COPY {self.args[0]} {self.args[1]}"
+
+        else:
+            raise ValueError(f"Unsupported build op type {self.op_type}")
 
 
 class Build(BaseModel):
@@ -73,19 +73,19 @@ class Build(BaseModel):
     Model for talking with the build service.
     """
 
-    id: int | None = None
+    id: Optional[int] = None
     namespace: str
     image_name: str
     image_hash: str
-    status: str | None
-    result: str | None
-    error_message: str | None = None  # Only provided when result is "failed"
+    status: Optional[str] = None
+    result: Optional[str] = None
+    error_message: Optional[str] = None  # Only provided when result is "failed"
 
-    created_at: datetime.datetime | None
-    started_at: datetime.datetime | None = None
-    build_completed_at: datetime.datetime | None = None
-    push_completed_at: datetime.datetime | None = None
-    uri: str | None = None
+    created_at: Optional[datetime.datetime] = None
+    started_at: Optional[datetime.datetime] = None
+    build_completed_at: Optional[datetime.datetime] = None
+    push_completed_at: Optional[datetime.datetime] = None
+    uri: Optional[str] = None
 
 
 class Image:
