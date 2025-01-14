@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 import tests.testing
 from tensorlake import RemoteGraph
-from tensorlake.error import GraphStillProcessing, ApiException
+from tensorlake.error import ApiException, GraphStillProcessing
 from tensorlake.functions_sdk.functions import tensorlake_function
 from tensorlake.functions_sdk.graph import Graph
 from tests.testing import test_graph_name
@@ -174,12 +174,13 @@ class TestGraphUpdate(unittest.TestCase):
             except GraphStillProcessing:
                 time.sleep(1)
 
-
     def test_graph_update_fails_without_version_update(self):
         graph_name = test_graph_name(self)
+
         @tensorlake_function()
         def function_a() -> str:
             return "success"
+
         g = Graph(
             name=graph_name,
             description="test description",
