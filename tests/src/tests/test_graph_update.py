@@ -83,7 +83,7 @@ class TestGraphUpdate(unittest.TestCase):
         self.assertEqual(output[0].x, "9b")
 
     @parameterized.parameterized.expand(
-        ["second_graph_new_name", "second_graph_reused_function_names"]
+        [("second_graph_new_name",), ("second_graph_reused_function_names",)]
     )
     def test_running_invocation_unaffected_by_update(self, second_graph_name: str):
         graph_name = test_graph_name(self)

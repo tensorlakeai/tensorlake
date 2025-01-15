@@ -5,9 +5,6 @@ description = "Petabyte scale data framework for unstructured data of any modali
 authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
 homepage = "https://github.com/tensorlakeai/tensorlake"
 repository = "https://github.com/tensorlakeai/tensorlake"
-packages = [
-    { include = "tensorlake", from="src", format = ["sdist", "wheel"] },
-]
 
 [tool.poetry.dependencies]
 python = "^3.9"

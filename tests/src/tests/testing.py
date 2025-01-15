@@ -1,5 +1,5 @@
 import unittest
-from typing import Any, List
+from typing import Any, List, Union
 
 from tensorlake.functions_sdk.graph import Graph
 from tensorlake.remote_graph import RemoteGraph
@@ -7,7 +7,7 @@ from tensorlake.remote_graph import RemoteGraph
 
 def remote_or_local_graph(
     graph, remote=True, additional_modules: List[Any] = []
-) -> RemoteGraph | Graph:
+) -> Union[RemoteGraph, Graph]:
     if remote:
         return RemoteGraph.deploy(graph, additional_modules=additional_modules)
     return graph
