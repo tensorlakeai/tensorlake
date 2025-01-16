@@ -175,7 +175,7 @@ class Image:
             docker_contents.append(
                 f"RUN pip install indexify=={self._sdk_version}"
             )  # TODO: Update this to specify our local tensorlake version
-        
+
         docker_file = "\n".join(docker_contents)
         return docker_file
 
