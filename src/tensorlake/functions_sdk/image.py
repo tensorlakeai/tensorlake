@@ -171,10 +171,11 @@ class Image:
             docker_contents.append(f"COPY {python_sdk_path} /app/python-sdk")
             docker_contents.append("RUN (cd /app/python-sdk && pip install .)")
         else:
+            # TODO: Remove installation of indexify when we've finished the container executor
             docker_contents.append(
-                f"RUN pip install indexify"
+                f"RUN pip install indexify=={self._sdk_version}"
             )  # TODO: Update this to specify our local tensorlake version
-
+        
         docker_file = "\n".join(docker_contents)
         return docker_file
 
