@@ -2,9 +2,7 @@ networks:
   server:
 services:
   indexify:
-    # TODO: Switch to using public version of the server it's up to date 
-    #image: tensorlake/indexify-server
-    image: 127537880326.dkr.ecr.us-east-1.amazonaws.com/indexify:latest
+    image: tensorlake/indexify-server:latest
     ports:
       - 8900:8900
     networks:
@@ -14,9 +12,8 @@ services:
     volumes:
       - data:/tmp/indexify-blob-storage
   executor:
-    # TODO: Switch to using public version of the executor once it's up to date 
-    #image: tensorlake/indexify-executor-default:3.13
-    image: 127537880326.dkr.ecr.us-east-1.amazonaws.com/indexify-executor:latest
+    # Note: This must match the python version uses in test.yaml
+    image: tensorlake/indexify-executor-default:3.13
     environment:
       - INDEXIFY_URL=http://indexify:8900
     command:
