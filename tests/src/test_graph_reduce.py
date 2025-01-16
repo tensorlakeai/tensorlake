@@ -2,12 +2,12 @@ import unittest
 from typing import List
 
 import parameterized
+import testing
 from pydantic import BaseModel
+from testing import remote_or_local_graph, test_graph_name
 
-import tests
 from tensorlake import Graph
 from tensorlake.functions_sdk.functions import tensorlake_function
-from tests.testing import remote_or_local_graph, test_graph_name
 
 
 class AccumulatedState(BaseModel):
@@ -89,7 +89,7 @@ class TestGraphReduce(unittest.TestCase):
         graph.add_edge(add_one, accumulate_reduce)
         graph.add_edge(accumulate_reduce, store_result)
         graph = remote_or_local_graph(
-            graph, remote=is_remote, additional_modules=[tests, parameterized]
+            graph, remote=is_remote, additional_modules=[testing, parameterized]
         )
 
         invocation_id = graph.run(block_until_done=True, x=3)

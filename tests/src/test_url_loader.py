@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from tensorlake.data_loaders.url_loader import FileMetadata, UrlLoader
+from tensorlake.data_loaders.url_loader import UrlLoader
 
 
 class TestUrlLoader(unittest.TestCase):

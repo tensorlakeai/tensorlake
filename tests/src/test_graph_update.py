@@ -2,14 +2,14 @@ import time
 import unittest
 
 import parameterized
+import testing
 from pydantic import BaseModel
+from testing import test_graph_name
 
-import tests.testing
 from tensorlake import RemoteGraph
 from tensorlake.error import ApiException, GraphStillProcessing
 from tensorlake.functions_sdk.functions import tensorlake_function
 from tensorlake.functions_sdk.graph import Graph
-from tests.testing import test_graph_name
 
 
 class TestGraphUpdate(unittest.TestCase):
@@ -33,7 +33,7 @@ class TestGraphUpdate(unittest.TestCase):
             start_node=update,
             version="1.0",
         )
-        g = RemoteGraph.deploy(g, additional_modules=[tests, parameterized])
+        g = RemoteGraph.deploy(g, additional_modules=[testing, parameterized])
         invocation_id = g.run(block_until_done=True, x=Object(x="a"))
         output = g.output(invocation_id, fn_name="update")
         # TODO: Do self.assertEqual(output[0], Object(x="ab")) once we figure out why
@@ -49,7 +49,7 @@ class TestGraphUpdate(unittest.TestCase):
             start_node=update2,
             version="2.0",
         )
-        g = RemoteGraph.deploy(g, additional_modules=[tests, parameterized])
+        g = RemoteGraph.deploy(g, additional_modules=[testing, parameterized])
         g.replay_invocations()
         while g.metadata().replaying:
             time.sleep(1)
@@ -72,7 +72,7 @@ class TestGraphUpdate(unittest.TestCase):
             start_node=update,
             version="3.0",
         )
-        g = RemoteGraph.deploy(g, additional_modules=[tests, parameterized])
+        g = RemoteGraph.deploy(g, additional_modules=[testing, parameterized])
 
         g.replay_invocations()
         while g.metadata().replaying:
@@ -151,7 +151,7 @@ class TestGraphUpdate(unittest.TestCase):
             return g, end_node.name
 
         g = initial_graph()
-        g = RemoteGraph.deploy(g, additional_modules=[tests, parameterized])
+        g = RemoteGraph.deploy(g, additional_modules=[testing, parameterized])
         first_invocation_id = g.run(block_until_done=False, x=0)
 
         if second_graph_name == "second_graph_new_name":
@@ -161,7 +161,7 @@ class TestGraphUpdate(unittest.TestCase):
         # The first invocation should not be affected by the second graph version
         # This loop waits for the first invocation to finish and checks its output.
         time.sleep(0.25)
-        g = RemoteGraph.deploy(g, additional_modules=[tests, parameterized])
+        g = RemoteGraph.deploy(g, additional_modules=[testing, parameterized])
         g.metadata()
         invocation_id = g.run(block_until_done=True, x=0)
         output = g.output(invocation_id, fn_name=end_node_name)
