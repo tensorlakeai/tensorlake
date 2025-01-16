@@ -9,7 +9,7 @@ on:
     branches:
       - 'main'
     paths:
-      - 'tensorlake/**'
+      - 'src/**'
       - 'tests/**'
       - '.github/workflows/tests.yaml'
 

@@ -1,12 +1,13 @@
 import unittest
 from pathlib import Path
-from typing import List, Tuple, Union
+from typing import List, Union
 
 import parameterized
+import testing
 from pydantic import BaseModel
+from testing import remote_or_local_graph, test_graph_name
 from typing_extensions import TypedDict
 
-import tests
 from tensorlake import (
     Graph,
     RemoteGraph,
@@ -17,7 +18,6 @@ from tensorlake import (
     tensorlake_router,
 )
 from tensorlake.functions_sdk.data_objects import File
-from tests.testing import remote_or_local_graph, test_graph_name
 
 
 class MyObject(BaseModel):
@@ -399,7 +399,7 @@ class TestGraphBehaviors(unittest.TestCase):
         )
         graph.add_edge(my_func, my_func_2)
         graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[tests, parameterized]
+            graph, is_remote, additional_modules=[testing, parameterized]
         )
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, my_func_2.name)
@@ -435,7 +435,7 @@ class TestGraphBehaviors(unittest.TestCase):
         graph.add_edge(my_func, my_router)
         graph.route(my_router, [my_func_2, my_func_3])
         graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[tests, parameterized]
+            graph, is_remote, additional_modules=[testing, parameterized]
         )
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, my_func_2.name)
@@ -459,7 +459,7 @@ class TestGraphBehaviors(unittest.TestCase):
         )
         graph.add_edge(my_func, my_func_2)
         graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[tests, parameterized]
+            graph, is_remote, additional_modules=[testing, parameterized]
         )
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, my_func_2.name)
@@ -490,7 +490,7 @@ class TestGraphBehaviors(unittest.TestCase):
         )
         graph.add_edge(my_func, my_func_2)
         graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[tests, parameterized]
+            graph, is_remote, additional_modules=[testing, parameterized]
         )
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, my_func_2.name)
@@ -514,7 +514,7 @@ class TestGraphBehaviors(unittest.TestCase):
         )
         graph.add_edge(my_func, my_func_2)
         graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[tests, parameterized]
+            graph, is_remote, additional_modules=[testing, parameterized]
         )
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, my_func_2.name)
@@ -538,7 +538,7 @@ class TestGraphBehaviors(unittest.TestCase):
         )
         graph.add_edge(my_func, my_func_2)
         graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[tests, parameterized]
+            graph, is_remote, additional_modules=[testing, parameterized]
         )
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, my_func_2.name)
@@ -562,7 +562,7 @@ class TestGraphBehaviors(unittest.TestCase):
         )
         graph.add_edge(my_func, my_func_2)
         graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[tests, parameterized]
+            graph, is_remote, additional_modules=[testing, parameterized]
         )
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, my_func_2.name)
@@ -591,7 +591,7 @@ class TestGraphBehaviors(unittest.TestCase):
 
         graph.add_edge(my_func, my_func_2)
         graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[tests, parameterized]
+            graph, is_remote, additional_modules=[testing, parameterized]
         )
         invocation_id = graph.run(block_until_done=True, text="hi")
         output = graph.output(invocation_id, my_func_2.name)
@@ -620,7 +620,7 @@ class TestGraphBehaviors(unittest.TestCase):
 
         graph.add_edge(my_func, my_func_2)
         graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[tests, parameterized]
+            graph, is_remote, additional_modules=[testing, parameterized]
         )
         invocation_id = graph.run(block_until_done=True, text="hi")
         output = graph.output(invocation_id, my_func_2.name)
@@ -652,7 +652,7 @@ class TestGraphBehaviors(unittest.TestCase):
         )
         graph.add_edge(my_func, my_func_2)
         graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[tests, parameterized]
+            graph, is_remote, additional_modules=[testing, parameterized]
         )
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, my_func_2.name)
@@ -676,7 +676,7 @@ class TestGraphBehaviors(unittest.TestCase):
         )
         graph.add_edge(my_func, my_func_2)
         graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[tests, parameterized]
+            graph, is_remote, additional_modules=[testing, parameterized]
         )
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, my_func_2.name)
@@ -811,7 +811,7 @@ class TestGraphBehaviors(unittest.TestCase):
         graph.add_edge(gen_seq, ignore_none)
         graph.add_edge(ignore_none, add_two)
         graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[tests, parameterized]
+            graph, is_remote, additional_modules=[testing, parameterized]
         )
         invocation_id = graph.run(block_until_done=True, x=5)
         output = graph.output(invocation_id, "add_two")
@@ -877,7 +877,7 @@ class TestGraphBehaviors(unittest.TestCase):
         )
         graph.add_edge(my_func1, my_func_2)
         graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[tests, parameterized]
+            graph, is_remote, additional_modules=[testing, parameterized]
         )
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, my_func_2.name)

@@ -4,9 +4,9 @@ import unittest
 from typing import Optional
 
 from parameterized import parameterized
+from testing import remote_or_local_graph
 
 from tensorlake import Graph, tensorlake_function
-from tests.testing import remote_or_local_graph
 
 cached_file_descriptor: Optional[int] = None
 

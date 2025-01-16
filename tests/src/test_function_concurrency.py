@@ -2,8 +2,9 @@ import threading
 import time
 import unittest
 
+from testing import remote_or_local_graph, test_graph_name
+
 from tensorlake import Graph, tensorlake_function
-from tests.testing import remote_or_local_graph, test_graph_name
 
 
 @tensorlake_function()

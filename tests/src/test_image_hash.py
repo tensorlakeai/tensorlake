@@ -2,7 +2,7 @@ import os
 import shutil
 import unittest
 
-from tensorlake.functions_sdk.image import BASE_IMAGE_NAME, Image
+from tensorlake.functions_sdk.image import Image
 
 KNOWN_GOOD_HASH = "3f25487a14c4c0e8c9948545e85e17404717a3eebf33c91821b6d8d06cc6d704"
 
