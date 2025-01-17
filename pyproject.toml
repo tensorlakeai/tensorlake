@@ -14,7 +14,7 @@ pydantic = "2.10.4"
 docker = "^7.1.0"
 nanoid = "^2.0.0"
 httpx-sse = "^0.4.0"
-rich = "^13.9.4" # TODO: Look into consolidating this with click
+rich = "^13.9.4"                                  # TODO: Look into consolidating this with click
 pyyaml = "^6.0.2"
 click = "^8.1.8"
 

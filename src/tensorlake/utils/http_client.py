@@ -4,6 +4,8 @@ import httpx
 import yaml
 from httpx import AsyncClient, Client
 
+_TRANSIENT_HTTPX_ERRORS = (httpx.NetworkError, httpx.RemoteProtocolError)
+
 
 def get_httpx_client(
     config_path: Optional[str] = None, make_async: Optional[bool] = False

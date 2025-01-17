@@ -53,7 +53,7 @@ class RemoteGraph:
             self._name,
             block_until_done,
             self._graph_definition.get_input_encoder(),
-            **kwargs
+            **kwargs,
         )
 
     def metadata(self) -> ComputeGraphMetadata:
