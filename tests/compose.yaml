@@ -13,7 +13,7 @@ services:
       - data:/tmp/indexify-blob-storage
   executor:
     # Note: This must match the python version uses in test.yaml
-    image: tensorlake/indexify-executor-default:3.13
+    image: tensorlake/indexify-executor-default:3.9
     environment:
       - INDEXIFY_URL=http://indexify:8900
     command:

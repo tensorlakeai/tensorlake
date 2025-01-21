@@ -1,20 +1,28 @@
 import json
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import cloudpickle
 import httpx
-from httpx_sse import connect_sse
+from httpx_sse import ServerSentEvent, connect_sse
 from pydantic import BaseModel, Json
 from rich import print  # TODO: Migrate to use click.echo
 
 from tensorlake.error import ApiException, GraphStillProcessing
 from tensorlake.functions_sdk.data_objects import TensorlakeData
-from tensorlake.functions_sdk.functions import TensorlakeCompute
 from tensorlake.functions_sdk.graph import ComputeGraphMetadata, Graph
 from tensorlake.functions_sdk.object_serializer import get_serializer
 from tensorlake.settings import DEFAULT_SERVICE_URL
-from tensorlake.utils.http_client import get_httpx_client, get_sync_or_async_client
+from tensorlake.utils.http_client import (
+    _TRANSIENT_HTTPX_ERRORS,
+    get_httpx_client,
+    get_sync_or_async_client,
+)
+from tensorlake.utils.retries import exponential_backoff
+
+
+class InvocationFinishedEvent(BaseModel):
+    invocation_id: str
 
 
 class InvocationEventPayload(BaseModel):
@@ -27,7 +35,7 @@ class InvocationEventPayload(BaseModel):
 
 class InvocationEvent(BaseModel):
     event_name: str
-    payload: InvocationEventPayload
+    payload: Union[InvocationEventPayload, InvocationFinishedEvent]
 
 
 class GraphOutputMetadata(BaseModel):
@@ -39,6 +47,12 @@ class GraphOutputs(BaseModel):
     status: str
     outputs: List[GraphOutputMetadata]
     cursor: Optional[str] = None
+
+
+def log_retries(e: BaseException, sleep_time: float, retries: int):
+    print(
+        f"Retrying after {sleep_time:.2f} seconds. Retry count: {retries}. Retryable exception: {e.__repr__()}"
+    )
 
 
 class TensorlakeClient:
@@ -56,7 +70,7 @@ class TensorlakeClient:
 
         self.service_url = service_url
         self._config_path = config_path
-        self._client = get_httpx_client(config_path)
+        self._client: httpx.Client = get_httpx_client(config_path)
 
         self.namespace: str = namespace
         self.compute_graphs: List[Graph] = []
@@ -74,19 +88,12 @@ class TensorlakeClient:
     def _request(self, method: str, **kwargs) -> httpx.Response:
         try:
             response = self._client.request(method, timeout=self._timeout, **kwargs)
-            status_code = str(response.status_code)
-            if status_code.startswith("4"):
-                raise ApiException(
-                    "status code: " + status_code + " message: " + response.text
-                )
-            if status_code.startswith("5"):
-                raise ApiException(response.text)
-        except httpx.ConnectError:
-            message = (
-                f"Make sure the server is running and accessible at {self._service_url}"
-            )
-            ex = ApiException(message=message)
-            raise ex
+            status_code = response.status_code
+            if status_code >= 400:
+                raise ApiException(status_code=status_code, message=response.text)
+        except httpx.RequestError as e:
+            message = f"Make sure the server is running and accessible at {self._service_url}, {e}"
+            raise ApiException(status_code=503, message=message)
         return response
 
     @classmethod
@@ -138,6 +145,12 @@ class TensorlakeClient:
                 kwargs["headers"] = {}
             kwargs["headers"]["Authorization"] = f"Bearer {self._api_key}"
 
+    @exponential_backoff(
+        max_retries=5,
+        retryable_exceptions=(ApiException,),
+        is_retryable=lambda e: isinstance(e, ApiException) and e.status_code == 503,
+        on_retry=log_retries,
+    )
     def _get(self, endpoint: str, **kwargs) -> httpx.Response:
         self._add_api_key(kwargs)
         return self._request("GET", url=f"{self._service_url}/{endpoint}", **kwargs)
@@ -161,7 +174,7 @@ class TensorlakeClient:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.close()
+        self._close()
 
     def register_compute_graph(self, graph: Graph, additional_modules):
         graph_metadata: ComputeGraphMetadata = graph.definition()
@@ -201,32 +214,12 @@ class TensorlakeClient:
         return ComputeGraphMetadata(**response.json())
 
     def namespaces(self) -> List[str]:
-        response = self._get(f"namespaces")
+        response = self._get("namespaces")
         namespaces_dict = response.json()["namespaces"]
         namespaces = []
         for item in namespaces_dict:
             namespaces.append(item["name"])
         return namespaces
-
-    @classmethod
-    def new_namespace(
-        cls, namespace: str, server_addr: Optional[str] = "http://localhost:8900"
-    ):
-        # Create a new client instance with the specified server address
-        client = cls(service_url=server_addr)
-
-        try:
-            # Create the new namespace using the client
-            client.create_namespace(namespace)
-        except ApiException as e:
-            print(f"Failed to create namespace '{namespace}': {e}")
-            raise
-
-        # Set the namespace for the newly created client
-        client.namespace = namespace
-
-        # Return the client instance with the new namespace
-        return client
 
     def create_namespace(self, namespace: str):
         self._post("namespaces", json={"name": namespace})
@@ -263,57 +256,122 @@ class TensorlakeClient:
             "params": params,
         }
         self._add_api_key(kwargs)
-        with get_httpx_client(self._config_path) as client:
+        invocation_id: str | None = ""
+        try:
             with connect_sse(
-                client,
+                self._client,
                 "POST",
                 f"{self.service_url}/namespaces/{self.namespace}/compute_graphs/{graph}/invoke_object",
                 **kwargs,
             ) as event_source:
                 if not event_source.response.is_success:
                     resp = event_source.response.read().decode("utf-8")
-                    raise Exception(f"failed to invoke graph: {resp}")
+                    raise Exception(f"failed to wait for invocation: {resp}")
                 for sse in event_source.iter_sse():
-                    obj = json.loads(sse.data)
-                    for k, v in obj.items():
-                        if k == "id":
-                            return v
-                        if k == "InvocationFinished":
-                            return v["id"]
-                        if k == "DiagnosticMessage":
-                            message = v.get("message", None)
-                            print(
-                                f"[bold red]scheduler diagnostic: [/bold red]{message}"
-                            )
-                            continue
-                        event_payload = InvocationEventPayload.model_validate(v)
-                        event = InvocationEvent(event_name=k, payload=event_payload)
-                        if (
-                            event.event_name == "TaskCompleted"
-                            and event.payload.outcome == "Failure"
-                        ):
-                            stdout = self.logs(
-                                event.payload.invocation_id,
-                                graph,
-                                event.payload.fn_name,
-                                event.payload.task_id,
-                                "stdout",
-                            )
-                            stderr = self.logs(
-                                event.payload.invocation_id,
-                                graph,
-                                event.payload.fn_name,
-                                event.payload.task_id,
-                                "stderr",
-                            )
-                            if stdout:
-                                print(f"[bold red]stdout[/bold red]: \n {stdout}")
-                            if stderr:
-                                print(f"[bold red]stderr[/bold red]: \n {stderr}")
-                        print(
-                            f"[bold green]{event.event_name}[/bold green]: {event.payload}"
-                        )
+                    events = self._parse_invocation_events_from_sse_event(graph, sse)
+                    for event in events:
+                        invocation_id = event.payload.invocation_id
+                        if event.event_name == "InvocationFinished":
+                            break
+
+                if invocation_id is None:
+                    raise Exception("invocation ID not returned")
+                return invocation_id
+        except _TRANSIENT_HTTPX_ERRORS:
+            if invocation_id is None:
+                print("invocation ID is unknown, cannot block until done")
+                raise
+
+            if not block_until_done:
+                return invocation_id
+
+            self.wait_on_invocation_completion(graph, invocation_id, **kwargs)
+            return invocation_id
+
         raise Exception("invocation ID not returned")
+
+    def _parse_invocation_events_from_sse_event(
+        self, graph: str, sse: ServerSentEvent
+    ) -> List[InvocationEvent]:
+        events = []
+        obj = json.loads(sse.data)
+        for k, v in obj.items():
+            if k == "InvocationFinished":
+                events.append(
+                    InvocationEvent(
+                        event_name=k,
+                        payload=InvocationFinishedEvent(invocation_id=v["id"]),
+                    )
+                )
+                continue
+            if k == "id":
+                # backwards compatibility
+                events.append(
+                    InvocationEvent(
+                        event_name=k,
+                        payload=InvocationFinishedEvent(invocation_id=v),
+                    )
+                )
+                continue
+            if k == "DiagnosticMessage":
+                message = v.get("message", None)
+                print(f"[bold red]scheduler diagnostic: [/bold red]{message}")
+                continue
+            event_payload = InvocationEventPayload.model_validate(v)
+            event = InvocationEvent(event_name=k, payload=event_payload)
+            if (
+                event.event_name == "TaskCompleted"
+                and isinstance(event.payload, InvocationEventPayload)
+                and event.payload.outcome == "Failure"
+            ):
+                stdout = self.logs(
+                    event.payload.invocation_id,
+                    graph,
+                    event.payload.fn_name,
+                    event.payload.task_id,
+                    "stdout",
+                )
+                stderr = self.logs(
+                    event.payload.invocation_id,
+                    graph,
+                    event.payload.fn_name,
+                    event.payload.task_id,
+                    "stderr",
+                )
+                if stdout:
+                    print(f"[bold red]stdout[/bold red]: \n {stdout}")
+                if stderr:
+                    print(f"[bold red]stderr[/bold red]: \n {stderr}")
+            print(f"[bold green]{event.event_name}[/bold green]: {event.payload}")
+            events.append(event)
+        return events
+
+    @exponential_backoff(
+        max_retries=10,
+        retryable_exceptions=_TRANSIENT_HTTPX_ERRORS,
+        on_retry=log_retries,
+    )
+    def wait_on_invocation_completion(
+        self,
+        graph: str,
+        invocation_id: str,
+        **kwargs,
+    ):
+        self._add_api_key(kwargs)
+        with connect_sse(
+            self._client,
+            "GET",
+            f"{self.service_url}/namespaces/{self.namespace}/compute_graphs/{graph}/invocations/{invocation_id}/wait",
+            **kwargs,
+        ) as event_source:
+            if not event_source.response.is_success:
+                resp = event_source.response.read().decode("utf-8")
+                raise Exception(f"failed to wait for invocation: {resp}")
+            for sse in event_source.iter_sse():
+                events = self._parse_invocation_events_from_sse_event(graph, sse)
+                for event in events:
+                    if event.event_name == "InvocationFinished":
+                        break
 
     def _download_output(
         self,
@@ -348,7 +406,6 @@ class TensorlakeClient:
         fn_name: Optional[str]: The name of the function whose output is to be returned if provided
         return: Union[Dict[str, List[Any]], List[Any]]: The extracted objects. If the extractor name is provided, the output is a list of extracted objects by the extractor. If the extractor name is not provided, the output is a dictionary with the extractor name as the key and the extracted objects as the value. If no objects are found, an empty list is returned.
         """
-        fn_key = f"{graph}/{fn_name}"
         response = self._get(
             f"namespaces/{self.namespace}/compute_graphs/{graph}/invocations/{invocation_id}/outputs",
         )
@@ -366,14 +423,3 @@ class TensorlakeClient:
                 output = serializer.deserialize(indexify_data.payload)
                 outputs.append(output)
         return outputs
-
-    def invoke_graph_with_file(
-        self, graph: str, path: str, metadata: Optional[Dict[str, Json]] = None
-    ) -> str:
-        """
-        Invokes a graph with an input file. The file's mimetype is appropriately detected.
-        graph: str: The name of the graph to invoke
-        path: str: The path to the file to be ingested
-        return: str: The ID of the ingested object
-        """
-        pass

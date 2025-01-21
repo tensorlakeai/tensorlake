@@ -197,11 +197,11 @@ class TestGraphUpdate(unittest.TestCase):
             RemoteGraph.deploy(g)
             self.fail("Expected an exception to be raised")
         except ApiException as e:
+            self.assertEqual(e.status_code, 400)
             self.assertIn(
                 "This graph version already exists, please update the graph version",
                 str(e),
             )
-            self.assertIn("status code: 400", str(e))
         except Exception as e:
             self.fail(f"Unexpected exception: {e}")
 
