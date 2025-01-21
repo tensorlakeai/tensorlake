@@ -127,7 +127,6 @@ class Image:
         return self
 
     def to_image_information(self):
-        print(self.uri)
         return ImageInformation(
             image_name=self._image_name,
             sdk_version=self._sdk_version,
@@ -217,12 +216,14 @@ BASE_IMAGE_NAME = f"python:{LOCAL_PYTHON_VERSION}-slim-bookworm"
 
 
 def GetDefaultPythonImage(python_version: str):
-    return (
+    image = (
         Image()
         .name("tensorlake/indexify-executor-default")
         .base_image(f"python:{python_version}-slim-bookworm")
         .tag(python_version)
     )
+    image.uri = f"{image._image_name}:{LOCAL_PYTHON_VERSION}"
+    return image
 
 
 DEFAULT_IMAGE = GetDefaultPythonImage(LOCAL_PYTHON_VERSION)
