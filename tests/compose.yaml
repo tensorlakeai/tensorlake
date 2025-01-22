@@ -28,6 +28,6 @@ services:
       server:
     deploy:
       mode: replicated
-      replicas: 2
+      replicas: 1 # Some tests require a single executor
 volumes:
   data:

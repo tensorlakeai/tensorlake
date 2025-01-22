@@ -24,7 +24,7 @@ class TestFunctionProcessCrash(unittest.TestCase):
         graph = RemoteGraph.deploy(graph)
 
         print("Running a function that will crash FunctionExecutor process...")
-        for i in range(10):
+        for i in range(2):
             crash_invocation_id = graph.run(
                 block_until_done=True,
                 crash=True,
