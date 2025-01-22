@@ -1,10 +1,11 @@
-import threading
+import multiprocessing
 import time
 import unittest
 
-from testing import remote_or_local_graph, test_graph_name
+from testing import test_graph_name
 
 from tensorlake import Graph, tensorlake_function
+from tensorlake.remote_graph import RemoteGraph
 
 
 @tensorlake_function()
@@ -19,37 +20,59 @@ def sleep_b(secs: int) -> str:
     return "success"
 
 
+def invoke_sleep_graph(graph_name, func_name, func_arg_secs: int):
+    graph = RemoteGraph.by_name(graph_name)
+    invocation_id = graph.run(
+        block_until_done=True,
+        secs=func_arg_secs,
+    )
+    # Run in a new process because this call blocks and with threads
+    # we won't be able to run it with a real concurrency.
+    output = graph.output(invocation_id, func_name)
+    if output != ["success"]:
+        raise Exception(f"Expected output to be ['success'], got {output}")
+
+
 class TestRemoteGraphFunctionConcurrency(unittest.TestCase):
     def test_two_same_functions_run_with_concurrency_of_one(self):
-        is_remote = True
         graph = Graph(
             name=test_graph_name(self),
             description="test",
             start_node=sleep_a,
         )
-        graph = remote_or_local_graph(graph, is_remote)
-
-        def invoke_sleep_a(secs: int):
-            invocation_id = graph.run(
-                block_until_done=True,
-                secs=secs,
-            )
-            output = graph.output(invocation_id, "sleep_a")
-            self.assertEqual(output, ["success"])
+        graph = RemoteGraph.deploy(graph)
 
         # Pre-warm Executor so Executor delays in the next invokes are very low.
-        invoke_sleep_a(0.01)
+        invoke_sleep_graph(
+            graph_name=test_graph_name(self), func_name="sleep_a", func_arg_secs=0.01
+        )
 
-        threads = [
-            threading.Thread(target=invoke_sleep_a, args=(0.51,)),
-            threading.Thread(target=invoke_sleep_a, args=(0.51,)),
+        processes = [
+            multiprocessing.Process(
+                target=invoke_sleep_graph,
+                kwargs={
+                    "graph_name": test_graph_name(self),
+                    "func_name": "sleep_a",
+                    "func_arg_secs": 0.51,
+                },
+            ),
+            multiprocessing.Process(
+                target=invoke_sleep_graph,
+                kwargs={
+                    "graph_name": test_graph_name(self),
+                    "func_name": "sleep_a",
+                    "func_arg_secs": 0.51,
+                },
+            ),
         ]
 
+        for process in processes:
+            process.start()
+
         start_time = time.time()
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
+        for process in processes:
+            process.join()
+            self.assertEqual(process.exitcode, 0)
 
         end_time = time.time()
         duration = end_time - start_time
@@ -60,51 +83,56 @@ class TestRemoteGraphFunctionConcurrency(unittest.TestCase):
         )
 
     def test_two_different_functions_run_with_concurrency_of_two(self):
-        is_remote = True
+        graph_a_name = test_graph_name(self) + "_a"
         graph_a = Graph(
-            name=test_graph_name(self) + "_a",
+            name=graph_a_name,
             description="test",
             start_node=sleep_a,
         )
-        graph_a = remote_or_local_graph(graph_a, is_remote)
+        graph_a = RemoteGraph.deploy(graph_a)
 
-        def invoke_sleep_a(secs: int):
-            invocation_id = graph_a.run(
-                block_until_done=True,
-                secs=secs,
-            )
-            output = graph_a.output(invocation_id, "sleep_a")
-            self.assertEqual(output, ["success"])
-
+        graph_b_name = test_graph_name(self) + "_b"
         graph_b = Graph(
-            name=test_graph_name(self) + "_b",
+            name=graph_b_name,
             description="test",
             start_node=sleep_b,
         )
-        graph_b = remote_or_local_graph(graph_b, is_remote)
-
-        def invoke_sleep_b(secs: int):
-            invocation_id = graph_b.run(
-                block_until_done=True,
-                secs=secs,
-            )
-            output = graph_b.output(invocation_id, "sleep_b")
-            self.assertEqual(output, ["success"])
+        graph_b = RemoteGraph.deploy(graph_b)
 
         # Pre-warm Executor so Executor delays in the next invokes are very low.
-        invoke_sleep_a(0.01)
-        invoke_sleep_b(0.01)
+        invoke_sleep_graph(
+            graph_name=graph_a_name, func_name="sleep_a", func_arg_secs=0.01
+        )
+        invoke_sleep_graph(
+            graph_name=graph_b_name, func_name="sleep_b", func_arg_secs=0.01
+        )
 
-        threads = [
-            threading.Thread(target=invoke_sleep_a, args=(0.51,)),
-            threading.Thread(target=invoke_sleep_b, args=(0.51,)),
+        processes = [
+            multiprocessing.Process(
+                target=invoke_sleep_graph,
+                kwargs={
+                    "graph_name": graph_a_name,
+                    "func_name": "sleep_a",
+                    "func_arg_secs": 0.51,
+                },
+            ),
+            multiprocessing.Process(
+                target=invoke_sleep_graph,
+                kwargs={
+                    "graph_name": graph_b_name,
+                    "func_name": "sleep_b",
+                    "func_arg_secs": 0.51,
+                },
+            ),
         ]
 
+        for process in processes:
+            process.start()
+
         start_time = time.time()
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
+        for process in processes:
+            process.join()
+            self.assertEqual(process.exitcode, 0)
 
         end_time = time.time()
         duration = end_time - start_time
