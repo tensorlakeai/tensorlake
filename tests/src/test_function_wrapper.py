@@ -6,7 +6,6 @@ from pydantic import BaseModel
 from tensorlake.functions_sdk.functions import (
     GraphInvocationContext,
     TensorlakeFunctionWrapper,
-    get_ctx,
     tensorlake_function,
     tensorlake_router,
 )
@@ -31,8 +30,8 @@ class TestFunctionWrapper(unittest.TestCase):
             """
             return "hello"
 
-        extractor_wrapper = TensorlakeFunctionWrapper(extractor_a, TEST_GRAPH_CTX)
-        result, err = extractor_wrapper.run_fn({"url": "foo"})
+        extractor_wrapper = TensorlakeFunctionWrapper(extractor_a)
+        result, err = extractor_wrapper.run_fn(TEST_GRAPH_CTX, {"url": "foo"})
         self.assertEqual(result[0], "hello")
 
     def test_get_output_model(self):
@@ -43,7 +42,7 @@ class TestFunctionWrapper(unittest.TestCase):
             """
             return "hello"
 
-        extractor_wrapper = TensorlakeFunctionWrapper(extractor_b, TEST_GRAPH_CTX)
+        extractor_wrapper = TensorlakeFunctionWrapper(extractor_b)
         result = extractor_wrapper.get_output_model()
         self.assertEqual(result, str)
 
@@ -55,7 +54,7 @@ class TestFunctionWrapper(unittest.TestCase):
             """
             return ["hello", "world"]
 
-        extractor_wrapper = TensorlakeFunctionWrapper(extractor_b, TEST_GRAPH_CTX)
+        extractor_wrapper = TensorlakeFunctionWrapper(extractor_b)
         result = extractor_wrapper.get_output_model()
         self.assertEqual(result, str)
 
@@ -75,8 +74,8 @@ class TestFunctionWrapper(unittest.TestCase):
             """
             return [func_a]
 
-        router_wrapper = TensorlakeFunctionWrapper(router_fn, TEST_GRAPH_CTX)
-        result, err = router_wrapper.run_router({"url": "foo"})
+        router_wrapper = TensorlakeFunctionWrapper(router_fn)
+        result, err = router_wrapper.run_router(TEST_GRAPH_CTX, {"url": "foo"})
         self.assertEqual(result, ["func_a"])
 
     def test_accumulate(self):
@@ -88,21 +87,21 @@ class TestFunctionWrapper(unittest.TestCase):
             acc.x += x
             return acc
 
-        wrapper = TensorlakeFunctionWrapper(accumulate_fn, TEST_GRAPH_CTX)
-        result, err = wrapper.run_fn(acc=AccumulatedState(x=12), input={"x": 1})
+        wrapper = TensorlakeFunctionWrapper(accumulate_fn)
+        result, err = wrapper.run_fn(TEST_GRAPH_CTX, acc=AccumulatedState(x=12), input={"x": 1})
         self.assertEqual(result[0].x, 13)
 
     def test_get_ctx(self):
-        @tensorlake_function()
-        def extractor_c(url: str) -> str:
-            ctx = get_ctx()  # type: ignore
+        @tensorlake_function(inject_ctx=True)
+        def extractor_c(ctx, url: str) -> str:
             ctx.invocation_state.set("foo", "bar")
             foo_val = ctx.invocation_state.get("foo")
-            return ctx.invocation_id
+            return {"invocation_id": ctx.invocation_id, "foo_val": foo_val}
 
-        extractor_wrapper = TensorlakeFunctionWrapper(extractor_c, TEST_GRAPH_CTX)
-        result, _ = extractor_wrapper.run_fn({"url": "foo"})
-        self.assertEqual(result[0], "123")
+        extractor_wrapper = TensorlakeFunctionWrapper(extractor_c)
+        result, _ = extractor_wrapper.run_fn(TEST_GRAPH_CTX, {"url": "foo"})
+        self.assertEqual(result[0]["invocation_id"], "123")
+        self.assertEqual(result[0]["foo_val"], "bar")
 
 
 if __name__ == "__main__":

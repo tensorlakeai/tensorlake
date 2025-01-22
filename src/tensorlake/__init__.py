@@ -2,7 +2,6 @@ from . import data_loaders
 from .functions_sdk.functions import (
     TensorlakeCompute,
     TensorlakeRouter,
-    get_ctx,
     tensorlake_function,
     tensorlake_router,
 )
@@ -20,7 +19,6 @@ __all__ = [
     "RemotePipeline",
     "Image",
     "tensorlake_function",
-    "get_ctx",
     "TensorlakeCompute",
     "TensorlakeRouter",
     "tensorlake_router",

@@ -68,6 +68,7 @@ class TensorlakeCompute:
     accumulate: Optional[Type[Any]] = None
     input_encoder: Optional[str] = "cloudpickle"
     output_encoder: Optional[str] = "cloudpickle"
+    inject_ctx = False
 
     def run(self, *args, **kwargs) -> Union[List[Any], Any]:
         pass
@@ -102,6 +103,7 @@ class TensorlakeRouter:
     placement_constraints: List[PlacementConstraints] = []
     input_encoder: Optional[str] = "cloudpickle"
     output_encoder: Optional[str] = "cloudpickle"
+    inject_ctx = False
 
     def run(self, *args, **kwargs) -> Optional[List[TensorlakeCompute]]:
         pass
@@ -146,6 +148,7 @@ def tensorlake_router(
     placement_constraints: List[PlacementConstraints] = [],
     input_encoder: Optional[str] = "cloudpickle",
     output_encoder: Optional[str] = "cloudpickle",
+    inject_ctx: Optional[bool] = False,
 ):
     def construct(fn):
         attrs = {
@@ -159,6 +162,7 @@ def tensorlake_router(
             "placement_constraints": placement_constraints,
             "input_encoder": input_encoder,
             "output_encoder": output_encoder,
+            "inject_ctx": inject_ctx,
             "run": staticmethod(fn),
         }
 
@@ -175,6 +179,7 @@ def tensorlake_function(
     input_encoder: Optional[str] = "cloudpickle",
     output_encoder: Optional[str] = "cloudpickle",
     placement_constraints: List[PlacementConstraints] = [],
+    inject_ctx: Optional[bool] = False,
 ):
     def construct(fn):
         attrs = {
@@ -189,6 +194,7 @@ def tensorlake_function(
             "accumulate": accumulate,
             "input_encoder": input_encoder,
             "output_encoder": output_encoder,
+            "inject_ctx": inject_ctx,
             "run": staticmethod(fn),
         }
 
@@ -211,12 +217,10 @@ class TensorlakeFunctionWrapper:
     def __init__(
         self,
         indexify_function: Union[TensorlakeCompute, TensorlakeRouter],
-        context: GraphInvocationContext,
     ):
         self.indexify_function: Union[TensorlakeCompute, TensorlakeRouter] = (
             indexify_function()
         )
-        self.indexify_function._ctx = context
 
     def get_output_model(self) -> Any:
         if not isinstance(self.indexify_function, TensorlakeCompute):
@@ -248,7 +252,7 @@ class TensorlakeFunctionWrapper:
         }
 
     def run_router(
-        self, input: Union[Dict, Type[BaseModel]]
+        self, ctx: GraphInvocationContext, input: Union[Dict, Type[BaseModel]]
     ) -> Tuple[List[str], Optional[str]]:
         args = []
         kwargs = {}
@@ -261,6 +265,8 @@ class TensorlakeFunctionWrapper:
                 kwargs.update(input)
             else:
                 args.append(input)
+            if self.indexify_function.inject_ctx:
+                args.insert(0, ctx)
             extracted_data = self.indexify_function._call_run(*args, **kwargs)
         except Exception as e:
             return [], traceback.format_exc()
@@ -272,7 +278,7 @@ class TensorlakeFunctionWrapper:
         return edges, None
 
     def run_fn(
-        self, input: Union[Dict, Type[BaseModel], List, Tuple], acc: Type[Any] = None
+        self, ctx: GraphInvocationContext, input: Union[Dict, Type[BaseModel], List, Tuple], acc: Type[Any] = None
     ) -> Tuple[List[Any], Optional[str]]:
         args = []
         kwargs = {}
@@ -289,6 +295,9 @@ class TensorlakeFunctionWrapper:
         else:
             args.append(input)
 
+        print("inject_ctx ", self.indexify_function.inject_ctx)
+        if self.indexify_function.inject_ctx:
+                args.insert(0, ctx)
         try:
             extracted_data = self.indexify_function._call_run(*args, **kwargs)
         except Exception as e:
@@ -302,7 +311,7 @@ class TensorlakeFunctionWrapper:
         return output, None
 
     def invoke_fn_ser(
-        self, name: str, input: TensorlakeData, acc: Optional[Any] = None
+        self, ctx: GraphInvocationContext, name: str, input: TensorlakeData, acc: Optional[Any] = None
     ) -> FunctionCallResult:
         input = self.deserialize_input(name, input)
         input_serializer = get_serializer(self.indexify_function.input_encoder)
@@ -311,7 +320,7 @@ class TensorlakeFunctionWrapper:
             acc = input_serializer.deserialize(acc.payload)
         if acc is None and self.indexify_function.accumulate is not None:
             acc = self.indexify_function.accumulate()
-        outputs, err = self.run_fn(input, acc=acc)
+        outputs, err = self.run_fn(ctx, input, acc=acc)
         ser_outputs = [
             TensorlakeData(
                 payload=output_serializer.serialize(output),
@@ -321,9 +330,9 @@ class TensorlakeFunctionWrapper:
         ]
         return FunctionCallResult(ser_outputs=ser_outputs, traceback_msg=err)
 
-    def invoke_router(self, name: str, input: TensorlakeData) -> RouterCallResult:
-        input = self.deserialize_input(name, input)
-        edges, err = self.run_router(input)
+    def invoke_router(self, ctx: GraphInvocationContext, name: str, input: TensorlakeData) -> RouterCallResult:
+        input = self.deserialize_input(ctx, name, input)
+        edges, err = self.run_router(ctx, input)
         return RouterCallResult(edges=edges, traceback_msg=err)
 
     def deserialize_input(self, compute_fn: str, indexify_data: TensorlakeData) -> Any:
@@ -331,14 +340,3 @@ class TensorlakeFunctionWrapper:
         payload = indexify_data.payload
         serializer = get_serializer(encoder)
         return serializer.deserialize(payload)
-
-
-def get_ctx() -> GraphInvocationContext:
-    frame = inspect.currentframe()
-    caller_frame = frame.f_back.f_back
-    function_instance = caller_frame.f_locals["self"]
-    del frame
-    del caller_frame
-    if isinstance(function_instance, TensorlakeFunctionWrapper):
-        return function_instance.indexify_function._ctx
-    return function_instance._ctx
