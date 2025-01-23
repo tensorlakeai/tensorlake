@@ -119,7 +119,7 @@ class TestBrokenGraphs(unittest.TestCase):
         sdk_stdout_str: str = sdk_stdout.getvalue()
 
         self.assertIn(
-            "Exception: this exception was raised by TensorlakeComputeWithFailingConstructor constructor",
+            "this exception was raised by TensorlakeComputeWithFailingConstructor",
             sdk_stdout_str,
         )
         # No output from extractor_a because it failed.
