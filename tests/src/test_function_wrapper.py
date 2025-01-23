@@ -88,7 +88,9 @@ class TestFunctionWrapper(unittest.TestCase):
             return acc
 
         wrapper = TensorlakeFunctionWrapper(accumulate_fn)
-        result, err = wrapper.run_fn(TEST_GRAPH_CTX, acc=AccumulatedState(x=12), input={"x": 1})
+        result, err = wrapper.run_fn(
+            TEST_GRAPH_CTX, acc=AccumulatedState(x=12), input={"x": 1}
+        )
         self.assertEqual(result[0].x, 13)
 
     def test_get_ctx(self):

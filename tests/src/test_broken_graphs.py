@@ -5,10 +5,8 @@ from contextlib import redirect_stdout
 
 from testing import test_graph_name
 
-from tensorlake import RemoteGraph
+from tensorlake import Graph, RemoteGraph, TensorlakeCompute, tensorlake_function
 from tensorlake.functions_sdk.data_objects import File
-from tensorlake.functions_sdk.functions import TensorlakeCompute, tensorlake_function
-from tensorlake.functions_sdk.graph import Graph
 
 
 @tensorlake_function()
