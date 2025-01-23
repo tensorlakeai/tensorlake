@@ -331,7 +331,7 @@ class TensorlakeFunctionWrapper:
         return FunctionCallResult(ser_outputs=ser_outputs, traceback_msg=err)
 
     def invoke_router(self, ctx: GraphInvocationContext, name: str, input: TensorlakeData) -> RouterCallResult:
-        input = self.deserialize_input(ctx, name, input)
+        input = self.deserialize_input(name, input)
         edges, err = self.run_router(ctx, input)
         return RouterCallResult(edges=edges, traceback_msg=err)
 

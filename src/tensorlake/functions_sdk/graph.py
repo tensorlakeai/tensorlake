@@ -100,7 +100,7 @@ class Graph:
     def get_function(self, name: str) -> TensorlakeFunctionWrapper:
         if name not in self.nodes:
             raise ValueError(f"Function {name} not found in graph")
-        return TensorlakeFunctionWrapper(self.nodes[name], self._local_graph_ctx)
+        return TensorlakeFunctionWrapper(self.nodes[name])
 
     def get_accumulators(self) -> Dict[str, Any]:
         return self.accumulator_zero_values
@@ -330,18 +330,14 @@ class Graph:
     ) -> Optional[Union[RouterCallResult, FunctionCallResult]]:
         node = self.nodes[node_name]
         if node_name in self.routers and len(self.routers[node_name]) > 0:
-            result = TensorlakeFunctionWrapper(
-                node, self._local_graph_ctx
-            ).invoke_router(node_name, input)
+            result = TensorlakeFunctionWrapper(node).invoke_router(self._local_graph_ctx, node_name, input)
             for dynamic_edge in result.edges:
                 if dynamic_edge in self.nodes:
                     print(f"[bold]dynamic router returned node: {dynamic_edge}[/bold]")
             return result
 
         acc_value = self._accumulator_values.get(node_name, None)
-        return TensorlakeFunctionWrapper(
-            node, context=self._local_graph_ctx
-        ).invoke_fn_ser(node_name, input, acc_value)
+        return TensorlakeFunctionWrapper(node).invoke_fn_ser(self._local_graph_ctx, node_name, input, acc_value)
 
     def _log_local_exec_tracebacks(
         self, results: Union[FunctionCallResult, RouterCallResult]
