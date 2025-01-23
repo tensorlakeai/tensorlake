@@ -12,8 +12,8 @@ from tensorlake import (
     Graph,
     RemoteGraph,
     TensorlakeCompute,
+    GraphInvocationContext,
     TensorlakeRouter,
-    get_ctx,
     tensorlake_function,
     tensorlake_router,
 )
@@ -62,9 +62,8 @@ class ComplexObject(BaseModel):
     graph_version: str
 
 
-@tensorlake_function()
-def simple_function_ctx(x: MyObject) -> ComplexObject:
-    ctx = get_ctx()
+@tensorlake_function(inject_ctx=True)
+def simple_function_ctx(ctx: GraphInvocationContext, x: MyObject) -> ComplexObject:
     ctx.invocation_state.set("my_key", 10)
     return ComplexObject(
         invocation_id=ctx.invocation_id,
@@ -73,21 +72,20 @@ def simple_function_ctx(x: MyObject) -> ComplexObject:
     )
 
 
-@tensorlake_function()
-def simple_function_ctx_b(x: ComplexObject) -> int:
-    ctx = get_ctx()
+@tensorlake_function(inject_ctx=True)
+def simple_function_ctx_b(ctx: GraphInvocationContext, x: ComplexObject) -> int:
     val = ctx.invocation_state.get("my_key")
     return val + 1
 
 
 class SimpleFunctionCtxC(TensorlakeCompute):
     name = "SimpleFunctionCtxC"
+    inject_ctx = True
 
     def __init__(self):
         super().__init__()
 
-    def run(self, x: ComplexObject) -> int:
-        ctx = get_ctx()
+    def run(self, ctx: GraphInvocationContext, x: ComplexObject) -> int:
         print(f"ctx: {ctx}")
         val = ctx.invocation_state.get("my_key")
         assert val == 10

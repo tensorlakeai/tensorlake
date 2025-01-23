@@ -2,9 +2,9 @@ from . import data_loaders
 from .functions_sdk.functions import (
     TensorlakeCompute,
     TensorlakeRouter,
-    get_ctx,
     tensorlake_function,
     tensorlake_router,
+    GraphInvocationContext,
 )
 from .functions_sdk.graph import Graph
 from .functions_sdk.image import Image
@@ -15,12 +15,12 @@ from .settings import DEFAULT_SERVICE_URL
 __all__ = [
     "data_loaders",
     "Graph",
+    "GraphInvocationContext",
     "RemoteGraph",
     "Pipeline",
     "RemotePipeline",
     "Image",
     "tensorlake_function",
-    "get_ctx",
     "TensorlakeCompute",
     "TensorlakeRouter",
     "tensorlake_router",
