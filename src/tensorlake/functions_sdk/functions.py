@@ -278,7 +278,10 @@ class TensorlakeFunctionWrapper:
         return edges, None
 
     def run_fn(
-        self, ctx: GraphInvocationContext, input: Union[Dict, Type[BaseModel], List, Tuple], acc: Type[Any] = None
+        self,
+        ctx: GraphInvocationContext,
+        input: Union[Dict, Type[BaseModel], List, Tuple],
+        acc: Type[Any] = None,
     ) -> Tuple[List[Any], Optional[str]]:
         args = []
         kwargs = {}
@@ -296,7 +299,7 @@ class TensorlakeFunctionWrapper:
             args.append(input)
 
         if self.indexify_function.inject_ctx:
-                args.insert(0, ctx)
+            args.insert(0, ctx)
         try:
             extracted_data = self.indexify_function._call_run(*args, **kwargs)
         except Exception as e:
@@ -310,7 +313,11 @@ class TensorlakeFunctionWrapper:
         return output, None
 
     def invoke_fn_ser(
-        self, ctx: GraphInvocationContext, name: str, input: TensorlakeData, acc: Optional[Any] = None
+        self,
+        ctx: GraphInvocationContext,
+        name: str,
+        input: TensorlakeData,
+        acc: Optional[Any] = None,
     ) -> FunctionCallResult:
         input = self.deserialize_input(name, input)
         input_serializer = get_serializer(self.indexify_function.input_encoder)
@@ -329,7 +336,9 @@ class TensorlakeFunctionWrapper:
         ]
         return FunctionCallResult(ser_outputs=ser_outputs, traceback_msg=err)
 
-    def invoke_router(self, ctx: GraphInvocationContext, name: str, input: TensorlakeData) -> RouterCallResult:
+    def invoke_router(
+        self, ctx: GraphInvocationContext, name: str, input: TensorlakeData
+    ) -> RouterCallResult:
         input = self.deserialize_input(name, input)
         edges, err = self.run_router(ctx, input)
         return RouterCallResult(edges=edges, traceback_msg=err)
