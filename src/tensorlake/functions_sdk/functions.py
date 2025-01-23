@@ -295,7 +295,6 @@ class TensorlakeFunctionWrapper:
         else:
             args.append(input)
 
-        print("inject_ctx ", self.indexify_function.inject_ctx)
         if self.indexify_function.inject_ctx:
                 args.insert(0, ctx)
         try:
