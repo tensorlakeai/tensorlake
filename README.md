@@ -123,7 +123,7 @@ def run_workflow(g: Graph) -> None:
 
 #### Running locally
 
-The workflow code is available at [examples.readme_example.py](examples/readme_example.py).
+The workflow code is available at [examples/readme_example.py](examples/readme_example.py).
 The following code was added there to create the workflow and run it locally on your computer:
 
 ```python
@@ -172,21 +172,22 @@ if __name__ == "__main__":
 python examples/readme_example.py
 ```
 
-Running a workflow on Tensorlake Cloud comes with the following benefits:
+#### Running on your own infrastructure
+
+Tensorlake Cloud is based on Open Source [Indexify](https://github.com/tensorlakeai/indexify)
+and is fully compatible with it. You can setup your own Indexify cluster e.g. with Kubernetes
+and run workflows on it.
+
+Running workflows on Tensorlake Cloud comes with the following benefits:
 
 * Automatically scale compute resources to the required number of workflow invocations.
 * Pay only for compute resources used by the workflow. No need to pay for idle resources.
 * Automated workflow deployments using a few CLI commands.
 * High availability of Tensorlake Cloud.
 
-#### Running on your own infrastructure
-
-Tensorlake Cloud is based on Open Source [Indexify](https://github.com/tensorlakeai/indexify)
-and is fully compatible with it. You can setup your own Indexify cluster e.g. with Kubernetes
-and run the workflows on it.
-
 ## Learn more
 
+* [More examples](examples/)
 * [Tensorlake Documentation](https://docs.tensorlake.ai)
 * [Serverless Workflows Documentation](https://docs.tensorlake.ai/serverless/overview)
 * [Key programming concepts in Tensorlake Workflows](https://docs.tensorlake.ai/serverless/key-concepts)
