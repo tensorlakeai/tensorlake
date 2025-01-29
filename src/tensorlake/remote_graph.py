@@ -42,7 +42,7 @@ class RemoteGraph:
         :return: The invocation ID of the graph execution.
 
         Example:
-            @indexify_function()
+            @tensorlake_function()
             def foo(x: int) -> int:
                 return x + 1
 

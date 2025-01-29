@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tensorlake"
-version = "0.1.11"
+version = "0.1.12"
 description = "Petabyte scale data framework for unstructured data of any modality"
 authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
 homepage = "https://github.com/tensorlakeai/tensorlake"
@@ -18,8 +18,14 @@ rich = "^13.9.4"                                  # TODO: Look into consolidatin
 pyyaml = "^6.0.2"
 click = "^8.1.8"
 
+# Required only by Function Executor
+structlog = "^24.4.0"
+grpcio = "1.70.0"
+grpcio-tools = "1.70.0"
+
 [tool.poetry.scripts]
 tensorlake = "tensorlake.cli:tensorlake"
+function-executor = "tensorlake.function_executor.main:main"
 
 [build-system]
 requires = ["poetry==2.0.0"]
