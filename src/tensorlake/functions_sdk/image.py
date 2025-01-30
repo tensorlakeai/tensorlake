@@ -172,7 +172,7 @@ class Image:
         else:
             # TODO: Remove installation of indexify when we've finished the container executor
             docker_contents.append(
-                f"RUN pip install indexify=={self._sdk_version}"
+                f"RUN pip install indexify"
             )  # TODO: Update this to specify our local tensorlake version
 
         docker_file = "\n".join(docker_contents)

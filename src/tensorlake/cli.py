@@ -59,10 +59,21 @@ def deploy(workflow_file: click.File):
 
 
 def _wait_for_build(builder: ImageBuilderClient, build: Build):
-    click.echo(f"Waiting for {build.image_name} to build")
-    while build.status != "completed":
+    click.echo(f"Waiting for {build.image_name} to start building")
+    while build.status != "building":
         time.sleep(1)
         build = builder.get_build(build.id)
+
+    # Start streaming logs
+
+    with builder.client.stream(
+        "GET",
+        f"{builder.build_service}/v1/builds/{build.id}/log",
+        timeout=500,
+        headers=builder.headers,
+    ) as r:
+        for line in r.iter_lines():
+            print(line)
 
     if build.push_completed_at:
         build_duration = build.build_completed_at - build.push_completed_at
@@ -137,7 +148,7 @@ def _prepare_images(builder: ImageBuilderClient, images: Dict[Image, str]):
                     _show_failed_summary(builder, build)
 
         else:
-            build = _build_image(builder, image, image_hash=image_hash)
+            ready_builds[image] = _build_image(builder, image, image_hash=image_hash)
 
     # Find any blockers and report them to the users
     blockers = []
