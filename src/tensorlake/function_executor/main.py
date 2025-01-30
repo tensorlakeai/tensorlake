@@ -7,6 +7,7 @@ from tensorlake.utils.logging import (
 configure_logging_early()
 
 import argparse
+from typing import Any
 
 import structlog
 
@@ -14,7 +15,7 @@ from .info import info_response_kv_args
 from .server import Server
 from .service import Service
 
-logger = structlog.get_logger(module=__name__).bind(**info_response_kv_args())
+logger: Any = None
 
 
 def validate_args(args):
@@ -24,6 +25,7 @@ def validate_args(args):
 
 
 def main():
+    global logger
     parser = argparse.ArgumentParser(
         description="Runs Function Executor with the specified API server address"
     )
@@ -37,9 +39,11 @@ def main():
         configure_development_mode_logging()
     else:
         configure_production_mode_logging()
+
+    logger = structlog.get_logger(module=__name__).bind(**info_response_kv_args())
     validate_args(args)
 
-    logger.info("starting function executor server", address=args.address)
+    logger.info("starting function executor server", address=args.address, dev=args.dev)
 
     Server(
         server_address=args.address,
