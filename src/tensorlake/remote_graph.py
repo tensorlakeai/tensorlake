@@ -78,6 +78,7 @@ class RemoteGraph:
         additional_modules=[],
         server_url: Optional[str] = DEFAULT_SERVICE_URL,
         client: Optional[TensorlakeClient] = None,
+        upgrade_tasks_to_latest_version: bool = False,
     ):
         """
         Create a new RemoteGraph from a local Graph object.
@@ -93,7 +94,7 @@ class RemoteGraph:
         g.validate_graph()
         if not client:
             client = TensorlakeClient(service_url=server_url)
-        client.register_compute_graph(g, additional_modules)
+        client.register_compute_graph(g, additional_modules, upgrade_tasks_to_latest_version)
         return cls(name=g.name, server_url=server_url, client=client)
 
     @classmethod
