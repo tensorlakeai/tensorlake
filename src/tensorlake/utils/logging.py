@@ -2,9 +2,6 @@ import logging
 import sys
 
 import structlog
-from structlog.contextvars import merge_contextvars
-from structlog.dev import ConsoleRenderer, set_exc_info
-from structlog.processors import StackInfoRenderer, TimeStamper, add_log_level
 
 # Using this module allows us to be consistent with the logging configuration across all Python programs.
 
@@ -29,13 +26,13 @@ def configure_logging_early():
 
 def configure_development_mode_logging():
     processors = [
+        structlog.contextvars.merge_contextvars,
         structlog_suppressor,
-        merge_contextvars,
-        add_log_level,
-        StackInfoRenderer(),
-        set_exc_info,
-        TimeStamper(fmt="%Y-%m-%d %H:%M:%S", utc=False),
-        ConsoleRenderer(),
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.dev.set_exc_info,
+        structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S", utc=False),
+        structlog.dev.ConsoleRenderer(),
     ]
     structlog.configure(
         processors=processors,
@@ -44,8 +41,12 @@ def configure_development_mode_logging():
 
 def configure_production_mode_logging():
     processors = [
+        structlog.contextvars.merge_contextvars,
         structlog_suppressor,
+        structlog.processors.add_log_level,
+        structlog.dev.set_exc_info,
         structlog.processors.format_exc_info,
+        structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S", utc=False),
         structlog.processors.JSONRenderer(),
     ]
     structlog.configure(processors=processors)
