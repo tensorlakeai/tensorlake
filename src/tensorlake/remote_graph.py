@@ -94,7 +94,9 @@ class RemoteGraph:
         g.validate_graph()
         if not client:
             client = TensorlakeClient(service_url=server_url)
-        client.register_compute_graph(g, additional_modules, upgrade_tasks_to_latest_version)
+        client.register_compute_graph(
+            g, additional_modules, upgrade_tasks_to_latest_version
+        )
         return cls(name=g.name, server_url=server_url, client=client)
 
     @classmethod
