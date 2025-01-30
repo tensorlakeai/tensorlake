@@ -176,13 +176,18 @@ class TensorlakeClient:
     def __exit__(self, exc_type, exc_value, traceback):
         self._close()
 
-    def register_compute_graph(self, graph: Graph, additional_modules):
+    def register_compute_graph(
+        self, graph: Graph, additional_modules, upgrade_tasks_to_latest_version=False
+    ):
         graph_metadata: ComputeGraphMetadata = graph.definition()
         serialized_code = cloudpickle.dumps(graph.serialize(additional_modules))
         response = self._post(
             f"namespaces/{self.namespace}/compute_graphs",
             files={"code": serialized_code},
-            data={"compute_graph": graph_metadata.model_dump_json(exclude_none=True)},
+            data={
+                "compute_graph": graph_metadata.model_dump_json(exclude_none=True),
+                "upgrade_tasks_to_latest_version": upgrade_tasks_to_latest_version,
+            },
         )
         response.raise_for_status()
         self._graphs[graph.name] = graph
