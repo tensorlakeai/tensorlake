@@ -54,7 +54,6 @@ class Handler:
         """
         self._logger.info("running function")
         inputs: FunctionInputs = self._input_loader.load()
-        self._flush_logs()
         return self._run_func_safe_and_captured(inputs)
 
     def _run_func_safe_and_captured(self, inputs: FunctionInputs) -> RunTaskResponse:
@@ -65,8 +64,15 @@ class Handler:
         using the response.
         """
         try:
+            # Flush any logs buffered in memory before doing stdout, stderr capture.
+            # Otherwise our logs logged before this point will end up in the function's stdout capture.
+            self._flush_logs()
             with redirect_stdout(self._func_stdout), redirect_stderr(self._func_stderr):
-                return self._run_func(inputs)
+                try:
+                    return self._run_func(inputs)
+                finally:
+                    # Ensure that whatever outputted by the function gets captured.
+                    self._flush_logs()
         except Exception:
             return self._response_helper.failure_response(
                 message=traceback.format_exc(),
@@ -102,8 +108,6 @@ class Handler:
             )
 
     def _flush_logs(self) -> None:
-        # Flush any logs buffered in memory before running the function with stdout, stderr capture.
-        # Otherwise our logs logged before this point will end up in the function's stdout.
         # structlog.PrintLogger uses print function. This is why flushing with print works.
         print("", flush=True)
         sys.stdout.flush()
