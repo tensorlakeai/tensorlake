@@ -89,13 +89,15 @@ class Build(BaseModel):
 
 
 class Image:
-    def __init__(self):
+    def __init__(self, indexify_version: Optional[str] = None):
         self._image_name = None
         self._tag = "latest"
         self._base_image = BASE_IMAGE_NAME
         self._python_version = LOCAL_PYTHON_VERSION
         self._build_ops = []  # List of ImageOperation
         self._sdk_version = importlib.metadata.version("tensorlake")
+        if indexify_version is not None:
+            self._indexify_version = indexify_version
         self.uri = ""  # For internal use
 
     def name(self, image_name):
@@ -171,8 +173,11 @@ class Image:
             docker_contents.append("RUN (cd /app/python-sdk && pip install .)")
         else:
             # TODO: Remove installation of indexify when we've finished the container executor
+            indexify_pkg = "indexify"
+            if self._indexify_version is not None:
+                indexfiy_pkg += f"=={self._indexify_version}"
             docker_contents.append(
-                f"RUN pip install indexify"
+                f"RUN pip install {indexify_pkg}"
             )  # TODO: Update this to specify our local tensorlake version
 
         docker_file = "\n".join(docker_contents)
