@@ -28,6 +28,8 @@ class FunctionExecutorProcessContextManager:
             "--dev",
             "--address",
             f"localhost:{port}",
+            "--executor-id",
+            "test-executor",
         ]
         self._process: Optional[subprocess.Popen] = None
         self.port = port

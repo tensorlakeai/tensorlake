@@ -23,11 +23,20 @@ def validate_args(args):
         logger.error("--address argument is required")
         exit(1)
 
+    if args.executor_id is None:
+        logger.error("--executor-id argument is required")
+        exit(1)
+
 
 def main():
     global logger
     parser = argparse.ArgumentParser(
         description="Runs Function Executor with the specified API server address"
+    )
+    parser.add_argument(
+        "--executor-id",
+        help="ID of Executor that started this Function Executor",
+        type=str,
     )
     parser.add_argument("--address", help="API server address to listen on", type=str)
     parser.add_argument(
@@ -40,9 +49,10 @@ def main():
     else:
         configure_production_mode_logging()
 
-    logger = structlog.get_logger(module=__name__).bind(**info_response_kv_args())
+    logger = structlog.get_logger(module=__name__)
     validate_args(args)
 
+    logger = logger.bind(executor_id=args.executor_id, **info_response_kv_args())
     logger.info("starting function executor server", address=args.address, dev=args.dev)
 
     Server(
