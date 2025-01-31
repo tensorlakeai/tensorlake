@@ -5,7 +5,7 @@ from pathlib import Path
 
 def upload_file_sync(
     file_path: Union[str, Path],
-    api_token: str = "",
+    api_key: str = "",
     base_url: str = "https://api.tensorlake.ai"
 ) -> str:
     """
@@ -13,7 +13,7 @@ def upload_file_sync(
     
     Args:
         file_path: Path to the file to upload
-        api_token: API authentication token
+        api_key: API authentication token
         base_url: Base URL for the API (optional)
         
     Returns:
@@ -28,7 +28,7 @@ def upload_file_sync(
         raise FileNotFoundError(f"File not found: {file_path}")
         
     headers = {
-        "Authorization": f"Bearer {api_token}"
+        "Authorization": f"Bearer {api_key}"
     }
     
     url = f"{base_url}/documents/v1/files"
@@ -47,7 +47,7 @@ def upload_file_sync(
 
 async def upload_file_async(
     file_path: Union[str, Path],
-    api_token: str = "",
+    api_key: str = "",
     base_url: str = "https://api.tensorlake.ai"
 ) -> Dict:
     """
@@ -55,7 +55,7 @@ async def upload_file_async(
     
     Args:
         file_path: Path to the file to upload
-        token: API authentication token
+        api_key: API authentication token
         base_url: Base URL for the API (optional)
         
     Returns:
@@ -70,7 +70,7 @@ async def upload_file_async(
         raise FileNotFoundError(f"File not found: {file_path}")
         
     headers = {
-        "Authorization": f"Bearer {api_token}"
+        "Authorization": f"Bearer {api_key}"
     }
     
     url = f"{base_url}/documents/v1/files"
