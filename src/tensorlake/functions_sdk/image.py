@@ -96,8 +96,7 @@ class Image:
         self._python_version = LOCAL_PYTHON_VERSION
         self._build_ops = []  # List of ImageOperation
         self._sdk_version = importlib.metadata.version("tensorlake")
-        if indexify_version is not None:
-            self._indexify_version = indexify_version
+        self._indexify_version = indexify_version
         self.uri = ""  # For internal use
 
     def name(self, image_name):
