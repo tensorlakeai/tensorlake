@@ -72,6 +72,7 @@ class DocumentParser:
                 url=DOC_AI_BASE_URL,
                 headers=self._headers(),
                 json=self._create_req(file, options),
+                timeout=2,
             )
             try:
                 response.raise_for_status()

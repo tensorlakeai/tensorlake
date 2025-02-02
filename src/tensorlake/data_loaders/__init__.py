@@ -14,6 +14,7 @@ class FileMetadata(BaseModel):
     md5_hash: str
     created_at: int
     updated_at: int
+    name: str
 
     @classmethod
     def from_path(cls, path: str):
@@ -37,6 +38,7 @@ class FileMetadata(BaseModel):
             md5_hash=md5_hash,
             created_at=created_at,
             updated_at=updated_at,
+            name=f.name,
         )
 
 

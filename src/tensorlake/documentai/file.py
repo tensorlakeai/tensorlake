@@ -1,8 +1,12 @@
 import httpx
+import requests
 from typing import Union, Dict
 from pathlib import Path
+from retry import retry
+from httpx import ConnectTimeout
 
 
+retry(tries=10, delay=2)
 def upload_file_sync(
     file_path: Union[str, Path],
     api_key: str = "",
@@ -39,7 +43,8 @@ def upload_file_sync(
             response = client.post(
                 url=url,
                 headers=headers,
-                files=files
+                files=files,
+                timeout=None,
             )
             response.raise_for_status()
             resp = response.json()
