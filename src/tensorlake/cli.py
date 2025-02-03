@@ -1,4 +1,8 @@
+import importlib
+import inspect
 import os
+import pathlib
+import sys
 import tempfile
 import time
 from typing import Dict, List
@@ -25,12 +29,9 @@ def deploy(workflow_file: click.File):
     seen_images: Dict[Image, str] = {}
     deployed_graphs: List[Graph] = []
 
-    # Read the graph file and build the images
-    workflow_globals = {}
-    with open(workflow_file.name, "r") as f:
-        exec(f.read(), workflow_globals)
-
-    for name, obj in workflow_globals.items():
+    workflow = _import_workflow_file(workflow_file.name)
+    for name in dir(workflow):
+        obj = getattr(workflow, name)
         if isinstance(obj, Graph):
             deployed_graphs.append(obj)
             for node_name, node_obj in obj.nodes.items():
@@ -166,6 +167,30 @@ def _prepare_images(builder: ImageBuilderClient, images: Dict[Image, str]):
         raise click.Abort
 
 
+def _import_workflow_file(workflow):
+    if "" not in sys.path:
+        sys.path.insert(0, "")
+
+    if workflow.endswith(".py"):
+        workflow_path = pathlib.Path(workflow).resolve()
+        sys.path.insert(0, str(workflow_path.parent))
+
+        module_name = inspect.getmodulename(workflow)
+        assert module_name is not None
+
+        spec = importlib.util.spec_from_file_location(module_name, workflow_path)
+        assert spec is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+
+        assert spec.loader
+        spec.loader.exec_module(module)
+
+        return module
+    else:
+        raise click.ClickException("Workflow must be python files")
+
+
 @click.command()
 @click.argument("workflow_file", type=click.File("r"))
 def prepare(workflow_file: click.File):
@@ -175,12 +200,9 @@ def prepare(workflow_file: click.File):
     client = ImageBuilderClient.from_env()
     seen_images: Dict[Image, str] = {}
 
-    # Read the graph file and build the images
-    workflow_globals = {}
-    with open(workflow_file.name, "r") as f:
-        exec(f.read(), workflow_globals)
-
-    for name, obj in workflow_globals.items():
+    workflow = _import_workflow_file(workflow_file.name)
+    for name in dir(workflow):
+        obj = getattr(workflow, name)
         if isinstance(obj, Graph):
             click.echo(f"Found graph {name}")
             for node_name, node_obj in obj.nodes.items():
