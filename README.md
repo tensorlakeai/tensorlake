@@ -52,7 +52,7 @@ class LoanDocumentSchema(BaseModel):
     amount_due: str = Field(description="Total amount due in the current statement")
     due_data: str = Field(description="Due Date")
 
-files = Files(api_key="xxxx")
+files = Files(api_key="tl_xxxx")
 file_id = files.upload(path="/path/to/file.pdf")
 
 parser = StructuredExtractor(api_key="tl_xxx")
@@ -64,17 +64,14 @@ This uses the default Parsing options, which chunks a document by page. We can s
 
 ## Serverless Workflows
 
-Serverless Workflows allows to build and deploy custom data processing workflows as an API.
+Serverless Workflows enables building and deploy custom data processing workflows in Python. The workflows listen to API requests, and scale up on-demand to process data on the cloud. A function can do anything from calling a web service to loading a data model into a GPU and running inference on it. Tensorlake will provision the required compute resources and run as many copies of a function as needed.
 
 ### Quickstart
 
 Define a workflow by implementing its data transformation steps as Python functions decorated with `@tensorlake_function()`.
 Connect the outputs of a function to the inputs of another function using edges in a `Graph` object, which represents the full workflow.
 
-A function can do anything from calling a web service to loading a data model into a GPU and running inference on it. Tensorlake will
-provision the required compute resources and run as many copies of a function as needed.
-
-### Example workflow
+### Example 
 
 The example below creates a workflow with the following steps:
 

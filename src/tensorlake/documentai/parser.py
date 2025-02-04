@@ -51,6 +51,12 @@ class DocumentParser:
 
         self._client = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None, headers=self._headers())
 
+    def _headers(self):
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
     def _create_parse_req(self, file: str, options: ParsingOptions) -> dict:
         payload = {
             "file": file,
@@ -78,7 +84,7 @@ class DocumentParser:
         Parse a document.
         """
         response = self._client.post(
-            url="/extract_async",
+            url="/parse_async",
             headers=self._headers(),
             json=self._create_parse_req(file, options),
             timeout=2,
