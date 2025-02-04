@@ -1,5 +1,5 @@
 <a name="readme-top"></a>
-# Tensorlake Cloud
+# Tensorlake SDK for Document Ingestion and Serverless Workflows
 
 [![Discord](https://dcbadge.vercel.app/api/server/VXkY7zVmTD?style=flat&compact=true)](https://discord.gg/VXkY7zVmTD)
 
