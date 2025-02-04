@@ -10,12 +10,14 @@ from tensorlake.documentai.common import DOC_AI_BASE_URL
 
 class Files:
 
-    def __init__(self, api_key: str=""):
+    def __init__(self, api_key: str = ""):
         self.api_key = api_key
         if not self.api_key:
             self.api_key = os.getenv("TENSORLAKE_API_KEY")
 
-        self._client = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None, headers=self._headers())
+        self._client = httpx.Client(
+            base_url=DOC_AI_BASE_URL, timeout=None, headers=self._headers()
+        )
 
     def _headers(self):
         return {
@@ -23,6 +25,7 @@ class Files:
         }
 
     retry(tries=10, delay=2)
+
     def upload(self, path: Union[str, Path]) -> str:
         """
         Upload a file to the Tensorlake
@@ -40,7 +43,7 @@ class Files:
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"File not found: {path}")
-        
+
         with open(path, "rb") as f:
             files = {"file": (f.name, f)}
             response = self._client.post(
