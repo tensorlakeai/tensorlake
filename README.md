@@ -37,7 +37,7 @@ parser = DocumentParser(api_key="tl_xxx")
 job_id = parser.parse(file_id, options=ParsingOptions())
 ```
 
-This uses the default Parsing options, which chunks a document by page. We can summarize figures, charts and tables as well. You can change the chunking strategy, the prompts for summarization by changing the `ParsingOptions`. The API is [documented here](https://docs.tensorlake.ai/documentai/parsing).
+In addition to OCR, it can summarize figures, charts and tables. The default chunking strategy is by Page, you can change the chunking strategy, the prompts for summarization by configuring `ParsingOptions`. The API is [documented here](https://docs.tensorlake.ai/documentai/parsing).
 
 #### Structured Extraction 
 
