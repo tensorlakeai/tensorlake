@@ -38,7 +38,7 @@ class ExtractionOptions(BaseModel):
     """
     Options for parsing a document.
     """
-    schema: Json
+    json_schema: Json
     deliver_webhook: bool = False
 
 
@@ -79,7 +79,7 @@ class DocumentParser:
         return payload
  
 
-    def parse_document(self, file: str, options: ParsingOptions, timeout: int=5) -> str:
+    def parse(self, file: str, options: ParsingOptions, timeout: int=5) -> str:
         """
         Parse a document.
         """
@@ -97,7 +97,7 @@ class DocumentParser:
         resp = response.json()
         return resp.get("jobId")
 
-    def extract_structured_data(self, file: str, options: ExtractionOptions, timeout: int=5) -> str:
+    def extract(self, file: str, options: ExtractionOptions, timeout: int=5) -> str:
         """
         Parse a document.
         """

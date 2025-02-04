@@ -22,6 +22,8 @@ The API offers two main primitives -
 
 ## Quickstart 
 
+If you want to dive into code, here is an [example](examples/readme_documentai.py).
+
 #### Document Parsing
 
 Convert a PDF to markdown and chunk it.
@@ -33,7 +35,7 @@ files = Files(api_key="xxxx")
 file_id = files.upload(path="/path/to/file.pdf")
 
 parser = DocumentParser(api_key="tl_xxx")
-job_id = parser.parse_document(file_id, options=ParsingOptions())
+job_id = parser.parse(file_id, options=ParsingOptions())
 ```
 
 This uses the default Parsing options, which chunks a document by page. We can summarize figures, charts and tables as well. You can change the chunking strategy, the prompts for summarization by changing the `ParsingOptions`. The API is [documented here](https://docs.tensorlake.ai/documentai/parsing).
@@ -61,6 +63,14 @@ job_id = parser.parse_document(file_id, options=ExtractionOptions(schema=LoanDoc
 
 This uses the default Parsing options, which chunks a document by page. We can summarize figures, charts and tables as well. You can change the chunking strategy, the prompts for summarization by changing the `ParsingOptions`. The API is [documented here](https://docs.tensorlake.ai/documentai/parsing).
 
+#### Getting Parsed Data
+
+Document AI APIs are async to be able to handle large volumes of documents with many pages. You can use a Job ID to retrieve results, or configure a webhook endpoint to receive updates.
+
+from tensorlake.documentai Jobs
+
+jobs = Jobs(api_key="tl_xxxx")
+data = jobs.get(job_id="job-xxxx")
 
 ## Serverless Workflows
 

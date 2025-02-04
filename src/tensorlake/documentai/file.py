@@ -18,13 +18,12 @@ class Files:
     def _headers(self):
         return {
             "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
         }
 
     retry(tries=10, delay=2)
-    def upload_file_sync(self, file_path: Union[str, Path]) -> str:
+    def upload(self, path: Union[str, Path]) -> str:
         """
-        Synchronously upload a file to the Tensorlake
+        Upload a file to the Tensorlake
 
         Args:
             file_path: Path to the file to upload
@@ -36,18 +35,17 @@ class Files:
             httpx.HTTPError: If the request fails
             FileNotFoundError: If the file doesn't exist
         """
-        file_path = Path(file_path)
-        if not file_path.exists():
-            raise FileNotFoundError(f"File not found: {file_path}")
-
-        with open(file_path, "rb") as f:
-            files = {"file": (file_path.name, f)}
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+        
+        with open(path, "rb") as f:
+            files = {"file": (f.name, f)}
             response = self._client.post(
-                url="/files",
+                url="files",
+                headers=self._headers(),
                 files=files,
-                timeout=None,
             )
             response.raise_for_status()
             resp = response.json()
-            print(resp)
             return resp.get("id")
