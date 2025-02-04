@@ -60,6 +60,9 @@ class DocumentParser:
         self._client = httpx.Client(
             base_url=DOC_AI_BASE_URL, timeout=None, headers=self._headers()
         )
+        self._async_client = httpx.AsyncClient(
+            base_url=DOC_AI_BASE_URL, timeout=None, headers=self._headers()
+        )
 
     def _headers(self):
         return {
@@ -97,6 +100,25 @@ class DocumentParser:
             headers=self._headers(),
             json=self._create_parse_req(file, options),
             timeout=2,
+        )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            print(e.response.text)
+            raise e
+        resp = response.json()
+        return resp.get("jobId")
+
+    async def parse_async(
+        self, file: str, options: ParsingOptions, timeout: int = 5
+    ) -> str:
+        """
+        Parse a document asynchronously.
+        """
+        response = await self._async_client.post(
+            url="/parse_async",
+            headers=self._headers(),
+            json=self._create_parse_req(file, options),
         )
         try:
             response.raise_for_status()

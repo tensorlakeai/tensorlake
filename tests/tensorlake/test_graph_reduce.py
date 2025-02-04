@@ -59,7 +59,7 @@ class TestGraphReduce(unittest.TestCase):
         result = graph.output(invocation_id, store_result.name)
         self.assertEqual(result[0], 15)  # 0 + 1 + 2 + 3 + 4 + 5
 
-    @parameterized.parameterized.expand([(True)])
+    @parameterized.parameterized.expand([True])
     def test_failure_in_parent(self, is_remote: bool):
         # Not running this with local graph because local execution currently
         # raises an exception on function error and fails the test case.
@@ -76,7 +76,7 @@ class TestGraphReduce(unittest.TestCase):
         outputs = graph.output(invocation_id, store_result.name)
         self.assertEqual(len(outputs), 0, "Expected zero results")
 
-    @parameterized.parameterized.expand([(True)])
+    @parameterized.parameterized.expand([True])
     def test_failure_start_node(self, is_remote: bool):
         # Not running this with local graph because local execution currently
         # raises an exception on function error and fails the test case.

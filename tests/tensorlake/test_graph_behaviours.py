@@ -331,7 +331,7 @@ class TestGraphBehaviors(unittest.TestCase):
         self.assertTrue(len(output) == 1)
         self.assertEqual(output[0], "ab")
 
-    @parameterized.parameterized.expand([(True)])
+    @parameterized.parameterized.expand([True])
     def test_remote_graph_by_name(self, is_remote):
         graph = Graph(
             name=test_graph_name(self), description="test", start_node=simple_function
