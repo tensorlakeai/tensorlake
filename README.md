@@ -66,10 +66,13 @@ Structured Extraction is guided by the provided schema. We support Pyndatic Mode
 
 Document AI APIs are async to be able to handle large volumes of documents with many pages. You can use a Job ID to retrieve results, or configure a webhook endpoint to receive updates.
 
+```python
+
 from tensorlake.documentai Jobs, JobResult
 
 jobs = Jobs(api_key="tl_xxxx")
 data: JobResult = jobs.get(job_id="job-xxxx")
+```
 
 ## Serverless Workflows
 
