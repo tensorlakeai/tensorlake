@@ -2,7 +2,7 @@ import os
 
 import httpx
 
-from tensorlake.documentai.common import DOC_AI_BASE_URL
+from tensorlake.documentai.common import DOC_AI_BASE_URL, JobResult
 
 
 class Jobs:
@@ -19,12 +19,13 @@ class Jobs:
             "Authorization": f"Bearer {self.api_key}",
         }
     
-    def get(self, job_id: str) -> dict:
+    def get(self, job_id: str) -> JobResult:
         response = self._client.get(
             url=f"jobs/{job_id}",
             headers=self._headers(),
         )
         response.raise_for_status()
         resp = response.json()
-        return resp
+        job_result = JobResult.model_validate(resp)
+        return job_result
     

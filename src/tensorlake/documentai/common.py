@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import List, Literal, Optional, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 DOC_AI_BASE_URL = "https://api.tensorlake.ai/documents/v1/"
 
@@ -57,16 +57,11 @@ class Document(BaseModel):
     """
     pages: List[Page]
 
-class ParsedDocument(BaseModel):
-    num_pages: Optional[int] = None
-    document: Optional[Document] = None
-    chunks: List[str]
-
-
 class JobResult(BaseModel):
-    job_id: str
-    file_id: str
-    job_type: str
-    document: Optional[ParsedDocument] = None
+    job_id: str = Field(alias="jobId")
+    file_id: str = Field(alias="fileId")
+    job_type: str = Field(alias="jobType")
+    chunks: List[str] = Field(alias="chunks", default_factory=list)
+    document: Optional[Document] = Field(alias="document")
     status: Literal["processing", "successful", "failure", "pending"]
     
