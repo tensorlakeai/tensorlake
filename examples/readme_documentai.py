@@ -1,6 +1,6 @@
 import time
-from tensorlake.documentai import DocumentParser, Files, ParsingOptions, Jobs
 
+from tensorlake.documentai import DocumentParser, Files, Jobs, ParsingOptions
 
 API_KEY = "tl_XXXXX"
 

@@ -5,10 +5,12 @@ from pydantic import BaseModel, Field
 
 DOC_AI_BASE_URL = "https://api.tensorlake.ai/documents/v1/"
 
+
 class PageFragmentType(str, Enum):
     """
     Type of a page fragment.
     """
+
     SECTION_HEADER = "section_header"
 
     TEXT = "text"
@@ -24,16 +26,20 @@ class PageFragmentType(str, Enum):
     FIGURE_CAPTION = "figure_caption"
     FORMULA_CAPTION = "formula_caption"
 
+
 class Text(BaseModel):
     content: str
+
 
 class Table(BaseModel):
     content: str
     summary: Optional[str] = None
 
+
 class Figure(BaseModel):
     content: str
     summary: Optional[str] = None
+
 
 class PageFragment(BaseModel):
     fragment_type: PageFragmentType
@@ -41,6 +47,7 @@ class PageFragment(BaseModel):
     reading_order: Optional[int] = None
     page_number: Optional[int] = None
     bbox: Optional[dict[str, float]] = None
+
 
 class Page(BaseModel):
     """
@@ -51,11 +58,14 @@ class Page(BaseModel):
     page_fragments: Optional[List[PageFragment]] = []
     layout: Optional[dict] = {}
 
+
 class Document(BaseModel):
     """
     Document in a document.
     """
+
     pages: List[Page]
+
 
 class JobResult(BaseModel):
     job_id: str = Field(alias="jobId")
@@ -64,4 +74,3 @@ class JobResult(BaseModel):
     chunks: List[str] = Field(alias="chunks", default_factory=list)
     document: Optional[Document] = Field(alias="document")
     status: Literal["processing", "successful", "failure", "pending"]
-    

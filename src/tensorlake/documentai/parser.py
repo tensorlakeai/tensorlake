@@ -13,6 +13,7 @@ class OutputFormat(str, Enum):
     MARKDOWN = "markdown"
     JSON = "json"
 
+
 class ChunkingStrategy(str, Enum):
     NONE = "none"
     PAGE = "page"
@@ -23,10 +24,12 @@ class TableParsingStrategy(str, Enum):
     TSR = "tsr"
     VLM = "vlm"
 
+
 class ParsingOptions(BaseModel):
     """
     Options for parsing a document.
     """
+
     format: OutputFormat = OutputFormat.MARKDOWN
     chunking_strategy: Optional[ChunkingStrategy] = None
     table_parsing_strategy: TableParsingStrategy = TableParsingStrategy.TSR
@@ -36,10 +39,12 @@ class ParsingOptions(BaseModel):
     page_range: Optional[str] = None
     deliver_webhook: bool = False
 
+
 class ExtractionOptions(BaseModel):
     """
     Options for parsing a document.
     """
+
     json_schema: Optional[Json]
     model: Type[BaseModel]
     deliver_webhook: bool = False
@@ -47,13 +52,17 @@ class ExtractionOptions(BaseModel):
 
 class DocumentParser:
 
-    def __init__(self, api_key: str=""):
+    def __init__(self, api_key: str = ""):
         self.api_key = api_key
         if not self.api_key:
             self.api_key = os.getenv("TENSORLAKE_API_KEY")
 
-        self._client = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None, headers=self._headers())
-        self._async_client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None, headers=self._headers())
+        self._client = httpx.Client(
+            base_url=DOC_AI_BASE_URL, timeout=None, headers=self._headers()
+        )
+        self._async_client = httpx.AsyncClient(
+            base_url=DOC_AI_BASE_URL, timeout=None, headers=self._headers()
+        )
 
     def _headers(self):
         return {
@@ -65,25 +74,24 @@ class DocumentParser:
         payload = {
             "file": file,
             "outputMode": options.format.value,
-            "deliverWebhook": options.deliver_webhook 
+            "deliverWebhook": options.deliver_webhook,
         }
         if options.chunking_strategy:
             payload["chunkStrategy"] = options.chunking_strategy.value
-    
+
         if options.page_range:
-            payload["pages"] = options.page_range 
+            payload["pages"] = options.page_range
         return payload
-    
+
     def _create_extract_req(self, file: str, options: ExtractionOptions) -> dict:
         payload = {
             "file": file,
             "schema": options.schema,
-            "deliverWebhook": options.deliver_webhook 
+            "deliverWebhook": options.deliver_webhook,
         }
         return payload
- 
 
-    def parse(self, file: str, options: ParsingOptions, timeout: int=5) -> str:
+    def parse(self, file: str, options: ParsingOptions, timeout: int = 5) -> str:
         """
         Parse a document.
         """
@@ -101,7 +109,9 @@ class DocumentParser:
         resp = response.json()
         return resp.get("jobId")
 
-    async def parse_async(self, file: str, options: ParsingOptions, timeout: int=5) -> str:
+    async def parse_async(
+        self, file: str, options: ParsingOptions, timeout: int = 5
+    ) -> str:
         """
         Parse a document asynchronously.
         """
@@ -118,7 +128,7 @@ class DocumentParser:
         resp = response.json()
         return resp.get("jobId")
 
-    def extract(self, file: str, options: ExtractionOptions, timeout: int=5) -> str:
+    def extract(self, file: str, options: ExtractionOptions, timeout: int = 5) -> str:
         """
         Parse a document.
         """

@@ -26,6 +26,7 @@ from tqdm import tqdm
 
 from tensorlake.documentai.common import DOC_AI_BASE_URL
 
+
 class Files:
     """
     Class to interact with the Tensorlake Files API.
@@ -51,6 +52,7 @@ class Files:
         return {"Authorization": f"Bearer {self.api_key}", "Accept": "application/json"}
 
     retry(tries=10, delay=2)
+
     def upload(self, path: Union[str, Path]) -> str:
         """
         Upload a file to the Tensorlake
@@ -86,6 +88,7 @@ class Files:
             return resp.get("id")
 
     retry(tries=10, delay=2)
+
     async def upload_async(self, path: Union[str, Path]) -> str:
         """
         Upload a file to the Tensorlake asynchronously.
@@ -151,6 +154,7 @@ class Files:
 
         with open(path, "rb") as f:
             with httpx.Client() as upload_client:
+
                 def file_chunk_generator():
                     while chunk := f.read(1024 * 1024):
                         progress_bar.update(len(chunk))
@@ -222,6 +226,7 @@ class Files:
         )
 
         async with httpx.AsyncClient() as upload_client:
+
             async def file_chunk_generator():
                 async with aiofiles.open(path, "rb") as file:
                     while chunk := await file.read(1024 * 1024):

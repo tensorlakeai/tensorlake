@@ -1,6 +1,7 @@
 """
 Example of how to parse all the documents in a folder using the DocumentAI API.
 """
+
 import csv
 
 from requests.exceptions import HTTPError
@@ -35,7 +36,7 @@ for file_name, file_id in file_ids.items():
     job_ids[job_id] = (file_name, file_id)
 
 CSV_FILENAME = "job_ids.csv"
-with open(CSV_FILENAME, mode='w', encoding='utf-8') as file:
+with open(CSV_FILENAME, mode="w", encoding="utf-8") as file:
     writer = csv.writer(file)
     writer.writerow(["job_id", "file_name", "file_id"])
     for job_id, (file_name, file_id) in job_ids.items():

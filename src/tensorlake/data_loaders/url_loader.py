@@ -40,6 +40,7 @@ class UrlLoader(DataLoader):
                     updated_at=convert_date_to_epoch(
                         response.headers.get("last-modified")
                     ),
+                    name="",
                 )
             )
         return file_metadata_list
