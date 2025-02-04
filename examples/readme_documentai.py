@@ -5,9 +5,11 @@ from tensorlake.documentai import DocumentParser, Files, ParsingOptions, Jobs
 API_KEY = "tl_XXXXX"
 
 files = Files(api_key=API_KEY)
+# Skip this if you are passing a pre-signed URL to the `DocumentParser`.
 file_id = files.upload(path="./examples/appliance-repair-invoice-2.pdf")
 
 parser = DocumentParser(api_key=API_KEY)
+# or pass an external URL
 job_id = parser.parse(file_id, options=ParsingOptions())
 
 jobs_client = Jobs(api_key=API_KEY)
