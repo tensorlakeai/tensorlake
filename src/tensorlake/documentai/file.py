@@ -12,17 +12,19 @@ Example:
 """
 
 import os
+import sys
 import hashlib
 from pathlib import Path
-from typing import AsyncGenerator, Union
+from typing import Union
 
 import aiofiles
 import httpx
 import magic
 from retry import retry
+from tqdm.asyncio import tqdm as async_tqdm
+from tqdm import tqdm
 
 from tensorlake.documentai.common import DOC_AI_BASE_URL
-
 
 class Files:
     """
@@ -140,11 +142,23 @@ class Files:
         if presign_id.startswith("tensorlake-"):
             return presign_id
 
+        progress_bar = tqdm(
+            total=file_size,
+            unit="B",
+            unit_scale=True,
+            desc=path.name,
+        )
+
         with open(path, "rb") as f:
             with httpx.Client() as upload_client:
+                def file_chunk_generator():
+                    while chunk := f.read(1024 * 1024):
+                        progress_bar.update(len(chunk))
+                        yield chunk
+
                 upload_response = upload_client.put(
                     url=init_response_json.get("presigned_url"),
-                    data=f.read(),
+                    data=file_chunk_generator(),
                     headers={
                         "Content-Type": self.__get_mime_type__(path),
                         "Content-Length": str(file_size),
@@ -153,7 +167,8 @@ class Files:
                 )
                 upload_response.raise_for_status()
 
-        print("\nUpload complete!")
+        progress_bar.close()
+        print(f"{path.name} upload complete!")
 
         # Finalize the upload
         finalize_response = self._client.post(
@@ -179,6 +194,7 @@ class Files:
 
         checksum_sha256 = await self.__calculate_checksum_sha256_async__(path)
         file_size = path.stat().st_size
+        filename = path.name
 
         init_response = await self._async_client.post(
             url="files_large",
@@ -186,7 +202,7 @@ class Files:
             json={
                 "sha256_checksum": checksum_sha256,
                 "file_size": file_size,
-                "filename": path.name,
+                "filename": filename,
             },
         )
         init_response.raise_for_status()
@@ -196,10 +212,25 @@ class Files:
         if presign_id.startswith("tensorlake-"):
             return presign_id
 
+        progress_bar = async_tqdm(
+            total=file_size,
+            unit="B",
+            unit_scale=True,
+            desc=filename,
+            disable=not sys.stdout.isatty(),
+            leave=False,
+        )
+
         async with httpx.AsyncClient() as upload_client:
+            async def file_chunk_generator():
+                async with aiofiles.open(path, "rb") as file:
+                    while chunk := await file.read(1024 * 1024):
+                        progress_bar.update(len(chunk))
+                        yield chunk
+
             upload_response = await upload_client.put(
                 url=init_response_json.get("presigned_url"),
-                data=self.__file_chunk_reader__(path),
+                data=file_chunk_generator(),
                 headers={
                     "Content-Type": self.__get_mime_type__(path),
                     "Content-Length": str(file_size),
@@ -208,6 +239,12 @@ class Files:
             )
             upload_response.raise_for_status()
 
+        progress_bar.set_description("")
+        progress_bar.clear()
+        progress_bar.close()
+        sys.stdout.flush()
+        print(f"{filename} upload complete!", flush=True)
+
         finalize_response = await self._async_client.post(
             url=f"files_large/{presign_id}", headers=self.__headers__()
         )
@@ -215,16 +252,6 @@ class Files:
         finalize_response_json = finalize_response.json()
 
         return finalize_response_json.get("id")
-
-    async def __file_chunk_reader__(
-        self, path: Path, chunk_size: int = 10 * 1024 * 1024
-    ) -> AsyncGenerator[bytes, None]:
-        """
-        Generator that reads a file in chunks asynchronously.
-        """
-        async with aiofiles.open(path, "rb") as file:
-            while chunk := await file.read(chunk_size):
-                yield chunk
 
     async def __calculate_checksum_sha256_async__(self, path: Union[str, Path]) -> str:
         hasher = hashlib.sha256()
