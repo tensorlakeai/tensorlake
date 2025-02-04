@@ -14,9 +14,11 @@ Example:
 import os
 import hashlib
 from pathlib import Path
-from typing import Union
+from typing import AsyncGenerator, Union
 
+import aiofiles
 import httpx
+import magic
 from retry import retry
 
 from tensorlake.documentai.common import DOC_AI_BASE_URL
@@ -31,18 +33,20 @@ class Files:
             will be read from the TENSORLAKE_API_KEY environment variable.
     """
 
-    def __init__(self, api_key: str=""):
+    def __init__(self, api_key: str = ""):
         self.api_key = api_key
         if not self.api_key:
             self.api_key = os.getenv("TENSORLAKE_API_KEY")
 
-        self._client = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None, headers=self._headers())
-        self._async_client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None, headers=self._headers())
+        self._client = httpx.Client(
+            base_url=DOC_AI_BASE_URL, timeout=None, headers=self.__headers__()
+        )
+        self._async_client = httpx.AsyncClient(
+            base_url=DOC_AI_BASE_URL, timeout=None, headers=self.__headers__()
+        )
 
-    def _headers(self):
-        return {
-            "Authorization": f"Bearer {self.api_key}",
-        }
+    def __headers__(self):
+        return {"Authorization": f"Bearer {self.api_key}", "Accept": "application/json"}
 
     retry(tries=10, delay=2)
     def upload(self, path: Union[str, Path]) -> str:
@@ -66,73 +70,172 @@ class Files:
 
         # check if file is longer than 10 mb
         if path.stat().st_size > 10 * 1024 * 1024:
-            return self._upload_large_file(path)
-        
+            return self.__upload_large_file__(path)
+
         with open(path, "rb") as f:
             files = {"file": (f.name, f)}
             response = self._client.post(
                 url="files",
-                headers=self._headers(),
+                headers=self.__headers__(),
                 files=files,
             )
             response.raise_for_status()
             resp = response.json()
             return resp.get("id")
-   
-    def _upload_large_file(self, path: Union[str, Path]) -> str:
+
+    retry(tries=10, delay=2)
+    async def upload_async(self, path: Union[str, Path]) -> str:
+        """
+        Upload a file to the Tensorlake asynchronously.
+
+        Args:
+            file_path: Path to the file to upload
+
+        Returns:
+            File ID of the uploaded file. This ID can be used to reference the file in other API calls.
+            String in the format "tensorlake-<ID>"
+
+        Raises:
+            httpx.HTTPError: If the request fails
+            FileNotFoundError: If the file doesn't exist
+        """
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"File not found: {path}")
-        checksum_sha256 = self._calculate_checksum_sha256(path)
-        with open(path, "rb") as f:
-            file_size = path.stat().st_size
-            init_response =  self._client.post(
-                url="files_large",
-                headers=self._headers(),
-                json={
-                    "sha256_checksum": checksum_sha256,
-                    "file_size": file_size,
-                    "filename": path.name
-                }
+
+        if path.stat().st_size > 10 * 1024 * 1024:
+            return await self.__upload_large_file_async__(path)
+
+        async with aiofiles.open(path, "rb") as f:
+            files = {"file": (path.name, await f.read())}
+            response = await self._async_client.post(
+                url="files",
+                headers=self.__headers__(),
+                files=files,
             )
+            response.raise_for_status()
+            resp = response.json()
+            return resp.get("id")
 
-            init_response.raise_for_status()
-            init_response_json = init_response.json()
-        
+    def __upload_large_file__(self, path: Union[str, Path]) -> str:
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+
+        file_size = path.stat().st_size
+        # Initialize upload request
+        init_response = self._client.post(
+            url="files_large",
+            headers=self.__headers__(),
+            json={
+                "sha256_checksum": self.__calculate_checksum_sha256__(path),
+                "file_size": file_size,
+                "filename": path.name,
+            },
+        )
+        init_response.raise_for_status()
+        init_response_json = init_response.json()
+
         presign_id = init_response_json.get("id")
-
         if presign_id.startswith("tensorlake-"):
             return presign_id
 
-        presigned_url = init_response_json.get("presigned_url")
-
-        upload_headers = {
-            "Content-Type": "application/pdf",
-            "Content-Length": str(file_size)
-        }
-
         with open(path, "rb") as f:
             with httpx.Client() as upload_client:
-                upload_response =  upload_client.put(
-                    url=presigned_url,
+                upload_response = upload_client.put(
+                    url=init_response_json.get("presigned_url"),
                     data=f.read(),
-                    headers=upload_headers,
-                    timeout=httpx.Timeout(None)
+                    headers={
+                        "Content-Type": self.__get_mime_type__(path),
+                        "Content-Length": str(file_size),
+                    },
+                    timeout=httpx.Timeout(None),
                 )
                 upload_response.raise_for_status()
 
-        finalize_response =  self._client.post(
-            url=f"files_large/{presign_id}",
-            headers=self._headers()
+        print("\nUpload complete!")
+
+        # Finalize the upload
+        finalize_response = self._client.post(
+            url=f"files_large/{presign_id}", headers=self.__headers__()
         )
-
         finalize_response.raise_for_status()
-        finalize_response_json = finalize_response.json()
-        return finalize_response_json.get("id")
+        return finalize_response.json().get("id")
 
-    def _calculate_checksum_sha256(self, path: Union[str, Path]) -> str:
+    def __calculate_checksum_sha256__(self, path: Union[str, Path]) -> str:
         hasher = hashlib.sha256()
         with open(path, "rb") as file:
             for chunk in iter(lambda: file.read(4096), b""):
                 hasher.update(chunk)
         return hasher.hexdigest()
+
+    async def __upload_large_file_async__(self, path: Union[str, Path]) -> str:
+        """
+        Asynchronously upload large files to Tensorlake
+        """
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+
+        checksum_sha256 = await self.__calculate_checksum_sha256_async__(path)
+        file_size = path.stat().st_size
+
+        init_response = await self._async_client.post(
+            url="files_large",
+            headers=self.__headers__(),
+            json={
+                "sha256_checksum": checksum_sha256,
+                "file_size": file_size,
+                "filename": path.name,
+            },
+        )
+        init_response.raise_for_status()
+        init_response_json = init_response.json()
+
+        presign_id = init_response_json.get("id")
+        if presign_id.startswith("tensorlake-"):
+            return presign_id
+
+        async with httpx.AsyncClient() as upload_client:
+            upload_response = await upload_client.put(
+                url=init_response_json.get("presigned_url"),
+                data=self.__file_chunk_reader__(path),
+                headers={
+                    "Content-Type": self.__get_mime_type__(path),
+                    "Content-Length": str(file_size),
+                },
+                timeout=httpx.Timeout(None),
+            )
+            upload_response.raise_for_status()
+
+        finalize_response = await self._async_client.post(
+            url=f"files_large/{presign_id}", headers=self.__headers__()
+        )
+        finalize_response.raise_for_status()
+        finalize_response_json = finalize_response.json()
+
+        return finalize_response_json.get("id")
+
+    async def __file_chunk_reader__(
+        self, path: Path, chunk_size: int = 10 * 1024 * 1024
+    ) -> AsyncGenerator[bytes, None]:
+        """
+        Generator that reads a file in chunks asynchronously.
+        """
+        async with aiofiles.open(path, "rb") as file:
+            while chunk := await file.read(chunk_size):
+                yield chunk
+
+    async def __calculate_checksum_sha256_async__(self, path: Union[str, Path]) -> str:
+        hasher = hashlib.sha256()
+        async with aiofiles.open(path, "rb") as file:
+            while chunk := await file.read(4096):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    def __get_mime_type__(self, path: Union[str, Path]) -> str:
+        """
+        Get the mime type of a file
+        """
+        mime = magic.Magic(mime=True)
+        return mime.from_file(str(path))
