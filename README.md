@@ -66,7 +66,7 @@ job_id = parser.extract(file_id, options=ExtractionOptions(model=LoanDocumentSch
 
 Structured Extraction is guided by the provided schema. We support Pyndatic Models as well JSON Schema. All the levers for structured extraction are (documented here)[https://docs.tensorlake.ai/api-reference/extract/extract-file-async].
 
-#### Getting Parsed Data
+#### Getting Back Parsed Data
 
 Document AI APIs are async to be able to handle large volumes of documents with many pages. You can use a Job ID to retrieve results, or configure a webhook endpoint to receive updates.
 
