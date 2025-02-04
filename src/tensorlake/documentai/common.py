@@ -1,1 +1,1 @@
-DOC_AI_BASE_URL = "https://api.tensorlake.ai/documents/v1/parse_async"
+DOC_AI_BASE_URL = "https://api.tensorlake.ai/documents/v1/"

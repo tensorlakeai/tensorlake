@@ -2,7 +2,7 @@ import os
 import httpx
 from enum import Enum
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Json
 
 from tensorlake.documentai.api import Document
 from tensorlake.documentai.common import DOC_AI_BASE_URL
@@ -34,6 +34,13 @@ class ParsingOptions(BaseModel):
     page_range: Optional[str] = None
     deliver_webhook: bool = False
 
+class ExtractionOptions(BaseModel):
+    """
+    Options for parsing a document.
+    """
+    schema: Json
+    deliver_webhook: bool = False
+
 
 class DocumentParser:
 
@@ -42,14 +49,9 @@ class DocumentParser:
         if not self.api_key:
             self.api_key = os.getenv("TENSORLAKE_API_KEY")
 
-    def _headers(self) -> dict:
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        return headers
+        self._client = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None, headers=self._headers())
 
-    def _create_req(self, file: str, options: ParsingOptions) -> dict:
+    def _create_parse_req(self, file: str, options: ParsingOptions) -> dict:
         payload = {
             "file": file,
             "outputMode": options.format.value,
@@ -61,42 +63,47 @@ class DocumentParser:
         if options.page_range:
             payload["pages"] = options.page_range 
         return payload
+    
+    def _create_extract_req(self, file: str, options: ExtractionOptions) -> dict:
+        payload = {
+            "file": file,
+            "schema": options.schema,
+            "deliverWebhook": options.deliver_webhook 
+        }
+        return payload
  
 
     def parse_document(self, file: str, options: ParsingOptions, timeout: int=5) -> str:
         """
         Parse a document.
         """
-        with httpx.Client() as client:
-            response = client.post(
-                url=DOC_AI_BASE_URL,
-                headers=self._headers(),
-                json=self._create_req(file, options),
-                timeout=2,
-            )
-            try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                print(e.response.text)
-                raise e
-            resp = response.json()
-            return resp.get("jobId")
+        response = self._client.post(
+            url="/extract_async",
+            headers=self._headers(),
+            json=self._create_parse_req(file, options),
+            timeout=2,
+        )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            print(e.response.text)
+            raise e
+        resp = response.json()
+        return resp.get("jobId")
 
-    
-    async def parse_document_async(self, path: str, options: ParsingOptions) -> Document:
+    def extract_structured_data(self, file: str, options: ExtractionOptions, timeout: int=5) -> str:
         """
-        Parse a document asynchronously.
+        Parse a document.
         """
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                url=DOC_AI_BASE_URL,
-                headers=self._headers(),
-                json=self._create_req()
-            )
-            try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                print(e.response)
-                raise e
-            resp = response.json()
-            return resp.get("jobId")
+        response = self._client.post(
+            url="/extract_async",
+            headers=self._headers(),
+            json=self._create_extract_req(file, options),
+        )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            print(e.response.text)
+            raise e
+        resp = response.json()
+        return resp.get("jobId")

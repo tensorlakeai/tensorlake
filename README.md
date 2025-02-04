@@ -20,30 +20,53 @@ The API offers two main primitives -
 
 2. Structured Extraction - Extracts JSON from documents, guided by a provided schema.
 
+## Quickstart 
+
+#### Document Parsing
+
+Convert a PDF to markdown and chunk it.
+
 ```python
-from tensorlake.documentai import DocumentParser, upload_file
+from tensorlake.documentai import DocumentParser, Files, ParsingOptions
 
-file_id = upload_file(path="/path/to/file.pdf")
+files = Files(api_key="xxxx")
+file_id = files.upload(path="/path/to/file.pdf")
 
-
-dataset =  create_dataset(name="pdf_documents", dataset_type=DatasetType.CHUNKS)
 parser = DocumentParser(api_key="tl_xxx")
-parser.parse(file)
+job_id = parser.parse_document(file_id, options=ParsingOptions())
 ```
+
+This uses the default Parsing options, which chunks a document by page. We can summarize figures, charts and tables as well. You can change the chunking strategy, the prompts for summarization by changing the `ParsingOptions`. The API is [documented here](https://docs.tensorlake.ai/documentai/parsing).
+
+#### Structured Extraction 
+
+Extract structured data from a document.
+
+```python
+from tensorlake.documentai import StructuredExtractor, Files, ExtractionOptions
+from pydantic import BaseModel, Field
+
+class LoanDocumentSchema(BaseModel):
+    account_number: str = Field(description="Account number of the customer")
+    customer_name: str = Field(description="Name of the customer")
+    amount_due: str = Field(description="Total amount due in the current statement")
+    due_data: str = Field(description="Due Date")
+
+files = Files(api_key="xxxx")
+file_id = files.upload(path="/path/to/file.pdf")
+
+parser = StructuredExtractor(api_key="tl_xxx")
+job_id = parser.parse_document(file_id, options=ExtractionOptions(schema=LoanDocumentSchema))
+```
+
+This uses the default Parsing options, which chunks a document by page. We can summarize figures, charts and tables as well. You can change the chunking strategy, the prompts for summarization by changing the `ParsingOptions`. The API is [documented here](https://docs.tensorlake.ai/documentai/parsing).
+
 
 ## Serverless Workflows
 
-Tensorlake Serverless Workflows allows to build, deploy, and scale data processing applications effortlessly and efficiently.
+Serverless Workflows allows to build and deploy custom data processing workflows as an API.
 
-### Key Features
-
-* **Effortless Scalability**: Automatically scale based on demand.
-* **Cost Efficiency**: Pay only for compute resources used.
-* **Simplified Deployment**: Focus on building AI applications, not infrastructure.
-* **High Availability**: Built-in redundancy and fault tolerance.
-* **Seamless Integration**: Integrate with existing tools and workflows.
-
-### Key concepts
+### Quickstart
 
 Define a workflow by implementing its data transformation steps as Python functions decorated with `@tensorlake_function()`.
 Connect the outputs of a function to the inputs of another function using edges in a `Graph` object, which represents the full workflow.
@@ -153,9 +176,8 @@ The workflow code is available at [examples/readme_example.py](examples/readme_e
 The following code was added there to create the workflow and run it locally on your computer:
 
 ```python
-if __name__ == "__main__":
-    local_workflow: Graph = create_workflow()
-    run_workflow(local_workflow)
+local_workflow: Graph = create_workflow()
+run_workflow(local_workflow)
 ```
 
 Run the workflow locally:
@@ -188,9 +210,8 @@ tensorlake-cli deploy examples/readme_example.py
 def fetch_workflow_from_cloud() -> Optional[RemoteGraph]:
     return RemoteGraph.by_name("example_workflow")
 
-if __name__ == "__main__":
-    cloud_workflow: RemoteGraph = fetch_workflow_from_cloud()
-    run_workflow(cloud_workflow)
+cloud_workflow: RemoteGraph = fetch_workflow_from_cloud()
+run_workflow(cloud_workflow)
 ```
 6. Run the workflow on Tensorlake Cloud:
 
