@@ -1,11 +1,13 @@
 import os
-import httpx
 from enum import Enum
-from typing import Optional
+from typing import Optional, Type
+
+import httpx
 from pydantic import BaseModel, Json
 
 from tensorlake.documentai.api import Document
 from tensorlake.documentai.common import DOC_AI_BASE_URL
+
 
 class OutputFormat(str, Enum):
     MARKDOWN = "markdown"
@@ -38,7 +40,8 @@ class ExtractionOptions(BaseModel):
     """
     Options for parsing a document.
     """
-    json_schema: Json
+    json_schema: Optional[Json]
+    model: Type[BaseModel]
     deliver_webhook: bool = False
 
 

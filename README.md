@@ -57,19 +57,19 @@ files = Files(api_key="tl_xxxx")
 file_id = files.upload(path="/path/to/file.pdf")
 
 parser = StructuredExtractor(api_key="tl_xxx")
-job_id = parser.parse_document(file_id, options=ExtractionOptions(schema=LoanDocumentSchema))
+job_id = parser.extract(file_id, options=ExtractionOptions(model=LoanDocumentSchema))
 ```
 
-This uses the default Parsing options, which chunks a document by page. We can summarize figures, charts and tables as well. You can change the chunking strategy, the prompts for summarization by changing the `ParsingOptions`. The API is [documented here](https://docs.tensorlake.ai/documentai/parsing).
+Structured Extraction is guided by the provided schema. We support Pyndatic Models as well JSON Schema. All the levers for structured extraction are (documented here)[https://docs.tensorlake.ai/api-reference/extract/extract-file-async].
 
 #### Getting Parsed Data
 
 Document AI APIs are async to be able to handle large volumes of documents with many pages. You can use a Job ID to retrieve results, or configure a webhook endpoint to receive updates.
 
-from tensorlake.documentai Jobs
+from tensorlake.documentai Jobs, JobResult
 
 jobs = Jobs(api_key="tl_xxxx")
-data = jobs.get(job_id="job-xxxx")
+data: JobResult = jobs.get(job_id="job-xxxx")
 
 ## Serverless Workflows
 

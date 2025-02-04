@@ -1,6 +1,9 @@
 import os
+
 import httpx
+
 from tensorlake.documentai.common import DOC_AI_BASE_URL
+
 
 class Jobs:
     
