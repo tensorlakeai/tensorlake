@@ -34,6 +34,7 @@ files = Files(api_key="xxxx")
 file_id = files.upload(path="/path/to/file.pdf")
 
 parser = DocumentParser(api_key="tl_xxx")
+# Skip the upload step, if you are passing pre-signed URLs or HTTPS accessible files.
 job_id = parser.parse(file_id, options=ParsingOptions())
 ```
 
