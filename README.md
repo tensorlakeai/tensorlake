@@ -7,9 +7,12 @@ Tensorlake provides Document Ingestion APIs and a runtime to build and deploy da
 
 ## Quick Start
 
+1. Install the SDK
 ```bash
 pip install tensorlake
 ```
+
+2. Sign up and get an Tensorlake [API Key](https://cloud.tensorlake.ai/)
 
 ## Document Ingestion
 
@@ -94,14 +97,6 @@ The example below creates a workflow with the following steps:
 2. Compute square of each number.
 3. Sum all the squares.
 4. Send the sum to a web service.
-
-#### Installation
-
-Install Tensorlake SDK and CLI into your development environment:
-
-```bash
-pip install tensorlake
-```
 
 #### Code
 
@@ -206,18 +201,16 @@ gets deployed to see how it works.
 
 To run the workflow on tensorlake cloud it first needs to get deployed there.
 
-1. Register at [Tensorlake Cloud](https://cloud.tensorlake.ai).
-2. Get an API key at [API keys page](https://cloud.tensorlake.ai/dashboard/api-keys).
-3. Set `TENSORLAKE_API_KEY` environment variable in your shell session:
+1. Set `TENSORLAKE_API_KEY` environment variable in your shell session:
 ```bash
 export TENSORLAKE_API_KEY="Paste your API key here"
 ```
-4. Deploy the workflow to Tensorlake Cloud:
+2. Deploy the workflow to Tensorlake Cloud:
 ```bash
 tensorlake-cli prepare examples/readme_example.py
 tensorlake-cli deploy examples/readme_example.py
 ```
-5. The following code was added to the workflow file to run it on Tensorlake Cloud:
+3. The following code was added to the workflow file to run it on Tensorlake Cloud:
 ```python
 def fetch_workflow_from_cloud() -> Optional[RemoteGraph]:
     return RemoteGraph.by_name("example_workflow")
@@ -225,7 +218,7 @@ def fetch_workflow_from_cloud() -> Optional[RemoteGraph]:
 cloud_workflow: RemoteGraph = fetch_workflow_from_cloud()
 run_workflow(cloud_workflow)
 ```
-6. Run the workflow on Tensorlake Cloud:
+4. Run the workflow on Tensorlake Cloud:
 
 ```bash
 python examples/readme_example.py
@@ -233,7 +226,7 @@ python examples/readme_example.py
 
 #### Running on your own infrastructure
 
-Tensorlake Cloud is based on Open Source [Indexify](https://github.com/tensorlakeai/indexify)
+Tensorlake Workflows are based on an Open Source [Indexify](https://github.com/tensorlakeai/indexify)
 and is fully compatible with it. You can setup your own Indexify cluster e.g. with Kubernetes
 and run workflows on it.
 
