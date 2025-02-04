@@ -3,29 +3,85 @@
 
 [![Discord](https://dcbadge.vercel.app/api/server/VXkY7zVmTD?style=flat&compact=true)](https://discord.gg/VXkY7zVmTD)
 
-Tensorlake Cloud provides robust Data Ingestion APIs and a platform to build and run data processing workflows.
+Tensorlake provides Document Ingestion APIs and a runtime to build data workflows.
+
+## Quick Start
+
+```bash
+pip install tensorlake
+```
+
+## Document Ingestion
+
+Document Ingestion APIs enable building RAG or Knowledge Assistants from information in PDFs, Docx or Presentations. 
+
+The API offers two main primitives - 
+1. Document Parsing - Converts documents to text, and optionally chunk them. It can also extract information from Figure, Charts and Tables.
+
+2. Structured Extraction - Extracts JSON from documents, guided by a provided schema.
+
+## Quickstart 
+
+If you want to dive into code, here is an [example](examples/readme_documentai.py).
+
+#### Document Parsing
+
+Convert a PDF to markdown and chunk it.
+
+```python
+from tensorlake.documentai import DocumentParser, Files, ParsingOptions
+
+files = Files(api_key="xxxx")
+file_id = files.upload(path="/path/to/file.pdf")
+
+parser = DocumentParser(api_key="tl_xxx")
+job_id = parser.parse(file_id, options=ParsingOptions())
+```
+
+This uses the default Parsing options, which chunks a document by page. We can summarize figures, charts and tables as well. You can change the chunking strategy, the prompts for summarization by changing the `ParsingOptions`. The API is [documented here](https://docs.tensorlake.ai/documentai/parsing).
+
+#### Structured Extraction 
+
+Extract structured data from a document.
+
+```python
+from tensorlake.documentai import StructuredExtractor, Files, ExtractionOptions
+from pydantic import BaseModel, Field
+
+class LoanDocumentSchema(BaseModel):
+    account_number: str = Field(description="Account number of the customer")
+    customer_name: str = Field(description="Name of the customer")
+    amount_due: str = Field(description="Total amount due in the current statement")
+    due_data: str = Field(description="Due Date")
+
+files = Files(api_key="tl_xxxx")
+file_id = files.upload(path="/path/to/file.pdf")
+
+parser = StructuredExtractor(api_key="tl_xxx")
+job_id = parser.parse_document(file_id, options=ExtractionOptions(schema=LoanDocumentSchema))
+```
+
+This uses the default Parsing options, which chunks a document by page. We can summarize figures, charts and tables as well. You can change the chunking strategy, the prompts for summarization by changing the `ParsingOptions`. The API is [documented here](https://docs.tensorlake.ai/documentai/parsing).
+
+#### Getting Parsed Data
+
+Document AI APIs are async to be able to handle large volumes of documents with many pages. You can use a Job ID to retrieve results, or configure a webhook endpoint to receive updates.
+
+from tensorlake.documentai Jobs
+
+jobs = Jobs(api_key="tl_xxxx")
+data = jobs.get(job_id="job-xxxx")
 
 ## Serverless Workflows
 
-Tensorlake Serverless Workflows allows to build, deploy, and scale data processing applications effortlessly and efficiently.
+Serverless Workflows enables building and deploy custom data processing workflows in Python. The workflows listen to API requests, and scale up on-demand to process data on the cloud. A function can do anything from calling a web service to loading a data model into a GPU and running inference on it. Tensorlake will provision the required compute resources and run as many copies of a function as needed.
 
-### Key Features
-
-* **Effortless Scalability**: Automatically scale based on demand.
-* **Cost Efficiency**: Pay only for compute resources used.
-* **Simplified Deployment**: Focus on building AI applications, not infrastructure.
-* **High Availability**: Built-in redundancy and fault tolerance.
-* **Seamless Integration**: Integrate with existing tools and workflows.
-
-### Key concepts
+### Quickstart
 
 Define a workflow by implementing its data transformation steps as Python functions decorated with `@tensorlake_function()`.
 Connect the outputs of a function to the inputs of another function using edges in a `Graph` object, which represents the full workflow.
 
-A function can do anything from calling a web service to loading a data model into a GPU and running inference on it. Tensorlake will
-provision the required compute resources and run as many copies of a function as needed.
-
-### Example workflow
+### Example 
 
 The example below creates a workflow with the following steps:
 
@@ -127,9 +183,8 @@ The workflow code is available at [examples/readme_example.py](examples/readme_e
 The following code was added there to create the workflow and run it locally on your computer:
 
 ```python
-if __name__ == "__main__":
-    local_workflow: Graph = create_workflow()
-    run_workflow(local_workflow)
+local_workflow: Graph = create_workflow()
+run_workflow(local_workflow)
 ```
 
 Run the workflow locally:
@@ -162,9 +217,8 @@ tensorlake-cli deploy examples/readme_example.py
 def fetch_workflow_from_cloud() -> Optional[RemoteGraph]:
     return RemoteGraph.by_name("example_workflow")
 
-if __name__ == "__main__":
-    cloud_workflow: RemoteGraph = fetch_workflow_from_cloud()
-    run_workflow(cloud_workflow)
+cloud_workflow: RemoteGraph = fetch_workflow_from_cloud()
+run_workflow(cloud_workflow)
 ```
 6. Run the workflow on Tensorlake Cloud:
 
