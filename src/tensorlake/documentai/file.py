@@ -11,9 +11,9 @@ Example:
     "tensorlake-ID"
 """
 
+import hashlib
 import os
 import sys
-import hashlib
 from pathlib import Path
 from typing import Union
 
@@ -21,8 +21,8 @@ import aiofiles
 import httpx
 import magic
 from retry import retry
-from tqdm.asyncio import tqdm as async_tqdm
 from tqdm import tqdm
+from tqdm.asyncio import tqdm as async_tqdm
 
 from tensorlake.documentai.common import DOC_AI_BASE_URL
 

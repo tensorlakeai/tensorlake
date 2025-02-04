@@ -5,6 +5,7 @@ Example of how to parse all the documents in a folder using the DocumentAI API.
 import csv
 
 from requests.exceptions import HTTPError
+
 from tensorlake.data_loaders import LocalDirectoryLoader
 from tensorlake.documentai.file import Files
 from tensorlake.documentai.parser import DocumentParser, ParsingOptions

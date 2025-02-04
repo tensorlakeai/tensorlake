@@ -1,9 +1,12 @@
 """
 Example of how to parse all documents in a folder asynchronously using the Document AI API.
 """
+
 import asyncio
 import csv
+
 from requests.exceptions import HTTPError
+
 from tensorlake.data_loaders import LocalDirectoryLoader
 from tensorlake.documentai.file import Files
 from tensorlake.documentai.parser import DocumentParser, ParsingOptions
@@ -22,6 +25,7 @@ file_ids = {}
 
 job_ids = {}
 
+
 async def upload_files():
     """
     Upload all files in the folder asynchronously
@@ -38,6 +42,7 @@ async def upload_files():
         else:
             print(f"Error uploading file {file.path}: {result}")
 
+
 async def upload_single_file(file):
     """
     Upload a single file asynchronously
@@ -46,6 +51,7 @@ async def upload_single_file(file):
         return await files.upload_async(file.path)
     except HTTPError as e:
         return e
+
 
 async def parse_files():
     """
@@ -57,6 +63,7 @@ async def parse_files():
         print(job_id)
         job_ids[job_id] = (file_name, file_id)
 
+
 async def main():
     """
     Main function
@@ -66,10 +73,11 @@ async def main():
 
     # Write job IDs to CSV
     csv_filename = "job_ids.csv"
-    with open(csv_filename, mode='w', encoding="utf-8") as file:
+    with open(csv_filename, mode="w", encoding="utf-8") as file:
         writer = csv.writer(file)
         writer.writerow(["job_id", "file_name", "file_id"])
         for job_id, (file_name, file_id) in job_ids.items():
             writer.writerow([job_id, file_name, file_id])
+
 
 asyncio.run(main())

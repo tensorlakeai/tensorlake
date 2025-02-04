@@ -1,8 +1,10 @@
 """
 Poetry post-install script to install libmagic on Linux and macOS.
 """
-import sys
+
 import subprocess
+import sys
+
 
 def install_deps():
     """
