@@ -20,18 +20,15 @@ for file in all_files:
     file_ids[file.name] = file_id
 
 for file_name, file_id in file_ids.items():
-   job_id = document_parser.parse(file_id, ParsingOptions())
-   print(job_id)
-   job_ids[job_id] = (file_name, file_id)
+    job_id = document_parser.parse(file_id, ParsingOptions())
+    print(job_id)
+    job_ids[job_id] = (file_name, file_id)
 
 import csv
+
 csv_file = "job_ids.csv"
-with open(csv_file, mode='w') as file:
-   writer = csv.writer(file)
-   writer.writerow(["job_id", "file_name", "file_id"])
-   for job_id, (file_name, file_id) in job_ids.items():
-       writer.writerow([job_id, file_name, file_id])
-
-
-
-
+with open(csv_file, mode="w") as file:
+    writer = csv.writer(file)
+    writer.writerow(["job_id", "file_name", "file_id"])
+    for job_id, (file_name, file_id) in job_ids.items():
+        writer.writerow([job_id, file_name, file_id])

@@ -8,6 +8,7 @@ class PageFragmentType(str, Enum):
     """
     Type of a page fragment.
     """
+
     SECTION_HEADER = "section_header"
 
     TEXT = "text"
@@ -27,13 +28,16 @@ class PageFragmentType(str, Enum):
 class Text(BaseModel):
     content: str
 
+
 class Table(BaseModel):
     content: str
     summary: Optional[str] = None
 
+
 class Figure(BaseModel):
     content: str
     summary: Optional[str] = None
+
 
 class PageFragment(BaseModel):
     fragment_type: PageFragmentType
@@ -41,6 +45,7 @@ class PageFragment(BaseModel):
     reading_order: Optional[int] = None
     page_number: Optional[int] = None
     bbox: Optional[dict[str, float]] = None
+
 
 class Page(BaseModel):
     """
@@ -51,11 +56,14 @@ class Page(BaseModel):
     page_fragments: Optional[List[PageFragment]] = []
     layout: Optional[dict] = {}
 
+
 class Document(BaseModel):
     """
     Document in a document.
     """
+
     pages: List[Page]
+
 
 class ParsedDocument(BaseModel):
     num_pages: Optional[int] = None
