@@ -207,7 +207,6 @@ export TENSORLAKE_API_KEY="Paste your API key here"
 ```
 2. Deploy the workflow to Tensorlake Cloud:
 ```bash
-tensorlake-cli prepare examples/readme_example.py
 tensorlake-cli deploy examples/readme_example.py
 ```
 3. The following code was added to the workflow file to run it on Tensorlake Cloud:
