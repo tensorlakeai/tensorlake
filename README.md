@@ -3,7 +3,7 @@
 
 [![Discord](https://dcbadge.vercel.app/api/server/VXkY7zVmTD?style=flat&compact=true)](https://discord.gg/VXkY7zVmTD)
 
-Tensorlake provides Document Ingestion APIs and a runtime to build data workflows.
+Tensorlake provides Document Ingestion APIs and a runtime to build and deploy data workflows on a fully managed compute infrastructure including GPUs.
 
 ## Quick Start
 
@@ -13,12 +13,11 @@ pip install tensorlake
 
 ## Document Ingestion
 
-Document Ingestion APIs enable building RAG or Knowledge Assistants from information in PDFs, Docx or Presentations. 
+Document Ingestion APIs enable building RAG or Knowledge Assistants from information in PDFs, Docx or Presentations. It offer two main APIs - 
 
-The API offers two main primitives - 
 1. Document Parsing - Converts documents to text, and optionally chunk them. It can also extract information from Figure, Charts and Tables.
 
-2. Structured Extraction - Extracts JSON from documents, guided by a provided schema.
+2. Structured Extraction - Extracts JSON from documents, guided by JSON schemas or Pydantic models.
 
 ## Quickstart 
 
