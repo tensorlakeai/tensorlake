@@ -1,55 +1,162 @@
-"""
-Module to interact with the Tensorlake Files API.
-
-The Files API allows you to upload files to the Tensorlake platform.
-
-Example:
-    >>> from tensorlake.documentai import Files
-    >>> files = Files(api_key="YOUR_API_KEY")
-    >>> file_id = files.upload("path/to/file.pdf")
-    >>> print(file_id)
-    "tensorlake-ID"
-"""
-
 import hashlib
 import os
 import sys
+from enum import Enum
 from pathlib import Path
-from typing import Union
+from typing import Optional, Type, Union
 
 import aiofiles
 import httpx
 import magic
+from pydantic import BaseModel, Json
 from retry import retry
 from tqdm import tqdm
 from tqdm.asyncio import tqdm as async_tqdm
 
-from tensorlake.documentai.common import DOC_AI_BASE_URL
+from tensorlake.documentai.common import DOC_AI_BASE_URL, JobResult
 
 
-class Files:
+class OutputFormat(str, Enum):
+    MARKDOWN = "markdown"
+    JSON = "json"
+
+
+class ChunkingStrategy(str, Enum):
+    NONE = "none"
+    PAGE = "page"
+    SECTION_HEADER = "section_header"
+
+
+class TableParsingStrategy(str, Enum):
+    TSR = "tsr"
+    VLM = "vlm"
+
+
+class ParsingOptions(BaseModel):
     """
-    Class to interact with the Tensorlake Files API.
-
-    Args:
-        api_key: API key to use for authentication. If not provided, the value
-            will be read from the TENSORLAKE_API_KEY environment variable.
+    Options for parsing a document.
     """
+
+    format: OutputFormat = OutputFormat.MARKDOWN
+    chunking_strategy: Optional[ChunkingStrategy] = None
+    table_parsing_strategy: TableParsingStrategy = TableParsingStrategy.TSR
+    table_parsing_prompt: Optional[str] = None
+    summarize_table: bool = False
+    summarize_figure: bool = False
+    page_range: Optional[str] = None
+    deliver_webhook: bool = False
+
+
+class ExtractionOptions(BaseModel):
+    """
+    Options for parsing a document.
+    """
+
+    json_schema: Optional[Json]
+    model: Type[BaseModel]
+    deliver_webhook: bool = False
+
+
+class DocumentAI:
 
     def __init__(self, api_key: str = ""):
         self.api_key = api_key
         if not self.api_key:
             self.api_key = os.getenv("TENSORLAKE_API_KEY")
 
-        self._client = httpx.Client(
-            base_url=DOC_AI_BASE_URL, timeout=None, headers=self.__headers__()
-        )
-        self._async_client = httpx.AsyncClient(
-            base_url=DOC_AI_BASE_URL, timeout=None, headers=self.__headers__()
-        )
+        self._client = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None)
+        self._async_client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
 
-    def __headers__(self):
-        return {"Authorization": f"Bearer {self.api_key}", "Accept": "application/json"}
+    def _headers(self):
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+    def get_job(self, job_id: str) -> JobResult:
+        response = self._client.get(
+            url=f"jobs/{job_id}",
+            headers=self._headers(),
+        )
+        response.raise_for_status()
+        resp = response.json()
+        job_result = JobResult.model_validate(resp)
+        return job_result
+
+    def _create_parse_req(self, file: str, options: ParsingOptions) -> dict:
+        payload = {
+            "file": file,
+            "outputMode": options.format.value,
+            "deliverWebhook": options.deliver_webhook,
+        }
+        if options.chunking_strategy:
+            payload["chunkStrategy"] = options.chunking_strategy.value
+
+        if options.page_range:
+            payload["pages"] = options.page_range
+        return payload
+
+    def _create_extract_req(self, file: str, options: ExtractionOptions) -> dict:
+        payload = {
+            "file": file,
+            "schema": options.schema,
+            "deliverWebhook": options.deliver_webhook,
+        }
+        return payload
+
+    def parse(self, file: str, options: ParsingOptions, timeout: int = 5) -> str:
+        """
+        Parse a document.
+        """
+        response = self._client.post(
+            url="/parse_async",
+            headers=self._headers(),
+            json=self._create_parse_req(file, options),
+            timeout=2,
+        )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            print(e.response.text)
+            raise e
+        resp = response.json()
+        return resp.get("jobId")
+
+    async def parse_async(
+        self, file: str, options: ParsingOptions, timeout: int = 5
+    ) -> str:
+        """
+        Parse a document asynchronously.
+        """
+        response = await self._async_client.post(
+            url="/parse_async",
+            headers=self._headers(),
+            json=self._create_parse_req(file, options),
+        )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            print(e.response.text)
+            raise e
+        resp = response.json()
+        return resp.get("jobId")
+
+    def extract(self, file: str, options: ExtractionOptions, timeout: int = 5) -> str:
+        """
+        Parse a document.
+        """
+        response = self._client.post(
+            url="/extract_async",
+            headers=self._headers(),
+            json=self._create_extract_req(file, options),
+        )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            print(e.response.text)
+            raise e
+        resp = response.json()
+        return resp.get("jobId")
 
     retry(tries=10, delay=2)
 
@@ -80,7 +187,9 @@ class Files:
             files = {"file": (f.name, f)}
             response = self._client.post(
                 url="files",
-                headers=self.__headers__(),
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                },
                 files=files,
             )
             response.raise_for_status()
@@ -115,10 +224,17 @@ class Files:
             files = {"file": (path.name, await f.read())}
             response = await self._async_client.post(
                 url="files",
-                headers=self.__headers__(),
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                },
                 files=files,
             )
-            response.raise_for_status()
+            print(response.request.headers)
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                print(e.response.text)
+                raise e
             resp = response.json()
             return resp.get("id")
 
@@ -131,7 +247,7 @@ class Files:
         # Initialize upload request
         init_response = self._client.post(
             url="files_large",
-            headers=self.__headers__(),
+            headers=self._headers(),
             json={
                 "sha256_checksum": self.__calculate_checksum_sha256__(path),
                 "file_size": file_size,
@@ -176,7 +292,7 @@ class Files:
 
         # Finalize the upload
         finalize_response = self._client.post(
-            url=f"files_large/{presign_id}", headers=self.__headers__()
+            url=f"files_large/{presign_id}", headers=self._headers()
         )
         finalize_response.raise_for_status()
         return finalize_response.json().get("id")
@@ -202,7 +318,7 @@ class Files:
 
         init_response = await self._async_client.post(
             url="files_large",
-            headers=self.__headers__(),
+            headers=self._headers(),
             json={
                 "sha256_checksum": checksum_sha256,
                 "file_size": file_size,
@@ -251,7 +367,7 @@ class Files:
         print(f"{filename} upload complete!", flush=True)
 
         finalize_response = await self._async_client.post(
-            url=f"files_large/{presign_id}", headers=self.__headers__()
+            url=f"files_large/{presign_id}", headers=self._headers()
         )
         finalize_response.raise_for_status()
         finalize_response_json = finalize_response.json()
