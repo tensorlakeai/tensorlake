@@ -1,7 +1,7 @@
 <a name="readme-top"></a>
 # Tensorlake SDK
 
-[![Discord](https://dcbadge.vercel.app/api/server/VXkY7zVmTD?style=flat&compact=true)](https://discord.gg/VXkY7zVmTD)
+[![Discord](https://dcbadge.vercel.app/api/server/VXkY7zVmTD?style=flat&compact=true)](https://discord.gg/VXkY7zVmTD) ![PyPI - Version](https://img.shields.io/pypi/v/tensorlake)
 
 Tensorlake provides Document Ingestion APIs and a runtime to build and deploy data workflows on a fully managed compute infrastructure including GPUs.
 
