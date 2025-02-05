@@ -33,12 +33,12 @@ Convert a PDF to markdown and chunk it.
 ```python
 from tensorlake.documentai import DocumentAI, ParsingOptions
 
-document_ai = DocumentAI(api_key="xxxx")
+doc_ai = DocumentAI(api_key="xxxx")
 
 # Skip the upload step, if you are passing pre-signed URLs or HTTPS accessible files.
-file_id = document_ai.upload(path="/path/to/file.pdf")
+file_id = doc_ai.upload(path="/path/to/file.pdf")
 
-job_id = document_ai.parse(file_id, options=ParsingOptions())
+job_id = doc_ai.parse(file_id, options=ParsingOptions())
 ```
 
 In addition to OCR, it can summarize figures, charts and tables. The default chunking strategy is by Page, you can change the chunking strategy, the prompts for summarization by configuring `ParsingOptions`. The API is [documented here](https://docs.tensorlake.ai/documentai/parsing).
@@ -57,7 +57,7 @@ class LoanSchema(BaseModel):
     amount_due: str = Field(description="Total amount due in the current statement")
     due_data: str = Field(description="Due Date")
 
-job_id = document_ai.extract(file_id, options=ExtractionOptions(model=LoanDocumentSchema))
+job_id = doc_ai.extract(file_id, options=ExtractionOptions(model=LoanDocumentSchema))
 ```
 
 Structured Extraction is guided by the provided schema. We support Pyndatic Models as well JSON Schema. All the levers for structured extraction are (documented here)[https://docs.tensorlake.ai/api-reference/extract/extract-file-async].
@@ -70,7 +70,7 @@ Document AI APIs are async to be able to handle large volumes of documents with 
 
 from tensorlake.documentai import JobResult
 
-data: JobResult = document_ai.get_result(job_id="job-xxxx")
+data: JobResult = doc_ai.get_job(job_id="job-xxxx")
 ```
 
 The SDK includes [Pydantic models](src/tensorlake/documentai/common.py) that describes Document chunks, and individual page elements(including bounding boxes).

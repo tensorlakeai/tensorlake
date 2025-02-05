@@ -387,13 +387,3 @@ class DocumentAI:
         """
         mime = magic.Magic(mime=True)
         return mime.from_file(str(path))
-
-    def get_result(self, job_id: str) -> JobResult:
-        response = self._client.get(
-            url=f"jobs/{job_id}",
-            headers=self._headers(),
-        )
-        response.raise_for_status()
-        resp = response.json()
-        job_result = JobResult.model_validate(resp)
-        return job_result
