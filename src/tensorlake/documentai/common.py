@@ -72,5 +72,5 @@ class JobResult(BaseModel):
     file_id: str = Field(alias="fileId")
     job_type: str = Field(alias="jobType")
     chunks: List[str] = Field(alias="chunks", default_factory=list)
-    document: Optional[Document] = Field(alias="document")
+    document: Optional[Document] = Field(alias="document", default=None)
     status: Literal["processing", "successful", "failure", "pending"]
