@@ -10,11 +10,11 @@ from requests.exceptions import HTTPError
 from tensorlake.data_loaders import LocalDirectoryLoader
 from tensorlake.documentai import DocumentAI, ParsingOptions
 
-TENSORLAKE_API_KEY = "tl_apiKey_bhGmRwFpbGnfmpN7Jt9fC_ENC4x_A-yf9fLEe70fs4488D70ZtOH"
+TENSORLAKE_API_KEY = "tl_apiKey_XXXXXXX"
 
 document_parser = DocumentAI(api_key=TENSORLAKE_API_KEY)
 
-FILES_DIR = "/Users/diptanuc/Downloads/unextractable"
+FILES_DIR = "/path/to/files"
 loader = LocalDirectoryLoader(FILES_DIR, file_extensions=[".pdf"])
 
 all_files = loader.load()
