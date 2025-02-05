@@ -73,9 +73,14 @@ class Graph:
         start_node: TensorlakeCompute,
         description: Optional[str] = None,
         tags: Dict[str, str] = {},
-        # Update graph on every deployment unless user wants to manage the version manually.
-        version: str = nanoid.generate(),
+        version: Optional[str] = None,
     ):
+        if version is None:
+            # Update graph on every deployment unless user wants to manage the version manually.
+            # nonoid.generate() should be called inside function body, otherwise it'll be called
+            # only once during module loading.
+            version = nanoid.generate()
+
         _validate_identifier(version, "version")
         _validate_identifier(name, "name")
         self.name = name
