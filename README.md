@@ -28,7 +28,7 @@ If you want to dive into code, here is an [example](examples/readme_documentai.p
 
 #### Document Parsing
 
-Convert a PDF to markdown and chunk it.
+Convert a PDF to markdown and chunk it. The API has no limits of file size or number of pages in a document.
 
 ```python
 from tensorlake.documentai import DocumentAI, ParsingOptions
@@ -38,6 +38,7 @@ doc_ai = DocumentAI(api_key="xxxx")
 # Skip the upload step, if you are passing pre-signed URLs or HTTPS accessible files.
 file_id = doc_ai.upload(path="/path/to/file.pdf")
 
+# Get a Job ID back, and poll it to get the results.
 job_id = doc_ai.parse(file_id, options=ParsingOptions())
 ```
 
@@ -51,6 +52,7 @@ Extract structured data from a document.
 from tensorlake.documentai import ExtractionOptions
 from pydantic import BaseModel, Field
 
+# Provide a schema to guide structured extraction.
 class LoanSchema(BaseModel):
     account_number: str = Field(description="Account number of the customer")
     customer_name: str = Field(description="Name of the customer")
