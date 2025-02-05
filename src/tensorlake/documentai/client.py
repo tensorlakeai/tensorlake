@@ -1,4 +1,10 @@
+"""
+Tensorlake Document AI client
+"""
+
+import base64
 import hashlib
+import mimetypes
 import os
 import sys
 from enum import Enum
@@ -7,7 +13,6 @@ from typing import Optional, Type, Union
 
 import aiofiles
 import httpx
-import magic
 from pydantic import BaseModel, Json
 from retry import retry
 from tqdm import tqdm
@@ -15,19 +20,51 @@ from tqdm.asyncio import tqdm as async_tqdm
 
 from tensorlake.documentai.common import DOC_AI_BASE_URL, JobResult
 
+try:
+    import magic
+
+    _HAS_MAGIC = True
+except ImportError:
+    _HAS_MAGIC = False
+    print(
+        "Warning: `python-magic` (libmagic) is not installed. Falling back to `mimetypes`. Install it with `pip install python-magic` for better MIME detection."
+    )
+
 
 class OutputFormat(str, Enum):
+    """
+    Output format for parsing a document.
+
+    MARKDOWN: The parsed document is returned in Markdown format. Using Markdown requires setting a chunking strategy.
+    JSON: The parsed document is returned in JSON format.
+    """
+
     MARKDOWN = "markdown"
     JSON = "json"
 
 
 class ChunkingStrategy(str, Enum):
+    """
+    Chunking strategy for parsing a document.
+
+    NONE: No chunking is applied.
+    PAGE: The document is chunked by page.
+    SECTION_HEADER: The document is chunked by section headers.
+    """
+
     NONE = "none"
     PAGE = "page"
     SECTION_HEADER = "section_header"
 
 
 class TableParsingStrategy(str, Enum):
+    """
+    Algorithm to use for parsing tables in a document.
+
+    TSR: Table Structure Recognition
+    VLM: Visual Layout Model
+    """
+
     TSR = "tsr"
     VLM = "vlm"
 
@@ -58,6 +95,9 @@ class ExtractionOptions(BaseModel):
 
 
 class DocumentAI:
+    """
+    Document AI client for Tensorlake.
+    """
 
     def __init__(self, api_key: str = ""):
         self.api_key = api_key
@@ -74,6 +114,9 @@ class DocumentAI:
         }
 
     def get_job(self, job_id: str) -> JobResult:
+        """
+        Get the result of a job by its ID.
+        """
         response = self._client.get(
             url=f"jobs/{job_id}",
             headers=self._headers(),
@@ -83,7 +126,7 @@ class DocumentAI:
         job_result = JobResult.model_validate(resp)
         return job_result
 
-    def _create_parse_req(self, file: str, options: ParsingOptions) -> dict:
+    def __create_parse_req__(self, file: str, options: ParsingOptions) -> dict:
         payload = {
             "file": file,
             "outputMode": options.format.value,
@@ -111,7 +154,7 @@ class DocumentAI:
         response = self._client.post(
             url="/parse_async",
             headers=self._headers(),
-            json=self._create_parse_req(file, options),
+            json=self.__create_parse_req__(file, options),
             timeout=2,
         )
         try:
@@ -131,7 +174,7 @@ class DocumentAI:
         response = await self._async_client.post(
             url="/parse_async",
             headers=self._headers(),
-            json=self._create_parse_req(file, options),
+            json=self.__create_parse_req__(file, options),
         )
         try:
             response.raise_for_status()
@@ -229,7 +272,6 @@ class DocumentAI:
                 },
                 files=files,
             )
-            print(response.request.headers)
             try:
                 response.raise_for_status()
             except httpx.HTTPStatusError as e:
@@ -243,13 +285,14 @@ class DocumentAI:
         if not path.exists():
             raise FileNotFoundError(f"File not found: {path}")
 
+        sha256_checksum = self.__calculate_checksum_sha256__(path)
         file_size = path.stat().st_size
         # Initialize upload request
         init_response = self._client.post(
             url="files_large",
             headers=self._headers(),
             json={
-                "sha256_checksum": self.__calculate_checksum_sha256__(path),
+                "sha256_checksum": sha256_checksum,
                 "file_size": file_size,
                 "filename": path.name,
             },
@@ -282,6 +325,10 @@ class DocumentAI:
                     headers={
                         "Content-Type": self.__get_mime_type__(path),
                         "Content-Length": str(file_size),
+                        "x-amz-checksum-sha256": base64.b64encode(
+                            bytes.fromhex(sha256_checksum)
+                        ).decode(),
+                        "x-amz-sdk-checksum-algorithm": "SHA256",
                     },
                     timeout=httpx.Timeout(None),
                 )
@@ -355,6 +402,10 @@ class DocumentAI:
                 headers={
                     "Content-Type": self.__get_mime_type__(path),
                     "Content-Length": str(file_size),
+                    "x-amz-checksum-sha256": base64.b64encode(
+                        bytes.fromhex(checksum_sha256)
+                    ).decode(),
+                    "x-amz-sdk-checksum-algorithm": "SHA256",
                 },
                 timeout=httpx.Timeout(None),
             )
@@ -383,7 +434,17 @@ class DocumentAI:
 
     def __get_mime_type__(self, path: Union[str, Path]) -> str:
         """
-        Get the mime type of a file
+        Get the MIME type of a file. If `python-magic` (libmagic) is installed, use it.
+        Otherwise, fall back to `mimetypes`.
+
+        Args:
+            path (Union[str, Path]): The file path to check.
+
+        Returns:
+            str: The MIME type of the file, or "application/octet-stream" if unknown.
         """
+        if sys.platform.startswith("win") or not _HAS_MAGIC:
+            return mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+
         mime = magic.Magic(mime=True)
         return mime.from_file(str(path))
