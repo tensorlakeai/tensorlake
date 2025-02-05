@@ -59,7 +59,7 @@ class LoanSchema(BaseModel):
     amount_due: str = Field(description="Total amount due in the current statement")
     due_data: str = Field(description="Due Date")
 
-job_id = doc_ai.extract(file_id, options=ExtractionOptions(model=LoanDocumentSchema))
+job_id = doc_ai.extract(file_id, options=ExtractionOptions(model=LoanSchema))
 ```
 
 Structured Extraction is guided by the provided schema. We support Pyndatic Models as well JSON Schema. All the levers for structured extraction are (documented here)[https://docs.tensorlake.ai/api-reference/extract/extract-file-async].
