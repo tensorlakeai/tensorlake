@@ -8,17 +8,14 @@ import csv
 from requests.exceptions import HTTPError
 
 from tensorlake.data_loaders import LocalDirectoryLoader
-from tensorlake.documentai.file import Files
-from tensorlake.documentai.parser import DocumentParser, ParsingOptions
+from tensorlake.documentai import DocumentAI, ParsingOptions
 
-TENSORLAKE_API_KEY = "tl_apiKey_************"
+TENSORLAKE_API_KEY = "tl_apiKey_bhGmRwFpbGnfmpN7Jt9fC_ENC4x_A-yf9fLEe70fs4488D70ZtOH"
 
-document_parser = DocumentParser(api_key=TENSORLAKE_API_KEY)
+document_parser = DocumentAI(api_key=TENSORLAKE_API_KEY)
 
-FILES_DIR = "/path/to/folder"
+FILES_DIR = "/Users/diptanuc/Downloads/unextractable"
 loader = LocalDirectoryLoader(FILES_DIR, file_extensions=[".pdf"])
-
-files = Files(api_key=TENSORLAKE_API_KEY)
 
 all_files = loader.load()
 file_ids = {}
@@ -48,7 +45,7 @@ async def upload_single_file(file):
     Upload a single file asynchronously
     """
     try:
-        return await files.upload_async(file.path)
+        return await document_parser.upload_async(file.path)
     except HTTPError as e:
         return e
 

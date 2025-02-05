@@ -31,14 +31,14 @@ If you want to dive into code, here is an [example](examples/readme_documentai.p
 Convert a PDF to markdown and chunk it.
 
 ```python
-from tensorlake.documentai import DocumentParser, Files, ParsingOptions
+from tensorlake.documentai import DocumentAI, ParsingOptions
 
-files = Files(api_key="xxxx")
-file_id = files.upload(path="/path/to/file.pdf")
+document_ai = DocumentAI(api_key="xxxx")
 
-parser = DocumentParser(api_key="tl_xxx")
 # Skip the upload step, if you are passing pre-signed URLs or HTTPS accessible files.
-job_id = parser.parse(file_id, options=ParsingOptions())
+file_id = document_ai.upload(path="/path/to/file.pdf")
+
+job_id = document_ai.parse(file_id, options=ParsingOptions())
 ```
 
 In addition to OCR, it can summarize figures, charts and tables. The default chunking strategy is by Page, you can change the chunking strategy, the prompts for summarization by configuring `ParsingOptions`. The API is [documented here](https://docs.tensorlake.ai/documentai/parsing).
@@ -48,20 +48,16 @@ In addition to OCR, it can summarize figures, charts and tables. The default chu
 Extract structured data from a document.
 
 ```python
-from tensorlake.documentai import StructuredExtractor, Files, ExtractionOptions
+from tensorlake.documentai import ExtractionOptions
 from pydantic import BaseModel, Field
 
-class LoanDocumentSchema(BaseModel):
+class LoanSchema(BaseModel):
     account_number: str = Field(description="Account number of the customer")
     customer_name: str = Field(description="Name of the customer")
     amount_due: str = Field(description="Total amount due in the current statement")
     due_data: str = Field(description="Due Date")
 
-files = Files(api_key="tl_xxxx")
-file_id = files.upload(path="/path/to/file.pdf")
-
-parser = StructuredExtractor(api_key="tl_xxx")
-job_id = parser.extract(file_id, options=ExtractionOptions(model=LoanDocumentSchema))
+job_id = document_ai.extract(file_id, options=ExtractionOptions(model=LoanDocumentSchema))
 ```
 
 Structured Extraction is guided by the provided schema. We support Pyndatic Models as well JSON Schema. All the levers for structured extraction are (documented here)[https://docs.tensorlake.ai/api-reference/extract/extract-file-async].
@@ -72,10 +68,9 @@ Document AI APIs are async to be able to handle large volumes of documents with 
 
 ```python
 
-from tensorlake.documentai Jobs, JobResult
+from tensorlake.documentai import JobResult
 
-jobs = Jobs(api_key="tl_xxxx")
-data: JobResult = jobs.get(job_id="job-xxxx")
+data: JobResult = document_ai.get_result(job_id="job-xxxx")
 ```
 
 The SDK includes [Pydantic models](src/tensorlake/documentai/common.py) that describes Document chunks, and individual page elements(including bounding boxes).
