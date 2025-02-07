@@ -42,7 +42,7 @@ file_id = doc_ai.upload(path="/path/to/file.pdf")
 job_id = doc_ai.parse(file_id, options=ParsingOptions())
 ```
 
-In addition to OCR, it can summarize figures, charts and tables. The default chunking strategy is by Page, you can change the chunking strategy, the prompts for summarization by configuring `ParsingOptions`. The API is [documented here](https://docs.tensorlake.ai/documentai/parsing).
+In addition to OCR, it can summarize figures, charts and tables. The default chunking strategy is by Page, you can change the chunking strategy, the prompts for summarization by configuring `ParsingOptions`. The API is [documented here](https://docs.tensorlake.ai/documentai/parsing)
 
 #### Structured Extraction 
 
