@@ -1,6 +1,6 @@
 import time
 
-from tensorlake.documentai import DocumentAI, ParsingOptions, TableParsingStrategy
+from tensorlake.documentai import DocumentAI, ParsingOptions
 
 API_KEY = "tl_XXXXX"
 
@@ -8,10 +8,6 @@ doc_ai = DocumentAI(api_key=API_KEY)
 # Skip this if you are passing a pre-signed URL to the `DocumentParser`.
 # or pass an external URL
 file_id = doc_ai.upload(path="./examples/appliance-repair-invoice-2.pdf")
-
-options = ParsingOptions(
-    table_parsing_strategy=TableParsingStrategy.VLM,
-)
 
 job_id = doc_ai.parse(file_id, options=ParsingOptions())
 
