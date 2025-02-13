@@ -1,5 +1,12 @@
 from tensorlake.documentai.client import DocumentAI, ExtractionOptions, ParsingOptions
-from tensorlake.documentai.common import Document, JobResult
+from tensorlake.documentai.common import (
+    ChunkingStrategy,
+    Document,
+    JobResult,
+    ModelProvider,
+    TableOutputMode,
+    TableParsingStrategy,
+)
 
 __all__ = [
     "DocumentAI",
@@ -7,4 +14,8 @@ __all__ = [
     "ExtractionOptions",
     "Document",
     "JobResult",
+    "TableOutputMode",
+    "ModelProvider",
+    "TableParsingStrategy",
+    "ChunkingStrategy",
 ]
