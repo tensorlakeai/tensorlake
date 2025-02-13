@@ -36,6 +36,10 @@ def deploy(workflow_file: click.File):
             deployed_graphs.append(obj)
             for node_name, node_obj in obj.nodes.items():
                 image = node_obj.image
+                if image is None:
+                    raise click.ClickException(
+                        f"graph function {node_name} needs to use an image"
+                    )
                 if image in seen_images:
                     continue
                 seen_images[image] = image.hash()
@@ -207,6 +211,10 @@ def prepare(workflow_file: click.File):
             click.echo(f"Found graph {name}")
             for node_name, node_obj in obj.nodes.items():
                 image = node_obj.image
+                if image is None:
+                    raise click.ClickException(
+                        f"graph function {node_name} needs to use an image"
+                    )
                 click.echo(
                     f"graph function {node_name} uses image '{image._image_name}'"
                 )

@@ -40,6 +40,7 @@ from .graph_definition import (
     RuntimeInformation,
 )
 from .graph_validation import validate_node, validate_route
+from .image import ImageInformation
 from .invocation_state.local_invocation_state import LocalInvocationState
 from .object_serializer import get_serializer
 
@@ -64,6 +65,14 @@ def is_pydantic_model_from_annotation(type_annotation):
         return issubclass(type_annotation, BaseModel)
 
     return False
+
+
+# Placeholder for None image information until Server accepts Optional image information.
+_none_image_information = ImageInformation(
+    image_name="fake_image",
+    image_hash="fake_hash",
+    sdk_version="0.0.1",
+)
 
 
 class Graph:
@@ -188,7 +197,11 @@ class Graph:
             fn_name=start_node.name,
             description=start_node.description,
             reducer=is_reducer,
-            image_information=start_node.image.to_image_information(),
+            image_information=(
+                start_node.image.to_image_information()
+                if start_node.image
+                else _none_image_information
+            ),
             input_encoder=start_node.input_encoder,
             output_encoder=start_node.output_encoder,
         )
@@ -204,7 +217,11 @@ class Graph:
                         target_fns=self.routers[node_name],
                         input_encoder=node.input_encoder,
                         output_encoder=node.output_encoder,
-                        image_information=node.image.to_image_information(),
+                        image_information=(
+                            node.image.to_image_information()
+                            if node.image
+                            else _none_image_information
+                        ),
                     )
                 )
             else:
@@ -214,7 +231,11 @@ class Graph:
                         fn_name=node.name,
                         description=node.description,
                         reducer=node.accumulate is not None,
-                        image_information=node.image.to_image_information(),
+                        image_information=(
+                            node.image.to_image_information()
+                            if node.image
+                            else _none_image_information
+                        ),
                         input_encoder=node.input_encoder,
                         output_encoder=node.output_encoder,
                     )

@@ -217,17 +217,3 @@ class Image:
 
 LOCAL_PYTHON_VERSION = f"{sys.version_info.major}.{sys.version_info.minor}"
 BASE_IMAGE_NAME = f"python:{LOCAL_PYTHON_VERSION}-slim-bookworm"
-
-
-def GetDefaultPythonImage(python_version: str):
-    image = (
-        Image()
-        .name("tensorlake/indexify-executor-default")
-        .base_image(f"python:{python_version}-slim-bookworm")
-        .tag(python_version)
-    )
-    image.uri = f"{image._image_name}:{LOCAL_PYTHON_VERSION}"
-    return image
-
-
-DEFAULT_IMAGE = GetDefaultPythonImage(LOCAL_PYTHON_VERSION)
