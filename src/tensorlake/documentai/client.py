@@ -4,12 +4,13 @@ Tensorlake Document AI client
 
 import base64
 import hashlib
+import json
 import mimetypes
 import os
 import sys
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Type, Union
+from typing import Optional, Union
 
 import aiofiles
 import httpx
@@ -61,12 +62,40 @@ class TableParsingStrategy(str, Enum):
     """
     Algorithm to use for parsing tables in a document.
 
-    TSR: Table Structure Recognition
-    VLM: Visual Layout Model
+    TSR: Table Structure Recognition. Great for structured tables.
+    VLM: Visual Layout Model. Great for unstructured tables or semi-structured tables.
     """
 
     TSR = "tsr"
     VLM = "vlm"
+
+
+class TableOutputMode(str, Enum):
+    """
+    Output mode for tables in a document.
+
+    JSON: The table is returned in JSON format.
+    MARKDOWN: The table is returned in Markdown format.
+    HTML: The table is returned in HTML format.
+    """
+
+    JSON = "json"
+    MARKDOWN = "markdown"
+    HTML = "html"
+
+
+class ModelProvider(str, Enum):
+    """
+    The model provider to use for structured data extraction.
+
+    TENSORLAKE: private models, running on Tensorlake infrastructure.
+    SONNET: Claude 3.5 Sonnet model.
+    GPT4OMINI: GPT-4o-mini model.
+    """
+
+    TENSORLAKE = "tensorlake"
+    SONNET = "claude-3-5-sonnet-latest"
+    GPT4OMINI = "gpt-4o-mini"
 
 
 class ParsingOptions(BaseModel):
@@ -78,6 +107,8 @@ class ParsingOptions(BaseModel):
     chunking_strategy: Optional[ChunkingStrategy] = None
     table_parsing_strategy: TableParsingStrategy = TableParsingStrategy.TSR
     table_parsing_prompt: Optional[str] = None
+    figure_summarization_prompt: Optional[str] = None
+    table_output_mode: TableOutputMode = TableOutputMode.MARKDOWN
     summarize_table: bool = False
     summarize_figure: bool = False
     page_range: Optional[str] = None
@@ -86,12 +117,21 @@ class ParsingOptions(BaseModel):
 
 class ExtractionOptions(BaseModel):
     """
-    Options for parsing a document.
+    Options for structured data extraction.
+
+    Args:
+        json_schema: The JSON schema to guide structured data extraction from the file.
+        model: The model provider to use for structured data extraction.. Defaults to ModelProvider.TENSORLAKE.
+        deliver_webhook: Whether to deliver the result to a webhook. Defaults to False.
+        prompt: Override the prompt to customize structured extractions. Use this if you want to extract data froma file using a different prompt than the one we use to extract.
+        table_parsing_strategy: The algorithm to use for parsing tables in the document. Defaults to TableParsingStrategy.TSR.
     """
 
     json_schema: Optional[Json]
-    model: Type[BaseModel]
+    model: ModelProvider = ModelProvider.TENSORLAKE
     deliver_webhook: bool = False
+    prompt: Optional[str] = None
+    table_parsing_strategy: TableParsingStrategy = TableParsingStrategy.TSR
 
 
 class DocumentAI:
@@ -131,20 +171,31 @@ class DocumentAI:
             "file": file,
             "outputMode": options.format.value,
             "deliverWebhook": options.deliver_webhook,
+            "figureSummarization": options.summarize_figure,
+            "tableSummarization": options.summarize_table,
+            "tableOutputMode": options.table_output_mode.value,
+            "tableParsingStrategy": options.table_parsing_strategy.value,
+            "tableSummarizationPrompt": options.table_parsing_prompt,
+            "figureSummarizationPrompt": options.figure_summarization_prompt,
         }
         if options.chunking_strategy:
             payload["chunkStrategy"] = options.chunking_strategy.value
 
         if options.page_range:
             payload["pages"] = options.page_range
+
         return payload
 
     def _create_extract_req(self, file: str, options: ExtractionOptions) -> dict:
         payload = {
             "file": file,
-            "schema": options.schema,
+            "jsonSchema": json.dumps(options.json_schema),
             "deliverWebhook": options.deliver_webhook,
+            "prompt": options.prompt,
+            "modelProvider": options.model.value,
+            "tableParsingStrategy": options.table_parsing_strategy.value,
         }
+
         return payload
 
     def parse(self, file: str, options: ParsingOptions, timeout: int = 5) -> str:
@@ -189,6 +240,25 @@ class DocumentAI:
         Parse a document.
         """
         response = self._client.post(
+            url="/extract_async",
+            headers=self._headers(),
+            json=self._create_extract_req(file, options),
+        )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            print(e.response.text)
+            raise e
+        resp = response.json()
+        return resp.get("jobId")
+
+    async def extract_async(
+        self, file: str, options: ExtractionOptions, timeout: int = 5
+    ) -> str:
+        """
+        Parse a document asynchronously.
+        """
+        response = await self._async_client.post(
             url="/extract_async",
             headers=self._headers(),
             json=self._create_extract_req(file, options),
