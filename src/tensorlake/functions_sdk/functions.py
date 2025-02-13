@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from typing_extensions import get_type_hints
 
 from .data_objects import TensorlakeData
-from .image import DEFAULT_IMAGE, Image
+from .image import Image
 from .invocation_state.invocation_state import InvocationState
 from .object_serializer import get_serializer
 
@@ -63,7 +63,7 @@ class PlacementConstraints(BaseModel):
 class TensorlakeCompute:
     name: str = ""
     description: str = ""
-    image: Optional[Image] = DEFAULT_IMAGE
+    image: Optional[Image] = None
     placement_constraints: List[PlacementConstraints] = []
     accumulate: Optional[Type[Any]] = None
     input_encoder: Optional[str] = "cloudpickle"
@@ -99,7 +99,7 @@ class TensorlakeCompute:
 class TensorlakeRouter:
     name: str = ""
     description: str = ""
-    image: Optional[Image] = DEFAULT_IMAGE
+    image: Optional[Image] = None
     placement_constraints: List[PlacementConstraints] = []
     input_encoder: Optional[str] = "cloudpickle"
     output_encoder: Optional[str] = "cloudpickle"
@@ -144,7 +144,7 @@ def _process_dict_arg(dict_arg: dict, sig: inspect.Signature) -> Tuple[list, dic
 def tensorlake_router(
     name: Optional[str] = None,
     description: Optional[str] = "",
-    image: Optional[Image] = DEFAULT_IMAGE,
+    image: Optional[Image] = None,
     placement_constraints: List[PlacementConstraints] = [],
     input_encoder: Optional[str] = "cloudpickle",
     output_encoder: Optional[str] = "cloudpickle",
@@ -174,7 +174,7 @@ def tensorlake_router(
 def tensorlake_function(
     name: Optional[str] = None,
     description: Optional[str] = "",
-    image: Optional[Image] = DEFAULT_IMAGE,
+    image: Optional[Image] = None,
     accumulate: Optional[Type[BaseModel]] = None,
     input_encoder: Optional[str] = "cloudpickle",
     output_encoder: Optional[str] = "cloudpickle",
