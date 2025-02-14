@@ -110,14 +110,16 @@ class DocumentAI:
     def __create_parse_req__(self, file: str, options: ParsingOptions) -> dict:
         payload = {
             "file": file,
-            "outputMode": options.format.value,
             "deliverWebhook": options.deliver_webhook,
-            "figureSummarization": options.summarize_figure,
-            "tableSummarization": options.summarize_table,
-            "tableOutputMode": options.table_output_mode.value,
-            "tableParsingStrategy": options.table_parsing_strategy.value,
-            "tableSummarizationPrompt": options.table_parsing_prompt,
-            "figureSummarizationPrompt": options.figure_summarization_prompt,
+            "settings": {
+                "outputMode": options.format.value,
+                "figureSummarization": options.summarize_figure,
+                "tableSummarization": options.summarize_table,
+                "tableOutputMode": options.table_output_mode.value,
+                "tableParsingStrategy": options.table_parsing_strategy.value,
+                "tableSummarizationPrompt": options.table_parsing_prompt,
+                "figureSummarizationPrompt": options.figure_summarization_prompt,
+            },
         }
         if options.chunking_strategy:
             payload["chunkStrategy"] = options.chunking_strategy.value
@@ -130,11 +132,13 @@ class DocumentAI:
     def _create_extract_req(self, file: str, options: ExtractionOptions) -> dict:
         payload = {
             "file": file,
-            "jsonSchema": json.dumps(options.json_schema),
             "deliverWebhook": options.deliver_webhook,
-            "prompt": options.prompt,
-            "modelProvider": options.model.value,
-            "tableParsingStrategy": options.table_parsing_strategy.value,
+            "settings": {
+                "jsonSchema": json.dumps(options.json_schema),
+                "prompt": options.prompt,
+                "modelProvider": options.model.value,
+                "tableParsingStrategy": options.table_parsing_strategy.value,
+            },
         }
 
         return payload
