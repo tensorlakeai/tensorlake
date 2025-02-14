@@ -70,4 +70,5 @@ class ImageBuilderClient:
         res.raise_for_status()
         builds = [Build.model_validate(b) for b in res.json()]
         builds.sort(key=lambda b: b.created_at, reverse=True)
-        return builds[0]
+        if builds:
+            return builds[0]

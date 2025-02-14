@@ -8,6 +8,7 @@ import time
 from typing import Dict, List
 
 import click
+import httpx
 
 from tensorlake import Graph, Image, RemoteGraph, TensorlakeClient
 from tensorlake.builder.client import ImageBuilderClient
@@ -49,14 +50,9 @@ def deploy(workflow_file: click.File):
     # If we are still here then our images should all have URIs
 
     # TODO: Fold calls to the platform API into a client class.
-    indexify_addr = os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")
-    introspect_response = builder.client.post(
-        f"{indexify_addr}/platform/v1/keys/introspect", headers=builder.headers
-    )
-    introspect_response.raise_for_status()
-    project_id = introspect_response.json()["projectId"]
+    project_id = _get_project_id()
 
-    client = TensorlakeClient(namespace=project_id, service_url="http://localhost:8900")
+    client = TensorlakeClient(namespace=project_id)
     click.secho("Everything looks good, deploying now", fg="green")
     for graph in deployed_graphs:
         # TODO: Every time we post we get a new version, is that expected or the client should do the checks?
@@ -245,6 +241,31 @@ def show_logs(image: str):
             print(log)
 
 
+def _get_project_id():
+    indexify_addr = os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")
+    introspect_response = httpx.post(
+        f"{indexify_addr}/platform/v1/keys/introspect",
+        headers={"Authorization": f"Bearer {os.getenv('TENSORLAKE_API_KEY')}"},
+    )
+    introspect_response.raise_for_status()
+    return introspect_response.json()["projectId"]
+
+
+@click.command(help="Return the project ID")
+def get_project_id():
+    click.echo(_get_project_id())
+
+
+@click.command(help="Get URI for a given image")
+@click.argument("image")
+def get_image_uri(image: str):
+    builder = ImageBuilderClient.from_env()
+    build = builder.get_latest_build(image)
+    print(build.uri)
+
+
+tensorlake.add_command(get_image_uri)
+tensorlake.add_command(get_project_id)
 tensorlake.add_command(deploy)
 tensorlake.add_command(prepare)
 tensorlake.add_command(show_logs)
