@@ -14,7 +14,7 @@ job_id = doc_ai.parse(file_id, options=ParsingOptions())
 result = doc_ai.get_job(job_id=job_id)
 print(f"job status: {result.status}")
 while True:
-    if result.status == "processing":
+    if result.status in ["pending", "processing"]:
         print("waiting 5s...")
         time.sleep(5)
         result = doc_ai.get_job(job_id)
