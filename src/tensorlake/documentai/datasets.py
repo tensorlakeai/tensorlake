@@ -2,14 +2,22 @@
 DocumentAI datasets module.
 """
 
+from enum import Enum
 from pathlib import Path
-from typing import Optional, Union
+from typing import List, Optional
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from tensorlake.documentai.common import DOC_AI_BASE_URL, FileUploader, JobResult
-
+from tensorlake.documentai.client import ExtractionOptions, ParsingOptions
+from tensorlake.documentai.common import (
+    DOC_AI_BASE_URL,
+    Document,
+    FileUploader,
+    JobResult,
+    JobStatus,
+    PaginatedResult,
+)
 
 class DatasetExtendOptions(BaseModel):
     """
@@ -32,8 +40,86 @@ class DatasetExtendOptions(BaseModel):
     pages: Optional[str] = None
 
 
+class DatasetStatus(str, Enum):
+    """
+    Dataset status enum.
+    """
+
+    IDLE = "idle"
+    PROCESSING = "processing"
+    ERROR = "error"
+    DONE = "done"
+
+
+class DownloadableJobOutput(BaseModel):
+    """
+    DocumentAI dataset job item class. This class is used to download the output of a job.
+    """
+
+    id: str
+    file_id: str = Field(alias="fileId")
+    outputs_url: Optional[str] = Field(alias="outputsUrl")
+    status: JobStatus
+    error_message: Optional[str] = Field(alias="errorMessage")
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
+
+
+class DatasetOutputAnalytics(BaseModel):
+    """
+    DocumentAI dataset output analytics class.
+    """
+
+    total_jobs: int = Field(alias="totalJobs")
+    total_processing_jobs: int = Field(alias="totalProcessingJobs")
+    total_error_jobs: int = Field(alias="totalErrorJobs")
+    total_done_jobs: int = Field(alias="totalDoneJobs")
+
+
+class DatasetOutput(BaseModel):
+    """
+    DocumentAI dataset output class.
+    """
+
+    id: str
+    name: str
+    description: Optional[str]
+    parse_settings: Optional[ParsingOptions] = Field(alias="parseSettings")
+    extract_settings: Optional[ExtractionOptions] = Field(alias="extractSettings")
+    status: DatasetStatus
+    jobs: PaginatedResult[DownloadableJobOutput]
+    analytics: DatasetOutputAnalytics
+    created_at: str = Field(alias="createdAt")
+
+
+class DownloadedJobOutput(BaseModel):
+    """
+    DocumentAI downloaded job output class.
+    """
+    chunks: List[str] = Field(alias="chunks", default_factory=list)
+    document: Optional[Document] = Field(alias="document", default=None)
+    error_message: Optional[str] = Field(alias="errorMessage", default=None)
+
+class DatasetOptions(BaseModel):
+    """
+    DocumentAI create dataset request class.
+    """
+
+    name: str
+    description: Optional[str] = None
+    parsing_options: Optional[ParsingOptions] = None
+    extraction_options: Optional[ExtractionOptions] = None
+
+class DatasetOutputFormat(str, Enum):
+    """
+    Dataset output format enum.
+    """
+    CSV = "csv"
+
 class Dataset:
-    """DocumentAI dataset class."""
+    """
+    DocumentAI dataset class.
+    """
 
     def __init__(self, dataset_id: str, name: str, api_key: str):
         self.id = dataset_id
@@ -189,3 +275,76 @@ class Dataset:
 
         resp.raise_for_status()
         return JobResult.model_validate(resp.json())
+
+    def outputs(self, cursor: Optional[str] = None) -> PaginatedResult[DownloadedJobOutput]:
+        """
+        Get the outputs of the dataset.
+
+        Returns:
+            The outputs of the dataset.
+        """
+
+        url = f"datasets/{self.id}"
+        if cursor:
+            url += f"?cursor={cursor}"
+
+        resp = self._client.get(
+            url=url,
+            headers=self.__headers__(),
+        )
+
+        resp.raise_for_status()
+        raw_outputs = DatasetOutput.model_validate(resp.json())
+
+        outputs = []
+        for job in raw_outputs.jobs.items:
+            if job.status == JobStatus.SUCCESSFUL:
+                resp = self._client.get(job.outputs_url)
+                resp.raise_for_status()
+                outputs.append(DownloadedJobOutput.model_validate(resp.json()))
+
+            if job.status == JobStatus.FAILURE:
+                outputs.append(DownloadedJobOutput(error_message=job.error_message))
+
+        return PaginatedResult[DownloadedJobOutput](
+            items=outputs,
+            total_pages=raw_outputs.jobs.total_pages,
+            next_cursor=raw_outputs.jobs.next_cursor,
+            prev_cursor=raw_outputs.jobs.prev_cursor,
+        )
+
+    async def outputs_async(self, cursor: Optional[str] = None) -> PaginatedResult[DownloadedJobOutput]:
+        """
+        Get the outputs of the dataset asynchronously.
+
+        Returns:
+            The outputs of the dataset.
+        """
+        url = f"datasets/{self.id}"
+        if cursor:
+            url += f"?cursor={cursor}"
+            
+        resp = await self._async_client.get(
+            url=url,
+            headers=self.__headers__(),
+        )
+        resp.raise_for_status()
+
+        raw_outputs = DatasetOutput.model_validate(resp.json())
+
+        outputs = []
+        for job in raw_outputs.jobs.items:
+            if job.status == JobStatus.SUCCESSFUL:
+                resp = await self._async_client.get(job.outputs_url)
+                resp.raise_for_status()
+                outputs.append(DownloadedJobOutput.model_validate(resp.json()))
+
+            if job.status == JobStatus.FAILURE:
+                outputs.append(DownloadedJobOutput(error_message=job.error_message))
+
+        return PaginatedResult[DownloadedJobOutput](
+            items=outputs,
+            total_pages=raw_outputs.jobs.total_pages,
+            next_cursor=raw_outputs.jobs.next_cursor,
+            prev_cursor=raw_outputs.jobs.prev_cursor,
+        )

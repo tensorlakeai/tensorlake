@@ -14,7 +14,6 @@ from retry import retry
 from tensorlake.documentai.common import (
     DOC_AI_BASE_URL,
     ChunkingStrategy,
-    FileUploader,
     JobResult,
     ModelProvider,
     OutputFormat,
@@ -22,7 +21,7 @@ from tensorlake.documentai.common import (
     TableParsingStrategy,
 )
 from tensorlake.documentai.datasets import Dataset
-
+from tensorlake.documentai.files import FileUploader
 
 class ParsingOptions(BaseModel):
     """
@@ -293,3 +292,99 @@ class DocumentAI:
         return Dataset(
             dataset_id=resp.get("id"), name=dataset.name, api_key=self.api_key
         )
+
+    async def create_dataset_async(self, dataset: DatasetOptions) -> Dataset:
+        """
+        Create a new dataset asynchronously.
+
+        Args:
+            dataset: The dataset to create.
+
+        Returns:
+            str: The ID of the created dataset.
+        """
+
+        if dataset.parsing_options and dataset.extraction_options:
+            raise ValueError("Dataset cannot have both parsing and extraction options.")
+
+        response = await self._async_client.post(
+            url="datasets",
+            headers=self._headers(),
+            json={
+                "name": dataset.name,
+                "description": dataset.description,
+                "parseSettings": (
+                    self.__create_parse_settings__(dataset.parsing_options)
+                    if dataset.parsing_options
+                    else None
+                ),
+                "extractSettings": (
+                    self.__create_extract_settings__(dataset.extraction_options)
+                    if dataset.extraction_options
+                    else None
+                ),
+            },
+        )
+
+        response.raise_for_status()
+        resp = response.json()
+        return Dataset(
+            dataset_id=resp.get("id"), name=dataset.name, api_key=self.api_key
+        )
+    
+    def get_dataset(self, dataset_id: str) -> Dataset:
+        """
+        Get a dataset by its ID.
+
+        Args:
+            dataset_id: The ID of the dataset.
+
+        Returns:
+            Dataset: The dataset.
+        """
+        response = self._client.get(
+            url=f"datasets/{dataset_id}",
+            headers=self._headers(),
+        )
+        response.raise_for_status()
+        resp = response.json()
+        return Dataset(
+            dataset_id=resp.get("id"), name=resp.get("name"), api_key=self.api_key
+        )
+
+    async def get_dataset_async(self, dataset_id: str) -> Dataset:
+        """
+        Get a dataset by its ID asynchronously.
+        """
+        response = await self._async_client.get(
+            url=f"datasets/{dataset_id}",
+            headers=self._headers(),
+        )
+        response.raise_for_status()
+        resp = response.json()
+        return Dataset(
+            dataset_id=resp.get("id"), name=resp.get("name"), api_key=self.api_key
+        )
+
+    def delete_dataset(self, dataset_id: str):
+        """
+        Delete a dataset by its ID.
+
+        Args:
+            dataset_id: The ID of the dataset.
+        """
+        response = self._client.delete(
+            url=f"datasets/{dataset_id}",
+            headers=self._headers(),
+        )
+        response.raise_for_status()
+
+    async def delete_dataset_async(self, dataset_id: str):
+        """
+        Delete a dataset by its ID asynchronously.
+        """
+        response = await self._async_client.delete(
+            url=f"datasets/{dataset_id}",
+            headers=self._headers(),
+        )
+        response.raise_for_status()
