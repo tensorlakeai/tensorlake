@@ -2,41 +2,26 @@
 Tensorlake Document AI client
 """
 
-import base64
-import hashlib
 import json
-import mimetypes
 import os
-import sys
 from pathlib import Path
 from typing import Optional, Union
 
-import aiofiles
 import httpx
 from pydantic import BaseModel, Json
 from retry import retry
-from tqdm import tqdm
-from tqdm.asyncio import tqdm as async_tqdm
 
 from tensorlake.documentai.common import (
     DOC_AI_BASE_URL,
     ChunkingStrategy,
+    FileUploader,
     JobResult,
     ModelProvider,
     OutputFormat,
     TableOutputMode,
     TableParsingStrategy,
 )
-
-try:
-    import magic
-
-    _HAS_MAGIC = True
-except ImportError:
-    _HAS_MAGIC = False
-    print(
-        "Warning: `python-magic` (libmagic) is not installed. Falling back to `mimetypes`. Install it with `pip install python-magic` for better MIME detection."
-    )
+from tensorlake.documentai.datasets import Dataset
 
 
 class ParsingOptions(BaseModel):
@@ -75,6 +60,15 @@ class ExtractionOptions(BaseModel):
     table_parsing_strategy: TableParsingStrategy = TableParsingStrategy.TSR
 
 
+class DatasetOptions(BaseModel):
+    """DocumentAI create dataset request class."""
+
+    name: str
+    description: Optional[str] = None
+    parsing_options: Optional[ParsingOptions] = None
+    extraction_options: Optional[ExtractionOptions] = None
+
+
 class DocumentAI:
     """
     Document AI client for Tensorlake.
@@ -87,6 +81,7 @@ class DocumentAI:
 
         self._client = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None)
         self._async_client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
+        self.__file_uploader__ = FileUploader(api_key=api_key)
 
     def _headers(self):
         return {
@@ -107,19 +102,22 @@ class DocumentAI:
         job_result = JobResult.model_validate(resp)
         return job_result
 
+    def __create_parse_settings__(self, options: ParsingOptions) -> dict:
+        return {
+            "outputMode": options.format.value,
+            "figureSummarization": options.summarize_figure,
+            "tableSummarization": options.summarize_table,
+            "tableOutputMode": options.table_output_mode.value,
+            "tableParsingStrategy": options.table_parsing_strategy.value,
+            "tableSummarizationPrompt": options.table_parsing_prompt,
+            "figureSummarizationPrompt": options.figure_summarization_prompt,
+        }
+
     def __create_parse_req__(self, file: str, options: ParsingOptions) -> dict:
         payload = {
             "file": file,
             "deliverWebhook": options.deliver_webhook,
-            "settings": {
-                "outputMode": options.format.value,
-                "figureSummarization": options.summarize_figure,
-                "tableSummarization": options.summarize_table,
-                "tableOutputMode": options.table_output_mode.value,
-                "tableParsingStrategy": options.table_parsing_strategy.value,
-                "tableSummarizationPrompt": options.table_parsing_prompt,
-                "figureSummarizationPrompt": options.figure_summarization_prompt,
-            },
+            "settings": self.__create_parse_settings__(options),
         }
         if options.chunking_strategy:
             payload["chunkStrategy"] = options.chunking_strategy.value
@@ -129,16 +127,19 @@ class DocumentAI:
 
         return payload
 
+    def __create_extract_settings__(self, options: ExtractionOptions) -> dict:
+        return {
+            "jsonSchema": json.dumps(options.json_schema),
+            "prompt": options.prompt,
+            "modelProvider": options.model.value,
+            "tableParsingStrategy": options.table_parsing_strategy.value,
+        }
+
     def _create_extract_req(self, file: str, options: ExtractionOptions) -> dict:
         payload = {
             "file": file,
             "deliverWebhook": options.deliver_webhook,
-            "settings": {
-                "jsonSchema": json.dumps(options.json_schema),
-                "prompt": options.prompt,
-                "modelProvider": options.model.value,
-                "tableParsingStrategy": options.table_parsing_strategy.value,
-            },
+            "settings": self.__create_extract_settings__(options),
         }
 
         return payload
@@ -233,26 +234,7 @@ class DocumentAI:
             httpx.HTTPError: If the request fails
             FileNotFoundError: If the file doesn't exist
         """
-        path = Path(path)
-        if not path.exists():
-            raise FileNotFoundError(f"File not found: {path}")
-
-        # check if file is longer than 10 mb
-        if path.stat().st_size > 10 * 1024 * 1024:
-            return self.__upload_large_file__(path)
-
-        with open(path, "rb") as f:
-            files = {"file": (f.name, f)}
-            response = self._client.post(
-                url="files",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                },
-                files=files,
-            )
-            response.raise_for_status()
-            resp = response.json()
-            return resp.get("id")
+        return self.__file_uploader__.upload_file(path)
 
     retry(tries=10, delay=2)
 
@@ -271,195 +253,43 @@ class DocumentAI:
             httpx.HTTPError: If the request fails
             FileNotFoundError: If the file doesn't exist
         """
-        path = Path(path)
-        if not path.exists():
-            raise FileNotFoundError(f"File not found: {path}")
+        return await self.__file_uploader__.upload_file_async(path)
 
-        if path.stat().st_size > 10 * 1024 * 1024:
-            return await self.__upload_large_file_async__(path)
-
-        async with aiofiles.open(path, "rb") as f:
-            files = {"file": (path.name, await f.read())}
-            response = await self._async_client.post(
-                url="files",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                },
-                files=files,
-            )
-            try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                print(e.response.text)
-                raise e
-            resp = response.json()
-            return resp.get("id")
-
-    def __upload_large_file__(self, path: Union[str, Path]) -> str:
-        path = Path(path)
-        if not path.exists():
-            raise FileNotFoundError(f"File not found: {path}")
-
-        sha256_checksum = self.__calculate_checksum_sha256__(path)
-        file_size = path.stat().st_size
-        # Initialize upload request
-        init_response = self._client.post(
-            url="files_large",
-            headers=self._headers(),
-            json={
-                "sha256_checksum": sha256_checksum,
-                "file_size": file_size,
-                "filename": path.name,
-            },
-        )
-        init_response.raise_for_status()
-        init_response_json = init_response.json()
-
-        presign_id = init_response_json.get("id")
-        if presign_id.startswith("tensorlake-"):
-            return presign_id
-
-        progress_bar = tqdm(
-            total=file_size,
-            unit="B",
-            unit_scale=True,
-            desc=path.name,
-        )
-
-        with open(path, "rb") as f:
-            with httpx.Client() as upload_client:
-
-                def file_chunk_generator():
-                    while chunk := f.read(1024 * 1024):
-                        progress_bar.update(len(chunk))
-                        yield chunk
-
-                upload_response = upload_client.put(
-                    url=init_response_json.get("presigned_url"),
-                    data=file_chunk_generator(),
-                    headers={
-                        "Content-Type": self.__get_mime_type__(path),
-                        "Content-Length": str(file_size),
-                        "x-amz-checksum-sha256": base64.b64encode(
-                            bytes.fromhex(sha256_checksum)
-                        ).decode(),
-                        "x-amz-sdk-checksum-algorithm": "SHA256",
-                    },
-                    timeout=httpx.Timeout(None),
-                )
-                upload_response.raise_for_status()
-
-        progress_bar.close()
-        print(f"{path.name} upload complete!")
-
-        # Finalize the upload
-        finalize_response = self._client.post(
-            url=f"files_large/{presign_id}", headers=self._headers()
-        )
-        finalize_response.raise_for_status()
-        return finalize_response.json().get("id")
-
-    def __calculate_checksum_sha256__(self, path: Union[str, Path]) -> str:
-        hasher = hashlib.sha256()
-        with open(path, "rb") as file:
-            for chunk in iter(lambda: file.read(4096), b""):
-                hasher.update(chunk)
-        return hasher.hexdigest()
-
-    async def __upload_large_file_async__(self, path: Union[str, Path]) -> str:
+    def create_dataset(self, dataset: DatasetOptions) -> Dataset:
         """
-        Asynchronously upload large files to Tensorlake
-        """
-        path = Path(path)
-        if not path.exists():
-            raise FileNotFoundError(f"File not found: {path}")
-
-        checksum_sha256 = await self.__calculate_checksum_sha256_async__(path)
-        file_size = path.stat().st_size
-        filename = path.name
-
-        init_response = await self._async_client.post(
-            url="files_large",
-            headers=self._headers(),
-            json={
-                "sha256_checksum": checksum_sha256,
-                "file_size": file_size,
-                "filename": filename,
-            },
-        )
-        init_response.raise_for_status()
-        init_response_json = init_response.json()
-
-        presign_id = init_response_json.get("id")
-        if presign_id.startswith("tensorlake-"):
-            return presign_id
-
-        progress_bar = async_tqdm(
-            total=file_size,
-            unit="B",
-            unit_scale=True,
-            desc=filename,
-            disable=not sys.stdout.isatty(),
-            leave=False,
-        )
-
-        async with httpx.AsyncClient() as upload_client:
-
-            async def file_chunk_generator():
-                async with aiofiles.open(path, "rb") as file:
-                    while chunk := await file.read(1024 * 1024):
-                        progress_bar.update(len(chunk))
-                        yield chunk
-
-            upload_response = await upload_client.put(
-                url=init_response_json.get("presigned_url"),
-                data=file_chunk_generator(),
-                headers={
-                    "Content-Type": self.__get_mime_type__(path),
-                    "Content-Length": str(file_size),
-                    "x-amz-checksum-sha256": base64.b64encode(
-                        bytes.fromhex(checksum_sha256)
-                    ).decode(),
-                    "x-amz-sdk-checksum-algorithm": "SHA256",
-                },
-                timeout=httpx.Timeout(None),
-            )
-            upload_response.raise_for_status()
-
-        progress_bar.set_description("")
-        progress_bar.clear()
-        progress_bar.close()
-        sys.stdout.flush()
-        print(f"{filename} upload complete!", flush=True)
-
-        finalize_response = await self._async_client.post(
-            url=f"files_large/{presign_id}", headers=self._headers()
-        )
-        finalize_response.raise_for_status()
-        finalize_response_json = finalize_response.json()
-
-        return finalize_response_json.get("id")
-
-    async def __calculate_checksum_sha256_async__(self, path: Union[str, Path]) -> str:
-        hasher = hashlib.sha256()
-        async with aiofiles.open(path, "rb") as file:
-            while chunk := await file.read(4096):
-                hasher.update(chunk)
-        return hasher.hexdigest()
-
-    def __get_mime_type__(self, path: Union[str, Path]) -> str:
-        """
-        Get the MIME type of a file. If `python-magic` (libmagic) is installed, use it.
-        Otherwise, fall back to `mimetypes`.
+        Create a new dataset.
 
         Args:
-            path (Union[str, Path]): The file path to check.
+            dataset: The dataset to create.
 
         Returns:
-            str: The MIME type of the file, or "application/octet-stream" if unknown.
+            str: The ID of the created dataset.
         """
-        if sys.platform.startswith("win") or not _HAS_MAGIC:
-            return mimetypes.guess_type(str(path))[0] or "application/octet-stream"
 
-        mime = magic.Magic(mime=True)
-        return mime.from_file(str(path))
+        if dataset.parsing_options and dataset.extraction_options:
+            raise ValueError("Dataset cannot have both parsing and extraction options.")
+
+        response = self._client.post(
+            url="datasets",
+            headers=self._headers(),
+            json={
+                "name": dataset.name,
+                "description": dataset.description,
+                "parseSettings": (
+                    self.__create_parse_settings__(dataset.parsing_options)
+                    if dataset.parsing_options
+                    else None
+                ),
+                "extractSettings": (
+                    self.__create_extract_settings__(dataset.extraction_options)
+                    if dataset.extraction_options
+                    else None
+                ),
+            },
+        )
+
+        response.raise_for_status()
+        resp = response.json()
+        return Dataset(
+            dataset_id=resp.get("id"), name=dataset.name, api_key=self.api_key
+        )
