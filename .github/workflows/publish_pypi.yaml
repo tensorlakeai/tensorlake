@@ -1,8 +1,7 @@
-name: Build and Publish to PyPI
+name: Release Tensorlake SDK package.
 
 on:
   workflow_dispatch:
-
 
 permissions:
   contents: write
@@ -23,7 +22,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: 3.12
+          python-version: 3.9
           cache: 'pip'
 
       - name: Install Poetry
@@ -36,12 +35,7 @@ jobs:
       - name: Install dependencies
         run: |
           poetry install --no-interaction
-
-      # # TODO: Re-enable once executor has been migrated
-      # - name: Run tests
-      #   run: |
-      #     make test
-        
+          
       - name: Build package
         run: |
           poetry build
