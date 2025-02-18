@@ -5,67 +5,19 @@ Tensorlake Document AI client
 import json
 import os
 from pathlib import Path
-from typing import Optional, Union
+from typing import Union
 
 import httpx
-from pydantic import BaseModel, Json
 from retry import retry
 
 from tensorlake.documentai.common import (
     DOC_AI_BASE_URL,
-    ChunkingStrategy,
-    JobResult,
-    ModelProvider,
-    OutputFormat,
-    TableOutputMode,
-    TableParsingStrategy,
 )
-from tensorlake.documentai.datasets import Dataset
+from tensorlake.documentai.datasets import Dataset, DatasetOptions
+from tensorlake.documentai.extract import ExtractionOptions
 from tensorlake.documentai.files import FileUploader
-
-class ParsingOptions(BaseModel):
-    """
-    Options for parsing a document.
-    """
-
-    format: OutputFormat = OutputFormat.MARKDOWN
-    chunking_strategy: Optional[ChunkingStrategy] = None
-    table_parsing_strategy: TableParsingStrategy = TableParsingStrategy.TSR
-    table_parsing_prompt: Optional[str] = None
-    figure_summarization_prompt: Optional[str] = None
-    table_output_mode: TableOutputMode = TableOutputMode.MARKDOWN
-    summarize_table: bool = False
-    summarize_figure: bool = False
-    page_range: Optional[str] = None
-    deliver_webhook: bool = False
-
-
-class ExtractionOptions(BaseModel):
-    """
-    Options for structured data extraction.
-
-    Args:
-        json_schema: The JSON schema to guide structured data extraction from the file.
-        model: The model provider to use for structured data extraction.. Defaults to ModelProvider.TENSORLAKE.
-        deliver_webhook: Whether to deliver the result to a webhook. Defaults to False.
-        prompt: Override the prompt to customize structured extractions. Use this if you want to extract data froma file using a different prompt than the one we use to extract.
-        table_parsing_strategy: The algorithm to use for parsing tables in the document. Defaults to TableParsingStrategy.TSR.
-    """
-
-    json_schema: Optional[Json]
-    model: ModelProvider = ModelProvider.TENSORLAKE
-    deliver_webhook: bool = False
-    prompt: Optional[str] = None
-    table_parsing_strategy: TableParsingStrategy = TableParsingStrategy.TSR
-
-
-class DatasetOptions(BaseModel):
-    """DocumentAI create dataset request class."""
-
-    name: str
-    description: Optional[str] = None
-    parsing_options: Optional[ParsingOptions] = None
-    extraction_options: Optional[ExtractionOptions] = None
+from tensorlake.documentai.jobs import Job
+from tensorlake.documentai.parse import ParsingOptions
 
 
 class DocumentAI:
@@ -88,7 +40,7 @@ class DocumentAI:
             "Content-Type": "application/json",
         }
 
-    def get_job(self, job_id: str) -> JobResult:
+    def get_job(self, job_id: str) -> Job:
         """
         Get the result of a job by its ID.
         """
@@ -98,7 +50,7 @@ class DocumentAI:
         )
         response.raise_for_status()
         resp = response.json()
-        job_result = JobResult.model_validate(resp)
+        job_result = Job.model_validate(resp)
         return job_result
 
     def __create_parse_settings__(self, options: ParsingOptions) -> dict:
@@ -331,7 +283,7 @@ class DocumentAI:
         return Dataset(
             dataset_id=resp.get("id"), name=dataset.name, api_key=self.api_key
         )
-    
+
     def get_dataset(self, dataset_id: str) -> Dataset:
         """
         Get a dataset by its ID.

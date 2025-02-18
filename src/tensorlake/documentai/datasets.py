@@ -12,12 +12,20 @@ from pydantic import BaseModel, Field
 from tensorlake.documentai.client import ExtractionOptions, ParsingOptions
 from tensorlake.documentai.common import (
     DOC_AI_BASE_URL,
-    Document,
-    FileUploader,
-    JobResult,
-    JobStatus,
     PaginatedResult,
 )
+from tensorlake.documentai.files import FileUploader
+from tensorlake.documentai.jobs import Document, Job, JobStatus
+
+
+class DatasetOptions(BaseModel):
+    """DocumentAI create dataset request class."""
+
+    name: str
+    description: Optional[str] = None
+    parsing_options: Optional[ParsingOptions] = None
+    extraction_options: Optional[ExtractionOptions] = None
+
 
 class DatasetExtendOptions(BaseModel):
     """
@@ -96,25 +104,19 @@ class DownloadedJobOutput(BaseModel):
     """
     DocumentAI downloaded job output class.
     """
+
     chunks: List[str] = Field(alias="chunks", default_factory=list)
     document: Optional[Document] = Field(alias="document", default=None)
     error_message: Optional[str] = Field(alias="errorMessage", default=None)
 
-class DatasetOptions(BaseModel):
-    """
-    DocumentAI create dataset request class.
-    """
-
-    name: str
-    description: Optional[str] = None
-    parsing_options: Optional[ParsingOptions] = None
-    extraction_options: Optional[ExtractionOptions] = None
 
 class DatasetOutputFormat(str, Enum):
     """
     Dataset output format enum.
     """
+
     CSV = "csv"
+
 
 class Dataset:
     """
@@ -136,7 +138,7 @@ class Dataset:
             "Content-Type": "application/json",
         }
 
-    def extend(self, options: DatasetExtendOptions) -> JobResult:
+    def extend(self, options: DatasetExtendOptions) -> Job:
         """
         Submit a new job to extend the dataset with a new file.
 
@@ -168,7 +170,7 @@ class Dataset:
                 data=data,
             )
             resp.raise_for_status()
-            return JobResult.model_validate(resp.json())
+            return Job.model_validate(resp.json())
 
         if options.file_path is not None:
             path = Path(options.file_path)
@@ -189,7 +191,7 @@ class Dataset:
                 data=data,
             )
             resp.raise_for_status()
-            return JobResult.model_validate(resp.json())
+            return Job.model_validate(resp.json())
 
         data = {
             "file_id": options.file_id,
@@ -204,9 +206,9 @@ class Dataset:
         )
 
         resp.raise_for_status()
-        return JobResult.model_validate(resp.json())
+        return Job.model_validate(resp.json())
 
-    async def extend_async(self, options: DatasetExtendOptions) -> JobResult:
+    async def extend_async(self, options: DatasetExtendOptions) -> Job:
         """
         Submit a new job to extend the dataset with a new file asynchronously.
 
@@ -238,7 +240,7 @@ class Dataset:
                 data=data,
             )
             resp.raise_for_status()
-            return JobResult.model_validate(resp.json())
+            return Job.model_validate(resp.json())
 
         if options.file_path is not None:
             path = Path(options.file_path)
@@ -259,7 +261,7 @@ class Dataset:
                 data=data,
             )
             resp.raise_for_status()
-            return JobResult.model_validate(resp.json())
+            return Job.model_validate(resp.json())
 
         data = {
             "file_id": options.file_id,
@@ -274,9 +276,11 @@ class Dataset:
         )
 
         resp.raise_for_status()
-        return JobResult.model_validate(resp.json())
+        return Job.model_validate(resp.json())
 
-    def outputs(self, cursor: Optional[str] = None) -> PaginatedResult[DownloadedJobOutput]:
+    def outputs(
+        self, cursor: Optional[str] = None
+    ) -> PaginatedResult[DownloadedJobOutput]:
         """
         Get the outputs of the dataset.
 
@@ -313,7 +317,9 @@ class Dataset:
             prev_cursor=raw_outputs.jobs.prev_cursor,
         )
 
-    async def outputs_async(self, cursor: Optional[str] = None) -> PaginatedResult[DownloadedJobOutput]:
+    async def outputs_async(
+        self, cursor: Optional[str] = None
+    ) -> PaginatedResult[DownloadedJobOutput]:
         """
         Get the outputs of the dataset asynchronously.
 
@@ -323,7 +329,7 @@ class Dataset:
         url = f"datasets/{self.id}"
         if cursor:
             url += f"?cursor={cursor}"
-            
+
         resp = await self._async_client.get(
             url=url,
             headers=self.__headers__(),

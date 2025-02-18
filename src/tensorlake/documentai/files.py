@@ -1,4 +1,3 @@
-
 import base64
 import hashlib
 import mimetypes
@@ -22,6 +21,7 @@ except ImportError:
     print(
         "Warning: `python-magic` (libmagic) is not installed. Falling back to `mimetypes`. Install it with `pip install python-magic` for better MIME detection."
     )
+
 
 class FileUploader:
     """

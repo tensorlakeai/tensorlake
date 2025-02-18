@@ -1,13 +1,11 @@
 """
-Common types and constants for the Document AI API.
+This module contains the data models for parsing a document.
 """
 
 from enum import Enum
-from typing import Generic, List, Optional, TypeVar
+from typing import Optional
 
 from pydantic import BaseModel
-
-DOC_AI_BASE_URL = "https://api.tensorlake.ai/documents/v1/"
 
 
 class OutputFormat(str, Enum):
@@ -76,15 +74,18 @@ class ModelProvider(str, Enum):
     GPT4OMINI = "gpt-4o-mini"
 
 
-T = TypeVar("T")
-
-
-class PaginatedResult(BaseModel, Generic[T]):
+class ParsingOptions(BaseModel):
     """
-    A slice from a paginated endpoint.
+    Options for parsing a document.
     """
 
-    items: List[T]
-    total_pages: int
-    prev_cursor: Optional[str]
-    next_cursor: Optional[str]
+    format: OutputFormat = OutputFormat.MARKDOWN
+    chunking_strategy: Optional[ChunkingStrategy] = None
+    table_parsing_strategy: TableParsingStrategy = TableParsingStrategy.TSR
+    table_parsing_prompt: Optional[str] = None
+    figure_summarization_prompt: Optional[str] = None
+    table_output_mode: TableOutputMode = TableOutputMode.MARKDOWN
+    summarize_table: bool = False
+    summarize_figure: bool = False
+    page_range: Optional[str] = None
+    deliver_webhook: bool = False
