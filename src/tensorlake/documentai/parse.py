@@ -7,6 +7,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from .common import TableOutputMode, TableParsingStrategy
 
 class OutputFormat(str, Enum):
     """
@@ -32,46 +33,6 @@ class ChunkingStrategy(str, Enum):
     NONE = "none"
     PAGE = "page"
     SECTION_HEADER = "section_header"
-
-
-class TableParsingStrategy(str, Enum):
-    """
-    Algorithm to use for parsing tables in a document.
-
-    TSR: Table Structure Recognition. Great for structured tables.
-    VLM: Visual Layout Model. Great for unstructured tables or semi-structured tables.
-    """
-
-    TSR = "tsr"
-    VLM = "vlm"
-
-
-class TableOutputMode(str, Enum):
-    """
-    Output mode for tables in a document.
-
-    JSON: The table is returned in JSON format.
-    MARKDOWN: The table is returned in Markdown format.
-    HTML: The table is returned in HTML format.
-    """
-
-    JSON = "json"
-    MARKDOWN = "markdown"
-    HTML = "html"
-
-
-class ModelProvider(str, Enum):
-    """
-    The model provider to use for structured data extraction.
-
-    TENSORLAKE: private models, running on Tensorlake infrastructure.
-    SONNET: Claude 3.5 Sonnet model.
-    GPT4OMINI: GPT-4o-mini model.
-    """
-
-    TENSORLAKE = "tensorlake"
-    SONNET = "claude-3-5-sonnet-latest"
-    GPT4OMINI = "gpt-4o-mini"
 
 
 class ParsingOptions(BaseModel):
