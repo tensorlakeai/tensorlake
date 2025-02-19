@@ -299,7 +299,7 @@ class DocumentAI:
             str: The ID of the created dataset.
         """
 
-        if not ignore_if_exists:
+        if ignore_if_exists:
             existing_dataset = await self.get_dataset_async(dataset.name)
             if existing_dataset:
                 return existing_dataset
