@@ -7,7 +7,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Union
+from typing import Union, Optional
 
 import httpx
 from retry import retry
@@ -245,16 +245,20 @@ class DocumentAI:
         """
         return await self.__file_uploader__.upload_file_async(path)
 
-    def create_dataset(self, dataset: DatasetOptions) -> Dataset:
+    def create_dataset(self, dataset: DatasetOptions, ignore_if_exists=False) -> Dataset:
         """
         Create a new dataset.
 
         Args:
             dataset: The dataset to create.
-
         Returns:
             str: The ID of the created dataset.
         """
+
+        if not ignore_if_exists:
+            existing_dataset = self.get_dataset(dataset.name)
+            if existing_dataset:
+                return existing_dataset
 
         if dataset.parsing_options and dataset.extraction_options:
             raise ValueError("Dataset cannot have both parsing and extraction options.")
@@ -284,7 +288,7 @@ class DocumentAI:
             dataset_id=resp.get("id"), name=dataset.name, api_key=self.api_key
         )
 
-    async def create_dataset_async(self, dataset: DatasetOptions) -> Dataset:
+    async def create_dataset_async(self, dataset: DatasetOptions, ignore_if_exists=False) -> Dataset:
         """
         Create a new dataset asynchronously.
 
@@ -294,6 +298,11 @@ class DocumentAI:
         Returns:
             str: The ID of the created dataset.
         """
+
+        if not ignore_if_exists:
+            existing_dataset = await self.get_dataset_async(dataset.name)
+            if existing_dataset:
+                return existing_dataset
 
         if dataset.parsing_options and dataset.extraction_options:
             raise ValueError("Dataset cannot have both parsing and extraction options.")
@@ -323,7 +332,7 @@ class DocumentAI:
             dataset_id=resp.get("id"), name=dataset.name, api_key=self.api_key
         )
 
-    def get_dataset(self, dataset_id: str) -> Dataset:
+    def get_dataset(self, name: str) -> Optional[Dataset]:
         """
         Get a dataset by its ID.
 
@@ -334,30 +343,38 @@ class DocumentAI:
             Dataset: The dataset.
         """
         response = self._client.get(
-            url=f"datasets/{dataset_id}",
+            url=f"datasets/{name}",
             headers=self.__headers__(),
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return None
         resp = response.json()
         return Dataset(
             dataset_id=resp.get("id"), name=resp.get("name"), api_key=self.api_key
         )
 
-    async def get_dataset_async(self, dataset_id: str) -> Dataset:
+    async def get_dataset_async(self, name: str) -> Optional[Dataset]:
         """
         Get a dataset by its ID asynchronously.
         """
         response = await self._async_client.get(
-            url=f"datasets/{dataset_id}",
+            url=f"datasets/{name}",
             headers=self.__headers__(),
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return None
         resp = response.json()
         return Dataset(
             dataset_id=resp.get("id"), name=resp.get("name"), api_key=self.api_key
         )
 
-    def delete_dataset(self, dataset_id: str):
+    def delete_dataset(self, name: str):
         """
         Delete a dataset by its ID.
 
@@ -365,17 +382,17 @@ class DocumentAI:
             dataset_id: The ID of the dataset.
         """
         response = self._client.delete(
-            url=f"datasets/{dataset_id}",
+            url=f"datasets/{name}",
             headers=self.__headers__(),
         )
         response.raise_for_status()
 
-    async def delete_dataset_async(self, dataset_id: str):
+    async def delete_dataset_async(self, name: str):
         """
         Delete a dataset by its ID asynchronously.
         """
         response = await self._async_client.delete(
-            url=f"datasets/{dataset_id}",
+            url=f"datasets/{name}",
             headers=self.__headers__(),
         )
         response.raise_for_status()

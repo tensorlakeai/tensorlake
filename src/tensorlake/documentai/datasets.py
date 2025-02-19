@@ -28,7 +28,7 @@ class DatasetOptions(BaseModel):
     extraction_options: Optional[ExtractionOptions] = None
 
 
-class DatasetExtendOptions(BaseModel):
+class IngestArgs(BaseModel):
     """
     DocumentAI create dataset request class.
 
@@ -74,7 +74,7 @@ class DownloadableJobOutput(BaseModel):
     updated_at: str = Field(alias="updatedAt")
 
 
-class DatasetOutputAnalytics(BaseModel):
+class DatasetAnalytics(BaseModel):
     """
     DocumentAI dataset output analytics class.
     """
@@ -85,7 +85,7 @@ class DatasetOutputAnalytics(BaseModel):
     total_done_jobs: int = Field(alias="totalDoneJobs")
 
 
-class DatasetOutput(BaseModel):
+class DatasetInfo(BaseModel):
     """
     DocumentAI dataset output class.
     """
@@ -101,11 +101,11 @@ class DatasetOutput(BaseModel):
     )
     status: DatasetStatus
     jobs: PaginatedResult[DownloadableJobOutput]
-    analytics: DatasetOutputAnalytics
+    analytics: DatasetAnalytics
     created_at: str = Field(alias="createdAt")
 
 
-class DownloadedJobOutput(BaseModel):
+class DatasetItem(BaseModel):
     """
     DocumentAI downloaded job output class.
     """
@@ -115,14 +115,14 @@ class DownloadedJobOutput(BaseModel):
     error_message: Optional[str] = Field(alias="errorMessage", default=None)
 
 
-class DatasetOutputCursor(BaseModel):
+class DatasetItems(BaseModel):
     """
     DocumentAI dataset output cursor class.
     """
 
     cursor: Optional[str] = None
     total_pages: int = 0
-    outputs: dict[str, DownloadedJobOutput] = {}
+    items: dict[str, DatasetItem] = {}
 
 
 class DatasetOutputFormat(str, Enum):
@@ -153,7 +153,7 @@ class Dataset:
             "Content-Type": "application/json",
         }
 
-    def extend(self, options: DatasetExtendOptions) -> Job:
+    def ingest(self, ingest_args: IngestArgs) -> Job:
         """
         Submit a new job to extend the dataset with a new file.
 
@@ -164,37 +164,37 @@ class Dataset:
             The job result. It contains the job ID, the Tensorlake file ID, and the status of the job.
         """
         if (
-            options.file_url is not None
-            and options.file_path is not None
-            and options.file_id is not None
+            ingest_args.file_url is not None
+            and ingest_args.file_path is not None
+            and ingest_args.file_id is not None
         ):
             raise ValueError(
                 "Only one of file_url, file_path, or file_id should be provided"
             )
 
         file_id = None
-        if options.file_url is not None:
-            file_id = options.file_url
-        elif options.file_id is not None:
-            file_id = options.file_id
-        elif options.file_path is not None:
-            path = Path(options.file_path)
+        if ingest_args.file_url is not None:
+            file_id = ingest_args.file_url
+        elif ingest_args.file_id is not None:
+            file_id = ingest_args.file_id
+        elif ingest_args.file_path is not None:
+            path = Path(ingest_args.file_path)
             if not path.exists():
                 raise FileNotFoundError(f"File {path} not found")
 
-            file_id = self.__file_uploader__.upload_file(options.file_path)
+            file_id = self.__file_uploader__.upload_file(ingest_args.file_path)
 
         if file_id is None:
             raise ValueError("file_url, file_path, or file_id should be provided")
 
         data = {
             "file_id": (None, file_id),
-            "deliver_webhook": (None, f"{options.deliver_webhook}"),
-            "pages": (None, f"{options.pages}"),
+            "deliver_webhook": (None, f"{ingest_args.deliver_webhook}"),
+            "pages": (None, f"{ingest_args.pages}"),
         }
 
         response = self._client.post(
-            url=f"datasets/{self.id}",
+            url=f"datasets/{self.name}",
             headers={
                 "Authorization": f"Bearer {self.api_key}",
             },
@@ -203,35 +203,35 @@ class Dataset:
         response.raise_for_status()
         return Job.model_validate(response.json())
 
-    async def extend_async(self, options: DatasetExtendOptions) -> str:
+    async def ingest_async(self, ingest_args: IngestArgs) -> str:
         """
         Submit a new job to extend the dataset with a new file asynchronously.
 
         Args:
-            options: The options for extending the dataset.
+            ingest_args: The URL or path, and the pages to parse of a file.
 
         Returns:
-            The job result. It contains the job ID, the Tensorlake file ID, and the status of the job.
+            The job ID.
         """
         if (
-            options.file_url is not None
-            and options.file_path is not None
-            and options.file_id is not None
+            ingest_args.file_url is not None
+            and ingest_args.file_path is not None
+            and ingest_args.file_id is not None
         ):
             raise ValueError(
                 "Only one of file_url, file_path, or file_id should be provided"
             )
 
         file_id = None
-        if options.file_url is not None:
-            file_id = options.file_url
-        elif options.file_id is not None:
-            file_id = options.file_id
-        elif options.file_path is not None:
-            path = Path(options.file_path)
+        if ingest_args.file_url is not None:
+            file_id = ingest_args.file_url
+        elif ingest_args.file_id is not None:
+            file_id = ingest_args.file_id
+        elif ingest_args.file_path is not None:
+            path = Path(ingest_args.file_path)
             if not path.exists():
                 raise FileNotFoundError(f"File {path} not found")
-            file_id = await self.__file_uploader__.upload_file_async(options.file_path)
+            file_id = await self.__file_uploader__.upload_file_async(ingest_args.file_path)
 
         if file_id is None:
             raise ValueError("file_url, file_path, or file_id should be provided")
@@ -240,15 +240,15 @@ class Dataset:
             "file_id": (None, file_id),
         }
 
-        if options.deliver_webhook:
-            data["deliver_webhook"] = (None, f"{options.deliver_webhook}")
+        if ingest_args.deliver_webhook:
+            data["deliver_webhook"] = (None, f"{ingest_args.deliver_webhook}")
 
-        if options.pages:
-            data["pages"] = (None, f"{options.pages}")
+        if ingest_args.pages:
+            data["pages"] = (None, f"{ingest_args.pages}")
 
         try:
             response = await self._async_client.post(
-                url=f"/datasets/{self.id}",
+                url=f"/datasets/{self.name}",
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                 },
@@ -262,7 +262,7 @@ class Dataset:
             print(f"error: {e.response.text}")
             raise e
 
-    def outputs(self, cursor: Optional[str] = None) -> DatasetOutputCursor:
+    def items(self, cursor: Optional[str] = None) -> DatasetItems:
         """
         Get the outputs of the dataset.
 
@@ -270,7 +270,7 @@ class Dataset:
             The outputs of the dataset.
         """
 
-        url = f"datasets/{self.id}"
+        url = f"datasets/{self.name}"
         if cursor:
             url += f"?cursor={cursor}"
 
@@ -280,7 +280,7 @@ class Dataset:
         )
 
         resp.raise_for_status()
-        raw_outputs = DatasetOutput.model_validate(resp.json())
+        raw_outputs = DatasetInfo.model_validate(resp.json())
 
         outputs = {}
         for job in raw_outputs.jobs.items:
@@ -289,7 +289,7 @@ class Dataset:
                 resp.raise_for_status()
 
                 resp_json = resp.json()
-                downloaded_output = DownloadedJobOutput(
+                downloaded_output = DatasetItem(
                     chunks=resp_json["chunks"] if "chunks" in resp_json else [],
                     document=(
                         Document.model_validate(resp_json["document"])
@@ -300,22 +300,22 @@ class Dataset:
                 outputs[job.id] = downloaded_output
 
             if job.status == JobStatus.FAILURE:
-                outputs[job.id] = DownloadedJobOutput(error_message=job.error_message)
+                outputs[job.id] = DatasetItem(error_message=job.error_message)
 
-        return DatasetOutputCursor(
+        return DatasetItems(
             cursor=raw_outputs.jobs.next_cursor,
             total_pages=raw_outputs.jobs.total_pages,
-            outputs=outputs,
+            items=outputs,
         )
 
-    async def outputs_async(self, cursor: Optional[str] = None) -> DatasetOutputCursor:
+    async def items_async(self, cursor: Optional[str] = None) -> DatasetItems:
         """
         Get the outputs of the dataset asynchronously.
 
         Returns:
             The outputs of the dataset.
         """
-        url = f"datasets/{self.id}"
+        url = f"datasets/{self.name}"
         if cursor:
             url += f"?cursor={cursor}"
 
@@ -326,7 +326,7 @@ class Dataset:
 
         resp.raise_for_status()
 
-        raw_outputs = DatasetOutput.model_validate(resp.json())
+        raw_outputs = DatasetInfo.model_validate(resp.json())
         outputs = {}
 
         for job in raw_outputs.jobs.items:
@@ -336,7 +336,7 @@ class Dataset:
 
                 resp_json = resp.json()
 
-                downloaded_output = DownloadedJobOutput(
+                downloaded_output = DatasetItem(
                     chunks=resp_json["chunks"] if "chunks" in resp_json else [],
                     document=(
                         Document.model_validate(resp_json["document"])
@@ -347,10 +347,10 @@ class Dataset:
                 outputs[job.id] = downloaded_output
 
             if job.status == JobStatus.FAILURE:
-                outputs[job.id] = DownloadedJobOutput(error_message=job.error_message)
+                outputs[job.id] = DatasetItem(error_message=job.error_message)
 
-        return DatasetOutputCursor(
+        return DatasetItems(
             cursor=raw_outputs.jobs.next_cursor,
             total_pages=raw_outputs.jobs.total_pages,
-            outputs=outputs,
+            items=outputs,
         )
