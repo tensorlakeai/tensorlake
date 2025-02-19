@@ -69,7 +69,7 @@ class DownloadableJobOutput(BaseModel):
     file_id: str = Field(alias="fileId")
     outputs_url: Optional[str] = Field(alias="outputsUrl")
     status: JobStatus
-    error_message: Optional[str] = Field(alias="errorMessage")
+    error_message: Optional[str] = Field(alias="errorMessage", default=None)
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
 
@@ -93,8 +93,12 @@ class DatasetOutput(BaseModel):
     id: str
     name: str
     description: Optional[str]
-    parse_settings: Optional[ParsingOptions] = Field(alias="parseSettings")
-    extract_settings: Optional[ExtractionOptions] = Field(alias="extractSettings")
+    parse_settings: Optional[ParsingOptions] = Field(
+        alias="parseSettings", default=None
+    )
+    extract_settings: Optional[ExtractionOptions] = Field(
+        alias="extractSettings", default=None
+    )
     status: DatasetStatus
     jobs: PaginatedResult[DownloadableJobOutput]
     analytics: DatasetOutputAnalytics
@@ -106,11 +110,19 @@ class DownloadedJobOutput(BaseModel):
     DocumentAI downloaded job output class.
     """
 
-    id: str = Field(alias="id")
-    file_id: str = Field(alias="fileId")
     chunks: List[str] = Field(alias="chunks", default_factory=list)
     document: Optional[Document] = Field(alias="document", default=None)
     error_message: Optional[str] = Field(alias="errorMessage", default=None)
+
+
+class DatasetOutputCursor(BaseModel):
+    """
+    DocumentAI dataset output cursor class.
+    """
+
+    cursor: Optional[str] = None
+    total_pages: int = 0
+    outputs: dict[str, DownloadedJobOutput] = {}
 
 
 class DatasetOutputFormat(str, Enum):
@@ -221,7 +233,6 @@ class Dataset:
                 raise FileNotFoundError(f"File {path} not found")
             file_id = await self.__file_uploader__.upload_file_async(options.file_path)
 
-        print(f"file_id: {file_id}")
         if file_id is None:
             raise ValueError("file_url, file_path, or file_id should be provided")
 
@@ -245,16 +256,13 @@ class Dataset:
             )
             response.raise_for_status()
 
-            print(f"job status: {response.status_code}")
             response_json = response.json()
             return response_json["jobId"]
         except httpx.HTTPStatusError as e:
             print(f"error: {e.response.text}")
             raise e
 
-    def outputs(
-        self, cursor: Optional[str] = None
-    ) -> PaginatedResult[DownloadedJobOutput]:
+    def outputs(self, cursor: Optional[str] = None) -> DatasetOutputCursor:
         """
         Get the outputs of the dataset.
 
@@ -272,29 +280,35 @@ class Dataset:
         )
 
         resp.raise_for_status()
-        print(f"dataset outputs response: {resp.json()}")
         raw_outputs = DatasetOutput.model_validate(resp.json())
 
-        outputs = []
+        outputs = {}
         for job in raw_outputs.jobs.items:
             if job.status == JobStatus.SUCCESSFUL:
                 resp = self._client.get(job.outputs_url)
                 resp.raise_for_status()
-                outputs.append(DownloadedJobOutput.model_validate(resp.json()))
+
+                resp_json = resp.json()
+                downloaded_output = DownloadedJobOutput(
+                    chunks=resp_json["chunks"] if "chunks" in resp_json else [],
+                    document=(
+                        Document.model_validate(resp_json["document"])
+                        if "document" in resp_json
+                        else None
+                    ),
+                )
+                outputs[job.id] = downloaded_output
 
             if job.status == JobStatus.FAILURE:
-                outputs.append(DownloadedJobOutput(error_message=job.error_message))
+                outputs[job.id] = DownloadedJobOutput(error_message=job.error_message)
 
-        return PaginatedResult[DownloadedJobOutput](
-            items=outputs,
+        return DatasetOutputCursor(
+            cursor=raw_outputs.jobs.next_cursor,
             total_pages=raw_outputs.jobs.total_pages,
-            next_cursor=raw_outputs.jobs.next_cursor,
-            prev_cursor=raw_outputs.jobs.prev_cursor,
+            outputs=outputs,
         )
 
-    async def outputs_async(
-        self, cursor: Optional[str] = None
-    ) -> PaginatedResult[DownloadedJobOutput]:
+    async def outputs_async(self, cursor: Optional[str] = None) -> DatasetOutputCursor:
         """
         Get the outputs of the dataset asynchronously.
 
@@ -310,24 +324,33 @@ class Dataset:
             headers=self.__headers__(),
         )
 
-        print(f"dataset outputs response: {resp.json()}")
         resp.raise_for_status()
 
         raw_outputs = DatasetOutput.model_validate(resp.json())
+        outputs = {}
 
-        outputs = []
         for job in raw_outputs.jobs.items:
             if job.status == JobStatus.SUCCESSFUL:
                 resp = await self._async_client.get(job.outputs_url)
                 resp.raise_for_status()
-                outputs.append(DownloadedJobOutput.model_validate(resp.json()))
+
+                resp_json = resp.json()
+
+                downloaded_output = DownloadedJobOutput(
+                    chunks=resp_json["chunks"] if "chunks" in resp_json else [],
+                    document=(
+                        Document.model_validate(resp_json["document"])
+                        if "document" in resp_json
+                        else None
+                    ),
+                )
+                outputs[job.id] = downloaded_output
 
             if job.status == JobStatus.FAILURE:
-                outputs.append(DownloadedJobOutput(error_message=job.error_message))
+                outputs[job.id] = DownloadedJobOutput(error_message=job.error_message)
 
-        return PaginatedResult[DownloadedJobOutput](
-            items=outputs,
+        return DatasetOutputCursor(
+            cursor=raw_outputs.jobs.next_cursor,
             total_pages=raw_outputs.jobs.total_pages,
-            next_cursor=raw_outputs.jobs.next_cursor,
-            prev_cursor=raw_outputs.jobs.prev_cursor,
+            outputs=outputs,
         )
