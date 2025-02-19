@@ -13,6 +13,7 @@ from tensorlake.documentai import (
     OutputFormat,
     ParsingOptions,
     TableOutputMode,
+    TableParsingStrategy,
 )
 
 TENSORLAKE_API_KEY = "tl_apiKey_***"
@@ -34,7 +35,9 @@ async def main():
             name="My Dataset",
             description="A dataset of documents",
             parsing_options=ParsingOptions(
-                format=OutputFormat.JSON, table_output_mode=TableOutputMode.JSON
+                format=OutputFormat.MARKDOWN,
+                table_output_mode=TableOutputMode.JSON,
+                table_parsing_strategy=TableParsingStrategy.VLM,
             ),
         )
     )
