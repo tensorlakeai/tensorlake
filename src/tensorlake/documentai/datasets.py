@@ -9,13 +9,14 @@ from typing import List, Optional
 import httpx
 from pydantic import BaseModel, Field
 
-from tensorlake.documentai.client import ExtractionOptions, ParsingOptions
 from tensorlake.documentai.common import (
     DOC_AI_BASE_URL,
     PaginatedResult,
 )
+from tensorlake.documentai.extract import ExtractionOptions
 from tensorlake.documentai.files import FileUploader
 from tensorlake.documentai.jobs import Document, Job, JobStatus
+from tensorlake.documentai.parse import ParsingOptions
 
 
 class DatasetOptions(BaseModel):
@@ -105,6 +106,8 @@ class DownloadedJobOutput(BaseModel):
     DocumentAI downloaded job output class.
     """
 
+    id: str = Field(alias="id")
+    file_id: str = Field(alias="fileId")
     chunks: List[str] = Field(alias="chunks", default_factory=list)
     document: Optional[Document] = Field(alias="document", default=None)
     error_message: Optional[str] = Field(alias="errorMessage", default=None)
@@ -157,58 +160,38 @@ class Dataset:
                 "Only one of file_url, file_path, or file_id should be provided"
             )
 
+        file_id = None
         if options.file_url is not None:
-            data = {
-                "file_id": options.file_url,
-                "deliver_webhook": options.deliver_webhook,
-                "pages": options.pages,
-            }
-
-            resp = self._client.post(
-                url=f"datasets/{self.id}",
-                headers=self.__headers__(),
-                data=data,
-            )
-            resp.raise_for_status()
-            return Job.model_validate(resp.json())
-
-        if options.file_path is not None:
+            file_id = options.file_url
+        elif options.file_id is not None:
+            file_id = options.file_id
+        elif options.file_path is not None:
             path = Path(options.file_path)
             if not path.exists():
                 raise FileNotFoundError(f"File {path} not found")
 
             file_id = self.__file_uploader__.upload_file(options.file_path)
 
-            data = {
-                "file_id": file_id,
-                "deliver_webhook": options.deliver_webhook,
-                "pages": options.pages,
-            }
-
-            resp = self._client.post(
-                url=f"datasets/{self.id}",
-                headers=self.__headers__(),
-                data=data,
-            )
-            resp.raise_for_status()
-            return Job.model_validate(resp.json())
+        if file_id is None:
+            raise ValueError("file_url, file_path, or file_id should be provided")
 
         data = {
-            "file_id": options.file_id,
-            "deliver_webhook": options.deliver_webhook,
-            "pages": options.pages,
+            "file_id": (None, file_id),
+            "deliver_webhook": (None, f"{options.deliver_webhook}"),
+            "pages": (None, f"{options.pages}"),
         }
 
-        resp = self._client.post(
+        response = self._client.post(
             url=f"datasets/{self.id}",
-            headers=self.__headers__(),
-            data=data,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            files=data,
         )
+        response.raise_for_status()
+        return Job.model_validate(response.json())
 
-        resp.raise_for_status()
-        return Job.model_validate(resp.json())
-
-    async def extend_async(self, options: DatasetExtendOptions) -> Job:
+    async def extend_async(self, options: DatasetExtendOptions) -> str:
         """
         Submit a new job to extend the dataset with a new file asynchronously.
 
@@ -227,56 +210,47 @@ class Dataset:
                 "Only one of file_url, file_path, or file_id should be provided"
             )
 
+        file_id = None
         if options.file_url is not None:
-            data = {
-                "file_id": options.file_url,
-                "deliver_webhook": options.deliver_webhook,
-                "pages": options.pages,
-            }
-
-            resp = await self._async_client.post(
-                url=f"datasets/{self.id}",
-                headers=self.__headers__(),
-                data=data,
-            )
-            resp.raise_for_status()
-            return Job.model_validate(resp.json())
-
-        if options.file_path is not None:
+            file_id = options.file_url
+        elif options.file_id is not None:
+            file_id = options.file_id
+        elif options.file_path is not None:
             path = Path(options.file_path)
             if not path.exists():
                 raise FileNotFoundError(f"File {path} not found")
-
             file_id = await self.__file_uploader__.upload_file_async(options.file_path)
 
-            data = {
-                "file_id": file_id,
-                "deliver_webhook": options.deliver_webhook,
-                "pages": options.pages,
-            }
-
-            resp = await self._async_client.post(
-                url=f"datasets/{self.id}",
-                headers=self.__headers__(),
-                data=data,
-            )
-            resp.raise_for_status()
-            return Job.model_validate(resp.json())
+        print(f"file_id: {file_id}")
+        if file_id is None:
+            raise ValueError("file_url, file_path, or file_id should be provided")
 
         data = {
-            "file_id": options.file_id,
-            "deliver_webhook": options.deliver_webhook,
-            "pages": options.pages,
+            "file_id": (None, file_id),
         }
 
-        resp = await self._async_client.post(
-            url=f"datasets/{self.id}",
-            headers=self.__headers__(),
-            data=data,
-        )
+        if options.deliver_webhook:
+            data["deliver_webhook"] = (None, f"{options.deliver_webhook}")
 
-        resp.raise_for_status()
-        return Job.model_validate(resp.json())
+        if options.pages:
+            data["pages"] = (None, f"{options.pages}")
+
+        try:
+            response = await self._async_client.post(
+                url=f"/datasets/{self.id}",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                },
+                files=data,
+            )
+            response.raise_for_status()
+
+            print(f"job status: {response.status_code}")
+            response_json = response.json()
+            return response_json["jobId"]
+        except httpx.HTTPStatusError as e:
+            print(f"error: {e.response.text}")
+            raise e
 
     def outputs(
         self, cursor: Optional[str] = None
@@ -298,6 +272,7 @@ class Dataset:
         )
 
         resp.raise_for_status()
+        print(f"dataset outputs response: {resp.json()}")
         raw_outputs = DatasetOutput.model_validate(resp.json())
 
         outputs = []
@@ -334,6 +309,8 @@ class Dataset:
             url=url,
             headers=self.__headers__(),
         )
+
+        print(f"dataset outputs response: {resp.json()}")
         resp.raise_for_status()
 
         raw_outputs = DatasetOutput.model_validate(resp.json())

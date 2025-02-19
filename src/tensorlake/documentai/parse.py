@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from .common import TableOutputMode, TableParsingStrategy
 
+
 class OutputFormat(str, Enum):
     """
     Output format for parsing a document.

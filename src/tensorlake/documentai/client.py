@@ -2,8 +2,10 @@
 Tensorlake Document AI client
 """
 
+import asyncio
 import json
 import os
+import time
 from pathlib import Path
 from typing import Union
 
@@ -34,7 +36,7 @@ class DocumentAI:
         self._async_client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
         self.__file_uploader__ = FileUploader(api_key=api_key)
 
-    def _headers(self):
+    def __headers__(self):
         return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -46,12 +48,49 @@ class DocumentAI:
         """
         response = self._client.get(
             url=f"jobs/{job_id}",
-            headers=self._headers(),
+            headers=self.__headers__(),
         )
         response.raise_for_status()
-        resp = response.json()
-        job_result = Job.model_validate(resp)
-        return job_result
+        return Job.model_validate(response.json())
+
+    async def get_job_async(self, job_id: str) -> Job:
+        """
+        Get the result of a job by its ID asynchronously.
+        """
+        response = await self._async_client.get(
+            url=f"jobs/{job_id}",
+            headers=self.__headers__(),
+        )
+        response.raise_for_status()
+        return Job.model_validate(response.json())
+
+    def wait_for_completion(self, job_id) -> Job:
+        """
+        Wait for a job to complete.
+        """
+        job = self.get_job(job_id)
+        finished_job = job
+        while finished_job.status in ["pending", "processing"]:
+            print("waiting 5s...")
+            time.sleep(5)
+            finished_job = self.get_job(job.job_id)
+            print(f"job status: {finished_job.status}")
+
+        return finished_job
+
+    async def wait_for_completion_async(self, job_id: str) -> Job:
+        """
+        Wait for a job to complete asynchronously.
+        """
+        job = await self.get_job_async(job_id)
+        finished_job = job
+        while finished_job.status in ["pending", "processing"]:
+            print("waiting 5s...")
+            await asyncio.sleep(5)
+            finished_job = await self.get_job_async(job.job_id)
+            print(f"job_id: {job_id}, job status: {finished_job.status}")
+
+        return finished_job
 
     def __create_parse_settings__(self, options: ParsingOptions) -> dict:
         return {
@@ -101,7 +140,7 @@ class DocumentAI:
         """
         response = self._client.post(
             url="/parse_async",
-            headers=self._headers(),
+            headers=self.__headers__(),
             json=self.__create_parse_req__(file, options),
             timeout=2,
         )
@@ -121,7 +160,7 @@ class DocumentAI:
         """
         response = await self._async_client.post(
             url="/parse_async",
-            headers=self._headers(),
+            headers=self.__headers__(),
             json=self.__create_parse_req__(file, options),
         )
         try:
@@ -138,7 +177,7 @@ class DocumentAI:
         """
         response = self._client.post(
             url="/extract_async",
-            headers=self._headers(),
+            headers=self.__headers__(),
             json=self._create_extract_req(file, options),
         )
         try:
@@ -157,7 +196,7 @@ class DocumentAI:
         """
         response = await self._async_client.post(
             url="/extract_async",
-            headers=self._headers(),
+            headers=self.__headers__(),
             json=self._create_extract_req(file, options),
         )
         try:
@@ -222,7 +261,7 @@ class DocumentAI:
 
         response = self._client.post(
             url="datasets",
-            headers=self._headers(),
+            headers=self.__headers__(),
             json={
                 "name": dataset.name,
                 "description": dataset.description,
@@ -261,7 +300,7 @@ class DocumentAI:
 
         response = await self._async_client.post(
             url="datasets",
-            headers=self._headers(),
+            headers=self.__headers__(),
             json={
                 "name": dataset.name,
                 "description": dataset.description,
@@ -296,7 +335,7 @@ class DocumentAI:
         """
         response = self._client.get(
             url=f"datasets/{dataset_id}",
-            headers=self._headers(),
+            headers=self.__headers__(),
         )
         response.raise_for_status()
         resp = response.json()
@@ -310,7 +349,7 @@ class DocumentAI:
         """
         response = await self._async_client.get(
             url=f"datasets/{dataset_id}",
-            headers=self._headers(),
+            headers=self.__headers__(),
         )
         response.raise_for_status()
         resp = response.json()
@@ -327,7 +366,7 @@ class DocumentAI:
         """
         response = self._client.delete(
             url=f"datasets/{dataset_id}",
-            headers=self._headers(),
+            headers=self.__headers__(),
         )
         response.raise_for_status()
 
@@ -337,6 +376,6 @@ class DocumentAI:
         """
         response = await self._async_client.delete(
             url=f"datasets/{dataset_id}",
-            headers=self._headers(),
+            headers=self.__headers__(),
         )
         response.raise_for_status()

@@ -3,11 +3,11 @@ TensorLake Document AI SDK
 """
 
 from tensorlake.documentai.client import DocumentAI
-from tensorlake.documentai.parse import ParsingOptions, TableOutputMode, ChunkingStrategy
+from tensorlake.documentai.common import TableOutputMode, TableParsingStrategy
+from tensorlake.documentai.datasets import Dataset, DatasetExtendOptions, DatasetOptions
 from tensorlake.documentai.extract import ExtractionOptions, ModelProvider
 from tensorlake.documentai.jobs import Document, Job
-from tensorlake.documentai.common import TableParsingStrategy
-from tensorlake.documentai.datasets import Dataset, DatasetOptions, DatasetExtendOptions
+from tensorlake.documentai.parse import ChunkingStrategy, OutputFormat, ParsingOptions
 
 __all__ = [
     "DocumentAI",
@@ -22,4 +22,5 @@ __all__ = [
     "Dataset",
     "DatasetOptions",
     "DatasetExtendOptions",
+    "OutputFormat",
 ]
