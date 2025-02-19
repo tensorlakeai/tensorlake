@@ -1,96 +1,13 @@
+"""
+Common types and constants for the Document AI API.
+"""
+
 from enum import Enum
-from typing import List, Literal, Optional, Union
+from typing import Generic, List, Optional, TypeVar
 
 from pydantic import BaseModel, Field
 
 DOC_AI_BASE_URL = "https://api.tensorlake.ai/documents/v1/"
-
-
-class PageFragmentType(str, Enum):
-    """
-    Type of a page fragment.
-    """
-
-    SECTION_HEADER = "section_header"
-
-    TEXT = "text"
-    TABLE = "table"
-    FIGURE = "figure"
-    FORMULA = "formula"
-    FORM = "form"
-    KEY_VALUE_REGION = "key_value_region"
-    DOCUMENT_INDEX = "document_index"
-    LIST_ITEM = "list_item"
-
-    TABLE_CAPTION = "table_caption"
-    FIGURE_CAPTION = "figure_caption"
-    FORMULA_CAPTION = "formula_caption"
-
-
-class Text(BaseModel):
-    content: str
-
-
-class Table(BaseModel):
-    content: str
-    summary: Optional[str] = None
-
-
-class Figure(BaseModel):
-    content: str
-    summary: Optional[str] = None
-
-
-class PageFragment(BaseModel):
-    fragment_type: PageFragmentType
-    content: Union[Text, Table, Figure]
-    reading_order: Optional[int] = None
-    page_number: Optional[int] = None
-    bbox: Optional[dict[str, float]] = None
-
-
-class Page(BaseModel):
-    """
-    Page in a document.
-    """
-
-    page_number: int
-    page_fragments: Optional[List[PageFragment]] = []
-    layout: Optional[dict] = {}
-
-
-class Document(BaseModel):
-    """
-    Document in a document.
-    """
-
-    pages: List[Page]
-
-
-class OutputFormat(str, Enum):
-    """
-    Output format for parsing a document.
-
-    MARKDOWN: The parsed document is returned in Markdown format. Using Markdown requires setting a chunking strategy.
-    JSON: The parsed document is returned in JSON format.
-    """
-
-    MARKDOWN = "markdown"
-    JSON = "json"
-
-
-class ChunkingStrategy(str, Enum):
-    """
-    Chunking strategy for parsing a document.
-
-    NONE: No chunking is applied.
-    PAGE: The document is chunked by page.
-    SECTION_HEADER: The document is chunked by section headers.
-    """
-
-    NONE = "none"
-    PAGE = "page"
-    SECTION_HEADER = "section_header"
 
 
 class TableParsingStrategy(str, Enum):
@@ -119,24 +36,15 @@ class TableOutputMode(str, Enum):
     HTML = "html"
 
 
-class ModelProvider(str, Enum):
+T = TypeVar("T")
+
+
+class PaginatedResult(BaseModel, Generic[T]):
     """
-    The model provider to use for structured data extraction.
-
-    TENSORLAKE: private models, running on Tensorlake infrastructure.
-    SONNET: Claude 3.5 Sonnet model.
-    GPT4OMINI: GPT-4o-mini model.
+    A slice from a paginated endpoint.
     """
 
-    TENSORLAKE = "tensorlake"
-    SONNET = "claude-3-5-sonnet-latest"
-    GPT4OMINI = "gpt-4o-mini"
-
-
-class JobResult(BaseModel):
-    job_id: str = Field(alias="jobId")
-    file_id: str = Field(alias="fileId")
-    job_type: str = Field(alias="jobType")
-    chunks: List[str] = Field(alias="chunks", default_factory=list)
-    document: Optional[Document] = Field(alias="document", default=None)
-    status: Literal["processing", "successful", "failure", "pending"]
+    items: List[T] = Field(alias="items")
+    total_pages: int = Field(alias="totalPages")
+    prev_cursor: Optional[str] = Field(alias="prevCursor")
+    next_cursor: Optional[str] = Field(alias="nextCursor")
