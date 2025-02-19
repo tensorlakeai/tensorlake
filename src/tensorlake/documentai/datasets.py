@@ -104,7 +104,19 @@ class DatasetInfo(BaseModel):
     analytics: DatasetAnalytics
     created_at: str = Field(alias="createdAt")
 
+class StructuredDataPage(BaseModel):
+    """
+    DocumentAI structured data class.
+    """
+    page_number: int
+    parsed_page: str
+    data: dict = Field(alias="json_result", default_factory=dict)
 
+class StructuredData(BaseModel):
+    """
+    DocumentAI structured data class.
+    """
+    pages: List[StructuredDataPage] = Field(alias="pages", default_factory=list)
 class DatasetItem(BaseModel):
     """
     DocumentAI downloaded job output class.
@@ -112,6 +124,7 @@ class DatasetItem(BaseModel):
 
     chunks: List[str] = Field(alias="chunks", default_factory=list)
     document: Optional[Document] = Field(alias="document", default=None)
+    structured_data: Optional[StructuredData] = Field(default=None)
     error_message: Optional[str] = Field(alias="errorMessage", default=None)
 
 
@@ -138,10 +151,11 @@ class Dataset:
     DocumentAI dataset class.
     """
 
-    def __init__(self, dataset_id: str, name: str, api_key: str):
+    def __init__(self, dataset_id: str, name: str, api_key: str, dataset_type: str):
         self.id = dataset_id
         self.name = name
         self.api_key = api_key
+        self.dataset_type = dataset_type
 
         self.__file_uploader__ = FileUploader(api_key)
         self._client = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None)
@@ -335,7 +349,6 @@ class Dataset:
                 resp.raise_for_status()
 
                 resp_json = resp.json()
-
                 downloaded_output = DatasetItem(
                     chunks=resp_json["chunks"] if "chunks" in resp_json else [],
                     document=(
@@ -343,6 +356,7 @@ class Dataset:
                         if "document" in resp_json
                         else None
                     ),
+                    structured_data=(StructuredData.model_validate(resp_json) if self.dataset_type == "extract" else None) 
                 )
                 outputs[job.id] = downloaded_output
 

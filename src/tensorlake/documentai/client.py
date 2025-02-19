@@ -329,7 +329,7 @@ class DocumentAI:
         response.raise_for_status()
         resp = response.json()
         return Dataset(
-            dataset_id=resp.get("id"), name=dataset.name, api_key=self.api_key
+            dataset_id=resp.get("id"), name=dataset.name, api_key=self.api_key, dataset_type=resp.get("datasetType")
         )
 
     def get_dataset(self, name: str) -> Optional[Dataset]:
@@ -353,7 +353,7 @@ class DocumentAI:
                 return None
         resp = response.json()
         return Dataset(
-            dataset_id=resp.get("id"), name=resp.get("name"), api_key=self.api_key
+            dataset_id=resp.get("id"), name=resp.get("name"), api_key=self.api_key, dataset_type=resp.get("datasetType")
         )
 
     async def get_dataset_async(self, name: str) -> Optional[Dataset]:
@@ -371,7 +371,7 @@ class DocumentAI:
                 return None
         resp = response.json()
         return Dataset(
-            dataset_id=resp.get("id"), name=resp.get("name"), api_key=self.api_key
+            dataset_id=resp.get("id"), name=resp.get("name"), api_key=self.api_key, dataset_type=resp.get("datasetType")
         )
 
     def delete_dataset(self, name: str):

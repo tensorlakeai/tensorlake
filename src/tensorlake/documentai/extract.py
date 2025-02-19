@@ -1,11 +1,11 @@
 """
 This module defines the data structures used for structured data extraction.
 """
-
+import json
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Json
+from pydantic import BaseModel, Json, Field, field_validator, ConfigDict
 
 from tensorlake.documentai.common import TableParsingStrategy
 
@@ -36,8 +36,16 @@ class ExtractionOptions(BaseModel):
         table_parsing_strategy: The algorithm to use for parsing tables in the document. Defaults to TableParsingStrategy.TSR.
     """
 
-    json_schema: Optional[Json]
-    model: ModelProvider = ModelProvider.TENSORLAKE
-    deliver_webhook: bool = False
+    json_schema: Json = Field(alias="jsonSchema")
+    model: ModelProvider = Field(alias="modelProvider", default=ModelProvider.TENSORLAKE)
+    deliver_webhook: bool = Field(alias="deliverWebhook", default=False)
     prompt: Optional[str] = None
-    table_parsing_strategy: TableParsingStrategy = TableParsingStrategy.TSR
+    table_parsing_strategy: TableParsingStrategy =  Field(alias="tableParsingStrategy", default=TableParsingStrategy.TSR)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator("json_schema", mode="before")
+    @classmethod
+    def transform(cls, raw: dict) -> Json:
+        return json.dumps(raw)
+
