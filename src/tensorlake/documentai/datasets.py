@@ -4,7 +4,7 @@ DocumentAI datasets module.
 
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import httpx
 from pydantic import BaseModel, Field
@@ -82,7 +82,7 @@ class DatasetAnalytics(BaseModel):
     total_jobs: int = Field(alias="totalJobs")
     total_processing_jobs: int = Field(alias="totalProcessingJobs")
     total_error_jobs: int = Field(alias="totalErrorJobs")
-    total_done_jobs: int = Field(alias="totalDoneJobs")
+    total_successful_jobs: int = Field(alias="totalSuccessfulJobs")
 
 
 class DatasetInfo(BaseModel):
@@ -146,16 +146,26 @@ class DatasetOutputFormat(str, Enum):
     CSV = "csv"
 
 
+class DatasetStatus(str, Enum):
+    PROCESSING = "processing"
+    IDLE = "idle"
+
 class Dataset:
     """
     DocumentAI dataset class.
     """
 
-    def __init__(self, dataset_id: str, name: str, api_key: str, dataset_type: str):
+    def __init__(self, dataset_id: str, name: str, api_key: str, settings: Union[ExtractionOptions, ParsingOptions], status: DatasetStatus):
         self.id = dataset_id
         self.name = name
         self.api_key = api_key
-        self.dataset_type = dataset_type
+        if isinstance(settings, ExtractionOptions):
+            self.dataset_type = "extract"
+        elif isinstance(settings, ParsingOptions):
+            self.dataset_type = "parse"
+        else:
+            raise ValueError("settings must be either ExtractionOptions or ParsingOptions")
+        self.status = status
 
         self.__file_uploader__ = FileUploader(api_key)
         self._client = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None)

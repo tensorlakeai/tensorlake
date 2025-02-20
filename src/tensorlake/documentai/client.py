@@ -342,19 +342,12 @@ class DocumentAI:
         Returns:
             Dataset: The dataset.
         """
-        response = self._client.get(
-            url=f"datasets/{name}",
-            headers=self.__headers__(),
-        )
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                return None
-        resp = response.json()
-        return Dataset(
-            dataset_id=resp.get("id"), name=resp.get("name"), api_key=self.api_key, dataset_type=resp.get("datasetType")
-        )
+        async def asyncfunc():
+            dataset = await self.get_dataset_async(name)
+            return dataset
+        loop = asyncio.get_event_loop()
+        dataset = loop.run_until_complete(asyncfunc())
+        return dataset
 
     async def get_dataset_async(self, name: str) -> Optional[Dataset]:
         """
@@ -370,8 +363,15 @@ class DocumentAI:
             if e.response.status_code == 404:
                 return None
         resp = response.json()
+        settings = None
+        if resp.get("extractSettings") is not None:
+            settings = ExtractionOptions.model_validate(resp.get("extractSettings"))
+        elif resp.get("parseSettings") is not None:
+            settings = ParsingOptions.model_validate(resp.get("parseSettings"))
+        else:
+            raise ValueError("Dataset does not have any settings.")
         return Dataset(
-            dataset_id=resp.get("id"), name=resp.get("name"), api_key=self.api_key, dataset_type=resp.get("datasetType")
+            dataset_id=resp.get("id"), name=resp.get("name"), api_key=self.api_key, settings=settings, status=resp.get("status")
         )
 
     def delete_dataset(self, name: str):
