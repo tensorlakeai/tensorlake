@@ -4,20 +4,21 @@ This script demonstrates how to use the DocumentAI class to load and parse a dat
 
 import asyncio
 import csv
+import json
+
+from pydantic import BaseModel, Field
 
 from tensorlake.data_loaders import LocalDirectoryLoader
 from tensorlake.documentai import (
-    IngestArgs,
     DatasetOptions,
     DocumentAI,
+    ExtractionOptions,
+    IngestArgs,
     OutputFormat,
     ParsingOptions,
-    ExtractionOptions,
     TableOutputMode,
     TableParsingStrategy,
 )
-import json
-from pydantic import BaseModel, Field
 
 TENSORLAKE_API_KEY = "tl_apiKey_xxxx"
 
@@ -28,26 +29,45 @@ loader = LocalDirectoryLoader(FILES_DIR, file_extensions=[".pdf"])
 
 files = loader.load()
 
+
 class Transaction(BaseModel):
-    date: str = Field(description="The date of the transaction. Dates should be formatted as dd/mm/yyyy")
+    date: str = Field(
+        description="The date of the transaction. Dates should be formatted as dd/mm/yyyy"
+    )
     description: str = Field(description="The description of the transaction")
-    amount: float = Field(description="The amount of the transaction. Include the currency symbol")
-    transaction_type: str = Field(description="The type of the transaction. Debit or Credit")
+    amount: float = Field(
+        description="The amount of the transaction. Include the currency symbol"
+    )
+    transaction_type: str = Field(
+        description="The type of the transaction. Debit or Credit"
+    )
+
 
 class Statement(BaseModel):
-    beginning_balance: float = Field(description="The beginning balance of the statement. Include the currency symbol")
-    ending_balance: float = Field(description="The ending balance of the statement. Include the currency symbol")
+    beginning_balance: float = Field(
+        description="The beginning balance of the statement. Include the currency symbol"
+    )
+    ending_balance: float = Field(
+        description="The ending balance of the statement. Include the currency symbol"
+    )
     account_number: str = Field(description="The account number")
-    statement_start_date: str = Field(description="The start date of the statement. Dates should be formatted as dd/mm/yyyy")
-    statement_end_date: str = Field(description="The end date of the statement. Dates should be formatted as dd/mm/yyyy")
-    transactions: list[Transaction] = Field(description="The transactions in the statement")
+    statement_start_date: str = Field(
+        description="The start date of the statement. Dates should be formatted as dd/mm/yyyy"
+    )
+    statement_end_date: str = Field(
+        description="The end date of the statement. Dates should be formatted as dd/mm/yyyy"
+    )
+    transactions: list[Transaction] = Field(
+        description="The transactions in the statement"
+    )
+
 
 async def main():
     """
     Main function
     """
-    # Create a dataset, by specifying the document ingestion actions 
-    # The name of the dataset must be unique within a project so you 
+    # Create a dataset, by specifying the document ingestion actions
+    # The name of the dataset must be unique within a project so you
     # can retrieve the dataset later using the name.
     dataset = await document_ai.create_dataset_async(
         DatasetOptions(
@@ -70,10 +90,7 @@ async def main():
 
     # Extend a existing dataset with some files. Tensorlake will automatically
     # parse the files or any other ingestion actions specified in the dataset.
-    tasks = [
-        dataset.ingest_async(IngestArgs(file_path=file.path))
-        for file in files
-    ]
+    tasks = [dataset.ingest_async(IngestArgs(file_path=file.path)) for file in files]
     job_ids = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Debug: Print job results
@@ -87,7 +104,9 @@ async def main():
 
     # Proceed only with valid jobs
     # You can wait for the completion of the jobs using the `wait_for_completion_async` method
-    wait_tasks = [document_ai.wait_for_completion_async(job_id) for job_id in valid_job_ids]
+    wait_tasks = [
+        document_ai.wait_for_completion_async(job_id) for job_id in valid_job_ids
+    ]
     await asyncio.gather(*wait_tasks)
 
     # Retrieve the outputs of the dataset
