@@ -287,10 +287,10 @@ class Dataset:
 
         resp.raise_for_status()
 
-        raw_outputs = DatasetInfo.model_validate(resp.json())
+        jobs = DatasetItems.model_validate(resp.json())
         outputs = {}
 
-        for job in raw_outputs.jobs.items:
+        for job in jobs.items:
             if job.status == JobStatus.SUCCESSFUL:
                 resp = await self._async_client.get(job.outputs_url)
                 resp.raise_for_status()
@@ -315,7 +315,7 @@ class Dataset:
                 outputs[job.id] = DatasetItem(error_message=job.error_message)
 
         return DatasetItems(
-            cursor=raw_outputs.jobs.next_cursor,
-            total_pages=raw_outputs.jobs.total_pages,
+            cursor=jobs.jobs.next_cursor,
+            total_pages=jobs.jobs.total_pages,
             items=outputs,
         )
