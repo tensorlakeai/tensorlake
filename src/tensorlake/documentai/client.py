@@ -7,7 +7,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Union, Optional
+from typing import Optional, Union
 
 import httpx
 from retry import retry
@@ -138,19 +138,7 @@ class DocumentAI:
         """
         Parse a document.
         """
-        response = self._client.post(
-            url="/parse_async",
-            headers=self.__headers__(),
-            json=self.__create_parse_req__(file, options),
-            timeout=2,
-        )
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            print(e.response.text)
-            raise e
-        resp = response.json()
-        return resp.get("jobId")
+        return asyncio.run(self.parse_async(file, options, timeout))
 
     async def parse_async(
         self, file: str, options: ParsingOptions, timeout: int = 5
@@ -175,18 +163,7 @@ class DocumentAI:
         """
         Parse a document.
         """
-        response = self._client.post(
-            url="/extract_async",
-            headers=self.__headers__(),
-            json=self._create_extract_req(file, options),
-        )
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            print(e.response.text)
-            raise e
-        resp = response.json()
-        return resp.get("jobId")
+        return asyncio.run(self.extract_async(file, options, timeout))
 
     async def extract_async(
         self, file: str, options: ExtractionOptions, timeout: int = 5
@@ -245,7 +222,9 @@ class DocumentAI:
         """
         return await self.__file_uploader__.upload_file_async(path)
 
-    def create_dataset(self, dataset: DatasetOptions, ignore_if_exists=False) -> Dataset:
+    def create_dataset(
+        self, dataset: DatasetOptions, ignore_if_exists=False
+    ) -> Dataset:
         """
         Create a new dataset.
 
@@ -254,41 +233,11 @@ class DocumentAI:
         Returns:
             str: The ID of the created dataset.
         """
+        return asyncio.run(self.create_dataset_async(dataset, ignore_if_exists))
 
-        if not ignore_if_exists:
-            existing_dataset = self.get_dataset(dataset.name)
-            if existing_dataset:
-                return existing_dataset
-
-        if dataset.parsing_options and dataset.extraction_options:
-            raise ValueError("Dataset cannot have both parsing and extraction options.")
-
-        response = self._client.post(
-            url="datasets",
-            headers=self.__headers__(),
-            json={
-                "name": dataset.name,
-                "description": dataset.description,
-                "parseSettings": (
-                    self.__create_parse_settings__(dataset.parsing_options)
-                    if dataset.parsing_options
-                    else None
-                ),
-                "extractSettings": (
-                    self.__create_extract_settings__(dataset.extraction_options)
-                    if dataset.extraction_options
-                    else None
-                ),
-            },
-        )
-
-        response.raise_for_status()
-        resp = response.json()
-        return Dataset(
-            dataset_id=resp.get("id"), name=dataset.name, api_key=self.api_key
-        )
-
-    async def create_dataset_async(self, dataset: DatasetOptions, ignore_if_exists=False) -> Dataset:
+    async def create_dataset_async(
+        self, dataset: DatasetOptions, ignore_if_exists=False
+    ) -> Dataset:
         """
         Create a new dataset asynchronously.
 
@@ -325,12 +274,7 @@ class DocumentAI:
                 ),
             },
         )
-
-        response.raise_for_status()
-        resp = response.json()
-        return Dataset(
-            dataset_id=resp.get("id"), name=dataset.name, api_key=self.api_key, dataset_type=resp.get("datasetType")
-        )
+        return self.__dataset_from_response__(response)
 
     def get_dataset(self, name: str) -> Optional[Dataset]:
         """
@@ -342,9 +286,11 @@ class DocumentAI:
         Returns:
             Dataset: The dataset.
         """
+
         async def asyncfunc():
             dataset = await self.get_dataset_async(name)
             return dataset
+
         loop = asyncio.get_event_loop()
         dataset = loop.run_until_complete(asyncfunc())
         return dataset
@@ -357,6 +303,10 @@ class DocumentAI:
             url=f"datasets/{name}",
             headers=self.__headers__(),
         )
+
+        return self.__dataset_from_response__(response)
+
+    def __dataset_from_response__(self, response: httpx.Response) -> Dataset:
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
@@ -371,7 +321,11 @@ class DocumentAI:
         else:
             raise ValueError("Dataset does not have any settings.")
         return Dataset(
-            dataset_id=resp.get("id"), name=resp.get("name"), api_key=self.api_key, settings=settings, status=resp.get("status")
+            dataset_id=resp.get("id"),
+            name=resp.get("name"),
+            api_key=self.api_key,
+            settings=settings,
+            status=resp.get("status"),
         )
 
     def delete_dataset(self, name: str):
@@ -381,11 +335,7 @@ class DocumentAI:
         Args:
             dataset_id: The ID of the dataset.
         """
-        response = self._client.delete(
-            url=f"datasets/{name}",
-            headers=self.__headers__(),
-        )
-        response.raise_for_status()
+        asyncio.run(self.delete_dataset_async(name))
 
     async def delete_dataset_async(self, name: str):
         """
