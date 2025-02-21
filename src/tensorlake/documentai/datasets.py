@@ -133,10 +133,12 @@ class DatasetItem(BaseModel):
     structured_data: Optional[StructuredData] = Field(default=None)
     error_message: Optional[str] = Field(alias="errorMessage", default=None)
 
+
 class DatasetItemInfo(BaseModel):
     """
     DocumentAI dataset item info class
     """
+
     job_id: str
     file_name: str
 
