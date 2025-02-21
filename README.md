@@ -77,6 +77,35 @@ data: JobResult = doc_ai.get_job(job_id="job-xxxx")
 
 The SDK includes [Pydantic models](src/tensorlake/documentai/common.py) that describes Document chunks, and individual page elements(including bounding boxes).
 
+#### Datasets 
+
+Datasets are a named collection that you can attach some ingestion actions, such as document parsing or structured extraction. Tensorlake automatically applies those functions whenever there are new files ingested into a Dataset. It makes it easy to build a knowledgebase from a corpus of documents and keep them continuously updated when documents are added, updated or removed.
+
+1. Create a Dataset 
+```python
+    dataset = await document_ai.create_dataset_async(
+        DatasetOptions(
+            name="My Dataset",
+            description="A dataset of documents",
+            parsing_options=ParsingOptions(
+                format=OutputFormat.MARKDOWN,
+                table_output_mode=TableOutputMode.JSON,
+                table_parsing_strategy=TableParsingStrategy.VLM,
+            ),
+        )
+    )
+```
+
+2. Add a document to a dataset 
+```python
+job = dataset.extend(DatasetExtendOptions(file_path=file.path))
+```
+
+3. Retrieve Dataset output and metadata 
+```python
+outputs: dataset.outputs()
+```
+
 ## Serverless Workflows
 
 Serverless Workflows enables building and deploy custom data processing workflows in Python. The workflows listen to API requests, and scale up on-demand to process data on the cloud. A function can do anything from calling a web service to loading a data model into a GPU and running inference on it. Tensorlake will provision the required compute resources and run as many copies of a function as needed.
