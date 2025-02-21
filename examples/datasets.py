@@ -14,9 +14,6 @@ from tensorlake.documentai import (
     DocumentAI,
     ExtractionOptions,
     IngestArgs,
-    OutputFormat,
-    ParsingOptions,
-    TableOutputMode,
     TableParsingStrategy,
 )
 
@@ -111,22 +108,24 @@ async def main():
 
     # Retrieve the outputs of the dataset
     # The output includes the job id and the extracted contents
-    items = []
+    items = {}
     items_page = await dataset.items_async()
-    items.append(items_page.items)
+    for key_info, data in items_page.items.items():
+        items[key_info] = data.model_dump_json()
+
     cursor = items_page.cursor
     while cursor is not None:
         items_page = await dataset.items_async(cursor=cursor)
-        items.append(items_page.items)
+        for key_info, data in items_page.items.items():
+            items[key_info] = data.model_dump_json()
         cursor = items_page.cursor
-    print(f"Retrieved {len(items)} items from the dataset")
 
     csv_filename = f"{dataset.name}.csv"
     with open(csv_filename, "w", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["job_id", "output"])
-        for job_id, data in items_page.items.items():
-            writer.writerow([job_id, data.model_dump_json()])
+        writer.writerow(["job_id", "file_name", "output"])
+        for key_info, data in items.items():
+            writer.writerow([key_info.job_id, key_info.file_name, data])
 
 
 asyncio.run(main())
