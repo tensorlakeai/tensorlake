@@ -111,7 +111,15 @@ async def main():
 
     # Retrieve the outputs of the dataset
     # The output includes the job id and the extracted contents
+    items = []
     items_page = await dataset.items_async()
+    items.append(items_page.items)
+    cursor = items_page.cursor
+    while cursor is not None:
+        items_page = await dataset.items_async(cursor=cursor)
+        items.append(items_page.items)
+        cursor = items_page.cursor
+    print(f"Retrieved {len(items)} items from the dataset")
 
     csv_filename = f"{dataset.name}.csv"
     with open(csv_filename, "w", encoding="utf-8") as f:
