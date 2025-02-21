@@ -66,6 +66,7 @@ class DownloadableJobOutput(BaseModel):
 
     id: str
     file_id: str = Field(alias="fileId")
+    file_name: str = Field(alias="fileName")
     outputs_url: Optional[str] = Field(alias="outputsUrl")
     status: JobStatus
     error_message: Optional[str] = Field(alias="errorMessage", default=None)
@@ -133,6 +134,18 @@ class DatasetItem(BaseModel):
     error_message: Optional[str] = Field(alias="errorMessage", default=None)
 
 
+class DatasetItemInfo(BaseModel):
+    """
+    DocumentAI dataset item info class
+    """
+
+    job_id: str
+    file_name: str
+
+    def __hash__(self):
+        return hash(self.job_id)
+
+
 class DatasetItems(BaseModel):
     """
     DocumentAI dataset output cursor class.
@@ -140,7 +153,7 @@ class DatasetItems(BaseModel):
 
     cursor: Optional[str] = None
     total_pages: int = 0
-    items: dict[str, DatasetItem] = {}
+    items: dict[DatasetItemInfo, DatasetItem] = {}
 
 
 class DatasetOutputFormat(str, Enum):
@@ -287,10 +300,11 @@ class Dataset:
 
         resp.raise_for_status()
 
-        jobs = DatasetItems.model_validate(resp.json())
+        jobs = PaginatedResult[DownloadableJobOutput].model_validate(resp.json())
         outputs = {}
 
         for job in jobs.items:
+            key_info = DatasetItemInfo(job_id=job.id, file_name=job.file_name)
             if job.status == JobStatus.SUCCESSFUL:
                 resp = await self._async_client.get(job.outputs_url)
                 resp.raise_for_status()
@@ -309,13 +323,13 @@ class Dataset:
                         else None
                     ),
                 )
-                outputs[job.id] = downloaded_output
+                outputs[key_info] = downloaded_output
 
             if job.status == JobStatus.FAILURE:
-                outputs[job.id] = DatasetItem(error_message=job.error_message)
+                outputs[key_info] = DatasetItem(error_message=job.error_message)
 
         return DatasetItems(
-            cursor=jobs.jobs.next_cursor,
-            total_pages=jobs.jobs.total_pages,
+            cursor=jobs.next_cursor,
+            total_pages=jobs.total_pages,
             items=outputs,
         )

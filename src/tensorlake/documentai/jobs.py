@@ -27,6 +27,7 @@ class JobListItem(BaseModel):
 
     id: str
     file_id: str = Field(alias="fileId")
+    file_name: str = Field(alias="fileName")
     status: JobStatus
     job_type: str = Field(alias="jobType")
     error_message: Optional[str] = Field(alias="errorMessage")
