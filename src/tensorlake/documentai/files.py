@@ -27,16 +27,19 @@ except ImportError:
         "Warning: `python-magic` (libmagic) is not installed. Falling back to `mimetypes`. Install it with `pip install python-magic` for better MIME detection."
     )
 
+
 class FileInfo(BaseModel):
     """
     Metadata from a file uploaded to DocumentAI.
     """
+
     id: str
     name: str
     file_size: int = Field(alias="fileSize")
     mime_type: str = Field(alias="mimeType")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
+
 
 class FileUploader:
     """

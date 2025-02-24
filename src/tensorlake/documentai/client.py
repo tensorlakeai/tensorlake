@@ -12,13 +12,10 @@ from typing import Optional, Union
 import httpx
 from retry import retry
 
-from tensorlake.documentai.common import (
-    DOC_AI_BASE_URL,
-    PaginatedResult
-)
+from tensorlake.documentai.common import DOC_AI_BASE_URL, PaginatedResult
 from tensorlake.documentai.datasets import Dataset, DatasetOptions
 from tensorlake.documentai.extract import ExtractionOptions
-from tensorlake.documentai.files import FileUploader, FileInfo
+from tensorlake.documentai.files import FileInfo, FileUploader
 from tensorlake.documentai.jobs import Job
 from tensorlake.documentai.parse import ParsingOptions
 
@@ -70,7 +67,7 @@ class DocumentAI:
         Delete a job by its ID.
         """
         asyncio.run(self.delete_job_async(job_id))
-    
+
     async def delete_job_async(self, job_id: str):
         """
         Delete a job by its ID asynchronously.
@@ -176,7 +173,9 @@ class DocumentAI:
         """
         return asyncio.run(self.files_async(cursor))
 
-    async def files_async(self, cursor: Optional[str] = None) -> PaginatedResult[FileInfo]:
+    async def files_async(
+        self, cursor: Optional[str] = None
+    ) -> PaginatedResult[FileInfo]:
         """
         Get a list of files asynchronously.
         """
