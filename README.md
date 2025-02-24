@@ -42,7 +42,7 @@ file_id = doc_ai.upload(path="/path/to/file.pdf")
 job_id = doc_ai.parse(file_id, options=ParsingOptions())
 ```
 
-In addition to OCR, it can summarize figures, charts and tables. The default chunking strategy is by Page, you can change the chunking strategy, the prompts for summarization by configuring `ParsingOptions`. The API is [documented here](https://docs.tensorlake.ai/documentai/parsing)
+In addition to OCR, it can summarize figures, charts and tables. The default chunking strategy is by Page, you can change the chunking strategy, the prompts for summarization by configuring `ParsingOptions`. The API is [documented here](https://docs.tensorlake.ai/documentai/parsing#parse-api-reference)
 
 #### Structured Extraction 
 
@@ -64,6 +64,8 @@ job_id = doc_ai.extract(file_id, options=ExtractionOptions(model=LoanSchema))
 
 Structured Extraction is guided by the provided schema. We support Pyndatic Models as well JSON Schema. All the levers for structured extraction are (documented here)[https://docs.tensorlake.ai/api-reference/extract/extract-file-async].
 
+We recommend adding a description to each field in the schema, as it helps the model to learn the context of the field.
+
 #### Getting Back Parsed Data
 
 Document AI APIs are async to be able to handle large volumes of documents with many pages. You can use a Job ID to retrieve results, or configure a webhook endpoint to receive updates.
@@ -83,6 +85,7 @@ Datasets are a named collection that you can attach some ingestion actions, such
 
 1. Create a Dataset 
 ```python
+from tensorlake.documentai import DatasetOptions, ParsingOptions, OutputFormat, TableOutputMode, TableParsingStrategy
     dataset = await document_ai.create_dataset_async(
         DatasetOptions(
             name="My Dataset",
@@ -98,13 +101,17 @@ Datasets are a named collection that you can attach some ingestion actions, such
 
 2. Add a document to a dataset 
 ```python
-job = dataset.extend(DatasetExtendOptions(file_path=file.path))
+from tensorlake.documentai import IngestArgs
+
+job = dataset.ingest(IngestArgs(file_path=file.path))
 ```
 
 3. Retrieve Dataset output and metadata 
 ```python
-outputs: dataset.outputs()
+items = dataset.items()
 ```
+
+A dataset can be in any of these states - `idle`, `processing`. You can also configure a webhook to receive updates for each file that is processed.
 
 ## Serverless Workflows
 

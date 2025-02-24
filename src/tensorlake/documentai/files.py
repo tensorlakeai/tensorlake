@@ -1,3 +1,7 @@
+"""
+This module contains the FileUploader class, which is used to upload files to the DocumentAI API.
+"""
+
 import base64
 import hashlib
 import mimetypes
@@ -7,6 +11,7 @@ from typing import Union
 
 import aiofiles
 import httpx
+from pydantic import BaseModel, Field
 from tqdm import tqdm
 from tqdm.asyncio import tqdm as async_tqdm
 
@@ -21,6 +26,19 @@ except ImportError:
     print(
         "Warning: `python-magic` (libmagic) is not installed. Falling back to `mimetypes`. Install it with `pip install python-magic` for better MIME detection."
     )
+
+
+class FileInfo(BaseModel):
+    """
+    Metadata from a file uploaded to DocumentAI.
+    """
+
+    id: str
+    name: str
+    file_size: int = Field(alias="fileSize")
+    mime_type: str = Field(alias="mimeType")
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
 
 
 class FileUploader:

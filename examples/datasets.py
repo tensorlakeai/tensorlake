@@ -127,5 +127,4 @@ async def main():
         for key_info, data in items.items():
             writer.writerow([key_info.job_id, key_info.file_name, data])
 
-
 asyncio.run(main())
