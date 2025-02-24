@@ -14,10 +14,11 @@ from retry import retry
 
 from tensorlake.documentai.common import (
     DOC_AI_BASE_URL,
+    PaginatedResult
 )
 from tensorlake.documentai.datasets import Dataset, DatasetOptions
 from tensorlake.documentai.extract import ExtractionOptions
-from tensorlake.documentai.files import FileUploader
+from tensorlake.documentai.files import FileUploader, FileInfo
 from tensorlake.documentai.jobs import Job
 from tensorlake.documentai.parse import ParsingOptions
 
@@ -63,6 +64,41 @@ class DocumentAI:
         )
         response.raise_for_status()
         return Job.model_validate(response.json())
+
+    def delete_job(self, job_id: str):
+        """
+        Delete a job by its ID.
+        """
+        asyncio.run(self.delete_job_async(job_id))
+    
+    async def delete_job_async(self, job_id: str):
+        """
+        Delete a job by its ID asynchronously.
+        """
+        response = await self._async_client.delete(
+            url=f"jobs/{job_id}",
+            headers=self.__headers__(),
+        )
+        response.raise_for_status()
+
+    def jobs(self, cursor: Optional[str] = None) -> PaginatedResult[Job]:
+        """
+        Get a list of jobs.
+        """
+        return asyncio.run(self.jobs_async(cursor))
+
+    async def jobs_async(self, cursor: Optional[str] = None) -> PaginatedResult[Job]:
+        """
+        Get a list of jobs asynchronously.
+        """
+        response = await self._async_client.get(
+            url="/jobs",
+            headers=self.__headers__(),
+            params={"cursor": cursor} if cursor else None,
+        )
+        response.raise_for_status()
+        result = PaginatedResult[Job].model_validate(response.json())
+        return result
 
     def wait_for_completion(self, job_id) -> Job:
         """
@@ -133,6 +169,25 @@ class DocumentAI:
         }
 
         return payload
+
+    def files(self, cursor: Optional[str] = None) -> PaginatedResult[FileInfo]:
+        """
+        Get a list of files.
+        """
+        return asyncio.run(self.files_async(cursor))
+
+    async def files_async(self, cursor: Optional[str] = None) -> PaginatedResult[FileInfo]:
+        """
+        Get a list of files asynchronously.
+        """
+        response = await self._async_client.get(
+            url="/files",
+            headers=self.__headers__(),
+            params={"cursor": cursor} if cursor else None,
+        )
+        response.raise_for_status()
+        result = PaginatedResult[FileInfo].model_validate(response.json())
+        return result
 
     def parse(self, file: str, options: ParsingOptions, timeout: int = 5) -> str:
         """
@@ -221,6 +276,22 @@ class DocumentAI:
             FileNotFoundError: If the file doesn't exist
         """
         return await self.__file_uploader__.upload_file_async(path)
+
+    def delete_file(self, file_id: str):
+        """
+        Delete a file by its ID.
+        """
+        asyncio.run(self.delete_file_async(file_id))
+
+    async def delete_file_async(self, file_id: str):
+        """
+        Delete a file by its ID asynchronously.
+        """
+        response = await self._async_client.delete(
+            url=f"files/{file_id}",
+            headers=self.__headers__(),
+        )
+        response.raise_for_status()
 
     def create_dataset(
         self, dataset: DatasetOptions, ignore_if_exists=False

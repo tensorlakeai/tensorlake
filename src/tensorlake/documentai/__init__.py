@@ -8,6 +8,7 @@ from tensorlake.documentai.datasets import Dataset, DatasetOptions, IngestArgs
 from tensorlake.documentai.extract import ExtractionOptions, ModelProvider
 from tensorlake.documentai.jobs import Document, Job
 from tensorlake.documentai.parse import ChunkingStrategy, OutputFormat, ParsingOptions
+from tensorlake.documentai.files import FileInfo
 
 __all__ = [
     "DocumentAI",
@@ -23,4 +24,5 @@ __all__ = [
     "DatasetOptions",
     "IngestArgs",
     "OutputFormat",
+    "FileInfo",
 ]

@@ -108,24 +108,24 @@ async def main():
 
     # Retrieve the outputs of the dataset
     # The output includes the job id and the extracted contents
-    items = {}
+    items = []
     items_page = await dataset.items_async()
     for key_info, data in items_page.items.items():
-        items[key_info] = data.model_dump_json()
+        items.append([key_info.job_id, key_info.file_name, data.model_dump_json()])
 
     cursor = items_page.cursor
     while cursor is not None:
         items_page = await dataset.items_async(cursor=cursor)
         for key_info, data in items_page.items.items():
-            items[key_info] = data.model_dump_json()
+            items.append([key_info.job_id, key_info.file_name, data.model_dump_json()])
         cursor = items_page.cursor
 
     csv_filename = f"{dataset.name}.csv"
     with open(csv_filename, "w", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["job_id", "file_name", "output"])
-        for key_info, data in items.items():
-            writer.writerow([key_info.job_id, key_info.file_name, data])
+        for item in items:
+            writer.writerow(item)
 
 
 asyncio.run(main())
