@@ -416,8 +416,10 @@ class TensorlakeClient:
         )
         response.raise_for_status()
         graph_outputs = GraphOutputs(**response.json())
-        if graph_outputs.status == "pending":
+        # "pending" is old server API behavior, left here for backward compatibility.
+        if graph_outputs.status in ["pending", "Pending", "Running"]:
             raise GraphStillProcessing()
+
         outputs = []
         for output in graph_outputs.outputs:
             if output.compute_fn == fn_name:

@@ -3,16 +3,51 @@ import unittest
 
 import parameterized
 import testing
-from pydantic import BaseModel
-from testing import test_graph_name
+from testing import test_graph_name, wait_function_output
 
-from tensorlake import RemoteGraph
-from tensorlake.error import ApiException, GraphStillProcessing
-from tensorlake.functions_sdk.functions import tensorlake_function
-from tensorlake.functions_sdk.graph import Graph
+from tensorlake import Graph, RemoteGraph, tensorlake_function
+from tensorlake.error import ApiException
+
+
+@tensorlake_function()
+def start_func_v1(sleep_sec: int) -> str:
+    time.sleep(sleep_sec)
+    return "start_func_v1"
+
+
+@tensorlake_function()
+def end_func_v1(_: str) -> str:
+    return "end_func_v1"
+
+
+@tensorlake_function()
+def end_func_v2(_: str) -> str:
+    return "end_func_v2"
 
 
 class TestGraphUpdate(unittest.TestCase):
+    def test_running_invocation_gets_its_graph_version_updated(self):
+        g = Graph(
+            name=test_graph_name(self),
+            start_node=start_func_v1,
+        )
+        g.add_edge(start_func_v1, end_func_v1)
+
+        g = RemoteGraph.deploy(g)
+
+        invocation_id = g.run(block_until_done=False, sleep_sec=10)
+
+        g = Graph(
+            name=test_graph_name(self),
+            start_node=start_func_v1,
+        )
+        g.add_edge(start_func_v1, end_func_v2)
+        g = RemoteGraph.deploy(g, upgrade_tasks_to_latest_version=True)
+
+        output = wait_function_output(g, invocation_id, "end_func_v2")
+        self.assertEqual(len(output), 1, output)
+        self.assertEqual(output[0], "end_func_v2", output)
+
     @parameterized.parameterized.expand(
         [
             ("new_function_names", "second_graph_new_name"),
@@ -101,14 +136,9 @@ class TestGraphUpdate(unittest.TestCase):
 
         # The first invocation should not be affected by the second graph version
         # This loop waits for the first invocation to finish and checks its output.
-        while True:
-            try:
-                output = g.output(first_invocation_id, fn_name="end_node")
-                self.assertEqual(len(output), 1, output)
-                self.assertEqual(output[0], 3)
-                break
-            except GraphStillProcessing:
-                time.sleep(1)
+        output = wait_function_output(g, first_invocation_id, "end_node")
+        self.assertEqual(len(output), 1, output)
+        self.assertEqual(output[0], 3)
 
     def test_graph_update_fails_without_version_update(self):
         graph_name = test_graph_name(self)
