@@ -1,6 +1,8 @@
+import time
 import unittest
 from typing import Any, List, Union
 
+from tensorlake.error import GraphStillProcessing
 from tensorlake.functions_sdk.graph import Graph
 from tensorlake.remote_graph import RemoteGraph
 
@@ -25,3 +27,11 @@ def test_graph_name(test_case: unittest.TestCase) -> str:
     ...         # test_graph_reduce_test_simple
     """
     return unittest.TestCase.id(test_case).replace(".", "_")
+
+
+def wait_function_output(graph: RemoteGraph, invocation_id: str, func_name: str) -> Any:
+    while True:
+        try:
+            return graph.output(invocation_id, func_name)
+        except GraphStillProcessing:
+            time.sleep(1)

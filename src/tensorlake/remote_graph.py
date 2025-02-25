@@ -90,6 +90,9 @@ class RemoteGraph:
             Not used if client is provided.
         :param client: The IndexifyClient used to communicate with the server.
             Preferred over server_url.
+        :param upgrade_tasks_to_latest_version: If True, all not started and running invocations
+            will be upgraded to run on the latest version of the graph. This requires the graph
+            code to be backward compatible between the versions.
         """
         g.validate_graph()
         if not client:
