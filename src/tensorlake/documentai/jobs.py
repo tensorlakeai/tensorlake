@@ -111,6 +111,19 @@ class Document(BaseModel):
 
     pages: List[Page]
 
+class StructuredDataPage(BaseModel):
+    content: dict = Field(alias="json_result")
+    page_number: int
+
+class StructuredData(BaseModel):
+    pages: List[StructuredDataPage]
+
+class ParsedDocument(BaseModel):
+    num_pages: Optional[int] = None
+    document: Optional[Document] = None
+    chunks: List[str]
+    structured_data: Optional[StructuredData] = None
+
 
 class Job(BaseModel):
     """
@@ -120,6 +133,4 @@ class Job(BaseModel):
     job_id: str = Field(alias="jobId")
     file_id: str = Field(alias="fileId")
     job_type: str = Field(alias="jobType")
-    chunks: List[str] = Field(alias="chunks", default_factory=list)
     document: Optional[Document] = Field(alias="document", default=None)
-    status: JobStatus = Field(alias="status")
