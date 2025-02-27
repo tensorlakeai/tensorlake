@@ -1,5 +1,5 @@
-import time
 import json
+import time
 
 from pydantic import BaseModel
 
@@ -29,7 +29,9 @@ file_id = doc_ai.upload(path="/Users/miguelhernandez/Downloads/papers/omega.pdf"
 json_schema = PaperSchema.model_json_schema()
 job_id = doc_ai.parse(
     file_id,
-    options=ParsingOptions(extraction_options=ExtractionOptions(model=json.dumps(json_schema))),
+    options=ParsingOptions(
+        extraction_options=ExtractionOptions(model=json.dumps(json_schema))
+    ),
 )
 
 print(f"job id: {job_id}")
