@@ -3,7 +3,6 @@ Tensorlake Document AI client
 """
 
 import asyncio
-import json
 import os
 import time
 from pathlib import Path
@@ -291,19 +290,16 @@ class DocumentAI:
             if existing_dataset:
                 return existing_dataset
 
-        if dataset.parsing_options:
-            raise ValueError("Dataset cannot have both parsing and extraction options.")
-
         response = await self._async_client.post(
             url="datasets",
             headers=self.__headers__(),
             json={
                 "name": dataset.name,
                 "description": dataset.description,
-                "settings": self.__create_parse_settings__(dataset.parsing_options),
+                "settings": self.__create_parse_settings__(dataset.options),
             },
         )
-        return self.__dataset_from_response__(response)
+        return await self.get_dataset_async(response.json().get("id"))
 
     def get_dataset(self, name: str) -> Optional[Dataset]:
         """
@@ -341,14 +337,12 @@ class DocumentAI:
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 return None
+
+        print(response)
+        print(response.json())
         resp = response.json()
-        settings = None
-        if resp.get("extractSettings") is not None:
-            settings = ExtractionOptions.model_validate(resp.get("extractSettings"))
-        elif resp.get("parseSettings") is not None:
-            settings = ParsingOptions.model_validate(resp.get("parseSettings"))
-        else:
-            raise ValueError("Dataset does not have any settings.")
+        
+        settings = ParsingOptions.model_validate(resp.get("settings"))
         return Dataset(
             dataset_id=resp.get("id"),
             name=resp.get("name"),

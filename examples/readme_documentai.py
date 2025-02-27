@@ -14,8 +14,6 @@ class PaperSchema(BaseModel):
     title: str
     abstract: str
 
-
-
 API_KEY = "tl_XXXXX"
 
 doc_ai = DocumentAI(api_key=API_KEY)
