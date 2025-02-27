@@ -18,13 +18,13 @@ class PaperSchema(BaseModel):
     abstract: str
 
 
-API_KEY = "tl_apiKey_LBmFWTkrhpQFLzbBPwRQJ_QYbZs2iqdC5DncovbMGG_t7Wr9JsDs"
+API_KEY = "tl_apiKey_************"
 
 doc_ai = DocumentAI(api_key=API_KEY)
 # Skip this if you are passing a pre-signed URL to the `DocumentParser`.
 # or pass an external URL
 
-file_id = doc_ai.upload(path="/Users/miguelhernandez/Downloads/papers/omega.pdf")
+file_id = doc_ai.upload(path="/path/to/files")
 
 json_schema = PaperSchema.model_json_schema()
 job_id = doc_ai.parse(
