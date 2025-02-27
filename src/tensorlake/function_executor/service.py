@@ -1,5 +1,3 @@
-import os
-import subprocess
 from typing import Iterator, Optional
 
 import grpc
@@ -8,6 +6,7 @@ import structlog
 from tensorlake.functions_sdk.functions import TensorlakeFunctionWrapper
 from tensorlake.functions_sdk.object_serializer import get_serializer
 
+from .handlers.check_health.handler import CheckHealthHandler
 from .handlers.run_function.handler import Handler as RunTaskHandler
 from .handlers.run_function.request_validator import (
     RequestValidator as RunTaskRequestValidator,
@@ -41,8 +40,7 @@ class Service(FunctionExecutorServicer):
         self._function_name: Optional[str] = None
         self._function_wrapper: Optional[TensorlakeFunctionWrapper] = None
         self._invocation_state_proxy_server: Optional[InvocationStateProxyServer] = None
-        self._enable_gpu_health_checks = False
-        self._logged_gpu_health_check_failure = False
+        self._check_health_handler = CheckHealthHandler()
 
     def initialize(
         self, request: InitializeRequest, context: grpc.ServicerContext
@@ -67,17 +65,7 @@ class Service(FunctionExecutorServicer):
             graph_version=request.graph_version,
             function_name=request.function_name,
         )
-        # NVIDIA_VISIBLE_DEVICES is set by NVIDIA Docker runtime when GPUs are provided.
-        # nvidia-smi is installed with NVIDIA GPU drivers.
-        # If both are available then run health checks to detect that the Function Executor
-        # is currently affected by known issue https://github.com/NVIDIA/nvidia-container-toolkit/issues/857.
-        if (
-            "NVIDIA_VISIBLE_DEVICES" in os.environ
-            and os.system("which -s nvidia-smi") == 0
-        ):
-            self._enable_gpu_health_checks = True
-            self._logger.info("enabling GPU health checks")
-
+        self._check_health_handler.initialize(self._logger)
         graph_serializer = get_serializer(request.graph.content_type)
         try:
             # Process user controlled input in a try-except block to not treat errors here as our
@@ -149,35 +137,7 @@ class Service(FunctionExecutorServicer):
     def check_health(
         self, request: HealthCheckRequest, context: grpc.ServicerContext
     ) -> HealthCheckResponse:
-        # This health check validates that the Server:
-        # - Has its process alive (not exited).
-        # - Didn't exhaust its thread pool.
-        # - Is able to communicate over its server socket.
-        # - If NVIDIA GPUs are available then verify that they are working okay.
-        if self._enable_gpu_health_checks:
-            return self._gpu_health_check()
-        else:
-            return HealthCheckResponse(healthy=True)
-
-    def _gpu_health_check(self) -> HealthCheckResponse:
-        result: subprocess.CompletedProcess = subprocess.run(
-            ["nvidia-smi"],
-            capture_output=True,
-            text=True,
-        )
-        gpu_health_check_ok = result.returncode == 0
-        if gpu_health_check_ok:
-            return HealthCheckResponse(healthy=True)
-
-        # Only log this error once to avoid log spam.
-        if not self._logged_gpu_health_check_failure:
-            self._logged_gpu_health_check_failure = True
-            self._logger.error(
-                "NVIDIA GPU health check failed.",
-                nvidia_smi_output=result.stdout,
-                nvidia_smi_error=result.stderr,
-            )
-        return HealthCheckResponse(healthy=False)
+        return self._check_health_handler.handle(request, self._logger)
 
     def get_info(
         self, request: InfoRequest, context: grpc.ServicerContext
