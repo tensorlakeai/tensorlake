@@ -10,6 +10,7 @@ DOC_AI_BASE_URL = "https://api.tensorlake.ai/documents/v1/"
 
 T = TypeVar("T")
 
+
 class PaginatedResult(BaseModel, Generic[T]):
     """
     A slice from a paginated endpoint.

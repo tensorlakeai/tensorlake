@@ -103,6 +103,7 @@ class Page(BaseModel):
     page_fragments: Optional[List[PageFragment]] = []
     layout: Optional[dict] = {}
 
+
 class Document(BaseModel):
     """
     Document in a document.
@@ -110,12 +111,15 @@ class Document(BaseModel):
 
     pages: List[Page]
 
+
 class StructuredDataPage(BaseModel):
     """
     DocumentAI structured data class.
     """
+
     page_number: int
     data: dict = Field(alias="json_result", default_factory=dict)
+
 
 class StructuredData(BaseModel):
     """
@@ -124,20 +128,24 @@ class StructuredData(BaseModel):
 
     pages: List[StructuredDataPage] = Field(alias="pages", default_factory=list)
 
+
 class Output(BaseModel):
     """
     Output of a job.
     """
+
     chunks: List[str] = Field(alias="chunks", default_factory=list)
     document: Optional[Document]
     num_pages: Optional[int]
     structured_data: Optional[StructuredData] = None
     # error_message: Optional[str] = Field(alias="errorMessage")
 
+
 class Job(BaseModel):
     """
     DocumentAI job class.
     """
+
     job_id: str = Field(alias="jobId")
     file_id: str = Field(alias="fileId")
     status: JobStatus = Field(alias="status")

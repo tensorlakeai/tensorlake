@@ -3,16 +3,19 @@ import time
 from pydantic import BaseModel
 
 from tensorlake.documentai import DocumentAI
-from tensorlake.documentai.parse import ParsingOptions, ExtractionOptions
+from tensorlake.documentai.parse import ExtractionOptions, ParsingOptions
+
 
 class PaperSchema(BaseModel):
     """
     Paper schema for the Document AI API.
     """
+
     references: list[str]
     authors: list[str]
     title: str
     abstract: str
+
 
 API_KEY = "tl_XXXXX"
 

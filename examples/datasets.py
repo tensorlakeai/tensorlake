@@ -11,9 +11,9 @@ from tensorlake.data_loaders import LocalDirectoryLoader
 from tensorlake.documentai import (
     DatasetOptions,
     DocumentAI,
+    ExtractionOptions,
     IngestArgs,
     ParsingOptions,
-    ExtractionOptions,
 )
 
 TENSORLAKE_API_KEY = "tl_apiKey_xxxx"
@@ -56,6 +56,7 @@ class Statement(BaseModel):
     transactions: list[Transaction] = Field(
         description="The transactions in the statement"
     )
+
 
 async def main():
     """
@@ -120,5 +121,6 @@ async def main():
         writer.writerow(["job_id", "file_name", "output"])
         for key_info, data in items.items():
             writer.writerow([key_info.job_id, key_info.file_name, data])
+
 
 asyncio.run(main())

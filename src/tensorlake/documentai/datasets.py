@@ -15,7 +15,7 @@ from tensorlake.documentai.common import (
     PaginatedResult,
 )
 from tensorlake.documentai.files import FileUploader
-from tensorlake.documentai.jobs import Output, Job, JobStatus
+from tensorlake.documentai.jobs import Job, JobStatus, Output
 from tensorlake.documentai.parse import ParsingOptions
 
 

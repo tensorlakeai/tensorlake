@@ -341,7 +341,7 @@ class DocumentAI:
         print(response)
         print(response.json())
         resp = response.json()
-        
+
         settings = ParsingOptions.model_validate(resp.get("settings"))
         return Dataset(
             dataset_id=resp.get("id"),

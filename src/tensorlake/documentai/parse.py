@@ -7,6 +7,7 @@ from typing import Optional, Type
 
 from pydantic import BaseModel
 
+
 class ChunkingStrategy(str, Enum):
     """
     Chunking strategy for parsing a document.
@@ -19,6 +20,7 @@ class ChunkingStrategy(str, Enum):
     NONE = "none"
     PAGE = "page"
     SECTION_HEADER = "section_header"
+
 
 class TableParsingStrategy(str, Enum):
     """
@@ -45,6 +47,7 @@ class TableOutputMode(str, Enum):
     MARKDOWN = "markdown"
     HTML = "html"
 
+
 class ModelProvider(str, Enum):
     """
     The model provider to use for structured data extraction.
@@ -58,18 +61,22 @@ class ModelProvider(str, Enum):
     SONNET = "claude-3-5-sonnet-latest"
     GPT4OMINI = "gpt-4o-mini"
 
+
 class ExtractionOptions(BaseModel):
     """
     Options for structured data extraction.
     """
+
     model: Type[BaseModel]
     prompt: Optional[str] = None
     provider: ModelProvider = ModelProvider.TENSORLAKE
+
 
 class ParsingOptions(BaseModel):
     """
     Options for parsing a document.
     """
+
     chunking_strategy: Optional[ChunkingStrategy] = None
     table_parsing_strategy: TableParsingStrategy = TableParsingStrategy.TSR
     table_parsing_prompt: Optional[str] = None
