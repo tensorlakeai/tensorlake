@@ -3,6 +3,7 @@ Tensorlake Document AI client
 """
 
 import asyncio
+import json
 import os
 import time
 from pathlib import Path
@@ -124,6 +125,13 @@ class DocumentAI:
         return finished_job
 
     def __create_parse_settings__(self, options: ParsingOptions) -> dict:
+        json_schema = None
+        if options.extraction_options:
+            if isinstance(options.extraction_options.model, str):
+                json_schema = json.loads(options.extraction_options.model)
+            else:
+                json_schema = options.extraction_options.model.model_json_schema()
+
         return {
             "chunkStrategy": (
                 options.chunking_strategy.value if options.chunking_strategy else None
@@ -132,11 +140,7 @@ class DocumentAI:
             "tableParsingStrategy": options.table_parsing_strategy.value,
             "tableSummarizationPrompt": options.table_parsing_prompt,
             "figureSummarizationPrompt": options.figure_summarization_prompt,
-            "jsonSchema": (
-                options.extraction_options.model.model_json_schema()
-                if options.extraction_options
-                else None
-            ),
+            "jsonSchema": json_schema,
             "structuredExtractionPrompt": (
                 options.extraction_options.prompt
                 if options.extraction_options
