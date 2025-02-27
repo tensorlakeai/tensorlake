@@ -4,7 +4,6 @@ This script demonstrates how to use the DocumentAI class to load and parse a dat
 
 import asyncio
 import csv
-import json
 
 from pydantic import BaseModel, Field
 
@@ -12,9 +11,9 @@ from tensorlake.data_loaders import LocalDirectoryLoader
 from tensorlake.documentai import (
     DatasetOptions,
     DocumentAI,
-    ExtractionOptions,
     IngestArgs,
-    TableParsingStrategy,
+    ParsingOptions,
+    ExtractionOptions,
 )
 
 TENSORLAKE_API_KEY = "tl_apiKey_xxxx"
@@ -58,7 +57,6 @@ class Statement(BaseModel):
         description="The transactions in the statement"
     )
 
-
 async def main():
     """
     Main function
@@ -68,16 +66,12 @@ async def main():
     # can retrieve the dataset later using the name.
     dataset = await document_ai.create_dataset_async(
         DatasetOptions(
-            name="My Dataset",
+            name="new_api",
             description="A dataset of documents",
-            # parsing_options=ParsingOptions(
-            #     format=OutputFormat.MARKDOWN,
-            #     table_output_mode=TableOutputMode.JSON,
-            #     table_parsing_strategy=TableParsingStrategy.VLM,
-            # ),
-            extraction_options=ExtractionOptions(
-                json_schema=json.dumps(Statement.model_json_schema()),
-                table_parsing_strategy=TableParsingStrategy.VLM,
+            options=ParsingOptions(
+                extraction_options=ExtractionOptions(
+                    model=Statement,
+                )
             ),
         ),
         ignore_if_exists=True,
@@ -126,6 +120,5 @@ async def main():
         writer.writerow(["job_id", "file_name", "output"])
         for key_info, data in items.items():
             writer.writerow([key_info.job_id, key_info.file_name, data])
-
 
 asyncio.run(main())

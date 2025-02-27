@@ -3,24 +3,9 @@ This module contains the data models for parsing a document.
 """
 
 from enum import Enum
-from typing import Optional
+from typing import Optional, Type
 
 from pydantic import BaseModel
-
-from .common import TableOutputMode, TableParsingStrategy
-
-
-class OutputFormat(str, Enum):
-    """
-    Output format for parsing a document.
-
-    MARKDOWN: The parsed document is returned in Markdown format. Using Markdown requires setting a chunking strategy.
-    JSON: The parsed document is returned in JSON format.
-    """
-
-    MARKDOWN = "markdown"
-    JSON = "json"
-
 
 class ChunkingStrategy(str, Enum):
     """
@@ -35,19 +20,61 @@ class ChunkingStrategy(str, Enum):
     PAGE = "page"
     SECTION_HEADER = "section_header"
 
+class TableParsingStrategy(str, Enum):
+    """
+    Algorithm to use for parsing tables in a document.
+
+    TSR: Table Structure Recognition. Great for structured tables.
+    VLM: Visual Layout Model. Great for unstructured tables or semi-structured tables.
+    """
+
+    TSR = "tsr"
+    VLM = "vlm"
+
+
+class TableOutputMode(str, Enum):
+    """
+    Output mode for tables in a document.
+
+    JSON: The table is returned in JSON format.
+    MARKDOWN: The table is returned in Markdown format.
+    HTML: The table is returned in HTML format.
+    """
+
+    JSON = "json"
+    MARKDOWN = "markdown"
+    HTML = "html"
+
+class ModelProvider(str, Enum):
+    """
+    The model provider to use for structured data extraction.
+
+    TENSORLAKE: private models, running on Tensorlake infrastructure.
+    SONNET: Claude 3.5 Sonnet model.
+    GPT4OMINI: GPT-4o-mini model.
+    """
+
+    TENSORLAKE = "tensorlake"
+    SONNET = "claude-3-5-sonnet-latest"
+    GPT4OMINI = "gpt-4o-mini"
+
+class ExtractionOptions(BaseModel):
+    """
+    Options for structured data extraction.
+    """
+    model: Type[BaseModel]
+    prompt: Optional[str] = None
+    provider: ModelProvider = ModelProvider.TENSORLAKE
 
 class ParsingOptions(BaseModel):
     """
     Options for parsing a document.
     """
-
-    format: OutputFormat = OutputFormat.MARKDOWN
     chunking_strategy: Optional[ChunkingStrategy] = None
     table_parsing_strategy: TableParsingStrategy = TableParsingStrategy.TSR
     table_parsing_prompt: Optional[str] = None
     figure_summarization_prompt: Optional[str] = None
     table_output_mode: TableOutputMode = TableOutputMode.MARKDOWN
-    summarize_table: bool = False
-    summarize_figure: bool = False
     page_range: Optional[str] = None
     deliver_webhook: bool = False
+    extraction_options: Optional[ExtractionOptions] = None

@@ -3,7 +3,6 @@ Tensorlake Document AI client
 """
 
 import asyncio
-import json
 import os
 import time
 from pathlib import Path
@@ -14,7 +13,6 @@ from retry import retry
 
 from tensorlake.documentai.common import DOC_AI_BASE_URL, PaginatedResult
 from tensorlake.documentai.datasets import Dataset, DatasetOptions
-from tensorlake.documentai.extract import ExtractionOptions
 from tensorlake.documentai.files import FileInfo, FileUploader
 from tensorlake.documentai.jobs import Job
 from tensorlake.documentai.parse import ParsingOptions
@@ -127,42 +125,36 @@ class DocumentAI:
 
     def __create_parse_settings__(self, options: ParsingOptions) -> dict:
         return {
-            "outputMode": options.format.value,
-            "figureSummarization": options.summarize_figure,
-            "tableSummarization": options.summarize_table,
+            "chunkStrategy": (
+                options.chunking_strategy.value if options.chunking_strategy else None
+            ),
             "tableOutputMode": options.table_output_mode.value,
             "tableParsingStrategy": options.table_parsing_strategy.value,
             "tableSummarizationPrompt": options.table_parsing_prompt,
             "figureSummarizationPrompt": options.figure_summarization_prompt,
+            "jsonSchema": (
+                options.extraction_options.model.model_json_schema()
+                if options.extraction_options
+                else None
+            ),
+            "structuredExtractionPrompt": (
+                options.extraction_options.prompt
+                if options.extraction_options
+                else None
+            ),
+            "modelProvider": (
+                options.extraction_options.provider.value
+                if options.extraction_options
+                else None
+            ),
         }
 
     def __create_parse_req__(self, file: str, options: ParsingOptions) -> dict:
         payload = {
             "file": file,
+            "pages": options.page_range,
             "deliverWebhook": options.deliver_webhook,
             "settings": self.__create_parse_settings__(options),
-        }
-        if options.chunking_strategy:
-            payload["chunkStrategy"] = options.chunking_strategy.value
-
-        if options.page_range:
-            payload["pages"] = options.page_range
-
-        return payload
-
-    def __create_extract_settings__(self, options: ExtractionOptions) -> dict:
-        return {
-            "jsonSchema": json.dumps(options.json_schema),
-            "prompt": options.prompt,
-            "modelProvider": options.model.value,
-            "tableParsingStrategy": options.table_parsing_strategy.value,
-        }
-
-    def _create_extract_req(self, file: str, options: ExtractionOptions) -> dict:
-        payload = {
-            "file": file,
-            "deliverWebhook": options.deliver_webhook,
-            "settings": self.__create_extract_settings__(options),
         }
 
         return payload
@@ -201,34 +193,9 @@ class DocumentAI:
         Parse a document asynchronously.
         """
         response = await self._async_client.post(
-            url="/parse_async",
+            url="/parse",
             headers=self.__headers__(),
             json=self.__create_parse_req__(file, options),
-        )
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            print(e.response.text)
-            raise e
-        resp = response.json()
-        return resp.get("jobId")
-
-    def extract(self, file: str, options: ExtractionOptions, timeout: int = 5) -> str:
-        """
-        Parse a document.
-        """
-        return asyncio.run(self.extract_async(file, options, timeout))
-
-    async def extract_async(
-        self, file: str, options: ExtractionOptions, timeout: int = 5
-    ) -> str:
-        """
-        Parse a document asynchronously.
-        """
-        response = await self._async_client.post(
-            url="/extract_async",
-            headers=self.__headers__(),
-            json=self._create_extract_req(file, options),
         )
         try:
             response.raise_for_status()
@@ -323,28 +290,16 @@ class DocumentAI:
             if existing_dataset:
                 return existing_dataset
 
-        if dataset.parsing_options and dataset.extraction_options:
-            raise ValueError("Dataset cannot have both parsing and extraction options.")
-
         response = await self._async_client.post(
             url="datasets",
             headers=self.__headers__(),
             json={
                 "name": dataset.name,
                 "description": dataset.description,
-                "parseSettings": (
-                    self.__create_parse_settings__(dataset.parsing_options)
-                    if dataset.parsing_options
-                    else None
-                ),
-                "extractSettings": (
-                    self.__create_extract_settings__(dataset.extraction_options)
-                    if dataset.extraction_options
-                    else None
-                ),
+                "settings": self.__create_parse_settings__(dataset.options),
             },
         )
-        return self.__dataset_from_response__(response)
+        return await self.get_dataset_async(response.json().get("id"))
 
     def get_dataset(self, name: str) -> Optional[Dataset]:
         """
@@ -382,14 +337,12 @@ class DocumentAI:
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 return None
+
+        print(response)
+        print(response.json())
         resp = response.json()
-        settings = None
-        if resp.get("extractSettings") is not None:
-            settings = ExtractionOptions.model_validate(resp.get("extractSettings"))
-        elif resp.get("parseSettings") is not None:
-            settings = ParsingOptions.model_validate(resp.get("parseSettings"))
-        else:
-            raise ValueError("Dataset does not have any settings.")
+        
+        settings = ParsingOptions.model_validate(resp.get("settings"))
         return Dataset(
             dataset_id=resp.get("id"),
             name=resp.get("name"),
