@@ -14,7 +14,6 @@ from retry import retry
 
 from tensorlake.documentai.common import DOC_AI_BASE_URL, PaginatedResult
 from tensorlake.documentai.datasets import Dataset, DatasetOptions
-from tensorlake.documentai.extract import ExtractionOptions
 from tensorlake.documentai.files import FileInfo, FileUploader
 from tensorlake.documentai.jobs import Job
 from tensorlake.documentai.parse import ParsingOptions
@@ -134,13 +133,21 @@ class DocumentAI:
             "tableParsingStrategy": options.table_parsing_strategy.value,
             "tableSummarizationPrompt": options.table_parsing_prompt,
             "figureSummarizationPrompt": options.figure_summarization_prompt,
-            "jsonSchema": json.dumps(
+            "jsonSchema": (
                 options.extraction_options.model.model_json_schema()
                 if options.extraction_options
                 else None
             ),
-            "structuredExtractionPrompt": options.extraction_options.prompt,
-            "modelProvider": options.extraction_options.provider.value,
+            "structuredExtractionPrompt": (
+                options.extraction_options.prompt
+                if options.extraction_options
+                else None
+            ),
+            "modelProvider": (
+                options.extraction_options.provider.value
+                if options.extraction_options
+                else None
+            ),
         }
 
     def __create_parse_req__(self, file: str, options: ParsingOptions) -> dict:

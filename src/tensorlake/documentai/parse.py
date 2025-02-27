@@ -3,7 +3,7 @@ This module contains the data models for parsing a document.
 """
 
 from enum import Enum
-from typing import Optional
+from typing import Optional, Type
 
 from pydantic import BaseModel
 
@@ -62,7 +62,7 @@ class ExtractionOptions(BaseModel):
     """
     Options for structured data extraction.
     """
-    model: BaseModel
+    model: Type[BaseModel]
     prompt: Optional[str] = None
     provider: ModelProvider = ModelProvider.TENSORLAKE
 

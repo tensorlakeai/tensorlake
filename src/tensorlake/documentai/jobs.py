@@ -132,7 +132,7 @@ class Output(BaseModel):
     document: Optional[Document]
     num_pages: Optional[int]
     structured_data: Optional[StructuredData] = None
-    error_message: Optional[str] = Field(alias="errorMessage")
+    # error_message: Optional[str] = Field(alias="errorMessage")
 
 class Job(BaseModel):
     """
