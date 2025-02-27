@@ -16,11 +16,11 @@ from tensorlake.documentai import (
     ParsingOptions,
 )
 
-TENSORLAKE_API_KEY = "tl_apiKey_xxxx"
+TENSORLAKE_API_KEY = "tl_apiKey_LBmFWTkrhpQFLzbBPwRQJ_QYbZs2iqdC5DncovbMGG_t7Wr9JsDs"
 
 document_ai = DocumentAI(api_key=TENSORLAKE_API_KEY)
 
-FILES_DIR = "/path/to/your/files"
+FILES_DIR = "/Users/miguelhernandez/Downloads/papers"
 loader = LocalDirectoryLoader(FILES_DIR, file_extensions=[".pdf"])
 
 files = loader.load()

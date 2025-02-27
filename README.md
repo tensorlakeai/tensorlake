@@ -49,7 +49,7 @@ In addition to OCR, it can summarize figures, charts and tables. The default chu
 Extract structured data from a document.
 
 ```python
-from tensorlake.documentai import ExtractionOptions
+from tensorlake.documentai import ParsingOptions, ExtractionOptions
 from pydantic import BaseModel, Field
 
 # Provide a schema to guide structured extraction.
@@ -59,7 +59,11 @@ class LoanSchema(BaseModel):
     amount_due: str = Field(description="Total amount due in the current statement")
     due_data: str = Field(description="Due Date")
 
-job_id = doc_ai.extract(file_id, options=ExtractionOptions(model=LoanSchema))
+options = ParsingOptions(
+    extraction_options=ExtractionOptions(model=LoanSchema)
+)
+
+job_id = doc_ai.parse(file_id, options=options)
 ```
 
 Structured Extraction is guided by the provided schema. We support Pyndatic Models as well JSON Schema. All the levers for structured extraction are (documented here)[https://docs.tensorlake.ai/api-reference/extract/extract-file-async].

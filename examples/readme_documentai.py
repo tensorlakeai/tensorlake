@@ -1,3 +1,4 @@
+import json
 import time
 
 from pydantic import BaseModel
@@ -17,20 +18,22 @@ class PaperSchema(BaseModel):
     abstract: str
 
 
-API_KEY = "tl_XXXXX"
+API_KEY = "tl_apiKey_************"
 
 doc_ai = DocumentAI(api_key=API_KEY)
 # Skip this if you are passing a pre-signed URL to the `DocumentParser`.
 # or pass an external URL
 
-file_id = doc_ai.upload(path="./examples/appliance-repair-invoice-2.pdf")
+file_id = doc_ai.upload(path="/path/to/files")
 
-job_id = doc_ai.parse(file_id, options=ParsingOptions())
-
+json_schema = PaperSchema.model_json_schema()
 job_id = doc_ai.parse(
     file_id,
-    options=ParsingOptions(extraction_options=ExtractionOptions(model=PaperSchema)),
+    options=ParsingOptions(
+        extraction_options=ExtractionOptions(model=json.dumps(json_schema))
+    ),
 )
+
 print(f"job id: {job_id}")
 result = doc_ai.get_job(job_id=job_id)
 print(f"job status: {result.status}")
