@@ -5,7 +5,7 @@ DocumentAI datasets module.
 import asyncio
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Optional
 
 import httpx
 from pydantic import BaseModel, Field
@@ -14,9 +14,8 @@ from tensorlake.documentai.common import (
     DOC_AI_BASE_URL,
     PaginatedResult,
 )
-from tensorlake.documentai.extract import ExtractionOptions
 from tensorlake.documentai.files import FileUploader
-from tensorlake.documentai.jobs import Document, Job, JobStatus
+from tensorlake.documentai.jobs import Output, Job, JobStatus
 from tensorlake.documentai.parse import ParsingOptions
 
 
@@ -25,8 +24,7 @@ class DatasetOptions(BaseModel):
 
     name: str
     description: Optional[str] = None
-    parsing_options: Optional[ParsingOptions] = None
-    extraction_options: Optional[ExtractionOptions] = None
+    options: Optional[ParsingOptions] = None
 
 
 class IngestArgs(BaseModel):
@@ -93,45 +91,11 @@ class DatasetInfo(BaseModel):
     id: str
     name: str
     description: Optional[str]
-    parse_settings: Optional[ParsingOptions] = Field(
-        alias="parseSettings", default=None
-    )
-    extract_settings: Optional[ExtractionOptions] = Field(
-        alias="extractSettings", default=None
-    )
+    settings: Optional[ParsingOptions] = Field(alias="parseSettings", default=None)
     status: DatasetStatus
     jobs: PaginatedResult[DownloadableJobOutput]
     analytics: DatasetAnalytics
     created_at: str = Field(alias="createdAt")
-
-
-class StructuredDataPage(BaseModel):
-    """
-    DocumentAI structured data class.
-    """
-
-    page_number: int
-    parsed_page: str
-    data: dict = Field(alias="json_result", default_factory=dict)
-
-
-class StructuredData(BaseModel):
-    """
-    DocumentAI structured data class.
-    """
-
-    pages: List[StructuredDataPage] = Field(alias="pages", default_factory=list)
-
-
-class DatasetItem(BaseModel):
-    """
-    DocumentAI downloaded job output class.
-    """
-
-    chunks: List[str] = Field(alias="chunks", default_factory=list)
-    document: Optional[Document] = Field(alias="document", default=None)
-    structured_data: Optional[StructuredData] = Field(default=None)
-    error_message: Optional[str] = Field(alias="errorMessage", default=None)
 
 
 class DatasetItemInfo(BaseModel):
@@ -153,7 +117,7 @@ class DatasetItems(BaseModel):
 
     cursor: Optional[str] = None
     total_pages: int = 0
-    items: dict[DatasetItemInfo, DatasetItem] = {}
+    items: dict[DatasetItemInfo, Output] = {}
 
 
 class DatasetOutputFormat(str, Enum):
@@ -174,20 +138,13 @@ class Dataset:
         dataset_id: str,
         name: str,
         api_key: str,
-        settings: Union[ExtractionOptions, ParsingOptions],
+        settings: ParsingOptions,
         status: DatasetStatus,
     ):
         self.id = dataset_id
         self.name = name
         self.api_key = api_key
-        if isinstance(settings, ExtractionOptions):
-            self.dataset_type = "extract"
-        elif isinstance(settings, ParsingOptions):
-            self.dataset_type = "parse"
-        else:
-            raise ValueError(
-                "settings must be either ExtractionOptions or ParsingOptions"
-            )
+        self.settings = settings
         self.status = status
 
         self.__file_uploader__ = FileUploader(api_key)
@@ -310,23 +267,11 @@ class Dataset:
                 resp.raise_for_status()
 
                 resp_json = resp.json()
-                downloaded_output = DatasetItem(
-                    chunks=resp_json["chunks"] if "chunks" in resp_json else [],
-                    document=(
-                        Document.model_validate(resp_json["document"])
-                        if "document" in resp_json
-                        else None
-                    ),
-                    structured_data=(
-                        StructuredData.model_validate(resp_json)
-                        if self.dataset_type == "extract"
-                        else None
-                    ),
-                )
+                downloaded_output = Output.model_validate(resp_json)
                 outputs[key_info] = downloaded_output
 
             if job.status == JobStatus.FAILURE:
-                outputs[key_info] = DatasetItem(error_message=job.error_message)
+                outputs[key_info] = Output(error_message=job.error_message)
 
         return DatasetItems(
             cursor=jobs.next_cursor,
