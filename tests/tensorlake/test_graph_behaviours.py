@@ -393,12 +393,13 @@ class TestGraphBehaviors(unittest.TestCase):
             return x + y + z
 
         graph = Graph(
-            name=test_graph_name(self), description="test", start_node=my_func
+            name=test_graph_name(self),
+            description="test",
+            start_node=my_func,
+            additional_modules=[testing, parameterized],
         )
         graph.add_edge(my_func, my_func_2)
-        graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[testing, parameterized]
-        )
+        graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, my_func_2.name)
         self.assertEqual(len(output), 1)
@@ -429,12 +430,11 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=my_func,
+            additional_modules=[testing, parameterized],
         )
         graph.add_edge(my_func, my_router)
         graph.route(my_router, [my_func_2, my_func_3])
-        graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[testing, parameterized]
-        )
+        graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, my_func_2.name)
         self.assertEqual(len(output), 1)
@@ -485,10 +485,12 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=my_func,
+            additional_modules=[testing, parameterized],
         )
         graph.add_edge(my_func, my_func_2)
         graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[testing, parameterized]
+            graph,
+            is_remote,
         )
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, my_func_2.name)
@@ -509,11 +511,10 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=my_func,
+            additional_modules=[testing, parameterized],
         )
         graph.add_edge(my_func, my_func_2)
-        graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[testing, parameterized]
-        )
+        graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, my_func_2.name)
         self.assertEqual(len(output), 1)
@@ -533,10 +534,12 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=my_func,
+            additional_modules=[testing, parameterized],
         )
         graph.add_edge(my_func, my_func_2)
         graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[testing, parameterized]
+            graph,
+            is_remote,
         )
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, my_func_2.name)
@@ -557,11 +560,10 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=my_func,
+            additional_modules=[testing, parameterized],
         )
         graph.add_edge(my_func, my_func_2)
-        graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[testing, parameterized]
-        )
+        graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, my_func_2.name)
         self.assertEqual(len(output), 1)
@@ -585,12 +587,11 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=my_func,
+            additional_modules=[testing, parameterized],
         )
 
         graph.add_edge(my_func, my_func_2)
-        graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[testing, parameterized]
-        )
+        graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(block_until_done=True, text="hi")
         output = graph.output(invocation_id, my_func_2.name)
         self.assertEqual(len(output), 2)
@@ -614,11 +615,13 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=my_func,
+            additional_modules=[testing, parameterized],
         )
 
         graph.add_edge(my_func, my_func_2)
         graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[testing, parameterized]
+            graph,
+            is_remote,
         )
         invocation_id = graph.run(block_until_done=True, text="hi")
         output = graph.output(invocation_id, my_func_2.name)
@@ -647,11 +650,10 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=my_func,
+            additional_modules=[testing, parameterized],
         )
         graph.add_edge(my_func, my_func_2)
-        graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[testing, parameterized]
-        )
+        graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, my_func_2.name)
         self.assertEqual(len(output), 1)
@@ -671,10 +673,12 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=my_func,
+            additional_modules=[testing, parameterized],
         )
         graph.add_edge(my_func, my_func_2)
         graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[testing, parameterized]
+            graph,
+            is_remote,
         )
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, my_func_2.name)
@@ -805,12 +809,15 @@ class TestGraphBehaviors(unittest.TestCase):
         def add_two(x: int) -> int:
             return x + 2
 
-        graph = Graph(test_graph_name(self), description="test", start_node=gen_seq)
+        graph = Graph(
+            test_graph_name(self),
+            description="test",
+            start_node=gen_seq,
+            additional_modules=[testing, parameterized],
+        )
         graph.add_edge(gen_seq, ignore_none)
         graph.add_edge(ignore_none, add_two)
-        graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[testing, parameterized]
-        )
+        graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(block_until_done=True, x=5)
         output = graph.output(invocation_id, "add_two")
         self.assertEqual(sorted(output), [2, 4, 6])
@@ -872,11 +879,10 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=my_func1,
+            additional_modules=[testing, parameterized],
         )
         graph.add_edge(my_func1, my_func_2)
-        graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[testing, parameterized]
-        )
+        graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, my_func_2.name)
         self.assertEqual(len(output), 1)

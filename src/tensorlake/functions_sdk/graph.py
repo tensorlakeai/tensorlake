@@ -83,6 +83,7 @@ class Graph:
         description: Optional[str] = None,
         tags: Dict[str, str] = {},
         version: Optional[str] = None,
+        additional_modules: List = [],
     ):
         if version is None:
             # Update graph on every deployment unless user wants to manage the version manually.
@@ -100,6 +101,7 @@ class Graph:
         self.accumulator_zero_values: Dict[str, Any] = {}
         self.tags = tags
         self.version = version
+        self.additional_modules = additional_modules
 
         self.add_node(start_node)
         if issubclass(start_node, TensorlakeRouter):
