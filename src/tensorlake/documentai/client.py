@@ -27,7 +27,7 @@ class DocumentAI:
     def __init__(self, api_key: str = ""):
         self.api_key = api_key
         if not self.api_key:
-            self.api_key = os.getenv("TENSORLAKE_API_KEY")
+            self.api_key = os.getenv("TENSORLAKE_API_KEY").strip()
 
         self._client = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None)
         self._async_client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)

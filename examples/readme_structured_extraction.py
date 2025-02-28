@@ -3,7 +3,7 @@ from datetime import date
 from typing import List, Optional, Dict
 from pydantic import BaseModel, Field
 
-from tensorlake.documentai import DocumentAI, ExtractionOptions
+from tensorlake.documentai import DocumentAI, ExtractionOptions, ParsingOptions
 
 API_KEY = "tl_apiKey_XXXX"
 
@@ -43,7 +43,7 @@ doc_ai = DocumentAI(api_key=API_KEY)
 # or pass an external URL
 file_id = doc_ai.upload(path="./examples/example_bank_statement.pdf")
 
-job_id = doc_ai.extract(file_id, options=ExtractionOptions(jsonSchema=BankStatement.model_json_schema()))
+job_id = doc_ai.parse(file_id, options=ParsingOptions(extraction_options=ExtractionOptions(schema=BankStatement)))
 
 result = doc_ai.get_job(job_id=job_id)
 print(f"job status: {result.status}")
