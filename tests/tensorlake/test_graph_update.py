@@ -75,7 +75,12 @@ class TestGraphUpdate(unittest.TestCase):
             def end_node(x: int) -> int:
                 return x + 2
 
-            g = Graph(name=graph_name, start_node=start_node, version="1.0")
+            g = Graph(
+                name=graph_name,
+                start_node=start_node,
+                version="1.0",
+                additional_modules=[testing, parameterized],
+            )
             g.add_edge(start_node, middle_node)
             g.add_edge(middle_node, end_node)
             return g
@@ -93,7 +98,12 @@ class TestGraphUpdate(unittest.TestCase):
             def end_node2(data: dict) -> int:
                 return data["num"] + 3
 
-            g = Graph(name=graph_name, start_node=start_node2, version="2.0")
+            g = Graph(
+                name=graph_name,
+                start_node=start_node2,
+                version="2.0",
+                additional_modules=[testing, parameterized],
+            )
             g.add_edge(start_node2, middle_node2)
             g.add_edge(middle_node2, end_node2)
             return g, end_node2.name
@@ -111,13 +121,18 @@ class TestGraphUpdate(unittest.TestCase):
             def end_node(data: dict) -> int:
                 return data["num"] + 3
 
-            g = Graph(name=graph_name, start_node=start_node, version="3.0")
+            g = Graph(
+                name=graph_name,
+                start_node=start_node,
+                version="3.0",
+                additional_modules=[testing, parameterized],
+            )
             g.add_edge(start_node, middle_node)
             g.add_edge(middle_node, end_node)
             return g, end_node.name
 
         g = initial_graph()
-        g = RemoteGraph.deploy(g, additional_modules=[testing, parameterized])
+        g = RemoteGraph.deploy(g)
         first_invocation_id = g.run(block_until_done=False, x=0)
 
         if second_graph_name == "second_graph_new_name":
@@ -127,7 +142,7 @@ class TestGraphUpdate(unittest.TestCase):
         # The first invocation should not be affected by the second graph version
         # This loop waits for the first invocation to finish and checks its output.
         time.sleep(0.25)
-        g = RemoteGraph.deploy(g, additional_modules=[testing, parameterized])
+        g = RemoteGraph.deploy(g)
         g.metadata()
         invocation_id = g.run(block_until_done=True, x=0)
         output = g.output(invocation_id, fn_name=end_node_name)

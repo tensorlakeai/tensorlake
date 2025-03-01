@@ -59,8 +59,10 @@ class ImageBuilderClient:
             f"{self.build_service}/v1/builds", headers=self.headers, params=params
         )
         res.raise_for_status()
-        return [Build.model_validate(b) for b in res.json()]
-
+        result = [Build.model_validate(b) for b in res.json()]
+        result.sort(key=lambda b: b.build_completed_at, reverse=True)
+        return result
+    
     def get_latest_build(self, image_name: str) -> Build:
         res = self.client.get(
             f"{self.build_service}/v1/builds",
