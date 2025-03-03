@@ -85,7 +85,8 @@ class RemoteGraph:
 
         :param g: The local Graph object.
         :param additional_modules: List of additional modules to be registered with the graph.
-            Needed for modules that are imported outside of an indexify function.
+            Needed for modules that are imported outside of an indexify function. Modules passed 
+            here will be added to the additional_modules parameters provided to the Graph.
         :param server_url: The URL of the server where the graph will be registered.
             Not used if client is provided.
         :param client: The IndexifyClient used to communicate with the server.
@@ -97,6 +98,11 @@ class RemoteGraph:
         g.validate_graph()
         if not client:
             client = TensorlakeClient(service_url=server_url)
+
+        for mod in g.additional_modules:
+            if mod not in additional_modules:
+                additional_modules.append(mod)
+
         client.register_compute_graph(
             g, additional_modules, upgrade_tasks_to_latest_version
         )
