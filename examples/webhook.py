@@ -7,7 +7,7 @@ from tensorlake.documentai import DocumentAI
 from tensorlake.documentai.parse import ParsingOptions, TableParsingStrategy
 
 
-API_KEY = "tl_apiKey_HTj6kdr7QhGGj6tqMTn6J_LPrTSU4mtgQkUP14oFjtCQZjgfR5Mk"
+API_KEY = "tl_api_key_XXXX"
 
 doc_ai = DocumentAI(api_key=API_KEY)
 
