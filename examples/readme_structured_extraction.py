@@ -1,12 +1,11 @@
 import time
-import json
 from datetime import date
 from typing import List, Optional, Dict
 from pydantic import BaseModel, Field
 
 from tensorlake.documentai import DocumentAI, ExtractionOptions
 
-API_KEY = "tl_apiKey_CTmmqmqgQhwLtgHGwffWz_iNPyz1PRW5n9n3lpI-XPxEEjZq_WZj"
+API_KEY = "tl_apiKey_XXXX"
 
 class Address(BaseModel):
     street: Optional[str] = Field(None, description="Street address")
