@@ -16,7 +16,7 @@ pip install tensorlake
 
 ## Document Ingestion
 
-Document Ingestion APIs enable building RAG or Knowledge Assistants from information in PDFs, Docx or Presentations. It offer two main APIs - 
+Document Ingestion APIs enable building RAG or Knowledge Assistants from information in PDFs, Docx or Presentations. It offers mainly the following capabilities - 
 
 1. Document Parsing - Converts documents to text, and optionally chunk them. It can also extract information from Figure, Charts and Tables.
 
@@ -42,7 +42,7 @@ file_id = doc_ai.upload(path="/path/to/file.pdf")
 job_id = doc_ai.parse(file_id, options=ParsingOptions())
 ```
 
-In addition to OCR, it can summarize figures, charts and tables. The default chunking strategy is by Page, you can change the chunking strategy, the prompts for summarization by configuring `ParsingOptions`. The API is [documented here](https://docs.tensorlake.ai/documentai/parsing#parse-api-reference)
+The default chunking strategy is by Page, you can change the chunking strategy, the prompts for table and figure summarization by configuring `ParsingOptions`. The API is [documented here](https://docs.tensorlake.ai/documentai/parsing#parse-api-reference)
 
 #### Structured Extraction 
 
@@ -60,13 +60,13 @@ class LoanSchema(BaseModel):
     due_data: str = Field(description="Due Date")
 
 options = ParsingOptions(
-    extraction_options=ExtractionOptions(model=LoanSchema)
+    extraction_options=ExtractionOptions(schema=LoanSchema)
 )
 
 job_id = doc_ai.parse(file_id, options=options)
 ```
 
-Structured Extraction is guided by the provided schema. We support Pyndatic Models as well JSON Schema. All the levers for structured extraction are (documented here)[https://docs.tensorlake.ai/api-reference/extract/extract-file-async].
+Structured Extraction is guided by the provided schema. We support Pydantic Models as well JSON Schema. All the levers for structured extraction are (documented here)[https://docs.tensorlake.ai/api-reference/extract/extract-file-async].
 
 We recommend adding a description to each field in the schema, as it helps the model to learn the context of the field.
 
@@ -85,7 +85,7 @@ The SDK includes [Pydantic models](src/tensorlake/documentai/common.py) that des
 
 #### Datasets 
 
-Datasets are a named collection that you can attach some ingestion actions, such as document parsing or structured extraction. Tensorlake automatically applies those functions whenever there are new files ingested into a Dataset. It makes it easy to build a knowledgebase from a corpus of documents and keep them continuously updated when documents are added, updated or removed.
+Datasets are a named collection that you can attach some ingestion actions, such as document parsing or structured extraction. These operations are automatically applied whenever new files are uploaded to the datasets.
 
 1. Create a Dataset 
 ```python
@@ -117,9 +117,13 @@ items = dataset.items()
 
 A dataset can be in any of these states - `idle`, `processing`. You can also configure a webhook to receive updates for each file that is processed.
 
-## Serverless Workflows
+## Webhooks
 
-Serverless Workflows enables building and deploy custom data processing workflows in Python. The workflows listen to API requests, and scale up on-demand to process data on the cloud. A function can do anything from calling a web service to loading a data model into a GPU and running inference on it. Tensorlake will provision the required compute resources and run as many copies of a function as needed.
+You can get notified by Tensorlake when documents are ingested. Here is a [code example](examples/webhook.py).
+
+## End-to-End Data Workflows
+
+Workflows enables building and deploy data processing workflows in Python. Once deployed, the workflows are exposed as a REST API, and scale up on-demand to process data on the cloud. Functions in workflows can do anything from calling a web service to loading a data model into a GPU and running inference on it. Tensorlake will provision the required compute resources and run as many copies of a function as needed.
 
 ### Quickstart
 
