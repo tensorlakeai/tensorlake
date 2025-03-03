@@ -121,7 +121,7 @@ A dataset can be in any of these states - `idle`, `processing`. You can also con
 
 You can get notified by Tensorlake when documents are ingested. Here is a [code example](examples/webhook.py).
 
-## End-to-End Data Workflows
+## Custom Data Workflows
 
 Workflows enables building and deploy data processing workflows in Python. Once deployed, the workflows are exposed as a REST API, and scale up on-demand to process data on the cloud. Functions in workflows can do anything from calling a web service to loading a data model into a GPU and running inference on it. Tensorlake will provision the required compute resources and run as many copies of a function as needed.
 
