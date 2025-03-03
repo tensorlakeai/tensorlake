@@ -4,7 +4,7 @@ import time
 from pydantic import BaseModel
 
 from tensorlake.documentai import DocumentAI
-from tensorlake.documentai.parse import ExtractionOptions, ParsingOptions
+from tensorlake.documentai.parse import ExtractionOptions, ParsingOptions, TableParsingStrategy
 
 
 class PaperSchema(BaseModel):
@@ -30,6 +30,7 @@ json_schema = PaperSchema.model_json_schema()
 job_id = doc_ai.parse(
     file_id,
     options=ParsingOptions(
+        table_parsing_strategy=TableParsingStrategy.VLM,
         extraction_options=ExtractionOptions(model=json.dumps(json_schema))
     ),
 )

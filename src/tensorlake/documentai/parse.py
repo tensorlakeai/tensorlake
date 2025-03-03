@@ -53,7 +53,7 @@ class ModelProvider(str, Enum):
     The model provider to use for structured data extraction.
 
     TENSORLAKE: private models, running on Tensorlake infrastructure.
-    SONNET: Claude 3.5 Sonnet model.
+    SONNET: Claude 3.7 Sonnet model.
     GPT4OMINI: GPT-4o-mini model.
     """
 
@@ -78,7 +78,8 @@ class ParsingOptions(BaseModel):
     """
 
     chunking_strategy: Optional[ChunkingStrategy] = None
-    table_parsing_strategy: TableParsingStrategy = TableParsingStrategy.TSR
+    skew_correction: bool = False
+    table_parsing_strategy: TableParsingStrategy = TableParsingStrategy.VLM
     table_parsing_prompt: Optional[str] = None
     figure_summarization_prompt: Optional[str] = None
     table_output_mode: TableOutputMode = TableOutputMode.MARKDOWN
