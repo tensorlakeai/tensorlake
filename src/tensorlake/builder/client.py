@@ -62,7 +62,7 @@ class ImageBuilderClient:
         result = [Build.model_validate(b) for b in res.json()]
         result.sort(key=lambda b: b.build_completed_at, reverse=True)
         return result
-    
+
     def get_latest_build(self, image_name: str) -> Build:
         res = self.client.get(
             f"{self.build_service}/v1/builds",
@@ -74,3 +74,12 @@ class ImageBuilderClient:
         builds.sort(key=lambda b: b.created_at, reverse=True)
         if builds:
             return builds[0]
+
+    def retry_build(self, build_id: int):
+        request = self.client.post(
+            f"{self.build_service}/v1/builds/{build_id}/rebuild",
+            headers=self.headers,
+        )
+        request.raise_for_status()
+
+        return Build.model_validate(request.json())

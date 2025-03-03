@@ -85,7 +85,7 @@ class RemoteGraph:
 
         :param g: The local Graph object.
         :param additional_modules: List of additional modules to be registered with the graph.
-            Needed for modules that are imported outside of an indexify function. Modules passed 
+            Needed for modules that are imported outside of an indexify function. Modules passed
             here will be added to the additional_modules parameters provided to the Graph.
         :param server_url: The URL of the server where the graph will be registered.
             Not used if client is provided.
