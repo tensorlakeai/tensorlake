@@ -11,7 +11,7 @@ from typing import Optional, Union
 
 import httpx
 from retry import retry
-
+from pydantic import Json
 from tensorlake.documentai.common import DOC_AI_BASE_URL, PaginatedResult
 from tensorlake.documentai.datasets import Dataset, DatasetOptions
 from tensorlake.documentai.files import FileInfo, FileUploader
@@ -27,7 +27,7 @@ class DocumentAI:
     def __init__(self, api_key: str = ""):
         self.api_key = api_key
         if not self.api_key:
-            self.api_key = os.getenv("TENSORLAKE_API_KEY")
+            self.api_key = os.getenv("TENSORLAKE_API_KEY").strip()
 
         self._client = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None)
         self._async_client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
@@ -127,17 +127,17 @@ class DocumentAI:
     def __create_parse_settings__(self, options: ParsingOptions) -> dict:
         json_schema = None
         if options.extraction_options:
-            if isinstance(options.extraction_options.model, str):
-                json_schema = json.loads(options.extraction_options.model)
+            if isinstance(options.extraction_options.schema, Json):
+                json_schema = json.loads(options.extraction_options.schema)
             else:
-                json_schema = options.extraction_options.model.model_json_schema()
+                json_schema = options.extraction_options.schema.model_json_schema()
 
         return {
             "chunkStrategy": (
                 options.chunking_strategy.value if options.chunking_strategy else None
             ),
             "tableOutputMode": options.table_output_mode.value,
-            "tableParsingStrategy": options.table_parsing_strategy.value,
+            "tableParsingMode": options.table_parsing_strategy.value,
             "tableSummarizationPrompt": options.table_parsing_prompt,
             "figureSummarizationPrompt": options.figure_summarization_prompt,
             "jsonSchema": json_schema,
@@ -153,11 +153,11 @@ class DocumentAI:
             ),
         }
 
-    def __create_parse_req__(self, file: str, options: ParsingOptions) -> dict:
+    def __create_parse_req__(self, file: str, options: ParsingOptions, deliver_webhook: bool) -> dict:
         payload = {
             "file": file,
             "pages": options.page_range,
-            "deliverWebhook": options.deliver_webhook,
+            "deliverWebhook": deliver_webhook,
             "settings": self.__create_parse_settings__(options),
         }
 
@@ -184,14 +184,14 @@ class DocumentAI:
         result = PaginatedResult[FileInfo].model_validate(response.json())
         return result
 
-    def parse(self, file: str, options: ParsingOptions, timeout: int = 5) -> str:
+    def parse(self, file: str, options: ParsingOptions, timeout: int = 5, deliver_webhook: bool = False) -> str:
         """
         Parse a document.
         """
-        return asyncio.run(self.parse_async(file, options, timeout))
+        return asyncio.run(self.parse_async(file, options, timeout, deliver_webhook))
 
     async def parse_async(
-        self, file: str, options: ParsingOptions, timeout: int = 5
+        self, file: str, options: ParsingOptions, timeout: int = 5, deliver_webhook: bool = False
     ) -> str:
         """
         Parse a document asynchronously.
@@ -199,7 +199,7 @@ class DocumentAI:
         response = await self._async_client.post(
             url="/parse",
             headers=self.__headers__(),
-            json=self.__create_parse_req__(file, options),
+            json=self.__create_parse_req__(file, options, deliver_webhook),
         )
         try:
             response.raise_for_status()
