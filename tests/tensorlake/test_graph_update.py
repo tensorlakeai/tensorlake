@@ -40,7 +40,7 @@ class TestGraphUpdate(unittest.TestCase):
         g = Graph(
             name=test_graph_name(self),
             start_node=start_func_v1,
-	    version="2.0",
+            version="2.0",
         )
         g.add_edge(start_func_v1, end_func_v2)
         g = RemoteGraph.deploy(g, upgrade_tasks_to_latest_version=True)

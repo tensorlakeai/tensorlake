@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import inspect
 import os
@@ -21,8 +22,10 @@ def tensorlake():
 
 
 @click.command()
+@click.option("-p", "--parallel-builds", is_flag=True, default=False)
+@click.option("-r", "--retry", is_flag=True, default=False)
 @click.argument("workflow_file", type=click.File("r"))
-def deploy(workflow_file: click.File):
+def deploy(workflow_file: click.File, parallel_builds: bool, retry: bool):
     """Deploy a workflow to tensorlake."""
 
     click.echo(f"Preparing deployment for {workflow_file.name}")
@@ -45,28 +48,23 @@ def deploy(workflow_file: click.File):
                     continue
                 seen_images[image] = image.hash()
 
-    _prepare_images(builder, seen_images)
+    asyncio.run(
+        _prepare_images(
+            builder, seen_images, parallel_builds=parallel_builds, retry=retry
+        )
+    )
 
     # If we are still here then our images should all have URIs
-
-    # TODO: Fold calls to the platform API into a client class.
     project_id = _get_project_id()
-
     client = TensorlakeClient(namespace=project_id)
     click.secho("Everything looks good, deploying now", fg="green")
     for graph in deployed_graphs:
         # TODO: Every time we post we get a new version, is that expected or the client should do the checks?
         remote = RemoteGraph.deploy(graph, client=client)
+        click.secho(f"Deployed {graph.name}", fg="green")
 
 
-def _wait_for_build(builder: ImageBuilderClient, build: Build):
-    click.echo(f"Waiting for {build.image_name} to start building")
-    while build.status != "building":
-        time.sleep(1)
-        build = builder.get_build(build.id)
-
-    # Start streaming logs
-
+def _stream_build_log(builder: ImageBuilderClient, build: Build, print_logs=True):
     with builder.client.stream(
         "GET",
         f"{builder.build_service}/v1/builds/{build.id}/log",
@@ -74,7 +72,23 @@ def _wait_for_build(builder: ImageBuilderClient, build: Build):
         headers=builder.headers,
     ) as r:
         for line in r.iter_lines():
-            print(line)
+            if print_logs:
+                print(line)
+
+
+async def _wait_for_build(builder: ImageBuilderClient, build: Build, print_logs=True):
+    click.echo(f"Waiting for {build.image_name} to start building")
+    while build.status == "ready":
+        await asyncio.sleep(5)
+        build = builder.get_build(build.id)
+
+    # Start streaming logs
+    await asyncio.to_thread(_stream_build_log, builder, build, print_logs=print_logs)
+    build = builder.get_build(build.id)
+
+    while build.status != "completed":
+        await asyncio.sleep(5)
+        build = builder.get_build(build.id)
 
     if build.push_completed_at:
         build_duration = build.build_completed_at - build.push_completed_at
@@ -82,8 +96,8 @@ def _wait_for_build(builder: ImageBuilderClient, build: Build):
     return build
 
 
-def _build_image(
-    builder: ImageBuilderClient, image: Image, image_hash: str = ""
+async def _build_image(
+    builder: ImageBuilderClient, image: Image, image_hash: str = "", print_logs=True
 ) -> Build:
     click.echo(f"Building {image._image_name}")
     fd, context_file = tempfile.mkstemp()
@@ -104,8 +118,7 @@ def _build_image(
     )
     res.raise_for_status()
     build = Build.model_validate(res.json())
-
-    return _wait_for_build(builder, build)
+    return await _wait_for_build(builder, build, print_logs=print_logs)
 
 
 def _show_failed_summary(builder: ImageBuilderClient, build: Build):
@@ -126,9 +139,16 @@ def _show_failed_summary(builder: ImageBuilderClient, build: Build):
         log_response.raise_for_status()
 
 
-def _prepare_images(builder: ImageBuilderClient, images: Dict[Image, str]):
+async def _prepare_images(
+    builder: ImageBuilderClient,
+    images: Dict[Image, str],
+    parallel_builds=False,
+    retry=False,
+):
+    build_tasks = {}
     ready_builds: Dict[Image, Build] = {}
-    # Go through the images and build anything that hasn't been built
+
+    # Iterate through the images and build anything that hasn't been built
     for image, image_hash in images.items():
         builds = builder.find_build(image._image_name, image_hash)
 
@@ -137,19 +157,56 @@ def _prepare_images(builder: ImageBuilderClient, images: Dict[Image, str]):
             if build.status == "completed":
                 if build.result == "failed":
                     _show_failed_summary(builder, build)
+                    if retry:
+                        click.secho(f"Retrying failed build '{build.image_name}'")
+                        build = builder.retry_build(build.id)
+                        task = asyncio.create_task(
+                            _wait_for_build(
+                                builder, build, print_logs=not parallel_builds
+                            )
+                        )
+                        build_tasks[image] = task
+                        if not parallel_builds:  # Await the task serially
+                            await task
+
                 else:
                     click.secho(f"Image '{build.image_name}' is built", fg="green")
                     ready_builds[image] = build
 
             elif build.status in ("ready", "building"):
-                build = _wait_for_build(builder, build)
-                if build.result != "failed":
-                    ready_builds[image] = build
-                else:
-                    _show_failed_summary(builder, build)
+                task = asyncio.create_task(
+                    _wait_for_build(builder, build, print_logs=not parallel_builds)
+                )
+                build_tasks[image] = task
+                if not parallel_builds:  # Await the task serially
+                    await task
 
         else:
-            ready_builds[image] = _build_image(builder, image, image_hash=image_hash)
+            task = asyncio.create_task(
+                _build_image(
+                    builder,
+                    image,
+                    image_hash=image_hash,
+                    print_logs=not parallel_builds,
+                )
+            )
+            build_tasks[image] = task
+            if not parallel_builds:  # Await the task serially
+                await task
+
+    # Collect the results for our builds
+    while True:
+        for image, task in dict(build_tasks).items():
+            if task.done():
+                build_tasks.pop(image)
+                build = task.result()
+                if build.result != "failed":
+                    ready_builds[image] = build
+
+        if len(build_tasks) == 0:
+            break
+        else:
+            await asyncio.sleep(1)
 
     # Find any blockers and report them to the users
     blockers = []
@@ -163,6 +220,7 @@ def _prepare_images(builder: ImageBuilderClient, images: Dict[Image, str]):
         else:
             build = ready_builds[image]
             image.uri = build.uri
+
     if blockers:
         raise click.Abort
 
@@ -197,7 +255,7 @@ def prepare(workflow_file: click.File):
     """Prepare a workflow and it's artifacts for deployment."""
 
     click.echo(f"Preparing deployment for {workflow_file.name}")
-    client = ImageBuilderClient.from_env()
+    builder = ImageBuilderClient.from_env()
     seen_images: Dict[Image, str] = {}
 
     workflow = _import_workflow_file(workflow_file.name)
@@ -219,7 +277,7 @@ def prepare(workflow_file: click.File):
                 seen_images[image] = image.hash()
 
     click.echo(f"Found {len(seen_images)} images in this workflow")
-    _prepare_images(client, seen_images)
+    asyncio.run(_prepare_images(builder, seen_images))
 
 
 @click.command(help="Extract and display logs from tensorlake")

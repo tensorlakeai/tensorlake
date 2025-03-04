@@ -10,9 +10,28 @@ from pydantic import BaseModel
 
 from tensorlake import Graph, Image, tensorlake_function
 
-mapper_image = Image().name("generator").run("pip install httpx")
-process_image = Image().name("process").run("pip install numpy")
-reducer_image = Image().name("adder").run("pip install httpx")
+mapper_image = (
+    Image()
+    .name("generator")
+    .run("pip install dotenv")
+    .run("echo foo bar crap")
+    .run("foo")
+)
+
+process_image = (
+    Image()
+    .name("process")
+    .run("pip install dotenv")
+    .run("echo foo bar crap")
+    .run("echo again again")
+)
+reducer_image = (
+    Image()
+    .name("adder")
+    .run("pip install dotenv")
+    .run("echo foo bar crap")
+    .run("echo again again")
+)
 
 
 class Total(BaseModel):

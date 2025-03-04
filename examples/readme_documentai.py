@@ -3,7 +3,11 @@ import time
 from pydantic import BaseModel
 
 from tensorlake.documentai import DocumentAI
-from tensorlake.documentai.parse import ExtractionOptions, ParsingOptions, TableParsingStrategy
+from tensorlake.documentai.parse import (
+    ExtractionOptions,
+    ParsingOptions,
+    TableParsingStrategy,
+)
 
 
 class PaperSchema(BaseModel):
@@ -26,11 +30,11 @@ doc_ai = DocumentAI(api_key=API_KEY)
 file_id = doc_ai.upload(path="/path/to/files")
 
 job_id = doc_ai.parse(
-    file_id, # You can pass in a publicly accessible URL instead of a file_id
-    #"https://arxiv.org/pdf/2409.13148",
+    file_id,  # You can pass in a publicly accessible URL instead of a file_id
+    # "https://arxiv.org/pdf/2409.13148",
     options=ParsingOptions(
         table_parsing_strategy=TableParsingStrategy.VLM,
-        extraction_options=ExtractionOptions(schema=PaperSchema)
+        extraction_options=ExtractionOptions(schema=PaperSchema),
     ),
 )
 
