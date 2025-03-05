@@ -1,13 +1,12 @@
-import os
-import subprocess
-from typing import Iterator, Optional
+import time
+from typing import Any, Iterator, Optional
 
 import grpc
-import structlog
 
 from tensorlake.functions_sdk.functions import TensorlakeFunctionWrapper
 from tensorlake.functions_sdk.object_serializer import get_serializer
 
+from .handlers.check_health.handler import Handler as CheckHealthHandler
 from .handlers.run_function.handler import Handler as RunTaskHandler
 from .handlers.run_function.request_validator import (
     RequestValidator as RunTaskRequestValidator,
@@ -31,22 +30,22 @@ from .proto.function_executor_pb2_grpc import FunctionExecutorServicer
 
 
 class Service(FunctionExecutorServicer):
-    def __init__(self):
-        self._logger = structlog.get_logger(module=__name__).bind(
-            **info_response_kv_args()
-        )
+    def __init__(self, logger: Any):
+        self._logger = logger.bind(module=__name__, **info_response_kv_args())
         self._namespace: Optional[str] = None
         self._graph_name: Optional[str] = None
         self._graph_version: Optional[str] = None
         self._function_name: Optional[str] = None
         self._function_wrapper: Optional[TensorlakeFunctionWrapper] = None
         self._invocation_state_proxy_server: Optional[InvocationStateProxyServer] = None
-        self._enable_gpu_health_checks = False
-        self._logged_gpu_health_check_failure = False
+        self._check_health_handler = CheckHealthHandler(self._logger)
 
     def initialize(
         self, request: InitializeRequest, context: grpc.ServicerContext
     ) -> InitializeResponse:
+        start_time = time.monotonic()
+        self._logger.info("initializing function executor service")
+
         request_validator: InitializeRequestValidator = InitializeRequestValidator(
             request
         )
@@ -67,16 +66,6 @@ class Service(FunctionExecutorServicer):
             graph_version=request.graph_version,
             function_name=request.function_name,
         )
-        # NVIDIA_VISIBLE_DEVICES is set by NVIDIA Docker runtime when GPUs are provided.
-        # nvidia-smi is installed with NVIDIA GPU drivers.
-        # If both are available then run health checks to detect that the Function Executor
-        # is currently affected by known issue https://github.com/NVIDIA/nvidia-container-toolkit/issues/857.
-        if (
-            "NVIDIA_VISIBLE_DEVICES" in os.environ
-            and os.system("which -s nvidia-smi") == 0
-        ):
-            self._enable_gpu_health_checks = True
-            self._logger.info("enabling GPU health checks")
 
         graph_serializer = get_serializer(request.graph.content_type)
         try:
@@ -87,9 +76,17 @@ class Service(FunctionExecutorServicer):
             function = graph_serializer.deserialize(graph[request.function_name])
             self._function_wrapper = TensorlakeFunctionWrapper(function)
         except Exception as e:
+            self._logger.error(
+                "function executor service initialization failed",
+                reason="failed to load customer function",
+                duration_sec=f"{time.monotonic() - start_time:.3f}",
+            )
             return InitializeResponse(success=False, customer_error=str(e))
 
-        self._logger.info("initialized function executor service")
+        self._logger.info(
+            "initialized function executor service",
+            duration_sec=f"{time.monotonic() - start_time:.3f}",
+        )
         return InitializeResponse(success=True)
 
     def initialize_invocation_state_server(
@@ -97,10 +94,17 @@ class Service(FunctionExecutorServicer):
         client_responses: Iterator[InvocationStateResponse],
         context: grpc.ServicerContext,
     ):
+        start_time = time.monotonic()
+        self._logger.info("initializing invocation proxy server")
+
         self._invocation_state_proxy_server = InvocationStateProxyServer(
             client_responses, self._logger
         )
-        self._logger.info("initialized invocation proxy server")
+
+        self._logger.info(
+            "initialized invocation proxy server",
+            duration_sec=f"{time.monotonic() - start_time:.3f}",
+        )
         yield from self._invocation_state_proxy_server.run()
 
     def run_task(
@@ -149,35 +153,7 @@ class Service(FunctionExecutorServicer):
     def check_health(
         self, request: HealthCheckRequest, context: grpc.ServicerContext
     ) -> HealthCheckResponse:
-        # This health check validates that the Server:
-        # - Has its process alive (not exited).
-        # - Didn't exhaust its thread pool.
-        # - Is able to communicate over its server socket.
-        # - If NVIDIA GPUs are available then verify that they are working okay.
-        if self._enable_gpu_health_checks:
-            return self._gpu_health_check()
-        else:
-            return HealthCheckResponse(healthy=True)
-
-    def _gpu_health_check(self) -> HealthCheckResponse:
-        result: subprocess.CompletedProcess = subprocess.run(
-            ["nvidia-smi"],
-            capture_output=True,
-            text=True,
-        )
-        gpu_health_check_ok = result.returncode == 0
-        if gpu_health_check_ok:
-            return HealthCheckResponse(healthy=True)
-
-        # Only log this error once to avoid log spam.
-        if not self._logged_gpu_health_check_failure:
-            self._logged_gpu_health_check_failure = True
-            self._logger.error(
-                "NVIDIA GPU health check failed.",
-                nvidia_smi_output=result.stdout,
-                nvidia_smi_error=result.stderr,
-            )
-        return HealthCheckResponse(healthy=False)
+        return self._check_health_handler.run(request)
 
     def get_info(
         self, request: InfoRequest, context: grpc.ServicerContext

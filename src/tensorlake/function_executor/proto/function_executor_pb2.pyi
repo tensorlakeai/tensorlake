@@ -219,10 +219,14 @@ class HealthCheckRequest(_message.Message):
     def __init__(self) -> None: ...
 
 class HealthCheckResponse(_message.Message):
-    __slots__ = ("healthy",)
+    __slots__ = ("healthy", "status_message")
     HEALTHY_FIELD_NUMBER: _ClassVar[int]
+    STATUS_MESSAGE_FIELD_NUMBER: _ClassVar[int]
     healthy: bool
-    def __init__(self, healthy: bool = ...) -> None: ...
+    status_message: str
+    def __init__(
+        self, healthy: bool = ..., status_message: _Optional[str] = ...
+    ) -> None: ...
 
 class InfoRequest(_message.Message):
     __slots__ = ()

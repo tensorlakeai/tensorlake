@@ -1,5 +1,6 @@
 import io
 import sys
+import time
 import traceback
 from contextlib import redirect_stderr, redirect_stdout
 from typing import Any
@@ -35,6 +36,7 @@ class Handler:
         self._function_name: str = function_name
         self._invocation_state: InvocationState = invocation_state
         self._logger = logger.bind(
+            module=__name__,
             graph_invocation_id=request.graph_invocation_id,
             task_id=request.task_id,
         )
@@ -53,8 +55,14 @@ class Handler:
         Details of customer function failure are returned in the response.
         """
         self._logger.info("running function")
+        start_time = time.monotonic()
         inputs: FunctionInputs = self._input_loader.load()
-        return self._run_func_safe_and_captured(inputs)
+        response: RunTaskResponse = self._run_func_safe_and_captured(inputs)
+        self._logger.info(
+            "function finished",
+            duration_sec=f"{time.monotonic() - start_time:.3f}",
+        )
+        return response
 
     def _run_func_safe_and_captured(self, inputs: FunctionInputs) -> RunTaskResponse:
         """Runs the customer function while capturing what happened in it.

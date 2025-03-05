@@ -22,7 +22,9 @@ DEFAULT_FUNCTION_EXECUTOR_PORT: int = 60000
 
 
 class FunctionExecutorProcessContextManager:
-    def __init__(self, port: int = DEFAULT_FUNCTION_EXECUTOR_PORT):
+    def __init__(
+        self, port: int = DEFAULT_FUNCTION_EXECUTOR_PORT, extra_args: List[str] = []
+    ):
         self._args = [
             "function-executor",
             "--dev",
@@ -31,6 +33,7 @@ class FunctionExecutorProcessContextManager:
             "--executor-id",
             "test-executor",
         ]
+        self._args.extend(extra_args)
         self._process: Optional[subprocess.Popen] = None
         self.port = port
 
