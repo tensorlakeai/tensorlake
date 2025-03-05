@@ -15,10 +15,8 @@ from .info import info_response_kv_args
 from .server import Server
 from .service import Service
 
-logger: Any = None
 
-
-def validate_args(args):
+def validate_args(args, logger: Any):
     if args.address is None:
         logger.error("--address argument is required")
         exit(1)
@@ -29,7 +27,6 @@ def validate_args(args):
 
 
 def main():
-    global logger
     parser = argparse.ArgumentParser(
         description="Runs Function Executor with the specified API server address"
     )
@@ -42,7 +39,10 @@ def main():
     parser.add_argument(
         "-d", "--dev", help="Run in development mode", action="store_true"
     )
-    args = parser.parse_args()
+    # TODO: Add --function-executor-id after all used Function Executors allow unknown CLI arguments.
+
+    # Don't fail if unknown arguments are present. This supports backward compatibility when new args are added.
+    args, ignored_args = parser.parse_known_args()
 
     if args.dev:
         configure_development_mode_logging()
@@ -50,14 +50,17 @@ def main():
         configure_production_mode_logging()
 
     logger = structlog.get_logger(module=__name__)
-    validate_args(args)
+    validate_args(args, logger)
 
+    # TODO: Add function-executor-id to logger context.
     logger = logger.bind(executor_id=args.executor_id, **info_response_kv_args())
     logger.info("starting function executor server", address=args.address, dev=args.dev)
+    if len(ignored_args) > 0:
+        logger.warning("ignored cli arguments", ignored_args=ignored_args)
 
     Server(
         server_address=args.address,
-        service=Service(),
+        service=Service(logger),
     ).run()
 
 

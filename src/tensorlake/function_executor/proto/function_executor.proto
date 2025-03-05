@@ -110,6 +110,7 @@ message HealthCheckRequest {}
 
 message HealthCheckResponse {
     optional bool healthy = 1;
+    optional string status_message = 2;
 }
 
 message InfoRequest {}

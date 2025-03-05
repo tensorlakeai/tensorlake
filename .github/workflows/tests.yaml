@@ -20,7 +20,7 @@ permissions: # These are required to log into ECR, remove when no longer require
 jobs:
   lint_python_packages:
     name: Lint and test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-xlarge
     steps:
       - uses: actions/checkout@v4
       
