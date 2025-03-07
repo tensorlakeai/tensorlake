@@ -64,17 +64,15 @@ def deploy(workflow_file: click.File, parallel_builds: bool, retry: bool):
         click.secho(f"Deployed {graph.name}", fg="green")
 
 
-def _stream_build_log(builder: ImageBuilderClient, build: Build, print_logs=True):
+def _stream_build_log(builder: ImageBuilderClient, build: Build):
     with builder.client.stream(
         "GET",
         f"{builder.build_service}/v1/builds/{build.id}/log",
-        timeout=500,
+        timeout=600,
         headers=builder.headers,
     ) as r:
         for line in r.iter_lines():
-            if print_logs:
-                print(line)
-
+            print(line)
 
 async def _wait_for_build(builder: ImageBuilderClient, build: Build, print_logs=True):
     click.echo(f"Waiting for {build.image_name} to start building")
@@ -83,8 +81,9 @@ async def _wait_for_build(builder: ImageBuilderClient, build: Build, print_logs=
         build = builder.get_build(build.id)
 
     # Start streaming logs
-    await asyncio.to_thread(_stream_build_log, builder, build, print_logs=print_logs)
-    build = builder.get_build(build.id)
+    if print_logs:
+        await asyncio.to_thread(_stream_build_log, builder, build)
+        build = builder.get_build(build.id)
 
     while build.status != "completed":
         await asyncio.sleep(5)
@@ -165,9 +164,10 @@ async def _prepare_images(
                                 builder, build, print_logs=not parallel_builds
                             )
                         )
-                        build_tasks[image] = task
                         if not parallel_builds:  # Await the task serially
                             await task
+                        else:
+                            build_tasks[task] = image
 
                 else:
                     click.secho(f"Image '{build.image_name}' is built", fg="green")
@@ -177,9 +177,10 @@ async def _prepare_images(
                 task = asyncio.create_task(
                     _wait_for_build(builder, build, print_logs=not parallel_builds)
                 )
-                build_tasks[image] = task
                 if not parallel_builds:  # Await the task serially
                     await task
+                else:
+                    build_tasks[task] = image
 
         else:
             task = asyncio.create_task(
@@ -190,13 +191,23 @@ async def _prepare_images(
                     print_logs=not parallel_builds,
                 )
             )
-            build_tasks[image] = task
             if not parallel_builds:  # Await the task serially
                 await task
+            else:
+                build_tasks[task] = image
+    
+    task_exceptions = {}
+    for task in asyncio.as_completed(build_tasks.keys()):
+        try:
+            await task
+        except Exception as e:
+            task_exceptions[task] = e
+
 
     # Collect the results for our builds
     while True:
         for image, task in dict(build_tasks).items():
+
             if task.done():
                 build_tasks.pop(image)
                 build = task.result()
