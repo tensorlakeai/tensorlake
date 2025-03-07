@@ -57,11 +57,13 @@ _suppress_logging = False
 
 def structlog_suppressor(logger, name, event_dict):
     global _suppress_logging
-    return None if _suppress_logging else event_dict
+    if _suppress_logging:
+        raise structlog.DropEvent
+    else:
+        return event_dict
 
 
 def suppress():
-    """Sets the log level for the root logger to the new level."""
     global _suppress_logging
     _suppress_logging = True
     logging.getLogger().setLevel(logging.CRITICAL)

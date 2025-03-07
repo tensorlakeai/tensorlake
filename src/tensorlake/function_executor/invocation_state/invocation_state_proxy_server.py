@@ -2,6 +2,8 @@ import queue
 import threading
 from typing import Any, Iterator, Optional
 
+import grpc
+
 from tensorlake.functions_sdk.object_serializer import (
     CloudPickleSerializer,
     get_serializer,
@@ -63,12 +65,22 @@ class InvocationStateProxyServer:
                 with self._lock:
                     self._response_map[response.request_id] = response
                     self._new_response.notify_all()
+        except grpc.RpcError:
+            self._logger.warning("shutting down, looks like client disconnected")
+            # This is the only shutdown path for the server.
+            self._request_queue.put("shutdown")
         except Exception as e:
             self._logger.error("error in reciever thread, exiting", exc_info=e)
 
     def _sender(self) -> Iterator[InvocationStateRequest]:
         while True:
-            yield self._request_queue.get()
+            request: Any = self._request_queue.get()
+            if request == "shutdown":
+                self._logger.warning("sender thread shutting down")
+                return
+
+            request: InvocationStateRequest
+            yield request
             with self._lock:
                 # Wait until we get a response for the request.
                 # This allows to ensure a serialized order of reads and writes so
