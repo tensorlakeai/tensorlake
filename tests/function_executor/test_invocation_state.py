@@ -1,7 +1,9 @@
 import threading
+import time
 import unittest
-from typing import Any, Dict, List
+from typing import Any, Dict, Generator, Iterator, List
 
+import grpc
 from pydantic import BaseModel
 from testing import (
     DEFAULT_FUNCTION_EXECUTOR_PORT,
@@ -404,6 +406,104 @@ class TestGetInvocationState(unittest.TestCase):
                     "Joining invocation state client thread, it should exit immediately..."
                 )
                 client_thread.join()
+
+
+class TestInvocationStateServerReconnect(unittest.TestCase):
+    def test_second_initialize_invocation_state_server_request_fails(self):
+        def infinite_response_generator() -> (
+            Generator[InvocationStateResponse, None, None]
+        ):
+            while True:
+                yield InvocationStateResponse(
+                    request_id="0", success=True, set=SetInvocationStateResponse()
+                )
+
+        with FunctionExecutorProcessContextManager(
+            DEFAULT_FUNCTION_EXECUTOR_PORT + 5
+        ) as fe:
+            with rpc_channel(fe) as channel:
+                stub: FunctionExecutorStub = FunctionExecutorStub(channel)
+                first_request_iterator: Iterator[InvocationStateRequest] = (
+                    stub.initialize_invocation_state_server(
+                        infinite_response_generator()
+                    )
+                )
+                # The fact that first request iterator works correctly is checked in other tests.
+
+                # The second request should fail because there's already a proxy server running.
+                second_request_iterator: Iterator[InvocationStateRequest] = (
+                    stub.initialize_invocation_state_server(
+                        infinite_response_generator()
+                    )
+                )
+                try:
+                    for request in second_request_iterator:
+                        self.fail(
+                            "Second request iterator should not return any requests but should raise an exception"
+                        )
+                except grpc.RpcError as e:
+                    self.assertEqual(grpc.StatusCode.ALREADY_EXISTS, e.code())
+
+    def test_second_initialize_invocation_state_server_request_succeeds_after_channel_close(
+        self,
+    ):
+        def infinite_response_generator() -> (
+            Generator[InvocationStateResponse, None, None]
+        ):
+            while True:
+                yield InvocationStateResponse(
+                    request_id="0", success=True, set=SetInvocationStateResponse()
+                )
+
+        with FunctionExecutorProcessContextManager(
+            DEFAULT_FUNCTION_EXECUTOR_PORT + 5
+        ) as fe:
+            with rpc_channel(fe) as channel_1:
+                stub: FunctionExecutorStub = FunctionExecutorStub(channel_1)
+                first_request_iterator: Iterator[InvocationStateRequest] = (
+                    stub.initialize_invocation_state_server(
+                        infinite_response_generator()
+                    )
+                )
+                # On exit from this with block the channel is closed and proxy server should cleanely shutdown.
+
+            time.sleep(5)  # Wait until the channel closes and proxy server shuts down.
+
+            with rpc_channel(fe) as channel_2:
+                stub: FunctionExecutorStub = FunctionExecutorStub(channel_2)
+                # The second request should succeed because the first channel was closed with results in clean proxy server shutdown.
+                second_request_iterator: Iterator[InvocationStateRequest] = (
+                    stub.initialize_invocation_state_server(
+                        infinite_response_generator()
+                    )
+                )
+
+                def thread_func():
+                    try:
+                        for request in second_request_iterator:
+                            self.fail(
+                                "Second request iterator should not return any requests"
+                            )
+                    except grpc.RpcError as e:
+                        self.assertEqual(
+                            grpc.StatusCode.CANCELLED, e.code()
+                        )  # This happens when we close the channel
+                    except Exception as e:
+                        self.fail(
+                            "Second request iterator should not raise any exceptions"
+                        )
+
+                thread = threading.Thread(target=thread_func)
+                thread.start()
+                time.sleep(
+                    5
+                )  # Wait for the thread to start and check that it doesn't raise any exceptions.
+                self.assertTrue(
+                    thread.is_alive()
+                )  # Check that the thread is still blocked on the iterator without any Exceptions.
+
+            # channel_2 is closed, the thread should return immediately.
+            thread.join()
 
 
 if __name__ == "__main__":

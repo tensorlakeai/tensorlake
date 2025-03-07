@@ -1,5 +1,5 @@
 import time
-from typing import Any, Iterator, Optional
+from typing import Any, Generator, Iterator, Optional
 
 import grpc
 
@@ -22,6 +22,7 @@ from .proto.function_executor_pb2 import (
     InfoResponse,
     InitializeRequest,
     InitializeResponse,
+    InvocationStateRequest,
     InvocationStateResponse,
     RunTaskRequest,
     RunTaskResponse,
@@ -93,9 +94,18 @@ class Service(FunctionExecutorServicer):
         self,
         client_responses: Iterator[InvocationStateResponse],
         context: grpc.ServicerContext,
-    ):
+    ) -> Generator[InvocationStateRequest, None, None]:
         start_time = time.monotonic()
         self._logger.info("initializing invocation proxy server")
+
+        if self._invocation_state_proxy_server is not None:
+            self._logger.error(
+                "invocation state proxy server already exists, looks like client reconnected without disconnecting first"
+            )
+            context.abort(
+                grpc.StatusCode.ALREADY_EXISTS,
+                "invocation state proxy server already exists, please disconnect first",
+            )
 
         self._invocation_state_proxy_server = InvocationStateProxyServer(
             client_responses, self._logger
@@ -106,6 +116,7 @@ class Service(FunctionExecutorServicer):
             duration_sec=f"{time.monotonic() - start_time:.3f}",
         )
         yield from self._invocation_state_proxy_server.run()
+        self._invocation_state_proxy_server = None
 
     def run_task(
         self, request: RunTaskRequest, context: grpc.ServicerContext
