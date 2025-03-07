@@ -196,29 +196,19 @@ async def _prepare_images(
             else:
                 build_tasks[task] = image
     
-    task_exceptions = {}
-    for task in asyncio.as_completed(build_tasks.keys()):
-        try:
-            await task
-        except Exception as e:
-            task_exceptions[task] = e
-
-
     # Collect the results for our builds
-    while True:
-        for image, task in dict(build_tasks).items():
-
+    task_exceptions = {}
+    while len(build_tasks):
+        for task, image in dict(build_tasks).items():
             if task.done():
-                build_tasks.pop(image)
+                build_tasks.pop(task)
+                if task_exc :=task.exception():
+                    raise task_exc
                 build = task.result()
                 if build.result != "failed":
                     ready_builds[image] = build
 
-        if len(build_tasks) == 0:
-            break
-        else:
             await asyncio.sleep(1)
-
     # Find any blockers and report them to the users
     blockers = []
     for image in images:
