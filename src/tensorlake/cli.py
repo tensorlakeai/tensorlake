@@ -24,8 +24,9 @@ def tensorlake():
 @click.command()
 @click.option("-p", "--parallel-builds", is_flag=True, default=False)
 @click.option("-r", "--retry", is_flag=True, default=False)
+@click.option("--upgrade-queued-requests", is_flag=True, default=False)
 @click.argument("workflow_file", type=click.File("r"))
-def deploy(workflow_file: click.File, parallel_builds: bool, retry: bool):
+def deploy(workflow_file: click.File, parallel_builds: bool, retry: bool, upgrade_queued_requests: bool):
     """Deploy a workflow to tensorlake."""
 
     click.echo(f"Preparing deployment for {workflow_file.name}")
@@ -60,7 +61,7 @@ def deploy(workflow_file: click.File, parallel_builds: bool, retry: bool):
     click.secho("Everything looks good, deploying now", fg="green")
     for graph in deployed_graphs:
         # TODO: Every time we post we get a new version, is that expected or the client should do the checks?
-        remote = RemoteGraph.deploy(graph, client=client)
+        remote = RemoteGraph.deploy(graph, client=client, upgrade_tasks_to_latest_version=upgrade_queued_requests)
         click.secho(f"Deployed {graph.name}", fg="green")
 
 
