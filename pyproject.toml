@@ -29,7 +29,7 @@ grpcio = "1.70.0"
 grpcio-tools = "1.70.0"
 
 [tool.poetry.scripts]
-tensorlake = "tensorlake.cli:tensorlake"
+tensorlake = "tensorlake.cli.main:start"
 function-executor = "tensorlake.function_executor.main:main"
 
 [build-system]
