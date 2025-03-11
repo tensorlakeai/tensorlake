@@ -38,9 +38,6 @@ def list(auth: AuthContext):
 
     for secret in secrets:
         created_at = datetime.fromisoformat(secret["createdAt"])
-        # Get the local timezone offset
-        local_offset = datetime.now(timezone.utc).astimezone().utcoffset()
-
         # Convert to local time
         local_created_at = created_at.astimezone(
             datetime.now(timezone.utc).astimezone().tzinfo
@@ -130,7 +127,7 @@ def unset(auth: AuthContext, secret_names: str):
         num += 1
 
     if num == 1:
-        click.echo(f"1 secret unset")
+        click.echo("1 secret unset")
     else:
         click.echo(f"{num} secrets unset")
 
@@ -141,3 +138,19 @@ def _get_all_existing_secrets(auth: AuthContext) -> List[dict]:
     )
     resp.raise_for_status()
     return resp.json()["items"]
+
+
+def warning_missing_secrets(
+    auth: AuthContext, secrets: List[str]
+) -> Tuple[bool, List[str]]:
+    existing_secrets = _get_all_existing_secrets(auth)
+    existing_secret_names = [s["name"] for s in existing_secrets]
+    missing_secrets = [s for s in secrets if s not in existing_secret_names]
+
+    if len(missing_secrets) > 0:
+        click.secho(
+            f"Your Tensorlake project has missing secrets: {', '.join(missing_secrets)}. Graph invocations may fail until these secrets are set.",
+            fg="yellow",
+        )
+
+    return len(missing_secrets) == 0, missing_secrets

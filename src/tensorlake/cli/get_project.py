@@ -1,7 +1,4 @@
-import os
-
 import click
-import httpx
 
 from tensorlake.cli._common import AuthContext, with_auth
 

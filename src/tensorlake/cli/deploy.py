@@ -5,13 +5,14 @@ import os
 import pathlib
 import sys
 import tempfile
-from typing import Dict, List
+from typing import Dict, List, Set
 
 import click
 
 from tensorlake import Graph, Image, RemoteGraph, TensorlakeClient
 from tensorlake.builder.client import ImageBuilderClient
 from tensorlake.cli._common import AuthContext, with_auth
+from tensorlake.cli.secrets import warning_missing_secrets
 from tensorlake.functions_sdk.image import Build
 
 
@@ -34,6 +35,7 @@ def deploy(
     builder = ImageBuilderClient.from_env()
     seen_images: Dict[Image, str] = {}
     deployed_graphs: List[Graph] = []
+    secret_names: Set[str] = set()
 
     workflow = _import_workflow_file(workflow_file.name)
     for name in dir(workflow):
@@ -41,6 +43,7 @@ def deploy(
         if isinstance(obj, Graph):
             deployed_graphs.append(obj)
             for node_name, node_obj in obj.nodes.items():
+                [secret_names.add(secret) for secret in node_obj.secrets or []]
                 image = node_obj.image
                 if image is None:
                     raise click.ClickException(
@@ -50,6 +53,7 @@ def deploy(
                     continue
                 seen_images[image] = image.hash()
 
+    warning_missing_secrets(auth, list(secret_names))
     asyncio.run(
         _prepare_images(
             builder, seen_images, parallel_builds=parallel_builds, retry=retry
