@@ -140,7 +140,6 @@ class Graph:
         from_node: Type[TensorlakeRouter],
         to_nodes: List[Type[TensorlakeCompute]],
     ) -> "Graph":
-
         validate_route(from_node=from_node, to_nodes=to_nodes)
 
         print(
@@ -206,6 +205,7 @@ class Graph:
             ),
             input_encoder=start_node.input_encoder,
             output_encoder=start_node.output_encoder,
+            secret_names=start_node.secrets,
         )
         metadata_edges = self.edges.copy()
         metadata_nodes = {}
@@ -224,6 +224,7 @@ class Graph:
                             if node.image
                             else _none_image_information
                         ),
+                        secret_names=node.secrets,
                     )
                 )
             else:
@@ -240,6 +241,7 @@ class Graph:
                         ),
                         input_encoder=node.input_encoder,
                         output_encoder=node.output_encoder,
+                        secret_names=node.secrets,
                     )
                 )
 

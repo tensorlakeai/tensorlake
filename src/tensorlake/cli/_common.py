@@ -1,7 +1,7 @@
 import importlib.metadata
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import click
 import httpx
@@ -25,10 +25,9 @@ class AuthContext:
         self.api_key = os.getenv("TENSORLAKE_API_KEY")
 
     @property
-    def client(self):
+    def client(self) -> httpx.Client:
         if self._client is None:
             if not self.api_key:
-                click.echo("ENV", os.environ)
                 raise click.UsageError(
                     "API key is not configured properly. The TENSORLAKE_API_KEY environment variable is required."
                 )
@@ -55,7 +54,7 @@ class AuthContext:
 
     def _introspect(self) -> httpx.Response:
         if self._introspect_response is None:
-            introspect_response = self.client.post(f"/platform/v1/keys/introspect")
+            introspect_response = self.client.post("/platform/v1/keys/introspect")
             if introspect_response.status_code == 401:
                 raise click.UsageError(
                     "API key is not valid. Please check the TENSORLAKE_API_KEY environment variable."
