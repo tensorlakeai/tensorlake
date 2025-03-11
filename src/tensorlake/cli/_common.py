@@ -64,4 +64,5 @@ class AuthContext:
         return self._introspect_response
 
 
+"""Pass the AuthContext object to the click command"""
 with_auth = click.make_pass_decorator(AuthContext)
