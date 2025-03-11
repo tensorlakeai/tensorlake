@@ -1,6 +1,6 @@
 import json
 from datetime import datetime, timezone
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import click
 from rich.console import Console
@@ -71,7 +71,6 @@ def set(auth: AuthContext, secrets: str):
     # Validate secrets
     upsert_secrets: List[Dict] = []
     for set_str in secrets:
-        print("sadf", set_str, "sdaf")
         if "=" not in set_str:
             raise click.UsageError(f"Invalid secret format {set_str}, missing '='")
 
@@ -110,7 +109,7 @@ def set(auth: AuthContext, secrets: str):
 @secrets.command()
 @click.argument("secret_names", nargs=-1)
 @with_auth
-def unset(auth: AuthContext, secret_names: str) -> List[dict]:
+def unset(auth: AuthContext, secret_names: str):
     """
     Unset one or many secrets in the current project.
 

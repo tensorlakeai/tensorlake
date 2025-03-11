@@ -209,7 +209,7 @@ class DocumentAI:
             raise e
         resp = response.json()
         return resp.get("jobId")
-    
+
     def parse_and_wait(
         self,
         file: str,

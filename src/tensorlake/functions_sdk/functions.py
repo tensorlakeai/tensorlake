@@ -64,6 +64,7 @@ class TensorlakeCompute:
     name: str = ""
     description: str = ""
     image: Optional[Image] = None
+    secrets: Optional[List[str]] = None
     placement_constraints: List[PlacementConstraints] = []
     accumulate: Optional[Type[Any]] = None
     input_encoder: Optional[str] = "cloudpickle"
@@ -100,6 +101,7 @@ class TensorlakeRouter:
     name: str = ""
     description: str = ""
     image: Optional[Image] = None
+    secrets: Optional[List[str]] = None
     placement_constraints: List[PlacementConstraints] = []
     input_encoder: Optional[str] = "cloudpickle"
     output_encoder: Optional[str] = "cloudpickle"
@@ -145,9 +147,10 @@ def tensorlake_router(
     name: Optional[str] = None,
     description: Optional[str] = "",
     image: Optional[Image] = None,
-    placement_constraints: List[PlacementConstraints] = [],
     input_encoder: Optional[str] = "cloudpickle",
     output_encoder: Optional[str] = "cloudpickle",
+    secrets: Optional[List[str]] = None,
+    placement_constraints: List[PlacementConstraints] = [],
     inject_ctx: Optional[bool] = False,
 ):
     def construct(fn):
@@ -159,9 +162,10 @@ def tensorlake_router(
                 else (fn.__doc__ or "").strip().replace("\n", "")
             ),
             "image": image,
-            "placement_constraints": placement_constraints,
             "input_encoder": input_encoder,
             "output_encoder": output_encoder,
+            "secrets": secrets,
+            "placement_constraints": placement_constraints,
             "inject_ctx": inject_ctx,
             "run": staticmethod(fn),
         }
@@ -178,6 +182,7 @@ def tensorlake_function(
     accumulate: Optional[Type[BaseModel]] = None,
     input_encoder: Optional[str] = "cloudpickle",
     output_encoder: Optional[str] = "cloudpickle",
+    secrets: Optional[List[str]] = None,
     placement_constraints: List[PlacementConstraints] = [],
     inject_ctx: Optional[bool] = False,
 ):
@@ -190,10 +195,11 @@ def tensorlake_function(
                 else (fn.__doc__ or "").strip().replace("\n", "")
             ),
             "image": image,
-            "placement_constraints": placement_constraints,
             "accumulate": accumulate,
             "input_encoder": input_encoder,
             "output_encoder": output_encoder,
+            "secrets": secrets,
+            "placement_constraints": placement_constraints,
             "inject_ctx": inject_ctx,
             "run": staticmethod(fn),
         }
@@ -281,7 +287,7 @@ class TensorlakeFunctionWrapper:
         self,
         ctx: GraphInvocationContext,
         input: Union[Dict, Type[BaseModel], List, Tuple],
-        acc: Type[Any] = None,
+        acc: Optional[Type[Any]] = None,
     ) -> Tuple[List[Any], Optional[str]]:
         args = []
         kwargs = {}

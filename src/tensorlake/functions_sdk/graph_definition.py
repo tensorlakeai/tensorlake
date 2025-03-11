@@ -15,6 +15,7 @@ class FunctionMetadata(BaseModel):
     image_information: Optional[ImageInformation]
     input_encoder: str = "cloudpickle"
     output_encoder: str = "cloudpickle"
+    secret_names: Optional[List[str]] = None
 
 
 class RouterMetadata(BaseModel):
@@ -25,6 +26,7 @@ class RouterMetadata(BaseModel):
     image_information: Optional[ImageInformation]
     input_encoder: str = "cloudpickle"
     output_encoder: str = "cloudpickle"
+    secret_names: Optional[List[str]] = None
 
 
 class NodeMetadata(BaseModel):
