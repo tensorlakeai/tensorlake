@@ -3,9 +3,9 @@ from typing import Dict
 
 import click
 
-from src.tensorlake.cli.deploy import _import_workflow_file, _prepare_images
 from tensorlake import Graph, Image
 from tensorlake.builder.client import ImageBuilderClient
+from tensorlake.cli.deploy import _import_workflow_file, _prepare_images
 
 
 @click.command()

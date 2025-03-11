@@ -1,7 +1,7 @@
 import importlib.metadata
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import click
 import httpx
@@ -16,15 +16,19 @@ except importlib.metadata.PackageNotFoundError:
 class AuthContext:
     """Class for CLI authentication context"""
 
-    api_key: str | None = os.getenv("TENSORLAKE_API_KEY")
+    api_key: str | None = None
     version: str = VERSION
     _client: httpx.Client | None = None
     _introspect_response: httpx.Response | None = None
+
+    def __post_init__(self):
+        self.api_key = os.getenv("TENSORLAKE_API_KEY")
 
     @property
     def client(self):
         if self._client is None:
             if not self.api_key:
+                click.echo("ENV", os.environ)
                 raise click.UsageError(
                     "API key is not configured properly. The TENSORLAKE_API_KEY environment variable is required."
                 )

@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Tuple
 
 import click
@@ -38,16 +38,23 @@ def list(auth: AuthContext):
 
     for secret in secrets:
         created_at = datetime.fromisoformat(secret["createdAt"])
-        local_offset = datetime.now(datetime.utcnow().astimezone().tzinfo).utcoffset()
+        # Get the local timezone offset
+        local_offset = datetime.now(timezone.utc).astimezone().utcoffset()
+
         # Convert to local time
-        local_created_at = created_at.astimezone(datetime.utcnow().astimezone().tzinfo)
-        # Format as ISO string
+        local_created_at = created_at.astimezone(
+            datetime.now(timezone.utc).astimezone().tzinfo
+        )
         local_created_at_iso = local_created_at.isoformat()
 
         table.add_row(secret["name"], local_created_at_iso)
 
     console = Console()
     console.print(table)
+    if len(secrets) == 1:
+        click.echo("1 secret")
+    else:
+        click.echo(f"{len(secrets)} secrets")
 
 
 @secrets.command()
@@ -64,6 +71,7 @@ def set(auth: AuthContext, secrets: str):
     # Validate secrets
     upsert_secrets: List[Dict] = []
     for set_str in secrets:
+        print("sadf", set_str, "sdaf")
         if "=" not in set_str:
             raise click.UsageError(f"Invalid secret format {set_str}, missing '='")
 
@@ -71,6 +79,11 @@ def set(auth: AuthContext, secrets: str):
 
         if not name or len(name) == 0:
             raise click.UsageError(f"Invalid secret format {set_str}, missing name")
+
+        if " " in name:
+            raise click.UsageError(
+                f"Invalid secret name {name}, spaces are not allowed"
+            )
 
         if name in [s["name"] for s in upsert_secrets]:
             raise click.UsageError(f"Duplicate secret name: {name}")
