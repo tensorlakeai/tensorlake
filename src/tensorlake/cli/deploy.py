@@ -5,20 +5,14 @@ import os
 import pathlib
 import sys
 import tempfile
-import time
 from typing import Dict, List
 
 import click
-import httpx
 
 from tensorlake import Graph, Image, RemoteGraph, TensorlakeClient
 from tensorlake.builder.client import ImageBuilderClient
+from tensorlake.cli._common import AuthContext, with_auth
 from tensorlake.functions_sdk.image import Build
-
-
-@click.group()
-def tensorlake():
-    pass
 
 
 @click.command()
@@ -26,7 +20,14 @@ def tensorlake():
 @click.option("-r", "--retry", is_flag=True, default=False)
 @click.option("--upgrade-queued-requests", is_flag=True, default=False)
 @click.argument("workflow_file", type=click.File("r"))
-def deploy(workflow_file: click.File, parallel_builds: bool, retry: bool, upgrade_queued_requests: bool):
+@with_auth
+def deploy(
+    auth: AuthContext,
+    workflow_file: click.File,
+    parallel_builds: bool,
+    retry: bool,
+    upgrade_queued_requests: bool,
+):
     """Deploy a workflow to tensorlake."""
 
     click.echo(f"Preparing deployment for {workflow_file.name}")
@@ -56,12 +57,15 @@ def deploy(workflow_file: click.File, parallel_builds: bool, retry: bool, upgrad
     )
 
     # If we are still here then our images should all have URIs
-    project_id = _get_project_id()
-    client = TensorlakeClient(namespace=project_id)
+    client = TensorlakeClient(namespace=auth.project_id)
     click.secho("Everything looks good, deploying now", fg="green")
     for graph in deployed_graphs:
         # TODO: Every time we post we get a new version, is that expected or the client should do the checks?
-        remote = RemoteGraph.deploy(graph, client=client, upgrade_tasks_to_latest_version=upgrade_queued_requests)
+        remote = RemoteGraph.deploy(
+            graph,
+            client=client,
+            upgrade_tasks_to_latest_version=upgrade_queued_requests,
+        )
         click.secho(f"Deployed {graph.name}", fg="green")
 
 
@@ -74,6 +78,7 @@ def _stream_build_log(builder: ImageBuilderClient, build: Build):
     ) as r:
         for line in r.iter_lines():
             print(line)
+
 
 async def _wait_for_build(builder: ImageBuilderClient, build: Build, print_logs=True):
     click.echo(f"Waiting for {build.image_name} to start building")
@@ -196,14 +201,14 @@ async def _prepare_images(
                 await task
             else:
                 build_tasks[task] = image
-    
+
     # Collect the results for our builds
     task_exceptions = {}
     while len(build_tasks):
         for task, image in dict(build_tasks).items():
             if task.done():
                 build_tasks.pop(task)
-                if task_exc :=task.exception():
+                if task_exc := task.exception():
                     raise task_exc
                 build = task.result()
                 if build.result != "failed":
@@ -249,86 +254,3 @@ def _import_workflow_file(workflow):
         return module
     else:
         raise click.ClickException("Workflow must be python files")
-
-
-@click.command()
-@click.argument("workflow_file", type=click.File("r"))
-def prepare(workflow_file: click.File):
-    """Prepare a workflow and it's artifacts for deployment."""
-
-    click.echo(f"Preparing deployment for {workflow_file.name}")
-    builder = ImageBuilderClient.from_env()
-    seen_images: Dict[Image, str] = {}
-
-    workflow = _import_workflow_file(workflow_file.name)
-    for name in dir(workflow):
-        obj = getattr(workflow, name)
-        if isinstance(obj, Graph):
-            click.echo(f"Found graph {name}")
-            for node_name, node_obj in obj.nodes.items():
-                image = node_obj.image
-                if image is None:
-                    raise click.ClickException(
-                        f"graph function {node_name} needs to use an image"
-                    )
-                click.echo(
-                    f"graph function {node_name} uses image '{image._image_name}'"
-                )
-                if image in seen_images:
-                    continue
-                seen_images[image] = image.hash()
-
-    click.echo(f"Found {len(seen_images)} images in this workflow")
-    asyncio.run(_prepare_images(builder, seen_images))
-
-
-@click.command(help="Extract and display logs from tensorlake")
-@click.option("--image", "-i")
-def show_logs(image: str):
-    if image:
-        builder = ImageBuilderClient.from_env()
-        if ":" in image:
-            image, image_hash = image.split(":")
-            build = builder.find_build(image, image_hash)[0]
-        else:
-            build = builder.get_latest_build(image)
-
-        log_response = builder.client.get(
-            f"{builder.build_service}/v1/builds/{build.id}/log", headers=builder.headers
-        )
-        if log_response.status_code == 200:
-            log = log_response.content.decode("utf-8")
-            print(log)
-
-
-def _get_project_id():
-    indexify_addr = os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")
-    introspect_response = httpx.post(
-        f"{indexify_addr}/platform/v1/keys/introspect",
-        headers={"Authorization": f"Bearer {os.getenv('TENSORLAKE_API_KEY')}"},
-    )
-    introspect_response.raise_for_status()
-    return introspect_response.json()["projectId"]
-
-
-@click.command(help="Return the project ID")
-def get_project_id():
-    click.echo(_get_project_id())
-
-
-@click.command(help="Get URI for a given image")
-@click.argument("image")
-def get_image_uri(image: str):
-    builder = ImageBuilderClient.from_env()
-    build = builder.get_latest_build(image)
-    print(build.uri)
-
-
-tensorlake.add_command(get_image_uri)
-tensorlake.add_command(get_project_id)
-tensorlake.add_command(deploy)
-tensorlake.add_command(prepare)
-tensorlake.add_command(show_logs)
-
-if __name__ == "__main__":
-    tensorlake()
