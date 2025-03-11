@@ -12,18 +12,10 @@ from ...proto.function_executor_pb2 import (
 class Handler:
     def __init__(self, logger: Any):
         self._logger: Any = logger.bind(module=__name__)
-        self._enable_gpu_health_checks = False
+        self._enable_gpu_health_checks = _enable_gpu_health_checks()
         self._logged_gpu_health_check_failure = False
 
-        # NVIDIA_VISIBLE_DEVICES is set by NVIDIA Docker runtime when GPUs are provided.
-        # nvidia-smi is installed with NVIDIA GPU drivers.
-        # If both are available then run health checks to detect if the Function Executor
-        # is currently affected by known issue https://github.com/NVIDIA/nvidia-container-toolkit/issues/857.
-        if (
-            "NVIDIA_VISIBLE_DEVICES" in os.environ
-            and os.system("which -s nvidia-smi") == 0
-        ):
-            self._enable_gpu_health_checks = True
+        if self._enable_gpu_health_checks:
             self._logger.info("enabling GPU health checks")
 
     def run(self, request: HealthCheckRequest) -> HealthCheckResponse:
@@ -68,3 +60,15 @@ class Handler:
             healthy=False,
             status_message="Function Executor gRPC channel is healthy but nvidia-smi fails",
         )
+
+
+def _enable_gpu_health_checks() -> bool:
+    # NVIDIA_VISIBLE_DEVICES is set by NVIDIA Docker runtime when GPUs are provided.
+    # nvidia-smi is installed with NVIDIA GPU drivers.
+    # If both are available then run health checks to detect if the Function Executor
+    # is currently affected by known issue https://github.com/NVIDIA/nvidia-container-toolkit/issues/857.
+    if "NVIDIA_VISIBLE_DEVICES" not in os.environ:
+        return False
+
+    result: subprocess.CompletedProcess = subprocess.run(["which", "nvidia-smi"])
+    return result.returncode == 0  # Enable the health check if nvidia-smi is available
