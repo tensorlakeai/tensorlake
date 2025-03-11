@@ -197,7 +197,31 @@ class DocumentAI:
         """
         Parse a document.
         """
-        return asyncio.run(self.parse_async(file, options, timeout, deliver_webhook))
+        response = self._client.post(
+            url="/parse",
+            headers=self.__headers__(),
+            json=self.__create_parse_req__(file, options, deliver_webhook),
+        )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            print(e.response.text)
+            raise e
+        resp = response.json()
+        return resp.get("jobId")
+    
+    def parse_and_wait(
+        self,
+        file: str,
+        options: ParsingOptions,
+        timeout: int = 5,
+        deliver_webhook: bool = False,
+    ) -> Job:
+        """
+        Parse a document and wait for completion.
+        """
+        job_id = self.parse(file, options, timeout, deliver_webhook)
+        return self.wait_for_completion(job_id)
 
     async def parse_async(
         self,
