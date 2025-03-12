@@ -1,4 +1,5 @@
 import io
+import os
 import sys
 import time
 import traceback
@@ -72,6 +73,15 @@ class Handler:
         using the response.
         """
         try:
+            if (
+                os.getenv("INDEXIFY_FUNCTION_EXECUTOR_DISABLE_OUTPUT_CAPTURE", "0")
+                == "1"
+            ):
+                self._func_stdout.write(
+                    "Function output capture is disabled using INDEXIFY_FUNCTION_EXECUTOR_DISABLE_OUTPUT_CAPTURE env var.\n"
+                )
+                return self._run_func(inputs)
+
             # Flush any logs buffered in memory before doing stdout, stderr capture.
             # Otherwise our logs logged before this point will end up in the function's stdout capture.
             self._flush_logs()
