@@ -150,6 +150,52 @@ class TestRunTask(unittest.TestCase):
                     self.assertEqual("success", fn_outputs[0])
                     validation_function(self, content, run_task_response)
 
+    def test_expected_run_task_response_stdout_stderr_with_disabled_capture_env_var(
+        self,
+    ):
+        with FunctionExecutorProcessContextManager(
+            DEFAULT_FUNCTION_EXECUTOR_PORT + 1,
+            extra_env={"INDEXIFY_FUNCTION_EXECUTOR_DISABLE_OUTPUT_CAPTURE": "1"},
+        ) as process:
+            with rpc_channel(process) as channel:
+                graph = Graph(
+                    name="test", description="test", start_node=print_function
+                )
+                stub: FunctionExecutorStub = FunctionExecutorStub(channel)
+                initialize_response: InitializeResponse = stub.initialize(
+                    InitializeRequest(
+                        namespace="test",
+                        graph_name="test",
+                        graph_version="1",
+                        function_name="print_function",
+                        graph=SerializedObject(
+                            bytes=CloudPickleSerializer.serialize(
+                                graph.serialize(additional_modules=[])
+                            ),
+                            content_type=CloudPickleSerializer.content_type,
+                        ),
+                    )
+                )
+                self.assertTrue(initialize_response.success)
+
+                run_task_response: RunTaskResponse = run_task(
+                    stub,
+                    function_name="print_function",
+                    input="print function argument to print",
+                )
+
+                self.assertTrue(run_task_response.success)
+                fn_outputs = deserialized_function_output(
+                    self, run_task_response.function_output
+                )
+                self.assertEqual(len(fn_outputs), 1)
+                self.assertEqual("success", fn_outputs[0])
+                self.assertEqual(
+                    "Function output capture is disabled using INDEXIFY_FUNCTION_EXECUTOR_DISABLE_OUTPUT_CAPTURE env var.\n",
+                    run_task_response.stdout,
+                )
+                self.assertEqual("", run_task_response.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

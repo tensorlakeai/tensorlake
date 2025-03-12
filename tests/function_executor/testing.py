@@ -1,3 +1,4 @@
+import os
 import subprocess
 import unittest
 from typing import Any, Dict, List, Optional
@@ -23,8 +24,13 @@ DEFAULT_FUNCTION_EXECUTOR_PORT: int = 60000
 
 class FunctionExecutorProcessContextManager:
     def __init__(
-        self, port: int = DEFAULT_FUNCTION_EXECUTOR_PORT, extra_args: List[str] = []
+        self,
+        port: int = DEFAULT_FUNCTION_EXECUTOR_PORT,
+        extra_args: List[str] = [],
+        keep_std_outputs: bool = True,
+        extra_env: Dict[str, str] = {},
     ):
+        self.port = port
         self._args = [
             "function-executor",
             "--dev",
@@ -34,11 +40,19 @@ class FunctionExecutorProcessContextManager:
             "test-executor",
         ]
         self._args.extend(extra_args)
+        self._keep_std_outputs = keep_std_outputs
+        self._extra_env = extra_env
         self._process: Optional[subprocess.Popen] = None
-        self.port = port
 
     def __enter__(self) -> "FunctionExecutorProcessContextManager":
-        self._process = subprocess.Popen(self._args)
+        kwargs = {}
+        if not self._keep_std_outputs:
+            kwargs["stdout"] = subprocess.DEVNULL
+            kwargs["stderr"] = subprocess.DEVNULL
+        if self._extra_env is not None:
+            kwargs["env"] = os.environ.copy()
+            kwargs["env"].update(self._extra_env)
+        self._process = subprocess.Popen(self._args, **kwargs)
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
