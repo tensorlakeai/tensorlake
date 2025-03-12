@@ -1,3 +1,4 @@
+import os
 import unittest
 from typing import List, Union
 
@@ -12,6 +13,10 @@ from tensorlake.functions_sdk.functions import tensorlake_router
 
 
 class TestGraphSecrets(unittest.TestCase):
+    @unittest.skipIf(
+        os.environ.get("PLATFORM_EXECUTOR_TESTS") == "1",
+        "Test skipped for platform executor",
+    )
     @parameterized.parameterized.expand([(False), (True)])
     def test_secrets_settable(self, is_remote):
         @tensorlake_function(secrets=["SECRET_NAME"])
@@ -27,6 +32,10 @@ class TestGraphSecrets(unittest.TestCase):
         self.assertTrue(len(output) == 1)
         self.assertEqual(output[0], 2)
 
+    @unittest.skipIf(
+        os.environ.get("PLATFORM_EXECUTOR_TESTS") == "1",
+        "Test skipped for platform executor",
+    )
     @parameterized.parameterized.expand([(False), (True)])
     def test_graph_router_secrets_settable(self, is_remote):
         @tensorlake_function()
