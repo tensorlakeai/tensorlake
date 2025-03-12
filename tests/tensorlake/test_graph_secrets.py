@@ -13,11 +13,11 @@ from tensorlake.functions_sdk.functions import tensorlake_router
 
 
 class TestGraphSecrets(unittest.TestCase):
+    @parameterized.parameterized.expand([(False), (True)])
     @unittest.skipIf(
         os.environ.get("PLATFORM_EXECUTOR_TESTS") == "1",
         "Test skipped for platform executor",
     )
-    @parameterized.parameterized.expand([(False), (True)])
     def test_secrets_settable(self, is_remote):
         @tensorlake_function(secrets=["SECRET_NAME"])
         def node_with_secret(x: int) -> int:
@@ -32,11 +32,11 @@ class TestGraphSecrets(unittest.TestCase):
         self.assertTrue(len(output) == 1)
         self.assertEqual(output[0], 2)
 
+    @parameterized.parameterized.expand([(False), (True)])
     @unittest.skipIf(
         os.environ.get("PLATFORM_EXECUTOR_TESTS") == "1",
         "Test skipped for platform executor",
     )
-    @parameterized.parameterized.expand([(False), (True)])
     def test_graph_router_secrets_settable(self, is_remote):
         @tensorlake_function()
         def add_two(x: int) -> int:
