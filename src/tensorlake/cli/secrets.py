@@ -1,4 +1,3 @@
-import json
 from datetime import datetime, timezone
 from typing import Dict, List, Tuple
 
@@ -33,7 +32,7 @@ def list(auth: AuthContext):
 
     table = Table()
 
-    table.add_column("Name", justify="right", no_wrap=True)
+    table.add_column("Name", no_wrap=True)
     table.add_column("Created At", style="green")
 
     for secret in secrets:
@@ -98,7 +97,7 @@ def set(auth: AuthContext, secrets: str):
     resp.raise_for_status()
 
     if len(upsert_secrets) == 1:
-        click.echo(f"1 secret set")
+        click.echo("1 secret set")
     else:
         click.echo(f"{len(upsert_secrets)} secrets set")
 
@@ -134,7 +133,7 @@ def unset(auth: AuthContext, secret_names: str):
 
 def _get_all_existing_secrets(auth: AuthContext) -> List[dict]:
     resp = auth.client.get(
-        f"/platform/v1/organizations/{auth.organization_id}/projects/{auth.project_id}/secrets?limit=100"
+        f"/platform/v1/organizations/{auth.organization_id}/projects/{auth.project_id}/secrets?pageSize=100"
     )
     resp.raise_for_status()
     return resp.json()["items"]
