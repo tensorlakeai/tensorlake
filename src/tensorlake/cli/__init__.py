@@ -1,6 +1,6 @@
 import click
 
-from . import _common, deploy, get_project, images, prepare, secrets
+from . import _common, auth, deploy, images, secrets
 
 
 @click.group()
@@ -16,9 +16,7 @@ def cli(ctx: click.Context):
     pass
 
 
-cli.add_command(get_project.get_project_id)
-cli.add_command(prepare.prepare)
+cli.add_command(auth.auth)
 cli.add_command(deploy.deploy)
-cli.add_command(images.get_image_uri)
-cli.add_command(images.show_logs)
+cli.add_command(images.image_logs)
 cli.add_command(secrets.secrets)

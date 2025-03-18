@@ -9,7 +9,7 @@ from typing import Dict, List, Set
 
 import click
 
-from tensorlake import Graph, Image, RemoteGraph, TensorlakeClient
+from tensorlake import Graph, Image, RemoteGraph
 from tensorlake.builder.client import ImageBuilderClient
 from tensorlake.cli._common import AuthContext, with_auth
 from tensorlake.cli.secrets import warning_missing_secrets
@@ -53,6 +53,11 @@ def deploy(
                     continue
                 seen_images[image] = image.hash()
 
+    if len(deployed_graphs) == 0:
+        raise click.UsageError(
+            "No graphs found in the workflow file, make sure at least one graph is defined as a global variable."
+        )
+
     warning_missing_secrets(auth, list(secret_names))
     asyncio.run(
         _prepare_images(
@@ -61,13 +66,11 @@ def deploy(
     )
 
     # If we are still here then our images should all have URIs
-    client = TensorlakeClient(namespace=auth.project_id)
     click.secho("Everything looks good, deploying now", fg="green")
     for graph in deployed_graphs:
         # TODO: Every time we post we get a new version, is that expected or the client should do the checks?
         RemoteGraph.deploy(
             graph,
-            client=client,
             upgrade_tasks_to_latest_version=upgrade_queued_requests,
         )
         click.secho(f"Deployed {graph.name}", fg="green")
