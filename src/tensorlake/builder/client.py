@@ -63,7 +63,7 @@ class ImageBuilderClient:
         result.sort(key=lambda b: b.build_completed_at, reverse=True)
         return result
 
-    def get_latest_build(self, image_name: str) -> Build:
+    def get_latest_build(self, image_name: str) -> Build | None:
         res = self.client.get(
             f"{self.build_service}/v1/builds",
             headers=self.headers,
@@ -74,6 +74,7 @@ class ImageBuilderClient:
         builds.sort(key=lambda b: b.created_at, reverse=True)
         if builds:
             return builds[0]
+        return None
 
     def retry_build(self, build_id: int):
         request = self.client.post(

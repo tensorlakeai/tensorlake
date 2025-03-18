@@ -45,6 +45,10 @@ class AuthContext:
         return self._client
 
     @property
+    def api_key_id(self):
+        return self._introspect().json().get("id")
+
+    @property
     def project_id(self):
         return self._introspect().json().get("projectId")
 
