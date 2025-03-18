@@ -65,7 +65,7 @@ def deploy(
     click.secho("Everything looks good, deploying now", fg="green")
     for graph in deployed_graphs:
         # TODO: Every time we post we get a new version, is that expected or the client should do the checks?
-        remote = RemoteGraph.deploy(
+        RemoteGraph.deploy(
             graph,
             client=client,
             upgrade_tasks_to_latest_version=upgrade_queued_requests,
@@ -154,7 +154,7 @@ async def _prepare_images(
     parallel_builds=False,
     retry=False,
 ):
-    build_tasks = {}
+    build_tasks: Dict[asyncio.Task[Build], Image] = {}
     ready_builds: Dict[Image, Build] = {}
 
     # Iterate through the images and build anything that hasn't been built
@@ -174,10 +174,9 @@ async def _prepare_images(
                                 builder, build, print_logs=not parallel_builds
                             )
                         )
+                        build_tasks[task] = image
                         if not parallel_builds:  # Await the task serially
                             await task
-                        else:
-                            build_tasks[task] = image
 
                 else:
                     click.secho(f"Image '{build.image_name}' is built", fg="green")
@@ -187,10 +186,9 @@ async def _prepare_images(
                 task = asyncio.create_task(
                     _wait_for_build(builder, build, print_logs=not parallel_builds)
                 )
+                build_tasks[task] = image
                 if not parallel_builds:  # Await the task serially
                     await task
-                else:
-                    build_tasks[task] = image
 
         else:
             task = asyncio.create_task(
@@ -201,13 +199,11 @@ async def _prepare_images(
                     print_logs=not parallel_builds,
                 )
             )
+            build_tasks[task] = image
             if not parallel_builds:  # Await the task serially
                 await task
-            else:
-                build_tasks[task] = image
 
     # Collect the results for our builds
-    task_exceptions = {}
     while len(build_tasks):
         for task, image in dict(build_tasks).items():
             if task.done():
