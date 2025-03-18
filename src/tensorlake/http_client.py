@@ -80,9 +80,6 @@ class TensorlakeClient:
         self._graphs: Dict[str, Graph] = {}
         self._api_key = api_key
         if not self._api_key:
-            print(
-                "API key not provided. Trying to fetch from environment TENSORLAKE_API_KEY variable"
-            )
             self._api_key = os.getenv("TENSORLAKE_API_KEY")
 
     def _request(self, method: str, **kwargs) -> httpx.Response:
