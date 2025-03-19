@@ -2,8 +2,7 @@ import os
 import unittest
 from typing import List, Union
 
-import parameterized
-from testing import remote_or_local_graph, test_graph_name
+from testing import test_graph_name
 
 from tensorlake import (
     Graph,
@@ -13,31 +12,22 @@ from tensorlake.functions_sdk.functions import tensorlake_router
 
 
 class TestGraphSecrets(unittest.TestCase):
-    @parameterized.parameterized.expand([(False), (True)])
-    @unittest.skipIf(
-        os.environ.get("PLATFORM_EXECUTOR_TESTS") == "1",
-        "Test skipped for platform executor",
-    )
-    def test_secrets_settable(self, is_remote):
+    def test_secrets_settable(self):
         @tensorlake_function(secrets=["SECRET_NAME"])
         def node_with_secret(x: int) -> int:
             return x + 1
 
+        # Only test local graph mode here because behavior of secrets in remote graph depends
+        # on Executor flavor.
         graph = Graph(
             name=test_graph_name(self), description="test", start_node=node_with_secret
         )
-        graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, "node_with_secret")
         self.assertTrue(len(output) == 1)
         self.assertEqual(output[0], 2)
 
-    @parameterized.parameterized.expand([(False), (True)])
-    @unittest.skipIf(
-        os.environ.get("PLATFORM_EXECUTOR_TESTS") == "1",
-        "Test skipped for platform executor",
-    )
-    def test_graph_router_secrets_settable(self, is_remote):
+    def test_graph_router_secrets_settable(self):
         @tensorlake_function()
         def add_two(x: int) -> int:
             return x + 2
@@ -53,11 +43,12 @@ class TestGraphSecrets(unittest.TestCase):
             else:
                 return add_two
 
+        # Only test local graph mode here because behavior of secrets in remote graph depends
+        # on Executor flavor.
         graph = Graph(
             name=test_graph_name(self), description="test", start_node=route_if_even
         )
         graph.route(route_if_even, [add_two, add_three])
-        graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(block_until_done=True, x=2)
         output = graph.output(invocation_id, "add_three")
         self.assertEqual(output, [5])
