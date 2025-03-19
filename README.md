@@ -90,11 +90,11 @@ Datasets are a named collection that you can attach some ingestion actions, such
 1. Create a Dataset 
 ```python
 from tensorlake.documentai import DatasetOptions, ParsingOptions, OutputFormat, TableOutputMode, TableParsingStrategy
-    dataset = await document_ai.create_dataset_async(
+    dataset = await doc_ai.create_dataset_async(
         DatasetOptions(
             name="My Dataset",
             description="A dataset of documents",
-            parsing_options=ParsingOptions(
+            options=ParsingOptions(
                 format=OutputFormat.MARKDOWN,
                 table_output_mode=TableOutputMode.JSON,
                 table_parsing_strategy=TableParsingStrategy.VLM,
