@@ -334,7 +334,6 @@ class Graph:
             function_outputs: Union[FunctionCallResult, RouterCallResult] = (
                 self._invoke_fn(node_name, input)
             )
-            print(f"function_outputs: {function_outputs}")
             # Store metrics for local graph execution
             if function_outputs.metrics is not None:
                 metrics = self._metrics.get(
@@ -343,7 +342,6 @@ class Graph:
                 metrics.timers.update(function_outputs.metrics.timers)
                 metrics.counters.update(function_outputs.metrics.counters)
                 self._metrics[self._local_graph_ctx.invocation_id] = metrics
-                print(f"metrics1111: {self._metrics}")
 
             self._log_local_exec_tracebacks(function_outputs)
             if isinstance(function_outputs, RouterCallResult):

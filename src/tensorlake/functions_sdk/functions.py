@@ -341,8 +341,6 @@ class TensorlakeFunctionWrapper:
             counters=ctx.invocation_state.counters,
         )
 
-        print(f"metrics: {metrics}")
-
         ser_outputs = [
             TensorlakeData(
                 payload=output_serializer.serialize(output),
