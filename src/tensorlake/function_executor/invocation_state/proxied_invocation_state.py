@@ -9,6 +9,7 @@ class ProxiedInvocationState(InvocationState):
     """InvocationState that proxies the calls via InvocationStateProxyServer."""
 
     def __init__(self, task_id: str, proxy_server: InvocationStateProxyServer):
+        super().__init__()
         self._task_id: str = task_id
         self._proxy_server: InvocationStateProxyServer = proxy_server
 

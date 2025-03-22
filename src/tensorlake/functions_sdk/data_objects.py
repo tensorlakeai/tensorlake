@@ -10,6 +10,11 @@ class FileInput(BaseModel):
     sha_256: Optional[str] = None
 
 
+class Metrics(BaseModel):
+    timers: Dict[str, float]
+    counters: Dict[str, int]
+
+
 class RouterOutput(BaseModel):
     edges: List[str]
 
