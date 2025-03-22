@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union, get_args, get_
 from pydantic import BaseModel
 from typing_extensions import get_type_hints
 
-from .data_objects import TensorlakeData
+from .data_objects import Metrics, TensorlakeData
 from .image import Image
 from .invocation_state.invocation_state import InvocationState
 from .object_serializer import get_serializer
@@ -212,11 +212,13 @@ def tensorlake_function(
 class FunctionCallResult(BaseModel):
     ser_outputs: List[TensorlakeData]
     traceback_msg: Optional[str] = None
+    metrics: Optional[Metrics] = None
 
 
 class RouterCallResult(BaseModel):
     edges: List[str]
     traceback_msg: Optional[str] = None
+    metrics: Optional[Metrics] = None
 
 
 class TensorlakeFunctionWrapper:
@@ -333,6 +335,14 @@ class TensorlakeFunctionWrapper:
         if acc is None and self.indexify_function.accumulate is not None:
             acc = self.indexify_function.accumulate()
         outputs, err = self.run_fn(ctx, input, acc=acc)
+
+        metrics = Metrics(
+            timers=ctx.invocation_state.timers,
+            counters=ctx.invocation_state.counters,
+        )
+
+        print(f"metrics: {metrics}")
+
         ser_outputs = [
             TensorlakeData(
                 payload=output_serializer.serialize(output),
@@ -340,14 +350,20 @@ class TensorlakeFunctionWrapper:
             )
             for output in outputs
         ]
-        return FunctionCallResult(ser_outputs=ser_outputs, traceback_msg=err)
+        return FunctionCallResult(
+            ser_outputs=ser_outputs, traceback_msg=err, metrics=metrics
+        )
 
     def invoke_router(
         self, ctx: GraphInvocationContext, name: str, input: TensorlakeData
     ) -> RouterCallResult:
         input = self.deserialize_input(name, input)
         edges, err = self.run_router(ctx, input)
-        return RouterCallResult(edges=edges, traceback_msg=err)
+        # NOT SUPPORTING METRICS FOR ROUTER UNTIL
+        # WE NEED THEM
+        return RouterCallResult(
+            edges=edges, traceback_msg=err, metrics=Metrics(timers={}, counters={})
+        )
 
     def deserialize_input(self, compute_fn: str, indexify_data: TensorlakeData) -> Any:
         encoder = indexify_data.encoder

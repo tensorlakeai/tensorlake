@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from rich import print  # TODO: Migrate to use click.echo
 from typing_extensions import get_args, get_origin
 
-from .data_objects import RouterOutput, TensorlakeData
+from .data_objects import RouterOutput, TensorlakeData, Metrics
 from .functions import (
     FunctionCallResult,
     GraphInvocationContext,
@@ -112,6 +112,10 @@ class Graph:
         self._results: Dict[str, Dict[str, List[TensorlakeData]]] = {}
         self._accumulator_values: Dict[str, TensorlakeData] = {}
         self._local_graph_ctx: Optional[GraphInvocationContext] = None
+
+        # Invocation ID -> Metrics
+        # For local graphs
+        self._metrics: Dict[str, Metrics] = {}
 
     def get_function(self, name: str) -> TensorlakeFunctionWrapper:
         if name not in self.nodes:
@@ -330,6 +334,17 @@ class Graph:
             function_outputs: Union[FunctionCallResult, RouterCallResult] = (
                 self._invoke_fn(node_name, input)
             )
+            print(f"function_outputs: {function_outputs}")
+            # Store metrics for local graph execution
+            if function_outputs.metrics is not None:
+                metrics = self._metrics.get(
+                    self._local_graph_ctx.invocation_id, Metrics(timers={}, counters={})
+                )
+                metrics.timers.update(function_outputs.metrics.timers)
+                metrics.counters.update(function_outputs.metrics.counters)
+                self._metrics[self._local_graph_ctx.invocation_id] = metrics
+                print(f"metrics1111: {self._metrics}")
+
             self._log_local_exec_tracebacks(function_outputs)
             if isinstance(function_outputs, RouterCallResult):
                 for edge in function_outputs.edges:

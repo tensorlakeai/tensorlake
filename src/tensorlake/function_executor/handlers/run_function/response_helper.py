@@ -9,6 +9,7 @@ from ...proto.function_executor_pb2 import (
     RouterOutput,
     RunTaskResponse,
     SerializedObject,
+    Metrics,
 )
 
 
@@ -26,6 +27,10 @@ class ResponseHelper:
         stderr: str = "",
     ) -> RunTaskResponse:
         if result.traceback_msg is None:
+            metrics = Metrics(
+                timers=result.metrics.timers,
+                counters=result.metrics.counters,
+            )
             return RunTaskResponse(
                 task_id=self._task_id,
                 function_output=self._to_function_output(result.ser_outputs),
@@ -34,12 +39,14 @@ class ResponseHelper:
                 stderr=stderr,
                 is_reducer=is_reducer,
                 success=True,
+                metrics=metrics,
             )
         else:
             return self.failure_response(
                 message=result.traceback_msg,
                 stdout=stdout,
                 stderr=stderr,
+                metrics=metrics,
             )
 
     def router_response(
@@ -49,6 +56,10 @@ class ResponseHelper:
         stderr: str = "",
     ) -> RunTaskResponse:
         if result.traceback_msg is None:
+            metrics = Metrics(
+                timers={},
+                counters={},
+            )
             return RunTaskResponse(
                 task_id=self._task_id,
                 function_output=None,
@@ -57,6 +68,7 @@ class ResponseHelper:
                 stderr=stderr,
                 is_reducer=False,
                 success=True,
+                metrics=metrics,
             )
         else:
             return self.failure_response(
