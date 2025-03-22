@@ -127,11 +127,15 @@ class InvocationStateResponse(_message.Message):
     ) -> None: ...
 
 class FunctionOutput(_message.Message):
-    __slots__ = ("outputs",)
+    __slots__ = ("outputs", "output_encoding")
     OUTPUTS_FIELD_NUMBER: _ClassVar[int]
+    OUTPUT_ENCODING_FIELD_NUMBER: _ClassVar[int]
     outputs: _containers.RepeatedCompositeFieldContainer[SerializedObject]
+    output_encoding: str
     def __init__(
-        self, outputs: _Optional[_Iterable[_Union[SerializedObject, _Mapping]]] = ...
+        self,
+        outputs: _Optional[_Iterable[_Union[SerializedObject, _Mapping]]] = ...,
+        output_encoding: _Optional[str] = ...,
     ) -> None: ...
 
 class RouterOutput(_message.Message):

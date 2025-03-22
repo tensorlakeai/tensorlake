@@ -79,6 +79,7 @@ message InvocationStateResponse {
 
 message FunctionOutput {
     repeated SerializedObject outputs = 1;
+    optional string output_encoding = 2;
 }
 
 message RouterOutput {
