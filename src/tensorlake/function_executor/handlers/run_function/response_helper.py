@@ -6,10 +6,10 @@ from tensorlake.functions_sdk.object_serializer import get_serializer
 
 from ...proto.function_executor_pb2 import (
     FunctionOutput,
+    Metrics,
     RouterOutput,
     RunTaskResponse,
     SerializedObject,
-    Metrics,
 )
 
 
