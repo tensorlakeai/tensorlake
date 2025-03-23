@@ -79,6 +79,7 @@ message InvocationStateResponse {
 
 message FunctionOutput {
     repeated SerializedObject outputs = 1;
+    optional string output_encoding = 2;
 }
 
 message RouterOutput {
@@ -96,6 +97,11 @@ message RunTaskRequest {
     optional SerializedObject function_init_value = 8;
 }
 
+message Metrics {
+    map<string, float> timers = 1;
+    map<string, uint64> counters = 2;
+}
+
 message RunTaskResponse {
     optional string task_id = 1;
     optional FunctionOutput function_output = 2;
@@ -104,6 +110,7 @@ message RunTaskResponse {
     optional string stderr = 5;
     optional bool is_reducer = 6;
     optional bool success = 7;
+    optional Metrics metrics = 8;
 }
 
 message HealthCheckRequest {}

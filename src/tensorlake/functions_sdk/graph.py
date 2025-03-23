@@ -20,10 +20,9 @@ import cloudpickle
 import nanoid
 from nanoid import generate
 from pydantic import BaseModel
-from rich import print  # TODO: Migrate to use click.echo
 from typing_extensions import get_args, get_origin
 
-from .data_objects import RouterOutput, TensorlakeData
+from .data_objects import Metrics, RouterOutput, TensorlakeData
 from .functions import (
     FunctionCallResult,
     GraphInvocationContext,
@@ -112,6 +111,10 @@ class Graph:
         self._results: Dict[str, Dict[str, List[TensorlakeData]]] = {}
         self._accumulator_values: Dict[str, TensorlakeData] = {}
         self._local_graph_ctx: Optional[GraphInvocationContext] = None
+
+        # Invocation ID -> Metrics
+        # For local graphs
+        self._metrics: Dict[str, Metrics] = {}
 
     def get_function(self, name: str) -> TensorlakeFunctionWrapper:
         if name not in self.nodes:
@@ -330,6 +333,15 @@ class Graph:
             function_outputs: Union[FunctionCallResult, RouterCallResult] = (
                 self._invoke_fn(node_name, input)
             )
+            # Store metrics for local graph execution
+            if function_outputs.metrics is not None:
+                metrics = self._metrics.get(
+                    self._local_graph_ctx.invocation_id, Metrics(timers={}, counters={})
+                )
+                metrics.timers.update(function_outputs.metrics.timers)
+                metrics.counters.update(function_outputs.metrics.counters)
+                self._metrics[self._local_graph_ctx.invocation_id] = metrics
+
             self._log_local_exec_tracebacks(function_outputs)
             if isinstance(function_outputs, RouterCallResult):
                 for edge in function_outputs.edges:
@@ -361,7 +373,7 @@ class Graph:
         node = self.nodes[node_name]
         if node_name in self.routers and len(self.routers[node_name]) > 0:
             result = TensorlakeFunctionWrapper(node).invoke_router(
-                self._local_graph_ctx, node_name, input
+                self._local_graph_ctx, input
             )
             for dynamic_edge in result.edges:
                 if dynamic_edge in self.nodes:
@@ -370,7 +382,7 @@ class Graph:
 
         acc_value = self._accumulator_values.get(node_name, None)
         return TensorlakeFunctionWrapper(node).invoke_fn_ser(
-            self._local_graph_ctx, node_name, input, acc_value
+            self._local_graph_ctx, input, acc_value
         )
 
     def _log_local_exec_tracebacks(

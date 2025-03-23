@@ -127,11 +127,15 @@ class InvocationStateResponse(_message.Message):
     ) -> None: ...
 
 class FunctionOutput(_message.Message):
-    __slots__ = ("outputs",)
+    __slots__ = ("outputs", "output_encoding")
     OUTPUTS_FIELD_NUMBER: _ClassVar[int]
+    OUTPUT_ENCODING_FIELD_NUMBER: _ClassVar[int]
     outputs: _containers.RepeatedCompositeFieldContainer[SerializedObject]
+    output_encoding: str
     def __init__(
-        self, outputs: _Optional[_Iterable[_Union[SerializedObject, _Mapping]]] = ...
+        self,
+        outputs: _Optional[_Iterable[_Union[SerializedObject, _Mapping]]] = ...,
+        output_encoding: _Optional[str] = ...,
     ) -> None: ...
 
 class RouterOutput(_message.Message):
@@ -179,6 +183,39 @@ class RunTaskRequest(_message.Message):
         function_init_value: _Optional[_Union[SerializedObject, _Mapping]] = ...,
     ) -> None: ...
 
+class Metrics(_message.Message):
+    __slots__ = ("timers", "counters")
+
+    class TimersEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: float
+        def __init__(
+            self, key: _Optional[str] = ..., value: _Optional[float] = ...
+        ) -> None: ...
+
+    class CountersEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: int
+        def __init__(
+            self, key: _Optional[str] = ..., value: _Optional[int] = ...
+        ) -> None: ...
+
+    TIMERS_FIELD_NUMBER: _ClassVar[int]
+    COUNTERS_FIELD_NUMBER: _ClassVar[int]
+    timers: _containers.ScalarMap[str, float]
+    counters: _containers.ScalarMap[str, int]
+    def __init__(
+        self,
+        timers: _Optional[_Mapping[str, float]] = ...,
+        counters: _Optional[_Mapping[str, int]] = ...,
+    ) -> None: ...
+
 class RunTaskResponse(_message.Message):
     __slots__ = (
         "task_id",
@@ -188,6 +225,7 @@ class RunTaskResponse(_message.Message):
         "stderr",
         "is_reducer",
         "success",
+        "metrics",
     )
     TASK_ID_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_OUTPUT_FIELD_NUMBER: _ClassVar[int]
@@ -196,6 +234,7 @@ class RunTaskResponse(_message.Message):
     STDERR_FIELD_NUMBER: _ClassVar[int]
     IS_REDUCER_FIELD_NUMBER: _ClassVar[int]
     SUCCESS_FIELD_NUMBER: _ClassVar[int]
+    METRICS_FIELD_NUMBER: _ClassVar[int]
     task_id: str
     function_output: FunctionOutput
     router_output: RouterOutput
@@ -203,6 +242,7 @@ class RunTaskResponse(_message.Message):
     stderr: str
     is_reducer: bool
     success: bool
+    metrics: Metrics
     def __init__(
         self,
         task_id: _Optional[str] = ...,
@@ -212,6 +252,7 @@ class RunTaskResponse(_message.Message):
         stderr: _Optional[str] = ...,
         is_reducer: bool = ...,
         success: bool = ...,
+        metrics: _Optional[_Union[Metrics, _Mapping]] = ...,
     ) -> None: ...
 
 class HealthCheckRequest(_message.Message):

@@ -14,6 +14,7 @@ class LocalInvocationState(InvocationState):
 
         Caller needs to ensure that the returned instance is only used for a single invocation state.
         """
+        super().__init__()
         self._state: Dict[str, bytes] = {}
 
     def set(self, key: str, value: Any) -> None:

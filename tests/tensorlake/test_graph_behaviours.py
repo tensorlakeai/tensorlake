@@ -65,6 +65,8 @@ class ComplexObject(BaseModel):
 @tensorlake_function(inject_ctx=True)
 def simple_function_ctx(ctx: GraphInvocationContext, x: MyObject) -> ComplexObject:
     ctx.invocation_state.set("my_key", 10)
+    ctx.invocation_state.timer("test_timer", 1.8)
+    ctx.invocation_state.counter("test_counter", 8)
     return ComplexObject(
         invocation_id=ctx.invocation_id,
         graph_name=ctx.graph_name,
