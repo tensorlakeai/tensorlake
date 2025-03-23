@@ -9,9 +9,7 @@ from typing import Any
 from tensorlake.functions_sdk.functions import (
     FunctionCallResult,
     GraphInvocationContext,
-    RouterCallResult,
     TensorlakeFunctionWrapper,
-    TensorlakeRouter,
 )
 from tensorlake.functions_sdk.invocation_state.invocation_state import InvocationState
 
@@ -105,43 +103,21 @@ class Handler:
             graph_version=self._graph_version,
             invocation_state=self._invocation_state,
         )
-        if _is_router(self._function_wrapper):
-            result: RouterCallResult = self._function_wrapper.invoke_router(
-                ctx, self._function_name, inputs.input
-            )
-            return self._response_helper.router_response(
-                result=result,
-                stdout=self._func_stdout.getvalue(),
-                stderr=self._func_stderr.getvalue(),
-            )
-        else:
-            result: FunctionCallResult = self._function_wrapper.invoke_fn_ser(
-                ctx, self._function_name, inputs.input, inputs.init_value
-            )
-            return self._response_helper.function_response(
-                result=result,
-                is_reducer=_function_is_reducer(self._function_wrapper),
-                stdout=self._func_stdout.getvalue(),
-                stderr=self._func_stderr.getvalue(),
-            )
+        result: FunctionCallResult = self._function_wrapper.invoke_fn_ser(
+            ctx, self._function_name, inputs.input, inputs.init_value
+        )
+        return self._response_helper.function_response(
+            result=result,
+            is_reducer=_function_is_reducer(self._function_wrapper),
+            stdout=self._func_stdout.getvalue(),
+            stderr=self._func_stderr.getvalue(),
+        )
 
     def _flush_logs(self) -> None:
         # structlog.PrintLogger uses print function. This is why flushing with print works.
         print("", flush=True)
         sys.stdout.flush()
         sys.stderr.flush()
-
-
-def _is_router(func_wrapper: TensorlakeFunctionWrapper) -> bool:
-    """Determines if the function is a router.
-
-    A function is a router if it is an instance of TensorlakeRouter or if it is an TensorlakeRouter class.
-    """
-    return str(
-        type(func_wrapper.indexify_function)
-    ) == "<class 'tensorlake.functions_sdk.functions.TensorlakeRouter'>" or isinstance(
-        func_wrapper.indexify_function, TensorlakeRouter
-    )
 
 
 def _function_is_reducer(func_wrapper: TensorlakeFunctionWrapper) -> bool:
