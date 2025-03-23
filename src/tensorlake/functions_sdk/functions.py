@@ -213,12 +213,14 @@ class FunctionCallResult(BaseModel):
     ser_outputs: List[TensorlakeData]
     traceback_msg: Optional[str] = None
     metrics: Optional[Metrics] = None
+    output_encoding: str
 
 
 class RouterCallResult(BaseModel):
     edges: List[str]
     traceback_msg: Optional[str] = None
     metrics: Optional[Metrics] = None
+    output_encoding: str
 
 
 class TensorlakeFunctionWrapper:
@@ -349,7 +351,10 @@ class TensorlakeFunctionWrapper:
             for output in outputs
         ]
         return FunctionCallResult(
-            ser_outputs=ser_outputs, traceback_msg=err, metrics=metrics
+            ser_outputs=ser_outputs,
+            traceback_msg=err,
+            metrics=metrics,
+            output_encoding=self.indexify_function.output_encoder,
         )
 
     def invoke_router(
@@ -360,7 +365,10 @@ class TensorlakeFunctionWrapper:
         # NOT SUPPORTING METRICS FOR ROUTER UNTIL
         # WE NEED THEM
         return RouterCallResult(
-            edges=edges, traceback_msg=err, metrics=Metrics(timers={}, counters={})
+            edges=edges,
+            traceback_msg=err,
+            metrics=Metrics(timers={}, counters={}),
+            output_encoding=self.indexify_function.output_encoder,
         )
 
     def deserialize_input(self, compute_fn: str, indexify_data: TensorlakeData) -> Any:

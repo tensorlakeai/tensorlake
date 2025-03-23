@@ -33,7 +33,9 @@ class ResponseHelper:
             )
             return RunTaskResponse(
                 task_id=self._task_id,
-                function_output=self._to_function_output(result.ser_outputs, result.output_encoding),
+                function_output=self._to_function_output(
+                    result.ser_outputs, result.output_encoding
+                ),
                 router_output=None,
                 stdout=stdout,
                 stderr=stderr,
@@ -91,7 +93,9 @@ class ResponseHelper:
             success=False,
         )
 
-    def _to_function_output(self, outputs: List[TensorlakeData], encoding: str) -> FunctionOutput:
+    def _to_function_output(
+        self, outputs: List[TensorlakeData], encoding: str
+    ) -> FunctionOutput:
         output = FunctionOutput(outputs=[], output_encoding=encoding)
         for ix_data in outputs:
             serialized_object: SerializedObject = SerializedObject(
