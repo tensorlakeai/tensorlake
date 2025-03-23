@@ -20,7 +20,6 @@ import cloudpickle
 import nanoid
 from nanoid import generate
 from pydantic import BaseModel
-from rich import print  # TODO: Migrate to use click.echo
 from typing_extensions import get_args, get_origin
 
 from .data_objects import Metrics, RouterOutput, TensorlakeData
