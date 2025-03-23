@@ -13,9 +13,7 @@ from tensorlake import (
     GraphInvocationContext,
     RemoteGraph,
     TensorlakeCompute,
-    TensorlakeRouter,
     tensorlake_function,
-    tensorlake_router,
 )
 from tensorlake.functions_sdk.data_objects import File
 
@@ -146,14 +144,14 @@ def add_two(x: Sum) -> int:
 def add_three(x: Sum) -> int:
     return x.val + 3
 
-
-@tensorlake_router()
-def route_if_even(x: Sum) -> List[Union[add_two, add_three]]:
-    print(f"routing input {x}")
-    if x.val % 2 == 0:
-        return add_three
+@tensorlake_function(inject_ctx=True, accumulate=Sum)
+def sum_of_squares_router(ctx: GraphInvocationContext, init_value: Sum, x: int) -> Sum:
+    init_value.val += x
+    if x % 2 == 0:
+        ctx.invocation_state.next_node("add_two")
     else:
-        return add_two
+        ctx.invocation_state.next_node("add_three")
+    return init_value
 
 
 @tensorlake_function()
@@ -215,11 +213,8 @@ def create_router_graph(test_case: unittest.TestCase) -> Graph:
         name=test_graph_name(test_case), description="test", start_node=generate_seq
     )
     graph.add_edge(generate_seq, square)
-    graph.add_edge(square, sum_of_squares)
-    graph.add_edge(sum_of_squares, route_if_even)
-    graph.route(route_if_even, [add_two, add_three])
-    graph.add_edge(add_two, make_it_string_from_int)
-    graph.add_edge(add_three, make_it_string_from_int)
+    graph.add_edge(square, sum_of_squares_router)
+    graph.add_edge(sum_of_squares_router, make_it_string_from_int)
     return graph
 
 
@@ -276,21 +271,6 @@ class SimpleFunctionCtxCls2(TensorlakeCompute):
 
     def run(self, obj: SimpleRouterCtxClsObject) -> SimpleRouterCtxClsObject:
         return SimpleRouterCtxClsObject(x=obj.x + 2)
-
-
-class SimpleRouterCtxCls(TensorlakeRouter):
-    name = "SimpleRouterCtxCls"
-
-    def __init__(self):
-        super().__init__()
-
-    def run(
-        self, obj: SimpleRouterCtxClsObject
-    ) -> Union[SimpleFunctionCtxCls1, SimpleFunctionCtxCls2]:
-        if obj.x % 2 == 0:
-            return SimpleFunctionCtxCls1
-        else:
-            return SimpleFunctionCtxCls2
 
 
 class TestGraphBehaviors(unittest.TestCase):
@@ -757,18 +737,6 @@ class TestGraphBehaviors(unittest.TestCase):
         self.assertEqual(output_str, ["7"])
 
     @parameterized.parameterized.expand([(False), (True)])
-    def test_router_graph_behavior_cls(self, is_remote):
-        graph = Graph(test_graph_name(self), start_node=SimpleRouterCtxCls)
-        graph.route(SimpleRouterCtxCls, [SimpleFunctionCtxCls1, SimpleFunctionCtxCls2])
-        graph = remote_or_local_graph(graph, is_remote)
-        invocation_id = graph.run(
-            block_until_done=True, obj=SimpleRouterCtxClsObject(x=1)
-        )
-        output = graph.output(invocation_id, "SimpleFunctionCtxCls2")
-        self.assertTrue(len(output) == 1)
-        self.assertEqual(output[0].x, 3)
-
-    @parameterized.parameterized.expand([(False), (True)])
     def test_invoke_file(self, is_remote):
         graph = Graph(
             name=test_graph_name(self), description="test", start_node=handle_file
@@ -851,12 +819,12 @@ class TestGraphBehaviors(unittest.TestCase):
     @parameterized.parameterized.expand([(False), (True)])
     def test_graph_router_start_node(self, is_remote):
         graph = Graph(
-            name=test_graph_name(self), description="test", start_node=route_if_even
+            name=test_graph_name(self), description="test", start_node=sum_of_squares_router
         )
-        graph.route(route_if_even, [add_two, add_three])
+        graph.add_edge(sum_of_squares_router, make_it_string_from_int)
         graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(block_until_done=True, x=Sum(val=2))
-        output = graph.output(invocation_id, "add_three")
+        output = graph.output(invocation_id, "sum_of_squares_router")
         self.assertEqual(output, [5])
 
     @parameterized.parameterized.expand([(False), (True)])

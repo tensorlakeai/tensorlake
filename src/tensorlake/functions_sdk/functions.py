@@ -97,31 +97,6 @@ class TensorlakeCompute:
         return serializer.deserialize(output.payload)
 
 
-class TensorlakeRouter:
-    name: str = ""
-    description: str = ""
-    image: Optional[Image] = None
-    secrets: Optional[List[str]] = None
-    placement_constraints: List[PlacementConstraints] = []
-    input_encoder: Optional[str] = "cloudpickle"
-    output_encoder: Optional[str] = "cloudpickle"
-    inject_ctx = False
-
-    def run(self, *args, **kwargs) -> Optional[List[TensorlakeCompute]]:
-        pass
-
-    # Create run method that preserves signature
-    def _call_run(self, *args, **kwargs):
-        # Process dictionary argument mapping it to args or to kwargs.
-        if len(args) == 1 and isinstance(args[0], dict):
-            sig = inspect.signature(self.run)
-            dict_arg = args[0]
-            new_args, new_kwargs = _process_dict_arg(dict_arg, sig)
-            return self.run(*new_args, **new_kwargs)
-
-        return self.run(*args, **kwargs)
-
-
 def _process_dict_arg(dict_arg: dict, sig: inspect.Signature) -> Tuple[list, dict]:
     new_args = []
     new_kwargs = {}
@@ -141,38 +116,6 @@ def _process_dict_arg(dict_arg: dict, sig: inspect.Signature) -> Tuple[list, dic
         new_args.append(remaining_kwargs)
 
     return new_args, new_kwargs
-
-
-def tensorlake_router(
-    name: Optional[str] = None,
-    description: Optional[str] = "",
-    image: Optional[Image] = None,
-    input_encoder: Optional[str] = "cloudpickle",
-    output_encoder: Optional[str] = "cloudpickle",
-    secrets: Optional[List[str]] = None,
-    placement_constraints: List[PlacementConstraints] = [],
-    inject_ctx: Optional[bool] = False,
-):
-    def construct(fn):
-        attrs = {
-            "name": name if name else fn.__name__,
-            "description": (
-                description
-                if description
-                else (fn.__doc__ or "").strip().replace("\n", "")
-            ),
-            "image": image,
-            "input_encoder": input_encoder,
-            "output_encoder": output_encoder,
-            "secrets": secrets,
-            "placement_constraints": placement_constraints,
-            "inject_ctx": inject_ctx,
-            "run": staticmethod(fn),
-        }
-
-        return type("TensorlakeRouter", (TensorlakeRouter,), attrs)
-
-    return construct
 
 
 def tensorlake_function(
@@ -214,23 +157,15 @@ class FunctionCallResult(BaseModel):
     traceback_msg: Optional[str] = None
     metrics: Optional[Metrics] = None
     output_encoding: str
-
-
-class RouterCallResult(BaseModel):
-    edges: List[str]
-    traceback_msg: Optional[str] = None
-    metrics: Optional[Metrics] = None
-    output_encoding: str
+    next_nodes: Optional[List[str]] = None
 
 
 class TensorlakeFunctionWrapper:
     def __init__(
         self,
-        indexify_function: Union[TensorlakeCompute, TensorlakeRouter],
+        indexify_function: TensorlakeCompute,
     ):
-        self.indexify_function: Union[TensorlakeCompute, TensorlakeRouter] = (
-            indexify_function()
-        )
+        self.indexify_function: TensorlakeCompute = indexify_function
 
     def get_output_model(self) -> Any:
         if not isinstance(self.indexify_function, TensorlakeCompute):
@@ -260,32 +195,6 @@ class TensorlakeFunctionWrapper:
             for k, v in type_hints.items()
             if k != "return" and not is_pydantic_model_from_annotation(v)
         }
-
-    def run_router(
-        self, ctx: GraphInvocationContext, input: Union[Dict, Type[BaseModel]]
-    ) -> Tuple[List[str], Optional[str]]:
-        args = []
-        kwargs = {}
-        try:
-            # tuple and list are considered positional arguments, list is used for compatibility
-            # with json encoding which won't deserialize in tuple.
-            if isinstance(input, tuple) or isinstance(input, list):
-                args += input
-            elif isinstance(input, dict):
-                kwargs.update(input)
-            else:
-                args.append(input)
-            if self.indexify_function.inject_ctx:
-                args.insert(0, ctx)
-            extracted_data = self.indexify_function._call_run(*args, **kwargs)
-        except Exception as e:
-            return [], traceback.format_exc()
-        if not isinstance(extracted_data, list) and extracted_data is not None:
-            return [extracted_data.name], None
-        edges = []
-        for fn in extracted_data or []:
-            edges.append(fn.name)
-        return edges, None
 
     def run_fn(
         self,
@@ -354,20 +263,6 @@ class TensorlakeFunctionWrapper:
             ser_outputs=ser_outputs,
             traceback_msg=err,
             metrics=metrics,
-            output_encoding=self.indexify_function.output_encoder,
-        )
-
-    def invoke_router(
-        self, ctx: GraphInvocationContext, name: str, input: TensorlakeData
-    ) -> RouterCallResult:
-        input = self.deserialize_input(name, input)
-        edges, err = self.run_router(ctx, input)
-        # NOT SUPPORTING METRICS FOR ROUTER UNTIL
-        # WE NEED THEM
-        return RouterCallResult(
-            edges=edges,
-            traceback_msg=err,
-            metrics=Metrics(timers={}, counters={}),
             output_encoding=self.indexify_function.output_encoder,
         )
 
