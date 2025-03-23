@@ -373,7 +373,7 @@ class Graph:
         node = self.nodes[node_name]
         if node_name in self.routers and len(self.routers[node_name]) > 0:
             result = TensorlakeFunctionWrapper(node).invoke_router(
-                self._local_graph_ctx, node_name, input
+                self._local_graph_ctx, input
             )
             for dynamic_edge in result.edges:
                 if dynamic_edge in self.nodes:
@@ -382,7 +382,7 @@ class Graph:
 
         acc_value = self._accumulator_values.get(node_name, None)
         return TensorlakeFunctionWrapper(node).invoke_fn_ser(
-            self._local_graph_ctx, node_name, input, acc_value
+            self._local_graph_ctx, input, acc_value
         )
 
     def _log_local_exec_tracebacks(

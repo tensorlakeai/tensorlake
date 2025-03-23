@@ -213,14 +213,12 @@ class FunctionCallResult(BaseModel):
     ser_outputs: List[TensorlakeData]
     traceback_msg: Optional[str] = None
     metrics: Optional[Metrics] = None
-    output_encoding: str
 
 
 class RouterCallResult(BaseModel):
     edges: List[str]
     traceback_msg: Optional[str] = None
     metrics: Optional[Metrics] = None
-    output_encoding: str
 
 
 class TensorlakeFunctionWrapper:
@@ -325,11 +323,10 @@ class TensorlakeFunctionWrapper:
     def invoke_fn_ser(
         self,
         ctx: GraphInvocationContext,
-        name: str,
         input: TensorlakeData,
         acc: Optional[Any] = None,
     ) -> FunctionCallResult:
-        input = self.deserialize_input(name, input)
+        input = self.deserialize_input(input)
         input_serializer = get_serializer(self.indexify_function.input_encoder)
         output_serializer = get_serializer(self.indexify_function.output_encoder)
         if acc is not None:
@@ -358,9 +355,9 @@ class TensorlakeFunctionWrapper:
         )
 
     def invoke_router(
-        self, ctx: GraphInvocationContext, name: str, input: TensorlakeData
+        self, ctx: GraphInvocationContext, input: TensorlakeData
     ) -> RouterCallResult:
-        input = self.deserialize_input(name, input)
+        input = self.deserialize_input(input)
         edges, err = self.run_router(ctx, input)
         # NOT SUPPORTING METRICS FOR ROUTER UNTIL
         # WE NEED THEM
@@ -371,8 +368,9 @@ class TensorlakeFunctionWrapper:
             output_encoding=self.indexify_function.output_encoder,
         )
 
-    def deserialize_input(self, compute_fn: str, indexify_data: TensorlakeData) -> Any:
-        encoder = indexify_data.encoder
-        payload = indexify_data.payload
-        serializer = get_serializer(encoder)
-        return serializer.deserialize(payload)
+    def deserialize_input(self, indexify_data: TensorlakeData) -> Any:
+        serializer = get_serializer(self.indexify_function.input_encoder)
+        return serializer.deserialize(indexify_data.payload)
+
+    def output_encoding(self) -> str:
+        return self.indexify_function.output_encoder

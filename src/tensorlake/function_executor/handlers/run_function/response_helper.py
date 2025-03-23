@@ -16,8 +16,9 @@ from ...proto.function_executor_pb2 import (
 class ResponseHelper:
     """Helper class for generating RunFunctionResponse."""
 
-    def __init__(self, task_id: str):
+    def __init__(self, task_id: str, output_encoding: str):
         self._task_id = task_id
+        self._output_encoding = output_encoding
 
     def function_response(
         self,
@@ -34,7 +35,7 @@ class ResponseHelper:
             return RunTaskResponse(
                 task_id=self._task_id,
                 function_output=self._to_function_output(
-                    result.ser_outputs, result.output_encoding
+                    result.ser_outputs, self._output_encoding
                 ),
                 router_output=None,
                 stdout=stdout,
