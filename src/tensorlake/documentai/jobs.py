@@ -129,12 +129,20 @@ class StructuredData(BaseModel):
     pages: List[StructuredDataPage] = Field(alias="pages", default_factory=list)
 
 
+class Chunk(BaseModel):
+    """
+    Chunk of a Page in a Document.
+    """
+
+    page_number: int
+    content: str
+
 class Output(BaseModel):
     """
     Output of a job.
     """
 
-    chunks: List[str] = Field(alias="chunks", default_factory=list)
+    chunks: List[Chunk] = Field(alias="chunks", default_factory=list)
     document: Optional[Document]
     num_pages: Optional[int]
     structured_data: Optional[StructuredData] = None
