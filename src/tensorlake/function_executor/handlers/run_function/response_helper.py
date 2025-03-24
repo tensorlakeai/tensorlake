@@ -49,7 +49,6 @@ class ResponseHelper:
                 message=result.traceback_msg,
                 stdout=stdout,
                 stderr=stderr,
-                metrics=metrics,
             )
 
     def router_response(
