@@ -17,6 +17,6 @@ class PaginatedResult(BaseModel, Generic[T]):
     """
 
     items: List[T] = Field(alias="items")
-    total_pages: int = Field(alias="totalPages")
+    has_more: bool = Field(alias="hasMore")
     prev_cursor: Optional[str] = Field(alias="prevCursor")
     next_cursor: Optional[str] = Field(alias="nextCursor")

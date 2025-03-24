@@ -137,6 +137,7 @@ class Chunk(BaseModel):
     page_number: int
     content: str
 
+
 class Output(BaseModel):
     """
     Output of a job.
