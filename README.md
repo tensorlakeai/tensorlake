@@ -44,6 +44,19 @@ job_id = doc_ai.parse(file_id, options=ParsingOptions())
 
 The default chunking strategy is by Page, you can change the chunking strategy, the prompts for table and figure summarization by configuring `ParsingOptions`. The API is [documented here](https://docs.tensorlake.ai/documentai/parsing#parse-api-reference)
 
+#### Getting Back Parsed Data
+
+Document AI APIs are async to be able to handle large volumes of documents with many pages. You can use a Job ID to retrieve results, or configure a webhook endpoint to receive updates.
+
+```python
+
+from tensorlake.documentai import Job
+
+data: JobResult = doc_ai.get_job(job_id="job-xxxx")
+```
+
+The SDK includes [Pydantic models](src/tensorlake/documentai/common.py) that describes Document chunks, and individual page elements(including bounding boxes).
+
 #### Structured Extraction 
 
 Extract structured data from a document.
@@ -69,19 +82,6 @@ job_id = doc_ai.parse(file_id, options=options)
 Structured Extraction is guided by the provided schema. We support Pydantic Models as well JSON Schema. All the levers for structured extraction are (documented here)[https://docs.tensorlake.ai/api-reference/extract/extract-file-async].
 
 We recommend adding a description to each field in the schema, as it helps the model to learn the context of the field.
-
-#### Getting Back Parsed Data
-
-Document AI APIs are async to be able to handle large volumes of documents with many pages. You can use a Job ID to retrieve results, or configure a webhook endpoint to receive updates.
-
-```python
-
-from tensorlake.documentai import JobResult
-
-data: JobResult = doc_ai.get_job(job_id="job-xxxx")
-```
-
-The SDK includes [Pydantic models](src/tensorlake/documentai/common.py) that describes Document chunks, and individual page elements(including bounding boxes).
 
 #### Datasets 
 
