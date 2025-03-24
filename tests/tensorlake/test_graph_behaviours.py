@@ -46,7 +46,7 @@ def simple_function_multiple_inputs_json(x: str, y: int) -> str:
     return x + suf
 
 
-@tensorlake_function()
+@tensorlake_function(input_encoder="json")
 def simple_function_with_str_as_input(x: str) -> str:
     return x + "cc"
 
