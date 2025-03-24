@@ -155,7 +155,10 @@ class Job(BaseModel):
     DocumentAI job class.
     """
 
-    job_id: str = Field(alias="jobId")
-    file_id: str = Field(alias="fileId")
+    job_id: str = Field(alias="id")
     status: JobStatus = Field(alias="status")
-    outputs: Optional[Output] = None
+    file_name: str = Field(alias="fileName")
+    file_id: str = Field(alias="fileId")
+    trace_id: str = Field(alias="traceId")
+    createdAt: str = Field(alias="createdAt")
+    updatedAt: str = Field(alias="updatedAt")
