@@ -110,7 +110,7 @@ class Handler:
         )
         if _is_router(self._function_wrapper):
             result: RouterCallResult = self._function_wrapper.invoke_router(
-                ctx, self._function_name, inputs.input
+                ctx, inputs.input
             )
             return self._response_helper.router_response(
                 result=result,
@@ -119,7 +119,7 @@ class Handler:
             )
         else:
             result: FunctionCallResult = self._function_wrapper.invoke_fn_ser(
-                ctx, self._function_name, inputs.input, inputs.init_value
+                ctx, inputs.input, inputs.init_value
             )
             return self._response_helper.function_response(
                 result=result,
