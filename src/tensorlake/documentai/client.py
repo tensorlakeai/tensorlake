@@ -38,6 +38,7 @@ class DocumentAI:
         return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
+            "Connection": "close",
         }
 
     def get_job(self, job_id: str) -> Job:
