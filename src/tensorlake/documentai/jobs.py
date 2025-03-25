@@ -5,7 +5,7 @@ DocumentAI job classes.
 from enum import Enum
 from typing import List, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class JobStatus(str, Enum):
@@ -155,7 +155,9 @@ class Job(BaseModel):
     DocumentAI job class.
     """
 
-    job_id: str = Field(alias="id")
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(alias="jobId")
     status: JobStatus = Field(alias="status")
     file_name: str = Field(alias="fileName")
     file_id: str = Field(alias="fileId")

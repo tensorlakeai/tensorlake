@@ -107,7 +107,7 @@ class DocumentAI:
         while finished_job.status in ["pending", "processing"]:
             print("waiting 5s...")
             time.sleep(5)
-            finished_job = self.get_job(job.job_id)
+            finished_job = self.get_job(job.id)
             print(f"job status: {finished_job.status}")
 
         return finished_job
@@ -121,7 +121,7 @@ class DocumentAI:
         while finished_job.status in ["pending", "processing"]:
             print("waiting 5s...")
             await asyncio.sleep(5)
-            finished_job = await self.get_job_async(job.job_id)
+            finished_job = await self.get_job_async(job.id)
             print(f"job_id: {job_id}, job status: {finished_job.status}")
 
         return finished_job
