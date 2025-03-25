@@ -417,13 +417,16 @@ class TensorlakeClient:
         if graph_outputs.status in ["pending", "Pending", "Running"]:
             raise GraphStillProcessing()
 
+        graph_metadata: ComputeGraphMetadata = self.graph(graph)
+        output_encoder = graph_metadata.nodes[fn_name].compute_fn.output_encoder
+
         outputs = []
         for output in graph_outputs.outputs:
             if output.compute_fn == fn_name:
                 indexify_data = self._download_output(
                     self.namespace, graph, invocation_id, fn_name, output.id
                 )
-                serializer = get_serializer(indexify_data.encoder)
+                serializer = get_serializer(output_encoder)
                 output = serializer.deserialize(indexify_data.payload)
                 outputs.append(output)
         return outputs
