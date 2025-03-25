@@ -116,7 +116,6 @@ class DatasetItems(BaseModel):
     """
 
     cursor: Optional[str] = None
-    total_pages: int = 0
     items: dict[DatasetItemInfo, Output] = {}
 
 
@@ -275,6 +274,5 @@ class Dataset:
 
         return DatasetItems(
             cursor=jobs.next_cursor,
-            total_pages=jobs.total_pages,
             items=outputs,
         )

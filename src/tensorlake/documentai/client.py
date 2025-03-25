@@ -341,7 +341,7 @@ class DocumentAI:
                 "settings": self.__create_parse_settings__(dataset.options),
             },
         )
-        return await self.get_dataset_async(response.json().get("id"))
+        return await self.get_dataset_async(dataset.name)
 
     def get_dataset(self, name: str) -> Optional[Dataset]:
         """
