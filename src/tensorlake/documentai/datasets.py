@@ -153,6 +153,7 @@ class Dataset:
         return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
+            "Connection": "close",
         }
 
     def ingest(self, ingest_args: IngestArgs) -> Job:
@@ -217,6 +218,7 @@ class Dataset:
                 url=f"/datasets/{self.name}",
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
+                    "Connection": "close",
                 },
                 files=data,
             )
