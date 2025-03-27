@@ -144,10 +144,10 @@ class Output(BaseModel):
     """
 
     chunks: List[Chunk] = Field(alias="chunks", default_factory=list)
-    document: Optional[Document]
-    num_pages: Optional[int]
+    document: Optional[Document] = None
+    num_pages: Optional[int] = 0
     structured_data: Optional[StructuredData] = None
-    # error_message: Optional[str] = Field(alias="errorMessage")
+    error_message: Optional[str] = Field(alias="errorMessage", default="")
 
 
 class Job(BaseModel):
