@@ -3,7 +3,7 @@ DocumentAI job classes.
 """
 
 from enum import Enum
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -43,13 +43,19 @@ class Text(BaseModel):
     content: str
 
 
+class TableCell(BaseModel):
+    text: str
+    bounding_box: Tuple[float, float, float, float]
+
+
 class Table(BaseModel):
     """
     Table content of a page fragment.
     """
 
     content: str
-    summary: Optional[str] = None
+    table_summary: Optional[str] = None
+    cells: List[TableCell]
 
 
 class Figure(BaseModel):
