@@ -64,7 +64,7 @@ class Figure(BaseModel):
     """
 
     content: str
-    summary: Optional[str] = None
+    figure_summary: Optional[str] = None
 
 
 class PageFragmentType(str, Enum):

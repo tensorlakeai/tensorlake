@@ -85,3 +85,7 @@ class ParsingOptions(BaseModel):
     table_output_mode: TableOutputMode = TableOutputMode.MARKDOWN
     page_range: Optional[str] = None
     extraction_options: Optional[ExtractionOptions] = None
+
+    detect_signature: Optional[bool] = False
+    table_summary: Optional[bool] = False
+    figure_summary: Optional[bool] = False
