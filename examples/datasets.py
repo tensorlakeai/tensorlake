@@ -110,6 +110,7 @@ async def main():
 
     cursor = items_page.cursor
     while cursor is not None:
+        # TODO This isn't working
         items_page = await dataset.items_async(cursor=cursor)
         for key_info, data in items_page.items.items():
             items[key_info] = data.model_dump_json()

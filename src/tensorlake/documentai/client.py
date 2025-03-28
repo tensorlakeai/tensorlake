@@ -380,8 +380,6 @@ class DocumentAI:
             if e.response.status_code == 404:
                 return None
 
-        print(response)
-        print(response.json())
         resp = response.json()
 
         settings = ParsingOptions.model_validate(resp.get("settings"))

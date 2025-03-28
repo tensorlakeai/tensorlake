@@ -10,6 +10,7 @@ from typing import Optional
 import httpx
 from pydantic import BaseModel, Field
 
+from tensorlake.connectors.connector import Connector
 from tensorlake.documentai.common import (
     DOC_AI_BASE_URL,
     PaginatedResult,
@@ -278,3 +279,39 @@ class Dataset:
             cursor=jobs.next_cursor,
             items=outputs,
         )
+
+    def export_dataset(self, connector: Connector) -> int:
+        return asyncio.run(self.export_dataset_async(connector=connector))
+
+    async def export_dataset_async(self, connector: Connector) -> int:
+        if not self.settings.extraction_options:
+            raise Exception("Unable to export, extraction options missing.")
+
+        counter = 0
+
+        # 1. get items
+        items_page = await self.items_async()
+        page_structured_datas = []
+        for key_info, data in items_page.items.items():
+            page_data = data.structured_data.pages
+            for page in page_data:
+                page_structured_datas.append(page.data)
+
+        # TODO table name
+        counter += connector.write_structured_data(table_name="test_table", data=page_structured_datas)
+
+        cursor = items_page.cursor
+        while cursor is not None:
+            items_page = self.items_async(cursor=cursor)
+            page_structured_datas = []
+
+            for key_info, data in items_page.items.items():
+                page_data = data.structured_data.pages
+                for page in page_data:
+                    page_structured_datas.append(page.data)
+
+            # TODO table name
+            counter += connector.write_structured_data(table_name="test_table", data=page_structured_datas)
+            cursor = items_page.cursor
+
+        return counter
