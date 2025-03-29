@@ -21,9 +21,10 @@ jobs:
   lint_python_packages:
     name: Lint and test
     runs-on: ubuntu-latest-xlarge
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      
+
       # TODO: Needed for compose, remove when compose is migrated to use public images
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
