@@ -17,7 +17,7 @@ class ImageBuilderClient:
     @classmethod
     def from_env(cls):
         api_key = os.getenv("TENSORLAKE_API_KEY")
-        server_url = os.getenv("TENSORLAKE_SERVER_URL", "https://api.tensorlake.ai")
+        server_url = os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")
         build_url = os.getenv(
             "TENSORLAKE_BUILD_SERVICE", f"{server_url}/images"
         )  # Mainly used for debugging/local testing
