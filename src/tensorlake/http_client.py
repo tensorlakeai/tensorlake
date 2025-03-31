@@ -64,9 +64,7 @@ class TensorlakeClient:
         api_key: Optional[str] = None,
         **kwargs,
     ):
-        if os.environ.get("INDEXIFY_URL"):
-            print("Using INDEXIFY_URL environment variable to connect to Indexify")
-            service_url = os.environ["INDEXIFY_URL"]
+        # service_url is already set from DEFAULT_SERVICE_URL, which reads from env var
 
         self.service_url = service_url
         self._config_path = config_path

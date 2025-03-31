@@ -32,7 +32,7 @@ class AuthContext:
                     "API key is not configured properly. The TENSORLAKE_API_KEY environment variable is required."
                 )
 
-            base_url = os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")
+            base_url = os.getenv("TENSORLAKE_SERVER_URL", "https://api.tensorlake.ai")
 
             self._client = httpx.Client(
                 base_url=base_url,
