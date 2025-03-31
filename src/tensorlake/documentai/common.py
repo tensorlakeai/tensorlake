@@ -8,7 +8,7 @@ from typing import Generic, List, Optional, TypeVar
 from pydantic import BaseModel, Field
 
 # Get base URL from environment variable or use default
-_server_url = os.getenv("TENSORLAKE_SERVER_URL", "https://api.tensorlake.ai")
+_server_url = os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")
 DOC_AI_BASE_URL = os.getenv("TENSORLAKE_DOCAI_URL", f"{_server_url}/documents/v1/")
 
 T = TypeVar("T")
