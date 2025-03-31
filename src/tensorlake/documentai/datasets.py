@@ -146,9 +146,6 @@ class Dataset:
         self.settings = settings
         self.status = status
 
-        self.__file_uploader__ = FileUploader(api_key)
-        self._async_client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
-
     def __headers__(self):
         return {
             "Authorization": f"Bearer {self.api_key}",
@@ -196,7 +193,9 @@ class Dataset:
             path = Path(ingest_args.file_path)
             if not path.exists():
                 raise FileNotFoundError(f"File {path} not found")
-            file_id = await self.__file_uploader__.upload_file_async(
+
+            uploader = FileUploader(self.api_key)
+            file_id = await uploader.upload_file_async(
                 ingest_args.file_path
             )
 
@@ -214,7 +213,8 @@ class Dataset:
             data["pages"] = (None, f"{ingest_args.pages}")
 
         try:
-            response = await self._async_client.post(
+            client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
+            response = await client.post(
                 url=f"/datasets/{self.name}",
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
@@ -251,7 +251,9 @@ class Dataset:
         if cursor:
             url += f"?cursor={cursor}"
 
-        resp = await self._async_client.get(
+        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
+
+        resp = await client.get(
             url=url,
             headers=self.__headers__(),
         )
@@ -264,7 +266,7 @@ class Dataset:
         for job in jobs.items:
             key_info = DatasetItemInfo(job_id=job.id, file_name=job.file_name)
             if job.status == JobStatus.SUCCESSFUL:
-                resp = await self._async_client.get(job.outputs_url)
+                resp = await client.get(job.outputs_url)
                 resp.raise_for_status()
 
                 resp_json = resp.json()
