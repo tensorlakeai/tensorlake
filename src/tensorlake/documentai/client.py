@@ -31,7 +31,6 @@ class DocumentAI:
             self.api_key = os.getenv("TENSORLAKE_API_KEY").strip()
 
         self._client = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None)
-        self._async_client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
         self.__file_uploader__ = FileUploader(api_key=api_key)
 
     def __headers__(self):
@@ -56,7 +55,8 @@ class DocumentAI:
         """
         Get the result of a job by its ID asynchronously.
         """
-        response = await self._async_client.get(
+        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
+        response = await client.get(
             url=f"jobs/{job_id}",
             headers=self.__headers__(),
         )
@@ -73,7 +73,8 @@ class DocumentAI:
         """
         Delete a job by its ID asynchronously.
         """
-        response = await self._async_client.delete(
+        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
+        response = await client.delete(
             url=f"jobs/{job_id}",
             headers=self.__headers__(),
         )
@@ -89,7 +90,8 @@ class DocumentAI:
         """
         Get a list of jobs asynchronously.
         """
-        response = await self._async_client.get(
+        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
+        response = await client.get(
             url="/jobs",
             headers=self.__headers__(),
             params={"cursor": cursor} if cursor else None,
@@ -179,7 +181,8 @@ class DocumentAI:
         """
         Get a list of files asynchronously.
         """
-        response = await self._async_client.get(
+        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
+        response = await client.get(
             url="/files",
             headers=self.__headers__(),
             params={"cursor": cursor} if cursor else None,
@@ -234,7 +237,8 @@ class DocumentAI:
         """
         Parse a document asynchronously.
         """
-        response = await self._async_client.post(
+        client = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None)
+        response = await client.post(
             url="/parse",
             headers=self.__headers__(),
             json=self.__create_parse_req__(file, options, deliver_webhook),
@@ -283,7 +287,8 @@ class DocumentAI:
             httpx.HTTPError: If the request fails
             FileNotFoundError: If the file doesn't exist
         """
-        return await self.__file_uploader__.upload_file_async(path)
+        uploader = FileUploader(api_key=api_key)
+        return await uploader.upload_file_async(path)
 
     def delete_file(self, file_id: str):
         """
@@ -295,7 +300,8 @@ class DocumentAI:
         """
         Delete a file by its ID asynchronously.
         """
-        response = await self._async_client.delete(
+        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
+        response = await client.delete(
             url=f"files/{file_id}",
             headers=self.__headers__(),
         )
@@ -332,7 +338,8 @@ class DocumentAI:
             if existing_dataset:
                 return existing_dataset
 
-        response = await self._async_client.post(
+        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
+        response = await client.post(
             url="datasets",
             headers=self.__headers__(),
             json={
@@ -354,19 +361,14 @@ class DocumentAI:
             Dataset: The dataset.
         """
 
-        async def asyncfunc():
-            dataset = await self.get_dataset_async(name)
-            return dataset
-
-        loop = asyncio.get_event_loop()
-        dataset = loop.run_until_complete(asyncfunc())
-        return dataset
+        return asyncio.run(self.get_dataset_async(name))
 
     async def get_dataset_async(self, name: str) -> Optional[Dataset]:
         """
         Get a dataset by its ID asynchronously.
         """
-        response = await self._async_client.get(
+        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
+        response = await client.get(
             url=f"datasets/{name}",
             headers=self.__headers__(),
         )
@@ -406,7 +408,8 @@ class DocumentAI:
         """
         Delete a dataset by its ID asynchronously.
         """
-        response = await self._async_client.delete(
+        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
+        response = await client.delete(
             url=f"datasets/{name}",
             headers=self.__headers__(),
         )
