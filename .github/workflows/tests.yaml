@@ -13,30 +13,22 @@ on:
       - 'tests/**'
       - '.github/workflows/tests.yaml'
 
-permissions: # These are required to log into ECR, remove when no longer required
-  id-token: write
-  contents: read
+env:
+  INDEXIFY_URL: http://localhost:8900
 
 jobs:
-  lint_python_packages:
+  run_tests:
     name: Lint and test
     runs-on: ubuntu-latest-xlarge
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      
-      # TODO: Needed for compose, remove when compose is migrated to use public images
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          role-session-name: github-actions-platform-api
-          aws-region: ${{ vars.AWS_REGION }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: 3.9
-          cache: 'pip'
+          cache: "pip"
 
       - name: Install Poetry
         uses: snok/install-poetry@v1
@@ -48,16 +40,68 @@ jobs:
       - name: Build and lint tensorlake
         run: make build && make check
 
+      - name: Set up Docker
+        uses: docker/setup-docker-action@v4
 
-
-        # TODO: Needed for compose, remove when compose is migrated to use public images          
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - uses: hoverkraft-tech/compose-action@v2.0.1
+      - name: Start Background Indexify Server in Docker container
+        uses: JarvusInnovations/background-action@v1
         with:
-          compose-file: "./tests/compose.yaml"
+          run: |
+            mkdir -p /tmp/indexify-server-storage
+            docker run -i -a stdout -a stderr --rm \
+              -p 127.0.0.1:8900:8900/tcp \
+              -p 127.0.0.1:8901:8901/tcp \
+              --name indexify-server \
+              -v /tmp/indexify-server-storage:/indexify-server \
+              -w /indexify-server \
+              tensorlake/indexify-server:latest &
+          wait-on: |
+            tcp:localhost:8900
+          tail: true
+          wait-for: 30s
+          log-output: true
+          # always logging the output to debug test failures.
+          log-output-if: true
+
+      - name: Install Indexify from PyPI
+        run: pip install indexify
+      - name: Install Tensorlake from local source
+        run: pip install -e . && pip show tensorlake
+      - name: Start Background Indexify Executor
+        uses: JarvusInnovations/background-action@v1
+        with:
+          run: |
+            indexify-cli executor --dev &
+            echo $! > /tmp/executor.pid &
+
+          wait-on: |
+            tcp:localhost:8900
+
+          tail: true
+          wait-for: 10s
+          log-output: true
+          # always logging the output to debug test failures.
+          log-output-if: true
+
+      - name: Wait for readiness
+        run: |
+          serverReady=false
+          counter=0
+          while [ "$serverReady" != true ]; do
+            output=$(curl --silent --fail http://localhost:8900/internal/executors | jq '. | length' 2>/dev/null)
+            if [[ $? -eq 0 && "$output" -ge 1 ]]; then
+                echo "Server ready with executors."
+                serverReady=true
+            else
+                echo 'Waiting for executors to join server...'
+                counter=$((counter+1))
+                if [ $counter -gt 6 ]; then
+                    echo "Timeout waiting for executors to join server."
+                    exit 1
+                fi
+                sleep 5
+            fi
+          done
 
       - name: Run tests
         env:

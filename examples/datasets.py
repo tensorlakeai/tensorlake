@@ -120,7 +120,7 @@ async def main():
         writer = csv.writer(f)
         writer.writerow(["job_id", "file_name", "output"])
         for key_info, data in items.items():
-            writer.writerow([key_info.job_id, key_info.file_name, data])
+            writer.writerow([key_info.id, key_info.file_name, data])
 
 
 asyncio.run(main())

@@ -29,7 +29,7 @@ class AuthContext:
         if self._client is None:
             if not self.api_key:
                 raise click.UsageError(
-                    "API key is not configured properly. The TENSORLAKE_API_KEY environment variable is required."
+                    "API key is not configured properly. The INDEXIFY_URL environment variable is required."
                 )
 
             base_url = os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")

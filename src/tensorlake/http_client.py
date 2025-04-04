@@ -58,15 +58,12 @@ def log_retries(e: BaseException, sleep_time: float, retries: int):
 class TensorlakeClient:
     def __init__(
         self,
-        service_url: str = DEFAULT_SERVICE_URL,
+        service_url: str = DEFAULT_SERVICE_URL,  # service_url is already set from DEFAULT_SERVICE_URL, which reads from env var
         config_path: Optional[str] = None,
         namespace: str = "default",
         api_key: Optional[str] = None,
         **kwargs,
     ):
-        if os.environ.get("INDEXIFY_URL"):
-            print("Using INDEXIFY_URL environment variable to connect to Indexify")
-            service_url = os.environ["INDEXIFY_URL"]
 
         self.service_url = service_url
         self._config_path = config_path
@@ -417,13 +414,16 @@ class TensorlakeClient:
         if graph_outputs.status in ["pending", "Pending", "Running"]:
             raise GraphStillProcessing()
 
+        graph_metadata: ComputeGraphMetadata = self.graph(graph)
+        output_encoder = graph_metadata.nodes[fn_name].compute_fn.output_encoder
+
         outputs = []
         for output in graph_outputs.outputs:
             if output.compute_fn == fn_name:
                 indexify_data = self._download_output(
                     self.namespace, graph, invocation_id, fn_name, output.id
                 )
-                serializer = get_serializer(indexify_data.encoder)
+                serializer = get_serializer(output_encoder)
                 output = serializer.deserialize(indexify_data.payload)
                 outputs.append(output)
         return outputs

@@ -3,9 +3,9 @@ DocumentAI job classes.
 """
 
 from enum import Enum
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class JobStatus(str, Enum):
@@ -43,13 +43,19 @@ class Text(BaseModel):
     content: str
 
 
+class TableCell(BaseModel):
+    text: str
+    bounding_box: Tuple[float, float, float, float]
+
+
 class Table(BaseModel):
     """
     Table content of a page fragment.
     """
 
     content: str
-    summary: Optional[str] = None
+    table_summary: Optional[str] = None
+    cells: List[TableCell]
 
 
 class Figure(BaseModel):
@@ -58,7 +64,7 @@ class Figure(BaseModel):
     """
 
     content: str
-    summary: Optional[str] = None
+    figure_summary: Optional[str] = None
 
 
 class PageFragmentType(str, Enum):
@@ -144,10 +150,10 @@ class Output(BaseModel):
     """
 
     chunks: List[Chunk] = Field(alias="chunks", default_factory=list)
-    document: Optional[Document]
-    num_pages: Optional[int]
+    document: Optional[Document] = None
+    num_pages: Optional[int] = 0
     structured_data: Optional[StructuredData] = None
-    # error_message: Optional[str] = Field(alias="errorMessage")
+    error_message: Optional[str] = Field(alias="errorMessage", default="")
 
 
 class Job(BaseModel):
@@ -155,10 +161,12 @@ class Job(BaseModel):
     DocumentAI job class.
     """
 
-    job_id: str = Field(alias="id")
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(alias="jobId")
     status: JobStatus = Field(alias="status")
     file_name: str = Field(alias="fileName")
     file_id: str = Field(alias="fileId")
-    trace_id: str = Field(alias="traceId")
-    createdAt: str = Field(alias="createdAt")
-    updatedAt: str = Field(alias="updatedAt")
+    trace_id: Optional[str] = Field(alias="traceId", default=None)
+    createdAt: Optional[str] = Field(alias="createdAt", default=None)
+    updatedAt: Optional[str] = Field(alias="updatedAt", default=None)

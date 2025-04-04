@@ -1,1 +1,3 @@
-DEFAULT_SERVICE_URL = "https://api.tensorlake.ai"
+import os
+
+DEFAULT_SERVICE_URL = os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")
