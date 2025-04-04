@@ -21,8 +21,8 @@ job_id = doc_ai.parse(
     "https://pub-157277cc11d64fb1a11f71cc52c688eb.r2.dev/invoice-example.pdf",
     options=ParsingOptions(
         table_parsing_strategy=TableParsingStrategy.VLM,
+        deliver_webhook=True,
     ),
-    deliver_webhook=True,
 )
 
 print(f"job id: {job_id}")

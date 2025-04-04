@@ -144,6 +144,7 @@ class DocumentAI:
             "tableParsingMode": options.table_parsing_strategy.value,
             "tableSummarizationPrompt": options.table_parsing_prompt,
             "figureSummarizationPrompt": options.figure_summarization_prompt,
+            "deliverWebhook": options.deliver_webhook,
             "jsonSchema": json_schema,
             "structuredExtractionPrompt": (
                 options.extraction_options.prompt
@@ -157,13 +158,10 @@ class DocumentAI:
             ),
         }
 
-    def __create_parse_req__(
-        self, file: str, options: ParsingOptions, deliver_webhook: bool
-    ) -> dict:
+    def __create_parse_req__(self, file: str, options: ParsingOptions) -> dict:
         payload = {
             "file": file,
             "pages": options.page_range,
-            "deliverWebhook": deliver_webhook,
             "settings": self.__create_parse_settings__(options),
         }
 
@@ -196,7 +194,6 @@ class DocumentAI:
         file: str,
         options: ParsingOptions,
         timeout: int = 5,
-        deliver_webhook: bool = False,
     ) -> str:
         """
         Parse a document.
@@ -204,7 +201,7 @@ class DocumentAI:
         response = self._client.post(
             url="/parse",
             headers=self.__headers__(),
-            json=self.__create_parse_req__(file, options, deliver_webhook),
+            json=self.__create_parse_req__(file, options),
         )
         try:
             response.raise_for_status()
@@ -224,7 +221,7 @@ class DocumentAI:
         """
         Parse a document and wait for completion.
         """
-        job_id = self.parse(file, options, timeout, deliver_webhook)
+        job_id = self.parse(file, options, timeout)
         return self.wait_for_completion(job_id)
 
     async def parse_async(
@@ -241,7 +238,7 @@ class DocumentAI:
         response = await client.post(
             url="/parse",
             headers=self.__headers__(),
-            json=self.__create_parse_req__(file, options, deliver_webhook),
+            json=self.__create_parse_req__(file, options),
         )
         try:
             response.raise_for_status()
@@ -287,7 +284,7 @@ class DocumentAI:
             httpx.HTTPError: If the request fails
             FileNotFoundError: If the file doesn't exist
         """
-        uploader = FileUploader(api_key=api_key)
+        uploader = FileUploader(api_key=self.api_key)
         return await uploader.upload_file_async(path)
 
     def delete_file(self, file_id: str):
@@ -348,6 +345,7 @@ class DocumentAI:
                 "settings": self.__create_parse_settings__(dataset.options),
             },
         )
+
         return await self.get_dataset_async(dataset.name)
 
     def get_dataset(self, name: str) -> Optional[Dataset]:
