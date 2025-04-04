@@ -58,7 +58,7 @@ def log_retries(e: BaseException, sleep_time: float, retries: int):
 class TensorlakeClient:
     def __init__(
         self,
-        service_url: str = DEFAULT_SERVICE_URL, # service_url is already set from DEFAULT_SERVICE_URL, which reads from env var
+        service_url: str = DEFAULT_SERVICE_URL,  # service_url is already set from DEFAULT_SERVICE_URL, which reads from env var
         config_path: Optional[str] = None,
         namespace: str = "default",
         api_key: Optional[str] = None,

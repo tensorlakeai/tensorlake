@@ -3,7 +3,7 @@ DocumentAI job classes.
 """
 
 from enum import Enum
-from typing import List, Optional, Union, Tuple
+from typing import List, Optional, Tuple, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
