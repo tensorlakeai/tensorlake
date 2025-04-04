@@ -195,9 +195,7 @@ class Dataset:
                 raise FileNotFoundError(f"File {path} not found")
 
             uploader = FileUploader(self.api_key)
-            file_id = await uploader.upload_file_async(
-                ingest_args.file_path
-            )
+            file_id = await uploader.upload_file_async(ingest_args.file_path)
 
         if file_id is None:
             raise ValueError("file_url, file_path, or file_id should be provided")
