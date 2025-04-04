@@ -141,6 +141,7 @@ class DocumentAI:
             "tableParsingMode": options.table_parsing_strategy.value,
             "tableSummarizationPrompt": options.table_parsing_prompt,
             "figureSummarizationPrompt": options.figure_summarization_prompt,
+            "deliverWebhook": options.deliver_webhook,
             "jsonSchema": json_schema,
             "structuredExtractionPrompt": (
                 options.extraction_options.prompt
@@ -155,12 +156,11 @@ class DocumentAI:
         }
 
     def __create_parse_req__(
-        self, file: str, options: ParsingOptions, deliver_webhook: bool
+        self, file: str, options: ParsingOptions
     ) -> dict:
         payload = {
             "file": file,
             "pages": options.page_range,
-            "deliverWebhook": deliver_webhook,
             "settings": self.__create_parse_settings__(options),
         }
 
@@ -192,7 +192,6 @@ class DocumentAI:
         file: str,
         options: ParsingOptions,
         timeout: int = 5,
-        deliver_webhook: bool = False,
     ) -> str:
         """
         Parse a document.
@@ -200,7 +199,7 @@ class DocumentAI:
         response = self._client.post(
             url="/parse",
             headers=self.__headers__(),
-            json=self.__create_parse_req__(file, options, deliver_webhook),
+            json=self.__create_parse_req__(file, options),
         )
         try:
             response.raise_for_status()
@@ -340,6 +339,9 @@ class DocumentAI:
                 "settings": self.__create_parse_settings__(dataset.options),
             },
         )
+
+        response.raise_for_status()
+
         return await self.get_dataset_async(response.json().get("id"))
 
     def get_dataset(self, name: str) -> Optional[Dataset]:
