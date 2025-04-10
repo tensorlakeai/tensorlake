@@ -11,6 +11,7 @@ import click
 
 from tensorlake import Graph, Image, RemoteGraph
 from tensorlake.builder.client import ImageBuilderClient
+from tensorlake.builder.client_v2 import BuildContext, ImageBuilderV2Client
 from tensorlake.cli._common import AuthContext, with_auth
 from tensorlake.cli.secrets import warning_missing_secrets
 from tensorlake.functions_sdk.image import Build
@@ -20,6 +21,7 @@ from tensorlake.functions_sdk.image import Build
 @click.option("-p", "--parallel-builds", is_flag=True, default=False)
 @click.option("-r", "--retry", is_flag=True, default=False)
 @click.option("--upgrade-queued-requests", is_flag=True, default=False)
+@click.option("--builder-v2", is_flag=True, default=False)
 @click.argument("workflow_file", type=click.File("r"))
 @with_auth
 def deploy(
@@ -28,14 +30,18 @@ def deploy(
     parallel_builds: bool,
     retry: bool,
     upgrade_queued_requests: bool,
+    builder_v2: bool,
 ):
     """Deploy a workflow to tensorlake."""
 
     click.echo(f"Preparing deployment for {workflow_file.name}")
     builder = ImageBuilderClient.from_env()
+    builder_v2 = ImageBuilderV2Client.from_env() if builder_v2 else None
+
     seen_images: Dict[Image, str] = {}
     deployed_graphs: List[Graph] = []
     secret_names: Set[str] = set()
+    context_collection: Dict[Image, BuildContext] = {}
 
     workflow = _import_workflow_file(workflow_file.name)
     for name in dir(workflow):
@@ -45,18 +51,31 @@ def deploy(
             for node_name, node_obj in obj.nodes.items():
                 [secret_names.add(secret) for secret in node_obj.secrets or []]
                 image = node_obj.image
+
                 if image is None:
                     raise click.ClickException(
                         f"graph function {node_name} needs to use an image"
                     )
+
                 if image in seen_images:
                     continue
+
+                if builder_v2:
+                    context_collection[image] = BuildContext(
+                        graph=obj.name,
+                        graph_version=obj.version,
+                        function_name=node_name,
+                    )
+
                 seen_images[image] = image.hash()
 
     if len(deployed_graphs) == 0:
         raise click.UsageError(
             "No graphs found in the workflow file, make sure at least one graph is defined as a global variable."
         )
+
+    if builder_v2:
+        asyncio.run(builder_v2.build_collection(context_collection))
 
     warning_missing_secrets(auth, list(secret_names))
     asyncio.run(
