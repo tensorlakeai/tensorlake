@@ -12,12 +12,6 @@
 # The API key is used for authentication when making requests to the service.
 # The client provides methods to get build information, check if a build exists,
 # and stream logs from a build.
-
-# The client uses the httpx library for making asynchronous HTTP requests.
-# The client is designed to be used in an asynchronous context, allowing for
-# non-blocking operations when interacting with the image builder service.
-
-# The client is initialized with the build service URL and an optional API key.
 """
 
 import os
@@ -64,24 +58,30 @@ class NewBuild(BaseModel):
     This model represents the response from the image builder service
     when a new build is created.
     Attributes:
-        id (str): The ID of the new build. Has prefix "build_".
+        build_id (str): The ID of the new build. Has prefix "build_".
     """
 
     build_id: str
+
 
 class BuildLogEvent(BaseModel):
     """
     BuildLogEvent model for the image builder service.
     This model represents a log event from the image builder service.
     Attributes:
-        event (str): The type of event (e.g., "login").
-        data (dict): The data associated with the event.
+        build_id (str): The ID of the build associated with the log event.
+        timestamp (str): The timestamp of the log event.
+        stream (str): The stream from which the log event originated (stdout, stderr, info).
+        message (str): The log message.
+        sequence_number (int): The sequence number of the log event. Used for ordering.
     """
+
     build_id: str
     timestamp: str
     stream: str
     message: str
     sequence_number: int
+
 
 class ImageBuilderV2Client:
     """
@@ -117,7 +117,9 @@ class ImageBuilderV2Client:
         build_url = os.getenv("TENSORLAKE_BUILD_SERVICE", f"{server_url}/images/v2")
         return cls(build_url, api_key)
 
-    async def build_collection(self, context_collection: Dict[Image, BuildContext]) -> Dict[str, str]:
+    async def build_collection(
+        self, context_collection: Dict[Image, BuildContext]
+    ) -> Dict[str, str]:
         """
         Build a collection of images using the provided build context.
 
@@ -206,4 +208,6 @@ class ImageBuilderV2Client:
                     case "stderr":
                         click.secho(log_entry.message, fg="red")
                     case "info":
-                        click.secho(f"{log_entry.timestamp}: {log_entry.message}", fg="blue")
+                        click.secho(
+                            f"{log_entry.timestamp}: {log_entry.message}", fg="blue"
+                        )
