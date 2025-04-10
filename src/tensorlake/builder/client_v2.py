@@ -28,6 +28,7 @@ import click
 import httpx
 from httpx_sse import aconnect_sse
 from pydantic import BaseModel
+from typing import Dict
 
 from tensorlake import Image
 
@@ -116,6 +117,26 @@ class ImageBuilderV2Client:
         build_url = os.getenv("TENSORLAKE_BUILD_SERVICE", f"{server_url}/images/v2")
         return cls(build_url, api_key)
 
+    async def build_collection(self, context_collection: Dict[Image, BuildContext]) -> Dict[str, str]:
+        """
+        Build a collection of images using the provided build context.
+
+        Args:
+            context_collection (Dict[Image, BuildContext]): A dictionary mapping images to their build contexts.
+        Returns:
+            dict: A dictionary mapping image hashes to their corresponding build IDs.
+        """
+        click.echo("Building images...")
+
+        builds = {}
+        for image, context in context_collection.items():
+            click.echo(f"Building {image.name()}")
+            build = await self.build(context, image)
+            click.echo(f"Built {image.name()} with hash {image.hash}")
+            builds[image.hash] = build.build_id
+
+        return builds
+
     async def build(self, context: BuildContext, image: Image) -> NewBuild:
         """
         Build an image using the provided build context.
@@ -146,7 +167,7 @@ class ImageBuilderV2Client:
         }
 
         res = await self._client.post(
-            f"{self._build_service}/v2/builds",
+            f"{self._build_service}/builds",
             data=data,
             files=files,
             headers=self._headers,
@@ -172,7 +193,7 @@ class ImageBuilderV2Client:
             async with aconnect_sse(
                 client,
                 "GET",
-                f"{self._build_service}/v2/builds/{build.build_id}/logs",
+                f"{self._build_service}/builds/{build.build_id}/logs",
                 headers=self._headers,
             ) as event_source:
                 events = [sse async for sse in event_source.aiter_sse()]
@@ -186,4 +207,3 @@ class ImageBuilderV2Client:
                         click.secho(log_entry.message, fg="red")
                     case "info":
                         click.secho(f"{log_entry.timestamp}: {log_entry.message}", fg="blue")
-
