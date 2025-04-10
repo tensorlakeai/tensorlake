@@ -11,6 +11,7 @@ import click
 
 from tensorlake import Graph, Image, RemoteGraph
 from tensorlake.builder.client import ImageBuilderClient
+from tensorlake.builder.client_v2 import BuildContext
 from tensorlake.cli._common import AuthContext, with_auth
 from tensorlake.cli.secrets import warning_missing_secrets
 from tensorlake.functions_sdk.image import Build
@@ -20,6 +21,7 @@ from tensorlake.functions_sdk.image import Build
 @click.option("-p", "--parallel-builds", is_flag=True, default=False)
 @click.option("-r", "--retry", is_flag=True, default=False)
 @click.option("--upgrade-queued-requests", is_flag=True, default=False)
+@click.option("--builder-v2", is_flag=True, default=False)
 @click.argument("workflow_file", type=click.File("r"))
 @with_auth
 def deploy(
@@ -28,6 +30,7 @@ def deploy(
     parallel_builds: bool,
     retry: bool,
     upgrade_queued_requests: bool,
+    builder_v2: bool,
 ):
     """Deploy a workflow to tensorlake."""
 
@@ -37,6 +40,8 @@ def deploy(
     deployed_graphs: List[Graph] = []
     secret_names: Set[str] = set()
 
+    context_collection: Set[BuildContext] = set()
+
     workflow = _import_workflow_file(workflow_file.name)
     for name in dir(workflow):
         obj = getattr(workflow, name)
@@ -45,12 +50,15 @@ def deploy(
             for node_name, node_obj in obj.nodes.items():
                 [secret_names.add(secret) for secret in node_obj.secrets or []]
                 image = node_obj.image
+
                 if image is None:
                     raise click.ClickException(
                         f"graph function {node_name} needs to use an image"
                     )
+
                 if image in seen_images:
                     continue
+
                 seen_images[image] = image.hash()
 
     if len(deployed_graphs) == 0:
