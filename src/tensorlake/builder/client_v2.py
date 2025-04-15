@@ -65,6 +65,7 @@ class BuildInfo(BaseModel):
         finished_at (Optional[str]): The timestamp when the build was finished.
         error_message (Optional[str]): An optional error message if the build failed.
     """
+
     id: str
     status: str
     created_at: str

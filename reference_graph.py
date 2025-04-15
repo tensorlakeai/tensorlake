@@ -8,11 +8,12 @@ from typing import List
 
 from pydantic import BaseModel
 
-from tensorlake import Image, tensorlake_function, Graph
+from tensorlake import Graph, Image, tensorlake_function
 
 mapper_image = Image().name("generator").run("pip install httpx")
 process_image = Image().name("process").run("pip install numpy")
 reducer_image = Image().name("adder").run("pip install httpx")
+
 
 class Total(BaseModel):
     val: int = 0
