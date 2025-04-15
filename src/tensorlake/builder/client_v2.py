@@ -17,12 +17,13 @@
 import os
 import tempfile
 from dataclasses import dataclass
+from typing import Dict, Optional
 
+import aiofiles
 import click
 import httpx
 from httpx_sse import aconnect_sse
 from pydantic import BaseModel
-from typing import Dict
 
 from tensorlake import Image
 
@@ -52,16 +53,24 @@ class BuildContext:
     function_name: str
 
 
-class NewBuild(BaseModel):
+class BuildInfo(BaseModel):
     """
-    NewBuild model for the image builder service.
-    This model represents the response from the image builder service
-    when a new build is created.
+    BuildInfo model for the image builder service.
+    This model represents the information about a build.
     Attributes:
-        build_id (str): The ID of the new build. Has prefix "build_".
+        id (str): The ID of the build.
+        status (str): The status of the build (e.g., "pending", "in_progress", "completed").
+        created_at (str): The timestamp when the build was created.
+        updated_at (str): The timestamp when the build was last updated.
+        finished_at (Optional[str]): The timestamp when the build was finished.
+        error_message (Optional[str]): An optional error message if the build failed.
     """
-
-    build_id: str
+    id: str
+    status: str
+    created_at: str
+    updated_at: str
+    finished_at: Optional[str]
+    error_message: Optional[str] = None
 
 
 class BuildLogEvent(BaseModel):
@@ -132,14 +141,14 @@ class ImageBuilderV2Client:
 
         builds = {}
         for image, context in context_collection.items():
-            click.echo(f"Building {image.name()}")
+            click.echo(f"Building {image.image_name}")
             build = await self.build(context, image)
-            click.echo(f"Built {image.name()} with hash {image.hash}")
-            builds[image.hash] = build.build_id
+            click.echo(f"Built {image.image_name} with hash {image.hash()}")
+            builds[image.hash()] = build.id
 
         return builds
 
-    async def build(self, context: BuildContext, image: Image) -> NewBuild:
+    async def build(self, context: BuildContext, image: Image) -> BuildInfo:
         """
         Build an image using the provided build context.
 
@@ -160,15 +169,20 @@ class ImageBuilderV2Client:
         click.echo(
             f"{context.graph}: Posting {os.path.getsize(context_file)} bytes of context to build service...."
         )
-        files = {"context": open(context_file, "rb")}
+
+        files = {}
+        async with aiofiles.open(context_file, "rb") as fp:
+            files["context"] = await fp.read()
+
+        os.remove(context_file)
         data = {
             "graph_name": context.graph,
             "graph_version": context.graph_version,
             "graph_function_name": context.function_name,
-            "image_hash": image.hash,
+            "image_hash": image.hash(),
         }
 
-        res = await self._client.post(
+        res = await self._client.put(
             f"{self._build_service}/builds",
             data=data,
             files=files,
@@ -177,37 +191,54 @@ class ImageBuilderV2Client:
         )
 
         res.raise_for_status()
-        build = NewBuild.model_validate(res.json())
+        build = BuildInfo.model_validate(res.json())
 
-        click.secho(f"Build ID: {build.build_id}", fg="green")
-        return build
+        click.secho(f"Build ID: {build.id}", fg="green")
+        return await self.stream_logs(build)
 
-    async def stream_logs(self, build: NewBuild):
+    async def stream_logs(self, build: BuildInfo) -> BuildInfo:
         """
         Stream logs from the image builder service for the specified build.
 
         Args:
             build (NewBuild): The build for which to stream logs.
         """
-        click.echo(f"Streaming logs for build {build.build_id}")
+        click.echo(f"Streaming logs for build {build.id}")
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=120) as client:
             async with aconnect_sse(
                 client,
                 "GET",
-                f"{self._build_service}/builds/{build.build_id}/logs",
+                f"{self._build_service}/builds/{build.id}/logs",
                 headers=self._headers,
             ) as event_source:
-                events = [sse async for sse in event_source.aiter_sse()]
-                (sse,) = events
+                async for sse in event_source.aiter_sse():
+                    log_entry = BuildLogEvent.model_validate(sse.json())
+                    match log_entry.stream:
+                        case "stdout":
+                            click.echo(log_entry.message)
+                        case "stderr":
+                            click.secho(log_entry.message, fg="red")
+                        case "info":
+                            click.secho(
+                                f"{log_entry.timestamp}: {log_entry.message}", fg="blue"
+                            )
 
-                log_entry = BuildLogEvent.model_validate(sse.json())
-                match log_entry.stream:
-                    case "stdout":
-                        click.echo(log_entry.message)
-                    case "stderr":
-                        click.secho(log_entry.message, fg="red")
-                    case "info":
-                        click.secho(
-                            f"{log_entry.timestamp}: {log_entry.message}", fg="blue"
-                        )
+        return await self.build_info(build.id)
+
+    async def build_info(self, build_id: str) -> BuildInfo:
+        """
+        Get information about a build.
+
+        Args:
+            build (NewBuild): The build for which to get information.
+        Returns:
+            BuildInfo: Information about the build.
+        """
+        res = await self._client.get(
+            f"{self._build_service}/builds/{build_id}",
+            headers=self._headers,
+            timeout=60,
+        )
+        res.raise_for_status()
+        return BuildInfo.model_validate(res.json())

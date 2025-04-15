@@ -74,20 +74,21 @@ def deploy(
             "No graphs found in the workflow file, make sure at least one graph is defined as a global variable."
         )
 
+    warning_missing_secrets(auth, list(secret_names))
     if builder_v2:
         asyncio.run(builder_v2.build_collection(context_collection))
-
-    warning_missing_secrets(auth, list(secret_names))
-    asyncio.run(
-        _prepare_images(
-            builder, seen_images, parallel_builds=parallel_builds, retry=retry
+        click.secho(
+            f"Built {len(context_collection)} images with builder v2", fg="green"
         )
-    )
+    else:
+        asyncio.run(
+            _prepare_images(
+                builder, seen_images, parallel_builds=parallel_builds, retry=retry
+            )
+        )
 
-    # If we are still here then our images should all have URIs
     click.secho("Everything looks good, deploying now", fg="green")
     for graph in deployed_graphs:
-        # TODO: Every time we post we get a new version, is that expected or the client should do the checks?
         RemoteGraph.deploy(
             graph,
             upgrade_tasks_to_latest_version=upgrade_queued_requests,

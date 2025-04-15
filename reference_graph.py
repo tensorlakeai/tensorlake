@@ -8,13 +8,11 @@ from typing import List
 
 from pydantic import BaseModel
 
-import tensorlake
-from tensorlake import Client, Graph, Image, tensorlake_function
+from tensorlake import Image, tensorlake_function, Graph
 
 mapper_image = Image().name("generator").run("pip install httpx")
 process_image = Image().name("process").run("pip install numpy")
 reducer_image = Image().name("adder").run("pip install httpx")
-
 
 class Total(BaseModel):
     val: int = 0
@@ -25,7 +23,7 @@ def map_function(a: int) -> List[int]:
     return [i for i in range(a)]
 
 
-@tensorlake_function()
+@tensorlake_function(image=process_image)
 def process_function(x: int) -> int:
     return x**2
 
