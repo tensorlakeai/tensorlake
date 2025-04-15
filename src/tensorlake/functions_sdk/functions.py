@@ -10,6 +10,7 @@ from .data_objects import Metrics, TensorlakeData
 from .image import Image
 from .invocation_state.invocation_state import InvocationState
 from .object_serializer import get_serializer
+from .retries import Retries
 
 
 class GraphInvocationContext:
@@ -53,23 +54,39 @@ def is_pydantic_model_from_annotation(type_annotation):
     return False
 
 
-class PlacementConstraints(BaseModel):
-    min_python_version: Optional[str] = "3.9"
-    max_python_version: Optional[str] = None
-    platform: Optional[str] = None
-    image_name: Optional[str] = None
+_DEFAULT_TIMEOUT: int = 300  # 5 minutes
+_DEFAULT_CPU: float = 0.125  # 0.125 CPU = 125 CPU ms per sec
+_DEFAULT_MEMORY: float = 0.125  # 0.125 GB = 128 MB
+_DEFAULT_EPHEMERAL_DISK: float = 100.0  # 100 GB
+_DEFAULT_GPU: Optional[str] = None  # No GPU by default
 
 
 class TensorlakeCompute:
+    """Base class for functions.
+
+    Args:
+        cpu (float): The number of CPUs available to the function. 1.0 means 1 CPU, 0.5 means half a CPU, 2 means 2 CPUs.
+        memory (float): The amount of memory available to the function in GB. 0.5 means 512 MB, 1.0 means 1 GB, etc.
+        ephemeral_disk (float): The amount of ephemeral disk space available to the function in GB.
+        gpu (Optional[str]): GPU(s) available to the function. No GPU is allocated by default.
+                             The value should be a string "GPU_MODEL:COUNT" representing the GPU model and the number of GPUs.
+                             Supported GPU models are string values from GPU_MODEL enum.
+    """
+
     name: str = ""
     description: str = ""
     image: Optional[Image] = None
     secrets: Optional[List[str]] = None
-    placement_constraints: List[PlacementConstraints] = []
     accumulate: Optional[Type[Any]] = None
     input_encoder: Optional[str] = "cloudpickle"
     output_encoder: Optional[str] = "cloudpickle"
     inject_ctx = False
+    retries: Optional[Retries] = None  # Use graph retry policy if not set
+    timeout: int = _DEFAULT_TIMEOUT
+    cpu: float = _DEFAULT_CPU
+    memory: float = _DEFAULT_MEMORY
+    ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK
+    gpu: Optional[str] = _DEFAULT_GPU
 
     def run(self, *args, **kwargs) -> Union[List[Any], Any]:
         pass
@@ -102,10 +119,15 @@ class TensorlakeRouter:
     description: str = ""
     image: Optional[Image] = None
     secrets: Optional[List[str]] = None
-    placement_constraints: List[PlacementConstraints] = []
     input_encoder: Optional[str] = "cloudpickle"
     output_encoder: Optional[str] = "cloudpickle"
     inject_ctx = False
+    retries: Optional[Retries] = None  # Use graph retry policy if not set
+    timeout: int = _DEFAULT_TIMEOUT
+    cpu: float = _DEFAULT_CPU
+    memory: float = _DEFAULT_MEMORY
+    ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK
+    gpu: Optional[str] = _DEFAULT_GPU
 
     def run(self, *args, **kwargs) -> Optional[List[TensorlakeCompute]]:
         pass
@@ -150,8 +172,13 @@ def tensorlake_router(
     input_encoder: Optional[str] = "cloudpickle",
     output_encoder: Optional[str] = "cloudpickle",
     secrets: Optional[List[str]] = None,
-    placement_constraints: List[PlacementConstraints] = [],
     inject_ctx: Optional[bool] = False,
+    retries: Optional[Retries] = None,  # Use graph retry policy if not set
+    timeout: int = _DEFAULT_TIMEOUT,
+    cpu: float = _DEFAULT_CPU,
+    memory: float = _DEFAULT_MEMORY,
+    ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK,
+    gpu: Optional[str] = _DEFAULT_GPU,
 ):
     def construct(fn):
         attrs = {
@@ -165,8 +192,13 @@ def tensorlake_router(
             "input_encoder": input_encoder,
             "output_encoder": output_encoder,
             "secrets": secrets,
-            "placement_constraints": placement_constraints,
             "inject_ctx": inject_ctx,
+            "retries": retries,
+            "timeout": timeout,
+            "cpu": cpu,
+            "memory": memory,
+            "ephemeral_disk": ephemeral_disk,
+            "gpu": gpu,
             "run": staticmethod(fn),
         }
 
@@ -183,8 +215,13 @@ def tensorlake_function(
     input_encoder: Optional[str] = "cloudpickle",
     output_encoder: Optional[str] = "cloudpickle",
     secrets: Optional[List[str]] = None,
-    placement_constraints: List[PlacementConstraints] = [],
     inject_ctx: Optional[bool] = False,
+    retries: Optional[Retries] = None,  # Use graph retry policy if not set
+    timeout: int = _DEFAULT_TIMEOUT,
+    cpu: float = _DEFAULT_CPU,
+    memory: float = _DEFAULT_MEMORY,
+    ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK,
+    gpu: Optional[str] = _DEFAULT_GPU,
 ):
     def construct(fn):
         attrs = {
@@ -199,8 +236,13 @@ def tensorlake_function(
             "input_encoder": input_encoder,
             "output_encoder": output_encoder,
             "secrets": secrets,
-            "placement_constraints": placement_constraints,
             "inject_ctx": inject_ctx,
+            "retries": retries,
+            "timeout": timeout,
+            "cpu": cpu,
+            "memory": memory,
+            "ephemeral_disk": ephemeral_disk,
+            "gpu": gpu,
             "run": staticmethod(fn),
         }
 
