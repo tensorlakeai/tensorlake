@@ -217,7 +217,13 @@ class ImageBuilderV2Client:
                     log_entry = BuildLogEvent.model_validate(sse.json())
                     match log_entry.stream:
                         case "stdout":
-                            click.secho(log_entry.message, nl=False, err=False, fg="black", dim=True)
+                            click.secho(
+                                log_entry.message,
+                                nl=False,
+                                err=False,
+                                fg="black",
+                                dim=True,
+                            )
                         case "stderr":
                             click.secho(log_entry.message, fg="red", err=True)
                         case "info":
