@@ -1,6 +1,7 @@
 import importlib
 import re
 import sys
+import time
 from collections import defaultdict
 from queue import deque
 from typing import (
@@ -35,6 +36,8 @@ from .graph_definition import (
     ComputeGraphMetadata,
     FunctionMetadata,
     NodeMetadata,
+    ResourceMetadata,
+    RetryPolicyMetadata,
     RouterMetadata,
     RuntimeInformation,
 )
@@ -42,6 +45,8 @@ from .graph_validation import validate_node, validate_route
 from .image import ImageInformation
 from .invocation_state.local_invocation_state import LocalInvocationState
 from .object_serializer import get_serializer
+from .resources import resource_metadata_for_graph_node
+from .retries import Retries
 
 RouterFn = Annotated[
     Callable[[TensorlakeData], Optional[List[TensorlakeCompute]]], "RouterFn"
@@ -83,6 +88,7 @@ class Graph:
         tags: Dict[str, str] = {},
         version: Optional[str] = None,
         additional_modules: List = [],
+        retries: Retries = Retries(),
     ):
         if version is None:
             # Update graph on every deployment unless user wants to manage the version manually.
@@ -101,6 +107,7 @@ class Graph:
         self.tags = tags
         self.version = version
         self.additional_modules = additional_modules
+        self.retries = retries
 
         self.add_node(start_node)
         if issubclass(start_node, TensorlakeRouter):
@@ -196,6 +203,12 @@ class Graph:
         is_reducer = False
         if hasattr(start_node, "accumulate"):
             is_reducer = start_node.accumulate is not None
+        graph_retry_policy: RetryPolicyMetadata = RetryPolicyMetadata(
+            max_retries=self.retries.max_retries,
+            initial_delay_sec=self.retries.initial_delay,
+            max_delay_sec=self.retries.max_delay,
+            delay_multiplier=self.retries.delay_multiplier,
+        )
         start_node = FunctionMetadata(
             name=start_node.name,
             fn_name=start_node.name,
@@ -209,6 +222,18 @@ class Graph:
             input_encoder=start_node.input_encoder,
             output_encoder=start_node.output_encoder,
             secret_names=start_node.secrets,
+            timeout_sec=start_node.timeout,
+            resources=resource_metadata_for_graph_node(start_node),
+            retry_policy=(
+                graph_retry_policy
+                if start_node.retries is None
+                else RetryPolicyMetadata(
+                    max_retries=start_node.retries.max_retries,
+                    initial_delay_sec=start_node.retries.initial_delay,
+                    max_delay_sec=start_node.retries.max_delay,
+                    delay_multiplier=start_node.retries.delay_multiplier,
+                )
+            ),
         )
         metadata_edges = self.edges.copy()
         metadata_nodes = {}
@@ -228,6 +253,18 @@ class Graph:
                             else _none_image_information
                         ),
                         secret_names=node.secrets,
+                        timeout_sec=node.timeout,
+                        resources=resource_metadata_for_graph_node(node),
+                        retry_policy=(
+                            graph_retry_policy
+                            if node.retries is None
+                            else RetryPolicyMetadata(
+                                max_retries=node.retries.max_retries,
+                                initial_delay_sec=node.retries.initial_delay,
+                                max_delay_sec=node.retries.max_delay,
+                                delay_multiplier=node.retries.delay_multiplier,
+                            )
+                        ),
                     )
                 )
             else:
@@ -245,6 +282,18 @@ class Graph:
                         input_encoder=node.input_encoder,
                         output_encoder=node.output_encoder,
                         secret_names=node.secrets,
+                        timeout_sec=node.timeout,
+                        resources=resource_metadata_for_graph_node(node),
+                        retry_policy=(
+                            graph_retry_policy
+                            if node.retries is None
+                            else RetryPolicyMetadata(
+                                max_retries=node.retries.max_retries,
+                                initial_delay_sec=node.retries.initial_delay,
+                                max_delay_sec=node.retries.max_delay,
+                                delay_multiplier=node.retries.delay_multiplier,
+                            )
+                        ),
                     )
                 )
 
@@ -331,7 +380,7 @@ class Graph:
         while queue:
             node_name, input = queue.popleft()
             function_outputs: Union[FunctionCallResult, RouterCallResult] = (
-                self._invoke_fn(node_name, input)
+                self._invoke_fn_with_retries(node_name, input)
             )
             # Store metrics for local graph execution
             if function_outputs.metrics is not None:
@@ -367,9 +416,31 @@ class Graph:
                 for output in fn_outputs:
                     queue.append((out_edge, output))
 
+    def _invoke_fn_with_retries(
+        self, node_name: str, input: TensorlakeData
+    ) -> Union[RouterCallResult, FunctionCallResult]:
+        node: Union[TensorlakeCompute, TensorlakeRouter] = self.nodes[node_name]
+        retries: Retries = self.retries if node.retries is None else node.retries
+        runs_left: int = 1 + retries.max_retries
+        delay: float = retries.initial_delay
+
+        while runs_left > 0:
+            last_result = self._invoke_fn(node_name=node_name, input=input)
+            if last_result.traceback_msg is None:
+                break  # successful run
+
+            time.sleep(delay)
+            runs_left -= 1
+            delay *= retries.delay_multiplier
+            delay = min(delay, retries.max_delay)
+
+        # Return the last result if successful or out of retries.
+        return last_result
+
     def _invoke_fn(
         self, node_name: str, input: TensorlakeData
-    ) -> Optional[Union[RouterCallResult, FunctionCallResult]]:
+    ) -> Union[RouterCallResult, FunctionCallResult]:
+        # TODO: Implement function timeouts when we start calling Function Executor in local mode.
         node = self.nodes[node_name]
         if node_name in self.routers and len(self.routers[node_name]) > 0:
             result = TensorlakeFunctionWrapper(node).invoke_router(

@@ -5,6 +5,14 @@ from pydantic import BaseModel
 from tensorlake.functions_sdk.image import ImageInformation
 
 from .object_serializer import get_serializer
+from .resources import ResourceMetadata
+
+
+class RetryPolicyMetadata(BaseModel):
+    max_retries: int
+    initial_delay_sec: float
+    max_delay_sec: float
+    delay_multiplier: float
 
 
 class FunctionMetadata(BaseModel):
@@ -16,6 +24,9 @@ class FunctionMetadata(BaseModel):
     input_encoder: str = "cloudpickle"
     output_encoder: str = "cloudpickle"
     secret_names: Optional[List[str]] = None
+    timeout_sec: Optional[int] = None
+    resources: Optional[ResourceMetadata] = None
+    retry_policy: Optional[RetryPolicyMetadata] = None
 
 
 class RouterMetadata(BaseModel):
@@ -27,6 +38,9 @@ class RouterMetadata(BaseModel):
     input_encoder: str = "cloudpickle"
     output_encoder: str = "cloudpickle"
     secret_names: Optional[List[str]] = None
+    timeout_sec: Optional[int] = None
+    resources: Optional[ResourceMetadata] = None
+    retry_policy: Optional[RetryPolicyMetadata] = None
 
 
 class NodeMetadata(BaseModel):

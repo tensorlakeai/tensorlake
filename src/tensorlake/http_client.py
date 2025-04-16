@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Union
 import cloudpickle
 import httpx
 from httpx_sse import ServerSentEvent, connect_sse
-from pydantic import BaseModel, Json
+from pydantic import BaseModel
 from rich import print  # TODO: Migrate to use click.echo
 
 from tensorlake.error import ApiException, GraphStillProcessing
@@ -64,7 +64,6 @@ class TensorlakeClient:
         api_key: Optional[str] = None,
         **kwargs,
     ):
-
         self.service_url = service_url
         self._config_path = config_path
         self._client: httpx.Client = get_httpx_client(config_path)
@@ -294,56 +293,65 @@ class TensorlakeClient:
     ) -> List[InvocationEvent]:
         events = []
         obj = json.loads(sse.data)
-        for k, v in obj.items():
-            if k == "InvocationFinished":
-                events.append(
-                    InvocationEvent(
-                        event_name=k,
-                        payload=InvocationFinishedEvent(invocation_id=v["id"]),
-                    )
+
+        for event_name, event_data in obj.items():
+            # Handle InvocationFinished events
+            if event_name == "InvocationFinished":
+                event = InvocationEvent(
+                    event_name=event_name,
+                    payload=InvocationFinishedEvent(invocation_id=event_data["id"]),
                 )
+                print(f"[bold green]InvocationFinished[/bold green]: {event.payload}")
+                events.append(event)
                 continue
-            if k == "id":
-                # backwards compatibility
-                events.append(
-                    InvocationEvent(
-                        event_name=k,
-                        payload=InvocationFinishedEvent(invocation_id=v),
-                    )
+
+            # Handle legacy 'id' events (backwards compatibility)
+            if event_name == "id":
+                event = InvocationEvent(
+                    event_name="InvocationFinished",  # Normalize event name
+                    payload=InvocationFinishedEvent(invocation_id=event_data),
                 )
+                print(f"[bold green]InvocationFinished[/bold green]: {event.payload}")
+                events.append(event)
                 continue
-            if k == "DiagnosticMessage":
-                message = v.get("message", None)
-                print(f"[bold red]scheduler diagnostic: [/bold red]{message}")
-                continue
-            event_payload = InvocationEventPayload.model_validate(v)
-            event = InvocationEvent(event_name=k, payload=event_payload)
+
+            # Handle all other event types
+            event_payload = InvocationEventPayload.model_validate(event_data)
+            event = InvocationEvent(event_name=event_name, payload=event_payload)
+
+            # Log failures with their stdout/stderr
             if (
                 event.event_name == "TaskCompleted"
                 and isinstance(event.payload, InvocationEventPayload)
                 and event.payload.outcome == "Failure"
             ):
-                stdout = self.logs(
-                    event.payload.invocation_id,
-                    graph,
-                    event.payload.fn_name,
-                    event.payload.task_id,
-                    "stdout",
-                )
-                stderr = self.logs(
-                    event.payload.invocation_id,
-                    graph,
-                    event.payload.fn_name,
-                    event.payload.task_id,
-                    "stderr",
-                )
-                if stdout:
-                    print(f"[bold red]stdout[/bold red]: \n {stdout}")
-                if stderr:
-                    print(f"[bold red]stderr[/bold red]: \n {stderr}")
+                self._log_task_failure(event.payload, graph)
+
             print(f"[bold green]{event.event_name}[/bold green]: {event.payload}")
             events.append(event)
+
         return events
+
+    def _log_task_failure(self, payload: InvocationEventPayload, graph: str) -> None:
+        stdout = self.logs(
+            payload.invocation_id,
+            graph,
+            payload.fn_name,
+            payload.task_id,
+            "stdout",
+        )
+        stderr = self.logs(
+            payload.invocation_id,
+            graph,
+            payload.fn_name,
+            payload.task_id,
+            "stderr",
+        )
+
+        if stdout:
+            print(f"[bold red]stdout[/bold red]: \n {stdout}")
+        if stderr:
+            print(f"[bold red]stderr[/bold red]: \n {stderr}")
 
     @exponential_backoff(
         max_retries=10,
