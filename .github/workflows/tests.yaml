@@ -46,14 +46,16 @@ jobs:
       - name: Start Background Indexify Server in Docker container
         uses: JarvusInnovations/background-action@v1
         with:
+          # Indexify Server storage path has to be that same in container and host
+          # so Executor can use local FS BLOB store.
           run: |
-            mkdir -p /tmp/indexify-server-storage
+            mkdir -p /tmp/indexify-server-storage/indexify_storage/blobs
             docker run -i -a stdout -a stderr --rm \
               -p 127.0.0.1:8900:8900/tcp \
               -p 127.0.0.1:8901:8901/tcp \
               --name indexify-server \
-              -v /tmp/indexify-server-storage:/indexify-server \
-              -w /indexify-server \
+              -v /tmp/indexify-server-storage:/tmp/indexify-server-storage \
+              -w /tmp/indexify-server-storage \
               tensorlake/indexify-server:latest &
           wait-on: |
             tcp:localhost:8900
