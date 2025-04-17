@@ -1,3 +1,5 @@
+from base64 import b64encode
+from hashlib import sha256
 import json
 import logging
 import os
@@ -260,8 +262,12 @@ class TensorlakeClient:
         serializer = get_serializer(input_encoding)
         ser_input = serializer.serialize(kwargs)
         params = {"block_until_finish": block_until_done}
+        digest = b64encode(sha256(ser_input).digest())
         kwargs = {
-            "headers": {"Content-Type": serializer.content_type},
+            "headers": {
+                "Content-Type": serializer.content_type,
+                "Content-Digest": f"sha-256={digest}",
+            },
             "data": ser_input,
             "params": params,
         }
