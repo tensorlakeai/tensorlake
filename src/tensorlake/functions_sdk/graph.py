@@ -240,7 +240,7 @@ class Graph:
                     algorithm=start_node.cache_key["algorithm"],
                     value=start_node.cache_key["value"],
                 )
-                if start_node.cache_key is not None
+                if hasattr(start_node, "cache_key") and start_node.cache_key is not None
                 else None
             ),
         )
@@ -308,7 +308,7 @@ class Graph:
                                 algorithm=node.cache_key["algorithm"],
                                 value=node.cache_key["value"],
                             )
-                            if node.cache_key is not None
+                            if hasattr(node, "cache_key") and node.cache_key is not None
                             else None
                         ),
                     )
