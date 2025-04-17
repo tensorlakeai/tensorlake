@@ -222,6 +222,7 @@ def tensorlake_function(
     memory: float = _DEFAULT_MEMORY,
     ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK,
     gpu: Optional[str] = _DEFAULT_GPU,
+    cache_key: Optional[str] = None,
 ):
     def construct(fn):
         attrs = {
@@ -243,6 +244,14 @@ def tensorlake_function(
             "memory": memory,
             "ephemeral_disk": ephemeral_disk,
             "gpu": gpu,
+            "cache_key": (
+                {
+                    "algorithm": "decorator",
+                    "value": cache_key,
+                }
+                if cache_key is not None
+                else None
+            ),
             "run": staticmethod(fn),
         }
 
