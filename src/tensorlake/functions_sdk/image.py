@@ -103,6 +103,13 @@ class Image:
         self._image_name = image_name
         return self
 
+    @property
+    def image_name(self) -> Optional[str]:
+        """
+        Get the name of the image.
+        """
+        return self._image_name
+
     def tag(self, tag):
         self._tag = tag
         return self
