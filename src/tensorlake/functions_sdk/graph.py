@@ -222,6 +222,11 @@ class Graph:
                     delay_multiplier=start_node.retries.delay_multiplier,
                 )
             ),
+            cache_key=(
+                f"version_function={self.version}:{start_node.name}"
+                if start_node.cacheable
+                else None
+            ),
         )
         metadata_edges = self.edges.copy()
         metadata_nodes = {}
@@ -281,6 +286,11 @@ class Graph:
                                 max_delay_sec=node.retries.max_delay,
                                 delay_multiplier=node.retries.delay_multiplier,
                             )
+                        ),
+                        cache_key=(
+                            f"version_function={self.version}:{node.name}"
+                            if node.cacheable
+                            else None
                         ),
                     )
                 )
