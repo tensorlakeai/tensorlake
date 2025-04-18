@@ -33,6 +33,7 @@ from .functions import (
     TensorlakeRouter,
 )
 from .graph_definition import (
+    CacheKeyMetadata,
     ComputeGraphMetadata,
     FunctionMetadata,
     NodeMetadata,
@@ -234,6 +235,14 @@ class Graph:
                     delay_multiplier=start_node.retries.delay_multiplier,
                 )
             ),
+            cache_key=(
+                CacheKeyMetadata(
+                    algorithm=start_node.cache_key["algorithm"],
+                    value=start_node.cache_key["value"],
+                )
+                if hasattr(start_node, "cache_key") and start_node.cache_key is not None
+                else None
+            ),
         )
         metadata_edges = self.edges.copy()
         metadata_nodes = {}
@@ -293,6 +302,14 @@ class Graph:
                                 max_delay_sec=node.retries.max_delay,
                                 delay_multiplier=node.retries.delay_multiplier,
                             )
+                        ),
+                        cache_key=(
+                            CacheKeyMetadata(
+                                algorithm=node.cache_key["algorithm"],
+                                value=node.cache_key["value"],
+                            )
+                            if hasattr(node, "cache_key") and node.cache_key is not None
+                            else None
                         ),
                     )
                 )

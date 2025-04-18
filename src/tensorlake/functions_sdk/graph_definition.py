@@ -15,6 +15,11 @@ class RetryPolicyMetadata(BaseModel):
     delay_multiplier: float
 
 
+class CacheKeyMetadata(BaseModel):
+    algorithm: str
+    value: str
+
+
 class FunctionMetadata(BaseModel):
     name: str
     fn_name: str
@@ -27,6 +32,7 @@ class FunctionMetadata(BaseModel):
     timeout_sec: Optional[int] = None
     resources: Optional[ResourceMetadata] = None
     retry_policy: Optional[RetryPolicyMetadata] = None
+    cache_key: Optional[CacheKeyMetadata] = None
 
 
 class RouterMetadata(BaseModel):
