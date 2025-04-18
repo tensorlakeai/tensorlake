@@ -262,7 +262,10 @@ class TensorlakeClient:
         serializer = get_serializer(input_encoding)
         ser_input = serializer.serialize(kwargs)
         params = {"block_until_finish": block_until_done}
-        digest = b64encode(sha256(ser_input).digest())
+        ser_input_encoded = (
+            ser_input if isinstance(ser_input, bytes) else ser_input.encode("utf-8")
+        )
+        digest = b64encode(sha256(ser_input_encoded).digest())
         kwargs = {
             "headers": {
                 "Content-Type": serializer.content_type,
