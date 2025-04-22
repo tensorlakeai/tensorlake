@@ -13,7 +13,7 @@ from tensorlake.functions_sdk.graph_definition import (
     ResourceMetadata,
     RetryPolicyMetadata,
 )
-from tensorlake.functions_sdk.resources import GPU_MODEL, GPUResourceMetadata
+from tensorlake.functions_sdk.resources import GPUResourceMetadata
 from tensorlake.functions_sdk.retries import Retries
 
 
@@ -167,7 +167,7 @@ class TestGraphMetadataFunctionResources(unittest.TestCase):
         self.assertIsNone(resource_metadata.gpu)
 
     def test_custom_function_resources(self):
-        @tensorlake_function(cpu=2.25, memory=2, ephemeral_disk=10, gpu=GPU_MODEL.H100)
+        @tensorlake_function(cpu=2.25, memory=2, ephemeral_disk=10, gpu="H100")
         def function_with_resources(x: int) -> str:
             return "success"
 
@@ -187,7 +187,7 @@ class TestGraphMetadataFunctionResources(unittest.TestCase):
         self.assertIsNotNone(resource_metadata.gpu)
         gpu_metadata: GPUResourceMetadata = resource_metadata.gpu
         self.assertEqual(gpu_metadata.count, 1)
-        self.assertEqual(gpu_metadata.model, GPU_MODEL.H100)
+        self.assertEqual(gpu_metadata.model, "H100")
 
     def test_custom_function_resources_many_gpus(self):
         @tensorlake_function(gpu="A100-40GB:4")
@@ -210,23 +210,7 @@ class TestGraphMetadataFunctionResources(unittest.TestCase):
         self.assertIsNotNone(resource_metadata.gpu)
         gpu_metadata: GPUResourceMetadata = resource_metadata.gpu
         self.assertEqual(gpu_metadata.count, 4)
-        self.assertEqual(gpu_metadata.model, GPU_MODEL.A100_40GB)
-
-    def test_custom_function_resources_not_supported_gpu_model(self):
-        @tensorlake_function(gpu="NOT_SUPPORTED:4")
-        def function_with_resources(x: int) -> str:
-            return "success"
-
-        graph = Graph(
-            name=test_graph_name(self),
-            description="test",
-            start_node=function_with_resources,
-        )
-        try:
-            graph.definition()
-            self.fail("Expected ValueError not raised")
-        except ValueError as e:
-            self.assertIn("Unsupported GPU model", str(e))
+        self.assertEqual(gpu_metadata.model, "A100-40GB")
 
 
 if __name__ == "__main__":
