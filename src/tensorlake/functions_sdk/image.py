@@ -145,7 +145,7 @@ class Image:
     def build_context(self, filename: str):
         with tarfile.open(filename, "w:gz") as tf:
             for op in self._build_ops:
-                if op.op_type == "COPY":
+                if op.op_type in ("COPY", "ADD"):
                     src = op.args[0]
                     logging.info(f"Adding {src}")
                     tf.add(src, src)
