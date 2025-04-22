@@ -157,7 +157,9 @@ class Image:
 
                 elif op.op_type == "ADD":
                     if self._is_url(src) or self._is_git_repo_url(src):
-                        logging.warning("Skipping ADD: %s is a URL or Git repo reference", src)
+                        logging.warning(
+                            "Skipping ADD: %s is a URL or Git repo reference", src
+                        )
                         continue
                     if not os.path.exists(src):
                         logging.warning("Skipping ADD: %s does not exist", src)
@@ -165,7 +167,8 @@ class Image:
                     if self._is_inside_git_dir(src):
                         logging.warning(
                             "Skipping ADD: %s is inside a .git directory", src
-                        logging.warning("Skipping ADD: %s is inside a .git directory", src)
+                        )
+                        continue
                     logging.info(f"Adding (ADD) {src}")
                     tf.add(src, arcname=src)
 
@@ -192,7 +195,9 @@ class Image:
                 f"Building image {self._image_name} with local version of the SDK"
             )
             if not os.path.exists(python_sdk_path):
-            logging.info("Building image %s with local version of the SDK", self._image_name)
+                logging.info(
+                    "Building image %s with local version of the SDK", self._image_name
+                )
             docker_contents.append("RUN (cd /app/python-sdk && pip install .)")
         else:
             # TODO: Remove installation of indexify when we've finished the container executor
