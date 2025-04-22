@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from typing import Any, Dict, List, Optional, Union
 
@@ -19,6 +20,8 @@ from tensorlake.utils.http_client import (
     get_sync_or_async_client,
 )
 from tensorlake.utils.retries import exponential_backoff
+
+logger = logging.getLogger("tensorlake")
 
 
 class InvocationFinishedEvent(BaseModel):
@@ -80,7 +83,16 @@ class TensorlakeClient:
 
     def _request(self, method: str, **kwargs) -> httpx.Response:
         try:
-            response = self._client.request(method, timeout=self._timeout, **kwargs)
+            request = self._client.build_request(
+                method, timeout=self._timeout, **kwargs
+            )
+            response = self._client.send(request)
+            logger.debug(
+                "Indexify: %r %r => %r",
+                request,
+                kwargs.get("data", {}),
+                response,
+            )
             status_code = response.status_code
             if status_code >= 400:
                 raise ApiException(status_code=status_code, message=response.text)
