@@ -36,7 +36,7 @@ class BuildContext:
     and function name used for building the image.
 
     Attributes:
-        graph (str): The name of the graph to be built.
+        graph_name (str): The name of the graph to be built.
         graph_version (str): The version of the graph to be built.
         function_name (str): The name of the function used in the build.
 
@@ -48,7 +48,7 @@ class BuildContext:
         )
     """
 
-    graph: str
+    graph_name: str
     graph_version: str
     function_name: str
 
@@ -161,14 +161,14 @@ class ImageBuilderV2Client:
             dict: The response from the image builder service.
         """
         click.echo(
-            f"Building {context.graph} version {context.graph_version} for {context.function_name}"
+            f"Building {context.graph_name} version {context.graph_version} for {context.function_name}"
         )
 
         _fd, context_file = tempfile.mkstemp()
         image.build_context(context_file)
 
         click.echo(
-            f"{context.graph}: Posting {os.path.getsize(context_file)} bytes of context to build service...."
+            f"{context.graph_name}: Posting {os.path.getsize(context_file)} bytes of context to build service...."
         )
 
         files = {}
@@ -177,7 +177,7 @@ class ImageBuilderV2Client:
 
         os.remove(context_file)
         data = {
-            "graph_name": context.graph,
+            "graph_name": context.graph_name,
             "graph_version": context.graph_version,
             "graph_function_name": context.function_name,
             "image_hash": image.hash(),

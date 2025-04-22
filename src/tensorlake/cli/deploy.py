@@ -62,7 +62,7 @@ def deploy(
 
                 if builder_v2:
                     context_collection[image] = BuildContext(
-                        graph=obj.name,
+                        graph_name=obj.name,
                         graph_version=obj.version,
                         function_name=node_name,
                     )
