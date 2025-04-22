@@ -148,7 +148,7 @@ class Image:
 
     def _is_git_repo_url(self, path: str) -> bool:
         parsed = urlparse(path)
-        return parsed.scheme == "git" or "github.com" in parsed.netloc
+        return parsed.scheme == "git" or (parsed.hostname and (parsed.hostname == "github.com" or parsed.hostname.endswith(".github.com")))
 
     def _is_inside_git_dir(self, path: str) -> bool:
         parts = os.path.normpath(path).split(os.sep)
