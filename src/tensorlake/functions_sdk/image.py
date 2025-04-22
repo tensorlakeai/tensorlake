@@ -176,7 +176,7 @@ class Image:
                             "Skipping ADD: %s is inside a .git directory", src
                         )
                         continue
-                    logging.info(f"Adding (ADD) {src}")
+                    logging.info("Adding (ADD) %s", src)
                     tf.add(src, arcname=src)
 
             dockerfile = self._generate_dockerfile()
@@ -202,9 +202,9 @@ class Image:
                 f"Building image {self._image_name} with local version of the SDK"
             )
             if not os.path.exists(python_sdk_path):
-                logging.info(
-                    "Building image %s with local version of the SDK", self._image_name
-                )
+                print(f"error: {python_sdk_path} does not exist")
+                sys.exit(1)
+            docker_contents.append(f"COPY {python_sdk_path} /app/python-sdk")
             docker_contents.append("RUN (cd /app/python-sdk && pip install .)")
         else:
             # TODO: Remove installation of indexify when we've finished the container executor
