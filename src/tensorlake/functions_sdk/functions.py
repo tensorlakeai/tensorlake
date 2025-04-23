@@ -70,7 +70,7 @@ class TensorlakeCompute:
         ephemeral_disk (float): The amount of ephemeral disk space available to the function in GB.
         gpu (Optional[str]): GPU(s) available to the function. No GPU is allocated by default.
                              The value should be a string "GPU_MODEL:COUNT" representing the GPU model and the number of GPUs.
-                             Supported GPU models are string values from GPU_MODEL enum.
+                             See supported GPU models and counts in Tensorlake Cloud documentation.
     """
 
     name: str = ""

@@ -1,50 +1,30 @@
 import math
-from enum import Enum
-from typing import Optional, Union
+from typing import List, Optional, Union
 
 from pydantic import BaseModel
 
 from .functions import TensorlakeCompute, TensorlakeRouter
 
 
-class GPU_MODEL(str, Enum):
-    """GPU models available in Tensorlake Cloud."""
-
-    H100 = "H100"
-    A100_40GB = "A100-40GB"
-    A100_80GB = "A100-80GB"
-
-
-_ALLOWED_GPU_MODELS = set(item.value for item in GPU_MODEL)
-
-
 class GPUResourceMetadata(BaseModel):
     count: int
-    model: GPU_MODEL
+    model: str
 
 
 def _parse_gpu_resource_metadata(gpu: str) -> GPUResourceMetadata:
-    parts = gpu.split(":")
+    # Example: "A100-80GB:2", "H100", "A100-40GB:4"
+    parts: List[str] = gpu.split(":")
     if len(parts) > 2:
         raise ValueError(
             f"Invalid GPU format: {gpu}. Expected format is 'GPU_MODEL:COUNT'."
         )
 
-    count: int = 1
+    gpu_model: str = parts[0]
+    gpu_count: int = 1
     if len(parts) == 2:
-        count = int(parts[1])
-        if count < 1 or count > 8:
-            raise ValueError(
-                f"Invalid GPU count: {count}. Count must be between 1 and 8."
-            )
+        gpu_count = int(parts[1])
 
-    gpu_model = parts[0]
-    if gpu_model not in _ALLOWED_GPU_MODELS:
-        raise ValueError(
-            f"Unsupported GPU model: {gpu_model}. Supported models are: {', '.join(_ALLOWED_GPU_MODELS)}."
-        )
-
-    return GPUResourceMetadata(count=count, model=GPU_MODEL(gpu_model))
+    return GPUResourceMetadata(count=gpu_count, model=gpu_model)
 
 
 class ResourceMetadata(BaseModel):
