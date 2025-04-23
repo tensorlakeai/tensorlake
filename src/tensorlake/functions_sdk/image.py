@@ -8,6 +8,7 @@ import sys
 import tarfile
 from io import BytesIO
 from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
 import docker
 import docker.api.build
@@ -142,6 +143,17 @@ class Image:
             image_uri=self.uri,
         )
 
+    def _is_url(self, path: str) -> bool:
+        return urlparse(path).scheme in ("http", "https")
+
+    def _is_git_repo_url(self, path: str) -> bool:
+        parsed = urlparse(path)
+        return parsed.scheme == "git" or (parsed.hostname and (parsed.hostname == "github.com" or parsed.hostname.endswith(".github.com")))
+
+    def _is_inside_git_dir(self, path: str) -> bool:
+        parts = os.path.normpath(path).split(os.sep)
+        return ".git" in parts
+
     def build_context(self, filename: str):
         with tarfile.open(filename, "w:gz") as tf:
             for op in self._build_ops:
@@ -149,6 +161,23 @@ class Image:
                     src = op.args[0]
                     logging.info(f"Adding {src}")
                     tf.add(src, src)
+
+                elif op.op_type == "ADD":
+                    if self._is_url(src) or self._is_git_repo_url(src):
+                        logging.warning(
+                            "Skipping ADD: %s is a URL or Git repo reference", src
+                        )
+                        continue
+                    if not os.path.exists(src):
+                        logging.warning("Skipping ADD: %s does not exist", src)
+                        continue
+                    if self._is_inside_git_dir(src):
+                        logging.warning(
+                            "Skipping ADD: %s is inside a .git directory", src
+                        )
+                        continue
+                    logging.info("Adding (ADD) %s", src)
+                    tf.add(src, arcname=src)
 
             dockerfile = self._generate_dockerfile()
             tarinfo = tarfile.TarInfo("Dockerfile")
@@ -174,7 +203,7 @@ class Image:
             )
             if not os.path.exists(python_sdk_path):
                 print(f"error: {python_sdk_path} does not exist")
-                os.exit(1)
+                sys.exit(1)
             docker_contents.append(f"COPY {python_sdk_path} /app/python-sdk")
             docker_contents.append("RUN (cd /app/python-sdk && pip install .)")
         else:
