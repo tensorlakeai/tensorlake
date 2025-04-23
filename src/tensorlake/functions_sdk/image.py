@@ -37,7 +37,7 @@ class BuildOp(BaseModel):
     args: List[str]
 
     def hash(self, hash):
-        if self.op_type in ("RUN", "ADD"):
+        if self.op_type in ("RUN", "ADD", "ENV"):
 
             hash.update(self.op_type.encode())
             for a in self.args:
@@ -58,7 +58,7 @@ class BuildOp(BaseModel):
             raise ValueError(f"Unsupported build op type {self.op_type}")
 
     def render(self):
-        if self.op_type in ("RUN", "ADD"):
+        if self.op_type in ("RUN", "ADD", "ENV"):
             options = [f"--{k}={v}" for k, v in self.options.items()]
             return f"{self.op_type} {' '.join(options)} {' '.join(self.args)}"
 
@@ -123,6 +123,10 @@ class Image:
         self._build_ops.append(
             BuildOp(op_type="ADD", args=[source, dest], options=kwargs)
         )
+        return self
+
+    def env(self, key, value):
+        self._build_ops.append(BuildOp(op_type="ENV", args=[f"{key}=\"{value}\""]))
         return self
 
     def run(self, run_str, **kwargs):
