@@ -126,7 +126,7 @@ class Image:
         return self
 
     def env(self, key, value):
-        self._build_ops.append(BuildOp(op_type="ENV", args=[f"{key}=\"{value}\""]))
+        self._build_ops.append(BuildOp(op_type="ENV", args=[f'{key}="{value}"']))
         return self
 
     def run(self, run_str, **kwargs):
@@ -152,7 +152,13 @@ class Image:
 
     def _is_git_repo_url(self, path: str) -> bool:
         parsed = urlparse(path)
-        return parsed.scheme == "git" or (parsed.hostname and (parsed.hostname == "github.com" or parsed.hostname.endswith(".github.com")))
+        return parsed.scheme == "git" or (
+            parsed.hostname
+            and (
+                parsed.hostname == "github.com"
+                or parsed.hostname.endswith(".github.com")
+            )
+        )
 
     def _is_inside_git_dir(self, path: str) -> bool:
         parts = os.path.normpath(path).split(os.sep)

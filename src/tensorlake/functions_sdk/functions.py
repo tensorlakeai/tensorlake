@@ -58,7 +58,7 @@ _DEFAULT_TIMEOUT: int = 300  # 5 minutes
 _DEFAULT_CPU: float = 0.125  # 0.125 CPU = 125 CPU ms per sec
 _DEFAULT_MEMORY: float = 0.125  # 0.125 GB = 128 MB
 _DEFAULT_EPHEMERAL_DISK: float = 100.0  # 100 GB
-_DEFAULT_GPU: Optional[str] = None  # No GPU by default
+_DEFAULT_GPU = None  # No GPU by default
 
 
 class TensorlakeCompute:
@@ -86,7 +86,7 @@ class TensorlakeCompute:
     cpu: float = _DEFAULT_CPU
     memory: float = _DEFAULT_MEMORY
     ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK
-    gpu: Optional[str] = _DEFAULT_GPU
+    gpu: Optional[Union[str, List[str]]] = _DEFAULT_GPU
 
     def run(self, *args, **kwargs) -> Union[List[Any], Any]:
         pass
@@ -127,7 +127,7 @@ class TensorlakeRouter:
     cpu: float = _DEFAULT_CPU
     memory: float = _DEFAULT_MEMORY
     ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK
-    gpu: Optional[str] = _DEFAULT_GPU
+    gpu: Optional[Union[str, List[str]]] = _DEFAULT_GPU
 
     def run(self, *args, **kwargs) -> Optional[List[TensorlakeCompute]]:
         pass
@@ -178,7 +178,7 @@ def tensorlake_router(
     cpu: float = _DEFAULT_CPU,
     memory: float = _DEFAULT_MEMORY,
     ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK,
-    gpu: Optional[str] = _DEFAULT_GPU,
+    gpu: Optional[Union[str, List[str]]] = _DEFAULT_GPU,
 ):
     def construct(fn):
         attrs = {
@@ -221,7 +221,7 @@ def tensorlake_function(
     cpu: float = _DEFAULT_CPU,
     memory: float = _DEFAULT_MEMORY,
     ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK,
-    gpu: Optional[str] = _DEFAULT_GPU,
+    gpu: Optional[Union[str, List[str]]] = _DEFAULT_GPU,
 ):
     def construct(fn):
         attrs = {
