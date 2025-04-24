@@ -164,7 +164,7 @@ class TestGraphMetadataFunctionResources(unittest.TestCase):
         self.assertEqual(resource_metadata.cpus, 0.125)
         self.assertEqual(resource_metadata.memory_mb, 128)
         self.assertEqual(resource_metadata.ephemeral_disk_mb, 100 * 1024)
-        self.assertIsNone(resource_metadata.gpu)
+        self.assertEqual(resource_metadata.gpus, [])
 
     def test_custom_function_resources(self):
         @tensorlake_function(cpu=2.25, memory=2, ephemeral_disk=10, gpu="H100")
@@ -184,12 +184,11 @@ class TestGraphMetadataFunctionResources(unittest.TestCase):
         self.assertEqual(resource_metadata.cpus, 2.25)
         self.assertEqual(resource_metadata.memory_mb, 2048)
         self.assertEqual(resource_metadata.ephemeral_disk_mb, 10 * 1024)
-        self.assertIsNotNone(resource_metadata.gpu)
-        gpu_metadata: GPUResourceMetadata = resource_metadata.gpu
-        self.assertEqual(gpu_metadata.count, 1)
-        self.assertEqual(gpu_metadata.model, "H100")
+        self.assertEqual(len(resource_metadata.gpus), 1)
+        self.assertEqual(resource_metadata.gpus[0].count, 1)
+        self.assertEqual(resource_metadata.gpus[0].model, "H100")
 
-    def test_custom_function_resources_many_gpus(self):
+    def test_custom_function_resources_many_gpus_per_model(self):
         @tensorlake_function(gpu="A100-40GB:4")
         def function_with_resources(x: int) -> str:
             return "success"
@@ -207,10 +206,35 @@ class TestGraphMetadataFunctionResources(unittest.TestCase):
         self.assertEqual(resource_metadata.cpus, 0.125)
         self.assertEqual(resource_metadata.memory_mb, 128)
         self.assertEqual(resource_metadata.ephemeral_disk_mb, 100 * 1024)
-        self.assertIsNotNone(resource_metadata.gpu)
-        gpu_metadata: GPUResourceMetadata = resource_metadata.gpu
-        self.assertEqual(gpu_metadata.count, 4)
-        self.assertEqual(gpu_metadata.model, "A100-40GB")
+        self.assertEqual(len(resource_metadata.gpus), 1)
+        self.assertEqual(resource_metadata.gpus[0].count, 4)
+        self.assertEqual(resource_metadata.gpus[0].model, "A100-40GB")
+
+    def test_custom_function_resources_many_gpu_models(self):
+        @tensorlake_function(gpu=["A100-40GB:4", "H100:2", "A100-80GB:1"])
+        def function_with_resources(x: int) -> str:
+            return "success"
+
+        graph = Graph(
+            name=test_graph_name(self),
+            description="test",
+            start_node=function_with_resources,
+        )
+        graph_metadata: ComputeGraphMetadata = graph.definition()
+        resource_metadata: ResourceMetadata = (
+            graph_metadata.start_node.compute_fn.resources
+        )
+        self.assertIsNotNone(resource_metadata)
+        self.assertEqual(resource_metadata.cpus, 0.125)
+        self.assertEqual(resource_metadata.memory_mb, 128)
+        self.assertEqual(resource_metadata.ephemeral_disk_mb, 100 * 1024)
+        self.assertEqual(len(resource_metadata.gpus), 3)
+        self.assertEqual(resource_metadata.gpus[0].count, 4)
+        self.assertEqual(resource_metadata.gpus[0].model, "A100-40GB")
+        self.assertEqual(resource_metadata.gpus[1].count, 2)
+        self.assertEqual(resource_metadata.gpus[1].model, "H100")
+        self.assertEqual(resource_metadata.gpus[2].count, 1)
+        self.assertEqual(resource_metadata.gpus[2].model, "A100-80GB")
 
 
 if __name__ == "__main__":
