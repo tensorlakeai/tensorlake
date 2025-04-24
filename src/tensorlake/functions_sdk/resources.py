@@ -11,7 +11,7 @@ class GPUResourceMetadata(BaseModel):
     model: str
 
 
-def _parse_gpu_resource_metadata(gpu: str) -> GPUResourceMetadata:
+def _parse_gpu_resource(gpu: str) -> GPUResourceMetadata:
     # Example: "A100-80GB:2", "H100", "A100-40GB:4"
     parts: List[str] = gpu.split(":")
     if len(parts) > 2:
@@ -27,11 +27,24 @@ def _parse_gpu_resource_metadata(gpu: str) -> GPUResourceMetadata:
     return GPUResourceMetadata(count=gpu_count, model=gpu_model)
 
 
+def _parse_gpu_resources(
+    gpu: Optional[Union[str, List[str]]]
+) -> List[GPUResourceMetadata]:
+    """Parses GPU resources from `gpu` attribute of TensorlakeCompute or TensorlakeRouter."""
+    if gpu is None:
+        return []
+    if isinstance(gpu, str):
+        return [_parse_gpu_resource(gpu)]
+    if isinstance(gpu, list):
+        return [_parse_gpu_resource(g) for g in gpu]
+    raise ValueError(f"Invalid GPU format: {gpu}. Expected str or List[str].")
+
+
 class ResourceMetadata(BaseModel):
     cpus: float
     memory_mb: int
     ephemeral_disk_mb: int
-    gpu: Optional[GPUResourceMetadata] = None
+    gpus: List[GPUResourceMetadata] = []
 
 
 def resource_metadata_for_graph_node(
@@ -41,5 +54,5 @@ def resource_metadata_for_graph_node(
         cpus=node.cpu,
         memory_mb=math.ceil(node.memory * 1024),  # float GB to int MB
         ephemeral_disk_mb=math.ceil(node.ephemeral_disk * 1024),  # float GB to int MB
-        gpu=(None if node.gpu is None else _parse_gpu_resource_metadata(node.gpu)),
+        gpus=_parse_gpu_resources(node.gpu),
     )
