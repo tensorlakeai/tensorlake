@@ -1,4 +1,5 @@
 import os
+import time
 import unittest
 
 from testing import test_graph_name
@@ -35,6 +36,9 @@ class TestFunctionProcessCrash(unittest.TestCase):
             crash_output = graph.output(crash_invocation_id, "function")
             self.assertEqual(crash_output, [])
 
+        # FIXME: we're only doing periodic Function Executor health checks right now,
+        # so we need to wait for the crash to be detected.
+        time.sleep(10)
         success_invocation_id = graph.run(
             block_until_done=True,
             crash=False,
