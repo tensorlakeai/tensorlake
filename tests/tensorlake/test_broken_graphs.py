@@ -65,8 +65,8 @@ class TestBrokenGraphs(unittest.TestCase):
         # extractor_a output is not written by SDK because it succeeded.
 
         # TODO: Fix this test, when server writes to stderr, it is not captured by SDK.
-        #self.assertNotIn("extractor_a is writing to stdout", sdk_stdout_str)
-        #self.assertNotIn("extractor_a is writing to stderr", sdk_stdout_str)
+        # self.assertNotIn("extractor_a is writing to stdout", sdk_stdout_str)
+        # self.assertNotIn("extractor_a is writing to stderr", sdk_stdout_str)
 
         # extractor_b output is written by SDK because it failed to help user to debug.
         # TODO: Fix this test, this line is currently failing due to some race condition
@@ -74,10 +74,10 @@ class TestBrokenGraphs(unittest.TestCase):
         # self.assertIn("extractor_b is writing to stdout", sdk_stdout_str)
 
         # TODO: Fix this test, when server writes to stderr, it is not captured by SDK.
-        #self.assertIn("extractor_b is writing to stderr", sdk_stdout_str)
-        #self.assertIn(
+        # self.assertIn("extractor_b is writing to stderr", sdk_stdout_str)
+        # self.assertIn(
         #    "Exception: this exception was raised from extractor_b", sdk_stdout_str
-        #)
+        # )
 
         # extractor_c should not have been executed after failed extractor_b.
         extractor_c_output = g.output(invocation_id, "extractor_c")
@@ -99,9 +99,9 @@ class TestBrokenGraphs(unittest.TestCase):
         sdk_stdout_str: str = sdk_stdout.getvalue()
 
         # TODO: Fix this test, when server writes to stderr, it is not captured by SDK.
-        #self.assertIn("extractor_a", sdk_stdout_str)
-        #self.assertIn("got an unexpected keyword argument", sdk_stdout_str)
-        #self.assertIn("unexpected_argument", sdk_stdout_str)
+        # self.assertIn("extractor_a", sdk_stdout_str)
+        # self.assertIn("got an unexpected keyword argument", sdk_stdout_str)
+        # self.assertIn("unexpected_argument", sdk_stdout_str)
 
         # No output from extractor_a because it failed.
         extractor_c_output = g.output(invocation_id, "extractor_a")
@@ -122,10 +122,10 @@ class TestBrokenGraphs(unittest.TestCase):
         sdk_stdout_str: str = sdk_stdout.getvalue()
 
         # TODO: Fix this test, when server writes to stderr, it is not captured by SDK.
-        #self.assertIn(
+        # self.assertIn(
         #    "this exception was raised by TensorlakeComputeWithFailingConstructor",
         #    sdk_stdout_str,
-        #)
+        # )
         # No output from extractor_a because it failed.
         extractor_c_output = g.output(
             invocation_id, "TensorlakeComputeWithFailingConstructor"
