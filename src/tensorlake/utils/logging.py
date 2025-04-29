@@ -1,5 +1,7 @@
 import logging
 import sys
+import traceback
+from typing import TextIO
 
 import structlog
 
@@ -24,15 +26,20 @@ def configure_logging_early():
     )
 
 
-def configure_development_mode_logging():
+def configure_development_mode_logging(compact_tracebacks=True):
     processors = [
         structlog.contextvars.merge_contextvars,
         structlog_suppressor,
         structlog.processors.add_log_level,
-        structlog.processors.StackInfoRenderer(),
         structlog.dev.set_exc_info,
         structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S", utc=False),
-        structlog.dev.ConsoleRenderer(),
+        structlog.dev.ConsoleRenderer(
+            exception_formatter=(
+                _compact_traceback_formatter
+                if compact_tracebacks
+                else structlog.dev.rich_traceback
+            ),
+        ),
     ]
     structlog.configure(
         processors=processors,
@@ -67,3 +74,18 @@ def suppress():
     global _suppress_logging
     _suppress_logging = True
     logging.getLogger().setLevel(logging.CRITICAL)
+
+
+def _compact_traceback_formatter(
+    sio: TextIO, exc_info: structlog.typing.ExcInfo
+) -> None:
+    print(
+        "\n (only the frame where the exception was raised is printed by default)",
+        file=sio,
+    )
+    traceback.print_exception(
+        *exc_info,
+        file=sio,
+        limit=-1,  # Print only 1 frame where the exception was raised
+        chain=False,
+    )
