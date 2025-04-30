@@ -56,8 +56,8 @@ def is_pydantic_model_from_annotation(type_annotation):
 
 _DEFAULT_TIMEOUT: int = 300  # 5 minutes
 _DEFAULT_CPU: float = 0.125  # 0.125 CPU = 125 CPU ms per sec
-_DEFAULT_MEMORY: float = 0.125  # 0.125 GB = 128 MB
-_DEFAULT_EPHEMERAL_DISK: float = 100.0  # 100 GB
+_DEFAULT_MEMORY_GB: float = 0.125  # 0.125 GB = 128 MB
+_DEFAULT_EPHEMERAL_DISK_GB: float = 2.0  # 2 GB
 _DEFAULT_GPU = None  # No GPU by default
 
 
@@ -84,8 +84,8 @@ class TensorlakeCompute:
     retries: Optional[Retries] = None  # Use graph retry policy if not set
     timeout: int = _DEFAULT_TIMEOUT
     cpu: float = _DEFAULT_CPU
-    memory: float = _DEFAULT_MEMORY
-    ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK
+    memory: float = _DEFAULT_MEMORY_GB
+    ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK_GB
     gpu: Optional[Union[str, List[str]]] = _DEFAULT_GPU
 
     def run(self, *args, **kwargs) -> Union[List[Any], Any]:
@@ -125,8 +125,8 @@ class TensorlakeRouter:
     retries: Optional[Retries] = None  # Use graph retry policy if not set
     timeout: int = _DEFAULT_TIMEOUT
     cpu: float = _DEFAULT_CPU
-    memory: float = _DEFAULT_MEMORY
-    ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK
+    memory: float = _DEFAULT_MEMORY_GB
+    ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK_GB
     gpu: Optional[Union[str, List[str]]] = _DEFAULT_GPU
 
     def run(self, *args, **kwargs) -> Optional[List[TensorlakeCompute]]:
@@ -177,7 +177,7 @@ def tensorlake_router(
     timeout: int = _DEFAULT_TIMEOUT,
     cpu: float = _DEFAULT_CPU,
     memory: float = _DEFAULT_MEMORY,
-    ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK,
+    ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK_GB,
     gpu: Optional[Union[str, List[str]]] = _DEFAULT_GPU,
 ):
     def construct(fn):
@@ -220,7 +220,7 @@ def tensorlake_function(
     timeout: int = _DEFAULT_TIMEOUT,
     cpu: float = _DEFAULT_CPU,
     memory: float = _DEFAULT_MEMORY,
-    ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK,
+    ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK_GB,
     gpu: Optional[Union[str, List[str]]] = _DEFAULT_GPU,
 ):
     def construct(fn):
