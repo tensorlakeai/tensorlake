@@ -176,7 +176,7 @@ def tensorlake_router(
     retries: Optional[Retries] = None,  # Use graph retry policy if not set
     timeout: int = _DEFAULT_TIMEOUT,
     cpu: float = _DEFAULT_CPU,
-    memory: float = _DEFAULT_MEMORY,
+    memory: float = _DEFAULT_MEMORY_GB,
     ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK_GB,
     gpu: Optional[Union[str, List[str]]] = _DEFAULT_GPU,
 ):
