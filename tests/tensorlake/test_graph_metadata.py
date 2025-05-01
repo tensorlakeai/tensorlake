@@ -13,7 +13,6 @@ from tensorlake.functions_sdk.graph_definition import (
     ResourceMetadata,
     RetryPolicyMetadata,
 )
-from tensorlake.functions_sdk.resources import GPUResourceMetadata
 from tensorlake.functions_sdk.retries import Retries
 
 
@@ -163,7 +162,7 @@ class TestGraphMetadataFunctionResources(unittest.TestCase):
         self.assertIsNotNone(resource_metadata)
         self.assertEqual(resource_metadata.cpus, 0.125)
         self.assertEqual(resource_metadata.memory_mb, 128)
-        self.assertEqual(resource_metadata.ephemeral_disk_mb, 100 * 1024)
+        self.assertEqual(resource_metadata.ephemeral_disk_mb, 2 * 1024)
         self.assertEqual(resource_metadata.gpus, [])
 
     def test_custom_function_resources(self):
@@ -205,7 +204,7 @@ class TestGraphMetadataFunctionResources(unittest.TestCase):
         self.assertIsNotNone(resource_metadata)
         self.assertEqual(resource_metadata.cpus, 0.125)
         self.assertEqual(resource_metadata.memory_mb, 128)
-        self.assertEqual(resource_metadata.ephemeral_disk_mb, 100 * 1024)
+        self.assertEqual(resource_metadata.ephemeral_disk_mb, 2 * 1024)
         self.assertEqual(len(resource_metadata.gpus), 1)
         self.assertEqual(resource_metadata.gpus[0].count, 4)
         self.assertEqual(resource_metadata.gpus[0].model, "A100-40GB")
@@ -227,7 +226,7 @@ class TestGraphMetadataFunctionResources(unittest.TestCase):
         self.assertIsNotNone(resource_metadata)
         self.assertEqual(resource_metadata.cpus, 0.125)
         self.assertEqual(resource_metadata.memory_mb, 128)
-        self.assertEqual(resource_metadata.ephemeral_disk_mb, 100 * 1024)
+        self.assertEqual(resource_metadata.ephemeral_disk_mb, 2 * 1024)
         self.assertEqual(len(resource_metadata.gpus), 3)
         self.assertEqual(resource_metadata.gpus[0].count, 4)
         self.assertEqual(resource_metadata.gpus[0].model, "A100-40GB")
