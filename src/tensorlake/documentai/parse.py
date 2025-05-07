@@ -90,3 +90,4 @@ class ParsingOptions(BaseModel):
     table_summary: Optional[bool] = False
     figure_summary: Optional[bool] = False
     structured_extraction_skip_ocr: Optional[bool] = False
+    disable_layout_detection: Optional[bool] = False
