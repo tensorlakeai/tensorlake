@@ -156,6 +156,10 @@ class DocumentAI:
                 if options.extraction_options
                 else None
             ),
+            "skewCorrection": options.skew_correction,
+            "detectSignature": options.detect_signature,
+            "structuredExtractionSkipOcr": options.structured_extraction_skip_ocr,
+            "disableLayoutDetection": options.disable_layout_detection,
         }
 
     def __create_parse_req__(self, file: str, options: ParsingOptions) -> dict:
