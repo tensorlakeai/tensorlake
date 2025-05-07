@@ -97,7 +97,7 @@ class TensorlakeCompute:
     memory: float = _DEFAULT_MEMORY_GB
     ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK_GB
     gpu: Optional[Union[str, List[str]]] = _DEFAULT_GPU
-    cacheable: bool = (False,)
+    cacheable: bool = False
 
     def run(self, *args, **kwargs) -> Union[List[Any], Any]:
         pass
@@ -139,6 +139,7 @@ class TensorlakeRouter:
     memory: float = _DEFAULT_MEMORY_GB
     ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK_GB
     gpu: Optional[Union[str, List[str]]] = _DEFAULT_GPU
+    cacheable: bool = False
 
     def run(self, *args, **kwargs) -> Optional[List[TensorlakeCompute]]:
         pass
