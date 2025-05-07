@@ -170,3 +170,4 @@ class Job(BaseModel):
     trace_id: Optional[str] = Field(alias="traceId", default=None)
     createdAt: Optional[str] = Field(alias="createdAt", default=None)
     updatedAt: Optional[str] = Field(alias="updatedAt", default=None)
+    output: Optional[Output] = Field(alias="output", default=None)
