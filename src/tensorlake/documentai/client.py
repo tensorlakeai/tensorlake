@@ -156,10 +156,10 @@ class DocumentAI:
                 if options.extraction_options
                 else None
             ),
-            "skewCorrection": options.skew_correction,
-            "detectSignature": options.detect_signature,
-            "structuredExtractionSkipOcr": options.structured_extraction_skip_ocr,
-            "disableLayoutDetection": options.disable_layout_detection,
+            "skewCorrection": options.skew_correction if options.skew_correction is not None else False,
+            "detectSignature": options.detect_signature if options.detect_signature is not None else False,
+            "structuredExtractionSkipOcr": options.structured_extraction_skip_ocr if options.structured_extraction_skip_ocr is not None else False,
+            "disableLayoutDetection": options.disable_layout_detection if options.disable_layout_detection is not None else False,
         }
 
     def __create_parse_req__(self, file: str, options: ParsingOptions) -> dict:
@@ -207,6 +207,7 @@ class DocumentAI:
             headers=self.__headers__(),
             json=self.__create_parse_req__(file, options),
         )
+
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
