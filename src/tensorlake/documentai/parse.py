@@ -89,3 +89,4 @@ class ParsingOptions(BaseModel):
     detect_signature: Optional[bool] = False
     table_summary: Optional[bool] = False
     figure_summary: Optional[bool] = False
+    structured_extraction_skip_ocr: Optional[bool] = False
