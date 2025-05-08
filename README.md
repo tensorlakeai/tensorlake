@@ -52,7 +52,7 @@ Document AI APIs are async to be able to handle large volumes of documents with 
 
 from tensorlake.documentai import Job
 
-data: JobResult = doc_ai.get_job(job_id="job-xxxx")
+data: Job = doc_ai.get_job(job_id="job-xxxx")
 ```
 
 The SDK includes [Pydantic models](src/tensorlake/documentai/common.py) that describes Document chunks, and individual page elements(including bounding boxes).
