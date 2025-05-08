@@ -12,6 +12,7 @@ from typing import Optional, Union
 import httpx
 from pydantic import Json
 from retry import retry
+from pydantic import BaseModel
 
 from tensorlake.documentai.common import DOC_AI_BASE_URL, PaginatedResult
 from tensorlake.documentai.datasets import Dataset, DatasetOptions
@@ -131,9 +132,13 @@ class DocumentAI:
     def __create_parse_settings__(self, options: ParsingOptions) -> dict:
         json_schema = None
         if options.extraction_options:
-            if isinstance(options.extraction_options.schema, Json):
+            if isinstance(options.extraction_options.schema, str):
                 json_schema = json.loads(options.extraction_options.schema)
-            else:
+            elif isinstance(options.extraction_options.schema, dict):
+                json_schema = options.extraction_options.schema
+            elif isinstance(options.extraction_options.schema, Json):
+                json_schema = json.loads(options.extraction_options.schema)
+            elif isinstance(options.extraction_options.schema, BaseModel):
                 json_schema = options.extraction_options.schema.model_json_schema()
 
         return {
@@ -155,6 +160,26 @@ class DocumentAI:
                 options.extraction_options.provider.value
                 if options.extraction_options
                 else None
+            ),
+            "skewCorrection": (
+                options.skew_correction
+                if options.skew_correction is not None
+                else False
+            ),
+            "detectSignature": (
+                options.detect_signature
+                if options.detect_signature is not None
+                else False
+            ),
+            "structuredExtractionSkipOcr": (
+                options.structured_extraction_skip_ocr
+                if options.structured_extraction_skip_ocr is not None
+                else False
+            ),
+            "disableLayoutDetection": (
+                options.disable_layout_detection
+                if options.disable_layout_detection is not None
+                else False
             ),
         }
 
@@ -203,6 +228,7 @@ class DocumentAI:
             headers=self.__headers__(),
             json=self.__create_parse_req__(file, options),
         )
+
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as e:

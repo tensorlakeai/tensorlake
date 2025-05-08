@@ -160,8 +160,8 @@ class TestGraphMetadataFunctionResources(unittest.TestCase):
             graph_metadata.start_node.compute_fn.resources
         )
         self.assertIsNotNone(resource_metadata)
-        self.assertEqual(resource_metadata.cpus, 0.125)
-        self.assertEqual(resource_metadata.memory_mb, 128)
+        self.assertEqual(resource_metadata.cpus, 1.0)
+        self.assertEqual(resource_metadata.memory_mb, 1024)
         self.assertEqual(resource_metadata.ephemeral_disk_mb, 2 * 1024)
         self.assertEqual(resource_metadata.gpus, [])
 
@@ -202,8 +202,8 @@ class TestGraphMetadataFunctionResources(unittest.TestCase):
             graph_metadata.start_node.compute_fn.resources
         )
         self.assertIsNotNone(resource_metadata)
-        self.assertEqual(resource_metadata.cpus, 0.125)
-        self.assertEqual(resource_metadata.memory_mb, 128)
+        self.assertEqual(resource_metadata.cpus, 1.0)
+        self.assertEqual(resource_metadata.memory_mb, 1024)
         self.assertEqual(resource_metadata.ephemeral_disk_mb, 2 * 1024)
         self.assertEqual(len(resource_metadata.gpus), 1)
         self.assertEqual(resource_metadata.gpus[0].count, 4)
@@ -224,8 +224,8 @@ class TestGraphMetadataFunctionResources(unittest.TestCase):
             graph_metadata.start_node.compute_fn.resources
         )
         self.assertIsNotNone(resource_metadata)
-        self.assertEqual(resource_metadata.cpus, 0.125)
-        self.assertEqual(resource_metadata.memory_mb, 128)
+        self.assertEqual(resource_metadata.cpus, 1.0)
+        self.assertEqual(resource_metadata.memory_mb, 1024)
         self.assertEqual(resource_metadata.ephemeral_disk_mb, 2 * 1024)
         self.assertEqual(len(resource_metadata.gpus), 3)
         self.assertEqual(resource_metadata.gpus[0].count, 4)

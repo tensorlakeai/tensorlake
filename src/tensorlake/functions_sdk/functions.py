@@ -55,8 +55,15 @@ def is_pydantic_model_from_annotation(type_annotation):
 
 
 _DEFAULT_TIMEOUT: int = 300  # 5 minutes
-_DEFAULT_CPU: float = 0.125  # 0.125 CPU = 125 CPU ms per sec
-_DEFAULT_MEMORY_GB: float = 0.125  # 0.125 GB = 128 MB
+# We need full CPU core to start Function Executor and load customer function quickly.
+# Otherwise, starting up Function Executor without loading customer functions takes more
+# than 5 seconds with 0.125 CPU.
+_DEFAULT_CPU: float = 1.0
+# nvidia-smi health checks consume up to 100 MB of memory.
+# Function Executor itself currently consumes up to 75 MB of memory.
+# So we need a large enough minimal memory limit to ensure stability while running customer
+# functions that consume memory too.
+_DEFAULT_MEMORY_GB: float = 1.0
 _DEFAULT_EPHEMERAL_DISK_GB: float = 2.0  # 2 GB
 _DEFAULT_GPU = None  # No GPU by default
 

@@ -9,7 +9,7 @@ from tensorlake import (
 )
 
 
-@tensorlake_function(cpu=0.9, memory=1.0, ephemeral_disk=1.0, gpu=["H100", "T4"])
+@tensorlake_function(cpu=1.1, memory=1.3, ephemeral_disk=1.0, gpu=["H100", "T4"])
 def function_with_custom_resources(x: int) -> str:
     return "success"
 
