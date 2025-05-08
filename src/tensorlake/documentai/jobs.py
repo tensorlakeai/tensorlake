@@ -67,6 +67,14 @@ class Figure(BaseModel):
     figure_summary: Optional[str] = None
 
 
+class Signature(BaseModel):
+    """
+    Signature content of a page fragment.
+    """
+
+    content: str
+
+
 class PageFragmentType(str, Enum):
     """
     Type of a page fragment.
@@ -86,6 +94,7 @@ class PageFragmentType(str, Enum):
     TABLE_CAPTION = "table_caption"
     FIGURE_CAPTION = "figure_caption"
     FORMULA_CAPTION = "formula_caption"
+    SIGNATURE = "signature"
 
 
 class PageFragment(BaseModel):
@@ -94,7 +103,7 @@ class PageFragment(BaseModel):
     """
 
     fragment_type: PageFragmentType
-    content: Union[Text, Table, Figure]
+    content: Union[Text, Table, Figure, Signature]
     reading_order: Optional[int] = None
     page_number: Optional[int] = None
     bbox: Optional[dict[str, float]] = None

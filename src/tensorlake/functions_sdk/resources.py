@@ -28,7 +28,7 @@ def _parse_gpu_resource(gpu: str) -> GPUResourceMetadata:
 
 
 def _parse_gpu_resources(
-    gpu: Optional[Union[str, List[str]]]
+    gpu: Optional[Union[str, List[str]]],
 ) -> List[GPUResourceMetadata]:
     """Parses GPU resources from `gpu` attribute of TensorlakeCompute or TensorlakeRouter."""
     if gpu is None:
@@ -48,7 +48,7 @@ class ResourceMetadata(BaseModel):
 
 
 def resource_metadata_for_graph_node(
-    node: Union[TensorlakeCompute, TensorlakeRouter]
+    node: Union[TensorlakeCompute, TensorlakeRouter],
 ) -> ResourceMetadata:
     return ResourceMetadata(
         cpus=node.cpu,
