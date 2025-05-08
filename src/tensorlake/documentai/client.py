@@ -12,6 +12,7 @@ from typing import Optional, Union
 import httpx
 from pydantic import Json
 from retry import retry
+from pydantic import BaseModel
 
 from tensorlake.documentai.common import DOC_AI_BASE_URL, PaginatedResult
 from tensorlake.documentai.datasets import Dataset, DatasetOptions
@@ -131,9 +132,13 @@ class DocumentAI:
     def __create_parse_settings__(self, options: ParsingOptions) -> dict:
         json_schema = None
         if options.extraction_options:
-            if isinstance(options.extraction_options.schema, Json):
+            if isinstance(options.extraction_options.schema, str):
                 json_schema = json.loads(options.extraction_options.schema)
-            else:
+            elif isinstance(options.extraction_options.schema, dict):
+                json_schema = options.extraction_options.schema
+            elif isinstance(options.extraction_options.schema, Json):
+                json_schema = json.loads(options.extraction_options.schema)
+            elif isinstance(options.extraction_options.schema, BaseModel):
                 json_schema = options.extraction_options.schema.model_json_schema()
 
         return {
