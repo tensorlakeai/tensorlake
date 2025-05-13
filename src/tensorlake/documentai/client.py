@@ -181,6 +181,11 @@ class DocumentAI:
                 if options.disable_layout_detection is not None
                 else False
             ),
+            "formDetectionMode": (
+                options.form_detection_mode.value
+                if options.form_detection_mode is not None
+                else "object_detection"
+            )
         }
 
     def __create_parse_req__(self, file: str, options: ParsingOptions) -> dict:

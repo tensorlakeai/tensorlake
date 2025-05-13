@@ -71,6 +71,19 @@ class ExtractionOptions(BaseModel):
     prompt: Optional[str] = None
     provider: ModelProvider = ModelProvider.TENSORLAKE
 
+class FormDetectionMode(str, Enum):
+    """
+    Algorithm to use for detecting forms in a document.
+
+    VLM: Uses a VLM to identify questions and answers in a form. 
+         Does not provide bounding boxes and is prone to hallucinations.
+    OBJECT_DETECTION: Uses a layout detector to identify questions and answers. 
+                     Does not work well with very complex forms.
+    """
+
+    VLM = "vlm"
+    OBJECT_DETECTION = "object_detection"
+
 
 class ParsingOptions(BaseModel):
     """
@@ -91,3 +104,4 @@ class ParsingOptions(BaseModel):
     figure_summary: Optional[bool] = False
     structured_extraction_skip_ocr: Optional[bool] = False
     disable_layout_detection: Optional[bool] = False
+    form_detection_mode: Optional[FormDetectionMode] = FormDetectionMode.OBJECT_DETECTION
