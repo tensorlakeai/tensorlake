@@ -1,5 +1,6 @@
 from typing import Optional, Union
 
+import ssl
 import httpx
 import yaml
 from httpx import AsyncClient, Client
@@ -70,21 +71,12 @@ def get_sync_or_async_client(
         ca_bundle_path (Optional[str]): Path to the CA bundle file for certificate verification.
             If not provided, defaults to system CA certificates.
     """
-    if make_async:
-        if cert_path and key_path:
-            return httpx.AsyncClient(
-                http2=True,
-                cert=(cert_path, key_path),
-                verify=ca_bundle_path if ca_bundle_path else True,
-            )
-        else:
-            return httpx.AsyncClient()
-    else:
-        if cert_path and key_path:
-            return httpx.Client(
-                http2=True,
-                cert=(cert_path, key_path),
-                verify=ca_bundle_path if ca_bundle_path else True,
-            )
-        else:
-            return httpx.Client()
+    ctx = ssl.create_default_context(cafile=ca_bundle_path)
+    if cert_path and key_path:
+        ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
+
+    return (
+        httpx.AsyncClient(http2=True, verify=ctx)
+        if make_async
+        else httpx.Client(http2=True, verify=ctx)
+    )
