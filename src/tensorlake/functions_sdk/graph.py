@@ -109,6 +109,8 @@ class Graph:
         self.additional_modules = additional_modules
         self.retries = retries
 
+        self._fn_cache: Dict[str, TensorlakeFunctionWrapper] = {}
+
         self.add_node(start_node)
         if issubclass(start_node, TensorlakeRouter):
             self.routers[start_node.name] = []
@@ -442,19 +444,18 @@ class Graph:
     ) -> Union[RouterCallResult, FunctionCallResult]:
         # TODO: Implement function timeouts when we start calling Function Executor in local mode.
         node = self.nodes[node_name]
+        if node_name not in self._fn_cache:
+            self._fn_cache[node_name] = TensorlakeFunctionWrapper(node)
+        fn = self._fn_cache[node_name]
         if node_name in self.routers and len(self.routers[node_name]) > 0:
-            result = TensorlakeFunctionWrapper(node).invoke_router(
-                self._local_graph_ctx, input
-            )
+            result = fn.invoke_router(self._local_graph_ctx, input)
             for dynamic_edge in result.edges:
                 if dynamic_edge in self.nodes:
                     print(f"[bold]dynamic router returned node: {dynamic_edge}[/bold]")
             return result
 
         acc_value = self._accumulator_values.get(node_name, None)
-        return TensorlakeFunctionWrapper(node).invoke_fn_ser(
-            self._local_graph_ctx, input, acc_value
-        )
+        return fn.invoke_fn_ser(self._local_graph_ctx, input, acc_value)
 
     def _log_local_exec_tracebacks(
         self, results: Union[FunctionCallResult, RouterCallResult]
