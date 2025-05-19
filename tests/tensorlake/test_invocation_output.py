@@ -3,6 +3,7 @@ import unittest
 from testing import test_graph_name, wait_function_output
 
 from tensorlake import Graph, RemoteGraph, tensorlake_function
+from tensorlake.functions_sdk.graph_serialization import graph_code_dir_path
 
 
 @tensorlake_function()
@@ -22,7 +23,7 @@ class TestInvocationOutput(unittest.TestCase):
             start_node=start_func,
         )
         g.add_edge(start_func, end_func)
-        g = RemoteGraph.deploy(g)
+        g = RemoteGraph.deploy(graph=g, code_dir_path=graph_code_dir_path(__file__))
 
         invocation_id = g.run(block_until_done=True)
 
@@ -40,7 +41,7 @@ class TestInvocationOutput(unittest.TestCase):
             start_node=start_func,
         )
         g.add_edge(start_func, end_func)
-        g = RemoteGraph.deploy(g)
+        g = RemoteGraph.deploy(graph=g, code_dir_path=graph_code_dir_path(__file__))
 
         invocation_id = g.run(block_until_done=False)
 

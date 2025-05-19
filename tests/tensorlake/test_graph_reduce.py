@@ -2,7 +2,6 @@ import unittest
 from typing import List
 
 import parameterized
-import testing
 from pydantic import BaseModel
 from testing import remote_or_local_graph, test_graph_name
 
@@ -88,9 +87,7 @@ class TestGraphReduce(unittest.TestCase):
         graph.add_edge(fail_generate_seq, add_one)
         graph.add_edge(add_one, accumulate_reduce)
         graph.add_edge(accumulate_reduce, store_result)
-        graph = remote_or_local_graph(
-            graph, remote=is_remote, additional_modules=[testing, parameterized]
-        )
+        graph = remote_or_local_graph(graph, remote=is_remote)
 
         invocation_id = graph.run(block_until_done=True, x=3)
         outputs = graph.output(invocation_id, store_result.name)

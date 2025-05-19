@@ -35,11 +35,16 @@ def main():
         help="ID of Executor that started this Function Executor",
         type=str,
     )
+    parser.add_argument(
+        "--function-executor-id",
+        help="ID of this Function Executor",
+        type=str,
+        default="",
+    )
     parser.add_argument("--address", help="API server address to listen on", type=str)
     parser.add_argument(
         "-d", "--dev", help="Run in development mode", action="store_true"
     )
-    # TODO: Add --function-executor-id after all used Function Executors allow unknown CLI arguments.
 
     # Don't fail if unknown arguments are present. This supports backward compatibility when new args are added.
     args, ignored_args = parser.parse_known_args()
@@ -53,7 +58,11 @@ def main():
     validate_args(args, logger)
 
     # TODO: Add function-executor-id to logger context.
-    logger = logger.bind(executor_id=args.executor_id, **info_response_kv_args())
+    logger = logger.bind(
+        executor_id=args.executor_id,
+        function_executor_id=args.function_executor_id,
+        **info_response_kv_args()
+    )
     logger.info("starting function executor server", address=args.address, dev=args.dev)
     if len(ignored_args) > 0:
         logger.warning("ignored cli arguments", ignored_args=ignored_args)

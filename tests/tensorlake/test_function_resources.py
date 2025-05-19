@@ -7,6 +7,7 @@ from tensorlake import (
     RemoteGraph,
     tensorlake_function,
 )
+from tensorlake.functions_sdk.graph_serialization import graph_code_dir_path
 
 
 @tensorlake_function(cpu=1.1, memory=1.3, ephemeral_disk=1.0, gpu=["H100", "T4"])
@@ -21,7 +22,9 @@ class TestFunctionResources(unittest.TestCase):
             description="test",
             start_node=function_with_custom_resources,
         )
-        graph = RemoteGraph.deploy(graph)
+        graph = RemoteGraph.deploy(
+            graph=graph, code_dir_path=graph_code_dir_path(__file__)
+        )
         invocation_id = graph.run(block_until_done=True, x=1)
         outputs = graph.output(invocation_id, "function_with_custom_resources")
         self.assertEqual(len(outputs), 1)

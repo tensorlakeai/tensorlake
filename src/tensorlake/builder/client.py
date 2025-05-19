@@ -63,7 +63,7 @@ class ImageBuilderClient:
         result.sort(key=lambda b: b.build_completed_at, reverse=True)
         return result
 
-    def get_latest_build(self, image_name: str) -> Build | None:
+    def get_latest_build(self, image_name: str) -> Optional[Build]:
         res = self.client.get(
             f"{self.build_service}/v1/builds",
             headers=self.headers,

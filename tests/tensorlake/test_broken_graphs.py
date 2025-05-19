@@ -7,6 +7,7 @@ from testing import test_graph_name
 
 from tensorlake import Graph, RemoteGraph, TensorlakeCompute, tensorlake_function
 from tensorlake.functions_sdk.data_objects import File
+from tensorlake.functions_sdk.graph_serialization import graph_code_dir_path
 
 
 @tensorlake_function()
@@ -49,7 +50,7 @@ class TestBrokenGraphs(unittest.TestCase):
         )
         g.add_edge(extractor_a, extractor_b)
         g.add_edge(extractor_b, extractor_c)
-        g = RemoteGraph.deploy(g)
+        g = RemoteGraph.deploy(graph=g, code_dir_path=graph_code_dir_path(__file__))
 
         # We don't have a public SDK API to read a functions' stderr
         # so we rely on internal SDK behavior where it prints a failed function's
@@ -88,7 +89,7 @@ class TestBrokenGraphs(unittest.TestCase):
             name=test_graph_name(self),
             start_node=extractor_a,
         )
-        g = RemoteGraph.deploy(g)
+        g = RemoteGraph.deploy(graph=g, code_dir_path=graph_code_dir_path(__file__))
 
         sdk_stdout: io.StringIO = io.StringIO()
         with redirect_stdout(sdk_stdout):
@@ -112,7 +113,7 @@ class TestBrokenGraphs(unittest.TestCase):
             name=test_graph_name(self),
             start_node=TensorlakeComputeWithFailingConstructor,
         )
-        g = RemoteGraph.deploy(g)
+        g = RemoteGraph.deploy(graph=g, code_dir_path=graph_code_dir_path(__file__))
 
         sdk_stdout: io.StringIO = io.StringIO()
         with redirect_stdout(sdk_stdout):

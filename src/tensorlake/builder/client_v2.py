@@ -215,21 +215,20 @@ class ImageBuilderV2Client:
             ) as event_source:
                 async for sse in event_source.aiter_sse():
                     log_entry = BuildLogEvent.model_validate(sse.json())
-                    match log_entry.stream:
-                        case "stdout":
-                            click.secho(
-                                log_entry.message,
-                                nl=False,
-                                err=False,
-                                fg="black",
-                                dim=True,
-                            )
-                        case "stderr":
-                            click.secho(log_entry.message, fg="red", err=True)
-                        case "info":
-                            click.secho(
-                                f"{log_entry.timestamp}: {log_entry.message}", fg="blue"
-                            )
+                    if log_entry.stream == "stdout":
+                        click.secho(
+                            log_entry.message,
+                            nl=False,
+                            err=False,
+                            fg="black",
+                            dim=True,
+                        )
+                    elif log_entry.stream == "stderr":
+                        click.secho(log_entry.message, fg="red", err=True)
+                    elif log_entry.stream == "info":
+                        click.secho(
+                            f"{log_entry.timestamp}: {log_entry.message}", fg="blue"
+                        )
 
         return await self.build_info(build.id)
 

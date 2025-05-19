@@ -1,3 +1,4 @@
+import os
 import unittest
 from typing import List, Mapping
 
@@ -25,7 +26,14 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
 )
 from tensorlake.functions_sdk.data_objects import File
 from tensorlake.functions_sdk.functions import tensorlake_function
+from tensorlake.functions_sdk.graph_serialization import (
+    ZIPPED_GRAPH_CODE_CONTENT_TYPE,
+    graph_code_dir_path,
+    zip_graph_code,
+)
 from tensorlake.functions_sdk.object_serializer import CloudPickleSerializer
+
+GRAPH_CODE_DIR_PATH = graph_code_dir_path(__file__)
 
 
 @tensorlake_function()
@@ -92,12 +100,11 @@ class TestRunTask(unittest.TestCase):
                         graph_version="1",
                         function_name="extractor_b",
                         graph=SerializedObject(
-                            bytes=CloudPickleSerializer.serialize(
-                                create_graph_a().serialize(
-                                    additional_modules=[],
-                                )
+                            bytes=zip_graph_code(
+                                graph=create_graph_a(),
+                                code_dir_path=GRAPH_CODE_DIR_PATH,
                             ),
-                            content_type=CloudPickleSerializer.content_type,
+                            content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
                         ),
                     )
                 )
@@ -118,7 +125,7 @@ class TestRunTask(unittest.TestCase):
                 self.assertEqual(len(fn_outputs), 2)
                 expected = FileChunk(data=b"hello", start=5, end=5)
 
-                self.assertEqual(expected, fn_outputs[1])
+                self.assertEqual(expected.model_dump(), fn_outputs[1].model_dump())
 
     def test_function_raises_error(self):
         with FunctionExecutorProcessContextManager(
@@ -133,12 +140,11 @@ class TestRunTask(unittest.TestCase):
                         graph_version="1",
                         function_name="extractor_exception",
                         graph=SerializedObject(
-                            bytes=CloudPickleSerializer.serialize(
-                                create_graph_exception().serialize(
-                                    additional_modules=[],
-                                )
+                            bytes=zip_graph_code(
+                                graph=create_graph_exception(),
+                                code_dir_path=GRAPH_CODE_DIR_PATH,
                             ),
-                            content_type=CloudPickleSerializer.content_type,
+                            content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
                         ),
                     )
                 )
@@ -167,12 +173,11 @@ class TestRunTask(unittest.TestCase):
                         graph_version="1",
                         function_name="extractor_b",
                         graph=SerializedObject(
-                            bytes=CloudPickleSerializer.serialize(
-                                create_graph_a().serialize(
-                                    additional_modules=[],
-                                )
+                            bytes=zip_graph_code(
+                                graph=create_graph_a(),
+                                code_dir_path=GRAPH_CODE_DIR_PATH,
                             ),
-                            content_type=CloudPickleSerializer.content_type,
+                            content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
                         ),
                     )
                 )

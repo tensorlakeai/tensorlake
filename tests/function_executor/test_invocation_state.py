@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 import unittest
@@ -33,7 +34,14 @@ from tensorlake.functions_sdk.functions import (
     GraphInvocationContext,
     tensorlake_function,
 )
+from tensorlake.functions_sdk.graph_serialization import (
+    ZIPPED_GRAPH_CODE_CONTENT_TYPE,
+    graph_code_dir_path,
+    zip_graph_code,
+)
 from tensorlake.functions_sdk.object_serializer import CloudPickleSerializer
+
+GRAPH_CODE_DIR_PATH = graph_code_dir_path(__file__)
 
 
 class StructuredField(BaseModel):
@@ -63,10 +71,15 @@ def invocation_state_client_stub(
             test_case.assertEqual(request.task_id, expected_request.task_id)
             if request.HasField("set"):
                 test_case.assertEqual(request.set.key, expected_request.set.key)
-                # Two different serialized objects are not equal so we need to deserialize them.
+                # Two different serialized objects are not equal so we need to deserialize them and dump
+                # into models that have corretly functioning equality operator.
                 test_case.assertEqual(
-                    CloudPickleSerializer.deserialize(request.set.value.bytes),
-                    CloudPickleSerializer.deserialize(expected_request.set.value.bytes),
+                    CloudPickleSerializer.deserialize(
+                        request.set.value.bytes
+                    ).model_dump(),
+                    CloudPickleSerializer.deserialize(
+                        expected_request.set.value.bytes
+                    ).model_dump(),
                 )
             else:
                 test_case.assertEqual(request.get.key, expected_request.get.key)
@@ -103,10 +116,10 @@ class TestSetInvocationState(unittest.TestCase):
                 graph_version="1",
                 function_name="set_invocation_state",
                 graph=SerializedObject(
-                    bytes=CloudPickleSerializer.serialize(
-                        graph.serialize(additional_modules=[])
+                    bytes=zip_graph_code(
+                        graph=graph, code_dir_path=GRAPH_CODE_DIR_PATH
                     ),
-                    content_type=CloudPickleSerializer.content_type,
+                    content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
                 ),
             )
         )
@@ -222,7 +235,11 @@ def check_invocation_state_is_expected(ctx: GraphInvocationContext, x: int) -> s
         integer=x,
         structured=StructuredField(list=[1, 2, 3], dictionary={"a": 1, "b": 2}),
     )
-    return "success" if got_state == expected_state else "failure"
+    return (
+        "success"
+        if got_state.model_dump() == expected_state.model_dump()
+        else "failure"
+    )
 
 
 @tensorlake_function(inject_ctx=True)
@@ -249,10 +266,10 @@ class TestGetInvocationState(unittest.TestCase):
                 graph_version="1",
                 function_name=function_name,
                 graph=SerializedObject(
-                    bytes=CloudPickleSerializer.serialize(
-                        graph.serialize(additional_modules=[])
+                    bytes=zip_graph_code(
+                        graph=graph, code_dir_path=GRAPH_CODE_DIR_PATH
                     ),
-                    content_type=CloudPickleSerializer.content_type,
+                    content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
                 ),
             )
         )

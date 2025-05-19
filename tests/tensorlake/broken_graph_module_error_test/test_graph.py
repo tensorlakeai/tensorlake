@@ -6,6 +6,7 @@ from extractors import extractor_a, extractor_c
 
 from tensorlake import RemoteGraph
 from tensorlake.functions_sdk.graph import Graph
+from tensorlake.functions_sdk.graph_serialization import graph_code_dir_path
 
 
 def create_broken_graph():
@@ -22,7 +23,7 @@ def create_broken_graph():
 class TestBrokenGraphs(unittest.TestCase):
     def test_broken_graph(self):
         g = create_broken_graph()
-        g = RemoteGraph.deploy(g=g)
+        g = RemoteGraph.deploy(graph=g, code_dir_path=graph_code_dir_path(__file__))
 
         # We don't have a public SDK API to read a function's stderr
         # so we rely on internal SDK behavior where it prints a failed function's

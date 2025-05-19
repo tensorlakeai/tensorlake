@@ -23,7 +23,13 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
 from tensorlake.functions_sdk.data_objects import File
-from tensorlake.functions_sdk.object_serializer import CloudPickleSerializer
+from tensorlake.functions_sdk.graph_serialization import (
+    ZIPPED_GRAPH_CODE_CONTENT_TYPE,
+    graph_code_dir_path,
+    zip_graph_code,
+)
+
+GRAPH_CODE_DIR_PATH = graph_code_dir_path(__file__)
 
 # Current max input and output sizes that we support.
 MAX_FUNCTION_PAYLOAD_SIZE_BYTES = math.floor(1.9 * 1024 * 1024 * 1024)  # 1.9 GB
@@ -90,10 +96,10 @@ class TestMaxPayload(unittest.TestCase):
                         graph_version="1",
                         function_name="validate_max_input",
                         graph=SerializedObject(
-                            bytes=CloudPickleSerializer.serialize(
-                                graph.serialize(additional_modules=[])
+                            bytes=zip_graph_code(
+                                graph=graph, code_dir_path=GRAPH_CODE_DIR_PATH
                             ),
-                            content_type=CloudPickleSerializer.content_type,
+                            content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
                         ),
                     )
                 )
@@ -130,10 +136,10 @@ class TestMaxPayload(unittest.TestCase):
                         graph_version="1",
                         function_name="generate_max_output",
                         graph=SerializedObject(
-                            bytes=CloudPickleSerializer.serialize(
-                                graph.serialize(additional_modules=[])
+                            bytes=zip_graph_code(
+                                graph=graph, code_dir_path=GRAPH_CODE_DIR_PATH
                             ),
-                            content_type=CloudPickleSerializer.content_type,
+                            content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
                         ),
                     )
                 )

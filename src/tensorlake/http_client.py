@@ -3,7 +3,6 @@ import logging
 import os
 from typing import Any, Dict, List, Optional, Union
 
-import cloudpickle
 import httpx
 from httpx_sse import ServerSentEvent, connect_sse
 from pydantic import BaseModel
@@ -12,6 +11,7 @@ from rich import print  # TODO: Migrate to use click.echo
 from tensorlake.error import ApiException, GraphStillProcessing
 from tensorlake.functions_sdk.data_objects import TensorlakeData
 from tensorlake.functions_sdk.graph import ComputeGraphMetadata, Graph
+from tensorlake.functions_sdk.graph_serialization import zip_graph_code
 from tensorlake.functions_sdk.object_serializer import get_serializer
 from tensorlake.settings import DEFAULT_SERVICE_URL
 from tensorlake.utils.http_client import (
@@ -182,13 +182,16 @@ class TensorlakeClient:
         self._close()
 
     def register_compute_graph(
-        self, graph: Graph, additional_modules, upgrade_tasks_to_latest_version=False
+        self,
+        graph: Graph,
+        code_dir_path: str,
+        upgrade_tasks_to_latest_version: bool,
     ):
         graph_metadata: ComputeGraphMetadata = graph.definition()
-        serialized_code = cloudpickle.dumps(graph.serialize(additional_modules))
+        graph_code: bytes = zip_graph_code(graph=graph, code_dir_path=code_dir_path)
         response = self._post(
             f"namespaces/{self.namespace}/compute_graphs",
-            files={"code": serialized_code},
+            files={"code": graph_code},
             data={
                 "compute_graph": graph_metadata.model_dump_json(exclude_none=True),
                 "upgrade_tasks_to_latest_version": upgrade_tasks_to_latest_version,
@@ -266,7 +269,7 @@ class TensorlakeClient:
             "params": params,
         }
         self._add_api_key(kwargs)
-        invocation_id: str | None = ""
+        invocation_id: Optional[str] = ""
         try:
             with connect_sse(
                 self._client,
