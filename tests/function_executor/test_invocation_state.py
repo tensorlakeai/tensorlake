@@ -76,30 +76,26 @@ def invocation_state_client_stub(
     return invocation_state_client_thread
 
 
-class TestSetInvocationState(unittest.TestCase):
-    def _create_graph(self):
-        @tensorlake_function(inject_ctx=True)
-        def set_invocation_state(ctx: GraphInvocationContext, x: int) -> str:
-            ctx.invocation_state.set(
-                "test_state_key",
-                StructuredState(
-                    string="hello",
-                    integer=x,
-                    structured=StructuredField(
-                        list=[1, 2, 3], dictionary={"a": 1, "b": 2}
-                    ),
-                ),
-            )
-            return "success"
+@tensorlake_function(inject_ctx=True)
+def set_invocation_state(ctx: GraphInvocationContext, x: int) -> str:
+    ctx.invocation_state.set(
+        "test_state_key",
+        StructuredState(
+            string="hello",
+            integer=x,
+            structured=StructuredField(list=[1, 2, 3], dictionary={"a": 1, "b": 2}),
+        ),
+    )
+    return "success"
 
-        return Graph(
+
+class TestSetInvocationState(unittest.TestCase):
+    def _initialize_function_executor(self, stub: FunctionExecutorStub):
+        graph = Graph(
             name="TestSetInvocationState",
             description="test",
             start_node=set_invocation_state,
         )
-
-    def _initialize_function_executor(self, stub: FunctionExecutorStub):
-        graph = self._create_graph()
         initialize_response: InitializeResponse = stub.initialize(
             InitializeRequest(
                 namespace="test",
@@ -218,31 +214,40 @@ class TestSetInvocationState(unittest.TestCase):
                 client_thread.join()
 
 
+@tensorlake_function(inject_ctx=True)
+def check_invocation_state_is_expected(ctx: GraphInvocationContext, x: int) -> str:
+    got_state: StructuredState = ctx.invocation_state.get("test_state_key")
+    expected_state: StructuredState = StructuredState(
+        string="hello",
+        integer=x,
+        structured=StructuredField(list=[1, 2, 3], dictionary={"a": 1, "b": 2}),
+    )
+    return "success" if got_state == expected_state else "failure"
+
+
+@tensorlake_function(inject_ctx=True)
+def check_invocation_state_is_none(ctx: GraphInvocationContext, x: int) -> str:
+    got_state: StructuredState = ctx.invocation_state.get("test_state_key")
+    return "success" if got_state is None else "failure"
+
+
 class TestGetInvocationState(unittest.TestCase):
     def _create_graph_with_result_validation(self):
-        @tensorlake_function(inject_ctx=True)
-        def get_invocation_state(ctx: GraphInvocationContext, x: int) -> str:
-            got_state: StructuredState = ctx.invocation_state.get("test_state_key")
-            expected_state: StructuredState = StructuredState(
-                string="hello",
-                integer=x,
-                structured=StructuredField(list=[1, 2, 3], dictionary={"a": 1, "b": 2}),
-            )
-            return "success" if got_state == expected_state else "failure"
-
         return Graph(
             name="TestGetInvocationState",
             description="test",
-            start_node=get_invocation_state,
+            start_node=check_invocation_state_is_expected,
         )
 
-    def _initialize_function_executor(self, graph: Graph, stub: FunctionExecutorStub):
+    def _initialize_function_executor(
+        self, graph: Graph, function_name: str, stub: FunctionExecutorStub
+    ):
         initialize_response: InitializeResponse = stub.initialize(
             InitializeRequest(
                 namespace="test",
                 graph_name="test",
                 graph_version="1",
-                function_name="get_invocation_state",
+                function_name=function_name,
                 graph=SerializedObject(
                     bytes=CloudPickleSerializer.serialize(
                         graph.serialize(additional_modules=[])
@@ -260,7 +265,9 @@ class TestGetInvocationState(unittest.TestCase):
             with rpc_channel(fe) as channel:
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 self._initialize_function_executor(
-                    self._create_graph_with_result_validation(), stub
+                    self._create_graph_with_result_validation(),
+                    "check_invocation_state_is_expected",
+                    stub,
                 )
                 expected_requests = [
                     InvocationStateRequest(
@@ -296,7 +303,7 @@ class TestGetInvocationState(unittest.TestCase):
                     self, stub, expected_requests, responses
                 )
                 run_task_response: RunTaskResponse = run_task(
-                    stub, function_name="get_invocation_state", input=33
+                    stub, function_name="check_invocation_state_is_expected", input=33
                 )
                 self.assertTrue(run_task_response.success)
                 fn_outputs = deserialized_function_output(
@@ -311,15 +318,10 @@ class TestGetInvocationState(unittest.TestCase):
                 client_thread.join()
 
     def test_success_none_value(self):
-        @tensorlake_function(inject_ctx=True)
-        def get_invocation_state(ctx: GraphInvocationContext, x: int) -> str:
-            got_state: StructuredState = ctx.invocation_state.get("test_state_key")
-            return "success" if got_state is None else "failure"
-
         graph = Graph(
             name="TestGetInvocationState",
             description="test",
-            start_node=get_invocation_state,
+            start_node=check_invocation_state_is_none,
         )
 
         with FunctionExecutorProcessContextManager(
@@ -327,7 +329,9 @@ class TestGetInvocationState(unittest.TestCase):
         ) as fe:
             with rpc_channel(fe) as channel:
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
-                self._initialize_function_executor(graph, stub)
+                self._initialize_function_executor(
+                    graph, "check_invocation_state_is_none", stub
+                )
                 expected_requests = [
                     InvocationStateRequest(
                         request_id="0",
@@ -351,7 +355,7 @@ class TestGetInvocationState(unittest.TestCase):
                     self, stub, expected_requests, responses
                 )
                 run_task_response: RunTaskResponse = run_task(
-                    stub, function_name="get_invocation_state", input=33
+                    stub, function_name="check_invocation_state_is_none", input=33
                 )
                 self.assertTrue(run_task_response.success)
                 fn_outputs = deserialized_function_output(
@@ -372,7 +376,9 @@ class TestGetInvocationState(unittest.TestCase):
             with rpc_channel(fe) as channel:
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 self._initialize_function_executor(
-                    self._create_graph_with_result_validation(), stub
+                    self._create_graph_with_result_validation(),
+                    "check_invocation_state_is_expected",
+                    stub,
                 )
                 expected_requests = [
                     InvocationStateRequest(
@@ -394,7 +400,7 @@ class TestGetInvocationState(unittest.TestCase):
                     self, stub, expected_requests, responses
                 )
                 run_task_response: RunTaskResponse = run_task(
-                    stub, function_name="get_invocation_state", input=14
+                    stub, function_name="check_invocation_state_is_expected", input=14
                 )
                 self.assertFalse(run_task_response.success)
                 self.assertTrue(
