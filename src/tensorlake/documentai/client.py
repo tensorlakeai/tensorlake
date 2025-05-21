@@ -10,9 +10,8 @@ from pathlib import Path
 from typing import Optional, Union
 
 import httpx
-from pydantic import Json
+from pydantic import BaseModel, Json
 from retry import retry
-from pydantic import BaseModel
 
 from tensorlake.documentai.common import DOC_AI_BASE_URL, PaginatedResult
 from tensorlake.documentai.datasets import Dataset, DatasetOptions
@@ -185,7 +184,7 @@ class DocumentAI:
                 options.form_detection_mode.value
                 if options.form_detection_mode is not None
                 else "object_detection"
-            )
+            ),
         }
 
     def __create_parse_req__(self, file: str, options: ParsingOptions) -> dict:

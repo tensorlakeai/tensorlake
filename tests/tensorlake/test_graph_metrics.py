@@ -9,14 +9,15 @@ from tensorlake import (
 )
 
 
+@tensorlake_function(inject_ctx=True)
+def node_with_metrics(ctx: GraphInvocationContext, x: int) -> int:
+    ctx.invocation_state.timer("test_timer", 1.8)
+    ctx.invocation_state.counter("test_counter", 8)
+    return x + 1
+
+
 class TestGraphMetrics(unittest.TestCase):
     def test_metrics_settable(self):
-        @tensorlake_function(inject_ctx=True)
-        def node_with_metrics(ctx: GraphInvocationContext, x: int) -> int:
-            ctx.invocation_state.timer("test_timer", 1.8)
-            ctx.invocation_state.counter("test_counter", 8)
-            return x + 1
-
         # Only test local graph mode here because behavior of secrets in remote graph depends
         # on Executor flavor.
         graph = Graph(

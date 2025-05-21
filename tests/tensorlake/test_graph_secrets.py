@@ -11,12 +11,31 @@ from tensorlake import (
 from tensorlake.functions_sdk.functions import tensorlake_router
 
 
+@tensorlake_function(secrets=["SECRET_NAME"])
+def node_with_secret(x: int) -> int:
+    return x + 1
+
+
+@tensorlake_function()
+def add_two(x: int) -> int:
+    return x + 2
+
+
+@tensorlake_function()
+def add_three(x: int) -> int:
+    return x + 3
+
+
+@tensorlake_router(secrets=["SECRET_NAME_ROUTER"])
+def route_if_even(x: int) -> List[Union[add_two, add_three]]:
+    if x % 2 == 0:
+        return add_three
+    else:
+        return add_two
+
+
 class TestGraphSecrets(unittest.TestCase):
     def test_secrets_settable(self):
-        @tensorlake_function(secrets=["SECRET_NAME"])
-        def node_with_secret(x: int) -> int:
-            return x + 1
-
         # Only test local graph mode here because behavior of secrets in remote graph depends
         # on Executor flavor.
         graph = Graph(
@@ -28,21 +47,6 @@ class TestGraphSecrets(unittest.TestCase):
         self.assertEqual(output[0], 2)
 
     def test_graph_router_secrets_settable(self):
-        @tensorlake_function()
-        def add_two(x: int) -> int:
-            return x + 2
-
-        @tensorlake_function()
-        def add_three(x: int) -> int:
-            return x + 3
-
-        @tensorlake_router(secrets=["SECRET_NAME_ROUTER"])
-        def route_if_even(x: int) -> List[Union[add_two, add_three]]:
-            if x % 2 == 0:
-                return add_three
-            else:
-                return add_two
-
         # Only test local graph mode here because behavior of secrets in remote graph depends
         # on Executor flavor.
         graph = Graph(
