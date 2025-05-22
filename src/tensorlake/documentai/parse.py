@@ -70,6 +70,7 @@ class ExtractionOptions(BaseModel):
     schema: Union[Type[BaseModel], Json]
     prompt: Optional[str] = None
     provider: ModelProvider = ModelProvider.TENSORLAKE
+    skip_ocr: bool = False
 
 
 class FormDetectionMode(str, Enum):
@@ -103,7 +104,6 @@ class ParsingOptions(BaseModel):
     detect_signature: Optional[bool] = False
     table_summary: Optional[bool] = False
     figure_summary: Optional[bool] = False
-    structured_extraction_skip_ocr: Optional[bool] = False
     disable_layout_detection: Optional[bool] = False
     form_detection_mode: Optional[FormDetectionMode] = (
         FormDetectionMode.OBJECT_DETECTION
