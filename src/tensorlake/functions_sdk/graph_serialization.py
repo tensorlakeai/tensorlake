@@ -14,13 +14,18 @@ from .graph import Graph
 
 
 class FunctionManifest(BaseModel):
+    # Name of the function in the graph.
     name: str
-    # The string used to import the module where the function is defined.
+    # The name used to import the module where the function class is defined.
+    # The name is not relative but points at a module inside graph code directory.
     module_import_name: str
+    # The string used to import the function class from its module.
+    class_import_name: str
 
 
 class GraphManifest(BaseModel):
     version: str
+    # The name of the function int the graph -> FunctionManifest.
     functions: Dict[str, FunctionManifest]
 
 
@@ -144,30 +149,50 @@ def _create_graph_manifest(
 ) -> GraphManifest:
     function_manifests: Dict[str, FunctionManifest] = {}
     for node in graph.nodes.values():
-        node: Union[TensorlakeCompute, TensorlakeRouter]
-        node_file_path = inspect.getsourcefile(node.run)
-        if node_file_path is None:
-            raise ValueError(
-                f"Function {node.name} is not defined in any file. "
-                "Please copy the function file into the graph code directory."
-            )
-        node_file_path = os.path.abspath(node_file_path)
-        if not node_file_path.startswith(code_dir_path):
-            raise ValueError(
-                f"Function {node.name} is defined in {node_file_path} "
-                f"which is not inside the graph code directory {code_dir_path}. "
-                "Please copy the function file into the graph code directory."
-            )
-        node_file_path_in_code_dir: str = os.path.relpath(
-            node_file_path, start=code_dir_path
-        )
-        # Converts relative path "foo/bar/buzz.py" to "foo.bar.buzz"
-        # which is importable if code_dir_path is added to sys.path. Function Executor adds it.
-        node_module_import_name: str = os.path.splitext(node_file_path_in_code_dir)[
-            0
-        ].replace(os.sep, ".")
-        function_manifests[node.name] = FunctionManifest(
-            name=node.name, module_import_name=node_module_import_name
-        )
+        function_manifests[node.name] = _create_function_manifest(node, code_dir_path)
+        print(node.name, function_manifests[node.name])
 
     return GraphManifest(version="0.1.0", functions=function_manifests)
+
+
+def _create_function_manifest(
+    node: Union[TensorlakeCompute, TensorlakeRouter],
+    code_dir_path: str,
+) -> FunctionManifest:
+    if node._created_by_decorator:
+        import_file_path: str = inspect.getsourcefile(node.run)
+    else:
+        import_file_path: str = inspect.getsourcefile(node)
+    if import_file_path is None:
+        raise ValueError(
+            f"Function {node.name} is not defined in any file. "
+            "Please copy the function file into the graph code directory."
+        )
+    import_file_path = os.path.abspath(import_file_path)
+    if not import_file_path.startswith(code_dir_path):
+        raise ValueError(
+            f"Function {node.name} is defined in {import_file_path} "
+            f"which is not inside the graph code directory {code_dir_path}. "
+            "Please copy or symlink the function file into the graph code directory."
+        )
+    import_file_path_in_code_dir: str = os.path.relpath(
+        import_file_path, start=code_dir_path
+    )
+    # Converts relative path "foo/bar/buzz.py" to "foo.bar.buzz"
+    # which is importable if code_dir_path is added to sys.path. Function Executor adds it.
+    module_import_name: str = os.path.splitext(import_file_path_in_code_dir)[0].replace(
+        os.sep, "."
+    )
+
+    if node._created_by_decorator:
+        # The class will be created by the function decorator when we import the module.
+        class_import_name: str = node.run.__name__
+    else:
+        # The class is already defined in the module as is.
+        class_import_name: str = node.__name__
+
+    return FunctionManifest(
+        name=node.name,
+        module_import_name=module_import_name,
+        class_import_name=class_import_name,
+    )
