@@ -3,7 +3,11 @@ from typing import List
 
 # Import from local package using absolute import path.
 from hello_world.hello_world import hello_world
-from hello_world.subpackage.subpackage import subpackage_hello_world
+from hello_world.subpackage.subpackage import (
+    TensorlakeComputeSubpackageHelloWorld,
+    subpackage_hello_world,
+    tensorlale_function_subpackage_hello_world,
+)
 
 # Import local module using absolute import path, works because the the code dir zip is added to PYTHONPATH.
 from repeat import repeat_hello_world
@@ -136,6 +140,40 @@ class TestGraphCodeSerialization(unittest.TestCase):
         output = graph.output(invocation_id, "import_from_subdir_fails")
         self.assertEqual(len(output), 1)
         self.assertTrue(output[0])
+
+    def test_imported_tensorlake_function(self):
+        # Check that the function imported from the module works.
+        graph = Graph(
+            name=test_graph_name(self),
+            description="test",
+            start_node=tensorlale_function_subpackage_hello_world,
+        )
+        graph = RemoteGraph.deploy(
+            graph=graph, code_dir_path=graph_code_dir_path(__file__)
+        )
+
+        invocation_id = graph.run(block_until_done=True)
+        output = graph.output(
+            invocation_id, tensorlale_function_subpackage_hello_world.name
+        )
+        self.assertEqual(len(output), 1)
+        self.assertEqual(output[0], subpackage_hello_world())
+
+    def test_imported_tensorlake_compute(self):
+        # Check that the function imported from the module works.
+        graph = Graph(
+            name=test_graph_name(self),
+            description="test",
+            start_node=TensorlakeComputeSubpackageHelloWorld,
+        )
+        graph = RemoteGraph.deploy(
+            graph=graph, code_dir_path=graph_code_dir_path(__file__)
+        )
+
+        invocation_id = graph.run(block_until_done=True)
+        output = graph.output(invocation_id, TensorlakeComputeSubpackageHelloWorld.name)
+        self.assertEqual(len(output), 1)
+        self.assertEqual(output[0], subpackage_hello_world())
 
 
 # TODO: Add test case that validates that multiprocessing works.

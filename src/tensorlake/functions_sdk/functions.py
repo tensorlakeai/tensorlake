@@ -98,6 +98,10 @@ class TensorlakeCompute:
     def run(self, *args, **kwargs) -> Union[List[Any], Any]:
         pass
 
+    _created_by_decorator: bool = (
+        False  # True if class was created using @tensorlake_function
+    )
+
     def _call_run(self, *args, **kwargs) -> Union[List[Any], Any]:
         # Process dictionary argument mapping it to args or to kwargs.
         if self.accumulate and len(args) == 2 and isinstance(args[1], dict):
@@ -138,6 +142,10 @@ class TensorlakeRouter:
 
     def run(self, *args, **kwargs) -> Optional[List[TensorlakeCompute]]:
         pass
+
+    _created_by_decorator: bool = (
+        False  # True if class was created using @tensorlake_function
+    )
 
     # Create run method that preserves signature
     def _call_run(self, *args, **kwargs):
@@ -189,6 +197,7 @@ def tensorlake_router(
 ):
     def construct(fn):
         attrs = {
+            "_created_by_decorator": True,
             "name": name if name else fn.__name__,
             "description": (
                 description
@@ -232,6 +241,7 @@ def tensorlake_function(
 ):
     def construct(fn):
         attrs = {
+            "_created_by_decorator": True,
             "name": name if name else fn.__name__,
             "description": (
                 description

@@ -99,10 +99,12 @@ class Service(FunctionExecutorServicer):
             function_module = importlib.import_module(
                 function_manifest.module_import_name
             )
-            function = getattr(function_module, request.function_name)
+            function_class = getattr(
+                function_module, function_manifest.class_import_name
+            )
 
             # TODO: capture stdout and stderr and report exceptions the same way as when we run a task.
-            self._function_wrapper = TensorlakeFunctionWrapper(function)
+            self._function_wrapper = TensorlakeFunctionWrapper(function_class)
         except Exception as e:
             self._logger.error(
                 "function executor service initialization failed",
