@@ -1,5 +1,4 @@
 import logging
-import re
 import sys
 import unittest
 
@@ -23,7 +22,13 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
 from tensorlake.functions_sdk.functions import tensorlake_function
-from tensorlake.functions_sdk.object_serializer import CloudPickleSerializer
+from tensorlake.functions_sdk.graph_serialization import (
+    ZIPPED_GRAPH_CODE_CONTENT_TYPE,
+    graph_code_dir_path,
+    zip_graph_code,
+)
+
+GRAPH_CODE_DIR_PATH = graph_code_dir_path(__file__)
 
 # Previously function outputs were missing time to time due to race conditions.
 # Run many iterations of the tests to ensure that the race conditions are really fixed.
@@ -127,10 +132,11 @@ class TestRunTask(unittest.TestCase):
                         graph_version="1",
                         function_name=function_name,
                         graph=SerializedObject(
-                            bytes=CloudPickleSerializer.serialize(
-                                graph.serialize(additional_modules=[])
+                            bytes=zip_graph_code(
+                                graph=graph,
+                                code_dir_path=GRAPH_CODE_DIR_PATH,
                             ),
-                            content_type=CloudPickleSerializer.content_type,
+                            content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
                         ),
                     )
                 )
@@ -169,10 +175,11 @@ class TestRunTask(unittest.TestCase):
                         graph_version="1",
                         function_name="print_function",
                         graph=SerializedObject(
-                            bytes=CloudPickleSerializer.serialize(
-                                graph.serialize(additional_modules=[])
+                            bytes=zip_graph_code(
+                                graph=graph,
+                                code_dir_path=GRAPH_CODE_DIR_PATH,
                             ),
-                            content_type=CloudPickleSerializer.content_type,
+                            content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
                         ),
                     )
                 )

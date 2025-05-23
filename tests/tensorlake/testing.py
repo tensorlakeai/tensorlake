@@ -1,17 +1,17 @@
 import time
 import unittest
-from typing import Any, List, Union
+from typing import Any, Union
 
 from tensorlake.error import GraphStillProcessing
 from tensorlake.functions_sdk.graph import Graph
+from tensorlake.functions_sdk.graph_serialization import graph_code_dir_path
 from tensorlake.remote_graph import RemoteGraph
 
 
-def remote_or_local_graph(
-    graph, remote=True, additional_modules: List[Any] = []
-) -> Union[RemoteGraph, Graph]:
+def remote_or_local_graph(graph, remote=True) -> Union[RemoteGraph, Graph]:
     if remote:
-        return RemoteGraph.deploy(graph, additional_modules=additional_modules)
+        # This testing utils file is in the same directory as the tests calling it.
+        return RemoteGraph.deploy(graph, code_dir_path=graph_code_dir_path(__file__))
     return graph
 
 

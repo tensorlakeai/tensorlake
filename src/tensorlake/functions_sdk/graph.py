@@ -17,7 +17,6 @@ from typing import (
     get_origin,
 )
 
-import cloudpickle
 import nanoid
 from nanoid import generate
 from pydantic import BaseModel
@@ -36,7 +35,6 @@ from .graph_definition import (
     ComputeGraphMetadata,
     FunctionMetadata,
     NodeMetadata,
-    ResourceMetadata,
     RetryPolicyMetadata,
     RouterMetadata,
     RuntimeInformation,
@@ -79,6 +77,7 @@ _none_image_information = ImageInformation(
 )
 
 
+# TODO: Remove additional_modules constructor argument once it's not used anymore by Document AI workflows and all examples.
 class Graph:
     def __init__(
         self,
@@ -106,7 +105,6 @@ class Graph:
         self.accumulator_zero_values: Dict[str, Any] = {}
         self.tags = tags
         self.version = version
-        self.additional_modules = additional_modules
         self.retries = retries
 
         self._fn_cache: Dict[str, TensorlakeFunctionWrapper] = {}
@@ -162,18 +160,6 @@ class Graph:
             self.add_node(node)
             self.routers[from_node.name].append(node.name)
         return self
-
-    def serialize(self, additional_modules):
-        # Get all unique modules from nodes and edges
-        pickled_functions = {}
-        for module in additional_modules:
-            cloudpickle.register_pickle_by_value(module)
-        for node in self.nodes.values():
-            cloudpickle.register_pickle_by_value(sys.modules[node.__module__])
-            pickled_functions[node.name] = cloudpickle.dumps(node)
-            if not sys.modules[node.__module__] in additional_modules:
-                cloudpickle.unregister_pickle_by_value(sys.modules[node.__module__])
-        return pickled_functions
 
     def add_edge(
         self,
@@ -345,6 +331,8 @@ class Graph:
         """
         A method to validate that each node in the graph is
         reachable from start node using BFS.
+
+        Raises ValueError if the graph is not valid.
         """
         total_number_of_nodes = len(self.nodes)
         queue = deque([self._start_node])
@@ -371,7 +359,9 @@ class Graph:
 
         if total_number_of_nodes != len(visited):
             # all the nodes are not reachable from the start_node.
-            raise Exception("Some nodes in the graph are not reachable from start node")
+            raise ValueError(
+                "Some nodes in the graph are not reachable from start node"
+            )
 
     def _run(
         self,

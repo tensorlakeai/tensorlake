@@ -5,6 +5,7 @@ from typing import Optional
 from testing import test_graph_name
 
 from tensorlake import Graph, RemoteGraph, TensorlakeCompute, tensorlake_function
+from tensorlake.functions_sdk.graph_serialization import graph_code_dir_path
 
 # The tests in this file verify publicly stated performance critical behaviors of Tensorlake RemoteGraphs.
 
@@ -40,7 +41,9 @@ class TestFileDescriptorCaching(unittest.TestCase):
             description="test",
             start_node=fd_caching_function,
         )
-        graph = RemoteGraph.deploy(graph)
+        graph = RemoteGraph.deploy(
+            graph=graph, code_dir_path=graph_code_dir_path(__file__)
+        )
 
         create_fd_invocation_id = graph.run(block_until_done=True, action="create_fd")
         output = graph.output(create_fd_invocation_id, "fd_caching_function")
@@ -105,7 +108,9 @@ class TestTensorlakeComputeObjectCaching(unittest.TestCase):
             description="test",
             start_node=TensorlakeComputeTestObject,
         )
-        graph = RemoteGraph.deploy(graph)
+        graph = RemoteGraph.deploy(
+            graph=graph, code_dir_path=graph_code_dir_path(__file__)
+        )
 
         # Run many times to ensure that the behavior is repeatable over many invocations.
         for i in range(5):

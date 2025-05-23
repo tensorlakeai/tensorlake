@@ -1,20 +1,23 @@
 import asyncio
-import importlib
-import inspect
 import os
-import pathlib
-import sys
 import tempfile
-from typing import Dict, List, Set
+from typing import Dict, List
 
 import click
 
-from tensorlake import Graph, Image, RemoteGraph
+from tensorlake import Graph, Image
 from tensorlake.builder.client import ImageBuilderClient
-from tensorlake.builder.client_v2 import BuildContext, ImageBuilderV2Client
+from tensorlake.builder.client_v2 import ImageBuilderV2Client
 from tensorlake.cli._common import AuthContext, with_auth
 from tensorlake.cli.secrets import warning_missing_secrets
+from tensorlake.functions_sdk.graph_serialization import graph_code_dir_path
 from tensorlake.functions_sdk.image import Build
+from tensorlake.functions_sdk.workflow_module import (
+    ImageInfo,
+    WorkflowModuleInfo,
+    load_workflow_module_info,
+)
+from tensorlake.remote_graph import RemoteGraph
 
 
 @click.command()
@@ -38,62 +41,54 @@ def deploy(
     builder = ImageBuilderClient.from_env()
     builder_v2 = ImageBuilderV2Client.from_env() if builder_v2 else None
 
-    seen_images: Dict[Image, str] = {}
-    deployed_graphs: List[Graph] = []
-    secret_names: Set[str] = set()
-    context_collection: Dict[Image, BuildContext] = {}
-
-    workflow = _import_workflow_file(workflow_file.name)
-    for name in dir(workflow):
-        obj = getattr(workflow, name)
-        if isinstance(obj, Graph):
-            deployed_graphs.append(obj)
-            for node_name, node_obj in obj.nodes.items():
-                [secret_names.add(secret) for secret in node_obj.secrets or []]
-                image = node_obj.image
-
-                if image is None:
-                    raise click.ClickException(
-                        f"graph function {node_name} needs to use an image"
-                    )
-
-                if image in seen_images:
-                    continue
-
-                if builder_v2:
-                    context_collection[image] = BuildContext(
-                        graph_name=obj.name,
-                        graph_version=obj.version,
-                        function_name=node_name,
-                    )
-
-                seen_images[image] = image.hash()
-
-    if len(deployed_graphs) == 0:
-        raise click.UsageError(
-            "No graphs found in the workflow file, make sure at least one graph is defined as a global variable."
+    try:
+        workflow_module_info: WorkflowModuleInfo = load_workflow_module_info(
+            workflow_file.name
         )
-
-    warning_missing_secrets(auth, list(secret_names))
-    if builder_v2:
-        asyncio.run(builder_v2.build_collection(context_collection))
+    except Exception as e:
         click.secho(
-            f"Built {len(context_collection)} images with builder v2", fg="green"
+            f"Failed loading workflow file, please check the error message: {e}",
+            fg="red",
         )
+        raise click.Abort
+
+    _validate_workflow_module(workflow_module_info, auth)
+
+    if builder_v2:
+        asyncio.run(_prepare_images_v2(builder_v2, workflow_module_info.images))
     else:
         asyncio.run(
             _prepare_images(
-                builder, seen_images, parallel_builds=parallel_builds, retry=retry
+                builder,
+                list(workflow_module_info.images.keys()),
+                parallel_builds=parallel_builds,
+                retry=retry,
             )
         )
 
     click.secho("Everything looks good, deploying now", fg="green")
-    for graph in deployed_graphs:
-        RemoteGraph.deploy(
-            graph,
-            upgrade_tasks_to_latest_version=upgrade_queued_requests,
+    _deploy_graphs(
+        graphs=workflow_module_info.graphs,
+        code_dir_path=graph_code_dir_path(workflow_file.name),
+        upgrade_queued_requests=upgrade_queued_requests,
+    )
+
+
+def _validate_workflow_module(
+    workflow_module_info: WorkflowModuleInfo, auth: AuthContext
+):
+    # Validate the workflow module contents for compatibility with Tensorlake Cloud requirements.
+    for graph in workflow_module_info.graphs:
+        for node in graph.nodes.values():
+            if node.image is None:
+                raise click.ClickException(
+                    f"graph {graph.name} function {node.name} needs to use an image"
+                )
+    if len(workflow_module_info.graphs) == 0:
+        raise click.UsageError(
+            "No graphs found in the workflow file, make sure at least one graph is defined as a global variable."
         )
-        click.secho(f"Deployed {graph.name}", fg="green")
+    warning_missing_secrets(auth, list(workflow_module_info.secret_names))
 
 
 def _stream_build_log(builder: ImageBuilderClient, build: Build):
@@ -171,9 +166,20 @@ def _show_failed_summary(builder: ImageBuilderClient, build: Build):
         log_response.raise_for_status()
 
 
+async def _prepare_images_v2(
+    builder_v2: ImageBuilderV2Client, images: Dict[Image, ImageInfo]
+):
+    for image_info in images.values():
+        for build_context in image_info.build_contexts:
+
+            await builder_v2.build(build_context, image_info.image)
+
+    click.secho(f"Built {len(images)} images with builder v2", fg="green")
+
+
 async def _prepare_images(
     builder: ImageBuilderClient,
-    images: Dict[Image, str],
+    images: List[Image],
     parallel_builds=False,
     retry=False,
 ):
@@ -181,7 +187,8 @@ async def _prepare_images(
     ready_builds: Dict[Image, Build] = {}
 
     # Iterate through the images and build anything that hasn't been built
-    for image, image_hash in images.items():
+    for image in images:
+        image_hash = image.hash()
         builds = builder.find_build(image._image_name, image_hash)
 
         if builds:
@@ -255,25 +262,21 @@ async def _prepare_images(
         raise click.Abort
 
 
-def _import_workflow_file(workflow):
-    if "" not in sys.path:
-        sys.path.insert(0, "")
+def _deploy_graphs(
+    graphs: List[Graph], code_dir_path: str, upgrade_queued_requests: bool
+):
+    for graph in graphs:
+        try:
+            RemoteGraph.deploy(
+                graph,
+                code_dir_path=code_dir_path,
+                upgrade_tasks_to_latest_version=upgrade_queued_requests,
+            )
+        except Exception as e:
+            click.secho(
+                f"Graph {graph.name} could not be deployed, please check the error message: {e}",
+                fg="red",
+            )
+            raise click.Abort
 
-    if workflow.endswith(".py"):
-        workflow_path = pathlib.Path(workflow).resolve()
-        sys.path.insert(0, str(workflow_path.parent))
-
-        module_name = inspect.getmodulename(workflow)
-        assert module_name is not None
-
-        spec = importlib.util.spec_from_file_location(module_name, workflow_path)
-        assert spec is not None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-
-        assert spec.loader
-        spec.loader.exec_module(module)
-
-        return module
-    else:
-        raise click.ClickException("Workflow must be python files")
+        click.secho(f"Deployed {graph.name}", fg="green")

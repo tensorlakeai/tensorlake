@@ -3,7 +3,6 @@ from pathlib import Path
 from typing import List, Union
 
 import parameterized
-import testing
 from pydantic import BaseModel
 from testing import remote_or_local_graph, test_graph_name
 from typing_extensions import TypedDict
@@ -492,7 +491,6 @@ class TestGraphBehaviors(unittest.TestCase):
         graph = Graph(
             name=test_graph_name(self), description="test", start_node=simple_function
         )
-        # Deploys the graph
         remote_or_local_graph(graph, is_remote)
         # Gets the graph by name
         graph = RemoteGraph.by_name(test_graph_name(self))
@@ -546,7 +544,6 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=return_multiple_values,
-            additional_modules=[testing, parameterized],
         )
         graph.add_edge(return_multiple_values, sum_multiple_values)
         graph = remote_or_local_graph(graph, is_remote)
@@ -561,7 +558,6 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=return_multiple_values,
-            additional_modules=[testing, parameterized],
         )
         graph.add_edge(return_multiple_values, route_multiple_values)
         graph.route(
@@ -582,9 +578,7 @@ class TestGraphBehaviors(unittest.TestCase):
             start_node=return_dict,
         )
         graph.add_edge(return_dict, sum_dict)
-        graph = remote_or_local_graph(
-            graph, is_remote, additional_modules=[testing, parameterized]
-        )
+        graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, sum_dict.name)
         self.assertEqual(len(output), 1)
@@ -596,7 +590,6 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=return_multiple_dicts,
-            additional_modules=[testing, parameterized],
         )
         graph.add_edge(return_multiple_dicts, sum_multiple_dicts)
         graph = remote_or_local_graph(
@@ -614,7 +607,6 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=return_dict_using_constructor_kw_args,
-            additional_modules=[testing, parameterized],
         )
         graph.add_edge(return_dict_using_constructor_kw_args, sum_multiple_values)
         graph = remote_or_local_graph(graph, is_remote)
@@ -629,7 +621,6 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=return_multiple_values_json,
-            additional_modules=[testing, parameterized],
         )
         graph.add_edge(return_multiple_values_json, sum_multiple_values_json)
         graph = remote_or_local_graph(
@@ -647,7 +638,6 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=return_dict_json,
-            additional_modules=[testing, parameterized],
         )
         graph.add_edge(return_dict_json, sum_dict_json)
         graph = remote_or_local_graph(graph, is_remote)
@@ -666,7 +656,6 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=return_list_of_dicts_with_index_of_each_character,
-            additional_modules=[testing, parameterized],
         )
 
         graph.add_edge(
@@ -685,7 +674,6 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=return_list_of_dicts_with_index_of_each_character_wrapped_into_data_dict,
-            additional_modules=[testing, parameterized],
         )
 
         graph.add_edge(
@@ -710,7 +698,6 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=return_multiple_dicts_json,
-            additional_modules=[testing, parameterized],
         )
         graph.add_edge(return_multiple_dicts_json, sum_multiple_dicts_json)
         graph = remote_or_local_graph(graph, is_remote)
@@ -725,7 +712,6 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=return_dict_using_constructor_kw_args_json,
-            additional_modules=[testing, parameterized],
         )
         graph.add_edge(
             return_dict_using_constructor_kw_args_json, sum_multiple_values_json
@@ -853,7 +839,6 @@ class TestGraphBehaviors(unittest.TestCase):
             test_graph_name(self),
             description="test",
             start_node=generate_seq,
-            additional_modules=[testing, parameterized],
         )
         graph.add_edge(generate_seq, return_none_if_arg_odd)
         graph.add_edge(return_none_if_arg_odd, add_two_int_arg)
@@ -880,7 +865,7 @@ class TestGraphBehaviors(unittest.TestCase):
             start_node=simple_function_ctx,
         )
         graph1.add_edge(simple_function_ctx, SimpleFunctionCtxC)
-        graph1 = RemoteGraph.deploy(graph1)
+        graph1 = remote_or_local_graph(graph1, is_remote)
         invocation_id = graph1.run(block_until_done=True, x=SimpleModelObjectStr(x="a"))
         output2 = graph1.output(invocation_id, "SimpleFunctionCtxC")
         self.assertEqual(len(output2), 1)
@@ -906,7 +891,6 @@ class TestGraphBehaviors(unittest.TestCase):
             name=test_graph_name(self),
             description="test",
             start_node=return_pydantic_base_model_json,
-            additional_modules=[testing, parameterized],
         )
         graph.add_edge(
             return_pydantic_base_model_json, return_field_from_pydantic_base_model_json

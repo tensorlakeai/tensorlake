@@ -1,6 +1,6 @@
 from typing import Any, List, Optional
 
-from tensorlake.functions_sdk.graph import ComputeGraphMetadata, Graph
+from tensorlake.functions_sdk.graph import Graph
 from tensorlake.functions_sdk.graph_definition import ComputeGraphMetadata
 
 from .http_client import TensorlakeClient
@@ -74,8 +74,8 @@ class RemoteGraph:
     @classmethod
     def deploy(
         cls,
-        g: Graph,
-        additional_modules=[],
+        graph: Graph,
+        code_dir_path: str,
         server_url: Optional[str] = DEFAULT_SERVICE_URL,
         client: Optional[TensorlakeClient] = None,
         upgrade_tasks_to_latest_version: bool = False,
@@ -83,10 +83,8 @@ class RemoteGraph:
         """
         Create a new RemoteGraph from a local Graph object.
 
-        :param g: The local Graph object.
-        :param additional_modules: List of additional modules to be registered with the graph.
-            Needed for modules that are imported outside of an indexify function. Modules passed
-            here will be added to the additional_modules parameters provided to the Graph.
+        :param graph: The local Graph object.
+        :param code_dir_path: The path to the directory containing the file where the graph is defined.
         :param server_url: The URL of the server where the graph will be registered.
             Not used if client is provided.
         :param client: The IndexifyClient used to communicate with the server.
@@ -95,18 +93,16 @@ class RemoteGraph:
             will be upgraded to run on the latest version of the graph. This requires the graph
             code to be backward compatible between the versions.
         """
-        g.validate_graph()
+        graph.validate_graph()
         if not client:
             client = TensorlakeClient(service_url=server_url)
 
-        for mod in g.additional_modules:
-            if mod not in additional_modules:
-                additional_modules.append(mod)
-
         client.register_compute_graph(
-            g, additional_modules, upgrade_tasks_to_latest_version
+            graph=graph,
+            code_dir_path=code_dir_path,
+            upgrade_tasks_to_latest_version=upgrade_tasks_to_latest_version,
         )
-        return cls(name=g.name, server_url=server_url, client=client)
+        return cls(name=graph.name, server_url=server_url, client=client)
 
     @classmethod
     def by_name(

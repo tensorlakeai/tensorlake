@@ -117,3 +117,6 @@ def copy_and_modify_request(
     for key, value in modifications.items():
         setattr(request, key, value)
     return request
+
+
+FOO = "FOO"

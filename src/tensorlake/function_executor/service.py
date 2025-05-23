@@ -1,10 +1,15 @@
+import importlib
+import json
+import sys
+import tempfile
 import time
-from typing import Any, Generator, Iterator, Optional
+import zipfile
+from typing import Any, Dict, Generator, Iterator, Optional
 
 import grpc
 
 from tensorlake.functions_sdk.functions import TensorlakeFunctionWrapper
-from tensorlake.functions_sdk.object_serializer import get_serializer
+from tensorlake.functions_sdk.graph_serialization import FunctionManifest, GraphManifest
 
 from .handlers.check_health.handler import Handler as CheckHealthHandler
 from .handlers.run_function.handler import Handler as RunTaskHandler
@@ -68,13 +73,35 @@ class Service(FunctionExecutorServicer):
             function_name=request.function_name,
         )
 
-        graph_serializer = get_serializer(request.graph.content_type)
+        graph_modules_zip_fd, graph_modules_zip_path = tempfile.mkstemp(suffix=".zip")
+        with open(graph_modules_zip_fd, "wb") as graph_modules_zip_file:
+            graph_modules_zip_file.write(request.graph.bytes)
+        sys.path.insert(
+            0, graph_modules_zip_path
+        )  # Add as the first entry so user modules have highest priority
+
         try:
             # Process user controlled input in a try-except block to not treat errors here as our
             # internal platform errors.
+            with zipfile.ZipFile(graph_modules_zip_path, "r") as zf:
+                with zf.open("graph_manifest.json") as graph_manifest_file:
+                    graph_manifest: GraphManifest = GraphManifest.model_validate(
+                        json.load(graph_manifest_file)
+                    )
+            if request.function_name not in graph_manifest.functions:
+                raise ValueError(
+                    f"Function {request.function_name} is not defined in the graph manifest {graph_manifest}"
+                )
+
+            function_manifest: FunctionManifest = graph_manifest.functions[
+                request.function_name
+            ]
+            function_module = importlib.import_module(
+                function_manifest.module_import_name
+            )
+            function = getattr(function_module, request.function_name)
+
             # TODO: capture stdout and stderr and report exceptions the same way as when we run a task.
-            graph = graph_serializer.deserialize(request.graph.bytes)
-            function = graph_serializer.deserialize(graph[request.function_name])
             self._function_wrapper = TensorlakeFunctionWrapper(function)
         except Exception as e:
             self._logger.error(

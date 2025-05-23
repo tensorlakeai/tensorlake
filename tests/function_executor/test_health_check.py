@@ -25,7 +25,13 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
 from tensorlake.functions_sdk.functions import tensorlake_function
-from tensorlake.functions_sdk.object_serializer import CloudPickleSerializer
+from tensorlake.functions_sdk.graph_serialization import (
+    ZIPPED_GRAPH_CODE_CONTENT_TYPE,
+    graph_code_dir_path,
+    zip_graph_code,
+)
+
+GRAPH_CODE_DIR_PATH = graph_code_dir_path(__file__)
 
 # Lower - faster tests but more CPU usage.
 HEALTH_CHECK_POLL_PERIOD_SEC = 0.1
@@ -60,14 +66,13 @@ def initialize(test_case: unittest.TestCase, stub: FunctionExecutorStub):
             graph_version="1",
             function_name="action_function",
             graph=SerializedObject(
-                bytes=CloudPickleSerializer.serialize(
-                    Graph(
+                bytes=zip_graph_code(
+                    graph=Graph(
                         name="test", description="test", start_node=action_function
-                    ).serialize(
-                        additional_modules=[],
-                    )
+                    ),
+                    code_dir_path=GRAPH_CODE_DIR_PATH,
                 ),
-                content_type=CloudPickleSerializer.content_type,
+                content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
             ),
         )
     )

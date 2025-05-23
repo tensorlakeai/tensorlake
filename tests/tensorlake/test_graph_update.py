@@ -5,6 +5,7 @@ from testing import test_graph_name, wait_function_output
 
 from tensorlake import Graph, RemoteGraph, tensorlake_function
 from tensorlake.error import ApiException
+from tensorlake.functions_sdk.graph_serialization import graph_code_dir_path
 
 
 @tensorlake_function()
@@ -31,7 +32,7 @@ class TestGraphUpdate(unittest.TestCase):
         )
         g.add_edge(start_func_v1, end_func_v1)
 
-        g = RemoteGraph.deploy(g)
+        g = RemoteGraph.deploy(graph=g, code_dir_path=graph_code_dir_path(__file__))
 
         invocation_id = g.run(block_until_done=False, sleep_sec=10)
 
@@ -41,7 +42,11 @@ class TestGraphUpdate(unittest.TestCase):
             version="2.0",
         )
         g.add_edge(start_func_v1, end_func_v2)
-        g = RemoteGraph.deploy(g, upgrade_tasks_to_latest_version=True)
+        g = RemoteGraph.deploy(
+            graph=g,
+            code_dir_path=graph_code_dir_path(__file__),
+            upgrade_tasks_to_latest_version=True,
+        )
 
         output = wait_function_output(g, invocation_id, "end_func_v2")
         self.assertEqual(len(output), 1, output)
@@ -53,7 +58,7 @@ class TestGraphUpdate(unittest.TestCase):
             start_node=start_func_v1,
         )
         g.add_edge(start_func_v1, end_func_v1)
-        g = RemoteGraph.deploy(g)
+        g = RemoteGraph.deploy(graph=g, code_dir_path=graph_code_dir_path(__file__))
 
         invocation_id = g.run(block_until_done=False, sleep_sec=10)
 
@@ -64,7 +69,11 @@ class TestGraphUpdate(unittest.TestCase):
         )
         g.add_edge(start_func_v1, end_func_v1)
         g.add_edge(end_func_v1, end_func_v2)
-        g = RemoteGraph.deploy(g, upgrade_tasks_to_latest_version=False)
+        g = RemoteGraph.deploy(
+            graph=g,
+            upgrade_tasks_to_latest_version=False,
+            code_dir_path=graph_code_dir_path(__file__),
+        )
 
         output = wait_function_output(g, invocation_id, "end_func_v2")
         self.assertEqual(len(output), 0, output)
@@ -75,10 +84,10 @@ class TestGraphUpdate(unittest.TestCase):
             description="test description",
             start_node=start_func_v1,
         )
-        RemoteGraph.deploy(g)
+        RemoteGraph.deploy(graph=g, code_dir_path=graph_code_dir_path(__file__))
         g.description = "updated description without version update"
         try:
-            RemoteGraph.deploy(g)
+            RemoteGraph.deploy(graph=g, code_dir_path=graph_code_dir_path(__file__))
             self.fail("Expected an exception to be raised")
         except ApiException as e:
             self.assertEqual(e.status_code, 400)

@@ -2,6 +2,7 @@ import importlib.metadata
 import os
 import sys
 from dataclasses import dataclass
+from typing import Optional
 
 import click
 import httpx
@@ -16,10 +17,10 @@ except importlib.metadata.PackageNotFoundError:
 class AuthContext:
     """Class for CLI authentication context"""
 
-    api_key: str | None = None
+    api_key: Optional[str] = None
     version: str = VERSION
-    _client: httpx.Client | None = None
-    _introspect_response: httpx.Response | None = None
+    _client: Optional[httpx.Client] = None
+    _introspect_response: Optional[httpx.Response] = None
 
     def __post_init__(self):
         self.api_key = os.getenv("TENSORLAKE_API_KEY")

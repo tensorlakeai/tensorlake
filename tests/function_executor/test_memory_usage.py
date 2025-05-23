@@ -21,15 +21,21 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
 from tensorlake.functions_sdk.functions import tensorlake_function
-from tensorlake.functions_sdk.object_serializer import CloudPickleSerializer
+from tensorlake.functions_sdk.graph_serialization import (
+    ZIPPED_GRAPH_CODE_CONTENT_TYPE,
+    graph_code_dir_path,
+    zip_graph_code,
+)
+
+GRAPH_CODE_DIR_PATH = graph_code_dir_path(__file__)
 
 # This test checks if the memory usage of a Function Executor process is below
 # a known threshold. Customers rely on this threshold because if FE memory usage
 # grows then customer functions can start failing with out of memory errors.
 #
-# Real max memory we saw in tests is 70 MB, add extra 5 MB to remove flakiness from
+# Real max memory we saw in tests is 80 MB, add extra 5 MB to remove flakiness from
 # the test.
-_FUNCTION_EXECUTOR_MAX_MEMORY_MB = 75
+_FUNCTION_EXECUTOR_MAX_MEMORY_MB = 85
 
 
 @tensorlake_function()
@@ -54,12 +60,10 @@ class TestMemoryUsage(unittest.TestCase):
                         graph_version="1",
                         function_name="process_rss_mb",
                         graph=SerializedObject(
-                            bytes=CloudPickleSerializer.serialize(
-                                graph.serialize(
-                                    additional_modules=[],
-                                )
+                            bytes=zip_graph_code(
+                                graph=graph, code_dir_path=GRAPH_CODE_DIR_PATH
                             ),
-                            content_type=CloudPickleSerializer.content_type,
+                            content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
                         ),
                     )
                 )

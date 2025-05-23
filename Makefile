@@ -2,7 +2,7 @@ all: build
 
 build: build_proto
 	@rm -rf dist
-	@poetry install
+	@poetry install --with=dev
 	@poetry build
 
 # .proto file and generated Python files have to be in the same directory.

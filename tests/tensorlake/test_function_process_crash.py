@@ -5,6 +5,7 @@ import unittest
 from testing import test_graph_name
 
 from tensorlake import Graph, RemoteGraph, tensorlake_function
+from tensorlake.functions_sdk.graph_serialization import graph_code_dir_path
 
 
 @tensorlake_function()
@@ -25,7 +26,9 @@ class TestFunctionProcessCrash(unittest.TestCase):
             description="test",
             start_node=function,
         )
-        graph = RemoteGraph.deploy(graph)
+        graph = RemoteGraph.deploy(
+            graph=graph, code_dir_path=graph_code_dir_path(__file__)
+        )
 
         print("Running a function that will crash FunctionExecutor process...")
         for i in range(2):
