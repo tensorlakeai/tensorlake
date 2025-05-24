@@ -130,7 +130,7 @@ class DocumentAI:
 
     def __create_parse_settings__(self, options: ParsingOptions) -> dict:
         json_schema = None
-        if options.extraction_options:
+        if options.extraction_options and options.extraction_options.schema:
             if isinstance(options.extraction_options.schema, str):
                 json_schema = json.loads(options.extraction_options.schema)
             elif isinstance(options.extraction_options.schema, dict):
