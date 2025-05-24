@@ -67,7 +67,7 @@ class ExtractionOptions(BaseModel):
     Options for structured data extraction.
     """
 
-    schema: Optional[Union[Type[BaseModel], Json]] = None
+    schema: Union[Type[BaseModel], Json] = None
     prompt: Optional[str] = None
     provider: ModelProvider = ModelProvider.TENSORLAKE
     skip_ocr: bool = False
