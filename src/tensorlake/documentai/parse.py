@@ -5,7 +5,7 @@ This module contains the data models for parsing a document.
 from enum import Enum
 from typing import Optional, Type, Union
 
-from pydantic import BaseModel, Json
+from pydantic import BaseModel, Json, Field
 
 
 class ChunkingStrategy(str, Enum):
@@ -67,7 +67,7 @@ class ExtractionOptions(BaseModel):
     Options for structured data extraction.
     """
 
-    schema: Union[Type[BaseModel], Json]
+    schema: Optional[Union[Type[BaseModel], Json]] = None
     prompt: Optional[str] = None
     provider: ModelProvider = ModelProvider.TENSORLAKE
     skip_ocr: bool = False
@@ -99,7 +99,7 @@ class ParsingOptions(BaseModel):
     figure_summarization_prompt: Optional[str] = None
     table_output_mode: TableOutputMode = TableOutputMode.MARKDOWN
     page_range: Optional[str] = None
-    extraction_options: Optional[ExtractionOptions] = None
+    extraction_options: Optional[ExtractionOptions] = Field(default_factory=ExtractionOptions),
     deliver_webhook: bool = False
     detect_signature: Optional[bool] = False
     table_summary: Optional[bool] = False
