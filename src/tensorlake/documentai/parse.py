@@ -99,7 +99,7 @@ class ParsingOptions(BaseModel):
     figure_summarization_prompt: Optional[str] = None
     table_output_mode: TableOutputMode = TableOutputMode.MARKDOWN
     page_range: Optional[str] = None
-    extraction_options: Optional[ExtractionOptions] = Field(default_factory=ExtractionOptions),
+    extraction_options: Optional[ExtractionOptions] = None,
     deliver_webhook: bool = False
     detect_signature: Optional[bool] = False
     table_summary: Optional[bool] = False
