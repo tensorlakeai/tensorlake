@@ -15,7 +15,6 @@ import json
 import logging
 from typing import Dict, Any, Optional, TypedDict, Annotated, List
 from pathlib import Path
-from datetime import datetime
 from dotenv import load_dotenv
 
 # LangGraph and LangChain imports
@@ -29,6 +28,8 @@ from langchain_openai import ChatOpenAI
 # TensorLake imports
 from tensorlake.documentai import DocumentAI, ParsingOptions, ExtractionOptions
 from tensorlake.documentai.parse import ChunkingStrategy, TableParsingStrategy, TableOutputMode
+
+from helper_functions import extract_signature_data, save_analysis_data
 
 # Load environment variables
 load_dotenv()
@@ -49,74 +50,29 @@ logger = logging.getLogger(__name__)
 _last_processed_file_name: Optional[str] = None
 
 
-class SignatureAnalysisError(Exception):
-    """Custom exception for signature analysis errors"""
-    pass
-
-
-def ensure_data_directory() -> None:
-    """Ensure the signature data directory exists"""
-    Path(SIGNATURE_DATA_DIR).mkdir(exist_ok=True)
-
-
-def upload_document_to_tensorlake(file_path: str) -> Dict[str, Any]:
-    """
-    Upload a document to TensorLake for processing.
-    Raises:
-        SignatureAnalysisError: If upload fails
-    """
-    if not TENSORLAKE_API_KEY:
-        raise SignatureAnalysisError("TENSORLAKE_API_KEY environment variable not set")
-
-    if not Path(file_path).exists():
-        raise SignatureAnalysisError(f"File not found: {file_path}")
-
-    try:
-        doc_ai = DocumentAI(api_key=TENSORLAKE_API_KEY)
-        file_id = doc_ai.upload(path=file_path)
-
-        logger.info(f"Successfully uploaded document: {file_path}")
-        return {
-            "success": True,
-            "file_path": file_path,
-            "file_id": file_id
-        }
-    except Exception as e:
-        logger.error(f"Failed to upload document {file_path}: {str(e)}")
-        return {
-            "success": False,
-            "error": f"Failed to upload {file_path}: {str(e)}"
-        }
-
-
 def detect_signatures_in_document(file_path: str) -> Dict[str, Any]:
     """
-    Detect signatures in a document using TensorLake signature detection.
-    This function processes a document for signature detection and saves the results
-    to a JSON file for later conversational analysis.
+    Complete signature detection pipeline - uploads document, processes it, and saves results.
     Args:
         file_path: Path to the document file to analyze
     Returns:
         Dictionary containing signature analysis results
     """
     global _last_processed_file_name
+    # Ensure data directory to save signature analysis data exists
+    Path(SIGNATURE_DATA_DIR).mkdir(exist_ok=True)
 
-    logger.info(f"Starting signature detection for: {file_path}")
-    ensure_data_directory()
+    if not Path(file_path).exists():
+        return {"success": False, "error": f"File not found: {file_path}"}
 
-    # Upload document
-    upload_result = upload_document_to_tensorlake(file_path)
-    if not upload_result.get('success'):
-        return upload_result
-
-    file_id = upload_result['file_id']
     file_name = Path(file_path).name
     _last_processed_file_name = file_name
 
-    logger.info(f"Starting signature detection process for file ID: {file_id}")
-
     try:
         doc_ai = DocumentAI(api_key=TENSORLAKE_API_KEY)
+
+        # Upload a document to TensorLake for processing
+        file_id = doc_ai.upload(path=file_path)
 
         # Configure parsing options for signature detection
         options = ParsingOptions(
@@ -134,9 +90,8 @@ def detect_signatures_in_document(file_path: str) -> Dict[str, Any]:
         # Poll for completion with timeout
         start_time = time.time()
         max_wait_time = 300  # 5 minutes max
-
         while time.time() - start_time < max_wait_time:
-            result = doc_ai.get_job(job_id)
+            result = doc_ai.get_job(job_id)  # Signature detection result after parsing the document
             elapsed = time.time() - start_time
 
             if result.status in ["pending", "processing"]:
@@ -146,20 +101,14 @@ def detect_signatures_in_document(file_path: str) -> Dict[str, Any]:
                 logger.info(f"Processing completed successfully in {elapsed:.0f} seconds")
                 break
             else:
-                return {
-                    "success": False,
-                    "error": f"Job failed with status: {result.status}"
-                }
+                return {"success": False, "error": f"Job failed with status: {result.status}"}
         else:
-            return {
-                "success": False,
-                "error": f"Processing timeout after {max_wait_time} seconds"
-            }
+            return {"success": False, "error": f"Processing timeout after {max_wait_time} seconds"}
 
         # Extract signature data from results
-        signature_data = _extract_signature_data(result, file_name, file_path)
+        signature_data = extract_signature_data(result, file_name, file_path)
         # Save analysis to JSON file
-        json_path = _save_analysis_data(signature_data, file_name)
+        json_path = save_analysis_data(signature_data, file_name)
 
         # Return summary
         return {
@@ -180,80 +129,10 @@ def detect_signatures_in_document(file_path: str) -> Dict[str, Any]:
         }
 
 
-def _extract_signature_data(result, file_name: str, file_path: str) -> Dict[str, Any]:
-    """Extract and structure signature data from TensorLake results"""
-    pages = result.outputs.document.pages
-    structured_data = {}
-    total_signatures = 0
-
-    for page in pages:
-        # Find signature fragments
-        signature_fragments = [
-            frag for frag in page.page_fragments
-            if (frag.fragment_type.name.lower() == "signature" and
-                frag.content.content.strip().lower() != "no signature detected")
-        ]
-
-        if signature_fragments:
-            # Extract page content from various fragment types
-            page_content = _extract_page_content(page.page_fragments)
-
-            structured_data[page.page_number] = {
-                "signature_count": len(signature_fragments),
-                "bboxes": [frag.bbox for frag in signature_fragments],
-                "page_content": page_content,
-            }
-            total_signatures += len(signature_fragments)
-
-    return {
-        "file_name": file_name,
-        "file_path": file_path,
-        "processed_timestamp": datetime.now().isoformat(),
-        "total_signatures": total_signatures,
-        "total_pages": len(pages),
-        "pages_with_signatures": list(structured_data.keys()),
-        "signatures_per_page": structured_data
-    }
-
-
-def _extract_page_content(page_fragments: List) -> str:
-    """Extract readable content from page fragments"""
-    content_parts = []
-
-    for fragment in page_fragments:
-        fragment_type = fragment.fragment_type.name.lower()
-
-        if fragment_type == "text":
-            content_parts.append(fragment.content.content.strip())
-        elif fragment_type == "key_value_region":
-            # Prefer markdown for tables if available
-            if hasattr(fragment.content, "markdown") and fragment.content.markdown.strip():
-                content_parts.append(fragment.content.markdown.strip())
-            elif hasattr(fragment.content, "content"):
-                content_parts.append(fragment.content.content.strip())
-
-    return "\n\n".join(filter(None, content_parts))
-
-
-def _save_analysis_data(signature_data: Dict[str, Any], file_name: str) -> str:
-    """Save signature analysis data to JSON file"""
-    safe_filename = "".join(c for c in file_name if c.isalnum() or c in (' ', '-', '_')).strip()
-    json_filename = f"{safe_filename}_signature_analysis.json"
-    json_path = Path(SIGNATURE_DATA_DIR) / json_filename
-
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(signature_data, f, indent=2, ensure_ascii=False)
-
-    logger.info(f"Analysis data saved to: {json_path}")
-    return str(json_path)
-
-
 @tool
 def load_signature_analysis_data() -> Dict[str, Any]:
-    """
-    Load saved signature analysis data for conversational queries.
-    """
-    ensure_data_directory()
+    """Load saved signature analysis data for conversational queries."""
+    Path(SIGNATURE_DATA_DIR).mkdir(exist_ok=True)
 
     global _last_processed_file_name
     file_to_load = _last_processed_file_name
@@ -308,8 +187,7 @@ class ConversationState(TypedDict):
 class SignatureConversationAgent:
     """
     LangGraph-based conversational agent for signature analysis queries.
-    This agent can answer questions about previously analyzed documents,
-    providing insights about signatures, document content, and parties involved.
+    This agent can answer questions about previously analyzed documents, providing insights about signatures, and parties involved.
     """
 
     SYSTEM_PROMPT = """You are a helpful assistant that answers questions about PREVIOUSLY ANALYZED documents with signature detection data.
@@ -339,9 +217,7 @@ Do NOT ask users for file paths - you work with already processed data only.
 If the tool returns an error (no data found), explain that no analysis data is available and the user needs to process documents first."""
 
     def __init__(self, model: str = "gpt-4o", temperature: float = 0.1):
-        """
-        Initialize the signature conversation agent.
-        """
+        """Initialize the signature conversation agent."""
         self.model = ChatOpenAI(model=model, temperature=temperature)
         self.tools = [load_signature_analysis_data]
         self.model_with_tools = self.model.bind_tools(self.tools)
@@ -443,47 +319,6 @@ If the tool returns an error (no data found), explain that no analysis data is a
                 print(f"Error: {e}\n")
 
 
-def process_document_standalone(file_path: str) -> Dict[str, Any]:
-    """
-    Standalone function to process a document for signature detection.
-    This function should be run separately before using the conversation agent.
-    Args:
-        file_path: Path to the document file to analyze
-    Returns:
-        Dictionary containing processing results
-    """
-    print("Document Signature Detection")
-    print("=" * 50)
-
-    result = detect_signatures_in_document(file_path)
-
-    if result.get("success"):
-        print("\nSUCCESS!")
-        print(f"Structured analysis: \n{result}")
-        print("\nYou can now use the conversation agent to ask questions about this document!")
-    else:
-        print(f"\nFAILED: {result.get('error', 'Unknown error')}")
-
-    return result
-
-
-def run_conversation_agent() -> None:
-    """Initialize and run the conversation agent for signature analysis queries"""
-    # Check for existing analysis files
-    ensure_data_directory()
-    analysis_files = list(Path(SIGNATURE_DATA_DIR).glob("*_signature_analysis.json"))
-
-    if not analysis_files:
-        print("No signature analysis files found!")
-        print("Please process some documents first using the processing function.")
-        return
-
-    print(f"Found {len(analysis_files)} analyzed document(s)")
-
-    agent = SignatureConversationAgent()
-    agent.chat()
-
-
 def main() -> None:
     """Main CLI interface for the signature analysis system"""
     print("Document Signature Analysis System")
@@ -496,13 +331,35 @@ def main() -> None:
     while True:
         try:
             choice = input("Select option (1-3): ").strip()
+
             if choice == "1":
                 file_path = input("Enter document file path: ").strip()
                 if file_path:
-                    process_document_standalone(file_path)
+                    print("Processing document...")
+                    result = detect_signatures_in_document(file_path)
+
+                    if result.get("success"):
+                        print("\nSUCCESS!")
+                        print(f"Analysis: {result['summary']}")
+                        print(f"Data saved to: {result['data_saved_to']}")
+                        print("\nYou can now use option 2 to ask questions about this document!")
+                    else:
+                        print(f"\nFAILED: {result.get('error', 'Unknown error')}")
                 print()
+
             elif choice == "2":
-                run_conversation_agent()
+                # Check for existing analysis files
+                Path(SIGNATURE_DATA_DIR).mkdir(exist_ok=True)
+                analysis_files = list(Path(SIGNATURE_DATA_DIR).glob("*_signature_analysis.json"))
+
+                if not analysis_files:
+                    print("No signature analysis files found!")
+                    print("Please process some documents first using option 1.")
+                else:
+                    print(f"Found {len(analysis_files)} analyzed document(s)")
+                    agent = SignatureConversationAgent()
+                    agent.chat()
+
             elif choice == "3":
                 print("Goodbye! 👋")
                 break
@@ -518,19 +375,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "process" and len(sys.argv) > 2:
-            # Direct processing: python script.py process /path/to/file.pdf
-            process_document_standalone(sys.argv[2])
-        elif sys.argv[1] == "chat":
-            # Direct chat: python script.py chat
-            run_conversation_agent()
-        else:
-            print("Usage:")
-            print("  python signature_analysis.py process /path/to/file.pdf")
-            print("  python signature_analysis.py chat")
-    else:
-        # Interactive menu
-        main()
+    # Run and test the flow
+    main()
