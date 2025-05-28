@@ -90,3 +90,16 @@ python-dotenv>=1.0.0
 ```
 
 *Note:* We recommend you setup a virtual environment and you should have Python>3.8 installed
+
+## Running the Streamlit App
+You can also interact with the signature detection system via a beautiful web UI built using Streamlit.
+
+### 🔧 Start the app:
+```bash
+streamlit run streamlit_app.py
+```
+
+This will launch a browser interface that allows you to:
+ - Upload and process documents using Tensorlake AI
+ - View signature analysis results in a structured format
+ - Chat with an intelligent assistant (LangGraph agent) about the signatures and document content
