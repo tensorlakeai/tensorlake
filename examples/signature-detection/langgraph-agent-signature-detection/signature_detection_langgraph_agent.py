@@ -117,6 +117,7 @@ def detect_signatures_in_document(file_path: str) -> Dict[str, Any]:
             "total_signatures": signature_data["total_signatures"],
             "total_pages": signature_data["total_pages"],
             "pages_with_signatures": signature_data["pages_with_signatures"],
+            "signature_data": signature_data["signatures_per_page"],
             "summary": f"Found {signature_data['total_signatures']} signatures across {len(signature_data['pages_with_signatures'])} pages in {file_name}",
             "data_saved_to": json_path
         }

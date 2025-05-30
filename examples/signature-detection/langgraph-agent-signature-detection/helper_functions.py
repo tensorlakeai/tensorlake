@@ -1,10 +1,7 @@
 import json
 from datetime import datetime
 from pathlib import Path
-import logging
 from typing import Dict, Any, List
-
-from signature_detection_usecase.signature_detection_agent import logger
 
 SIGNATURE_DATA_DIR = "signature_analysis_data"
 
@@ -73,5 +70,5 @@ def save_analysis_data(signature_data: Dict[str, Any], file_name: str) -> str:
     with open(json_path, 'w', encoding='utf-8') as f:
         json.dump(signature_data, f, indent=2, ensure_ascii=False)
 
-    logger.info(f"Analysis data saved to: {json_path}")
+    print(f"Analysis data saved to: {json_path}")
     return str(json_path)
