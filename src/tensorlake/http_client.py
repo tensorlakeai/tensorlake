@@ -41,10 +41,15 @@ class InvocationEvent(BaseModel):
     payload: Union[InvocationEventPayload, InvocationFinishedEvent]
 
 
+class DataObjectMetadata(BaseModel):
+    path: str
+    size: int
+    sha256_hash: str
+
 class GraphOutputMetadata(BaseModel):
     id: str
     compute_fn: str
-
+    payloads: List[DataObjectMetadata]
 
 class GraphOutputs(BaseModel):
     status: str
@@ -401,10 +406,11 @@ class TensorlakeClient:
         graph: str,
         invocation_id: str,
         fn_name: str,
-        output_id: str,
+        id: str,
+        index: Optional[str] = None,
     ) -> TensorlakeData:
         response = self._get(
-            f"namespaces/{namespace}/compute_graphs/{graph}/invocations/{invocation_id}/fn/{fn_name}/output/{output_id}",
+            f"namespaces/{namespace}/compute_graphs/{graph}/invocations/{invocation_id}/fn/{fn_name}/output/{id}/index/{index}",
         )
         response.raise_for_status()
         content_type = response.headers.get("Content-Type")
@@ -412,7 +418,17 @@ class TensorlakeClient:
             encoding = "json"
         else:
             encoding = "cloudpickle"
-        return TensorlakeData(id=output_id, payload=response.content, encoder=encoding)
+        import hashlib
+        hasher = hashlib.sha256(usedforsecurity=False)
+        hasher.update(response.content)
+        content_hash = hasher.hexdigest()
+        if "Content-Hash" in response.headers:
+            expected_hash = response.headers["Content-Hash"]
+            if content_hash != expected_hash:
+                raise ValueError(
+                    f"Content hash mismatch: expected {expected_hash}, got {content_hash}"
+                )
+        return TensorlakeData(payload=response.content, encoder=encoding, id=id)
 
     def graph_outputs(
         self,
@@ -443,10 +459,11 @@ class TensorlakeClient:
         outputs = []
         for output in graph_outputs.outputs:
             if output.compute_fn == fn_name:
-                indexify_data = self._download_output(
-                    self.namespace, graph, invocation_id, fn_name, output.id
-                )
-                serializer = get_serializer(output_encoder)
-                output = serializer.deserialize(indexify_data.payload)
-                outputs.append(output)
+                for idx in range(len(output.payloads)):
+                    indexify_data = self._download_output(
+                        self.namespace, graph, invocation_id, fn_name, output.id, idx
+                    )
+                    serializer = get_serializer(output_encoder)
+                    deserialized_output = serializer.deserialize(indexify_data.payload)
+                    outputs.append(deserialized_output)
         return outputs

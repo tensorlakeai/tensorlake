@@ -305,27 +305,27 @@ class Graph:
         start_node = self.nodes[self._start_node]
         serializer = get_serializer(start_node.input_encoder)
         input = TensorlakeData(
-            id=generate(),
             payload=serializer.serialize(kwargs),
             encoder=start_node.input_encoder,
         )
         print(f"[bold] Invoking {self._start_node}[/bold]")
         outputs = defaultdict(list)
+        invocation_id = generate()
         for k, v in self.accumulator_zero_values.items():
             node = self.nodes[k]
             serializer = get_serializer(node.input_encoder)
             self._accumulator_values[k] = TensorlakeData(
                 payload=serializer.serialize(v), encoder=node.input_encoder
             )
-        self._results[input.id] = outputs
+        self._results[invocation_id] = outputs
         self._local_graph_ctx = GraphInvocationContext(
-            invocation_id=input.id,
+            invocation_id=invocation_id,
             graph_name=self.name,
             graph_version=self.version,
             invocation_state=LocalInvocationState(),
         )
         self._run(input, outputs)
-        return input.id
+        return invocation_id
 
     def validate_graph(self) -> None:
         """
