@@ -1,6 +1,6 @@
 import unittest
 from pathlib import Path
-from typing import List, Union
+from typing import List, Tuple, Union
 
 import parameterized
 from pydantic import BaseModel
@@ -11,10 +11,9 @@ from tensorlake import (
     Graph,
     GraphInvocationContext,
     RemoteGraph,
+    RouteTo,
     TensorlakeCompute,
-    TensorlakeRouter,
     tensorlake_function,
-    tensorlake_router,
 )
 from tensorlake.functions_sdk.data_objects import File
 
@@ -156,13 +155,13 @@ def add_three(x: Sum) -> int:
     return x.val + 3
 
 
-@tensorlake_router()
-def route_if_even(x: Sum) -> List[Union[add_two, add_three]]:
+@tensorlake_function(next=[add_two, add_three])
+def route_if_even(x: Sum) -> RouteTo[Sum, Union[add_two, add_three]]:
     print(f"routing input {x}")
     if x.val % 2 == 0:
-        return add_three
+        return RouteTo(x, add_three)
     else:
-        return add_two
+        return RouteTo(x, add_two)
 
 
 @tensorlake_function()
@@ -226,7 +225,6 @@ def create_router_graph(test_case: unittest.TestCase) -> Graph:
     graph.add_edge(generate_seq, square)
     graph.add_edge(square, sum_of_squares)
     graph.add_edge(sum_of_squares, route_if_even)
-    graph.route(route_if_even, [add_two, add_three])
     graph.add_edge(add_two, make_it_string_from_int)
     graph.add_edge(add_three, make_it_string_from_int)
     return graph
@@ -287,19 +285,22 @@ class SimpleFunctionCtxCls2(TensorlakeCompute):
         return SimpleRouterCtxClsObject(x=obj.x + 2)
 
 
-class SimpleRouterCtxCls(TensorlakeRouter):
+class SimpleRouterCtxCls(TensorlakeCompute):
     name = "SimpleRouterCtxCls"
+    next = [SimpleFunctionCtxCls1, SimpleFunctionCtxCls2]
 
     def __init__(self):
         super().__init__()
 
     def run(
         self, obj: SimpleRouterCtxClsObject
-    ) -> Union[SimpleFunctionCtxCls1, SimpleFunctionCtxCls2]:
+    ) -> RouteTo[
+        SimpleRouterCtxClsObject, Union[SimpleFunctionCtxCls1, SimpleFunctionCtxCls2]
+    ]:
         if obj.x % 2 == 0:
-            return SimpleFunctionCtxCls1
+            return RouteTo(obj, SimpleFunctionCtxCls1)
         else:
-            return SimpleFunctionCtxCls2
+            return RouteTo(obj, SimpleFunctionCtxCls2)
 
 
 @tensorlake_function()
@@ -327,14 +328,15 @@ def raise_if_called_with_multiple_values(x: int, y: int, z: int) -> int:
     raise Exception("Should not be called")
 
 
-@tensorlake_router()
-def route_multiple_values(
-    x: int, y: int, z: int
-) -> List[Union[sum_multiple_values, raise_if_called_with_multiple_values]]:
+@tensorlake_function(next=[sum_multiple_values, raise_if_called_with_multiple_values])
+def route_multiple_values(x: int, y: int, z: int) -> RouteTo[
+    Tuple[int, int, int],
+    Union[sum_multiple_values, raise_if_called_with_multiple_values],
+]:
     if x + y + z == 0:
-        return raise_if_called_with_multiple_values
+        return RouteTo((x, y, z), raise_if_called_with_multiple_values)
     else:
-        return sum_multiple_values
+        return RouteTo((x, y, z), sum_multiple_values)
 
 
 @tensorlake_function()
@@ -444,6 +446,16 @@ def return_pydantic_base_model_json(x: int) -> dict:
 def return_field_from_pydantic_base_model_json(input: dict) -> int:
     p = SimpleModelObjectInt.model_validate(input)
     return p.x
+
+
+@tensorlake_function()
+def should_not_run(x: str) -> str:
+    return x + "c"
+
+
+@tensorlake_function(next=should_not_run)
+def simple_success(x: str) -> RouteTo[str, should_not_run]:
+    return RouteTo(x + "b", [])
 
 
 class TestGraphBehaviors(unittest.TestCase):
@@ -560,10 +572,6 @@ class TestGraphBehaviors(unittest.TestCase):
             start_node=return_multiple_values,
         )
         graph.add_edge(return_multiple_values, route_multiple_values)
-        graph.route(
-            route_multiple_values,
-            [sum_multiple_values, raise_if_called_with_multiple_values],
-        )
         graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(block_until_done=True, x=1)
         output = graph.output(invocation_id, sum_multiple_values.name)
@@ -797,7 +805,6 @@ class TestGraphBehaviors(unittest.TestCase):
     @parameterized.parameterized.expand([(False), (True)])
     def test_router_graph_behavior_cls(self, is_remote):
         graph = Graph(test_graph_name(self), start_node=SimpleRouterCtxCls)
-        graph.route(SimpleRouterCtxCls, [SimpleFunctionCtxCls1, SimpleFunctionCtxCls2])
         graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(
             block_until_done=True, obj=SimpleRouterCtxClsObject(x=1)
@@ -876,7 +883,6 @@ class TestGraphBehaviors(unittest.TestCase):
         graph = Graph(
             name=test_graph_name(self), description="test", start_node=route_if_even
         )
-        graph.route(route_if_even, [add_two, add_three])
         graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(block_until_done=True, x=Sum(val=2))
         output = graph.output(invocation_id, "add_three")
@@ -922,6 +928,20 @@ class TestGraphBehaviors(unittest.TestCase):
                 x=SimpleModelObjectStr(x="a"),
                 y=10,
             )
+
+    @parameterized.parameterized.expand([(False), (True)])
+    def test_early_success(self, is_remote):
+        graph = Graph(
+            name=test_graph_name(self),
+            description="test for early graph success",
+            start_node=simple_success,
+        )
+        graph = remote_or_local_graph(graph, is_remote)
+        invocation_id = graph.run(block_until_done=True, x="a")
+        output_simple_success = graph.output(invocation_id, "simple_success")
+        output_should_not_run = graph.output(invocation_id, "should_not_run")
+        self.assertEqual(output_simple_success, ["ab"])
+        self.assertEqual(output_should_not_run, [])
 
 
 if __name__ == "__main__":

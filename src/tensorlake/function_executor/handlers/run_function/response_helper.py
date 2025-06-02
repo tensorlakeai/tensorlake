@@ -1,7 +1,7 @@
-from typing import List
+from typing import List, Optional
 
 from tensorlake.functions_sdk.data_objects import TensorlakeData
-from tensorlake.functions_sdk.functions import FunctionCallResult, RouterCallResult
+from tensorlake.functions_sdk.functions import FunctionCallResult
 from tensorlake.functions_sdk.object_serializer import get_serializer
 
 from ...proto.function_executor_pb2 import (
@@ -37,38 +37,10 @@ class ResponseHelper:
                 function_output=self._to_function_output(
                     result.ser_outputs, self._output_encoding
                 ),
-                router_output=None,
+                router_output=self._to_router_output(result.edges),
                 stdout=stdout,
                 stderr=stderr,
                 is_reducer=is_reducer,
-                success=True,
-                metrics=metrics,
-            )
-        else:
-            return self.failure_response(
-                message=result.traceback_msg,
-                stdout=stdout,
-                stderr=stderr,
-            )
-
-    def router_response(
-        self,
-        result: RouterCallResult,
-        stdout: str = "",
-        stderr: str = "",
-    ) -> RunTaskResponse:
-        if result.traceback_msg is None:
-            metrics = Metrics(
-                timers={},
-                counters={},
-            )
-            return RunTaskResponse(
-                task_id=self._task_id,
-                function_output=None,
-                router_output=RouterOutput(edges=result.edges),
-                stdout=stdout,
-                stderr=stderr,
-                is_reducer=False,
                 success=True,
                 metrics=metrics,
             )
@@ -86,7 +58,6 @@ class ResponseHelper:
         return RunTaskResponse(
             task_id=self._task_id,
             function_output=None,
-            router_output=None,
             stdout=stdout,
             stderr=stderr,
             is_reducer=False,
@@ -110,3 +81,8 @@ class ResponseHelper:
 
             output.outputs.append(serialized_object)
         return output
+
+    def _to_router_output(self, edges: Optional[List[str]]) -> RouterOutput:
+        if edges is None:
+            return None
+        return RouterOutput(edges=edges)
