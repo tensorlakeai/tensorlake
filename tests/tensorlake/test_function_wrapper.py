@@ -1,5 +1,5 @@
 import unittest
-from typing import List, Union
+from typing import List
 
 from pydantic import BaseModel
 
@@ -7,7 +7,6 @@ from tensorlake.functions_sdk.functions import (
     GraphInvocationContext,
     TensorlakeFunctionWrapper,
     tensorlake_function,
-    tensorlake_router,
 )
 from tensorlake.functions_sdk.invocation_state.local_invocation_state import (
     LocalInvocationState,
@@ -57,26 +56,6 @@ class TestFunctionWrapper(unittest.TestCase):
         extractor_wrapper = TensorlakeFunctionWrapper(extractor_b)
         result = extractor_wrapper.get_output_model()
         self.assertEqual(result, str)
-
-    def test_router_fn(self):
-        @tensorlake_function()
-        def func_a(x: int) -> int:
-            return 6
-
-        @tensorlake_function()
-        def func_b(x: int) -> int:
-            return 7
-
-        @tensorlake_router()
-        def router_fn(url: str) -> List[Union[func_a, func_b]]:
-            """
-            Random description of router_fn
-            """
-            return [func_a]
-
-        router_wrapper = TensorlakeFunctionWrapper(router_fn)
-        result, err = router_wrapper.run_router(TEST_GRAPH_CTX, {"url": "foo"})
-        self.assertEqual(result, ["func_a"])
 
     def test_accumulate(self):
         class AccumulatedState(BaseModel):

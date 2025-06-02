@@ -15,10 +15,6 @@ class Metrics(BaseModel):
     counters: Dict[str, int]
 
 
-class RouterOutput(BaseModel):
-    edges: List[str]
-
-
 class TensorlakeData(BaseModel):
     id: Optional[str] = None
     payload: Union[bytes, str]

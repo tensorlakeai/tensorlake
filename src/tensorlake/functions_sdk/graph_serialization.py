@@ -9,7 +9,7 @@ from typing import Dict, List, Union
 import click
 from pydantic import BaseModel
 
-from .functions import TensorlakeCompute, TensorlakeRouter
+from .functions import TensorlakeCompute
 from .graph import Graph
 
 
@@ -156,7 +156,7 @@ def _create_graph_manifest(
 
 
 def _create_function_manifest(
-    node: Union[TensorlakeCompute, TensorlakeRouter],
+    node: TensorlakeCompute,
     code_dir_path: str,
 ) -> FunctionManifest:
     if node._created_by_decorator:
