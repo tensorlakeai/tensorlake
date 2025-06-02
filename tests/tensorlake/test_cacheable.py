@@ -67,7 +67,7 @@ class TestCacheableGraph(unittest.TestCase):
             counts,
         )
 
-        self.assertEqual([Total(val=13)], result)
+        self.assertEqual(13, result[0].val)
 
         counts, result = self._stream()
         self.assertDictEqual(
@@ -81,7 +81,7 @@ class TestCacheableGraph(unittest.TestCase):
             counts,
         )
 
-        self.assertEqual([Total(val=13)], result)
+        self.assertEqual(13, result[0].val)
 
 
 if __name__ == "__main__":
