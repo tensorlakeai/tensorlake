@@ -5,6 +5,7 @@ from typing import List
 from pydantic import BaseModel
 
 from tensorlake import Graph, RemoteGraph, tensorlake_function
+from tensorlake.functions_sdk.graph_serialization import graph_code_dir_path
 
 
 class Total(BaseModel):
@@ -36,7 +37,9 @@ class TestCacheableGraph(unittest.TestCase):
 
         graph.add_edge(generate_numbers, square)
         graph.add_edge(square, add)
-        self.graph = RemoteGraph.deploy(graph)
+        self.graph = RemoteGraph.deploy(
+            graph, code_dir_path=graph_code_dir_path(__file__)
+        )
 
     def _stream(self) -> tuple[dict[str, int], str]:
         counts = defaultdict(int)
