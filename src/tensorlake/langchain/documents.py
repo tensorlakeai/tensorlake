@@ -206,7 +206,7 @@ async def document_to_markdown_converter_async(path: str, options: DocumentParse
 
 
 # Create the LangChain tool using StructuredTool
-document_to_markdown_tool = StructuredTool.from_function(
+document_markdown_tool = StructuredTool.from_function(
     func=document_to_markdown_converter,
     coroutine=document_to_markdown_converter_async,
     name="DocumentToMarkdownConverter",
