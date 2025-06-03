@@ -13,7 +13,7 @@ from tensorlake.documentai.parse import (
     ModelProvider,
     FormDetectionMode
 )
-
+load_dotenv()
 TENSORLAKE_API_KEY = os.getenv("TENSORLAKE_API_KEY")
 
 
