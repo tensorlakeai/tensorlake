@@ -1,5 +1,6 @@
 import time
 import os
+from dotenv import load_dotenv
 from typing import Optional, Type, Union
 from langchain_core.tools import StructuredTool
 from pydantic import Field, BaseModel, Json
@@ -13,7 +14,7 @@ from tensorlake.documentai.parse import (
     ModelProvider,
     FormDetectionMode
 )
-
+load_dotenv()
 TENSORLAKE_API_KEY = os.getenv("TENSORLAKE_API_KEY")
 
 
