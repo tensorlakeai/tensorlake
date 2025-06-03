@@ -1,5 +1,6 @@
 import time
 import os
+from dotenv import load_dotenv
 from typing import Optional, Type, Union
 from langchain_core.tools import StructuredTool
 from pydantic import Field, BaseModel, Json
