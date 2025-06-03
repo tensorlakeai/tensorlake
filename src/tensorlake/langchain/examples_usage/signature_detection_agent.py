@@ -93,10 +93,11 @@ async def analyze_signatures_agents(
     return final_state["messages"][-1].content
 
 
-async def main():
+async def example_without_structured_schema():
 
+    # change to your own document path
     document_path = "path/to/your/document.pdf"
-
+    # set the parsing options
     parsing_options = DocumentParserOptions(
         detect_signature=True,
         chunking_strategy=ChunkingStrategy.PAGE,
@@ -120,6 +121,59 @@ async def main():
     print("Analysis Result:\n\n", result)
 
 
+async def example_with_stuctured_schema():
+
+    # change to your own document path
+    document_path = "path/to/your/document.pdf"
+    # the structured schema that you want to set
+    schema_json = """{
+            "properties": {
+                "buyer": {
+                    "properties": {
+                        "buyer_name": {"type": "string"},
+                        "buyer_signature_date": {"type": "string"},
+                        "buyer_signed": {"type": "boolean"}
+                    },
+                    "type": "object"
+                },
+                "seller": {
+                    "properties": {
+                        "seller_name": {"type": "string"},
+                        "seller_signature_date": {"type": "string"},
+                        "seller_signed": {"type": "boolean"}
+                    },
+                    "type": "object"
+                }
+            },
+            "title": "real_estate_purchase_agreement",
+            "type": "object"
+        }"""
+    # set the parsing options
+    parsing_options = DocumentParserOptions(
+        detect_signature=True,
+        page_range="10",  # set the page range here, I am setting it to page 10 here
+        extraction_schema=schema_json,
+        skip_ocr=True,
+        chunking_strategy=ChunkingStrategy.PAGE,
+        table_output_mode=TableOutputMode.MARKDOWN,
+        timeout_seconds=300
+    )
+
+    analysis_questions = "Give me the full parsed result"
+
+    result = await analyze_signatures_agents(
+        file_path=document_path,
+        parsing_options=parsing_options,
+        questions=analysis_questions
+    )
+
+    print("Analysis Result with strctured schema:\n\n", result)
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    # example 1
+    asyncio.run(example_without_structured_schema())
+    # example 2
+    asyncio.run(example_with_stuctured_schema())
+
 
