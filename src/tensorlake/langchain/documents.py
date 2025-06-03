@@ -1,14 +1,9 @@
-from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, Field
-from tensorlake.documentai import DocumentAI, ParsingOptions
-from tensorlake.documentai.parse import ChunkingStrategy, TableParsingStrategy, TableOutputMode, ExtractionOptions
-
-
 import time
 import os
-from typing import Optional
+from typing import Optional, Type, Union
 from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, Field
+from pydantic import Field, BaseModel, Json
+
 from tensorlake.documentai import DocumentAI, ParsingOptions
 from tensorlake.documentai.parse import (
     ChunkingStrategy,
@@ -84,7 +79,7 @@ class DocumentParserOptions(BaseModel):
     )
 
     # Structured extraction options
-    extraction_schema: Optional[dict] = Field(
+    extraction_schema: Optional[Union[Type[BaseModel], Json]] = Field(
         default=None,
         description="JSON schema for structured data extraction"
     )
@@ -141,7 +136,6 @@ def document_to_markdown_converter(path: str, options: DocumentParserOptions) ->
 
         # Configure parsing options based on user input
         parsing_options = ParsingOptions(
-            format=options.output_format,
             chunking_strategy=options.chunking_strategy,
             table_parsing_strategy=options.table_parsing_strategy,
             table_output_mode=options.table_output_mode,
@@ -158,10 +152,19 @@ def document_to_markdown_converter(path: str, options: DocumentParserOptions) ->
         )
 
         # Add extraction options if schema is provided
-        if options.extraction_schema:
+        schema = options.extraction_schema
+        if isinstance(schema, dict):
+            import json
+            schema = json.dumps(schema)
+        if schema:
             parsing_options.extraction_options = ExtractionOptions(
-                schema=options.extraction_schema,
+                schema=schema,
                 prompt=options.extraction_prompt,
+                provider=options.extraction_model_provider,
+                skip_ocr=options.skip_ocr
+            )
+        elif options.skip_ocr:
+            parsing_options.extraction_options = ExtractionOptions(
                 provider=options.extraction_model_provider,
                 skip_ocr=options.skip_ocr
             )
@@ -196,10 +199,10 @@ def document_to_markdown_converter(path: str, options: DocumentParserOptions) ->
         return f"Error processing document: {str(e)}"
 
 
-async def document_to_markdown_converter_async(file_path: str, options: DocumentParserOptions) -> str:
+async def document_to_markdown_converter_async(path: str, options: DocumentParserOptions) -> str:
     """Asynchronous version of document to markdown converter."""
     import asyncio
-    return await asyncio.to_thread(document_to_markdown_converter, file_path, options)
+    return await asyncio.to_thread(document_to_markdown_converter, path, options)
 
 
 # Create the LangChain tool using StructuredTool
@@ -207,7 +210,7 @@ document_to_markdown_tool = StructuredTool.from_function(
     func=document_to_markdown_converter,
     coroutine=document_to_markdown_converter_async,
     name="DocumentToMarkdownConverter",
-    description="Parse document to markdown from a given path. Supports tables, figures, signatures, and structured extraction.",
+    description="Convert documents (PDF, DOCX, images, etc.) to markdown using Tensorlake AI. Supports tables, figures, signatures, and structured extraction.",
     return_direct=False,
-    handle_tool_error="Document parsing failed. Please check the file path and ensure your Tensorlake API key is configured."
+    handle_tool_error="Document parsing failed. Please verify the file path and your Tensorlake API key."
 )
