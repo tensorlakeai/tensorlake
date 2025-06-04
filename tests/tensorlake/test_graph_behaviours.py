@@ -1,6 +1,6 @@
 import unittest
 from pathlib import Path
-from typing import List, Union, Tuple
+from typing import List, Tuple, Union
 
 import parameterized
 from pydantic import BaseModel
@@ -294,7 +294,9 @@ class SimpleRouterCtxCls(TensorlakeCompute):
 
     def run(
         self, obj: SimpleRouterCtxClsObject
-    ) -> RouteTo[SimpleRouterCtxClsObject, Union[SimpleFunctionCtxCls1, SimpleFunctionCtxCls2]]:
+    ) -> RouteTo[
+        SimpleRouterCtxClsObject, Union[SimpleFunctionCtxCls1, SimpleFunctionCtxCls2]
+    ]:
         if obj.x % 2 == 0:
             return RouteTo(obj, SimpleFunctionCtxCls1)
         else:
@@ -327,9 +329,10 @@ def raise_if_called_with_multiple_values(x: int, y: int, z: int) -> int:
 
 
 @tensorlake_function(next=[sum_multiple_values, raise_if_called_with_multiple_values])
-def route_multiple_values(
-    x: int, y: int, z: int
-) -> RouteTo[Tuple[int, int, int], Union[sum_multiple_values, raise_if_called_with_multiple_values]]:
+def route_multiple_values(x: int, y: int, z: int) -> RouteTo[
+    Tuple[int, int, int],
+    Union[sum_multiple_values, raise_if_called_with_multiple_values],
+]:
     if x + y + z == 0:
         return RouteTo((x, y, z), raise_if_called_with_multiple_values)
     else:
