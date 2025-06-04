@@ -191,7 +191,7 @@ class SignatureConversationAgent:
     This agent can answer questions about previously analyzed documents, providing insights about signatures, and parties involved.
     """
 
-    SYSTEM_PROMPT = """You are a helpful assistant that answers questions about PREVIOUSLY ANALYZED documents with signature detection data.
+    SYSTEM_PROMPT = """You are a helpful assistant that answers questions about PREVIOUSLY ANALYZED documents with contextual signature detection data.
 
 IMPORTANT: You can ONLY answer questions about documents that have ALREADY been processed and saved. You do NOT process new documents - that's done separately.
 
@@ -209,6 +209,11 @@ You can answer questions like:
 - What does the content say around signatures?
 - What type of document is this?
 - Who are the parties involved?
+- What is the date of the signature?
+- Did each party sign the document?
+- Are there any missing signatures on any pages?
+- Which property is missing signatures?
+- Who is the agent for the properties missing signatures?
 
 WORKFLOW:
 1. FIRST: Call load_signature_analysis_data tool (with or without file_name)

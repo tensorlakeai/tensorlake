@@ -73,7 +73,27 @@ Goodbye! 👋
     TENSORLAKE_API_KEY=your_tensorlake_api_key
     ```
 
-### 2. Python Dependencies
+### 2. [Optional]
+Set up a virtual environment:
+On Mac:
+```bash
+python -m venv tlake
+source tlake/bin/activate
+```
+
+On Windows:
+```bash
+python -m venv tlake
+tlake\Scripts\activate
+```
+
+And when you're done:
+```bash
+deactivate
+```
+works on both Mac and Windows
+
+### 3. Python Dependencies
 You need to install these dependencies individually, or by running:
 ```bash
 pip install -r requirements.txt
