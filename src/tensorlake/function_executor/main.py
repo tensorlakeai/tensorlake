@@ -8,6 +8,7 @@ configure_logging_early()
 
 import argparse
 from typing import Any
+import multiprocessing as mp
 
 import structlog
 
@@ -27,6 +28,7 @@ def validate_args(args, logger: Any):
 
 
 def main():
+    mp.set_start_method("spawn")
     parser = argparse.ArgumentParser(
         description="Runs Function Executor with the specified API server address"
     )
