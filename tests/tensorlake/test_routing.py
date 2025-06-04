@@ -53,7 +53,7 @@ def parallel_map(count: int) -> List[int]:
 _GRAPH_PARAM_SETS = [(False), (True)]
 
 
-class TestGraphAPI(unittest.TestCase):
+class TestRouting(unittest.TestCase):
     @parameterized.parameterized.expand(_GRAPH_PARAM_SETS)
     def test_fan_out(self, is_remote):
         graph = Graph(name=test_graph_name(self), start_node=fan_out)
