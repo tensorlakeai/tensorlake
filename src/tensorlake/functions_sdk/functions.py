@@ -230,6 +230,26 @@ class RouteTo(Generic[V, N]):
     NB: Each downstream function supplied to a RouteTo must be listed
     in the compute function's @tensorlake_function decorator's "next"
     argument.
+
+    For example:
+
+        @tensorlake_function()
+        def handle_even(x: int) -> int:
+            # Do something with even values of x
+            return x
+
+        @tensorlake_function()
+        def handle_odd(x: int) -> int:
+            # Do something with odd values of x
+            return x
+
+        @tensorlake_function(next=[handle_even, handle_odd])
+        def pass_value_to_some_function(x: int) -> RouteTo[
+            int, Union[handle_even, handle_odd]
+        ]:
+            if x % 2 == 0:
+                return RouteTo(x, handle_even)
+            return RouteTo(x, handle_odd)
     """
 
     value: V
