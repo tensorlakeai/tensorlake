@@ -133,9 +133,14 @@ class Graph:
 
         self.nodes[indexify_fn.name] = indexify_fn
 
-        for node in indexify_fn.next:
-            self.add_node(node)
-            self.add_edge(indexify_fn, node)
+        if indexify_fn.next:
+            if isinstance(indexify_fn.next, list):
+                for node in indexify_fn.next:
+                    self.add_node(node)
+                    self.add_edge(indexify_fn, node)
+            else:
+                self.add_node(indexify_fn.next)
+                self.add_edge(indexify_fn, indexify_fn.next)
 
         return self
 
@@ -336,7 +341,12 @@ class Graph:
                 )
                 continue
 
-            for out_edge in function_outputs.edges:
+            if function_outputs.edges is not None:
+                edges = function_outputs.edges
+            else:
+                edges = self.edges[node_name]
+
+            for out_edge in edges:
                 for output in fn_outputs:
                     queue.append((out_edge, output))
 

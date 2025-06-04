@@ -30,7 +30,7 @@ class TestFunctionWrapper(unittest.TestCase):
             return "hello"
 
         extractor_wrapper = TensorlakeFunctionWrapper(extractor_a)
-        result, err = extractor_wrapper.run_fn(TEST_GRAPH_CTX, {"url": "foo"})
+        result, err, _ = extractor_wrapper.run_fn(TEST_GRAPH_CTX, {"url": "foo"})
         self.assertEqual(result[0], "hello")
 
     def test_get_output_model(self):
@@ -67,7 +67,7 @@ class TestFunctionWrapper(unittest.TestCase):
             return acc
 
         wrapper = TensorlakeFunctionWrapper(accumulate_fn)
-        result, err = wrapper.run_fn(
+        result, err, _ = wrapper.run_fn(
             TEST_GRAPH_CTX, acc=AccumulatedState(x=12), input={"x": 1}
         )
         self.assertEqual(result[0].x, 13)
@@ -80,7 +80,7 @@ class TestFunctionWrapper(unittest.TestCase):
             return {"invocation_id": ctx.invocation_id, "foo_val": foo_val}
 
         extractor_wrapper = TensorlakeFunctionWrapper(extractor_c)
-        result, _ = extractor_wrapper.run_fn(TEST_GRAPH_CTX, {"url": "foo"})
+        result, _, _ = extractor_wrapper.run_fn(TEST_GRAPH_CTX, {"url": "foo"})
         self.assertEqual(result[0]["invocation_id"], "123")
         self.assertEqual(result[0]["foo_val"], "bar")
 

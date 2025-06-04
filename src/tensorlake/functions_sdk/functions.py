@@ -107,7 +107,7 @@ class TensorlakeCompute:
     memory: float = _DEFAULT_MEMORY_GB
     ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK_GB
     gpu: Optional[Union[str, List[str]]] = _DEFAULT_GPU
-    next: List["TensorlakeCompute"] = []
+    next: Optional[Union["TensorlakeCompute", List["TensorlakeCompute"]]] = None
 
     def run(self, *args, **kwargs) -> Union[List[Any], Any]:
         pass
@@ -177,11 +177,6 @@ def tensorlake_function(
     gpu: Optional[Union[str, List[str]]] = _DEFAULT_GPU,
     next: Optional[Union["TensorlakeCompute", List["TensorlakeCompute"]]] = None,
 ):
-    if next is None:
-        next = []
-    elif not isinstance(next, list):
-        next = [next]
-
     def construct(fn):
         attrs = {
             "_created_by_decorator": True,
@@ -305,11 +300,7 @@ class TensorlakeFunctionWrapper:
         try:
             extracted_data = self.indexify_function._call_run(*args, **kwargs)
             if isinstance(extracted_data, RouteTo):
-                edges = (
-                    extracted_data.edges
-                    if isinstance(extracted_data.edges, list)
-                    else [extracted_data.edges]
-                )
+                edges = extracted_data.edges
                 extracted_data = extracted_data.value
         except Exception:
             return [], traceback.format_exc(), None
@@ -320,7 +311,14 @@ class TensorlakeFunctionWrapper:
             extracted_data if isinstance(extracted_data, list) else [extracted_data]
         )
 
-        return output, None, [route.name for route in edges]
+        if edges is None:
+            routes = None
+        elif isinstance(edges, list):
+            routes = [edge.name for edge in edges]
+        else:
+            routes = [edges.name]
+
+        return output, None, routes
 
     def invoke_fn_ser(
         self,
