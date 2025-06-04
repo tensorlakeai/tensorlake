@@ -3,7 +3,8 @@ from typing import List, Union
 
 from pydantic import BaseModel
 
-from tensorlake.functions_sdk.functions import tensorlake_function, tensorlake_router
+from tensorlake import RouteTo
+from tensorlake.functions_sdk.functions import tensorlake_function
 from tensorlake.functions_sdk.graph import Graph
 
 
@@ -75,7 +76,7 @@ class TestValidations(unittest.TestCase):
 
             g.add_edge(node1, node2)
 
-        msg = "Unable to add node of type `<class 'function'>`. Required, `TensorlakeCompute` or `TensorlakeRouter`"
+        msg = "Unable to add node of type `<class 'function'>`. Required, `TensorlakeCompute`"
         self.assertEqual(msg, str(cm.exception))
 
     def test_router_callables_are_in_added_nodes_union(self):
@@ -95,12 +96,12 @@ class TestValidations(unittest.TestCase):
         def node3(a: int) -> int:
             pass
 
-        @tensorlake_router()
-        def router(a: int) -> List[Union[node1, node3]]:
+        @tensorlake_function(next=[node1, node2])
+        def router(a: int) -> RouteTo[int, Union[node1, node3]]:
             pass
 
-        @tensorlake_router()
-        def router2(a: int) -> Union[node1, node3]:
+        @tensorlake_function(next=[node2])
+        def router2(a: int) -> RouteTo[int, node1]:
             pass
 
         with self.assertRaises(Exception) as cm:
@@ -110,8 +111,7 @@ class TestValidations(unittest.TestCase):
             )
 
             g.add_edge(node0, router)
-            g.route(router, [node1, node2])
-        msg = "Unable to find node3 in to_nodes ['node1', 'node2']"
+        msg = "Unable to find 'node3' in available next nodes: ['node1', 'node2']"
         self.assertEqual(msg, str(cm.exception))
 
         with self.assertRaises(Exception) as cm:
@@ -120,9 +120,8 @@ class TestValidations(unittest.TestCase):
                 start_node=node0,
             )
 
-            g.add_edge(node0, router)
-            g.route(router2, [node1, node2])
-        msg = "Unable to find node3 in to_nodes ['node1', 'node2']"
+            g.add_edge(node0, router2)
+        msg = "Unable to find 'node1' in available next nodes: ['node2']"
         self.assertEqual(msg, str(cm.exception))
 
     def test_route_validation_with_valid_return_type_signature(self):
@@ -134,35 +133,12 @@ class TestValidations(unittest.TestCase):
         def end() -> int:
             return 1
 
-        @tensorlake_router()
+        @tensorlake_function(next=[start, end])
         def route1(**kwargs: dict) -> Union[start, end]:
             return 10
 
         g = Graph(name="test", start_node=start)
         g.add_edge(start, route1)
-        g.route(route1, [start, end])
-
-    def test_route_validation_used_as_edge(self):
-        @tensorlake_function()
-        def start() -> int:
-            return 1
-
-        @tensorlake_function()
-        def end() -> int:
-            return 1
-
-        @tensorlake_router()
-        def route1(**kwargs: dict) -> Union[start, end]:
-            return 10
-
-        g = Graph(name="test", start_node=start)
-        g.add_edge(start, route1)
-        with self.assertRaises(Exception) as cm:
-            g.add_edge(route1, [end, end])
-        self.assertEqual(
-            "Cannot add edges from a router node, use route method instead",
-            str(cm.exception),
-        )
 
     def test_unreachable_graph_nodes(self):
         @tensorlake_function()

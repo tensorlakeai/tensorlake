@@ -80,10 +80,7 @@ message InvocationStateResponse {
 message FunctionOutput {
     repeated SerializedObject outputs = 1;
     optional string output_encoding = 2;
-}
-
-message RouterOutput {
-    repeated string edges = 1;
+    repeated string edges = 3;
 }
 
 message RunTaskRequest {
@@ -105,7 +102,7 @@ message Metrics {
 message RunTaskResponse {
     optional string task_id = 1;
     optional FunctionOutput function_output = 2;
-    optional RouterOutput router_output = 3;
+    reserved 3;  // Was: router_output
     optional string stdout = 4;
     optional string stderr = 5;
     optional bool is_reducer = 6;

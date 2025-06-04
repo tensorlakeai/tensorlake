@@ -127,22 +127,19 @@ class InvocationStateResponse(_message.Message):
     ) -> None: ...
 
 class FunctionOutput(_message.Message):
-    __slots__ = ("outputs", "output_encoding")
+    __slots__ = ("outputs", "output_encoding", "edges")
     OUTPUTS_FIELD_NUMBER: _ClassVar[int]
     OUTPUT_ENCODING_FIELD_NUMBER: _ClassVar[int]
+    EDGES_FIELD_NUMBER: _ClassVar[int]
     outputs: _containers.RepeatedCompositeFieldContainer[SerializedObject]
     output_encoding: str
+    edges: _containers.RepeatedScalarFieldContainer[str]
     def __init__(
         self,
         outputs: _Optional[_Iterable[_Union[SerializedObject, _Mapping]]] = ...,
         output_encoding: _Optional[str] = ...,
+        edges: _Optional[_Iterable[str]] = ...,
     ) -> None: ...
-
-class RouterOutput(_message.Message):
-    __slots__ = ("edges",)
-    EDGES_FIELD_NUMBER: _ClassVar[int]
-    edges: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, edges: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class RunTaskRequest(_message.Message):
     __slots__ = (
@@ -220,7 +217,6 @@ class RunTaskResponse(_message.Message):
     __slots__ = (
         "task_id",
         "function_output",
-        "router_output",
         "stdout",
         "stderr",
         "is_reducer",
@@ -229,7 +225,6 @@ class RunTaskResponse(_message.Message):
     )
     TASK_ID_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_OUTPUT_FIELD_NUMBER: _ClassVar[int]
-    ROUTER_OUTPUT_FIELD_NUMBER: _ClassVar[int]
     STDOUT_FIELD_NUMBER: _ClassVar[int]
     STDERR_FIELD_NUMBER: _ClassVar[int]
     IS_REDUCER_FIELD_NUMBER: _ClassVar[int]
@@ -237,7 +232,6 @@ class RunTaskResponse(_message.Message):
     METRICS_FIELD_NUMBER: _ClassVar[int]
     task_id: str
     function_output: FunctionOutput
-    router_output: RouterOutput
     stdout: str
     stderr: str
     is_reducer: bool
@@ -247,7 +241,6 @@ class RunTaskResponse(_message.Message):
         self,
         task_id: _Optional[str] = ...,
         function_output: _Optional[_Union[FunctionOutput, _Mapping]] = ...,
-        router_output: _Optional[_Union[RouterOutput, _Mapping]] = ...,
         stdout: _Optional[str] = ...,
         stderr: _Optional[str] = ...,
         is_reducer: bool = ...,
