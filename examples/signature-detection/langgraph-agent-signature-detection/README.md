@@ -1,17 +1,20 @@
 # Signature Detection with a LangGraph Agent
-This is an example of a comprehensive document signature analysis system that combines Tensorlake's signature detection capability with LangGraph's conversational agent framework. 
+This is an example of a comprehensive document signature analysis system that combines Tensorlake's Contextual Signature Detection with LangGraph's conversational agent framework. 
 The system provides automated signature detection and intelligent querying capabilities for document analysis workflows.
 
 ## Key Features
-- Automated Signature Detection: Processes PDF/DOCX documents using Tensorlake's signature detection API
+- Automated Signature Detection: Processes PDF/DOCX documents using [Tensorlake's Contextual Signature Detection](http://localhost:3000/document-ingestion/parsing#signature-detection)
 - Conversational AI Interface: LangGraph-powered agent for natural language queries about signature analysis
 - Persistent Data Storage: Saves analysis results for future reference and querying
 
 ## Flow
-- Standalone Processing: Document upload → Tensorlake signature detection using Tensorlake's DocumentAI API → JSON storage
+- Document Processing: Document upload → Tensorlake Signature Detection → JSON storage
 - Conversational Agent: LangGraph agent with tool access to saved analysis data
+- [Optional] UI-based Agent: Streamlit application for a more user-friendly experience
 
-### Example
+[Insert Diagram Here]
+
+## Example Flow
 ```bash
 Document Signature Analysis System
 =============================================
@@ -20,7 +23,7 @@ Document Signature Analysis System
 3. Exit
 
 Select option (1-3): 1
-Enter document file path: real-estate-purchase-all-signed.pdf
+Enter document file path: documents/real-estate-purchase-all-signed.pdf
 Document Signature Detection
 ==================================================
 
@@ -64,8 +67,15 @@ Goodbye! 👋
 ```
 
 ## Using this example
+### 0. Prerequisites
+- Python 3.10+
+- An [OpenAI API key](https://platform.openai.com/api-keys)
+- A [Tensorlake API key](https://docs.tensorlake.ai/accounts-and-access/api-keys)
+- Some [sample real estate documents](https://drive.google.com/drive/folders/1lYTE8HIwvVNOZ6TNJDo-SLS0F12dybej?usp=sharing)
+- [Optional] A [virtual Python environment](https://docs.python.org/3/library/venv.html) to keep dependencies isolated
+
 ### 1. Set Environment Variables
-1. Get your [Tensorlake API Key](https://docs.tensorlake.ai/accounts-and-access/api-keys) and OpenAI API Key.
+1. Get your [Tensorlake API key](https://docs.tensorlake.ai/accounts-and-access/api-keys) and [OpenAI API key](https://platform.openai.com/api-keys).
 2. Rename `.env.example` to `.env`
 3. Fill in your API Keys in the `.env` file:
     ```bash
@@ -77,19 +87,19 @@ Goodbye! 👋
 Set up a virtual environment:
 On Mac:
 ```bash
-python -m venv tlake
-source tlake/bin/activate
+python -m venv venv
+source venv/bin/activate
 ```
 
 On Windows:
 ```bash
-python -m venv tlake
-tlake\Scripts\activate
+python -m venv venv
+venv\Scripts\activate
 ```
 
 And when you're done:
 ```bash
-deactivate
+deactivate venv
 ```
 works on both Mac and Windows
 
@@ -109,12 +119,18 @@ tensorlake>=0.1.0
 python-dotenv>=1.0.0
 ```
 
-*Note:* We recommend you setup a virtual environment and you should have Python>3.8 installed
+*Note:* We recommend you setup a virtual environment and you should have Python>3.10 installed
 
-## Running the Streamlit App
-You can also interact with the signature detection system via a beautiful web UI built using Streamlit.
+### 4. Run the example in the CLI
+Running the example is fairly straightforward, simply run:
+```bash
+python signature_detection_langgraph_agent.py
+```
 
-### 🔧 Start the app:
+Then, you can follow the instructions in the prompt and refer to the above [Example Flow](#example-flow).
+
+### 5. Runn the example in a Streamlit application
+You can also interact with the Signature Detection System via a beautiful web UI built using Streamlit. Simply run:
 ```bash
 streamlit run streamlit_app.py
 ```

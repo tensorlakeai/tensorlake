@@ -20,7 +20,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 
 # Page configuration
 st.set_page_config(
-    page_title="SignatureAI - Document Signature Detection",
+    page_title="Contextual Signature Detection",
     page_icon="✍️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -99,14 +99,14 @@ def display_sidebar():
         st.markdown("""
         <div class="sidebar-info">
             <h2 style="margin: 0; color: white;">✍️ SignatureAI</h2>
-            <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">Intelligent Document Signature Detection by Tensorlake</p>
+            <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">Intelligent, Contextual Signature Detection by Tensorlake</p>
         </div>
         """, unsafe_allow_html=True)
 
         # App features
         st.markdown("### 🚀 Features")
         features = [
-            "Upload documents and do automatic signature detection",
+            "Upload documents and automatically detect signatures",
             "Detailed Analysis with Page-by-page signature mapping",
             "Ask questions about your signed data analysis",
             "Signature statistics and location data"
@@ -121,8 +121,8 @@ def display_sidebar():
         st.markdown("### 📋 How It Works")
         st.markdown("""
         1. **Upload** your document
-        2. **Process** with TensorLake AI
-        3. **Review** signature analysis
+        2. **Process** with TensorLake
+        3. **Contextualize** signatures
         4. **Chat** to get insights
         """)
 
@@ -157,7 +157,7 @@ def process_document_tab():
     st.markdown("""
     <h2 class="main-header">📄 Document Upload & Processing</h2>
     <div style="text-align: center; color: #888; font-size: 0.9rem; margin-bottom: 1rem;">
-        Built using Tensorlake with 🩵
+        Built by Tensorlake with 💚
     </div>
     """, unsafe_allow_html=True)
 
