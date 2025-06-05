@@ -46,9 +46,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global state for tracking processed files
-_last_processed_file_name: Optional[str] = None
-
 
 def detect_signatures_in_document(file_path: str) -> Dict[str, Any]:
     """
@@ -58,7 +55,6 @@ def detect_signatures_in_document(file_path: str) -> Dict[str, Any]:
     Returns:
         Dictionary containing signature analysis results
     """
-    global _last_processed_file_name
     # Ensure data directory to save signature analysis data exists
     Path(SIGNATURE_DATA_DIR).mkdir(exist_ok=True)
 
@@ -66,7 +62,6 @@ def detect_signatures_in_document(file_path: str) -> Dict[str, Any]:
         return {"success": False, "error": f"File not found: {file_path}"}
 
     file_name = Path(file_path).name
-    _last_processed_file_name = file_name
 
     try:
         doc_ai = DocumentAI(api_key=TENSORLAKE_API_KEY)
@@ -135,49 +130,39 @@ def load_signature_analysis_data() -> Dict[str, Any]:
     """Load saved signature analysis data for conversational queries."""
     Path(SIGNATURE_DATA_DIR).mkdir(exist_ok=True)
 
-    global _last_processed_file_name
-    file_to_load = _last_processed_file_name
-
-    if not file_to_load:
-        # Find most recent analysis file
-        try:
-            analysis_files = list(Path(SIGNATURE_DATA_DIR).glob("*_signature_analysis.json"))
-            if not analysis_files:
-                return {"error": "No signature analysis files found in the directory."}
-
-            # Get the most recent file by modification time
-            latest_file = max(analysis_files, key=lambda x: x.stat().st_mtime)
-
-            with open(latest_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            return {
-                "success": True,
-                "data": data,
-                "file_name": data.get("file_name", "Unknown"),
-                "note": f"Loaded most recent analysis: {latest_file.name}"
-            }
-
-        except Exception as e:
-            logger.error(f"Failed to find analysis files: {str(e)}")
-            return {"error": f"Failed to find analysis files: {str(e)}"}
-
-    # Load specific file
-    json_path = Path(SIGNATURE_DATA_DIR) / file_to_load
-
-    if not json_path.exists():
-        return {"error": f"No signature analysis data found for {file_to_load}"}
     try:
-        with open(json_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        analysis_files = list(Path(SIGNATURE_DATA_DIR).glob("*_signature_analysis.json"))
+        if not analysis_files:
+            return {"error": "No signature analysis files found in the directory."}
+
+        all_data = []
+
+        for file_path in analysis_files:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    all_data.append(data)
+
+            except Exception as e:
+                logger.error(f"Failed to load {file_path}: {str(e)}")
+                continue
+
+        if not all_data:
+            return {"error": "No valid signature analysis files could be loaded."}
+
+        # Calculate total document files
+        total_files = len(all_data)
+
         return {
             "success": True,
-            "data": data,
-            "file_name": file_to_load
+            "total_files_analyzed": total_files,
+            "detailed_data": all_data,
+            "note": f"Loaded analysis data from {total_files} document(s)"
         }
+
     except Exception as e:
-        logger.error(f"Failed to load data for {file_to_load}: {str(e)}")
-        return {"error": f"Failed to load data: {str(e)}"}
+        logger.error(f"Failed to load analysis files from the directory: {str(e)}")
+        return {"error": f"Failed to load analysis files from the directory: {str(e)}"}
 
 
 class ConversationState(TypedDict):
@@ -283,13 +268,7 @@ If the tool returns an error (no data found), explain that no analysis data is a
         return "No response generated."
 
     def chat(self, conversation_history: Optional[List] = None) -> None:
-        """
-        Start an interactive chat session.
-        """
-        print("Signature Analysis Conversation")
-        print("=" * 50)
-        print("Ask me questions about your analyzed documents!")
-        print("Type 'quit' to exit.\n")
+        """Start an interactive chat session."""
 
         state = {"messages": conversation_history or []}
 
@@ -323,63 +302,3 @@ If the tool returns an error (no data found), explain that no analysis data is a
             except Exception as e:
                 logger.error(f"Error in conversation: {str(e)}")
                 print(f"Error: {e}\n")
-
-
-def main() -> None:
-    """Main CLI interface for the signature analysis system"""
-    print("Document Signature Analysis System")
-    print("=" * 45)
-    print("1. Process document for signature detection")
-    print("2. Chat about analyzed documents")
-    print("3. Exit")
-    print()
-
-    while True:
-        try:
-            choice = input("Select option (1-3): ").strip()
-
-            if choice == "1":
-                file_path = input("Enter document file path: ").strip()
-                if file_path:
-                    print("Processing document...")
-                    result = detect_signatures_in_document(file_path)
-
-                    if result.get("success"):
-                        print("\nSUCCESS!")
-                        print(f"Analysis: {result['summary']}")
-                        print(f"Data saved to: {result['data_saved_to']}")
-                        print("\nYou can now use option 2 to ask questions about this document!")
-                    else:
-                        print(f"\nFAILED: {result.get('error', 'Unknown error')}")
-                print()
-
-            elif choice == "2":
-                # Check for existing analysis files
-                Path(SIGNATURE_DATA_DIR).mkdir(exist_ok=True)
-                analysis_files = list(Path(SIGNATURE_DATA_DIR).glob("*_signature_analysis.json"))
-
-                if not analysis_files:
-                    print("No signature analysis files found!")
-                    print("Please process some documents first using option 1.")
-                else:
-                    print(f"Found {len(analysis_files)} analyzed document(s)")
-                    agent = SignatureConversationAgent()
-                    agent.chat()
-
-            elif choice == "3":
-                print("Goodbye! 👋")
-                break
-            else:
-                print("Invalid choice. Please select 1, 2, or 3.")
-
-        except KeyboardInterrupt:
-            print("\nGoodbye! 👋")
-            break
-        except Exception as e:
-            logger.error(f"Error in main menu: {str(e)}")
-            print(f"Error: {e}")
-
-
-if __name__ == "__main__":
-    # Run and test the flow
-    main()
