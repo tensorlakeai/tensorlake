@@ -2,7 +2,7 @@ import os
 import time
 import json
 import logging
-from typing import Dict, Any, Optional, TypedDict, Annotated, List
+from typing import Dict, Any, TypedDict, Annotated, List
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -34,8 +34,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global state for tracking processed files
-_last_processed_file_name: Optional[str] = None
 
 def detect_signatures_in_document(file_path: str) -> Dict[str, Any]:
     """
@@ -45,7 +43,6 @@ def detect_signatures_in_document(file_path: str) -> Dict[str, Any]:
     Returns:
         Dictionary containing signature analysis results
     """
-    global _last_processed_file_name
     # Ensure data directory to save signature analysis data exists
     Path(SIGNATURE_DATA_DIR).mkdir(exist_ok=True)
 
@@ -53,7 +50,6 @@ def detect_signatures_in_document(file_path: str) -> Dict[str, Any]:
         return {"success": False, "error": f"File not found: {file_path}"}
 
     file_name = Path(file_path).name
-    _last_processed_file_name = file_name
 
     try:
         doc_ai = DocumentAI(api_key=TENSORLAKE_API_KEY)
@@ -122,54 +118,45 @@ def load_signature_analysis_data() -> Dict[str, Any]:
     """Load saved signature analysis data for conversational queries."""
     Path(SIGNATURE_DATA_DIR).mkdir(exist_ok=True)
 
-    global _last_processed_file_name
-    file_to_load = _last_processed_file_name
-
-    if not file_to_load:
-        # Find most recent analysis file
-        try:
-            analysis_files = list(Path(SIGNATURE_DATA_DIR).glob("*_signature_analysis.json"))
-            if not analysis_files:
-                return {"error": "No signature analysis files found in the directory."}
-
-            # Get the most recent file by modification time
-            latest_file = max(analysis_files, key=lambda x: x.stat().st_mtime)
-
-            with open(latest_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            return {
-                "success": True,
-                "data": data,
-                "file_name": data.get("file_name", "Unknown"),
-                "note": f"Loaded most recent analysis: {latest_file.name}"
-            }
-
-        except Exception as e:
-            logger.error(f"Failed to find analysis files: {str(e)}")
-            return {"error": f"Failed to find analysis files: {str(e)}"}
-
-    # Load specific file
-    json_path = Path(SIGNATURE_DATA_DIR) / file_to_load
-
-    if not json_path.exists():
-        return {"error": f"No signature analysis data found for {file_to_load}"}
     try:
-        with open(json_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        analysis_files = list(Path(SIGNATURE_DATA_DIR).glob("*_signature_analysis.json"))
+        if not analysis_files:
+            return {"error": "No signature analysis files found in the directory."}
+
+        all_data = []
+
+        for file_path in analysis_files:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    all_data.append(data)
+
+            except Exception as e:
+                logger.error(f"Failed to load {file_path}: {str(e)}")
+                continue
+
+        if not all_data:
+            return {"error": "No valid signature analysis files could be loaded."}
+
+        # Calculate total document files
+        total_files = len(all_data)
+
         return {
             "success": True,
-            "data": data,
-            "file_name": file_to_load
+            "total_files_analyzed": total_files,
+            "detailed_data": all_data,
+            "note": f"Loaded analysis data from {total_files} document(s)"
         }
+
     except Exception as e:
-        logger.error(f"Failed to load data for {file_to_load}: {str(e)}")
-        return {"error": f"Failed to load data: {str(e)}"}
+        logger.error(f"Failed to load analysis files from the directory: {str(e)}")
+        return {"error": f"Failed to load analysis files from the directory: {str(e)}"}
 
 
 class ConversationState(TypedDict):
     """State schema for the signature conversation agent"""
     messages: Annotated[List, add_messages]
+
 
 class SignatureConversationAgent:
     """
@@ -267,45 +254,3 @@ If the tool returns an error (no data found), explain that no analysis data is a
                 return message.content
 
         return "No response generated."
-
-    def chat(self, conversation_history: Optional[List] = None) -> None:
-        """
-        Start an interactive chat session.
-        """
-        print("Signature Analysis Conversation")
-        print("=" * 50)
-        print("Ask me questions about your analyzed documents!")
-        print("Type 'quit' to exit.\n")
-
-        state = {"messages": conversation_history or []}
-
-        while True:
-            try:
-                user_input = input("You: ").strip()
-
-                if user_input.lower() in ['quit', 'exit', 'q']:
-                    print("Goodbye! 👋")
-                    break
-
-                if not user_input:
-                    continue
-
-                # Add user message and process
-                state["messages"].append(HumanMessage(content=user_input))
-                final_state = self.graph.invoke(state)
-
-                # Display response
-                for message in reversed(final_state["messages"]):
-                    if isinstance(message, AIMessage):
-                        print(f"Assistant: {message.content}\n")
-                        break
-
-                # Update state
-                state = final_state
-
-            except KeyboardInterrupt:
-                print("\nGoodbye! 👋")
-                break
-            except Exception as e:
-                logger.error(f"Error in conversation: {str(e)}")
-                print(f"Error: {e}\n")

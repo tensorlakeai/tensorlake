@@ -2,13 +2,9 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List
-import os
-from dotenv import load_dotenv
 
-load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-TENSORLAKE_API_KEY = os.getenv("TENSORLAKE_API_KEY")
 SIGNATURE_DATA_DIR = "signature_analysis_data"
+
 
 def extract_signature_data(result, file_name: str, file_path: str) -> Dict[str, Any]:
     """Extract and structure signature data from TensorLake results"""
@@ -44,6 +40,7 @@ def extract_signature_data(result, file_name: str, file_path: str) -> Dict[str, 
         "pages_with_signatures": list(structured_data.keys()),
         "signatures_per_page": structured_data
     }
+
 
 def extract_page_content(page_fragments: List) -> str:
     """Extract readable content from page fragments"""

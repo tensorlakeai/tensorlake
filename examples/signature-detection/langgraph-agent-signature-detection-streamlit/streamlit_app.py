@@ -1,5 +1,5 @@
 """
-Streamlit UI for Document Signature Detection System
+Streamlit UI for Contextual Signature Detection System
 """
 
 import streamlit as st
@@ -331,7 +331,6 @@ def main():
 
     with tab2:
         chat_tab()
-
 
 
 if __name__ == "__main__":
