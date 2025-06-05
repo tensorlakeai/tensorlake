@@ -10,9 +10,6 @@ The system provides automated signature detection and intelligent querying capab
 ## Flow
 - Document Processing: Document upload → Tensorlake Signature Detection → JSON storage
 - Conversational Agent: LangGraph agent with tool access to saved analysis data
-- [Optional] UI-based Agent: Streamlit application for a more user-friendly experience
-
-[Insert Diagram Here]
 
 ## Example Flow
 ```bash
@@ -128,14 +125,3 @@ python signature_detection_langgraph_agent.py
 ```
 
 Then, you can follow the instructions in the prompt and refer to the above [Example Flow](#example-flow).
-
-### 5. Runn the example in a Streamlit application
-You can also interact with the Signature Detection System via a beautiful web UI built using Streamlit. Simply run:
-```bash
-streamlit run streamlit_app.py
-```
-
-This will launch a browser interface that allows you to:
- - Upload and process documents using Tensorlake AI
- - View signature analysis results in a structured format
- - Chat with an intelligent assistant (LangGraph agent) about the signatures and document content
