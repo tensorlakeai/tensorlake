@@ -10,9 +10,12 @@ import tempfile
 
 # Import your existing modules
 from helper_functions import (
+    SIGNATURE_DATA_DIR
+)
+
+from langgraph_agent import (
     detect_signatures_in_document,
     SignatureConversationAgent,
-    SIGNATURE_DATA_DIR
 )
 
 # Import LangChain message types for state management
