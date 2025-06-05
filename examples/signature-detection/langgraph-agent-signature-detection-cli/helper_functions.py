@@ -1,9 +1,10 @@
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Any, Dict, List
 
 SIGNATURE_DATA_DIR = "signature_analysis_data"
+
 
 def extract_signature_data(result, file_name: str, file_path: str) -> Dict[str, Any]:
     """Extract and structure signature data from TensorLake results"""
@@ -14,9 +15,12 @@ def extract_signature_data(result, file_name: str, file_path: str) -> Dict[str, 
     for page in pages:
         # Find signature fragments
         signature_fragments = [
-            frag for frag in page.page_fragments
-            if (frag.fragment_type.name.lower() == "signature" and
-                frag.content.content.strip().lower() != "no signature detected")
+            frag
+            for frag in page.page_fragments
+            if (
+                frag.fragment_type.name.lower() == "signature"
+                and frag.content.content.strip().lower() != "no signature detected"
+            )
         ]
 
         if signature_fragments:
@@ -37,8 +41,9 @@ def extract_signature_data(result, file_name: str, file_path: str) -> Dict[str, 
         "total_signatures": total_signatures,
         "total_pages": len(pages),
         "pages_with_signatures": list(structured_data.keys()),
-        "signatures_per_page": structured_data
+        "signatures_per_page": structured_data,
     }
+
 
 def extract_page_content(page_fragments: List) -> str:
     """Extract readable content from page fragments"""
@@ -51,7 +56,10 @@ def extract_page_content(page_fragments: List) -> str:
             content_parts.append(fragment.content.content.strip())
         elif fragment_type == "key_value_region":
             # Prefer markdown for tables if available
-            if hasattr(fragment.content, "markdown") and fragment.content.markdown.strip():
+            if (
+                hasattr(fragment.content, "markdown")
+                and fragment.content.markdown.strip()
+            ):
                 content_parts.append(fragment.content.markdown.strip())
             elif hasattr(fragment.content, "content"):
                 content_parts.append(fragment.content.content.strip())
@@ -61,11 +69,13 @@ def extract_page_content(page_fragments: List) -> str:
 
 def save_analysis_data(signature_data: Dict[str, Any], file_name: str) -> str:
     """Save signature analysis data to JSON file"""
-    safe_filename = "".join(c for c in file_name if c.isalnum() or c in (' ', '-', '_')).strip()
+    safe_filename = "".join(
+        c for c in file_name if c.isalnum() or c in (" ", "-", "_")
+    ).strip()
     json_filename = f"{safe_filename}_signature_analysis.json"
     json_path = Path(SIGNATURE_DATA_DIR) / json_filename
 
-    with open(json_path, 'w', encoding='utf-8') as f:
+    with open(json_path, "w", encoding="utf-8") as f:
         json.dump(signature_data, f, indent=2, ensure_ascii=False)
 
     print(f"Analysis data saved to: {json_path}")

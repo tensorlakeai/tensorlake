@@ -1,24 +1,32 @@
-import os
-import time
 import json
 import logging
-from typing import Dict, Any, TypedDict, Annotated, List
+import os
+import time
 from pathlib import Path
-from dotenv import load_dotenv
+from typing import Annotated, Any, Dict, List, TypedDict
 
-# LangGraph and LangChain imports
-from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import ToolNode
-from langgraph.graph.message import add_messages
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from dotenv import load_dotenv
+from helper_functions import (
+    SIGNATURE_DATA_DIR,
+    extract_signature_data,
+    save_analysis_data,
+)
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
-# TensorLake imports
-from tensorlake.documentai import DocumentAI, ParsingOptions, ExtractionOptions
-from tensorlake.documentai.parse import ChunkingStrategy, TableParsingStrategy, TableOutputMode
+# LangGraph and LangChain imports
+from langgraph.graph import END, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
 
-from helper_functions import extract_signature_data, save_analysis_data, SIGNATURE_DATA_DIR
+# TensorLake imports
+from tensorlake.documentai import DocumentAI, ExtractionOptions, ParsingOptions
+from tensorlake.documentai.parse import (
+    ChunkingStrategy,
+    TableOutputMode,
+    TableParsingStrategy,
+)
 
 # Load environment variables
 load_dotenv()
@@ -29,8 +37,7 @@ TENSORLAKE_API_KEY = os.getenv("TENSORLAKE_API_KEY")
 
 # Logging configuration
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -74,19 +81,29 @@ def detect_signatures_in_document(file_path: str) -> Dict[str, Any]:
         start_time = time.time()
         max_wait_time = 300  # 5 minutes max
         while time.time() - start_time < max_wait_time:
-            result = doc_ai.get_job(job_id)  # Signature detection result after parsing the document
+            result = doc_ai.get_job(
+                job_id
+            )  # Signature detection result after parsing the document
             elapsed = time.time() - start_time
 
             if result.status in ["pending", "processing"]:
                 logger.info(f"Job status: {result.status} ({elapsed:.0f}s elapsed)")
                 time.sleep(5)
             elif result.status == "successful":
-                logger.info(f"Processing completed successfully in {elapsed:.0f} seconds")
+                logger.info(
+                    f"Processing completed successfully in {elapsed:.0f} seconds"
+                )
                 break
             else:
-                return {"success": False, "error": f"Job failed with status: {result.status}"}
+                return {
+                    "success": False,
+                    "error": f"Job failed with status: {result.status}",
+                }
         else:
-            return {"success": False, "error": f"Processing timeout after {max_wait_time} seconds"}
+            return {
+                "success": False,
+                "error": f"Processing timeout after {max_wait_time} seconds",
+            }
 
         # Extract signature data from results
         signature_data = extract_signature_data(result, file_name, file_path)
@@ -102,15 +119,12 @@ def detect_signatures_in_document(file_path: str) -> Dict[str, Any]:
             "pages_with_signatures": signature_data["pages_with_signatures"],
             "signature_data": signature_data["signatures_per_page"],
             "summary": f"Found {signature_data['total_signatures']} signatures across {len(signature_data['pages_with_signatures'])} pages in {file_name}",
-            "data_saved_to": json_path
+            "data_saved_to": json_path,
         }
 
     except Exception as e:
         logger.error(f"Processing failed for {file_path}: {str(e)}")
-        return {
-            "success": False,
-            "error": f"Processing failed: {str(e)}"
-        }
+        return {"success": False, "error": f"Processing failed: {str(e)}"}
 
 
 @tool
@@ -119,7 +133,9 @@ def load_signature_analysis_data() -> Dict[str, Any]:
     Path(SIGNATURE_DATA_DIR).mkdir(exist_ok=True)
 
     try:
-        analysis_files = list(Path(SIGNATURE_DATA_DIR).glob("*_signature_analysis.json"))
+        analysis_files = list(
+            Path(SIGNATURE_DATA_DIR).glob("*_signature_analysis.json")
+        )
         if not analysis_files:
             return {"error": "No signature analysis files found in the directory."}
 
@@ -127,7 +143,7 @@ def load_signature_analysis_data() -> Dict[str, Any]:
 
         for file_path in analysis_files:
             try:
-                with open(file_path, 'r', encoding='utf-8') as f:
+                with open(file_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     all_data.append(data)
 
@@ -145,7 +161,7 @@ def load_signature_analysis_data() -> Dict[str, Any]:
             "success": True,
             "total_files_analyzed": total_files,
             "detailed_data": all_data,
-            "note": f"Loaded analysis data from {total_files} document(s)"
+            "note": f"Loaded analysis data from {total_files} document(s)",
         }
 
     except Exception as e:
@@ -155,6 +171,7 @@ def load_signature_analysis_data() -> Dict[str, Any]:
 
 class ConversationState(TypedDict):
     """State schema for the signature conversation agent"""
+
     messages: Annotated[List, add_messages]
 
 
@@ -215,12 +232,7 @@ If the tool returns an error (no data found), explain that no analysis data is a
 
         # Add edges
         workflow.add_conditional_edges(
-            "agent",
-            self._should_continue,
-            {
-                "continue": "tools",
-                "end": END
-            }
+            "agent", self._should_continue, {"continue": "tools", "end": END}
         )
         workflow.add_edge("tools", "agent")
         return workflow.compile()
@@ -237,7 +249,7 @@ If the tool returns an error (no data found), explain that no analysis data is a
     def _should_continue(self, state: ConversationState) -> str:
         """Determine whether to continue to tools or end the conversation"""
         last_message = state["messages"][-1]
-        if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+        if hasattr(last_message, "tool_calls") and last_message.tool_calls:
             return "continue"
         return "end"
 

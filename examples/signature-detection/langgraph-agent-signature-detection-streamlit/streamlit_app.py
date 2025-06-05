@@ -2,35 +2,34 @@
 Streamlit UI for Contextual Signature Detection System
 """
 
-import streamlit as st
-import os
 import json
-from pathlib import Path
+import os
 import tempfile
+from pathlib import Path
+
+import streamlit as st
 
 # Import your existing modules
-from helper_functions import (
-    SIGNATURE_DATA_DIR
-)
-
-from langgraph_agent import (
-    detect_signatures_in_document,
-    SignatureConversationAgent,
-)
+from helper_functions import SIGNATURE_DATA_DIR
 
 # Import LangChain message types for state management
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
+from langgraph_agent import (
+    SignatureConversationAgent,
+    detect_signatures_in_document,
+)
 
 # Page configuration
 st.set_page_config(
     page_title="Contextual Signature Detection",
     page_icon="✍️",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 # Custom CSS for better styling
-st.markdown("""
+st.markdown(
+    """
 <style>
     .main-header {
         font-size: 3rem;
@@ -68,20 +67,22 @@ st.markdown("""
         color: #F9F9F6;
     }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
 def initialize_session_state():
     """Initialize Streamlit session state variables"""
-    if 'chat_history' not in st.session_state:
+    if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
-    if 'analysis_results' not in st.session_state:
+    if "analysis_results" not in st.session_state:
         st.session_state.analysis_results = None
-    if 'processed_files' not in st.session_state:
+    if "processed_files" not in st.session_state:
         st.session_state.processed_files = []
-    if 'agent' not in st.session_state:
+    if "agent" not in st.session_state:
         st.session_state.agent = None
-    if 'langgraph_state' not in st.session_state:
+    if "langgraph_state" not in st.session_state:
         st.session_state.langgraph_state = {"messages": []}
 
 
@@ -89,24 +90,28 @@ def load_processed_files():
     """Load list of previously processed files"""
     try:
         Path(SIGNATURE_DATA_DIR).mkdir(exist_ok=True)
-        analysis_files = list(Path(SIGNATURE_DATA_DIR).glob("*_signature_analysis.json"))
+        analysis_files = list(
+            Path(SIGNATURE_DATA_DIR).glob("*_signature_analysis.json")
+        )
 
         files_info = []
         for file_path in analysis_files:
             try:
-                with open(file_path, 'r', encoding='utf-8') as f:
+                with open(file_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                files_info.append({
-                    'filename': data.get('file_name', 'Unknown'),
-                    'processed_date': data.get('processed_timestamp', 'Unknown'),
-                    'total_signatures': data.get('total_signatures', 0),
-                    'total_pages': data.get('total_pages', 0),
-                    'json_path': str(file_path)
-                })
+                files_info.append(
+                    {
+                        "filename": data.get("file_name", "Unknown"),
+                        "processed_date": data.get("processed_timestamp", "Unknown"),
+                        "total_signatures": data.get("total_signatures", 0),
+                        "total_pages": data.get("total_pages", 0),
+                        "json_path": str(file_path),
+                    }
+                )
             except Exception as e:
                 continue
 
-        return sorted(files_info, key=lambda x: x['processed_date'], reverse=True)
+        return sorted(files_info, key=lambda x: x["processed_date"], reverse=True)
     except Exception as e:
         return []
 
@@ -115,12 +120,15 @@ def display_sidebar():
     """Display the sidebar with app information and processed files"""
     with st.sidebar:
         # App header
-        st.markdown("""
+        st.markdown(
+            """
         <div class="sidebar-info">
             <h2 style="margin: 0; color: white;">✍️ SignatureAI</h2>
             <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">Intelligent, Contextual Signature Detection by Tensorlake</p>
         </div>
-        """, unsafe_allow_html=True)
+        """,
+            unsafe_allow_html=True,
+        )
 
         # App features
         st.markdown("### 🚀 Features")
@@ -128,7 +136,7 @@ def display_sidebar():
             "Upload documents and automatically detect signatures",
             "Detailed Analysis with Page-by-page signature mapping",
             "Ask questions about your signed data analysis",
-            "Signature statistics and location data"
+            "Signature statistics and location data",
         ]
 
         for feature in features:
@@ -138,12 +146,14 @@ def display_sidebar():
 
         # How it works
         st.markdown("### 📋 How It Works")
-        st.markdown("""
+        st.markdown(
+            """
         1. **Upload** your document
         2. **Process** with TensorLake
         3. **Contextualize** signatures
         4. **Chat** to get insights
-        """)
+        """
+        )
 
         st.markdown("---")
 
@@ -164,33 +174,41 @@ def display_sidebar():
 
         # Support info
         st.markdown("### 🔧 Support")
-        st.markdown("""
+        st.markdown(
+            """
         - **Supported formats:** PDF, DOCX, PNG, JPG
         - **Max file size:** 10MB
         - **Processing time:** 1-5 minutes
-        """)
+        """
+        )
 
 
 def process_document_tab():
     """Tab for document processing"""
-    st.markdown("""
+    st.markdown(
+        """
     <h2 class="main-header">📄 Document Upload & Processing</h2>
     <div style="text-align: center; color: #888; font-size: 0.9rem; margin-bottom: 1rem;">
         Built by Tensorlake with 💚
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
     # File upload section
-    st.markdown("""
+    st.markdown(
+        """
     <div> <h3>🔤 Upload Your Document</h3>
         <p>Upload any document containing signatures. Our AI will automatically detect and analyze all signatures found in your document.</p>
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
     uploaded_file = st.file_uploader(
         "Choose a document file",
-        type=['pdf', 'docx', 'doc', 'png', 'jpg', 'jpeg'],
-        help="Supported formats: PDF, Word documents, and image files"
+        type=["pdf", "docx", "doc", "png", "jpg", "jpeg"],
+        help="Supported formats: PDF, Word documents, and image files",
     )
 
     if uploaded_file is not None:
@@ -207,7 +225,9 @@ def process_document_tab():
         if st.button("🚀 Process Document", type="primary", use_container_width=True):
             with st.spinner("🔄 Processing document... This may take a few minutes."):
                 # Save uploaded file temporarily
-                with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{uploaded_file.name}") as tmp_file:
+                with tempfile.NamedTemporaryFile(
+                    delete=False, suffix=f"_{uploaded_file.name}"
+                ) as tmp_file:
                     tmp_file.write(uploaded_file.getvalue())
                     temp_path = tmp_file.name
 
@@ -218,16 +238,24 @@ def process_document_tab():
                         st.session_state.analysis_results = result
 
                         # Success message
-                        st.markdown(f"""<h4>✅ Processing Completed Successfully!</h4>
-                                        <p><strong>Summary:</strong> {result['summary']}</p>""", unsafe_allow_html=True)
+                        st.markdown(
+                            f"""<h4>✅ Processing Completed Successfully!</h4>
+                                        <p><strong>Summary:</strong> {result['summary']}</p>""",
+                            unsafe_allow_html=True,
+                        )
 
                         # Display full result as JSON
                         st.markdown("### 📊 Analysis Results")
                         st.json(result)
-                        st.markdown("""<strong>🎉 Success!</strong> You can now use the Chat tab to ask questions about this document.""", unsafe_allow_html=True)
+                        st.markdown(
+                            """<strong>🎉 Success!</strong> You can now use the Chat tab to ask questions about this document.""",
+                            unsafe_allow_html=True,
+                        )
 
                     else:
-                        st.error(f"❌ Processing failed: {result.get('error', 'Unknown error')}")
+                        st.error(
+                            f"❌ Processing failed: {result.get('error', 'Unknown error')}"
+                        )
 
                 except Exception as e:
                     st.error(f"❌ An error occurred: {str(e)}")
@@ -242,20 +270,26 @@ def process_document_tab():
 
 def chat_tab():
     """Tab for conversational analysis"""
-    st.markdown("""
+    st.markdown(
+        """
         <h2 class="main-header">💬 Chat with Your Documents</h2>
         <div style="text-align: center; color: #888; font-size: 0.9rem; margin-bottom: 1rem;">
             Built using Tensorlake with 🩵
         </div>
-        """, unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True,
+    )
 
     # Check if we have processed documents
     processed_files = load_processed_files()
 
     if not processed_files:
-        st.markdown("""<h4>📄 No Documents Available</h4>
+        st.markdown(
+            """<h4>📄 No Documents Available</h4>
         <p>Please process a document first using the "Document Processing" tab before starting a conversation.</p>
-        """, unsafe_allow_html=True)
+        """,
+            unsafe_allow_html=True,
+        )
         return
 
     # Initialize chat agent if not already done
@@ -264,22 +298,27 @@ def chat_tab():
             st.session_state.agent = SignatureConversationAgent()
 
     # Chat interface
-    st.markdown("""
+    st.markdown(
+        """
     <div> <h3>🤖 AI Assistant Ready</h3>
         <p>Ask me anything about your processed documents. I can help you understand signature analysis results, identify signers, and provide insights about your documents.</p>
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
     # Example questions
     with st.expander("💡 Example Questions"):
-        st.markdown("""
+        st.markdown(
+            """
         - How many signatures were found in the document?
         - Which pages contain signatures?
         - What type of document is this?
         - Who are the parties involved?
         - What does the content say around the signatures?
         - Can you summarize the document content?
-        """)
+        """
+        )
 
     # Display chat history first
     for message in st.session_state.chat_history:
@@ -300,12 +339,16 @@ def chat_tab():
 
         # Add user message to both display history and LangGraph state
         st.session_state.chat_history.append({"role": "user", "content": user_question})
-        st.session_state.langgraph_state["messages"].append(HumanMessage(content=user_question))
+        st.session_state.langgraph_state["messages"].append(
+            HumanMessage(content=user_question)
+        )
 
         # Get AI response
         with st.spinner("🤔 Thinking..."):
             try:
-                final_state = st.session_state.agent.graph.invoke(st.session_state.langgraph_state)
+                final_state = st.session_state.agent.graph.invoke(
+                    st.session_state.langgraph_state
+                )
                 # Extract the last AI message
                 response = None
                 for message in reversed(final_state["messages"]):
@@ -315,12 +358,17 @@ def chat_tab():
 
                 if response:
                     st.write(response)
-                    st.session_state.chat_history.append({"role": "assistant", "content": response})
+                    st.session_state.chat_history.append(
+                        {"role": "assistant", "content": response}
+                    )
                     st.session_state.langgraph_state = final_state
                 else:
                     st.error("No response generated")
                     # Remove the user message if no response
-                    if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] == "user":
+                    if (
+                        st.session_state.chat_history
+                        and st.session_state.chat_history[-1]["role"] == "user"
+                    ):
                         st.session_state.chat_history.pop()
                     if st.session_state.langgraph_state["messages"]:
                         st.session_state.langgraph_state["messages"].pop()
@@ -328,7 +376,10 @@ def chat_tab():
             except Exception as e:
                 st.error(f"Error getting response: {str(e)}")
                 # Remove the user message if there was an error
-                if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] == "user":
+                if (
+                    st.session_state.chat_history
+                    and st.session_state.chat_history[-1]["role"] == "user"
+                ):
                     st.session_state.chat_history.pop()
                 if st.session_state.langgraph_state["messages"]:
                     st.session_state.langgraph_state["messages"].pop()
