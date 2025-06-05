@@ -7,8 +7,8 @@ from tensorlake.utils.logging import (
 configure_logging_early()
 
 import argparse
-from typing import Any
 import multiprocessing as mp
+from typing import Any
 
 import structlog
 

@@ -172,7 +172,8 @@ class DocumentAI:
             ),
             "structuredExtractionSkipOcr": (
                 options.extraction_options.skip_ocr
-                if options.extraction_options is not None and options.extraction_options.skip_ocr is not None
+                if options.extraction_options is not None
+                and options.extraction_options.skip_ocr is not None
                 else False
             ),
             "disableLayoutDetection": (
