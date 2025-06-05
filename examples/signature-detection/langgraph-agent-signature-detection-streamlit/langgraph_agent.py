@@ -1,23 +1,16 @@
-"""
-Document Signature Analysis System
-
-A comprehensive system for detecting and analyzing signatures in documents using TensorLake AI
-and LangGraph for conversational analysis. The system provides:
-
-1. Standalone signature detection and processing
-2. Conversational AI agent for querying signature analysis results
-3. Persistent storage of analysis data for future reference
-"""
-
 import json
 import logging
 import os
 import time
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, Optional, TypedDict
+from typing import Annotated, Any, Dict, List, TypedDict
 
 from dotenv import load_dotenv
-from helper_functions import extract_signature_data, save_analysis_data
+from helper_functions import (
+    SIGNATURE_DATA_DIR,
+    extract_signature_data,
+    save_analysis_data,
+)
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
@@ -41,9 +34,6 @@ load_dotenv()
 # Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TENSORLAKE_API_KEY = os.getenv("TENSORLAKE_API_KEY")
-SIGNATURE_DATA_DIR = (
-    "signature_analysis_data"  # signature data analysis will be stored here
-)
 
 # Logging configuration
 logging.basicConfig(
@@ -276,103 +266,3 @@ If the tool returns an error (no data found), explain that no analysis data is a
                 return message.content
 
         return "No response generated."
-
-    def chat(self, conversation_history: Optional[List] = None) -> None:
-        """Start an interactive chat session."""
-
-        state = {"messages": conversation_history or []}
-
-        while True:
-            try:
-                user_input = input("You: ").strip()
-
-                if user_input.lower() in ["quit", "exit", "q"]:
-                    print("Goodbye! 👋")
-                    break
-
-                if not user_input:
-                    continue
-
-                # Add user message and process
-                state["messages"].append(HumanMessage(content=user_input))
-                final_state = self.graph.invoke(state)
-
-                # Display response
-                for message in reversed(final_state["messages"]):
-                    if isinstance(message, AIMessage):
-                        print(f"Assistant: {message.content}\n")
-                        break
-
-                # Update state
-                state = final_state
-
-            except KeyboardInterrupt:
-                print("\nGoodbye! 👋")
-                break
-            except Exception as e:
-                logger.error(f"Error in conversation: {str(e)}")
-                print(f"Error: {e}\n")
-
-
-def main() -> None:
-    """Main CLI interface for the signature analysis system"""
-    print("Document Signature Analysis System")
-    print("=" * 45)
-    print("1. Process document for signature detection")
-    print("2. Chat about analyzed documents")
-    print("3. Exit")
-    print()
-
-    while True:
-        try:
-            choice = input("Select option (1-3): ").strip()
-
-            if choice == "1":
-                file_path = input("Enter document file path: ").strip()
-                if file_path:
-                    print("Processing document...")
-                    result = detect_signatures_in_document(file_path)
-
-                    if result.get("success"):
-                        print("\nSUCCESS!")
-                        print(f"Analysis: {result['summary']}")
-                        print(f"Data saved to: {result['data_saved_to']}")
-                        print(
-                            "\nYou can now use option 2 to ask questions about this document!"
-                        )
-                    else:
-                        print(f"\nFAILED: {result.get('error', 'Unknown error')}")
-                print()
-
-            elif choice == "2":
-                # Check for existing analysis files
-                Path(SIGNATURE_DATA_DIR).mkdir(exist_ok=True)
-                analysis_files = list(
-                    Path(SIGNATURE_DATA_DIR).glob("*_signature_analysis.json")
-                )
-
-                if not analysis_files:
-                    print("No signature analysis files found!")
-                    print("Please process some documents first using option 1.")
-                else:
-                    print(f"Found {len(analysis_files)} analyzed document(s)")
-                    agent = SignatureConversationAgent()
-                    agent.chat()
-
-            elif choice == "3":
-                print("Goodbye! 👋")
-                break
-            else:
-                print("Invalid choice. Please select 1, 2, or 3.")
-
-        except KeyboardInterrupt:
-            print("\nGoodbye! 👋")
-            break
-        except Exception as e:
-            logger.error(f"Error in main menu: {str(e)}")
-            print(f"Error: {e}")
-
-
-if __name__ == "__main__":
-    # Run and test the flow
-    main()
