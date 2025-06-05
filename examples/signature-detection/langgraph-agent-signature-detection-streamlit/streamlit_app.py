@@ -45,11 +45,27 @@ st.markdown("""
     }
 
     .sidebar-info {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
+        background: linear-gradient(135deg, #62D84E 0%, #01481B 100%);
+        color: #F9F9F6;
         padding: 1rem;
         border-radius: 8px;
         margin-bottom: 1rem;
+    }
+    
+    /* Primary Button */
+    div.stButton > button:first-child {
+        background-color: #347229;
+        color: #F9F9F6;
+        border: none;
+        border-radius: 8px;
+        padding: 0.6rem 1.2rem;
+        font-weight: 600;
+        transition: background-color 0.3s ease;
+    }
+
+    div.stButton > button:first-child:hover {
+        background-color: #2E641F;
+        color: #F9F9F6;
     }
 </style>
 """, unsafe_allow_html=True)
