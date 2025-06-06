@@ -26,9 +26,15 @@ class DocumentAI:
     """
 
     def __init__(self, api_key: str = ""):
-        self.api_key = api_key
-        if not self.api_key:
+        if os.getenv("TENSORLAKE_API_KEY"):
             self.api_key = os.getenv("TENSORLAKE_API_KEY").strip()
+        else:
+            self.api_key = api_key
+
+        if not self.api_key:
+            raise ValueError(
+                "API key is required. Set the TENSORLAKE_API_KEY environment variable or pass it as an argument."
+            )
 
         self._client = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None)
         self.__file_uploader__ = FileUploader(api_key=api_key)
