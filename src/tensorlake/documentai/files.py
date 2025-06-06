@@ -2,7 +2,6 @@
 This module contains the FileUploader class, which is used to upload files to the DocumentAI API.
 """
 
-import base64
 import hashlib
 import mimetypes
 import sys
@@ -163,22 +162,11 @@ class FileUploader:
 
         with open(path, "rb") as f:
             with httpx.Client() as upload_client:
-
-                def file_chunk_generator():
-                    while chunk := f.read(1024 * 1024):
-                        progress_bar.update(len(chunk))
-                        yield chunk
-
                 upload_response = upload_client.put(
                     url=init_response_json.get("presigned_url"),
-                    data=file_chunk_generator(),
+                    data=f,
                     headers={
                         "Content-Type": self.__get_mime_type__(path),
-                        "Content-Length": str(file_size),
-                        "x-amz-checksum-sha256": base64.b64encode(
-                            bytes.fromhex(sha256_checksum)
-                        ).decode(),
-                        "x-amz-sdk-checksum-algorithm": "SHA256",
                     },
                     timeout=httpx.Timeout(None),
                 )
@@ -257,26 +245,16 @@ class FileUploader:
 
         async with httpx.AsyncClient() as upload_client:
 
-            async def file_chunk_generator():
-                async with aiofiles.open(path, "rb") as file:
-                    while chunk := await file.read(1024 * 1024):
-                        progress_bar.update(len(chunk))
-                        yield chunk
-
-            upload_response = await upload_client.put(
-                url=init_response_json.get("presigned_url"),
-                data=file_chunk_generator(),
-                headers={
-                    "Content-Type": self.__get_mime_type__(path),
-                    "Content-Length": str(file_size),
-                    "x-amz-checksum-sha256": base64.b64encode(
-                        bytes.fromhex(checksum_sha256)
-                    ).decode(),
-                    "x-amz-sdk-checksum-algorithm": "SHA256",
-                },
-                timeout=httpx.Timeout(None),
-            )
-            upload_response.raise_for_status()
+            with open(path, "rb") as f:
+                upload_response = await upload_client.put(
+                    url=init_response_json.get("presigned_url"),
+                    data=f,
+                    headers={
+                        "Content-Type": self.__get_mime_type__(path),
+                    },
+                    timeout=httpx.Timeout(None),
+                )
+                upload_response.raise_for_status()
 
         progress_bar.set_description("")
         progress_bar.clear()
