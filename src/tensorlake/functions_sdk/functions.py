@@ -270,6 +270,8 @@ class TensorlakeFunctionWrapper:
         extract_method = self.indexify_function.run
         type_hints = get_type_hints(extract_method)
         return_type = type_hints.get("return", Any)
+        if get_origin(return_type) is RouteTo:
+            return_type = get_args(return_type)[0]
         if get_origin(return_type) is list:
             return_type = get_args(return_type)[0]
         elif get_origin(return_type) is Union:

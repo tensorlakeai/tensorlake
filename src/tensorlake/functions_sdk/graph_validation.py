@@ -32,10 +32,14 @@ def validate_node(indexify_fn: Type[TensorlakeCompute]):
 
     return_annotation = signature.return_annotation
 
+    next_fns = (
+        indexify_fn.next if isinstance(indexify_fn.next, list) else [indexify_fn.next]
+    )
+
     def validate_route_arg(arg):
-        if arg not in indexify_fn.next:
+        if arg not in next_fns:
             raise Exception(
-                f"Unable to find '{arg.name}' in available next nodes: {[node.name for node in indexify_fn.next]}"
+                f"Unable to find '{arg.name}' in available next nodes: {[node.name for node in next_fns]}"
             )
 
     if (
