@@ -1,7 +1,7 @@
 import unittest
 from typing import List, Union
 
-import parameterized
+from parameterized import parameterized, parameterized_class
 from testing import remote_or_local_graph, test_graph_name
 
 from tensorlake import Graph, RouteTo, tensorlake_function
@@ -50,14 +50,22 @@ def parallel_map(count: int) -> List[int]:
     return list(range(count))
 
 
-_GRAPH_PARAM_SETS = [(False), (True)]
+def _get_class_name(cls, unused_num, param_dict):
+    return f"{cls.__name__}_{'remote' if param_dict['is_remote'] else 'local'}"
 
 
+@parameterized_class(
+    ("is_remote"),
+    [
+        (False,),
+        (True,),
+    ],
+    class_name_func=_get_class_name,
+)
 class TestRouting(unittest.TestCase):
-    @parameterized.parameterized.expand(_GRAPH_PARAM_SETS)
-    def test_fan_out(self, is_remote):
+    def test_fan_out(self):
         graph = Graph(name=test_graph_name(self), start_node=fan_out)
-        graph = remote_or_local_graph(graph, is_remote)
+        graph = remote_or_local_graph(graph, self.is_remote)
         inv = graph.run(block_until_done=True, value=3)
         a_out = graph.output(inv, "a")
         b_out = graph.output(inv, "b")
@@ -65,10 +73,9 @@ class TestRouting(unittest.TestCase):
         self.assertEqual(6, a_out[0])  # 6 == 3 + 3
         self.assertEqual(7, b_out[0])  # 7 == 3 + 4
 
-    @parameterized.parameterized.expand(_GRAPH_PARAM_SETS)
-    def test_route_out(self, is_remote):
+    def test_route_out(self):
         graph = Graph(name=test_graph_name(self), start_node=route_out)
-        graph = remote_or_local_graph(graph, is_remote)
+        graph = remote_or_local_graph(graph, self.is_remote)
         inv = graph.run(block_until_done=True, value=3)
         a_out = graph.output(inv, "a")
         b_out = graph.output(inv, "b")
@@ -79,10 +86,9 @@ class TestRouting(unittest.TestCase):
         self.assertEqual(9, b_out[0])  # 7 == 3 + 2 + 4
         self.assertEqual(10, c_out[0])  # 8 == 3 + 2 + 5
 
-    @parameterized.parameterized.expand(_GRAPH_PARAM_SETS)
-    def test_parallel_map(self, is_remote):
+    def test_parallel_map(self):
         graph = Graph(name=test_graph_name(self), start_node=parallel_map)
-        graph = remote_or_local_graph(graph, is_remote)
+        graph = remote_or_local_graph(graph, self.is_remote)
         inv = graph.run(block_until_done=True, count=3)
         sum_out = graph.output(inv, "sum_of_squares")
 
