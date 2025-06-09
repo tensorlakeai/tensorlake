@@ -300,6 +300,14 @@ class TensorlakeFunctionWrapper:
         input: Union[Dict, Type[BaseModel], List, Tuple],
         acc: Optional[Type[Any]] = None,
     ) -> Tuple[List[Any], Optional[str], List[str]]:
+        """Invokes the wrapped function.
+
+        Returns a tuple of results, containing:
+            The function output
+            The exception traceback if there's an exception, else None
+            The router edges produced by the function if any, else None
+        """
+
         args = []
         kwargs = {}
 
