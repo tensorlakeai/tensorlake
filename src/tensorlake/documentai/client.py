@@ -25,11 +25,8 @@ class DocumentAI:
     Document AI client for Tensorlake.
     """
 
-    def __init__(self, api_key: str = ""):
-        if os.getenv("TENSORLAKE_API_KEY"):
-            self.api_key = os.getenv("TENSORLAKE_API_KEY").strip()
-        else:
-            self.api_key = api_key
+    def __init__(self, api_key: Optional[str] = None):
+        self.api_key = api_key or os.getenv("TENSORLAKE_API_KEY")
 
         if not self.api_key:
             raise ValueError(
@@ -37,7 +34,7 @@ class DocumentAI:
             )
 
         self._client = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None)
-        self.__file_uploader__ = FileUploader(api_key=api_key)
+        self.__file_uploader__ = FileUploader(api_key=self.api_key)
 
     def __headers__(self):
         return {
