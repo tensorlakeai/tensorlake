@@ -1,6 +1,6 @@
 import click
 
-from . import _common, auth, deploy, graphs, images, secrets
+from . import _common, auth, deploy, graphs, images, namespaces, secrets
 
 
 @click.group()
@@ -17,6 +17,7 @@ def cli(ctx: click.Context):
 
 cli.add_command(auth.auth)
 cli.add_command(deploy.deploy)
-cli.add_command(images.image_logs)
-cli.add_command(secrets.secrets)
 cli.add_command(graphs.graph)
+cli.add_command(images.image_logs)
+cli.add_command(namespaces.namespace)
+cli.add_command(secrets.secrets)
