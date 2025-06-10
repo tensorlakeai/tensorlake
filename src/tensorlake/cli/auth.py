@@ -2,7 +2,7 @@ import json
 
 import click
 
-from tensorlake.cli._common import AuthContext, with_auth
+from tensorlake.cli._common import AuthContext, pass_auth
 
 
 @click.group()
@@ -21,7 +21,7 @@ def auth():
     default="text",
     help="Output format",
 )
-@with_auth
+@pass_auth
 def status(auth: AuthContext, output: str):
     if output == "json":
         print(

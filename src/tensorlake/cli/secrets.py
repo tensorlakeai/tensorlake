@@ -5,7 +5,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from tensorlake.cli._common import AuthContext, with_auth
+from tensorlake.cli._common import AuthContext, pass_auth
 
 
 @click.group()
@@ -19,7 +19,7 @@ def secrets():
 
 
 @secrets.command()
-@with_auth
+@pass_auth
 def list(auth: AuthContext):
     """
     List all secrets in the current project.
@@ -55,7 +55,7 @@ def list(auth: AuthContext):
 
 @secrets.command()
 @click.argument("secrets", nargs=-1)
-@with_auth
+@pass_auth
 def set(auth: AuthContext, secrets: str):
     """
     Set one of many secrets in the current project.
@@ -104,7 +104,7 @@ def set(auth: AuthContext, secrets: str):
 
 @secrets.command()
 @click.argument("secret_names", nargs=-1)
-@with_auth
+@pass_auth
 def unset(auth: AuthContext, secret_names: str):
     """
     Unset one or many secrets in the current project.

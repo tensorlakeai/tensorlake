@@ -13,37 +13,52 @@ except importlib.metadata.PackageNotFoundError:
     VERSION = "unknown"
 
 
+from tensorlake.http_client import TensorlakeClient
+
+
 @dataclass
 class AuthContext:
-    """Class for CLI authentication context"""
+    """Class for CLI authentication context."""
 
     api_key: Optional[str] = None
+    base_url: str = None
     version: str = VERSION
     _client: Optional[httpx.Client] = None
     _introspect_response: Optional[httpx.Response] = None
+    _tensorlake_client: Optional[TensorlakeClient] = None
 
     def __post_init__(self):
         self.api_key = os.getenv("TENSORLAKE_API_KEY")
+        self.base_url = os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")
 
     @property
     def client(self) -> httpx.Client:
         if self._client is None:
-            if not self.api_key:
-                raise click.UsageError(
-                    "API key is not configured properly. The INDEXIFY_URL environment variable is required."
-                )
-
-            base_url = os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")
-
             self._client = httpx.Client(
-                base_url=base_url,
+                base_url=self.base_url,
                 headers={
-                    "Authorization": f"Bearer {self.api_key}",
+                    "Authorization": f"Bearer {self.valid_api_key()}",
                     "Accept": "application/json",
                     "User-Agent": f"Tensorlake CLI (python/{sys.version_info[0]}.{sys.version_info[1]} sdk/{self.version})",
                 },
             )
         return self._client
+
+    def valid_api_key(self) -> str:
+        if not self.api_key:
+            raise click.UsageError(
+                "API key is not configured properly. The TENSORLAKE_API_KEY environment variable is required."
+            )
+        return self.api_key
+
+    @property
+    def tensorlake_client(self) -> TensorlakeClient:
+        if self._tensorlake_client is None:
+            self._tensorlake_client = TensorlakeClient(
+                service_url=self.base_url,
+                api_key=self.valid_api_key(),
+            )
+        return self._tensorlake_client
 
     @property
     def api_key_id(self):
@@ -70,4 +85,4 @@ class AuthContext:
 
 
 """Pass the AuthContext object to the click command"""
-with_auth = click.make_pass_decorator(AuthContext)
+pass_auth = click.make_pass_decorator(AuthContext)

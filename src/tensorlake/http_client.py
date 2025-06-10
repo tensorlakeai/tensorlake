@@ -214,10 +214,12 @@ class TensorlakeClient:
         )
         response.raise_for_status()
 
-    def graphs(self, namespace="default") -> List[ComputeGraphMetadata]:
-        response = self._get(f"namespaces/{namespace}/compute_graphs")
+    def graphs(self) -> List[ComputeGraphMetadata]:
+        graphs_json = self._get(f"namespaces/{self.namespace}/compute_graphs").json()[
+            "compute_graphs"
+        ]
         graphs = []
-        for graph in response.json()["compute_graphs"]:
+        for graph in graphs_json:
             graphs.append(ComputeGraphMetadata(**graph))
 
         return graphs
@@ -397,14 +399,13 @@ class TensorlakeClient:
 
     def _download_output(
         self,
-        namespace: str,
         graph: str,
         invocation_id: str,
         fn_name: str,
         output_id: str,
     ) -> TensorlakeData:
         response = self._get(
-            f"namespaces/{namespace}/compute_graphs/{graph}/invocations/{invocation_id}/fn/{fn_name}/output/{output_id}",
+            f"namespaces/{self.namespace}/compute_graphs/{graph}/invocations/{invocation_id}/fn/{fn_name}/output/{output_id}",
         )
         response.raise_for_status()
         content_type = response.headers.get("Content-Type")
@@ -444,7 +445,7 @@ class TensorlakeClient:
         for output in graph_outputs.outputs:
             if output.compute_fn == fn_name:
                 indexify_data = self._download_output(
-                    self.namespace, graph, invocation_id, fn_name, output.id
+                    graph, invocation_id, fn_name, output.id
                 )
                 serializer = get_serializer(output_encoder)
                 output = serializer.deserialize(indexify_data.payload)
