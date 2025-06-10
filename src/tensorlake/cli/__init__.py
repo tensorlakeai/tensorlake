@@ -1,6 +1,6 @@
 import click
 
-from . import _common, auth, deploy, graphs, images, namespaces, secrets
+from . import _common, auth, deploy, graphs, images, invocations, namespaces, secrets
 
 
 @click.group()
@@ -19,5 +19,6 @@ cli.add_command(auth.auth)
 cli.add_command(deploy.deploy)
 cli.add_command(graphs.graph)
 cli.add_command(images.image_logs)
+cli.add_command(invocations.invocation)
 cli.add_command(namespaces.namespace)
 cli.add_command(secrets.secrets)

@@ -1,4 +1,6 @@
 import click
+from rich import print
+from rich.table import Table
 
 from tensorlake.cli._common import AuthContext, pass_auth
 
@@ -19,8 +21,16 @@ def list(auth: AuthContext):
     """
     namespaces = auth.tensorlake_client.namespaces()
 
+    table = Table(title="Namespaces")
+    table.add_column(" ", justify="center")
+    table.add_column("Name")
+
     for namespace in namespaces:
-        print(namespace)
+        table.add_row(
+            "*" if namespace == auth.tensorlake_client.namespace else "", namespace
+        )
+
+    print(table)
 
 
 @namespace.command()

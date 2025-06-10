@@ -3,6 +3,7 @@ import json
 import click
 from pydantic.json import pydantic_encoder
 from rich import print, print_json
+from rich.table import Table
 
 from tensorlake.cli._common import AuthContext, pass_auth
 
@@ -43,8 +44,14 @@ def list(auth: AuthContext, verbose: bool, use_json: bool):
         print(graphs)
         return
 
+    table = Table(title="Graphs")
+    table.add_column("Name")
+    table.add_column("Description")
+
     for graph in graphs:
-        print(graph.name)
+        table.add_row(graph.name, graph.description)
+
+    print(table)
 
 
 @graph.command()

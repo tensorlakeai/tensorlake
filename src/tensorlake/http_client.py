@@ -10,7 +10,11 @@ from rich import print  # TODO: Migrate to use click.echo
 
 from tensorlake.error import ApiException, GraphStillProcessing
 from tensorlake.functions_sdk.data_objects import TensorlakeData
-from tensorlake.functions_sdk.graph import ComputeGraphMetadata, Graph
+from tensorlake.functions_sdk.graph import (
+    ComputeGraphMetadata,
+    Graph,
+    InvocationMetadata,
+)
 from tensorlake.functions_sdk.graph_serialization import zip_graph_code
 from tensorlake.functions_sdk.object_serializer import get_serializer
 from tensorlake.settings import DEFAULT_SERVICE_URL
@@ -251,6 +255,22 @@ class TensorlakeClient:
         except ApiException as e:
             print(f"failed to fetch logs: {e}")
             return None
+
+    def invocations(self, graph: str) -> List[Any]:
+        response = self._get(
+            f"namespaces/{self.namespace}/compute_graphs/{graph}/invocations"
+        )
+        invocations = []
+        for invocation in response.json()["invocations"]:
+            invocations.append(InvocationMetadata(**invocation))
+
+        return invocations
+
+    def invocation(self, graph: str, invocation: str) -> InvocationMetadata:
+        response = self._get(
+            f"namespaces/{self.namespace}/compute_graphs/{graph}/invocations/{invocation}"
+        )
+        return InvocationMetadata(**response.json())
 
     def replay_invocations(self, graph: str):
         self._post(f"namespaces/{self.namespace}/compute_graphs/{graph}/replay")
