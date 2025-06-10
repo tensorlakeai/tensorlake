@@ -10,7 +10,7 @@ from tensorlake import (
 from tensorlake.functions_sdk.graph_serialization import graph_code_dir_path
 
 
-@tensorlake_function(cpu=1.1, memory=1.3, ephemeral_disk=1.0, gpu=["H100", "T4"])
+@tensorlake_function(cpu=1.1, memory=1.3, ephemeral_disk=1.0)
 def function_with_custom_resources(x: int) -> str:
     return "success"
 
