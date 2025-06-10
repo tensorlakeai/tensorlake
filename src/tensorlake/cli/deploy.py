@@ -8,7 +8,7 @@ import click
 from tensorlake import Graph, Image
 from tensorlake.builder.client import ImageBuilderClient
 from tensorlake.builder.client_v2 import ImageBuilderV2Client
-from tensorlake.cli._common import AuthContext, with_auth
+from tensorlake.cli._common import AuthContext, pass_auth
 from tensorlake.cli.secrets import warning_missing_secrets
 from tensorlake.functions_sdk.graph_serialization import graph_code_dir_path
 from tensorlake.functions_sdk.image import Build
@@ -26,7 +26,7 @@ from tensorlake.remote_graph import RemoteGraph
 @click.option("--upgrade-queued-requests", is_flag=True, default=False)
 @click.option("--builder-v2", is_flag=True, default=False)
 @click.argument("workflow_file", type=click.File("r"))
-@with_auth
+@pass_auth
 def deploy(
     auth: AuthContext,
     workflow_file: click.File,

@@ -34,6 +34,7 @@ from .functions import (
 from .graph_definition import (
     ComputeGraphMetadata,
     FunctionMetadata,
+    InvocationMetadata,
     NodeMetadata,
     RetryPolicyMetadata,
     RouterMetadata,

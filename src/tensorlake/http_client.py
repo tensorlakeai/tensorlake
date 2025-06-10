@@ -10,7 +10,11 @@ from rich import print  # TODO: Migrate to use click.echo
 
 from tensorlake.error import ApiException, GraphStillProcessing
 from tensorlake.functions_sdk.data_objects import TensorlakeData
-from tensorlake.functions_sdk.graph import ComputeGraphMetadata, Graph
+from tensorlake.functions_sdk.graph import (
+    ComputeGraphMetadata,
+    Graph,
+    InvocationMetadata,
+)
 from tensorlake.functions_sdk.graph_serialization import zip_graph_code
 from tensorlake.functions_sdk.object_serializer import get_serializer
 from tensorlake.settings import DEFAULT_SERVICE_URL
@@ -214,10 +218,12 @@ class TensorlakeClient:
         )
         response.raise_for_status()
 
-    def graphs(self, namespace="default") -> List[ComputeGraphMetadata]:
-        response = self._get(f"namespaces/{namespace}/compute_graphs")
+    def graphs(self) -> List[ComputeGraphMetadata]:
+        graphs_json = self._get(f"namespaces/{self.namespace}/compute_graphs").json()[
+            "compute_graphs"
+        ]
         graphs = []
-        for graph in response.json()["compute_graphs"]:
+        for graph in graphs_json:
             graphs.append(ComputeGraphMetadata(**graph))
 
         return graphs
@@ -249,6 +255,22 @@ class TensorlakeClient:
         except ApiException as e:
             print(f"failed to fetch logs: {e}")
             return None
+
+    def invocations(self, graph: str) -> List[Any]:
+        response = self._get(
+            f"namespaces/{self.namespace}/compute_graphs/{graph}/invocations"
+        )
+        invocations = []
+        for invocation in response.json()["invocations"]:
+            invocations.append(InvocationMetadata(**invocation))
+
+        return invocations
+
+    def invocation(self, graph: str, invocation: str) -> InvocationMetadata:
+        response = self._get(
+            f"namespaces/{self.namespace}/compute_graphs/{graph}/invocations/{invocation}"
+        )
+        return InvocationMetadata(**response.json())
 
     def replay_invocations(self, graph: str):
         self._post(f"namespaces/{self.namespace}/compute_graphs/{graph}/replay")
@@ -397,14 +419,13 @@ class TensorlakeClient:
 
     def _download_output(
         self,
-        namespace: str,
         graph: str,
         invocation_id: str,
         fn_name: str,
         output_id: str,
     ) -> TensorlakeData:
         response = self._get(
-            f"namespaces/{namespace}/compute_graphs/{graph}/invocations/{invocation_id}/fn/{fn_name}/output/{output_id}",
+            f"namespaces/{self.namespace}/compute_graphs/{graph}/invocations/{invocation_id}/fn/{fn_name}/output/{output_id}",
         )
         response.raise_for_status()
         content_type = response.headers.get("Content-Type")
@@ -444,7 +465,7 @@ class TensorlakeClient:
         for output in graph_outputs.outputs:
             if output.compute_fn == fn_name:
                 indexify_data = self._download_output(
-                    self.namespace, graph, invocation_id, fn_name, output.id
+                    graph, invocation_id, fn_name, output.id
                 )
                 serializer = get_serializer(output_encoder)
                 output = serializer.deserialize(indexify_data.payload)
