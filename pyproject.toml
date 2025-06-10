@@ -7,25 +7,25 @@ homepage = "https://github.com/tensorlakeai/tensorlake"
 repository = "https://github.com/tensorlakeai/tensorlake"
 
 [tool.poetry.dependencies]
-python = "^3.9"
+python = "^3.10"
 python-magic = "^0.4.27"
-httpx = { version = "^0.27", extras = ["http2"] }
+httpx = { version = "0.28.1", extras = ["http2"] }
 cloudpickle = "^3.1.0"
-pydantic = "2.10.4"
+pydantic = "2.11.5"
 docker = "^7.1.0"
 nanoid = "^2.0.0"
 httpx-sse = "^0.4.0"
-rich = "^13.9.4"                                  # TODO: Look into consolidating this with click
+rich = "14.0.0"                                  # TODO: Look into consolidating this with click
 pyyaml = "^6.0.2"
-click = "^8.1.8"
+click = "8.2.1"
 retry = "^0.9.2"
 aiofiles = "^24.1.0"
 tqdm = "^4.67.1"
 
 # Required only by Function Executor
-structlog = "^24.4.0"
-grpcio = "1.70.0"
-grpcio-tools = "1.70.0"
+structlog = "25.4.0"
+grpcio = "1.73.0"
+grpcio-tools = "1.73.0"
 
 [tool.poetry.scripts]
 tensorlake = "tensorlake.cli:cli"
