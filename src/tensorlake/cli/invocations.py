@@ -27,40 +27,39 @@ def invocation():
     is_flag=True,
     help="Export invocation information as JSON-encoded data",
 )
-@click.argument("graph")
-def list(auth: AuthContext, verbose: bool, use_json: bool, graph: str):
+@click.argument("graph-name")
+def list(auth: AuthContext, verbose: bool, use_json: bool, graph_name: str):
     """
     List remote invocations
     """
     if verbose and use_json:
         raise click.UsageError("--verbose and --json are incompatible")
 
-    invocations = auth.tensorlake_client.invocations(graph)
+    invocations = auth.tensorlake_client.invocations(graph_name)
 
     if use_json:
         all_invocations = json.dumps(invocations, default=pydantic_encoder)
         print_json(all_invocations)
-        return
 
-    if verbose:
+    elif verbose:
         print(invocations)
-        return
 
-    table = Table(title="Invocations")
-    table.add_column("Invocation")
-    table.add_column("Created At")
-    table.add_column("Status")
-    table.add_column("Outcome")
+    else:
+        table = Table(title="Invocations")
+        table.add_column("Invocation")
+        table.add_column("Created At")
+        table.add_column("Status")
+        table.add_column("Outcome")
 
-    for invocation in invocations:
-        table.add_row(
-            invocation.id,
-            str(invocation.created_at),
-            invocation.status,
-            invocation.outcome,
-        )
+        for invocation in invocations:
+            table.add_row(
+                invocation.id,
+                str(invocation.created_at),
+                invocation.status,
+                invocation.outcome,
+            )
 
-    print(table)
+        print(table)
 
 
 @invocation.command()
@@ -71,17 +70,17 @@ def list(auth: AuthContext, verbose: bool, use_json: bool, graph: str):
     is_flag=True,
     help="Export invocation information as JSON-encoded data",
 )
-@click.argument("graph")
-@click.argument("invocation")
+@click.argument("graph-name")
+@click.argument("invocation-id")
 @pass_auth
-def info(auth: AuthContext, use_json: bool, graph: str, invocation: str):
+def info(auth: AuthContext, use_json: bool, graph_name: str, invocation_id: str):
     """
     Info about a remote invocation
     """
-    inv = auth.tensorlake_client.invocation(graph, invocation)
+    inv = auth.tensorlake_client.invocation(graph_name, invocation_id)
 
     if use_json:
         print_json(inv.model_dump_json())
-        return
 
-    print(inv)
+    else:
+        print(inv)

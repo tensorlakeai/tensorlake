@@ -38,36 +38,35 @@ def list(auth: AuthContext, verbose: bool, use_json: bool):
     if use_json:
         all_graphs = json.dumps(graphs, default=pydantic_encoder)
         print_json(all_graphs)
-        return
 
-    if verbose:
+    elif verbose:
         print(graphs)
-        return
 
-    table = Table(title="Graphs")
-    table.add_column("Name")
-    table.add_column("Description")
+    else:
+        table = Table(title="Graphs")
+        table.add_column("Name")
+        table.add_column("Description")
 
-    for graph in graphs:
-        table.add_row(graph.name, graph.description)
+        for graph in graphs:
+            table.add_row(graph.name, graph.description)
 
-    print(table)
+        print(table)
 
 
 @graph.command()
 @click.option(
     "--json", "-j", is_flag=True, help="Export graph information as JSON-encoded data"
 )
-@click.argument("graph")
+@click.argument("graph-name")
 @pass_auth
-def info(auth: AuthContext, json: bool, graph: str):
+def info(auth: AuthContext, json: bool, graph_name: str):
     """
     Info about a remote graph
     """
-    g = auth.tensorlake_client.graph(graph)
+    g = auth.tensorlake_client.graph(graph_name)
 
     if json:
         print_json(g.model_dump_json())
-        return
 
-    print(g)
+    else:
+        print(g)
