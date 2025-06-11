@@ -94,7 +94,7 @@ class ParsingOptions(BaseModel):
 
     chunking_strategy: Optional[ChunkingStrategy] = None
     skew_correction: bool = False
-    table_parsing_strategy: TableParsingStrategy = TableParsingStrategy.VLM
+    table_parsing_strategy: TableParsingStrategy = TableParsingStrategy.TSR
     table_parsing_prompt: Optional[str] = None
     figure_summarization_prompt: Optional[str] = None
     table_output_mode: TableOutputMode = TableOutputMode.MARKDOWN
