@@ -8,6 +8,8 @@ from tensorlake.documentai import DocumentAI, ExtractionOptions, ParsingOptions
 
 API_KEY = "tl_apiKey_XXXX"
 
+# Or set this in the environment variable TENSORLAKE_API_KEY
+
 
 class Address(BaseModel):
     street: Optional[str] = Field(None, description="Street address")
@@ -67,10 +69,11 @@ class BankStatement(BaseModel):
     )
 
 
+# if you don't pass an api key, it will look for the TENSORLAKE_API_KEY environment variable
 doc_ai = DocumentAI(api_key=API_KEY)
 # Skip this if you are passing a pre-signed URL to the `DocumentParser`.
 # or pass an external URL
-file_id = doc_ai.upload(path="./examples/example_bank_statement.pdf")
+file_id = doc_ai.upload(path="./examples/documents/example_bank_statement.pdf")
 
 job_id = doc_ai.parse(
     file_id,
