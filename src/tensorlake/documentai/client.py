@@ -3,6 +3,7 @@ Tensorlake Document AI client
 """
 
 import asyncio
+import inspect
 import json
 import os
 import time
@@ -140,6 +141,8 @@ class DocumentAI:
                 json_schema = options.extraction_options.schema
             elif isinstance(options.extraction_options.schema, Json):
                 json_schema = json.loads(options.extraction_options.schema)
+            elif inspect.isclass(options.extraction_options.schema) and issubclass(options.extraction_options.schema, BaseModel):
+                json_schema = options.extraction_options.schema.model_json_schema()
             elif isinstance(options.extraction_options.schema, BaseModel):
                 json_schema = options.extraction_options.schema.model_json_schema()
 
