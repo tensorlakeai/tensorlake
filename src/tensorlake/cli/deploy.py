@@ -171,18 +171,7 @@ async def _prepare_images_v2(
 ):
     for image_info in images.values():
         for build_context in image_info.build_contexts:
-
-            build = await builder_v2.build(build_context, image_info.image)
-            if build.status == "failed":
-                click.secho(
-                    f"Building {image_info.image.name()} failed with error message: {build.error_message}",
-                    fg="red",
-                )
-                click.secho(
-                    f"Image {image_info.image.name()} could not be built, this is blocking deployment",
-                    fg="red",
-                )
-                raise click.Abort
+            await builder_v2.build(build_context, image_info.image)
 
     click.secho(f"Built {len(images)} images with builder v2", fg="green")
 
