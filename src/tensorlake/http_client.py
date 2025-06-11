@@ -13,10 +13,10 @@ from tensorlake.functions_sdk.data_objects import TensorlakeData
 from tensorlake.functions_sdk.graph import (
     ComputeGraphMetadata,
     Graph,
-    InvocationMetadata,
 )
 from tensorlake.functions_sdk.graph_serialization import zip_graph_code
 from tensorlake.functions_sdk.object_serializer import get_serializer
+from tensorlake.functions_sdk.runtime_definition import InvocationMetadata
 from tensorlake.settings import DEFAULT_SERVICE_URL
 from tensorlake.utils.http_client import (
     _TRANSIENT_HTTPX_ERRORS,
