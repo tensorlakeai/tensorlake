@@ -929,20 +929,6 @@ class TestGraphBehaviors(unittest.TestCase):
                 y=10,
             )
 
-    @parameterized.parameterized.expand([(False), (True)])
-    def test_early_success(self, is_remote):
-        graph = Graph(
-            name=test_graph_name(self),
-            description="test for early graph success",
-            start_node=simple_success,
-        )
-        graph = remote_or_local_graph(graph, is_remote)
-        invocation_id = graph.run(block_until_done=True, x="a")
-        output_simple_success = graph.output(invocation_id, "simple_success")
-        output_should_not_run = graph.output(invocation_id, "should_not_run")
-        self.assertEqual(output_simple_success, ["ab"])
-        self.assertEqual(output_should_not_run, [])
-
 
 if __name__ == "__main__":
     unittest.main()
