@@ -171,7 +171,6 @@ async def _prepare_images_v2(
 ):
     for image_info in images.values():
         for build_context in image_info.build_contexts:
-
             await builder_v2.build(build_context, image_info.image)
 
     click.secho(f"Built {len(images)} images with builder v2", fg="green")
