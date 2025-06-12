@@ -91,6 +91,9 @@ class TensorlakeCompute:
         gpu (Optional[str]): GPU(s) available to the function. No GPU is allocated by default.
                              The value should be a string "GPU_MODEL:COUNT" representing the GPU model and the number of GPUs.
                              See supported GPU models and counts in Tensorlake Cloud documentation.
+        cacheable (bool): Declares that applications of this function are cacheable.
+                          A function should only be marked cacheable if its outputs are a
+                          pure function of its inputs.
     """
 
     name: str = ""
@@ -108,6 +111,7 @@ class TensorlakeCompute:
     ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK_GB
     gpu: Optional[Union[str, List[str]]] = _DEFAULT_GPU
     next: Optional[Union["TensorlakeCompute", List["TensorlakeCompute"]]] = None
+    cacheable: bool = False
 
     def run(self, *args, **kwargs) -> Union[List[Any], Any]:
         pass
@@ -176,6 +180,7 @@ def tensorlake_function(
     ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK_GB,
     gpu: Optional[Union[str, List[str]]] = _DEFAULT_GPU,
     next: Optional[Union["TensorlakeCompute", List["TensorlakeCompute"]]] = None,
+    cacheable: bool = False,
 ):
     def construct(fn):
         attrs = {
@@ -198,6 +203,7 @@ def tensorlake_function(
             "memory": memory,
             "ephemeral_disk": ephemeral_disk,
             "gpu": gpu,
+            "cacheable": cacheable,
             "run": staticmethod(fn),
             "next": next,
         }

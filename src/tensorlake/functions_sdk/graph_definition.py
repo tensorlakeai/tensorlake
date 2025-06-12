@@ -27,6 +27,7 @@ class FunctionMetadata(BaseModel):
     timeout_sec: Optional[int] = None
     resources: Optional[ResourceMetadata] = None
     retry_policy: Optional[RetryPolicyMetadata] = None
+    cache_key: Optional[str] = None
 
 
 class NodeMetadata(BaseModel):
