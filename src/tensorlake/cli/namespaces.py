@@ -34,11 +34,11 @@ def list(auth: AuthContext):
 
 
 @namespace.command()
-@click.argument("namespace")
+@click.argument("namespace-name")
 @pass_auth
-def create(auth: AuthContext, namespace: str):
+def create(auth: AuthContext, namespace_name: str):
     """
     Create a remote namespace
     """
-    auth.tensorlake_client.create_namespace(namespace)
-    click.echo(f"Created namespace: {namespace}")
+    auth.tensorlake_client.create_namespace(namespace_name)
+    click.echo(f"Created namespace: {namespace_name}")

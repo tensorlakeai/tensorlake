@@ -3,7 +3,7 @@ from typing import List, Optional, Union
 
 from pydantic import BaseModel
 
-from .functions import TensorlakeCompute, TensorlakeRouter
+from .functions import TensorlakeCompute
 
 
 class GPUResourceMetadata(BaseModel):
@@ -30,7 +30,7 @@ def _parse_gpu_resource(gpu: str) -> GPUResourceMetadata:
 def _parse_gpu_resources(
     gpu: Optional[Union[str, List[str]]],
 ) -> List[GPUResourceMetadata]:
-    """Parses GPU resources from `gpu` attribute of TensorlakeCompute or TensorlakeRouter."""
+    """Parses GPU resources from `gpu` attribute of TensorlakeCompute."""
     if gpu is None:
         return []
     if isinstance(gpu, str):
@@ -48,7 +48,7 @@ class ResourceMetadata(BaseModel):
 
 
 def resource_metadata_for_graph_node(
-    node: Union[TensorlakeCompute, TensorlakeRouter],
+    node: TensorlakeCompute,
 ) -> ResourceMetadata:
     return ResourceMetadata(
         cpus=node.cpu,

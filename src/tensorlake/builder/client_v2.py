@@ -247,4 +247,15 @@ class ImageBuilderV2Client:
             timeout=60,
         )
         res.raise_for_status()
-        return BuildInfo.model_validate(res.json())
+        build_info = BuildInfo.model_validate(res.json())
+
+        if build_info.status == "failed":
+            click.secho(
+                f"Build {build_info.id} failed with error: {build_info.error_message}",
+                fg="red",
+            )
+            raise RuntimeError(
+                f"Build {build_info.id} failed with error: {build_info.error_message}"
+            )
+
+        return build_info

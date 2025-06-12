@@ -6,9 +6,9 @@ from testing import test_graph_name
 
 from tensorlake import (
     Graph,
+    RouteTo,
     tensorlake_function,
 )
-from tensorlake.functions_sdk.functions import tensorlake_router
 
 
 @tensorlake_function(secrets=["SECRET_NAME"])
@@ -26,12 +26,12 @@ def add_three(x: int) -> int:
     return x + 3
 
 
-@tensorlake_router(secrets=["SECRET_NAME_ROUTER"])
-def route_if_even(x: int) -> List[Union[add_two, add_three]]:
+@tensorlake_function(secrets=["SECRET_NAME_ROUTER"], next=[add_two, add_three])
+def route_if_even(x: int) -> RouteTo[int, Union[add_two, add_three]]:
     if x % 2 == 0:
-        return add_three
+        return RouteTo(x, add_three)
     else:
-        return add_two
+        return RouteTo(x, add_two)
 
 
 class TestGraphSecrets(unittest.TestCase):
@@ -52,7 +52,6 @@ class TestGraphSecrets(unittest.TestCase):
         graph = Graph(
             name=test_graph_name(self), description="test", start_node=route_if_even
         )
-        graph.route(route_if_even, [add_two, add_three])
         invocation_id = graph.run(block_until_done=True, x=2)
         output = graph.output(invocation_id, "add_three")
         self.assertEqual(output, [5])

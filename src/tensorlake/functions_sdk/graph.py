@@ -22,35 +22,28 @@ from nanoid import generate
 from pydantic import BaseModel
 from typing_extensions import get_args, get_origin
 
-from .data_objects import Metrics, RouterOutput, TensorlakeData
+from .data_objects import Metrics, TensorlakeData
 from .functions import (
     FunctionCallResult,
     GraphInvocationContext,
-    RouterCallResult,
     TensorlakeCompute,
     TensorlakeFunctionWrapper,
-    TensorlakeRouter,
 )
 from .graph_definition import (
     ComputeGraphMetadata,
     FunctionMetadata,
-    InvocationMetadata,
     NodeMetadata,
     RetryPolicyMetadata,
-    RouterMetadata,
     RuntimeInformation,
 )
-from .graph_validation import validate_node, validate_route
+from .graph_validation import validate_node
 from .image import ImageInformation
 from .invocation_state.local_invocation_state import LocalInvocationState
 from .object_serializer import get_serializer
 from .resources import resource_metadata_for_graph_node
 from .retries import Retries
 
-RouterFn = Annotated[
-    Callable[[TensorlakeData], Optional[List[TensorlakeCompute]]], "RouterFn"
-]
-GraphNode = Annotated[Union[TensorlakeFunctionWrapper, RouterFn], "GraphNode"]
+GraphNode = Annotated[TensorlakeFunctionWrapper, "GraphNode"]
 
 
 def is_pydantic_model_from_annotation(type_annotation):
@@ -100,8 +93,7 @@ class Graph:
         _validate_identifier(name, "name")
         self.name = name
         self.description = description
-        self.nodes: Dict[str, Union[TensorlakeCompute, TensorlakeRouter]] = {}
-        self.routers: Dict[str, List[str]] = defaultdict(list)
+        self.nodes: Dict[str, TensorlakeCompute] = {}
         self.edges: Dict[str, List[str]] = defaultdict(list)
         self.accumulator_zero_values: Dict[str, Any] = {}
         self.tags = tags
@@ -111,8 +103,6 @@ class Graph:
         self._fn_cache: Dict[str, TensorlakeFunctionWrapper] = {}
 
         self.add_node(start_node)
-        if issubclass(start_node, TensorlakeRouter):
-            self.routers[start_node.name] = []
         self._start_node: str = start_node.name
 
         # Storage for local execution
@@ -132,9 +122,7 @@ class Graph:
     def get_accumulators(self) -> Dict[str, Any]:
         return self.accumulator_zero_values
 
-    def add_node(
-        self, indexify_fn: Union[Type[TensorlakeCompute], Type[TensorlakeRouter]]
-    ) -> "Graph":
+    def add_node(self, indexify_fn: Type[TensorlakeCompute]) -> "Graph":
         validate_node(indexify_fn=indexify_fn)
 
         if indexify_fn.name in self.nodes:
@@ -144,42 +132,31 @@ class Graph:
             self.accumulator_zero_values[indexify_fn.name] = indexify_fn.accumulate()
 
         self.nodes[indexify_fn.name] = indexify_fn
-        return self
 
-    def route(
-        self,
-        from_node: Type[TensorlakeRouter],
-        to_nodes: List[Type[TensorlakeCompute]],
-    ) -> "Graph":
-        validate_route(from_node=from_node, to_nodes=to_nodes)
+        if indexify_fn.next:
+            if isinstance(indexify_fn.next, list):
+                for node in indexify_fn.next:
+                    self.add_node(node)
+                    self.add_edge(indexify_fn, node)
+            else:
+                self.add_node(indexify_fn.next)
+                self.add_edge(indexify_fn, indexify_fn.next)
 
-        print(
-            f"Adding router {from_node.name} to nodes {[node.name for node in to_nodes]}"
-        )
-        self.add_node(from_node)
-        for node in to_nodes:
-            self.add_node(node)
-            self.routers[from_node.name].append(node.name)
         return self
 
     def add_edge(
         self,
         from_node: Type[TensorlakeCompute],
-        to_node: Union[Type[TensorlakeCompute], RouterFn],
+        to_node: Type[TensorlakeCompute],
     ) -> "Graph":
         self.add_edges(from_node, [to_node])
         return self
 
     def add_edges(
         self,
-        from_node: Union[Type[TensorlakeCompute], Type[TensorlakeRouter]],
-        to_node: List[Union[Type[TensorlakeCompute], Type[TensorlakeRouter]]],
+        from_node: Type[TensorlakeCompute],
+        to_node: List[Type[TensorlakeCompute]],
     ) -> "Graph":
-        if issubclass(from_node, TensorlakeRouter):
-            raise ValueError(
-                "Cannot add edges from a router node, use route method instead"
-            )
-
         self.add_node(from_node)
         from_node_name = from_node.name
         for node in to_node:
@@ -223,68 +200,48 @@ class Graph:
                     delay_multiplier=start_node.retries.delay_multiplier,
                 )
             ),
+            cache_key=(
+                f"version_function={self.version}:{start_node.name}"
+                if start_node.cacheable
+                else None
+            ),
         )
         metadata_edges = self.edges.copy()
         metadata_nodes = {}
         for node_name, node in self.nodes.items():
-            if node_name in self.routers:
-                metadata_nodes[node_name] = NodeMetadata(
-                    dynamic_router=RouterMetadata(
-                        name=node_name,
-                        description=node.description or "",
-                        source_fn=node_name,
-                        target_fns=self.routers[node_name],
-                        input_encoder=node.input_encoder,
-                        output_encoder=node.output_encoder,
-                        image_information=(
-                            node.image.to_image_information()
-                            if node.image
-                            else _none_image_information
-                        ),
-                        secret_names=node.secrets,
-                        timeout_sec=node.timeout,
-                        resources=resource_metadata_for_graph_node(node),
-                        retry_policy=(
-                            graph_retry_policy
-                            if node.retries is None
-                            else RetryPolicyMetadata(
-                                max_retries=node.retries.max_retries,
-                                initial_delay_sec=node.retries.initial_delay,
-                                max_delay_sec=node.retries.max_delay,
-                                delay_multiplier=node.retries.delay_multiplier,
-                            )
-                        ),
-                    )
+            metadata_nodes[node_name] = NodeMetadata(
+                compute_fn=FunctionMetadata(
+                    name=node_name,
+                    fn_name=node.name,
+                    description=node.description,
+                    reducer=node.accumulate is not None,
+                    image_information=(
+                        node.image.to_image_information()
+                        if node.image
+                        else _none_image_information
+                    ),
+                    input_encoder=node.input_encoder,
+                    output_encoder=node.output_encoder,
+                    secret_names=node.secrets,
+                    timeout_sec=node.timeout,
+                    resources=resource_metadata_for_graph_node(node),
+                    retry_policy=(
+                        graph_retry_policy
+                        if node.retries is None
+                        else RetryPolicyMetadata(
+                            max_retries=node.retries.max_retries,
+                            initial_delay_sec=node.retries.initial_delay,
+                            max_delay_sec=node.retries.max_delay,
+                            delay_multiplier=node.retries.delay_multiplier,
+                        )
+                    ),
+                    cache_key=(
+                        f"version_function={self.version}:{node.name}"
+                        if node.cacheable
+                        else None
+                    ),
                 )
-            else:
-                metadata_nodes[node_name] = NodeMetadata(
-                    compute_fn=FunctionMetadata(
-                        name=node_name,
-                        fn_name=node.name,
-                        description=node.description,
-                        reducer=node.accumulate is not None,
-                        image_information=(
-                            node.image.to_image_information()
-                            if node.image
-                            else _none_image_information
-                        ),
-                        input_encoder=node.input_encoder,
-                        output_encoder=node.output_encoder,
-                        secret_names=node.secrets,
-                        timeout_sec=node.timeout,
-                        resources=resource_metadata_for_graph_node(node),
-                        retry_policy=(
-                            graph_retry_policy
-                            if node.retries is None
-                            else RetryPolicyMetadata(
-                                max_retries=node.retries.max_retries,
-                                initial_delay_sec=node.retries.initial_delay,
-                                max_delay_sec=node.retries.max_delay,
-                                delay_multiplier=node.retries.delay_multiplier,
-                            )
-                        ),
-                    )
-                )
+            )
 
         return ComputeGraphMetadata(
             name=self.name,
@@ -342,13 +299,7 @@ class Graph:
         while queue:
             current_node_name = queue.popleft()
             neighbours = (
-                self.edges[current_node_name]
-                if current_node_name in self.edges
-                else (
-                    self.routers[current_node_name]
-                    if current_node_name in self.routers
-                    else []
-                )
+                self.edges[current_node_name] if current_node_name in self.edges else []
             )
 
             for neighbour in neighbours:
@@ -372,8 +323,8 @@ class Graph:
         queue = deque([(self._start_node, initial_input)])
         while queue:
             node_name, input = queue.popleft()
-            function_outputs: Union[FunctionCallResult, RouterCallResult] = (
-                self._invoke_fn_with_retries(node_name, input)
+            function_outputs: FunctionCallResult = self._invoke_fn_with_retries(
+                node_name, input
             )
             # Store metrics for local graph execution
             if function_outputs.metrics is not None:
@@ -385,12 +336,7 @@ class Graph:
                 self._metrics[self._local_graph_ctx.invocation_id] = metrics
 
             self._log_local_exec_tracebacks(function_outputs)
-            if isinstance(function_outputs, RouterCallResult):
-                for edge in function_outputs.edges:
-                    if edge in self.nodes:
-                        queue.append((edge, input))
-                continue
-            out_edges = self.edges.get(node_name, [])
+
             fn_outputs = function_outputs.ser_outputs
             print(f"ran {node_name}: num outputs: {len(fn_outputs)}")
             if self._accumulator_values.get(node_name, None) is not None:
@@ -405,14 +351,19 @@ class Graph:
                 )
                 continue
 
-            for out_edge in out_edges:
+            if function_outputs.edges is not None:
+                edges = function_outputs.edges
+            else:
+                edges = self.edges[node_name]
+
+            for out_edge in edges:
                 for output in fn_outputs:
                     queue.append((out_edge, output))
 
     def _invoke_fn_with_retries(
         self, node_name: str, input: TensorlakeData
-    ) -> Union[RouterCallResult, FunctionCallResult]:
-        node: Union[TensorlakeCompute, TensorlakeRouter] = self.nodes[node_name]
+    ) -> FunctionCallResult:
+        node: TensorlakeCompute = self.nodes[node_name]
         retries: Retries = self.retries if node.retries is None else node.retries
         runs_left: int = 1 + retries.max_retries
         delay: float = retries.initial_delay
@@ -430,27 +381,16 @@ class Graph:
         # Return the last result if successful or out of retries.
         return last_result
 
-    def _invoke_fn(
-        self, node_name: str, input: TensorlakeData
-    ) -> Union[RouterCallResult, FunctionCallResult]:
+    def _invoke_fn(self, node_name: str, input: TensorlakeData) -> FunctionCallResult:
         # TODO: Implement function timeouts when we start calling Function Executor in local mode.
         node = self.nodes[node_name]
         if node_name not in self._fn_cache:
             self._fn_cache[node_name] = TensorlakeFunctionWrapper(node)
         fn = self._fn_cache[node_name]
-        if node_name in self.routers and len(self.routers[node_name]) > 0:
-            result = fn.invoke_router(self._local_graph_ctx, input)
-            for dynamic_edge in result.edges:
-                if dynamic_edge in self.nodes:
-                    print(f"[bold]dynamic router returned node: {dynamic_edge}[/bold]")
-            return result
-
         acc_value = self._accumulator_values.get(node_name, None)
         return fn.invoke_fn_ser(self._local_graph_ctx, input, acc_value)
 
-    def _log_local_exec_tracebacks(
-        self, results: Union[FunctionCallResult, RouterCallResult]
-    ):
+    def _log_local_exec_tracebacks(self, results: FunctionCallResult):
         if results.traceback_msg is not None:
             print(results.traceback_msg)
             import os
@@ -465,6 +405,8 @@ class Graph:
     ) -> List[Any]:
         results = self._results[invocation_id]
         if fn_name not in results:
+            if fn_name in self.nodes:
+                return []
             raise ValueError(f"no results found for fn {fn_name} on graph {self.name}")
         fn = self.nodes[fn_name]
         fn_model = self.get_function(fn_name).get_output_model()

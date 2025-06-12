@@ -1,4 +1,3 @@
-from datetime import datetime
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel
@@ -28,24 +27,10 @@ class FunctionMetadata(BaseModel):
     timeout_sec: Optional[int] = None
     resources: Optional[ResourceMetadata] = None
     retry_policy: Optional[RetryPolicyMetadata] = None
-
-
-class RouterMetadata(BaseModel):
-    name: str
-    description: str
-    source_fn: str
-    target_fns: List[str]
-    image_information: Optional[ImageInformation]
-    input_encoder: str = "cloudpickle"
-    output_encoder: str = "cloudpickle"
-    secret_names: Optional[List[str]] = None
-    timeout_sec: Optional[int] = None
-    resources: Optional[ResourceMetadata] = None
-    retry_policy: Optional[RetryPolicyMetadata] = None
+    cache_key: Optional[str] = None
 
 
 class NodeMetadata(BaseModel):
-    dynamic_router: Optional[RouterMetadata] = None
     compute_fn: Optional[FunctionMetadata] = None
 
 
@@ -74,24 +59,5 @@ class ComputeGraphMetadata(BaseModel):
     def get_input_encoder(self) -> str:
         if self.start_node.compute_fn:
             return self.start_node.compute_fn.input_encoder
-        elif self.start_node.dynamic_router:
-            return self.start_node.dynamic_router.input_encoder
 
         raise ValueError("start node is not set on the graph")
-
-
-class TaskInfoMetadata(BaseModel):
-    pending_tasks: int
-    successful_tasks: int
-    failed_tasks: int
-
-
-class InvocationMetadata(BaseModel):
-    id: str
-    completed: bool
-    status: str
-    outcome: str
-    outstanding_tasks: int
-    task_analytics: dict[str, TaskInfoMetadata]
-    graph_version: str
-    created_at: datetime

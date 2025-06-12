@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Generator, Iterator, List, Optional, Union
 
 import httpx
 from httpx_sse import ServerSentEvent, connect_sse
@@ -13,10 +13,10 @@ from tensorlake.functions_sdk.data_objects import TensorlakeData
 from tensorlake.functions_sdk.graph import (
     ComputeGraphMetadata,
     Graph,
-    InvocationMetadata,
 )
 from tensorlake.functions_sdk.graph_serialization import zip_graph_code
 from tensorlake.functions_sdk.object_serializer import get_serializer
+from tensorlake.functions_sdk.runtime_definition import InvocationMetadata
 from tensorlake.settings import DEFAULT_SERVICE_URL
 from tensorlake.utils.http_client import (
     _TRANSIENT_HTTPX_ERRORS,
@@ -42,7 +42,23 @@ class InvocationEventPayload(BaseModel):
 
 class InvocationEvent(BaseModel):
     event_name: str
+    stdout: Optional[str] = None
+    stderr: Optional[str] = None
     payload: Union[InvocationEventPayload, InvocationFinishedEvent]
+
+    def __str__(self) -> str:
+        stdout = (
+            ""
+            if self.stdout is None
+            else f"[bold red]stdout[/bold red]: \n {self.stdout}\n"
+        )
+        stderr = (
+            ""
+            if self.stderr is None
+            else f"[bold red]stderr[/bold red]: \n {self.stderr}\n"
+        )
+
+        return f"{stdout}{stderr}[bold green]{self.event_name}[/bold green]: {self.payload}"
 
 
 class GraphOutputMetadata(BaseModel):
@@ -282,16 +298,36 @@ class TensorlakeClient:
         input_encoding: str = "cloudpickle",
         **kwargs,
     ) -> str:
+        events = self.stream_invoke_graph_with_object(
+            graph, block_until_done, input_encoding, **kwargs
+        )
+        try:
+            while True:
+                print(str(next(events)))
+        except StopIteration as result:
+            # TODO: Once we only support Python >= 3.13, we can just return events.close().
+            events.close()
+            return result.value
+
+    def stream_invoke_graph_with_object(
+        self,
+        graph: str,
+        block_until_done: bool = False,
+        input_encoding: str = "cloudpickle",
+        **kwargs,
+    ) -> Generator[InvocationEvent, None, str]:
         serializer = get_serializer(input_encoding)
         ser_input = serializer.serialize(kwargs)
         params = {"block_until_finish": block_until_done}
         kwargs = {
-            "headers": {"Content-Type": serializer.content_type},
+            "headers": {
+                "Content-Type": serializer.content_type,
+            },
             "data": ser_input,
             "params": params,
         }
         self._add_api_key(kwargs)
-        invocation_id: Optional[str] = ""
+        invocation_id: Optional[str] = None
         try:
             with connect_sse(
                 self._client,
@@ -303,53 +339,46 @@ class TensorlakeClient:
                     resp = event_source.response.read().decode("utf-8")
                     raise Exception(f"failed to wait for invocation: {resp}")
                 for sse in event_source.iter_sse():
-                    events = self._parse_invocation_events_from_sse_event(graph, sse)
-                    for event in events:
-                        invocation_id = event.payload.invocation_id
-                        if event.event_name == "InvocationFinished":
-                            break
+                    for event in self._parse_invocation_events_from_sse_event(
+                        graph, sse
+                    ):
+                        if invocation_id is None:
+                            invocation_id = event.payload.invocation_id
+                        yield event
 
-                if invocation_id is None:
-                    raise Exception("invocation ID not returned")
-                return invocation_id
         except _TRANSIENT_HTTPX_ERRORS:
             if invocation_id is None:
                 print("invocation ID is unknown, cannot block until done")
                 raise
 
-            if not block_until_done:
-                return invocation_id
+            if block_until_done:
+                self.wait_on_invocation_completion(graph, invocation_id, **kwargs)
 
-            self.wait_on_invocation_completion(graph, invocation_id, **kwargs)
-            return invocation_id
+        if invocation_id is None:
+            raise Exception("invocation ID not returned")
 
-        raise Exception("invocation ID not returned")
+        return invocation_id
 
     def _parse_invocation_events_from_sse_event(
         self, graph: str, sse: ServerSentEvent
-    ) -> List[InvocationEvent]:
-        events = []
+    ) -> Iterator[InvocationEvent]:
         obj = json.loads(sse.data)
 
         for event_name, event_data in obj.items():
             # Handle InvocationFinished events
             if event_name == "InvocationFinished":
-                event = InvocationEvent(
+                yield InvocationEvent(
                     event_name=event_name,
                     payload=InvocationFinishedEvent(invocation_id=event_data["id"]),
                 )
-                print(f"[bold green]InvocationFinished[/bold green]: {event.payload}")
-                events.append(event)
                 continue
 
             # Handle legacy 'id' events (backwards compatibility)
             if event_name == "id":
-                event = InvocationEvent(
+                yield InvocationEvent(
                     event_name="InvocationFinished",  # Normalize event name
                     payload=InvocationFinishedEvent(invocation_id=event_data),
                 )
-                print(f"[bold green]InvocationFinished[/bold green]: {event.payload}")
-                events.append(event)
                 continue
 
             # Handle all other event types
@@ -362,33 +391,23 @@ class TensorlakeClient:
                 and isinstance(event.payload, InvocationEventPayload)
                 and event.payload.outcome == "Failure"
             ):
-                self._log_task_failure(event.payload, graph)
+                event.stdout = self.logs(
+                    event.payload.invocation_id,
+                    graph,
+                    event.payload.fn_name,
+                    event.payload.task_id,
+                    "stdout",
+                )
 
-            print(f"[bold green]{event.event_name}[/bold green]: {event.payload}")
-            events.append(event)
+                event.stderr = self.logs(
+                    event.payload.invocation_id,
+                    graph,
+                    event.payload.fn_name,
+                    event.payload.task_id,
+                    "stderr",
+                )
 
-        return events
-
-    def _log_task_failure(self, payload: InvocationEventPayload, graph: str) -> None:
-        stdout = self.logs(
-            payload.invocation_id,
-            graph,
-            payload.fn_name,
-            payload.task_id,
-            "stdout",
-        )
-        stderr = self.logs(
-            payload.invocation_id,
-            graph,
-            payload.fn_name,
-            payload.task_id,
-            "stderr",
-        )
-
-        if stdout:
-            print(f"[bold red]stdout[/bold red]: \n {stdout}")
-        if stderr:
-            print(f"[bold red]stderr[/bold red]: \n {stderr}")
+            yield event
 
     @exponential_backoff(
         max_retries=10,

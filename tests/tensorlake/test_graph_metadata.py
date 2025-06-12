@@ -5,8 +5,8 @@ from testing import test_graph_name
 
 from tensorlake import (
     Graph,
+    RouteTo,
     tensorlake_function,
-    tensorlake_router,
 )
 from tensorlake.functions_sdk.graph_definition import (
     ComputeGraphMetadata,
@@ -26,27 +26,26 @@ class TestGraphMetadataFunctionTimeouts(unittest.TestCase):
         def function_with_custom_timeout(x: int) -> str:
             return "success"
 
-        @tensorlake_router(timeout=99)
+        @tensorlake_function(
+            timeout=99,
+            next=[function_with_custom_timeout, function_with_default_timeout],
+        )
         def router_with_custom_timeout(
             x: int,
-        ) -> List[Union[function_with_default_timeout, function_with_custom_timeout]]:
-            return function_with_default_timeout
+        ) -> RouteTo[
+            int, Union[function_with_default_timeout, function_with_custom_timeout]
+        ]:
+            return RouteTo(x, function_with_default_timeout)
 
         graph = Graph(
             name=test_graph_name(self),
             description="test",
             start_node=router_with_custom_timeout,
         )
-        graph.route(
-            router_with_custom_timeout,
-            [function_with_default_timeout, function_with_custom_timeout],
-        )
 
         graph_metadata: ComputeGraphMetadata = graph.definition()
         self.assertEqual(
-            graph_metadata.nodes[
-                "router_with_custom_timeout"
-            ].dynamic_router.timeout_sec,
+            graph_metadata.nodes["router_with_custom_timeout"].compute_fn.timeout_sec,
             99,
         )
         self.assertEqual(
