@@ -19,7 +19,7 @@ from typing import (
 from pydantic import BaseModel
 from typing_extensions import get_type_hints
 
-from .data_objects import Metrics, TensorlakeData
+from .data_objects import Failure, Metrics, TensorlakeData
 from .image import Image
 from .invocation_state.invocation_state import InvocationState
 from .object_serializer import get_serializer
@@ -215,7 +215,7 @@ def tensorlake_function(
 
 class FunctionCallResult(BaseModel):
     ser_outputs: List[TensorlakeData]
-    traceback_msg: Optional[str] = None
+    failure: Optional[Failure] = None
     metrics: Optional[Metrics] = None
     edges: Optional[List[str]] = None
 
@@ -305,12 +305,12 @@ class TensorlakeFunctionWrapper:
         ctx: GraphInvocationContext,
         input: Union[Dict, Type[BaseModel], List, Tuple],
         acc: Optional[Type[Any]] = None,
-    ) -> Tuple[List[Any], Optional[str], List[str]]:
+    ) -> Tuple[List[Any], Optional[Failure], List[str]]:
         """Invokes the wrapped function.
 
         Returns a tuple of results, containing:
             The function output
-            The exception traceback if there's an exception, else None
+            The failure if there's an exception, else None
             The router edges produced by the function if any, else None
         """
 
@@ -338,8 +338,8 @@ class TensorlakeFunctionWrapper:
             if isinstance(extracted_data, RouteTo):
                 edges = extracted_data.edges
                 extracted_data = extracted_data.value
-        except Exception:
-            return [], traceback.format_exc(), None
+        except Exception as exc:
+            return [], Failure.from_exception(exc, traceback.format_exc()), None
         if extracted_data is None:
             return [], None, None
 
@@ -369,7 +369,7 @@ class TensorlakeFunctionWrapper:
             acc = input_serializer.deserialize(acc.payload)
         if acc is None and self.indexify_function.accumulate is not None:
             acc = self.indexify_function.accumulate()
-        outputs, err, edges = self.run_fn(ctx, input, acc=acc)
+        outputs, failure, edges = self.run_fn(ctx, input, acc=acc)
 
         metrics = Metrics(
             timers=ctx.invocation_state.timers,
@@ -385,7 +385,7 @@ class TensorlakeFunctionWrapper:
         ]
         return FunctionCallResult(
             ser_outputs=ser_outputs,
-            traceback_msg=err,
+            failure=failure,
             metrics=metrics,
             output_encoding=self.indexify_function.output_encoder,
             edges=edges,

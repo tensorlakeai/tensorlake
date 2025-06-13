@@ -102,6 +102,23 @@ message Metrics {
     map<string, uint64> counters = 2;
 }
 
+enum FailureScope {
+    FAILURE_SCOPE_UNKNOWN = 0;
+    FAILURE_SCOPE_TASK = 1;        // The task failed, but can be retried.
+    FAILURE_SCOPE_INVOCATION = 2;  // The invocation cannot continue (e.g. invalid input).
+    FAILURE_SCOPE_GRAPH = 3;       // The graph is broken, requiring repair; block invocations.
+}
+
+message FailureInfo {
+    // Scope determines the overall system's behavior in response to this failure.
+    optional FailureScope scope = 1;
+
+    // Cls, Msg, and Trace are human-comprehensible diagnostics.
+    optional string cls = 2;
+    optional string msg = 3;
+    optional string trace = 4;
+}
+
 message RunTaskResponse {
     optional string task_id = 1;
     optional FunctionOutput function_output = 2;
@@ -111,6 +128,7 @@ message RunTaskResponse {
     optional bool is_reducer = 6;
     optional bool success = 7;
     optional Metrics metrics = 8;
+    optional FailureInfo failure = 9;  // Implies !success
 }
 
 message HealthCheckRequest {}

@@ -1,6 +1,9 @@
+from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Json
+
+from ..error import GraphError, InvocationError
 
 
 class FileInput(BaseModel):
@@ -26,3 +29,26 @@ class File(BaseModel):
     mime_type: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
     sha_256: Optional[str] = None
+
+
+class FailureScope(str, Enum):
+    Task = "task"
+    Invocation = "invocation"
+    Graph = "graph"
+
+
+class Failure(BaseModel):
+    scope: FailureScope
+    cls: str
+    msg: str
+    trace: str
+
+    @classmethod
+    def from_exception(cls, exc: Exception, trace: str) -> "Failure":
+        scope = FailureScope.Task
+        if isinstance(exc, InvocationError):
+            scope = FailureScope.Invocation
+        elif isinstance(exc, GraphError):
+            scope = FailureScope.Graph
+
+        return cls(scope=scope, cls=type(exc).__name__, msg=str(exc), trace=trace)

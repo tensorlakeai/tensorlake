@@ -1,6 +1,6 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from tensorlake.functions_sdk.image import ImageInformation
 
@@ -41,6 +41,19 @@ class RuntimeInformation(BaseModel):
     sdk_version: str
 
 
+class ComputeGraphStateReady(BaseModel):
+    status: Literal["Ready"]
+
+
+class ComputeGraphStateBroken(BaseModel):
+    status: Literal["Broken"]
+    failed_invocation_id: None | str
+    failed_compute_fn: None | str
+    failure_cls: None | str
+    failure_msg: None | str
+    failure_trace: None | str
+
+
 class ComputeGraphMetadata(BaseModel):
     name: str
     description: str
@@ -52,6 +65,9 @@ class ComputeGraphMetadata(BaseModel):
     runtime_information: RuntimeInformation
     replaying: bool = False
     version: str
+    state: None | ComputeGraphStateReady | ComputeGraphStateBroken = Field(
+        default=None, discriminator="status"
+    )
 
     def get_input_payload_serializer(self):
         return get_serializer(self.start_node.compute_fn.input_encoder)

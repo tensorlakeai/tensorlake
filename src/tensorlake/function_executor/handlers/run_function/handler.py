@@ -6,6 +6,7 @@ import traceback
 from contextlib import redirect_stderr, redirect_stdout
 from typing import Any
 
+from tensorlake.functions_sdk.data_objects import Failure
 from tensorlake.functions_sdk.functions import (
     FunctionCallResult,
     GraphInvocationContext,
@@ -92,9 +93,9 @@ class Handler:
                 finally:
                     # Ensure that whatever outputted by the function gets captured.
                     self._flush_logs()
-        except Exception:
+        except Exception as exc:
             return self._response_helper.failure_response(
-                message=traceback.format_exc(),
+                Failure.from_exception(exc, traceback.format_exc()),
                 stdout=self._func_stdout.getvalue(),
                 stderr=self._func_stderr.getvalue(),
             )

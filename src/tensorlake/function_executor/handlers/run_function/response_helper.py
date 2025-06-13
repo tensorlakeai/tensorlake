@@ -1,9 +1,11 @@
 from typing import List, Optional
 
-from tensorlake.functions_sdk.data_objects import TensorlakeData
+from tensorlake.error import GraphError, InvocationError
+from tensorlake.functions_sdk.data_objects import Failure, FailureScope, TensorlakeData
 from tensorlake.functions_sdk.functions import FunctionCallResult
 from tensorlake.functions_sdk.object_serializer import get_serializer
 
+from ...proto.function_executor_pb2 import FailureScope as ProtoFailureScope
 from ...proto.function_executor_pb2 import (
     FunctionOutput,
     Metrics,
@@ -27,7 +29,7 @@ class ResponseHelper:
         stdout: str = "",
         stderr: str = "",
     ) -> RunTaskResponse:
-        if result.traceback_msg is None:
+        if result.failure is None:
             metrics = Metrics(
                 timers=result.metrics.timers,
                 counters=result.metrics.counters,
@@ -46,16 +48,16 @@ class ResponseHelper:
             )
         else:
             return self.failure_response(
-                message=result.traceback_msg,
+                failure=result.failure,
                 stdout=stdout,
                 stderr=stderr,
             )
 
     def failure_response(
-        self, message: str, stdout: str, stderr: str
+        self, failure: Failure, stdout: str, stderr: str
     ) -> RunTaskResponse:
-        stderr = "\n".join([stderr, message])
-        return RunTaskResponse(
+        stderr = "\n".join([stderr, failure.trace])
+        response = RunTaskResponse(
             task_id=self._task_id,
             function_output=None,
             stdout=stdout,
@@ -63,6 +65,18 @@ class ResponseHelper:
             is_reducer=False,
             success=False,
         )
+
+        response.failure.scope = ProtoFailureScope.FAILURE_SCOPE_TASK
+        if failure.scope == FailureScope.Invocation:
+            response.failure.scope = ProtoFailureScope.FAILURE_SCOPE_INVOCATION
+        elif failure.scope == FailureScope.Graph:
+            response.failure.scope = ProtoFailureScope.FAILURE_SCOPE_GRAPH
+
+        response.failure.cls = failure.cls
+        response.failure.msg = failure.msg
+        response.failure.trace = failure.trace
+
+        return response
 
     def _to_function_output(
         self, outputs: List[TensorlakeData], encoding: str

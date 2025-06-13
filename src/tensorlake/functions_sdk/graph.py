@@ -370,7 +370,7 @@ class Graph:
 
         while runs_left > 0:
             last_result = self._invoke_fn(node_name=node_name, input=input)
-            if last_result.traceback_msg is None:
+            if last_result.failure is None:
                 break  # successful run
 
             time.sleep(delay)
@@ -391,8 +391,8 @@ class Graph:
         return fn.invoke_fn_ser(self._local_graph_ctx, input, acc_value)
 
     def _log_local_exec_tracebacks(self, results: FunctionCallResult):
-        if results.traceback_msg is not None:
-            print(results.traceback_msg)
+        if results.failure is not None:
+            print(results.failure.trace)
             import os
 
             print("exiting local execution due to error")

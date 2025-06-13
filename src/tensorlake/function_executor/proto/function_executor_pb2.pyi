@@ -7,8 +7,21 @@ from typing import Union as _Union
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
 from google.protobuf.internal import containers as _containers
+from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 
 DESCRIPTOR: _descriptor.FileDescriptor
+
+class FailureScope(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    FAILURE_SCOPE_UNKNOWN: _ClassVar[FailureScope]
+    FAILURE_SCOPE_TASK: _ClassVar[FailureScope]
+    FAILURE_SCOPE_INVOCATION: _ClassVar[FailureScope]
+    FAILURE_SCOPE_GRAPH: _ClassVar[FailureScope]
+
+FAILURE_SCOPE_UNKNOWN: FailureScope
+FAILURE_SCOPE_TASK: FailureScope
+FAILURE_SCOPE_INVOCATION: FailureScope
+FAILURE_SCOPE_GRAPH: FailureScope
 
 class SerializedObject(_message.Message):
     __slots__ = ("bytes", "string", "content_type")
@@ -216,6 +229,24 @@ class Metrics(_message.Message):
         counters: _Optional[_Mapping[str, int]] = ...,
     ) -> None: ...
 
+class FailureInfo(_message.Message):
+    __slots__ = ("scope", "cls", "msg", "trace")
+    SCOPE_FIELD_NUMBER: _ClassVar[int]
+    CLS_FIELD_NUMBER: _ClassVar[int]
+    MSG_FIELD_NUMBER: _ClassVar[int]
+    TRACE_FIELD_NUMBER: _ClassVar[int]
+    scope: FailureScope
+    cls: str
+    msg: str
+    trace: str
+    def __init__(
+        self,
+        scope: _Optional[_Union[FailureScope, str]] = ...,
+        cls: _Optional[str] = ...,
+        msg: _Optional[str] = ...,
+        trace: _Optional[str] = ...,
+    ) -> None: ...
+
 class RunTaskResponse(_message.Message):
     __slots__ = (
         "task_id",
@@ -226,6 +257,7 @@ class RunTaskResponse(_message.Message):
         "is_reducer",
         "success",
         "metrics",
+        "failure",
     )
     TASK_ID_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_OUTPUT_FIELD_NUMBER: _ClassVar[int]
@@ -235,6 +267,7 @@ class RunTaskResponse(_message.Message):
     IS_REDUCER_FIELD_NUMBER: _ClassVar[int]
     SUCCESS_FIELD_NUMBER: _ClassVar[int]
     METRICS_FIELD_NUMBER: _ClassVar[int]
+    FAILURE_FIELD_NUMBER: _ClassVar[int]
     task_id: str
     function_output: FunctionOutput
     router_output: RouterOutput
@@ -243,6 +276,7 @@ class RunTaskResponse(_message.Message):
     is_reducer: bool
     success: bool
     metrics: Metrics
+    failure: FailureInfo
     def __init__(
         self,
         task_id: _Optional[str] = ...,
@@ -253,6 +287,7 @@ class RunTaskResponse(_message.Message):
         is_reducer: bool = ...,
         success: bool = ...,
         metrics: _Optional[_Union[Metrics, _Mapping]] = ...,
+        failure: _Optional[_Union[FailureInfo, _Mapping]] = ...,
     ) -> None: ...
 
 class HealthCheckRequest(_message.Message):
