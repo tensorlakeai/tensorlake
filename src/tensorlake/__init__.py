@@ -1,5 +1,4 @@
 from . import data_loaders
-from .error import GraphError, InvocationError
 from .functions_sdk.functions import (
     GraphInvocationContext,
     RouteTo,
@@ -12,11 +11,11 @@ from .functions_sdk.retries import Retries
 from .http_client import TensorlakeClient
 from .remote_graph import RemoteGraph
 from .settings import DEFAULT_SERVICE_URL
+from .user_error import InvocationError
 
 __all__ = [
     "data_loaders",
     "Graph",
-    "GraphError",
     "GraphInvocationContext",
     "Image",
     "InvocationError",

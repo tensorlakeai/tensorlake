@@ -93,9 +93,9 @@ class Handler:
                 finally:
                     # Ensure that whatever outputted by the function gets captured.
                     self._flush_logs()
-        except Exception as exc:
+        except Exception as e:
             return self._response_helper.failure_response(
-                Failure.from_exception(exc, traceback.format_exc()),
+                Failure.from_exception(e, traceback.format_exc()),
                 stdout=self._func_stdout.getvalue(),
                 stderr=self._func_stderr.getvalue(),
             )

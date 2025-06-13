@@ -16,12 +16,10 @@ class FailureScope(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     FAILURE_SCOPE_UNKNOWN: _ClassVar[FailureScope]
     FAILURE_SCOPE_TASK: _ClassVar[FailureScope]
     FAILURE_SCOPE_INVOCATION: _ClassVar[FailureScope]
-    FAILURE_SCOPE_GRAPH: _ClassVar[FailureScope]
 
 FAILURE_SCOPE_UNKNOWN: FailureScope
 FAILURE_SCOPE_TASK: FailureScope
 FAILURE_SCOPE_INVOCATION: FailureScope
-FAILURE_SCOPE_GRAPH: FailureScope
 
 class SerializedObject(_message.Message):
     __slots__ = ("bytes", "string", "content_type")

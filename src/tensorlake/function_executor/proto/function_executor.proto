@@ -106,7 +106,6 @@ enum FailureScope {
     FAILURE_SCOPE_UNKNOWN = 0;
     FAILURE_SCOPE_TASK = 1;        // The task failed, but can be retried.
     FAILURE_SCOPE_INVOCATION = 2;  // The invocation cannot continue (e.g. invalid input).
-    FAILURE_SCOPE_GRAPH = 3;       // The graph is broken, requiring repair; block invocations.
 }
 
 message FailureInfo {

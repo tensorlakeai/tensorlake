@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Json
 
-from ..error import GraphError, InvocationError
+from ..user_error import InvocationError
 
 
 class FileInput(BaseModel):
@@ -34,7 +34,6 @@ class File(BaseModel):
 class FailureScope(str, Enum):
     Task = "task"
     Invocation = "invocation"
-    Graph = "graph"
 
 
 class Failure(BaseModel):
@@ -48,7 +47,5 @@ class Failure(BaseModel):
         scope = FailureScope.Task
         if isinstance(exc, InvocationError):
             scope = FailureScope.Invocation
-        elif isinstance(exc, GraphError):
-            scope = FailureScope.Graph
 
         return cls(scope=scope, cls=type(exc).__name__, msg=str(exc), trace=trace)

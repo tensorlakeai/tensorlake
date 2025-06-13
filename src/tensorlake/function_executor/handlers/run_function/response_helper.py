@@ -1,11 +1,10 @@
 from typing import List, Optional
 
-from tensorlake.error import GraphError, InvocationError
 from tensorlake.functions_sdk.data_objects import Failure, FailureScope, TensorlakeData
 from tensorlake.functions_sdk.functions import FunctionCallResult
 from tensorlake.functions_sdk.object_serializer import get_serializer
 
-from ...proto.function_executor_pb2 import FailureScope as ProtoFailureScope
+from ...proto.function_executor_pb2 import FailureScope as FailureScopeProto
 from ...proto.function_executor_pb2 import (
     FunctionOutput,
     Metrics,
@@ -66,11 +65,9 @@ class ResponseHelper:
             success=False,
         )
 
-        response.failure.scope = ProtoFailureScope.FAILURE_SCOPE_TASK
+        response.failure.scope = FailureScopeProto.FAILURE_SCOPE_TASK
         if failure.scope == FailureScope.Invocation:
-            response.failure.scope = ProtoFailureScope.FAILURE_SCOPE_INVOCATION
-        elif failure.scope == FailureScope.Graph:
-            response.failure.scope = ProtoFailureScope.FAILURE_SCOPE_GRAPH
+            response.failure.scope = FailureScopeProto.FAILURE_SCOPE_INVOCATION
 
         response.failure.cls = failure.cls
         response.failure.msg = failure.msg
