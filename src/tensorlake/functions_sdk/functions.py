@@ -339,7 +339,11 @@ class TensorlakeFunctionWrapper:
                 edges = extracted_data.edges
                 extracted_data = extracted_data.value
         except Exception as exc:
-            return [], Failure.from_exception(exc, traceback.format_exc()), None
+            return (
+                [],
+                Failure.from_exception(exc, traceback.format_exc()),
+                None,
+            )
         if extracted_data is None:
             return [], None, None
 

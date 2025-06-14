@@ -1,10 +1,11 @@
-class InvocationError(Exception):
+class InvocationArgumentError(Exception):
     """An invocation cannot complete; the task should not be retried.
 
     This exception is raised by user code executing within a workflow
-    graph in order to indicate a serious problem with a particular
-    graph invocation -- typically things like invalid arguments
-    supplied to the workflow.
+    graph in order to indicate a problem with a particular graph
+    invocation -- typically things like invalid arguments supplied to
+    the workflow.
+
     """
 
     def __init__(self, message: str):

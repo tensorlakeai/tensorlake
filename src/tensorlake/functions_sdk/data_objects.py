@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Json
 
-from ..user_error import InvocationError
+from ..user_error import InvocationArgumentError
 
 
 class FileInput(BaseModel):
@@ -32,8 +32,13 @@ class File(BaseModel):
 
 
 class FailureScope(str, Enum):
+    # The task threw an exception; this is retryable, and does not
+    # break the graph.
     Task = "task"
-    Invocation = "invocation"
+
+    # The task has a problem with its arguments; this is not
+    # retryable, and does not break the graph.
+    InvocationArgument = "invocation_argument"
 
 
 class Failure(BaseModel):
@@ -45,7 +50,7 @@ class Failure(BaseModel):
     @classmethod
     def from_exception(cls, exc: Exception, trace: str) -> "Failure":
         scope = FailureScope.Task
-        if isinstance(exc, InvocationError):
-            scope = FailureScope.Invocation
+        if isinstance(exc, InvocationArgumentError):
+            scope = FailureScope.InvocationArgument
 
         return cls(scope=scope, cls=type(exc).__name__, msg=str(exc), trace=trace)

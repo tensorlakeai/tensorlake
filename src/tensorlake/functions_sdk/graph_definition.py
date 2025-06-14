@@ -47,16 +47,16 @@ class ComputeGraphStateReady(BaseModel):
 
 class ComputeGraphStateBroken(BaseModel):
     status: Literal["Broken"]
-    failed_invocation_id: None | str
-    failed_compute_fn: None | str
-    failure_cls: None | str
-    failure_msg: None | str
-    failure_trace: None | str
+    failed_invocation_id: None | str = None
+    failed_compute_fn: None | str = None
+    failure_cls: None | str = None
+    failure_msg: None | str = None
+    failure_trace: None | str = None
 
 
 class ComputeGraphFailureGauge(BaseModel):
     consecutive_failure_max: int
-    consecutive_failure_count: None | int
+    consecutive_failure_count: None | int = None
 
 
 class ComputeGraphMetadata(BaseModel):

@@ -66,8 +66,8 @@ class ResponseHelper:
         )
 
         response.failure.scope = FailureScopeProto.FAILURE_SCOPE_TASK
-        if failure.scope == FailureScope.Invocation:
-            response.failure.scope = FailureScopeProto.FAILURE_SCOPE_INVOCATION
+        if failure.scope == FailureScope.InvocationArgument:
+            response.failure.scope = FailureScopeProto.FAILURE_SCOPE_INVOCATION_ARGUMENT
 
         response.failure.cls = failure.cls
         response.failure.msg = failure.msg

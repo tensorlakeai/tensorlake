@@ -11,14 +11,14 @@ from .functions_sdk.retries import Retries
 from .http_client import TensorlakeClient
 from .remote_graph import RemoteGraph
 from .settings import DEFAULT_SERVICE_URL
-from .user_error import InvocationError
+from .user_error import InvocationArgumentError
 
 __all__ = [
     "data_loaders",
     "Graph",
     "GraphInvocationContext",
     "Image",
-    "InvocationError",
+    "InvocationArgumentError",
     "RemoteGraph",
     "Retries",
     "Pipeline",

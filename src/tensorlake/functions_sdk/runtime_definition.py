@@ -20,10 +20,10 @@ class InvocationStateSuccess(BaseModel):
 
 class InvocationStateError(BaseModel):
     status: Literal["Failed"]
-    failed_compute_fn: None | str
-    failure_cls: None | str
-    failure_msg: None | str
-    failure_trace: None | str
+    failed_compute_fn: None | str = None
+    failure_cls: None | str = None
+    failure_msg: None | str = None
+    failure_trace: None | str = None
 
 
 class InvocationMetadata(BaseModel):
