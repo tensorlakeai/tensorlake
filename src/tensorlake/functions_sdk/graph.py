@@ -30,6 +30,7 @@ from .functions import (
     TensorlakeFunctionWrapper,
 )
 from .graph_definition import (
+    ComputeGraphFailureGauge,
     ComputeGraphMetadata,
     FunctionMetadata,
     NodeMetadata,
@@ -82,6 +83,7 @@ class Graph:
         version: Optional[str] = None,
         additional_modules: List = [],
         retries: Retries = Retries(),
+        consecutive_failure_max: None | int = None,
     ):
         if version is None:
             # Update graph on every deployment unless user wants to manage the version manually.
@@ -99,6 +101,7 @@ class Graph:
         self.tags = tags
         self.version = version
         self.retries = retries
+        self.consecutive_failure_max = consecutive_failure_max
 
         self._fn_cache: Dict[str, TensorlakeFunctionWrapper] = {}
 
@@ -243,6 +246,14 @@ class Graph:
                 )
             )
 
+        if self.consecutive_failure_max is None:
+            failure_gauge = None
+        else:
+            failure_gauge = ComputeGraphFailureGauge(
+                consecutive_failure_max=self.consecutive_failure_max,
+                consecutive_failure_count=None,
+            )
+
         return ComputeGraphMetadata(
             name=self.name,
             description=self.description or "",
@@ -256,6 +267,7 @@ class Graph:
                 sdk_version=importlib.metadata.version("tensorlake"),
             ),
             version=self.version,
+            failure_gauge=failure_gauge,
         )
 
     def run(self, block_until_done: bool = False, **kwargs) -> str:
@@ -370,7 +382,7 @@ class Graph:
 
         while runs_left > 0:
             last_result = self._invoke_fn(node_name=node_name, input=input)
-            if last_result.traceback_msg is None:
+            if last_result.failure is None:
                 break  # successful run
 
             time.sleep(delay)
@@ -391,8 +403,8 @@ class Graph:
         return fn.invoke_fn_ser(self._local_graph_ctx, input, acc_value)
 
     def _log_local_exec_tracebacks(self, results: FunctionCallResult):
-        if results.traceback_msg is not None:
-            print(results.traceback_msg)
+        if results.failure is not None:
+            print(results.failure.trace)
             import os
 
             print("exiting local execution due to error")
