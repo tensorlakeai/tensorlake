@@ -54,6 +54,11 @@ class ComputeGraphStateBroken(BaseModel):
     failure_trace: None | str
 
 
+class ComputeGraphFailureGauge(BaseModel):
+    consecutive_failure_max: int
+    consecutive_failure_count: None | int
+
+
 class ComputeGraphMetadata(BaseModel):
     name: str
     description: str
@@ -65,6 +70,7 @@ class ComputeGraphMetadata(BaseModel):
     runtime_information: RuntimeInformation
     replaying: bool = False
     version: str
+    failure_gauge: None | ComputeGraphFailureGauge = None
     state: None | ComputeGraphStateReady | ComputeGraphStateBroken = Field(
         default=None, discriminator="status"
     )

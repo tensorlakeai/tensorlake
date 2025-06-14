@@ -2,6 +2,7 @@ from typing import Any, Generator, List, Optional
 
 from tensorlake.functions_sdk.graph import Graph
 from tensorlake.functions_sdk.graph_definition import ComputeGraphMetadata
+from tensorlake.functions_sdk.runtime_definition import InvocationMetadata
 
 from .http_client import InvocationEvent, TensorlakeClient
 from .settings import DEFAULT_SERVICE_URL
@@ -89,6 +90,12 @@ class RemoteGraph:
         Get the metadata of the graph.
         """
         return self._client.graph(self._name)
+
+    def invocation_metadata(self, invocation_id) -> InvocationMetadata:
+        """
+        Get the metadata of a particular graph invocation.
+        """
+        return self._client.invocation(self._name, invocation_id)
 
     def replay_invocations(self):
         """

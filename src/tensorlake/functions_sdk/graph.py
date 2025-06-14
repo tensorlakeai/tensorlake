@@ -30,6 +30,7 @@ from .functions import (
     TensorlakeFunctionWrapper,
 )
 from .graph_definition import (
+    ComputeGraphFailureGauge,
     ComputeGraphMetadata,
     FunctionMetadata,
     NodeMetadata,
@@ -82,6 +83,7 @@ class Graph:
         version: Optional[str] = None,
         additional_modules: List = [],
         retries: Retries = Retries(),
+        consecutive_failure_max: None | int = None,
     ):
         if version is None:
             # Update graph on every deployment unless user wants to manage the version manually.
@@ -99,6 +101,7 @@ class Graph:
         self.tags = tags
         self.version = version
         self.retries = retries
+        self.consecutive_failure_max = consecutive_failure_max
 
         self._fn_cache: Dict[str, TensorlakeFunctionWrapper] = {}
 
@@ -243,6 +246,14 @@ class Graph:
                 )
             )
 
+        if self.consecutive_failure_max is None:
+            failure_gauge = None
+        else:
+            failure_gauge = ComputeGraphFailureGauge(
+                consecutive_failure_max=self.consecutive_failure_max,
+                consecutive_failure_count=None,
+            )
+
         return ComputeGraphMetadata(
             name=self.name,
             description=self.description or "",
@@ -256,6 +267,7 @@ class Graph:
                 sdk_version=importlib.metadata.version("tensorlake"),
             ),
             version=self.version,
+            failure_gauge=failure_gauge,
         )
 
     def run(self, block_until_done: bool = False, **kwargs) -> str:
