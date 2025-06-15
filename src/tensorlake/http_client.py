@@ -36,6 +36,7 @@ class InvocationEventPayload(BaseModel):
     invocation_id: str
     fn_name: str
     task_id: str
+    allocation_id: Optional[str] = None
     executor_id: Optional[str] = None
     outcome: Optional[str] = None
 
@@ -260,11 +261,11 @@ class TensorlakeClient:
         self._post("namespaces", json={"name": namespace})
 
     def logs(
-        self, invocation_id: str, cg_name: str, fn_name: str, task_id: str, file: str
+        self, cg_name: str, invocation_id: str, allocation_id: str, file: str
     ) -> Optional[str]:
         try:
             response = self._get(
-                f"namespaces/{self.namespace}/compute_graphs/{cg_name}/invocations/{invocation_id}/fn/{fn_name}/tasks/{task_id}/logs/{file}"
+                f"namespaces/{self.namespace}/compute_graphs/{cg_name}/invocations/{invocation_id}/allocations/{allocation_id}/logs/{file}"
             )
             response.raise_for_status()
             return response.content.decode("utf-8")
@@ -392,18 +393,16 @@ class TensorlakeClient:
                 and event.payload.outcome == "Failure"
             ):
                 event.stdout = self.logs(
-                    event.payload.invocation_id,
                     graph,
-                    event.payload.fn_name,
-                    event.payload.task_id,
+                    event.payload.invocation_id,
+                    event.payload.allocation_id,
                     "stdout",
                 )
 
                 event.stderr = self.logs(
-                    event.payload.invocation_id,
                     graph,
-                    event.payload.fn_name,
-                    event.payload.task_id,
+                    event.payload.invocation_id,
+                    event.payload.allocation_id,
                     "stderr",
                 )
 
