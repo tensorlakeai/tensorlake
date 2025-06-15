@@ -30,11 +30,6 @@ class FunctionMetadata(BaseModel):
     cache_key: Optional[str] = None
 
 
-class NodeMetadata(BaseModel):
-    compute_fn: Optional[FunctionMetadata] = None
-
-
-# RuntimeInformation is a class that holds data about the environment in which the graph should run.
 class RuntimeInformation(BaseModel):
     major_version: int
     minor_version: int
@@ -44,9 +39,9 @@ class RuntimeInformation(BaseModel):
 class ComputeGraphMetadata(BaseModel):
     name: str
     description: str
-    start_node: NodeMetadata
+    start_node: FunctionMetadata
     tags: Dict[str, str] = {}
-    nodes: Dict[str, NodeMetadata]
+    nodes: Dict[str, FunctionMetadata]
     edges: Dict[str, List[str]]
     accumulator_zero_values: Dict[str, bytes] = {}
     runtime_information: RuntimeInformation
@@ -57,7 +52,7 @@ class ComputeGraphMetadata(BaseModel):
         return get_serializer(self.start_node.compute_fn.input_encoder)
 
     def get_input_encoder(self) -> str:
-        if self.start_node.compute_fn:
-            return self.start_node.compute_fn.input_encoder
+        if self.start_node.input_encoder:
+            return self.start_node.input_encoder
 
         raise ValueError("start node is not set on the graph")
