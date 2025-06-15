@@ -49,9 +49,7 @@ class TestGraphMetadataFunctionTimeouts(unittest.TestCase):
             99,
         )
         self.assertEqual(
-            graph_metadata.nodes[
-                "function_with_default_timeout"
-            ].timeout_sec,
+            graph_metadata.nodes["function_with_default_timeout"].timeout_sec,
             300,
         )
         self.assertEqual(
@@ -155,9 +153,7 @@ class TestGraphMetadataFunctionResources(unittest.TestCase):
             start_node=function_without_resources,
         )
         graph_metadata: ComputeGraphMetadata = graph.definition()
-        resource_metadata: ResourceMetadata = (
-            graph_metadata.start_node.resources
-        )
+        resource_metadata: ResourceMetadata = graph_metadata.start_node.resources
         self.assertIsNotNone(resource_metadata)
         self.assertEqual(resource_metadata.cpus, 1.0)
         self.assertEqual(resource_metadata.memory_mb, 1024)
@@ -175,9 +171,7 @@ class TestGraphMetadataFunctionResources(unittest.TestCase):
             start_node=function_with_resources,
         )
         graph_metadata: ComputeGraphMetadata = graph.definition()
-        resource_metadata: ResourceMetadata = (
-            graph_metadata.start_node.resources
-        )
+        resource_metadata: ResourceMetadata = graph_metadata.start_node.resources
         self.assertIsNotNone(resource_metadata)
         self.assertEqual(resource_metadata.cpus, 2.25)
         self.assertEqual(resource_metadata.memory_mb, 2048)
@@ -197,9 +191,7 @@ class TestGraphMetadataFunctionResources(unittest.TestCase):
             start_node=function_with_resources,
         )
         graph_metadata: ComputeGraphMetadata = graph.definition()
-        resource_metadata: ResourceMetadata = (
-            graph_metadata.start_node.resources
-        )
+        resource_metadata: ResourceMetadata = graph_metadata.start_node.resources
         self.assertIsNotNone(resource_metadata)
         self.assertEqual(resource_metadata.cpus, 1.0)
         self.assertEqual(resource_metadata.memory_mb, 1024)
@@ -219,9 +211,7 @@ class TestGraphMetadataFunctionResources(unittest.TestCase):
             start_node=function_with_resources,
         )
         graph_metadata: ComputeGraphMetadata = graph.definition()
-        resource_metadata: ResourceMetadata = (
-            graph_metadata.start_node.resources
-        )
+        resource_metadata: ResourceMetadata = graph_metadata.start_node.resources
         self.assertIsNotNone(resource_metadata)
         self.assertEqual(resource_metadata.cpus, 1.0)
         self.assertEqual(resource_metadata.memory_mb, 1024)
