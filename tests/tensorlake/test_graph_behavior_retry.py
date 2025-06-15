@@ -1,16 +1,18 @@
 import unittest
+
+import parameterized
 import testing
 from pydantic import BaseModel
-import parameterized
-
-from tensorlake.functions_sdk.graph import Graph
 from testing import remote_or_local_graph, test_graph_name
+
 from tensorlake import tensorlake_function
+from tensorlake.functions_sdk.graph import Graph
 from tensorlake.functions_sdk.retries import Retries
 
 
 class MyObject(BaseModel):
     x: str
+
 
 @tensorlake_function(retries=Retries(max_retries=4))
 def simple_function(x: MyObject) -> MyObject:
@@ -18,7 +20,6 @@ def simple_function(x: MyObject) -> MyObject:
         raise Exception("test exception")
     print("simple_function", x.x)
     return MyObject(x=x.x + "b")
-
 
 
 class TestGraphBehaviorRetry(unittest.TestCase):
