@@ -32,7 +32,6 @@ from .functions import (
 from .graph_definition import (
     ComputeGraphMetadata,
     FunctionMetadata,
-    NodeMetadata,
     RetryPolicyMetadata,
     RuntimeInformation,
 )
@@ -209,44 +208,42 @@ class Graph:
         metadata_edges = self.edges.copy()
         metadata_nodes = {}
         for node_name, node in self.nodes.items():
-            metadata_nodes[node_name] = NodeMetadata(
-                compute_fn=FunctionMetadata(
-                    name=node_name,
-                    fn_name=node.name,
-                    description=node.description,
-                    reducer=node.accumulate is not None,
-                    image_information=(
-                        node.image.to_image_information()
-                        if node.image
-                        else _none_image_information
-                    ),
-                    input_encoder=node.input_encoder,
-                    output_encoder=node.output_encoder,
-                    secret_names=node.secrets,
-                    timeout_sec=node.timeout,
-                    resources=resource_metadata_for_graph_node(node),
-                    retry_policy=(
-                        graph_retry_policy
-                        if node.retries is None
-                        else RetryPolicyMetadata(
-                            max_retries=node.retries.max_retries,
-                            initial_delay_sec=node.retries.initial_delay,
-                            max_delay_sec=node.retries.max_delay,
-                            delay_multiplier=node.retries.delay_multiplier,
-                        )
-                    ),
-                    cache_key=(
-                        f"version_function={self.version}:{node.name}"
-                        if node.cacheable
-                        else None
-                    ),
-                )
+            metadata_nodes[node_name] = FunctionMetadata(
+                name=node_name,
+                fn_name=node.name,
+                description=node.description,
+                reducer=node.accumulate is not None,
+                image_information=(
+                    node.image.to_image_information()
+                    if node.image
+                    else _none_image_information
+                ),
+                input_encoder=node.input_encoder,
+                output_encoder=node.output_encoder,
+                secret_names=node.secrets,
+                timeout_sec=node.timeout,
+                resources=resource_metadata_for_graph_node(node),
+                retry_policy=(
+                    graph_retry_policy
+                    if node.retries is None
+                    else RetryPolicyMetadata(
+                        max_retries=node.retries.max_retries,
+                        initial_delay_sec=node.retries.initial_delay,
+                        max_delay_sec=node.retries.max_delay,
+                        delay_multiplier=node.retries.delay_multiplier,
+                    )
+                ),
+                cache_key=(
+                    f"version_function={self.version}:{node.name}"
+                    if node.cacheable
+                    else None
+                ),
             )
 
         return ComputeGraphMetadata(
             name=self.name,
             description=self.description or "",
-            start_node=NodeMetadata(compute_fn=start_node),
+            start_node=start_node,
             nodes=metadata_nodes,
             edges=metadata_edges,
             tags=self.tags,
