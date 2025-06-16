@@ -45,17 +45,15 @@ class TestGraphMetadataFunctionTimeouts(unittest.TestCase):
 
         graph_metadata: ComputeGraphMetadata = graph.definition()
         self.assertEqual(
-            graph_metadata.nodes["router_with_custom_timeout"].compute_fn.timeout_sec,
+            graph_metadata.nodes["router_with_custom_timeout"].timeout_sec,
             99,
         )
         self.assertEqual(
-            graph_metadata.nodes[
-                "function_with_default_timeout"
-            ].compute_fn.timeout_sec,
+            graph_metadata.nodes["function_with_default_timeout"].timeout_sec,
             300,
         )
         self.assertEqual(
-            graph_metadata.nodes["function_with_custom_timeout"].compute_fn.timeout_sec,
+            graph_metadata.nodes["function_with_custom_timeout"].timeout_sec,
             10,
         )
 
@@ -73,7 +71,7 @@ class TestGraphMetadataFunctionRetries(unittest.TestCase):
         )
         graph_metadata: ComputeGraphMetadata = graph.definition()
         retry_policy_metadata: RetryPolicyMetadata = (
-            graph_metadata.start_node.compute_fn.retry_policy
+            graph_metadata.start_node.retry_policy
         )
         self.assertIsNotNone(retry_policy_metadata)
         self.assertEqual(retry_policy_metadata.max_retries, 0)
@@ -100,7 +98,7 @@ class TestGraphMetadataFunctionRetries(unittest.TestCase):
         )
         graph_metadata: ComputeGraphMetadata = graph.definition()
         retry_policy_metadata: RetryPolicyMetadata = (
-            graph_metadata.start_node.compute_fn.retry_policy
+            graph_metadata.start_node.retry_policy
         )
         self.assertIsNotNone(retry_policy_metadata)
         self.assertEqual(retry_policy_metadata.max_retries, 3)
@@ -134,7 +132,7 @@ class TestGraphMetadataFunctionRetries(unittest.TestCase):
         )
         graph_metadata: ComputeGraphMetadata = graph.definition()
         retry_policy_metadata: RetryPolicyMetadata = (
-            graph_metadata.start_node.compute_fn.retry_policy
+            graph_metadata.start_node.retry_policy
         )
         self.assertIsNotNone(retry_policy_metadata)
         self.assertEqual(retry_policy_metadata.max_retries, 2)
@@ -155,9 +153,7 @@ class TestGraphMetadataFunctionResources(unittest.TestCase):
             start_node=function_without_resources,
         )
         graph_metadata: ComputeGraphMetadata = graph.definition()
-        resource_metadata: ResourceMetadata = (
-            graph_metadata.start_node.compute_fn.resources
-        )
+        resource_metadata: ResourceMetadata = graph_metadata.start_node.resources
         self.assertIsNotNone(resource_metadata)
         self.assertEqual(resource_metadata.cpus, 1.0)
         self.assertEqual(resource_metadata.memory_mb, 1024)
@@ -175,9 +171,7 @@ class TestGraphMetadataFunctionResources(unittest.TestCase):
             start_node=function_with_resources,
         )
         graph_metadata: ComputeGraphMetadata = graph.definition()
-        resource_metadata: ResourceMetadata = (
-            graph_metadata.start_node.compute_fn.resources
-        )
+        resource_metadata: ResourceMetadata = graph_metadata.start_node.resources
         self.assertIsNotNone(resource_metadata)
         self.assertEqual(resource_metadata.cpus, 2.25)
         self.assertEqual(resource_metadata.memory_mb, 2048)
@@ -197,9 +191,7 @@ class TestGraphMetadataFunctionResources(unittest.TestCase):
             start_node=function_with_resources,
         )
         graph_metadata: ComputeGraphMetadata = graph.definition()
-        resource_metadata: ResourceMetadata = (
-            graph_metadata.start_node.compute_fn.resources
-        )
+        resource_metadata: ResourceMetadata = graph_metadata.start_node.resources
         self.assertIsNotNone(resource_metadata)
         self.assertEqual(resource_metadata.cpus, 1.0)
         self.assertEqual(resource_metadata.memory_mb, 1024)
@@ -219,9 +211,7 @@ class TestGraphMetadataFunctionResources(unittest.TestCase):
             start_node=function_with_resources,
         )
         graph_metadata: ComputeGraphMetadata = graph.definition()
-        resource_metadata: ResourceMetadata = (
-            graph_metadata.start_node.compute_fn.resources
-        )
+        resource_metadata: ResourceMetadata = graph_metadata.start_node.resources
         self.assertIsNotNone(resource_metadata)
         self.assertEqual(resource_metadata.cpus, 1.0)
         self.assertEqual(resource_metadata.memory_mb, 1024)

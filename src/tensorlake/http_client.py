@@ -477,7 +477,7 @@ class TensorlakeClient:
             raise GraphStillProcessing()
 
         graph_metadata: ComputeGraphMetadata = self.graph(graph)
-        output_encoder = graph_metadata.nodes[fn_name].compute_fn.output_encoder
+        output_encoder = graph_metadata.nodes[fn_name].output_encoder
 
         outputs = []
         for output in graph_outputs.outputs:
