@@ -8,6 +8,7 @@ on:
     types: [opened, synchronize, reopened, labeled, unlabeled]
     branches:
       - 'main'
+      - 'server-sse-stream-stable'
     paths:
       - 'src/**'
       - 'tests/**'
