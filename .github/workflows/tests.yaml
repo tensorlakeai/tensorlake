@@ -48,9 +48,6 @@ jobs:
         with:
           # Indexify Server storage path has to be that same in container and host
           # so Executor can use local FS BLOB store.
-          #
-          # Pin to Indexify Server version used in DocAI prod cluster to test all
-          # SDK changes for backward compatibility with the cluster.
           run: |
             mkdir -p /tmp/indexify-server-storage/indexify_storage/blobs
             docker run -i -a stdout -a stderr --rm \
@@ -59,7 +56,7 @@ jobs:
               --name indexify-server \
               -v /tmp/indexify-server-storage:/tmp/indexify-server-storage \
               -w /tmp/indexify-server-storage \
-              tensorlake/indexify-server:0.2.63 &
+              tensorlake/indexify-server:latest &
           wait-on: |
             tcp:localhost:8900
           tail: true
@@ -69,9 +66,7 @@ jobs:
           log-output-if: true
 
       - name: Install Indexify from PyPI
-        # Pin to Indexify version used in DocAI prod cluster to test all
-        # SDK changes for backward compatibility with the cluster.
-        run: pip install "indexify==0.3.31"
+        run: pip install indexify
       - name: Install Tensorlake from local source
         run: pip install -e . && pip show tensorlake
       - name: Install dependencies of integration tests globally
