@@ -181,11 +181,14 @@ class Image:
         docker_contents = [
             f"FROM {self._base_image}",
             "WORKDIR /app",
-            f"RUN pip install tensorlake=={self._sdk_version}",
         ]
 
         for build_op in self._build_ops:
             docker_contents.append(build_op.render())
+
+        # Run tensorlake install after all user commands. There's implicit dependency
+        # of tensorlake install success on user commands right now.
+        docker_contents.append(f"RUN pip install tensorlake=={self._sdk_version}")
 
         docker_file = "\n".join(docker_contents)
         return docker_file
