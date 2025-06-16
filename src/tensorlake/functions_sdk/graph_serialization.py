@@ -150,7 +150,6 @@ def _create_graph_manifest(
     function_manifests: Dict[str, FunctionManifest] = {}
     for node in graph.nodes.values():
         function_manifests[node.name] = _create_function_manifest(node, code_dir_path)
-        print(node.name, function_manifests[node.name])
 
     return GraphManifest(version="0.1.0", functions=function_manifests)
 

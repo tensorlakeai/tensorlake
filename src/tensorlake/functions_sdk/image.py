@@ -90,14 +90,13 @@ class Build(BaseModel):
 
 
 class Image:
-    def __init__(self, indexify_version: Optional[str] = None):
+    def __init__(self):
         self._image_name = None
         self._tag = "latest"
         self._base_image = BASE_IMAGE_NAME
         self._python_version = LOCAL_PYTHON_VERSION
         self._build_ops = []  # List of ImageOperation
         self._sdk_version = importlib.metadata.version("tensorlake")
-        self._indexify_version = indexify_version
         self.uri = ""  # For internal use
 
     def name(self, image_name):
@@ -147,23 +146,6 @@ class Image:
             image_uri=self.uri,
         )
 
-    def _is_url(self, path: str) -> bool:
-        return urlparse(path).scheme in ("http", "https")
-
-    def _is_git_repo_url(self, path: str) -> bool:
-        parsed = urlparse(path)
-        return parsed.scheme == "git" or (
-            parsed.hostname
-            and (
-                parsed.hostname == "github.com"
-                or parsed.hostname.endswith(".github.com")
-            )
-        )
-
-    def _is_inside_git_dir(self, path: str) -> bool:
-        parts = os.path.normpath(path).split(os.sep)
-        return ".git" in parts
-
     def build_context(self, filename: str):
         with tarfile.open(filename, "w:gz") as tf:
             for op in self._build_ops:
@@ -173,7 +155,7 @@ class Image:
                     tf.add(src, src)
 
                 elif op.op_type == "ADD":
-                    if self._is_url(src) or self._is_git_repo_url(src):
+                    if _is_url(src) or _is_git_repo_url(src):
                         logging.warning(
                             "Skipping ADD: %s is a URL or Git repo reference", src
                         )
@@ -181,7 +163,7 @@ class Image:
                     if not os.path.exists(src):
                         logging.warning("Skipping ADD: %s does not exist", src)
                         continue
-                    if self._is_inside_git_dir(src):
+                    if _is_inside_git_dir(src):
                         logging.warning(
                             "Skipping ADD: %s is inside a .git directory", src
                         )
@@ -195,45 +177,25 @@ class Image:
 
             tf.addfile(tarinfo, BytesIO(dockerfile.encode()))
 
-    def _generate_dockerfile(self, python_sdk_path: Optional[str] = None):
+    def _generate_dockerfile(self):
         docker_contents = [
             f"FROM {self._base_image}",
-            "RUN mkdir -p ~/.indexify",
-            f"RUN echo {self._image_name} > ~/.indexify/image_name",  # TODO: Do we still use this in executors?
-            f"RUN echo {self.hash()} > ~/.indexify/image_hash",  # TODO: Do we still use this in executors?
             "WORKDIR /app",
+            f"RUN pip install 'tensorlake=={self._sdk_version}'",
         ]
 
         for build_op in self._build_ops:
             docker_contents.append(build_op.render())
 
-        if python_sdk_path is not None:
-            logging.info(
-                f"Building image {self._image_name} with local version of the SDK"
-            )
-            if not os.path.exists(python_sdk_path):
-                print(f"error: {python_sdk_path} does not exist")
-                sys.exit(1)
-            docker_contents.append(f"COPY {python_sdk_path} /app/python-sdk")
-            docker_contents.append("RUN (cd /app/python-sdk && pip install .)")
-        else:
-            # TODO: Remove installation of indexify when we've finished the container executor
-            indexify_pkg = "indexify"
-            if self._indexify_version is not None:
-                indexfiy_pkg += f"=={self._indexify_version}"
-            docker_contents.append(
-                f"RUN pip install {indexify_pkg}"
-            )  # TODO: Update this to specify our local tensorlake version
-
         docker_file = "\n".join(docker_contents)
         return docker_file
 
-    def build(self, python_sdk_path: Optional[str] = None, docker_client=None):
+    def build(self, docker_client=None):
         if docker_client is None:
             docker_client = docker.from_env()
             docker_client.ping()
 
-        docker_file = self._generate_dockerfile(python_sdk_path=python_sdk_path)
+        docker_file = self._generate_dockerfile()
         image_name = f"{self._image_name}:{self._tag}"
 
         docker.api.build.process_dockerfile = lambda dockerfile, path: (
@@ -263,3 +225,20 @@ class Image:
 
 LOCAL_PYTHON_VERSION = f"{sys.version_info.major}.{sys.version_info.minor}"
 BASE_IMAGE_NAME = f"python:{LOCAL_PYTHON_VERSION}-slim-bookworm"
+
+
+def _is_url(path: str) -> bool:
+    return urlparse(path).scheme in ("http", "https")
+
+
+def _is_git_repo_url(path: str) -> bool:
+    parsed = urlparse(path)
+    return parsed.scheme == "git" or (
+        parsed.hostname
+        and (parsed.hostname == "github.com" or parsed.hostname.endswith(".github.com"))
+    )
+
+
+def _is_inside_git_dir(path: str) -> bool:
+    parts = os.path.normpath(path).split(os.sep)
+    return ".git" in parts
