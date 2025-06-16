@@ -181,7 +181,7 @@ class Image:
         docker_contents = [
             f"FROM {self._base_image}",
             "WORKDIR /app",
-            f"RUN pip install 'tensorlake=={self._sdk_version}'",
+            f"RUN pip install tensorlake=={self._sdk_version}",
         ]
 
         for build_op in self._build_ops:
