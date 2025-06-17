@@ -67,7 +67,7 @@ class ExtractionOptions(BaseModel):
     Options for structured data extraction.
     """
 
-    json_schema: Union[Type[BaseModel], dict] = Field(..., alias="schema")
+    json_schema: Union[Type[BaseModel], Json] = Field(..., alias="schema")
     prompt: Optional[str] = None
     provider: str = "TENSORLAKE"  # Assuming you replace this with your enum
     skip_ocr: bool = False
