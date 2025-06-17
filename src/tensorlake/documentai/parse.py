@@ -17,10 +17,10 @@ class ChunkingStrategy(str, Enum):
     SECTION_HEADER: The document is chunked by section headers.
     """
 
+    FRAGMENT = "fragment"
     NONE = "none"
     PAGE = "page"
     SECTION_HEADER = "section_header"
-    FRAGMENT = "fragment"
 
 
 class TableParsingStrategy(str, Enum):
