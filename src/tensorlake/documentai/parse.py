@@ -5,7 +5,7 @@ This module contains the data models for parsing a document.
 from enum import Enum
 from typing import Optional, Type, Union
 
-from pydantic import BaseModel, Json
+from pydantic import BaseModel, Field, Json
 
 
 class ChunkingStrategy(str, Enum):
@@ -67,10 +67,13 @@ class ExtractionOptions(BaseModel):
     Options for structured data extraction.
     """
 
-    schema: Union[Type[BaseModel], Json]
+    json_schema: Union[Type[BaseModel], dict] = Field(..., alias="schema")
     prompt: Optional[str] = None
-    provider: ModelProvider = ModelProvider.TENSORLAKE
+    provider: str = "TENSORLAKE"  # Assuming you replace this with your enum
     skip_ocr: bool = False
+
+    class Config:
+        allow_population_by_field_name = True  # Enables usage of 'json_schema=' as well
 
 
 class FormDetectionMode(str, Enum):
