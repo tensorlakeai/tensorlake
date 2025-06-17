@@ -69,7 +69,7 @@ class ExtractionOptions(BaseModel):
 
     json_schema: Union[Type[BaseModel], Json] = Field(..., alias="schema")
     prompt: Optional[str] = None
-    provider: str = "TENSORLAKE"  # Assuming you replace this with your enum
+    provider: ModelProvider = ModelProvider.TENSORLAKE
     skip_ocr: bool = False
 
     class Config:
