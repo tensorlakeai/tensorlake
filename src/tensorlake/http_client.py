@@ -32,6 +32,12 @@ class InvocationFinishedEvent(BaseModel):
     invocation_id: str
 
 
+class InvocationFailureEventDetails(BaseModel):
+    cls: Optional[str] = None
+    msg: Optional[str] = None
+    trace: Optional[str] = None
+
+
 class InvocationEventPayload(BaseModel):
     invocation_id: str
     fn_name: str
@@ -39,6 +45,9 @@ class InvocationEventPayload(BaseModel):
     allocation_id: Optional[str] = None
     executor_id: Optional[str] = None
     outcome: Optional[str] = None
+    reason: Optional[str] = None
+    reason: Optional[str] = None
+    failure: Optional[InvocationFailureEventDetails] = None
 
 
 class InvocationEvent(BaseModel):
