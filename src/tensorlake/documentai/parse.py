@@ -20,6 +20,7 @@ class ChunkingStrategy(str, Enum):
     NONE = "none"
     PAGE = "page"
     SECTION_HEADER = "section_header"
+    FRAGMENT = "fragment"
 
 
 class TableParsingStrategy(str, Enum):
