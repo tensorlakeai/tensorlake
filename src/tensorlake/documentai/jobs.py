@@ -13,10 +13,10 @@ class JobStatus(str, Enum):
     Status of a job.
     """
 
-    PROCESSING = "processing"
-    SUCCESSFUL = "successful"
     FAILURE = "failure"
     PENDING = "pending"
+    PROCESSING = "processing"
+    SUCCESSFUL = "successful"
 
 
 class JobListItem(BaseModel):
