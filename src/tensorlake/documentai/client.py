@@ -135,18 +135,18 @@ class DocumentAI:
     def __create_parse_settings__(self, options: ParsingOptions) -> dict:
         json_schema = None
         if options.extraction_options:
-            if isinstance(options.extraction_options.schema, str):
-                json_schema = json.loads(options.extraction_options.schema)
-            elif isinstance(options.extraction_options.schema, dict):
-                json_schema = options.extraction_options.schema
-            elif isinstance(options.extraction_options.schema, Json):
-                json_schema = json.loads(options.extraction_options.schema)
-            elif inspect.isclass(options.extraction_options.schema) and issubclass(
-                options.extraction_options.schema, BaseModel
+            if isinstance(options.extraction_options.json_schema, str):
+                json_schema = json.loads(options.extraction_options.json_schema)
+            elif isinstance(options.extraction_options.json_schema, dict):
+                json_schema = options.extraction_options.json_schema
+            elif isinstance(options.extraction_options.json_schema, Json):
+                json_schema = json.loads(options.extraction_options.json_schema)
+            elif inspect.isclass(options.extraction_options.json_schema) and issubclass(
+                options.extraction_options.json_schema, BaseModel
             ):
-                json_schema = options.extraction_options.schema.model_json_schema()
-            elif isinstance(options.extraction_options.schema, BaseModel):
-                json_schema = options.extraction_options.schema.model_json_schema()
+                json_schema = options.extraction_options.json_schema.model_json_schema()
+            elif isinstance(options.extraction_options.json_schema, BaseModel):
+                json_schema = options.extraction_options.json_schema.model_json_schema()
 
         return {
             "chunkStrategy": (
