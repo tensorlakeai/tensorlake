@@ -73,7 +73,7 @@ class ExtractionOptions(BaseModel):
     skip_ocr: bool = False
 
     class Config:
-        allow_population_by_field_name = True  # Enables usage of 'json_schema=' as well
+        allow_population_by_field_name = True  # Enables usage of 'schema=' as well
 
 
 class FormDetectionMode(str, Enum):
