@@ -12,14 +12,16 @@ class ChunkingStrategy(str, Enum):
     """
     Chunking strategy for parsing a document.
 
+    FRAGMENT: Each page element is converted into markdown form.
     NONE: No chunking is applied.
     PAGE: The document is chunked by page.
-    SECTION_HEADER: The document is chunked by section headers.
+    SECTION: The document is chunked into sections. Title and section headers are used as chunking markers.
     """
 
+    FRAGMENT = "fragment"
     NONE = "none"
     PAGE = "page"
-    SECTION_HEADER = "section_header"
+    SECTION = "section"
 
 
 class TableParsingStrategy(str, Enum):
