@@ -111,6 +111,7 @@ class PageFragment(BaseModel):
     fragment_type: PageFragmentType
     content: Union[Text, Table, Figure, Signature]
     reading_order: Optional[int] = None
+    page_number: Optional[int] = None
     bbox: Optional[dict[str, float]] = None
 
 
