@@ -13,10 +13,10 @@ class JobStatus(str, Enum):
     Status of a job.
     """
 
-    PROCESSING = "processing"
-    SUCCESSFUL = "successful"
     FAILURE = "failure"
     PENDING = "pending"
+    PROCESSING = "processing"
+    SUCCESSFUL = "successful"
 
 
 class JobListItem(BaseModel):
@@ -81,6 +81,7 @@ class PageFragmentType(str, Enum):
     """
 
     SECTION_HEADER = "section_header"
+    TITLE = "title"
 
     TEXT = "text"
     TABLE = "table"
@@ -94,7 +95,12 @@ class PageFragmentType(str, Enum):
     TABLE_CAPTION = "table_caption"
     FIGURE_CAPTION = "figure_caption"
     FORMULA_CAPTION = "formula_caption"
+
+    PAGE_FOOTER = "page_footer"
+    PAGE_HEADER = "page_header"
+    PAGE_NUMBER = "page_number"
     SIGNATURE = "signature"
+    STRIKETHROUGH = "strikethrough"
 
 
 class PageFragment(BaseModel):
