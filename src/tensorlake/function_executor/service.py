@@ -68,11 +68,11 @@ class Service(FunctionExecutorServicer):
         # only once.
         self._logger = self._logger.bind(
             namespace=request.namespace,
-            graph_name=request.graph_name,
+            graph=request.graph_name,
             graph_version=request.graph_version,
-            function_name=request.function_name,
+            fn_name=request.function_name,
         )
-
+        
         graph_modules_zip_fd, graph_modules_zip_path = tempfile.mkstemp(suffix=".zip")
         with open(graph_modules_zip_fd, "wb") as graph_modules_zip_file:
             graph_modules_zip_file.write(request.graph.bytes)
