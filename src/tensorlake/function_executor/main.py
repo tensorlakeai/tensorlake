@@ -62,7 +62,7 @@ def main():
     # TODO: Add function-executor-id to logger context.
     logger = logger.bind(
         executor_id=args.executor_id,
-        function_executor_id=args.function_executor_id,
+        fn_executor_id=args.function_executor_id,
         **info_response_kv_args()
     )
     logger.info("starting function executor server", address=args.address, dev=args.dev)
