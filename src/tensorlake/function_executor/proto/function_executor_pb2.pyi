@@ -152,6 +152,7 @@ class RunTaskRequest(_message.Message):
         "function_name",
         "graph_invocation_id",
         "task_id",
+        "allocation_id",
         "function_input",
         "function_init_value",
     )
@@ -161,6 +162,7 @@ class RunTaskRequest(_message.Message):
     FUNCTION_NAME_FIELD_NUMBER: _ClassVar[int]
     GRAPH_INVOCATION_ID_FIELD_NUMBER: _ClassVar[int]
     TASK_ID_FIELD_NUMBER: _ClassVar[int]
+    ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_INPUT_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_INIT_VALUE_FIELD_NUMBER: _ClassVar[int]
     namespace: str
@@ -169,6 +171,7 @@ class RunTaskRequest(_message.Message):
     function_name: str
     graph_invocation_id: str
     task_id: str
+    allocation_id: str
     function_input: SerializedObject
     function_init_value: SerializedObject
     def __init__(
@@ -179,6 +182,7 @@ class RunTaskRequest(_message.Message):
         function_name: _Optional[str] = ...,
         graph_invocation_id: _Optional[str] = ...,
         task_id: _Optional[str] = ...,
+        allocation_id: _Optional[str] = ...,
         function_input: _Optional[_Union[SerializedObject, _Mapping]] = ...,
         function_init_value: _Optional[_Union[SerializedObject, _Mapping]] = ...,
     ) -> None: ...

@@ -38,6 +38,9 @@ class Handler:
             module=__name__,
             graph_invocation_id=request.graph_invocation_id,
             task_id=request.task_id,
+            allocation_id=(
+                request.allocation_id if request.HasField("allocation_id") else None
+            ),
         )
         self._function_wrapper = function_wrapper
         self._input_loader = FunctionInputsLoader(request)
