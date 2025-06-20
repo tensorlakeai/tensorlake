@@ -59,7 +59,6 @@ def main():
     logger = structlog.get_logger(module=__name__)
     validate_args(args, logger)
 
-    # TODO: Add function-executor-id to logger context.
     logger = logger.bind(
         executor_id=args.executor_id,
         fn_executor_id=args.function_executor_id,
