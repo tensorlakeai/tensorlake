@@ -36,7 +36,7 @@ class Handler:
         self._invocation_state: InvocationState = invocation_state
         self._logger = logger.bind(
             module=__name__,
-            graph_invocation_id=request.graph_invocation_id,
+            invocation_id=request.graph_invocation_id,
             task_id=request.task_id,
             allocation_id=(
                 request.allocation_id if request.HasField("allocation_id") else None
