@@ -24,7 +24,7 @@ from tensorlake.remote_graph import RemoteGraph
 @click.option("-p", "--parallel-builds", is_flag=True, default=False)
 @click.option("-r", "--retry", is_flag=True, default=False)
 @click.option("--upgrade-queued-requests", is_flag=True, default=False)
-@click.option("--builder-v2", is_flag=True, default=False)
+@click.option("--builder-v2", is_flag=True, default=True)
 @click.argument("workflow_file", type=click.File("r"))
 @pass_auth
 def deploy(
