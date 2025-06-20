@@ -70,7 +70,7 @@ class Service(FunctionExecutorServicer):
             namespace=request.namespace,
             graph=request.graph_name,
             graph_version=request.graph_version,
-            fn_name=request.function_name,
+            fn=request.function_name,
         )
         
         graph_modules_zip_fd, graph_modules_zip_path = tempfile.mkstemp(suffix=".zip")
