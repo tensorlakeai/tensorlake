@@ -90,6 +90,7 @@ def run_task(
             function_name=function_name,
             graph_invocation_id="123",
             task_id="test-task",
+            allocation_id="test-allocation",
             function_input=SerializedObject(
                 bytes=CloudPickleSerializer.serialize(input),
                 content_type=CloudPickleSerializer.content_type,

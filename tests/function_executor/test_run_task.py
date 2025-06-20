@@ -189,6 +189,7 @@ class TestRunTask(unittest.TestCase):
                     function_name="extractor_b",
                     graph_invocation_id="123",
                     task_id="test-task",
+                    allocation_id="test-allocation",
                     function_input=SerializedObject(
                         bytes=CloudPickleSerializer.serialize(input),
                         content_type=CloudPickleSerializer.content_type,

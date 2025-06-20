@@ -22,3 +22,4 @@ class RequestValidator:
             .required_serialized_object("function_input")
             .optional_serialized_object("function_init_value")
         )
+        # TODO: make allocation_id required once Executor is updated to pass it.

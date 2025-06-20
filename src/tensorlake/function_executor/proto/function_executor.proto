@@ -93,6 +93,7 @@ message RunTaskRequest {
     optional string function_name = 4;
     optional string graph_invocation_id = 5;
     optional string task_id = 6;
+    optional string allocation_id = 9;
     optional SerializedObject function_input = 7;
     optional SerializedObject function_init_value = 8;
 }
