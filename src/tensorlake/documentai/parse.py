@@ -108,7 +108,9 @@ class ParsingOptions(BaseModel):
     deliver_webhook: bool = False
     detect_signature: Optional[bool] = False
     table_summary: Optional[bool] = False
+    table_summary_prompt: Optional[str] = None
     figure_summary: Optional[bool] = False
+    figure_summary_prompt: Optional[str] = None
     disable_layout_detection: Optional[bool] = False
     form_detection_mode: Optional[FormDetectionMode] = (
         FormDetectionMode.OBJECT_DETECTION
