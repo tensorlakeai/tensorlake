@@ -10,6 +10,7 @@ from tensorlake.functions_sdk.functions import (
     GraphInvocationContext,
     TensorlakeFunctionWrapper,
 )
+from tensorlake.functions_sdk.graph_definition import ComputeGraphMetadata
 from tensorlake.functions_sdk.invocation_state.invocation_state import InvocationState
 
 from ...proto.function_executor_pb2 import RunTaskRequest, RunTaskResponse
@@ -26,6 +27,7 @@ class Handler:
         function_name: str,
         invocation_state: InvocationState,
         function_wrapper: TensorlakeFunctionWrapper,
+        graph_metadata: ComputeGraphMetadata,
         logger: Any,
     ):
         self._invocation_id: str = request.graph_invocation_id
@@ -41,10 +43,12 @@ class Handler:
                 request.allocation_id if request.HasField("allocation_id") else None
             ),
         )
-        self._function_wrapper = function_wrapper
+        self._function_wrapper: TensorlakeFunctionWrapper = function_wrapper
         self._input_loader = FunctionInputsLoader(request)
         self._response_helper = ResponseHelper(
             task_id=request.task_id,
+            function_name=function_name,
+            graph_metadata=graph_metadata,
             logger=self._logger,
         )
         # TODO: use files for stdout, stderr capturing. This puts a natural and thus reasonable

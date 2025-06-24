@@ -4,6 +4,7 @@ from typing import Any, List, Optional
 from tensorlake.functions_sdk.data_objects import Metrics, TensorlakeData
 from tensorlake.functions_sdk.function_errors import InvocationError
 from tensorlake.functions_sdk.functions import FunctionCallResult
+from tensorlake.functions_sdk.graph_definition import ComputeGraphMetadata
 from tensorlake.functions_sdk.object_serializer import (
     CloudPickleSerializer,
     JsonSerializer,
@@ -22,8 +23,16 @@ from ...proto.function_executor_pb2 import (
 class ResponseHelper:
     """Helper class for generating RunFunctionResponse."""
 
-    def __init__(self, task_id: str, logger: Any):
+    def __init__(
+        self,
+        task_id: str,
+        function_name: str,
+        graph_metadata: ComputeGraphMetadata,
+        logger: Any,
+    ):
         self._task_id = task_id
+        self._function_name = function_name
+        self._graph_metadata: ComputeGraphMetadata = graph_metadata
         self._logger = logger.bind(module=__name__)
 
     def from_function_call(
@@ -41,11 +50,17 @@ class ResponseHelper:
                 metrics=result.metrics,
             )
 
+        if result.edges is None:
+            # Fallback to the graph edges if not provided by the function.
+            # Some functions don't have any outer edges.
+            next_functions = self._graph_metadata.edges.get(self._function_name, [])
+        else:
+            next_functions = result.edges
+
         return RunTaskResponse(
             task_id=self._task_id,
             function_outputs=self._to_function_outputs(result.ser_outputs),
-            next_functions=[] if result.edges is None else result.edges,
-            use_graph_routing=result.edges is None,
+            next_functions=next_functions,
             stdout=stdout,
             stderr=stderr,
             is_reducer=is_reducer,
@@ -74,7 +89,7 @@ class ResponseHelper:
             stdout=stdout,
             stderr=stderr,
             is_reducer=False,
-            use_graph_routing=True,
+            next_functions=[],
             metrics=self._to_metrics(metrics),
             outcome_code=TaskOutcomeCode.TASK_OUTCOME_CODE_FAILURE,
             failure_reason=failure_reason,

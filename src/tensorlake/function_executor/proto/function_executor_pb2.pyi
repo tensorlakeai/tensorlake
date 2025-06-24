@@ -268,7 +268,6 @@ class RunTaskResponse(_message.Message):
         "task_id",
         "function_outputs",
         "next_functions",
-        "use_graph_routing",
         "stdout",
         "stderr",
         "is_reducer",
@@ -280,7 +279,6 @@ class RunTaskResponse(_message.Message):
     TASK_ID_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_OUTPUTS_FIELD_NUMBER: _ClassVar[int]
     NEXT_FUNCTIONS_FIELD_NUMBER: _ClassVar[int]
-    USE_GRAPH_ROUTING_FIELD_NUMBER: _ClassVar[int]
     STDOUT_FIELD_NUMBER: _ClassVar[int]
     STDERR_FIELD_NUMBER: _ClassVar[int]
     IS_REDUCER_FIELD_NUMBER: _ClassVar[int]
@@ -291,7 +289,6 @@ class RunTaskResponse(_message.Message):
     task_id: str
     function_outputs: _containers.RepeatedCompositeFieldContainer[SerializedObject]
     next_functions: _containers.RepeatedScalarFieldContainer[str]
-    use_graph_routing: bool
     stdout: str
     stderr: str
     is_reducer: bool
@@ -306,7 +303,6 @@ class RunTaskResponse(_message.Message):
             _Iterable[_Union[SerializedObject, _Mapping]]
         ] = ...,
         next_functions: _Optional[_Iterable[str]] = ...,
-        use_graph_routing: bool = ...,
         stdout: _Optional[str] = ...,
         stderr: _Optional[str] = ...,
         is_reducer: bool = ...,

@@ -9,7 +9,13 @@ from typing import Any, Generator, Iterator, Optional
 import grpc
 
 from tensorlake.functions_sdk.functions import TensorlakeFunctionWrapper
-from tensorlake.functions_sdk.graph_serialization import FunctionManifest, GraphManifest
+from tensorlake.functions_sdk.graph_definition import ComputeGraphMetadata
+from tensorlake.functions_sdk.graph_serialization import (
+    GRAPH_MANIFEST_FILE_NAME,
+    GRAPH_METADATA_FILE_NAME,
+    FunctionManifest,
+    GraphManifest,
+)
 
 from .handlers.check_health.handler import Handler as CheckHealthHandler
 from .handlers.run_function.handler import Handler as RunTaskHandler
@@ -45,6 +51,7 @@ class Service(FunctionExecutorServicer):
         self._graph_version: Optional[str] = None
         self._function_name: Optional[str] = None
         self._function_wrapper: Optional[TensorlakeFunctionWrapper] = None
+        self._graph_metadata: Optional[ComputeGraphMetadata] = None
         self._invocation_state_proxy_server: Optional[InvocationStateProxyServer] = None
         self._check_health_handler = CheckHealthHandler(self._logger)
 
@@ -86,9 +93,15 @@ class Service(FunctionExecutorServicer):
             # Process user controlled input in a try-except block to not treat errors here as our
             # internal platform errors.
             with zipfile.ZipFile(graph_modules_zip_path, "r") as zf:
-                with zf.open("graph_manifest.json") as graph_manifest_file:
+                with zf.open(GRAPH_MANIFEST_FILE_NAME) as graph_manifest_file:
                     graph_manifest: GraphManifest = GraphManifest.model_validate(
                         json.load(graph_manifest_file)
+                    )
+                with zf.open(GRAPH_METADATA_FILE_NAME) as graph_metadata_file:
+                    self._graph_metadata: ComputeGraphMetadata = (
+                        ComputeGraphMetadata.model_validate(
+                            json.load(graph_metadata_file)
+                        )
                     )
             if request.function_name not in graph_manifest.functions:
                 raise ValueError(
@@ -174,6 +187,7 @@ class Service(FunctionExecutorServicer):
                 request.task_id, self._invocation_state_proxy_server
             ),
             function_wrapper=self._function_wrapper,
+            graph_metadata=self._graph_metadata,
             logger=self._logger,
         ).run()
 
