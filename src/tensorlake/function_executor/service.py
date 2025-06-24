@@ -72,7 +72,7 @@ class Service(FunctionExecutorServicer):
             graph_version=request.graph_version,
             fn=request.function_name,
         )
-        
+
         graph_modules_zip_fd, graph_modules_zip_path = tempfile.mkstemp(suffix=".zip")
         with open(graph_modules_zip_fd, "wb") as graph_modules_zip_file:
             graph_modules_zip_file.write(request.graph.bytes)
