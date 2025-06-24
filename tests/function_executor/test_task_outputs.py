@@ -13,10 +13,13 @@ from testing import (
 
 from tensorlake import Graph
 from tensorlake.function_executor.proto.function_executor_pb2 import (
+    InitializationOutcomeCode,
     InitializeRequest,
     InitializeResponse,
     RunTaskResponse,
     SerializedObject,
+    SerializedObjectEncoding,
+    TaskOutcomeCode,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
@@ -132,15 +135,19 @@ class TestRunTask(unittest.TestCase):
                         graph_version="1",
                         function_name=function_name,
                         graph=SerializedObject(
-                            bytes=zip_graph_code(
+                            data=zip_graph_code(
                                 graph=graph,
                                 code_dir_path=GRAPH_CODE_DIR_PATH,
                             ),
-                            content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
+                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                            encoding_version=1,
                         ),
                     )
                 )
-                self.assertTrue(initialize_response.success)
+                self.assertEqual(
+                    initialize_response.outcome_code,
+                    InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_SUCCESS,
+                )
 
                 for test_iteration in range(TEST_ITERATIONS):
                     content = f"test content, test case: {test_case_name}, test iteration: {test_iteration}"
@@ -148,9 +155,12 @@ class TestRunTask(unittest.TestCase):
                         stub, function_name=function_name, input=content
                     )
 
-                    self.assertTrue(run_task_response.success)
+                    self.assertEqual(
+                        run_task_response.outcome_code,
+                        TaskOutcomeCode.TASK_OUTCOME_CODE_SUCCESS,
+                    )
                     fn_outputs = deserialized_function_output(
-                        self, run_task_response.function_output
+                        self, run_task_response.function_outputs
                     )
                     self.assertEqual(len(fn_outputs), 1)
                     self.assertEqual("success", fn_outputs[0])
@@ -175,15 +185,19 @@ class TestRunTask(unittest.TestCase):
                         graph_version="1",
                         function_name="print_function",
                         graph=SerializedObject(
-                            bytes=zip_graph_code(
+                            data=zip_graph_code(
                                 graph=graph,
                                 code_dir_path=GRAPH_CODE_DIR_PATH,
                             ),
-                            content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
+                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                            encoding_version=1,
                         ),
                     )
                 )
-                self.assertTrue(initialize_response.success)
+                self.assertEqual(
+                    initialize_response.outcome_code,
+                    InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_SUCCESS,
+                )
 
                 run_task_response: RunTaskResponse = run_task(
                     stub,
@@ -191,9 +205,12 @@ class TestRunTask(unittest.TestCase):
                     input="print function argument to print",
                 )
 
-                self.assertTrue(run_task_response.success)
+                self.assertEqual(
+                    run_task_response.outcome_code,
+                    TaskOutcomeCode.TASK_OUTCOME_CODE_SUCCESS,
+                )
                 fn_outputs = deserialized_function_output(
-                    self, run_task_response.function_output
+                    self, run_task_response.function_outputs
                 )
                 self.assertEqual(len(fn_outputs), 1)
                 self.assertEqual("success", fn_outputs[0])

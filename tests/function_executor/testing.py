@@ -6,10 +6,10 @@ from typing import Any, Dict, List, Optional
 import grpc
 
 from tensorlake.function_executor.proto.function_executor_pb2 import (
-    FunctionOutput,
     RunTaskRequest,
     RunTaskResponse,
     SerializedObject,
+    SerializedObjectEncoding,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
@@ -38,6 +38,8 @@ class FunctionExecutorProcessContextManager:
             f"localhost:{port}",
             "--executor-id",
             "test-executor",
+            "--function-executor-id",
+            "test-function-executor",
         ]
         self._args.extend(extra_args)
         self._keep_std_outputs = keep_std_outputs
@@ -92,8 +94,9 @@ def run_task(
             task_id="test-task",
             allocation_id="test-allocation",
             function_input=SerializedObject(
-                bytes=CloudPickleSerializer.serialize(input),
-                content_type=CloudPickleSerializer.content_type,
+                data=CloudPickleSerializer.serialize(input),
+                encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
+                encoding_version=1,
             ),
         ),
         **kwargs,
@@ -101,12 +104,15 @@ def run_task(
 
 
 def deserialized_function_output(
-    test_case: unittest.TestCase, function_output: FunctionOutput
+    test_case: unittest.TestCase, function_outputs: List[SerializedObject]
 ) -> List[Any]:
     outputs: List[Any] = []
-    for output in function_output.outputs:
-        test_case.assertEqual(output.content_type, CloudPickleSerializer.content_type)
-        outputs.append(CloudPickleSerializer.deserialize(output.bytes))
+    for output in function_outputs:
+        test_case.assertEqual(
+            output.encoding,
+            SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
+        )
+        outputs.append(CloudPickleSerializer.deserialize(output.data))
     return outputs
 
 

@@ -14,7 +14,10 @@ from tensorlake.functions_sdk.graph import (
     ComputeGraphMetadata,
     Graph,
 )
-from tensorlake.functions_sdk.graph_serialization import zip_graph_code
+from tensorlake.functions_sdk.graph_serialization import (
+    ZIPPED_GRAPH_CODE_CONTENT_TYPE,
+    zip_graph_code,
+)
 from tensorlake.functions_sdk.object_serializer import get_serializer
 from tensorlake.functions_sdk.runtime_definition import InvocationMetadata
 from tensorlake.settings import DEFAULT_SERVICE_URL
@@ -216,6 +219,7 @@ class TensorlakeClient:
             data={
                 "compute_graph": graph_metadata.model_dump_json(exclude_none=True),
                 "upgrade_tasks_to_latest_version": upgrade_tasks_to_latest_version,
+                "code_content_type": ZIPPED_GRAPH_CODE_CONTENT_TYPE,
             },
         )
         response.raise_for_status()

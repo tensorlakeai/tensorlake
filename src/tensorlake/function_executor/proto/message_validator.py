@@ -28,11 +28,10 @@ class MessageValidator:
         if not self._message.HasField(field_name):
             return self
 
-        serializedObject: SerializedObject = getattr(self._message, field_name)
-        if not serializedObject.HasField("string") and not serializedObject.HasField(
-            "bytes"
-        ):
-            raise ValueError("oneof 'data' is required in SerializedObject")
-        if not serializedObject.HasField("content_type"):
-            raise ValueError("Field 'content_type' is required in SerializedObject")
+        so: SerializedObject = getattr(self._message, field_name)
+        so_validator: MessageValidator = MessageValidator(so)
+        so_validator.required_field("encoding")
+        so_validator.required_field("data")
+        so_validator.required_field("encoding_version")
+
         return self

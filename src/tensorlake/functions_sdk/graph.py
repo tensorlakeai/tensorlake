@@ -2,17 +2,16 @@ import importlib
 import re
 import sys
 import time
+import traceback
 from collections import defaultdict
 from queue import deque
 from typing import (
     Annotated,
     Any,
-    Callable,
     Dict,
     List,
     Optional,
     Type,
-    Union,
     get_args,
     get_origin,
 )
@@ -23,6 +22,7 @@ from pydantic import BaseModel
 from typing_extensions import get_args, get_origin
 
 from .data_objects import Metrics, TensorlakeData
+from .function_errors import InvocationError
 from .functions import (
     FunctionCallResult,
     GraphInvocationContext,
@@ -70,7 +70,6 @@ _none_image_information = ImageInformation(
 )
 
 
-# TODO: Remove additional_modules constructor argument once it's not used anymore by Document AI workflows and all examples.
 class Graph:
     def __init__(
         self,
@@ -79,7 +78,6 @@ class Graph:
         description: Optional[str] = None,
         tags: Dict[str, str] = {},
         version: Optional[str] = None,
-        additional_modules: List = [],
         retries: Retries = Retries(),
     ):
         if version is None:
@@ -108,6 +106,7 @@ class Graph:
         self._results: Dict[str, Dict[str, List[TensorlakeData]]] = {}
         self._accumulator_values: Dict[str, TensorlakeData] = {}
         self._local_graph_ctx: Optional[GraphInvocationContext] = None
+        self._invocation_error: Optional[InvocationError] = None
 
         # Invocation ID -> Metrics
         # For local graphs
@@ -279,6 +278,7 @@ class Graph:
             graph_version=self.version,
             invocation_state=LocalInvocationState(),
         )
+        self._invocation_error = None
         self._run(input, outputs)
         return input.id
 
@@ -316,12 +316,12 @@ class Graph:
         self,
         initial_input: TensorlakeData,
         outputs: Dict[str, List[bytes]],
-    ):
+    ) -> None:
         queue = deque([(self._start_node, initial_input)])
         while queue:
-            node_name, input = queue.popleft()
+            function_name, input = queue.popleft()
             function_outputs: FunctionCallResult = self._invoke_fn_with_retries(
-                node_name, input
+                function_name, input
             )
             # Store metrics for local graph execution
             if function_outputs.metrics is not None:
@@ -332,26 +332,34 @@ class Graph:
                 metrics.counters.update(function_outputs.metrics.counters)
                 self._metrics[self._local_graph_ctx.invocation_id] = metrics
 
+            if isinstance(function_outputs.exception, InvocationError):
+                self._invocation_error = function_outputs.exception
+                print(
+                    f'InvocationError in function {function_name}: "{function_outputs.exception.message}"'
+                )
+                return
+
             self._log_local_exec_tracebacks(function_outputs)
 
             fn_outputs = function_outputs.ser_outputs
-            print(f"ran {node_name}: num outputs: {len(fn_outputs)}")
-            if self._accumulator_values.get(node_name, None) is not None:
+            print(f"ran {function_name}: num outputs: {len(fn_outputs)}")
+            if self._accumulator_values.get(function_name, None) is not None:
                 acc_output = fn_outputs[-1].copy()
-                self._accumulator_values[node_name] = acc_output
-                outputs[node_name] = []
+                self._accumulator_values[function_name] = acc_output
+                outputs[function_name] = []
             if fn_outputs:
-                outputs[node_name].extend(fn_outputs)
-            if self._accumulator_values.get(node_name, None) is not None and queue:
+                outputs[function_name].extend(fn_outputs)
+            if self._accumulator_values.get(function_name, None) is not None and queue:
                 print(
-                    f"accumulator not none for {node_name}, continuing, len queue: {len(queue)}"
+                    f"accumulator not none for {function_name}, continuing, len queue: {len(queue)}"
                 )
                 continue
 
-            if function_outputs.edges is not None:
-                edges = function_outputs.edges
+            if function_outputs.edges is None:
+                # Fallback to the graph edges if not provided by the function.
+                edges = self.edges[function_name]
             else:
-                edges = self.edges[node_name]
+                edges = function_outputs.edges
 
             for out_edge in edges:
                 for output in fn_outputs:
@@ -367,7 +375,7 @@ class Graph:
 
         while runs_left > 0:
             last_result = self._invoke_fn(node_name=node_name, input=input)
-            if last_result.traceback_msg is None:
+            if last_result.exception is None:
                 break  # successful run
 
             time.sleep(delay)
@@ -387,19 +395,25 @@ class Graph:
         acc_value = self._accumulator_values.get(node_name, None)
         return fn.invoke_fn_ser(self._local_graph_ctx, input, acc_value)
 
-    def _log_local_exec_tracebacks(self, results: FunctionCallResult):
-        if results.traceback_msg is not None:
-            print(results.traceback_msg)
-            import os
+    def _log_local_exec_tracebacks(self, result: FunctionCallResult) -> None:
+        if result.exception is None:
+            return
 
-            print("exiting local execution due to error")
-            os._exit(1)
+        traceback.print_exception(result.exception)
+        import os
+
+        print("exiting local execution due to error")
+        os._exit(1)
 
     def output(
         self,
         invocation_id: str,
         fn_name: str,
     ) -> List[Any]:
+        if self._invocation_error is not None:
+            # Preserves the original error message and traceback
+            raise self._invocation_error
+
         results = self._results[invocation_id]
         if fn_name not in results:
             if fn_name in self.nodes:

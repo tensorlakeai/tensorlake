@@ -14,10 +14,13 @@ from testing import (
 
 from tensorlake import Graph, tensorlake_function
 from tensorlake.function_executor.proto.function_executor_pb2 import (
+    InitializationOutcomeCode,
     InitializeRequest,
     InitializeResponse,
     RunTaskResponse,
     SerializedObject,
+    SerializedObjectEncoding,
+    TaskOutcomeCode,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
@@ -96,23 +99,30 @@ class TestMaxPayload(unittest.TestCase):
                         graph_version="1",
                         function_name="validate_max_input",
                         graph=SerializedObject(
-                            bytes=zip_graph_code(
+                            data=zip_graph_code(
                                 graph=graph, code_dir_path=GRAPH_CODE_DIR_PATH
                             ),
-                            content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
+                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                            encoding_version=1,
                         ),
                     )
                 )
-                self.assertTrue(initialize_response.success)
+                self.assertEqual(
+                    initialize_response.outcome_code,
+                    InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_SUCCESS,
+                )
 
                 run_task_response: RunTaskResponse = run_task(
                     stub, function_name="validate_max_input", input=max_input
                 )
-                self.assertTrue(run_task_response.success)
+                self.assertEqual(
+                    run_task_response.outcome_code,
+                    TaskOutcomeCode.TASK_OUTCOME_CODE_SUCCESS,
+                )
                 self.assertFalse(run_task_response.is_reducer)
 
                 fn_outputs = deserialized_function_output(
-                    self, run_task_response.function_output
+                    self, run_task_response.function_outputs
                 )
                 self.assertEqual(len(fn_outputs), 1)
                 self.assertEqual("success", fn_outputs[0])
@@ -136,24 +146,31 @@ class TestMaxPayload(unittest.TestCase):
                         graph_version="1",
                         function_name="generate_max_output",
                         graph=SerializedObject(
-                            bytes=zip_graph_code(
+                            data=zip_graph_code(
                                 graph=graph, code_dir_path=GRAPH_CODE_DIR_PATH
                             ),
-                            content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
+                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                            encoding_version=1,
                         ),
                     )
                 )
-                self.assertTrue(initialize_response.success)
+                self.assertEqual(
+                    initialize_response.outcome_code,
+                    InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_SUCCESS,
+                )
 
                 run_task_response: RunTaskResponse = run_task(
                     stub, function_name="generate_max_output", input=1
                 )
 
-                self.assertTrue(run_task_response.success)
+                self.assertEqual(
+                    run_task_response.outcome_code,
+                    TaskOutcomeCode.TASK_OUTCOME_CODE_SUCCESS,
+                )
                 self.assertFalse(run_task_response.is_reducer)
 
                 fn_outputs = deserialized_function_output(
-                    self, run_task_response.function_output
+                    self, run_task_response.function_outputs
                 )
                 self.assertEqual(len(fn_outputs), 1)
                 output_file: File = fn_outputs[0]

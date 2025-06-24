@@ -2,7 +2,6 @@ import io
 import os
 import sys
 import time
-import traceback
 from contextlib import redirect_stderr, redirect_stdout
 from typing import Any
 
@@ -46,7 +45,7 @@ class Handler:
         self._input_loader = FunctionInputsLoader(request)
         self._response_helper = ResponseHelper(
             task_id=request.task_id,
-            output_encoding=self._function_wrapper.output_encoding(),
+            logger=self._logger,
         )
         # TODO: use files for stdout, stderr capturing. This puts a natural and thus reasonable
         # rate limit on the rate of writes and allows to not consume expensive memory for function logs.
@@ -62,14 +61,14 @@ class Handler:
         self._logger.info("running function")
         start_time = time.monotonic()
         inputs: FunctionInputs = self._input_loader.load()
-        response: RunTaskResponse = self._run_func_safe_and_captured(inputs)
+        response: RunTaskResponse = self._run_task(inputs)
         self._logger.info(
             "function finished",
             duration_sec=f"{time.monotonic() - start_time:.3f}",
         )
         return response
 
-    def _run_func_safe_and_captured(self, inputs: FunctionInputs) -> RunTaskResponse:
+    def _run_task(self, inputs: FunctionInputs) -> RunTaskResponse:
         """Runs the customer function while capturing what happened in it.
 
         Function stdout and stderr are captured so they don't get into Function Executor process stdout
@@ -81,42 +80,44 @@ class Handler:
                 os.getenv("INDEXIFY_FUNCTION_EXECUTOR_DISABLE_OUTPUT_CAPTURE", "0")
                 == "1"
             ):
-                self._func_stdout.write(
-                    "Function output capture is disabled using INDEXIFY_FUNCTION_EXECUTOR_DISABLE_OUTPUT_CAPTURE env var.\n"
+                return self._response_helper.from_function_call(
+                    result=self._run_func(inputs),
+                    is_reducer=_function_is_reducer(self._function_wrapper),
+                    stdout="Function output capture is disabled using INDEXIFY_FUNCTION_EXECUTOR_DISABLE_OUTPUT_CAPTURE env var.\n",
+                    stderr="",
                 )
-                return self._run_func(inputs)
 
             # Flush any logs buffered in memory before doing stdout, stderr capture.
             # Otherwise our logs logged before this point will end up in the function's stdout capture.
             self._flush_logs()
             with redirect_stdout(self._func_stdout), redirect_stderr(self._func_stderr):
                 try:
-                    return self._run_func(inputs)
+                    return self._response_helper.from_function_call(
+                        result=self._run_func(inputs),
+                        is_reducer=_function_is_reducer(self._function_wrapper),
+                        stdout=self._func_stdout.getvalue(),
+                        stderr=self._func_stderr.getvalue(),
+                    )
                 finally:
                     # Ensure that whatever outputted by the function gets captured.
                     self._flush_logs()
-        except Exception:
-            return self._response_helper.failure_response(
-                message=traceback.format_exc(),
+        except BaseException as e:
+            return self._response_helper.from_function_exception(
+                exception=e,
                 stdout=self._func_stdout.getvalue(),
                 stderr=self._func_stderr.getvalue(),
+                metrics=None,
             )
 
-    def _run_func(self, inputs: FunctionInputs) -> RunTaskResponse:
+    def _run_func(self, inputs: FunctionInputs) -> FunctionCallResult:
         ctx: GraphInvocationContext = GraphInvocationContext(
             invocation_id=self._invocation_id,
             graph_name=self._graph_name,
             graph_version=self._graph_version,
             invocation_state=self._invocation_state,
         )
-        result: FunctionCallResult = self._function_wrapper.invoke_fn_ser(
+        return self._function_wrapper.invoke_fn_ser(
             ctx, inputs.input, inputs.init_value
-        )
-        return self._response_helper.function_response(
-            result=result,
-            is_reducer=_function_is_reducer(self._function_wrapper),
-            stdout=self._func_stdout.getvalue(),
-            stderr=self._func_stderr.getvalue(),
         )
 
     def _flush_logs(self) -> None:

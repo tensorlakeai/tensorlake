@@ -1,5 +1,4 @@
 import inspect
-import traceback
 from dataclasses import dataclass
 from inspect import Parameter
 from typing import (
@@ -213,11 +212,12 @@ def tensorlake_function(
     return construct
 
 
-class FunctionCallResult(BaseModel):
+@dataclass
+class FunctionCallResult:
     ser_outputs: List[TensorlakeData]
-    traceback_msg: Optional[str] = None
-    metrics: Optional[Metrics] = None
-    edges: Optional[List[str]] = None
+    metrics: Metrics
+    edges: Optional[List[str]]  # None means use graph routing
+    exception: Optional[Exception]
 
 
 V = TypeVar("V")
@@ -300,12 +300,12 @@ class TensorlakeFunctionWrapper:
             if k != "return" and not is_pydantic_model_from_annotation(v)
         }
 
-    def run_fn(
+    def _run_fn(
         self,
         ctx: GraphInvocationContext,
         input: Union[Dict, Type[BaseModel], List, Tuple],
         acc: Optional[Type[Any]] = None,
-    ) -> Tuple[List[Any], Optional[str], List[str]]:
+    ) -> Tuple[List[Any], Optional[Exception], Optional[List[str]]]:
         """Invokes the wrapped function.
 
         Returns a tuple of results, containing:
@@ -338,10 +338,10 @@ class TensorlakeFunctionWrapper:
             if isinstance(extracted_data, RouteTo):
                 edges = extracted_data.edges
                 extracted_data = extracted_data.value
-        except Exception:
-            return [], traceback.format_exc(), None
+        except Exception as e:
+            return [], e, None
         if extracted_data is None:
-            return [], None, None
+            return [], None, edges
 
         output = (
             extracted_data if isinstance(extracted_data, list) else [extracted_data]
@@ -369,7 +369,7 @@ class TensorlakeFunctionWrapper:
             acc = input_serializer.deserialize(acc.payload)
         if acc is None and self.indexify_function.accumulate is not None:
             acc = self.indexify_function.accumulate()
-        outputs, err, edges = self.run_fn(ctx, input, acc=acc)
+        outputs, exception, edges = self._run_fn(ctx, input, acc=acc)
 
         metrics = Metrics(
             timers=ctx.invocation_state.timers,
@@ -385,15 +385,11 @@ class TensorlakeFunctionWrapper:
         ]
         return FunctionCallResult(
             ser_outputs=ser_outputs,
-            traceback_msg=err,
             metrics=metrics,
-            output_encoding=self.indexify_function.output_encoder,
             edges=edges,
+            exception=exception,
         )
 
     def deserialize_input(self, indexify_data: TensorlakeData) -> Any:
         serializer = get_serializer(self.indexify_function.input_encoder)
         return serializer.deserialize(indexify_data.payload)
-
-    def output_encoding(self) -> str:
-        return self.indexify_function.output_encoder

@@ -7,22 +7,75 @@ from typing import Union as _Union
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
 from google.protobuf.internal import containers as _containers
+from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
+class SerializedObjectEncoding(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    SERIALIZED_OBJECT_ENCODING_UNKNOWN: _ClassVar[SerializedObjectEncoding]
+    SERIALIZED_OBJECT_ENCODING_UTF8_JSON: _ClassVar[SerializedObjectEncoding]
+    SERIALIZED_OBJECT_ENCODING_UTF8_TEXT: _ClassVar[SerializedObjectEncoding]
+    SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE: _ClassVar[SerializedObjectEncoding]
+    SERIALIZED_OBJECT_ENCODING_BINARY_ZIP: _ClassVar[SerializedObjectEncoding]
+
+class InitializationOutcomeCode(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    INITIALIZE_OUTCOME_CODE_UNKNOWN: _ClassVar[InitializationOutcomeCode]
+    INITIALIZE_OUTCOME_CODE_SUCCESS: _ClassVar[InitializationOutcomeCode]
+    INITIALIZE_OUTCOME_CODE_FAILURE: _ClassVar[InitializationOutcomeCode]
+
+class InitializationFailureReason(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    INITIALIZATION_FAILURE_REASON_UNKNOWN: _ClassVar[InitializationFailureReason]
+    INITIALIZATION_FAILURE_REASON_INTERNAL_ERROR: _ClassVar[InitializationFailureReason]
+    INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR: _ClassVar[InitializationFailureReason]
+
+class TaskOutcomeCode(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    TASK_OUTCOME_CODE_UNKNOWN: _ClassVar[TaskOutcomeCode]
+    TASK_OUTCOME_CODE_SUCCESS: _ClassVar[TaskOutcomeCode]
+    TASK_OUTCOME_CODE_FAILURE: _ClassVar[TaskOutcomeCode]
+
+class TaskFailureReason(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    TASK_FAILURE_REASON_UNKNOWN: _ClassVar[TaskFailureReason]
+    TASK_FAILURE_REASON_INTERNAL_ERROR: _ClassVar[TaskFailureReason]
+    TASK_FAILURE_REASON_FUNCTION_ERROR: _ClassVar[TaskFailureReason]
+    TASK_FAILURE_REASON_INVOCATION_ERROR: _ClassVar[TaskFailureReason]
+
+SERIALIZED_OBJECT_ENCODING_UNKNOWN: SerializedObjectEncoding
+SERIALIZED_OBJECT_ENCODING_UTF8_JSON: SerializedObjectEncoding
+SERIALIZED_OBJECT_ENCODING_UTF8_TEXT: SerializedObjectEncoding
+SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE: SerializedObjectEncoding
+SERIALIZED_OBJECT_ENCODING_BINARY_ZIP: SerializedObjectEncoding
+INITIALIZE_OUTCOME_CODE_UNKNOWN: InitializationOutcomeCode
+INITIALIZE_OUTCOME_CODE_SUCCESS: InitializationOutcomeCode
+INITIALIZE_OUTCOME_CODE_FAILURE: InitializationOutcomeCode
+INITIALIZATION_FAILURE_REASON_UNKNOWN: InitializationFailureReason
+INITIALIZATION_FAILURE_REASON_INTERNAL_ERROR: InitializationFailureReason
+INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR: InitializationFailureReason
+TASK_OUTCOME_CODE_UNKNOWN: TaskOutcomeCode
+TASK_OUTCOME_CODE_SUCCESS: TaskOutcomeCode
+TASK_OUTCOME_CODE_FAILURE: TaskOutcomeCode
+TASK_FAILURE_REASON_UNKNOWN: TaskFailureReason
+TASK_FAILURE_REASON_INTERNAL_ERROR: TaskFailureReason
+TASK_FAILURE_REASON_FUNCTION_ERROR: TaskFailureReason
+TASK_FAILURE_REASON_INVOCATION_ERROR: TaskFailureReason
+
 class SerializedObject(_message.Message):
-    __slots__ = ("bytes", "string", "content_type")
-    BYTES_FIELD_NUMBER: _ClassVar[int]
-    STRING_FIELD_NUMBER: _ClassVar[int]
-    CONTENT_TYPE_FIELD_NUMBER: _ClassVar[int]
-    bytes: bytes
-    string: str
-    content_type: str
+    __slots__ = ("data", "encoding", "encoding_version")
+    DATA_FIELD_NUMBER: _ClassVar[int]
+    ENCODING_FIELD_NUMBER: _ClassVar[int]
+    ENCODING_VERSION_FIELD_NUMBER: _ClassVar[int]
+    data: bytes
+    encoding: SerializedObjectEncoding
+    encoding_version: int
     def __init__(
         self,
-        bytes: _Optional[bytes] = ...,
-        string: _Optional[str] = ...,
-        content_type: _Optional[str] = ...,
+        data: _Optional[bytes] = ...,
+        encoding: _Optional[_Union[SerializedObjectEncoding, str]] = ...,
+        encoding_version: _Optional[int] = ...,
     ) -> None: ...
 
 class InitializeRequest(_message.Message):
@@ -47,13 +100,21 @@ class InitializeRequest(_message.Message):
     ) -> None: ...
 
 class InitializeResponse(_message.Message):
-    __slots__ = ("success", "customer_error")
-    SUCCESS_FIELD_NUMBER: _ClassVar[int]
-    CUSTOMER_ERROR_FIELD_NUMBER: _ClassVar[int]
-    success: bool
-    customer_error: str
+    __slots__ = ("outcome_code", "failure_reason", "stdout", "stderr")
+    OUTCOME_CODE_FIELD_NUMBER: _ClassVar[int]
+    FAILURE_REASON_FIELD_NUMBER: _ClassVar[int]
+    STDOUT_FIELD_NUMBER: _ClassVar[int]
+    STDERR_FIELD_NUMBER: _ClassVar[int]
+    outcome_code: InitializationOutcomeCode
+    failure_reason: InitializationFailureReason
+    stdout: str
+    stderr: str
     def __init__(
-        self, success: bool = ..., customer_error: _Optional[str] = ...
+        self,
+        outcome_code: _Optional[_Union[InitializationOutcomeCode, str]] = ...,
+        failure_reason: _Optional[_Union[InitializationFailureReason, str]] = ...,
+        stdout: _Optional[str] = ...,
+        stderr: _Optional[str] = ...,
     ) -> None: ...
 
 class SetInvocationStateRequest(_message.Message):
@@ -125,24 +186,6 @@ class InvocationStateResponse(_message.Message):
         set: _Optional[_Union[SetInvocationStateResponse, _Mapping]] = ...,
         get: _Optional[_Union[GetInvocationStateResponse, _Mapping]] = ...,
     ) -> None: ...
-
-class FunctionOutput(_message.Message):
-    __slots__ = ("outputs", "output_encoding")
-    OUTPUTS_FIELD_NUMBER: _ClassVar[int]
-    OUTPUT_ENCODING_FIELD_NUMBER: _ClassVar[int]
-    outputs: _containers.RepeatedCompositeFieldContainer[SerializedObject]
-    output_encoding: str
-    def __init__(
-        self,
-        outputs: _Optional[_Iterable[_Union[SerializedObject, _Mapping]]] = ...,
-        output_encoding: _Optional[str] = ...,
-    ) -> None: ...
-
-class RouterOutput(_message.Message):
-    __slots__ = ("edges",)
-    EDGES_FIELD_NUMBER: _ClassVar[int]
-    edges: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, edges: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class RunTaskRequest(_message.Message):
     __slots__ = (
@@ -223,40 +266,54 @@ class Metrics(_message.Message):
 class RunTaskResponse(_message.Message):
     __slots__ = (
         "task_id",
-        "function_output",
-        "router_output",
+        "function_outputs",
+        "next_functions",
+        "use_graph_routing",
         "stdout",
         "stderr",
         "is_reducer",
-        "success",
         "metrics",
+        "outcome_code",
+        "failure_reason",
+        "failure_message",
     )
     TASK_ID_FIELD_NUMBER: _ClassVar[int]
-    FUNCTION_OUTPUT_FIELD_NUMBER: _ClassVar[int]
-    ROUTER_OUTPUT_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_OUTPUTS_FIELD_NUMBER: _ClassVar[int]
+    NEXT_FUNCTIONS_FIELD_NUMBER: _ClassVar[int]
+    USE_GRAPH_ROUTING_FIELD_NUMBER: _ClassVar[int]
     STDOUT_FIELD_NUMBER: _ClassVar[int]
     STDERR_FIELD_NUMBER: _ClassVar[int]
     IS_REDUCER_FIELD_NUMBER: _ClassVar[int]
-    SUCCESS_FIELD_NUMBER: _ClassVar[int]
     METRICS_FIELD_NUMBER: _ClassVar[int]
+    OUTCOME_CODE_FIELD_NUMBER: _ClassVar[int]
+    FAILURE_REASON_FIELD_NUMBER: _ClassVar[int]
+    FAILURE_MESSAGE_FIELD_NUMBER: _ClassVar[int]
     task_id: str
-    function_output: FunctionOutput
-    router_output: RouterOutput
+    function_outputs: _containers.RepeatedCompositeFieldContainer[SerializedObject]
+    next_functions: _containers.RepeatedScalarFieldContainer[str]
+    use_graph_routing: bool
     stdout: str
     stderr: str
     is_reducer: bool
-    success: bool
     metrics: Metrics
+    outcome_code: TaskOutcomeCode
+    failure_reason: TaskFailureReason
+    failure_message: str
     def __init__(
         self,
         task_id: _Optional[str] = ...,
-        function_output: _Optional[_Union[FunctionOutput, _Mapping]] = ...,
-        router_output: _Optional[_Union[RouterOutput, _Mapping]] = ...,
+        function_outputs: _Optional[
+            _Iterable[_Union[SerializedObject, _Mapping]]
+        ] = ...,
+        next_functions: _Optional[_Iterable[str]] = ...,
+        use_graph_routing: bool = ...,
         stdout: _Optional[str] = ...,
         stderr: _Optional[str] = ...,
         is_reducer: bool = ...,
-        success: bool = ...,
         metrics: _Optional[_Union[Metrics, _Mapping]] = ...,
+        outcome_code: _Optional[_Union[TaskOutcomeCode, str]] = ...,
+        failure_reason: _Optional[_Union[TaskFailureReason, str]] = ...,
+        failure_message: _Optional[str] = ...,
     ) -> None: ...
 
 class HealthCheckRequest(_message.Message):

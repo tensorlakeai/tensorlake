@@ -1,4 +1,3 @@
-import os
 import unittest
 from typing import List, Mapping
 
@@ -15,11 +14,15 @@ from testing import (
 
 from tensorlake import Graph
 from tensorlake.function_executor.proto.function_executor_pb2 import (
+    InitializationOutcomeCode,
     InitializeRequest,
     InitializeResponse,
     RunTaskRequest,
     RunTaskResponse,
     SerializedObject,
+    SerializedObjectEncoding,
+    TaskFailureReason,
+    TaskOutcomeCode,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
@@ -27,7 +30,6 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
 from tensorlake.functions_sdk.data_objects import File
 from tensorlake.functions_sdk.functions import tensorlake_function
 from tensorlake.functions_sdk.graph_serialization import (
-    ZIPPED_GRAPH_CODE_CONTENT_TYPE,
     graph_code_dir_path,
     zip_graph_code,
 )
@@ -100,15 +102,19 @@ class TestRunTask(unittest.TestCase):
                         graph_version="1",
                         function_name="extractor_b",
                         graph=SerializedObject(
-                            bytes=zip_graph_code(
+                            data=zip_graph_code(
                                 graph=create_graph_a(),
                                 code_dir_path=GRAPH_CODE_DIR_PATH,
                             ),
-                            content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
+                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                            encoding_version=1,
                         ),
                     )
                 )
-                self.assertTrue(initialize_response.success)
+                self.assertEqual(
+                    initialize_response.outcome_code,
+                    InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_SUCCESS,
+                )
 
                 run_task_response: RunTaskResponse = run_task(
                     stub,
@@ -116,11 +122,14 @@ class TestRunTask(unittest.TestCase):
                     input=File(data=bytes(b"hello"), mime_type="text/plain"),
                 )
 
-                self.assertTrue(run_task_response.success)
+                self.assertEqual(
+                    run_task_response.outcome_code,
+                    TaskOutcomeCode.TASK_OUTCOME_CODE_SUCCESS,
+                )
                 self.assertFalse(run_task_response.is_reducer)
 
                 fn_outputs = deserialized_function_output(
-                    self, run_task_response.function_output
+                    self, run_task_response.function_outputs
                 )
                 self.assertEqual(len(fn_outputs), 2)
                 expected = FileChunk(data=b"hello", start=5, end=5)
@@ -140,21 +149,36 @@ class TestRunTask(unittest.TestCase):
                         graph_version="1",
                         function_name="extractor_exception",
                         graph=SerializedObject(
-                            bytes=zip_graph_code(
+                            data=zip_graph_code(
                                 graph=create_graph_exception(),
                                 code_dir_path=GRAPH_CODE_DIR_PATH,
                             ),
-                            content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
+                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                            encoding_version=1,
                         ),
                     )
                 )
-                self.assertTrue(initialize_response.success)
+                self.assertEqual(
+                    initialize_response.outcome_code,
+                    InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_SUCCESS,
+                )
 
                 run_task_response: RunTaskResponse = run_task(
                     stub, function_name="extractor_exception", input=10
                 )
 
-                self.assertFalse(run_task_response.success)
+                self.assertEqual(
+                    run_task_response.outcome_code,
+                    TaskOutcomeCode.TASK_OUTCOME_CODE_FAILURE,
+                )
+                self.assertEqual(
+                    run_task_response.failure_reason,
+                    TaskFailureReason.TASK_FAILURE_REASON_FUNCTION_ERROR,
+                )
+                self.assertIn(
+                    "this extractor throws an exception.",
+                    run_task_response.failure_message,
+                )
                 self.assertFalse(run_task_response.is_reducer)
                 self.assertTrue(
                     "this extractor throws an exception." in run_task_response.stderr
@@ -173,15 +197,19 @@ class TestRunTask(unittest.TestCase):
                         graph_version="1",
                         function_name="extractor_b",
                         graph=SerializedObject(
-                            bytes=zip_graph_code(
+                            data=zip_graph_code(
                                 graph=create_graph_a(),
                                 code_dir_path=GRAPH_CODE_DIR_PATH,
                             ),
-                            content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
+                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                            encoding_version=1,
                         ),
                     )
                 )
-                self.assertTrue(initialize_response.success)
+                self.assertEqual(
+                    initialize_response.outcome_code,
+                    InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_SUCCESS,
+                )
                 valid_request: RunTaskRequest = RunTaskRequest(
                     namespace="test",
                     graph_name="test",
@@ -191,8 +219,9 @@ class TestRunTask(unittest.TestCase):
                     task_id="test-task",
                     allocation_id="test-allocation",
                     function_input=SerializedObject(
-                        bytes=CloudPickleSerializer.serialize(input),
-                        content_type=CloudPickleSerializer.content_type,
+                        data=CloudPickleSerializer.serialize(input),
+                        encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
+                        encoding_version=1,
                     ),
                 )
                 wrong_requests: List[RunTaskRequest] = [
