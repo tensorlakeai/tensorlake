@@ -10,6 +10,7 @@ from rich import print  # TODO: Migrate to use click.echo
 
 from tensorlake.error import ApiException, GraphStillProcessing
 from tensorlake.functions_sdk.data_objects import TensorlakeData
+from tensorlake.functions_sdk.function_errors import InvocationError
 from tensorlake.functions_sdk.graph import (
     ComputeGraphMetadata,
     Graph,
@@ -71,7 +72,7 @@ class GraphOutputMetadata(BaseModel):
 
 
 class GraphOutputs(BaseModel):
-    status: str
+    invocation: InvocationMetadata
     outputs: List[GraphOutputMetadata]
     cursor: Optional[str] = None
 
@@ -277,7 +278,7 @@ class TensorlakeClient:
             print(f"failed to fetch logs: {e}")
             return None
 
-    def invocations(self, graph: str) -> List[Any]:
+    def invocations(self, graph: str) -> List[InvocationMetadata]:
         response = self._get(
             f"namespaces/{self.namespace}/compute_graphs/{graph}/invocations"
         )
@@ -476,9 +477,11 @@ class TensorlakeClient:
         )
         response.raise_for_status()
         graph_outputs = GraphOutputs(**response.json())
-        # "pending" is old server API behavior, left here for backward compatibility.
-        if graph_outputs.status in ["pending", "Pending", "Running"]:
+        if graph_outputs.invocation.status in ["Pending", "Running"]:
             raise GraphStillProcessing()
+
+        if graph_outputs.invocation.invocation_error is not None:
+            raise InvocationError(graph_outputs.invocation.invocation_error.message)
 
         graph_metadata: ComputeGraphMetadata = self.graph(graph)
         output_encoder = graph_metadata.nodes[fn_name].output_encoder

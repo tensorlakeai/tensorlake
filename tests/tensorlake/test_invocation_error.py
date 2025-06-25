@@ -49,18 +49,3 @@ class TestInvocationError(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-# TODO:
-# from tensorlake import Graph, InvocationError, RemoteGraph, tensorlake_function
-
-
-# def my_function(a: int) -> int:
-#     if a < 0:
-#         raise InvocationError("Negative value is not allowed.")
-#     return a * 2
-
-
-# def main():
-#     # HTTP: API
-#     # invocation_state = "failed"
-#     # failure_reason/failure_message = "Negative value is not allowed."
