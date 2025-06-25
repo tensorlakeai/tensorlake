@@ -103,7 +103,7 @@ class InvocationStateProxyServer:
                     value=SerializedObject(
                         data=CloudPickleSerializer.serialize(value),
                         encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-                        encoding_version=1,
+                        encoding_version=0,
                     ),
                 ),
             )

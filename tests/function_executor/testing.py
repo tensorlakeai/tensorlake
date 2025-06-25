@@ -96,7 +96,7 @@ def run_task(
             function_input=SerializedObject(
                 data=CloudPickleSerializer.serialize(input),
                 encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-                encoding_version=1,
+                encoding_version=0,
             ),
         ),
         **kwargs,

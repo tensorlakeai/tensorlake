@@ -120,7 +120,7 @@ class TestSetInvocationState(unittest.TestCase):
                 graph=SerializedObject(
                     data=zip_graph_code(graph=graph, code_dir_path=GRAPH_CODE_DIR_PATH),
                     encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
-                    encoding_version=1,
+                    encoding_version=0,
                 ),
             )
         )
@@ -153,7 +153,7 @@ class TestSetInvocationState(unittest.TestCase):
                                     )
                                 ),
                                 encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-                                encoding_version=1,
+                                encoding_version=0,
                             ),
                         ),
                     ),
@@ -208,7 +208,7 @@ class TestSetInvocationState(unittest.TestCase):
                                     )
                                 ),
                                 encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-                                encoding_version=1,
+                                encoding_version=0,
                             ),
                         ),
                     ),
@@ -280,7 +280,7 @@ class TestGetInvocationState(unittest.TestCase):
                 graph=SerializedObject(
                     data=zip_graph_code(graph=graph, code_dir_path=GRAPH_CODE_DIR_PATH),
                     encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
-                    encoding_version=1,
+                    encoding_version=0,
                 ),
             )
         )
@@ -326,7 +326,7 @@ class TestGetInvocationState(unittest.TestCase):
                                     )
                                 ),
                                 encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-                                encoding_version=1,
+                                encoding_version=0,
                             ),
                         ),
                     ),

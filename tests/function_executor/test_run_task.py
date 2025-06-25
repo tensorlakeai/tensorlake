@@ -107,7 +107,7 @@ class TestRunTask(unittest.TestCase):
                                 code_dir_path=GRAPH_CODE_DIR_PATH,
                             ),
                             encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
-                            encoding_version=1,
+                            encoding_version=0,
                         ),
                     )
                 )
@@ -154,7 +154,7 @@ class TestRunTask(unittest.TestCase):
                                 code_dir_path=GRAPH_CODE_DIR_PATH,
                             ),
                             encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
-                            encoding_version=1,
+                            encoding_version=0,
                         ),
                     )
                 )
@@ -202,7 +202,7 @@ class TestRunTask(unittest.TestCase):
                                 code_dir_path=GRAPH_CODE_DIR_PATH,
                             ),
                             encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
-                            encoding_version=1,
+                            encoding_version=0,
                         ),
                     )
                 )
@@ -221,7 +221,7 @@ class TestRunTask(unittest.TestCase):
                     function_input=SerializedObject(
                         data=CloudPickleSerializer.serialize(input),
                         encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-                        encoding_version=1,
+                        encoding_version=0,
                     ),
                 )
                 wrong_requests: List[RunTaskRequest] = [

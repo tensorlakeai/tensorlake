@@ -71,19 +71,24 @@ class ResponseHelper:
     def from_function_exception(
         self, exception: Exception, stdout: str, stderr: str, metrics: Optional[Metrics]
     ) -> RunTaskResponse:
+        invocation_error_output: Optional[SerializedObject] = None
         if isinstance(exception, InvocationError):
             failure_reason: TaskFailureReason = (
                 TaskFailureReason.TASK_FAILURE_REASON_INVOCATION_ERROR
             )
-            failure_message: str = exception.message
+            invocation_error_output = SerializedObject(
+                data=exception.message.encode("utf-8"),
+                encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_TEXT,
+                encoding_version=0,
+            )
         else:
             failure_reason: TaskFailureReason = (
                 TaskFailureReason.TASK_FAILURE_REASON_FUNCTION_ERROR
             )
-            failure_message: str = "".join(traceback.format_exception(exception))
+            # Add the formatted exception message to stderr so customer can see it there.
+            formatted_exception: str = "".join(traceback.format_exception(exception))
+            stderr = "\n".join([stderr, formatted_exception])
 
-        # Add the formatted exception message to stderr so customer can see it there too.
-        stderr = "\n".join([stderr, failure_message])
         return RunTaskResponse(
             task_id=self._task_id,
             stdout=stdout,
@@ -93,7 +98,7 @@ class ResponseHelper:
             metrics=self._to_metrics(metrics),
             outcome_code=TaskOutcomeCode.TASK_OUTCOME_CODE_FAILURE,
             failure_reason=failure_reason,
-            failure_message=failure_message,
+            invocation_error_output=invocation_error_output,
         )
 
     def _to_function_outputs(

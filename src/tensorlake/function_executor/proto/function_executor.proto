@@ -133,7 +133,8 @@ message RunTaskResponse {
     optional Metrics metrics = 7;
     optional TaskOutcomeCode outcome_code = 8;
     optional TaskFailureReason failure_reason = 9;
-    optional string failure_message = 10;
+    // User payload for invocation error if task failed with invocation error.
+    optional SerializedObject invocation_error_output = 10;
 }
 
 message HealthCheckRequest {}

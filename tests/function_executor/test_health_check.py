@@ -76,7 +76,7 @@ def initialize(test_case: unittest.TestCase, stub: FunctionExecutorStub):
                     code_dir_path=GRAPH_CODE_DIR_PATH,
                 ),
                 encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
-                encoding_version=1,
+                encoding_version=0,
             ),
         )
     )

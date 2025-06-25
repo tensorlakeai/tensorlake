@@ -274,7 +274,7 @@ class RunTaskResponse(_message.Message):
         "metrics",
         "outcome_code",
         "failure_reason",
-        "failure_message",
+        "invocation_error_output",
     )
     TASK_ID_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_OUTPUTS_FIELD_NUMBER: _ClassVar[int]
@@ -285,7 +285,7 @@ class RunTaskResponse(_message.Message):
     METRICS_FIELD_NUMBER: _ClassVar[int]
     OUTCOME_CODE_FIELD_NUMBER: _ClassVar[int]
     FAILURE_REASON_FIELD_NUMBER: _ClassVar[int]
-    FAILURE_MESSAGE_FIELD_NUMBER: _ClassVar[int]
+    INVOCATION_ERROR_OUTPUT_FIELD_NUMBER: _ClassVar[int]
     task_id: str
     function_outputs: _containers.RepeatedCompositeFieldContainer[SerializedObject]
     next_functions: _containers.RepeatedScalarFieldContainer[str]
@@ -295,7 +295,7 @@ class RunTaskResponse(_message.Message):
     metrics: Metrics
     outcome_code: TaskOutcomeCode
     failure_reason: TaskFailureReason
-    failure_message: str
+    invocation_error_output: SerializedObject
     def __init__(
         self,
         task_id: _Optional[str] = ...,
@@ -309,7 +309,7 @@ class RunTaskResponse(_message.Message):
         metrics: _Optional[_Union[Metrics, _Mapping]] = ...,
         outcome_code: _Optional[_Union[TaskOutcomeCode, str]] = ...,
         failure_reason: _Optional[_Union[TaskFailureReason, str]] = ...,
-        failure_message: _Optional[str] = ...,
+        invocation_error_output: _Optional[_Union[SerializedObject, _Mapping]] = ...,
     ) -> None: ...
 
 class HealthCheckRequest(_message.Message):
