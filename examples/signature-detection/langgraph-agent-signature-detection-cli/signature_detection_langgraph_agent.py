@@ -1,8 +1,8 @@
 """
 Document Signature Analysis System
 
-A comprehensive system for detecting and analyzing signatures in documents using TensorLake AI through langchain-tensorlake
-and LangGraph for conversational agent.
+A comprehensive system for detecting and analyzing signatures in documents using TensorLake AI through
+langchain-tensorlake and LangGraph for conversational agent.
 """
 
 # Helper packages
