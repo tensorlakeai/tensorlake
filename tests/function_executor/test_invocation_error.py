@@ -1,7 +1,5 @@
-import math
 import unittest
 
-import psutil
 from testing import (
     DEFAULT_FUNCTION_EXECUTOR_PORT,
     FunctionExecutorProcessContextManager,
@@ -10,7 +8,7 @@ from testing import (
     run_task,
 )
 
-from tensorlake import Graph
+from tensorlake import Graph, InvocationError
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     InitializationOutcomeCode,
     InitializeRequest,
@@ -18,6 +16,7 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     RunTaskResponse,
     SerializedObject,
     SerializedObjectEncoding,
+    TaskFailureReason,
     TaskOutcomeCode,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
@@ -32,25 +31,17 @@ from tensorlake.functions_sdk.graph_serialization import (
 
 GRAPH_CODE_DIR_PATH = graph_code_dir_path(__file__)
 
-# This test checks if the memory usage of a Function Executor process is below
-# a known threshold. Customers rely on this threshold because if FE memory usage
-# grows then customer functions can start failing with out of memory errors.
-#
-# Real max memory we saw in tests is 80 MB, add extra 5 MB to remove flakiness from
-# the test.
-_FUNCTION_EXECUTOR_MAX_MEMORY_MB = 85
-
 
 @tensorlake_function()
-def process_rss_mb(x: int) -> int:
-    # rss is in bytes
-    return math.ceil(psutil.Process().memory_info().rss / (1024 * 1024))
+def raise_invocation_error(x: int) -> str:
+    raise InvocationError(f"The invocation can't succeed: {x}")
 
 
-class TestMemoryUsage(unittest.TestCase):
-    def test_memory_usage_is_below_max_threshold(self):
-        graph = Graph(name="test", description="test", start_node=process_rss_mb)
-
+class TestInvocationError(unittest.TestCase):
+    def test_invocation_error_response(self):
+        graph = Graph(
+            name="test", description="test", start_node=raise_invocation_error
+        )
         with FunctionExecutorProcessContextManager(
             DEFAULT_FUNCTION_EXECUTOR_PORT
         ) as process:
@@ -61,10 +52,11 @@ class TestMemoryUsage(unittest.TestCase):
                         namespace="test",
                         graph_name="test",
                         graph_version="1",
-                        function_name="process_rss_mb",
+                        function_name="raise_invocation_error",
                         graph=SerializedObject(
                             data=zip_graph_code(
-                                graph=graph, code_dir_path=GRAPH_CODE_DIR_PATH
+                                graph=graph,
+                                code_dir_path=GRAPH_CODE_DIR_PATH,
                             ),
                             encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
                             encoding_version=0,
@@ -78,26 +70,27 @@ class TestMemoryUsage(unittest.TestCase):
 
                 run_task_response: RunTaskResponse = run_task(
                     stub,
-                    function_name="process_rss_mb",
-                    input=0,
+                    function_name="raise_invocation_error",
+                    input=10,
                 )
 
                 self.assertEqual(
                     run_task_response.outcome_code,
-                    TaskOutcomeCode.TASK_OUTCOME_CODE_SUCCESS,
+                    TaskOutcomeCode.TASK_OUTCOME_CODE_FAILURE,
                 )
-
+                self.assertEqual(
+                    run_task_response.failure_reason,
+                    TaskFailureReason.TASK_FAILURE_REASON_INVOCATION_ERROR,
+                )
+                self.assertIn(
+                    "The invocation can't succeed: 10",
+                    run_task_response.failure_message,
+                )
+                self.assertFalse(run_task_response.is_reducer)
                 fn_outputs = deserialized_function_output(
                     self, run_task_response.function_outputs
                 )
-                self.assertEqual(len(fn_outputs), 1)
-                fe_process_rss_mb = fn_outputs[0]
-                print(
-                    f"Function Executor process RSS memory usage: {fe_process_rss_mb} MB"
-                )
-                self.assertLessEqual(
-                    fe_process_rss_mb, _FUNCTION_EXECUTOR_MAX_MEMORY_MB
-                )
+                self.assertEqual(len(fn_outputs), 0)
 
 
 if __name__ == "__main__":

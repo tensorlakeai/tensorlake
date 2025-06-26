@@ -4,12 +4,18 @@ import sys
 import tempfile
 import time
 import zipfile
-from typing import Any, Dict, Generator, Iterator, Optional
+from typing import Any, Generator, Iterator, Optional
 
 import grpc
 
 from tensorlake.functions_sdk.functions import TensorlakeFunctionWrapper
-from tensorlake.functions_sdk.graph_serialization import FunctionManifest, GraphManifest
+from tensorlake.functions_sdk.graph_definition import ComputeGraphMetadata
+from tensorlake.functions_sdk.graph_serialization import (
+    GRAPH_MANIFEST_FILE_NAME,
+    GRAPH_METADATA_FILE_NAME,
+    FunctionManifest,
+    GraphManifest,
+)
 
 from .handlers.check_health.handler import Handler as CheckHealthHandler
 from .handlers.run_function.handler import Handler as RunTaskHandler
@@ -25,6 +31,8 @@ from .proto.function_executor_pb2 import (
     HealthCheckResponse,
     InfoRequest,
     InfoResponse,
+    InitializationFailureReason,
+    InitializationOutcomeCode,
     InitializeRequest,
     InitializeResponse,
     InvocationStateRequest,
@@ -43,6 +51,7 @@ class Service(FunctionExecutorServicer):
         self._graph_version: Optional[str] = None
         self._function_name: Optional[str] = None
         self._function_wrapper: Optional[TensorlakeFunctionWrapper] = None
+        self._graph_metadata: Optional[ComputeGraphMetadata] = None
         self._invocation_state_proxy_server: Optional[InvocationStateProxyServer] = None
         self._check_health_handler = CheckHealthHandler(self._logger)
 
@@ -72,10 +81,10 @@ class Service(FunctionExecutorServicer):
             graph_version=request.graph_version,
             fn=request.function_name,
         )
-        
+
         graph_modules_zip_fd, graph_modules_zip_path = tempfile.mkstemp(suffix=".zip")
         with open(graph_modules_zip_fd, "wb") as graph_modules_zip_file:
-            graph_modules_zip_file.write(request.graph.bytes)
+            graph_modules_zip_file.write(request.graph.data)
         sys.path.insert(
             0, graph_modules_zip_path
         )  # Add as the first entry so user modules have highest priority
@@ -84,9 +93,15 @@ class Service(FunctionExecutorServicer):
             # Process user controlled input in a try-except block to not treat errors here as our
             # internal platform errors.
             with zipfile.ZipFile(graph_modules_zip_path, "r") as zf:
-                with zf.open("graph_manifest.json") as graph_manifest_file:
+                with zf.open(GRAPH_MANIFEST_FILE_NAME) as graph_manifest_file:
                     graph_manifest: GraphManifest = GraphManifest.model_validate(
                         json.load(graph_manifest_file)
+                    )
+                with zf.open(GRAPH_METADATA_FILE_NAME) as graph_metadata_file:
+                    self._graph_metadata: ComputeGraphMetadata = (
+                        ComputeGraphMetadata.model_validate(
+                            json.load(graph_metadata_file)
+                        )
                     )
             if request.function_name not in graph_manifest.functions:
                 raise ValueError(
@@ -103,7 +118,7 @@ class Service(FunctionExecutorServicer):
                 function_module, function_manifest.class_import_name
             )
 
-            # TODO: capture stdout and stderr and report exceptions the same way as when we run a task.
+            # TODO: capture stdout and stderr the same way as when we run tasks.
             self._function_wrapper = TensorlakeFunctionWrapper(function_class)
         except Exception as e:
             self._logger.error(
@@ -111,13 +126,19 @@ class Service(FunctionExecutorServicer):
                 reason="failed to load customer function",
                 duration_sec=f"{time.monotonic() - start_time:.3f}",
             )
-            return InitializeResponse(success=False, customer_error=str(e))
+            return InitializeResponse(
+                outcome_code=InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_FAILURE,
+                failure_reason=InitializationFailureReason.INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR,
+                stderr=str(e),
+            )
 
         self._logger.info(
             "initialized function executor service",
             duration_sec=f"{time.monotonic() - start_time:.3f}",
         )
-        return InitializeResponse(success=True)
+        return InitializeResponse(
+            outcome_code=InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_SUCCESS
+        )
 
     def initialize_invocation_state_server(
         self,
@@ -166,6 +187,7 @@ class Service(FunctionExecutorServicer):
                 request.task_id, self._invocation_state_proxy_server
             ),
             function_wrapper=self._function_wrapper,
+            graph_metadata=self._graph_metadata,
             logger=self._logger,
         ).run()
 

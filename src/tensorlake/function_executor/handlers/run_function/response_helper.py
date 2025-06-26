@@ -1,88 +1,143 @@
-from typing import List, Optional
+import traceback
+from typing import Any, List, Optional
 
-from tensorlake.functions_sdk.data_objects import TensorlakeData
+from tensorlake.functions_sdk.data_objects import Metrics, TensorlakeData
+from tensorlake.functions_sdk.function_errors import InvocationError
 from tensorlake.functions_sdk.functions import FunctionCallResult
-from tensorlake.functions_sdk.object_serializer import get_serializer
+from tensorlake.functions_sdk.graph_definition import ComputeGraphMetadata
+from tensorlake.functions_sdk.object_serializer import (
+    CloudPickleSerializer,
+    JsonSerializer,
+)
 
+from ...proto.function_executor_pb2 import Metrics as MetricsProto
 from ...proto.function_executor_pb2 import (
-    FunctionOutput,
-    Metrics,
-    RouterOutput,
     RunTaskResponse,
     SerializedObject,
+    SerializedObjectEncoding,
+    TaskFailureReason,
+    TaskOutcomeCode,
 )
 
 
 class ResponseHelper:
     """Helper class for generating RunFunctionResponse."""
 
-    def __init__(self, task_id: str, output_encoding: str):
+    def __init__(
+        self,
+        task_id: str,
+        function_name: str,
+        graph_metadata: ComputeGraphMetadata,
+        logger: Any,
+    ):
         self._task_id = task_id
-        self._output_encoding = output_encoding
+        self._function_name = function_name
+        self._graph_metadata: ComputeGraphMetadata = graph_metadata
+        self._logger = logger.bind(module=__name__)
 
-    def function_response(
+    def from_function_call(
         self,
         result: FunctionCallResult,
         is_reducer: bool,
-        stdout: str = "",
-        stderr: str = "",
+        stdout: str,
+        stderr: str,
     ) -> RunTaskResponse:
-        if result.traceback_msg is None:
-            metrics = Metrics(
-                timers=result.metrics.timers,
-                counters=result.metrics.counters,
-            )
-            return RunTaskResponse(
-                task_id=self._task_id,
-                function_output=self._to_function_output(
-                    result.ser_outputs, self._output_encoding
-                ),
-                router_output=self._to_router_output(result.edges),
+        if result.exception is not None:
+            return self.from_function_exception(
+                exception=result.exception,
                 stdout=stdout,
                 stderr=stderr,
-                is_reducer=is_reducer,
-                success=True,
-                metrics=metrics,
-            )
-        else:
-            return self.failure_response(
-                message=result.traceback_msg,
-                stdout=stdout,
-                stderr=stderr,
+                metrics=result.metrics,
             )
 
-    def failure_response(
-        self, message: str, stdout: str, stderr: str
-    ) -> RunTaskResponse:
-        stderr = "\n".join([stderr, message])
+        if result.edges is None:
+            # Fallback to the graph edges if not provided by the function.
+            # Some functions don't have any outer edges.
+            next_functions = self._graph_metadata.edges.get(self._function_name, [])
+        else:
+            next_functions = result.edges
+
         return RunTaskResponse(
             task_id=self._task_id,
-            function_output=None,
+            function_outputs=self._to_function_outputs(result.ser_outputs),
+            next_functions=next_functions,
+            stdout=stdout,
+            stderr=stderr,
+            is_reducer=is_reducer,
+            metrics=self._to_metrics(result.metrics),
+            outcome_code=TaskOutcomeCode.TASK_OUTCOME_CODE_SUCCESS,
+        )
+
+    def from_function_exception(
+        self, exception: Exception, stdout: str, stderr: str, metrics: Optional[Metrics]
+    ) -> RunTaskResponse:
+        invocation_error_output: Optional[SerializedObject] = None
+        if isinstance(exception, InvocationError):
+            failure_reason: TaskFailureReason = (
+                TaskFailureReason.TASK_FAILURE_REASON_INVOCATION_ERROR
+            )
+            invocation_error_output = SerializedObject(
+                data=exception.message.encode("utf-8"),
+                encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_TEXT,
+                encoding_version=0,
+            )
+        else:
+            failure_reason: TaskFailureReason = (
+                TaskFailureReason.TASK_FAILURE_REASON_FUNCTION_ERROR
+            )
+            # Add the formatted exception message to stderr so customer can see it there.
+            formatted_exception: str = "".join(traceback.format_exception(exception))
+            stderr = "\n".join([stderr, formatted_exception])
+
+        return RunTaskResponse(
+            task_id=self._task_id,
             stdout=stdout,
             stderr=stderr,
             is_reducer=False,
-            success=False,
+            next_functions=[],
+            metrics=self._to_metrics(metrics),
+            outcome_code=TaskOutcomeCode.TASK_OUTCOME_CODE_FAILURE,
+            failure_reason=failure_reason,
+            invocation_error_output=invocation_error_output,
         )
 
-    def _to_function_output(
-        self, outputs: List[TensorlakeData], encoding: str
-    ) -> FunctionOutput:
-        output = FunctionOutput(outputs=[], output_encoding=encoding)
-        for ix_data in outputs:
-            serialized_object: SerializedObject = SerializedObject(
-                content_type=get_serializer(ix_data.encoder).content_type,
-            )
-            if isinstance(ix_data.payload, bytes):
-                serialized_object.bytes = ix_data.payload
-            elif isinstance(ix_data.payload, str):
-                serialized_object.string = ix_data.payload
+    def _to_function_outputs(
+        self, tl_datas: List[TensorlakeData]
+    ) -> List[SerializedObject]:
+        outputs: List[SerializedObject] = []
+        for tl_data in tl_datas:
+            data: bytes = None
+            encoding: SerializedObjectEncoding = None
+            encoding_version: int = 1
+            if tl_data.encoder == JsonSerializer.encoding_type:
+                data = tl_data.payload.encode("utf-8")
+                encoding = SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON
+            elif tl_data.encoder == CloudPickleSerializer.encoding_type:
+                data = tl_data.payload
+                encoding = (
+                    SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE
+                )
             else:
-                raise ValueError(f"Unsupported payload type: {type(ix_data.payload)}")
+                self._logger.warning(
+                    "Unsupported encoder type",
+                    encoder=tl_data.encoder,
+                    payload_type=type(tl_data.payload),
+                )
+                continue
 
-            output.outputs.append(serialized_object)
-        return output
+            outputs.append(
+                SerializedObject(
+                    data=data,
+                    encoding=encoding,
+                    encoding_version=encoding_version,
+                )
+            )
+        return outputs
 
-    def _to_router_output(self, edges: Optional[List[str]]) -> RouterOutput:
-        if edges is None:
+    def _to_metrics(self, metrics: Optional[Metrics]) -> Optional[MetricsProto]:
+        if metrics is None:
             return None
-        return RouterOutput(edges=edges)
+        return MetricsProto(
+            timers=metrics.timers,
+            counters=metrics.counters,
+        )

@@ -1,5 +1,3 @@
-
-
 syntax = "proto3";
 
 package function_executor_service;
@@ -8,15 +6,18 @@ package function_executor_service;
 // in Python is allowed to import Python SDK to run customer functions. This ensures that
 // all the other components can be written in any language.
 
+enum SerializedObjectEncoding {
+    SERIALIZED_OBJECT_ENCODING_UNKNOWN = 0;
+    SERIALIZED_OBJECT_ENCODING_UTF8_JSON = 1;
+    SERIALIZED_OBJECT_ENCODING_UTF8_TEXT = 2;
+    SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE = 3;
+    SERIALIZED_OBJECT_ENCODING_BINARY_ZIP = 4;
+}
+
 message SerializedObject {
-    oneof data {
-        // Set bytes_data if the object is serialized as bytes.
-        bytes bytes = 1;
-        // Set string_data if the object is serialized as string.
-        string string = 2;
-    }
-    // The content type determines the serializer used to serialize the object.
-    optional string content_type = 3;
+    optional bytes data = 1;
+    optional SerializedObjectEncoding encoding = 2;
+    optional uint64 encoding_version = 3;
 }
 
 // InitializeRequest contains information about the function
@@ -29,9 +30,23 @@ message InitializeRequest {
     optional SerializedObject graph = 7;
 }
 
+enum InitializationOutcomeCode {
+    INITIALIZE_OUTCOME_CODE_UNKNOWN = 0;
+    INITIALIZE_OUTCOME_CODE_SUCCESS = 1;
+    INITIALIZE_OUTCOME_CODE_FAILURE = 2;
+}
+
+enum InitializationFailureReason {
+    INITIALIZATION_FAILURE_REASON_UNKNOWN = 0;
+    INITIALIZATION_FAILURE_REASON_INTERNAL_ERROR = 1;
+    INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR = 2;
+}
+
 message InitializeResponse {
-    optional bool success = 1;
-    optional string customer_error = 2;
+    optional InitializationOutcomeCode outcome_code = 1;
+    optional InitializationFailureReason failure_reason = 2;
+    optional string stdout = 3;
+    optional string stderr = 4;
 }
 
 message SetInvocationStateRequest {
@@ -77,15 +92,6 @@ message InvocationStateResponse {
     }
 }
 
-message FunctionOutput {
-    repeated SerializedObject outputs = 1;
-    optional string output_encoding = 2;
-}
-
-message RouterOutput {
-    repeated string edges = 1;
-}
-
 message RunTaskRequest {
     optional string namespace = 1;
     optional string graph_name = 2;
@@ -103,15 +109,32 @@ message Metrics {
     map<string, uint64> counters = 2;
 }
 
+enum TaskOutcomeCode {
+    TASK_OUTCOME_CODE_UNKNOWN = 0;
+    TASK_OUTCOME_CODE_SUCCESS = 1;
+    TASK_OUTCOME_CODE_FAILURE = 2;
+}
+
+enum TaskFailureReason {
+    TASK_FAILURE_REASON_UNKNOWN = 0;
+    TASK_FAILURE_REASON_INTERNAL_ERROR = 1;
+    TASK_FAILURE_REASON_FUNCTION_ERROR = 2;
+    TASK_FAILURE_REASON_INVOCATION_ERROR = 3;
+}
+
 message RunTaskResponse {
     optional string task_id = 1;
-    optional FunctionOutput function_output = 2;
-    optional RouterOutput router_output = 3;
+    repeated SerializedObject function_outputs = 2;
+    // Edges that the function wants the invocation to be routed to.
+    repeated string next_functions = 3;
     optional string stdout = 4;
     optional string stderr = 5;
     optional bool is_reducer = 6;
-    optional bool success = 7;
-    optional Metrics metrics = 8;
+    optional Metrics metrics = 7;
+    optional TaskOutcomeCode outcome_code = 8;
+    optional TaskFailureReason failure_reason = 9;
+    // User payload for invocation error if task failed with invocation error.
+    optional SerializedObject invocation_error_output = 10;
 }
 
 message HealthCheckRequest {}

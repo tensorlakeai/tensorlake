@@ -6,7 +6,6 @@ import grpc
 
 from tensorlake.functions_sdk.object_serializer import (
     CloudPickleSerializer,
-    get_serializer,
 )
 
 from ..proto.function_executor_pb2 import (
@@ -14,8 +13,10 @@ from ..proto.function_executor_pb2 import (
     InvocationStateRequest,
     InvocationStateResponse,
     SerializedObject,
+    SerializedObjectEncoding,
     SetInvocationStateRequest,
 )
+from ..proto.message_validator import MessageValidator
 from .response_validator import ResponseValidator
 
 
@@ -100,8 +101,9 @@ class InvocationStateProxyServer:
                 set=SetInvocationStateRequest(
                     key=key,
                     value=SerializedObject(
-                        content_type=CloudPickleSerializer.content_type,
-                        bytes=CloudPickleSerializer.serialize(value),
+                        data=CloudPickleSerializer.serialize(value),
+                        encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
+                        encoding_version=0,
                     ),
                 ),
             )
@@ -175,8 +177,16 @@ class InvocationStateProxyServer:
             if not response.get.HasField("value"):
                 return None
 
-            return get_serializer(response.get.value.content_type).deserialize(
-                response.get.value.bytes
-                if response.get.value.HasField("bytes")
-                else response.get.value.string
-            )
+            so_value: SerializedObject = response.get.value
+            if (
+                so_value.encoding
+                != SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE
+            ):
+                self._logger.error(
+                    "unexpected encoding of the invocation state value",
+                    key=key,
+                    encoding=SerializedObjectEncoding.Name(so_value.encoding),
+                )
+                raise RuntimeError("unexpected encoding of the invocation state value")
+
+            return CloudPickleSerializer.deserialize(so_value.data)

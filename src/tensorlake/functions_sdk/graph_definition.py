@@ -45,7 +45,6 @@ class ComputeGraphMetadata(BaseModel):
     edges: Dict[str, List[str]]
     accumulator_zero_values: Dict[str, bytes] = {}
     runtime_information: RuntimeInformation
-    replaying: bool = False
     version: str
 
     def get_input_payload_serializer(self):

@@ -1,9 +1,16 @@
-from typing import Optional
+from typing import Optional, Union
 
 from tensorlake.functions_sdk.data_objects import TensorlakeData
-from tensorlake.functions_sdk.object_serializer import get_serializer
+from tensorlake.functions_sdk.object_serializer import (
+    CloudPickleSerializer,
+    JsonSerializer,
+)
 
-from ...proto.function_executor_pb2 import RunTaskRequest, SerializedObject
+from ...proto.function_executor_pb2 import (
+    RunTaskRequest,
+    SerializedObject,
+    SerializedObjectEncoding,
+)
 
 
 class FunctionInputs:
@@ -42,12 +49,27 @@ class FunctionInputsLoader:
 def _to_tensorlake_data(
     input_id: str, serialized_object: SerializedObject
 ) -> TensorlakeData:
+    data: Union[str, bytes] = None
+    encoder: str = None
+    if (
+        serialized_object.encoding
+        == SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE
+    ):
+        data = serialized_object.data
+        encoder = CloudPickleSerializer.encoding_type
+    elif (
+        serialized_object.encoding
+        == SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON
+    ):
+        data = serialized_object.data.decode("utf-8")
+        encoder = JsonSerializer.encoding_type
+    else:
+        raise ValueError(
+            f"Unsupported serialized object encoding: {SerializedObjectEncoding.Name(serialized_object.encoding)}"
+        )
+
     return TensorlakeData(
         input_id=input_id,
-        payload=(
-            serialized_object.bytes
-            if serialized_object.HasField("bytes")
-            else serialized_object.string
-        ),
-        encoder=get_serializer(serialized_object.content_type).encoding_type,
+        payload=data,
+        encoder=encoder,
     )

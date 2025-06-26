@@ -16,10 +16,13 @@ from tensorlake import Graph
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     HealthCheckRequest,
     HealthCheckResponse,
+    InitializationOutcomeCode,
     InitializeRequest,
     InitializeResponse,
     RunTaskResponse,
     SerializedObject,
+    SerializedObjectEncoding,
+    TaskOutcomeCode,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
@@ -66,17 +69,21 @@ def initialize(test_case: unittest.TestCase, stub: FunctionExecutorStub):
             graph_version="1",
             function_name="action_function",
             graph=SerializedObject(
-                bytes=zip_graph_code(
+                data=zip_graph_code(
                     graph=Graph(
                         name="test", description="test", start_node=action_function
                     ),
                     code_dir_path=GRAPH_CODE_DIR_PATH,
                 ),
-                content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
+                encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                encoding_version=0,
             ),
         )
     )
-    test_case.assertTrue(initialize_response.success)
+    test_case.assertEqual(
+        initialize_response.outcome_code,
+        InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_SUCCESS,
+    )
 
 
 def wait_health_check_failure(test_case: unittest.TestCase, stub: FunctionExecutorStub):
@@ -151,7 +158,9 @@ class TestHealthCheck(unittest.TestCase):
                     response: RunTaskResponse = run_task(
                         stub, function_name="action_function", input="raise_exception"
                     )
-                    self.assertFalse(response.success)
+                    self.assertEqual(
+                        response.outcome_code, TaskOutcomeCode.TASK_OUTCOME_CODE_FAILURE
+                    )
 
                 task_thread = threading.Thread(target=run_task_in_thread)
                 task_thread.start()
