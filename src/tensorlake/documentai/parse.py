@@ -24,6 +24,34 @@ class ChunkingStrategy(str, Enum):
     SECTION = "section"
 
 
+class FormDetectionMode(str, Enum):
+    """
+    Algorithm to use for detecting forms in a document.
+
+    VLM: Uses a VLM to identify questions and answers in a form.
+         Does not provide bounding boxes and is prone to hallucinations.
+    OBJECT_DETECTION: Uses a layout detector to identify questions and answers.
+                      Does not work well with very complex forms.
+    """
+
+    VLM = "vlm"
+    OBJECT_DETECTION = "object_detection"
+
+
+class ModelProvider(str, Enum):
+    """
+    The model provider to use for structured data extraction.
+
+    TENSORLAKE: private models, running on Tensorlake infrastructure.
+    SONNET: Claude 3.7 Sonnet model.
+    GPT4OMINI: GPT-4o-mini model.
+    """
+
+    TENSORLAKE = "tensorlake"
+    SONNET = "claude-3-5-sonnet-latest"
+    GPT4OMINI = "gpt-4o-mini"
+
+
 class TableParsingFormat(str, Enum):
     """
     Determines how the system identifies and extracts tables from the document.
@@ -59,34 +87,6 @@ class TableOutputMode(str, Enum):
 
     MARKDOWN = "markdown"
     HTML = "html"
-
-
-class ModelProvider(str, Enum):
-    """
-    The model provider to use for structured data extraction.
-
-    TENSORLAKE: private models, running on Tensorlake infrastructure.
-    SONNET: Claude 3.7 Sonnet model.
-    GPT4OMINI: GPT-4o-mini model.
-    """
-
-    TENSORLAKE = "tensorlake"
-    SONNET = "claude-3-5-sonnet-latest"
-    GPT4OMINI = "gpt-4o-mini"
-
-
-class FormDetectionMode(str, Enum):
-    """
-    Algorithm to use for detecting forms in a document.
-
-    VLM: Uses a VLM to identify questions and answers in a form.
-         Does not provide bounding boxes and is prone to hallucinations.
-    OBJECT_DETECTION: Uses a layout detector to identify questions and answers.
-                      Does not work well with very complex forms.
-    """
-
-    VLM = "vlm"
-    OBJECT_DETECTION = "object_detection"
 
 
 class ParsingOptions(BaseModel):
