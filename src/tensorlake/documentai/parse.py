@@ -111,13 +111,34 @@ class ParseRequest(BaseModel):
     Request model for parsing a document.
     """
 
-    file_id: Optional[str] = None
-    file_url: Optional[str] = None
-    page_range: Optional[str] = None
-    raw_text: Optional[str] = None
-    enrichment_options: Optional["EnrichmentOptions"] = None
-    parsing_options: Optional["ParsingOptions"] = None
-    structured_extraction_options: Optional["StructuredExtractionOptions"] = None
+    # One of the following must be provided to run a parse operation:
+    file_id: Optional[str] = Field(
+        None, description="ID of the file previously uploaded to Tensorlake."
+    )
+    file_url: Optional[str] = Field(
+        None, description="External URL of the file to parse."
+    )
+    raw_text: Optional[str] = Field(None, description="The raw text to parse.")
+
+    labels: Optional[dict] = Field(
+        None,
+        description='Labels to attach to the parse operation. These labels can be used to store metadata about the parse operation. The format should be a JSON object, e.g. {"key1": "value1", "key2": "value2"}.',
+    )
+    page_range: Optional[str] = Field(
+        None,
+        description='The range of pages to parse in the document. This should be a comma-separated list of page numbers or ranges (e.g., "1,2,3-5"). If not provided, all pages will be parsed.',
+    )
+    enrichment_options: Optional["EnrichmentOptions"] = Field(
+        None,
+        description="Options for enriching a document with additional information.",
+    )
+    parsing_options: Optional["ParsingOptions"] = Field(
+        None,
+        description="Additional options for tailoring the document parsing process.",
+    )
+    structured_extraction_options: Optional["StructuredExtractionOptions"] = Field(
+        None, description="Options for structured data extraction from a document."
+    )
 
     class Config:
         arbitrary_types_allowed = (
