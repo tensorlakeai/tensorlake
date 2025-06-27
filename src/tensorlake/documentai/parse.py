@@ -40,12 +40,10 @@ class TableOutputMode(str, Enum):
     """
     Output mode for tables in a document.
 
-    JSON: The table is returned in JSON format.
     MARKDOWN: The table is returned in Markdown format.
     HTML: The table is returned in HTML format.
     """
 
-    JSON = "json"
     MARKDOWN = "markdown"
     HTML = "html"
 
@@ -63,21 +61,6 @@ class ModelProvider(str, Enum):
     SONNET = "claude-3-5-sonnet-latest"
     GPT4OMINI = "gpt-4o-mini"
 
-
-class ExtractionOptions(BaseModel):
-    """
-    Options for structured data extraction.
-    """
-
-    json_schema: Union[Type[BaseModel], Json] = Field(..., alias="schema")
-    prompt: Optional[str] = None
-    provider: ModelProvider = ModelProvider.TENSORLAKE
-    skip_ocr: bool = False
-
-    class Config:
-        allow_population_by_field_name = True  # Enables usage of 'schema=' as well
-
-
 class FormDetectionMode(str, Enum):
     """
     Algorithm to use for detecting forms in a document.
@@ -91,6 +74,22 @@ class FormDetectionMode(str, Enum):
     VLM = "vlm"
     OBJECT_DETECTION = "object_detection"
 
+class ParseRequest(BaseModel):
+    """
+    Request model for parsing a document.
+    """
+
+    file_id: Optional[str] = None
+    file_url: Optional[str] = None
+    page_range: Optional[str] = None
+    raw_text: Optional[str] = None
+    enrichment_options: Optional["EnrichmentOptions"] = None
+    parsing_options: Optional["ParsingOptions"] = None
+    structured_extraction_options: Optional["StructuredExtractionOptions"] = None
+
+    class Config:
+        arbitrary_types_allowed = True  # Allows the use of custom types like ParsingOptions
+        json_encoders = {ParsingOptions: lambda v: v.dict()}  # Custom JSON encoder for ParsingOptions
 
 class ParsingOptions(BaseModel):
     """
@@ -98,18 +97,41 @@ class ParsingOptions(BaseModel):
     """
 
     chunking_strategy: Optional[ChunkingStrategy] = None
-    skew_correction: bool = False
-    table_parsing_strategy: TableParsingStrategy = TableParsingStrategy.TSR
-    table_parsing_prompt: Optional[str] = None
-    figure_summarization_prompt: Optional[str] = None
-    table_output_mode: TableOutputMode = TableOutputMode.MARKDOWN
-    page_range: Optional[str] = None
-    extraction_options: Optional[ExtractionOptions] = None
-    deliver_webhook: bool = False
-    detect_signature: Optional[bool] = False
-    table_summary: Optional[bool] = False
-    figure_summary: Optional[bool] = False
     disable_layout_detection: Optional[bool] = False
     form_detection_mode: Optional[FormDetectionMode] = (
         FormDetectionMode.OBJECT_DETECTION
     )
+    remove_strikethrough: bool = False
+    signature_detection: Optional[bool] = False
+    skew_detection: bool = False
+    table_output_mode: TableOutputMode = TableOutputMode.MARKDOWN
+    table_parsing_format: TableParsingFormat = TableParsingFormat.TSR
+
+class StructuredExtractionOptions(BaseModel):
+    """ Options for structured data extraction from a document.
+    """
+    chunking_strategy: Optional[ChunkingStrategy] = None
+    json_schema: Union[Type[BaseModel], Json] = Field(..., alias="schema")
+    model_provider: ModelProvider = ModelProvider.TENSORLAKE
+    page_class: Optional[str] = None
+    page_class_defition: Optional[str] = None
+    prompt: Optional[str] = None
+    schema_name: str = "document_schema"
+    skip_ocr: bool = False
+
+    class Config:
+        allow_population_by_field_name = True  # Enables usage of 'schema=' as well
+
+class EnrichmentOptions(BaseModel):
+    """ Options for enriching a document with additional information.
+    """
+
+    figure_summarization: Optional[bool] = False
+    figure_summarization_prompt: Optional[str] = None
+    table_summarization: Optional[bool] = False
+    table_summarization_prompt: Optional[str] = None
+    
+    
+    
+    
+    
