@@ -24,6 +24,18 @@ class ChunkingStrategy(str, Enum):
     SECTION = "section"
 
 
+class TableParsingFormat(str, Enum):
+    """
+    Determines how the system identifies and extracts tables from the document.
+
+    TSR: Better suited for clean, grid-like tables.
+    VLM: Help for tables with merged cells or irregular structures.
+    """
+
+    TSR = "table_structure_recognition"
+    VLM = "vlm"
+
+
 class TableParsingStrategy(str, Enum):
     """
     Algorithm to use for parsing tables in a document.
@@ -34,6 +46,7 @@ class TableParsingStrategy(str, Enum):
 
     TSR = "tsr"
     VLM = "vlm"
+    UNKNOWN = "unknown"
 
 
 class TableOutputMode(str, Enum):
@@ -61,6 +74,7 @@ class ModelProvider(str, Enum):
     SONNET = "claude-3-5-sonnet-latest"
     GPT4OMINI = "gpt-4o-mini"
 
+
 class FormDetectionMode(str, Enum):
     """
     Algorithm to use for detecting forms in a document.
@@ -68,28 +82,12 @@ class FormDetectionMode(str, Enum):
     VLM: Uses a VLM to identify questions and answers in a form.
          Does not provide bounding boxes and is prone to hallucinations.
     OBJECT_DETECTION: Uses a layout detector to identify questions and answers.
-                     Does not work well with very complex forms.
+                      Does not work well with very complex forms.
     """
 
     VLM = "vlm"
     OBJECT_DETECTION = "object_detection"
 
-class ParseRequest(BaseModel):
-    """
-    Request model for parsing a document.
-    """
-
-    file_id: Optional[str] = None
-    file_url: Optional[str] = None
-    page_range: Optional[str] = None
-    raw_text: Optional[str] = None
-    enrichment_options: Optional["EnrichmentOptions"] = None
-    parsing_options: Optional["ParsingOptions"] = None
-    structured_extraction_options: Optional["StructuredExtractionOptions"] = None
-
-    class Config:
-        arbitrary_types_allowed = True  # Allows the use of custom types like ParsingOptions
-        json_encoders = {ParsingOptions: lambda v: v.dict()}  # Custom JSON encoder for ParsingOptions
 
 class ParsingOptions(BaseModel):
     """
@@ -107,14 +105,39 @@ class ParsingOptions(BaseModel):
     table_output_mode: TableOutputMode = TableOutputMode.MARKDOWN
     table_parsing_format: TableParsingFormat = TableParsingFormat.TSR
 
-class StructuredExtractionOptions(BaseModel):
-    """ Options for structured data extraction from a document.
+
+class ParseRequest(BaseModel):
     """
+    Request model for parsing a document.
+    """
+
+    file_id: Optional[str] = None
+    file_url: Optional[str] = None
+    page_range: Optional[str] = None
+    raw_text: Optional[str] = None
+    enrichment_options: Optional["EnrichmentOptions"] = None
+    parsing_options: Optional["ParsingOptions"] = None
+    structured_extraction_options: Optional["StructuredExtractionOptions"] = None
+
+    class Config:
+        arbitrary_types_allowed = (
+            True  # Allows the use of custom types like ParsingOptions
+        )
+        json_encoders = {
+            ParsingOptions: lambda v: v.dict()
+        }  # Custom JSON encoder for ParsingOptions
+
+
+class StructuredExtractionOptions(BaseModel):
+    """
+    Options for structured data extraction from a document.
+    """
+
     chunking_strategy: Optional[ChunkingStrategy] = None
     json_schema: Union[Type[BaseModel], Json] = Field(..., alias="schema")
     model_provider: ModelProvider = ModelProvider.TENSORLAKE
     page_class: Optional[str] = None
-    page_class_defition: Optional[str] = None
+    page_class_definition: Optional[str] = None
     prompt: Optional[str] = None
     schema_name: str = "document_schema"
     skip_ocr: bool = False
@@ -122,16 +145,13 @@ class StructuredExtractionOptions(BaseModel):
     class Config:
         allow_population_by_field_name = True  # Enables usage of 'schema=' as well
 
+
 class EnrichmentOptions(BaseModel):
-    """ Options for enriching a document with additional information.
+    """
+    Options for enriching a document with additional information.
     """
 
     figure_summarization: Optional[bool] = False
     figure_summarization_prompt: Optional[str] = None
     table_summarization: Optional[bool] = False
     table_summarization_prompt: Optional[str] = None
-    
-    
-    
-    
-    
