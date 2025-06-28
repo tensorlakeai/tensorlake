@@ -38,6 +38,30 @@ class FormDetectionMode(str, Enum):
     OBJECT_DETECTION = "object_detection"
 
 
+class MimeType(str, Enum):
+    """
+    Supported MIME types for document parsing.
+
+    PDF: Portable Document Format files.
+    DOCX: Microsoft Word documents.
+    PPTX: Microsoft PowerPoint presentations.
+    KEYNOTE: Apple Keynote presentations.
+    JPEG: JPEG image files.
+    TEXT: Plain text files.
+    HTML: HTML files.
+    XLSX: Microsoft Excel spreadsheets.
+    """
+
+    PDF = "application/pdf"
+    DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    KEYNOTE = "application/vnd.apple.keynote"
+    JPEG = "image/jpeg"
+    TEXT = "text/plain"
+    HTML = "text/html"
+    XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
 class ModelProvider(str, Enum):
     """
     The model provider to use for structured data extraction.
@@ -89,6 +113,32 @@ class TableOutputMode(str, Enum):
     HTML = "html"
 
 
+class EnrichmentOptions(BaseModel):
+    """
+    Options for enriching a document with additional information.
+
+    This object helps to extend the output of the document parsing process with additional information.
+    This includes summarization of tables and figures, which can help to provide a more comprehensive understanding of the document.
+    """
+
+    figure_summarization: bool = Field(
+        False,
+        description="Boolean flag to enable figure summarization. The default is `false`.",
+    )
+    figure_summarization_prompt: Optional[str] = Field(
+        None,
+        description="The prompt to guide the figure summarization. If not provided, a default prompt will be used. It is not required to provide a prompt. The prompt only has effect if `figure_summarization` is set to `true`.",
+    )
+    table_summarization: bool = Field(
+        False,
+        description="Boolean flag to enable summary generation for parsed tables. The default is `false`.",
+    )
+    table_summarization_prompt: Optional[str] = Field(
+        None,
+        description="The prompt to guide the table summarization. If not provided, a default prompt will be used. It is not required to provide a prompt. The prompt only has effect if `table_summarization` is set to `true`.",
+    )
+
+
 class ParsingOptions(BaseModel):
     """
     Options for parsing a document.
@@ -104,49 +154,6 @@ class ParsingOptions(BaseModel):
     skew_detection: bool = False
     table_output_mode: TableOutputMode = TableOutputMode.MARKDOWN
     table_parsing_format: TableParsingFormat = TableParsingFormat.TSR
-
-
-class ParseRequest(BaseModel):
-    """
-    Request model for parsing a document.
-    """
-
-    # One of the following must be provided to run a parse operation:
-    file_id: Optional[str] = Field(
-        None, description="ID of the file previously uploaded to Tensorlake."
-    )
-    file_url: Optional[str] = Field(
-        None, description="External URL of the file to parse."
-    )
-    raw_text: Optional[str] = Field(None, description="The raw text to parse.")
-
-    labels: Optional[dict] = Field(
-        None,
-        description='Labels to attach to the parse operation. These labels can be used to store metadata about the parse operation. The format should be a JSON object, e.g. {"key1": "value1", "key2": "value2"}.',
-    )
-    page_range: Optional[str] = Field(
-        None,
-        description='The range of pages to parse in the document. This should be a comma-separated list of page numbers or ranges (e.g., "1,2,3-5"). If not provided, all pages will be parsed.',
-    )
-    enrichment_options: Optional["EnrichmentOptions"] = Field(
-        None,
-        description="Options for enriching a document with additional information.",
-    )
-    parsing_options: Optional["ParsingOptions"] = Field(
-        None,
-        description="Additional options for tailoring the document parsing process.",
-    )
-    structured_extraction_options: Optional["StructuredExtractionOptions"] = Field(
-        None, description="Options for structured data extraction from a document."
-    )
-
-    class Config:
-        arbitrary_types_allowed = (
-            True  # Allows the use of custom types like ParsingOptions
-        )
-        json_encoders = {
-            ParsingOptions: lambda v: v.dict()
-        }  # Custom JSON encoder for ParsingOptions
 
 
 class StructuredExtractionOptions(BaseModel):
@@ -167,12 +174,46 @@ class StructuredExtractionOptions(BaseModel):
         allow_population_by_field_name = True  # Enables usage of 'schema=' as well
 
 
-class EnrichmentOptions(BaseModel):
+class ParseRequest(BaseModel):
     """
-    Options for enriching a document with additional information.
+    Request model for parsing a document.
+
+    A file ID, a file URL, or raw text must be provided.
     """
 
-    figure_summarization: Optional[bool] = False
-    figure_summarization_prompt: Optional[str] = None
-    table_summarization: Optional[bool] = False
-    table_summarization_prompt: Optional[str] = None
+    file_id: Optional[str] = Field(
+        None, description="ID of the file previously uploaded to Tensorlake."
+    )
+    file_url: Optional[str] = Field(
+        None, description="External URL of the file to parse."
+    )
+    raw_text: Optional[str] = Field(None, description="The raw text to parse.")
+
+    labels: Optional[dict] = Field(
+        None,
+        description='Labels to attach to the parse operation. These labels can be used to store metadata about the parse operation. The format should be a JSON object, e.g. {"key1": "value1", "key2": "value2"}.',
+    )
+    mime_type: Optional[MimeType] = Field(
+        None,
+        description="The MIME type of the document being parsed. It is optional if `file_id` or `file_url` are provided, as the MIME type will be inferred from the file extension or content.",
+    )
+    page_range: Optional[str] = Field(
+        None,
+        description='The range of pages to parse in the document. This should be a comma-separated list of page numbers or ranges (e.g., "1,2,3-5"). If not provided, all pages will be parsed.',
+    )
+    enrichment_options: Optional[EnrichmentOptions] = Field(
+        None,
+        description="Options for enriching a document with additional information.",
+    )
+    parsing_options: Optional[ParsingOptions] = Field(
+        None,
+        description="Additional options for tailoring the document parsing process.",
+    )
+    structured_extraction_options: Optional[StructuredExtractionOptions] = Field(
+        None, description="Options for structured data extraction from a document."
+    )
+
+    class Config:
+        arbitrary_types_allowed = (
+            True  # Allows the use of custom types like ParsingOptions
+        )
