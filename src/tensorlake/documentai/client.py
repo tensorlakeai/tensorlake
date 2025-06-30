@@ -21,11 +21,10 @@ from tensorlake.documentai.common import (
 )
 from tensorlake.documentai.datasets import Dataset, DatasetOptions
 from tensorlake.documentai.files import FileInfo, FileUploader
-from tensorlake.documentai.jobs import Job
+from tensorlake.documentai.jobs import Job, ParseResult
 from tensorlake.documentai.parse import (
     EnrichmentOptions,
     MimeType,
-    ParseRequest,
     ParsingOptions,
     StructuredExtractionOptions,
 )
@@ -141,6 +140,30 @@ class DocumentAI:
             print(f"job_id: {job_id}, job status: {finished_job.status}")
 
         return finished_job
+
+    def get_parse(self, parse_id: str) -> ParseResult:
+        """
+        Get the result of a parse job by its parse ID.
+        """
+        client = httpx.Client(base_url=DOC_AI_BASE_URL_V2, timeout=None)
+        response = client.get(
+            url=f"parse/{parse_id}",
+            headers=self.__headers__(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_parse_async(self, parse_id: str) -> ParseResult:
+        """
+        Get the result of a parse job by its parse ID asynchronously.
+        """
+        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL_V2, timeout=None)
+        response = await client.get(
+            url=f"parse/{parse_id}",
+            headers=self.__headers__(),
+        )
+        response.raise_for_status()
+        return response.json()
 
     def __create_parse_settings__(self, options: ParsingOptions) -> dict:
         json_schema = None
