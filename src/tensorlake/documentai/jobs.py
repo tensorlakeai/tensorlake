@@ -3,9 +3,16 @@ DocumentAI job classes.
 """
 
 from enum import Enum
-from typing import List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    from tensorlake.documentai.parse import (
+        EnrichmentOptions,
+        ParsingOptions,
+        StructuredExtractionOptions,
+    )
 
 
 class JobStatus(str, Enum):
@@ -188,6 +195,11 @@ class Job(BaseModel):
     outputs: Optional[Output] = Field(alias="outputs", default=None)
 
 
+# -------------------------------------------------------------------
+# V2 API related classes
+# -------------------------------------------------------------------
+
+
 class ParseStatus(str, Enum):
     """
     Status of a parse job in the v2 API.
@@ -199,21 +211,24 @@ class ParseStatus(str, Enum):
     FAILED = "failed"
 
 
-class TypedOrUntypedParsedDocument(BaseModel):
+class ConfigurationOptions(BaseModel):
     """
-    Parsed document output containing chunks, document layout, and structured data.
+    Options for configuring document parsing operations.
     """
 
-    chunks: List[Chunk] = Field(
-        description="Chunks of layout text extracted from the document. This is a vector of Chunk objects, each containing a piece of text extracted from the document."
-    )
-    document: Optional[Document] = Field(
+    enrichment_options: Optional["EnrichmentOptions"] = Field(
         None,
-        description="The layout of the document. This is a JSON object that contains the layout information of the document.",
+        description="The properties of this object help to extend the output of the document parsing process with additional information. This includes summarization of tables and figures, which can help to provide a more comprehensive understanding of the document. This object is not required, and the API will use default settings if it is not present.",
     )
-    structured_data: Optional[StructuredData] = Field(
+    parsing_options: Optional["ParsingOptions"] = Field(
         None,
-        description="Structured data extracted from the document. The structured data will be organized according to the JSON schema defined in the parse request.",
+        description="Additional options for tailoring the document parsing process. This object allows you to customize how the document is parsed, including table parsing, chunking strategies, and more. It is not required to provide this object, and the API will use default settings if it is not present.",
+    )
+    structured_extraction_options: Optional[List["StructuredExtractionOptions"]] = (
+        Field(
+            None,
+            description="The properties of this object define the settings for structured data extraction. If this object is present, the API will perform structured data extraction on the document.",
+        )
     )
 
 
@@ -222,7 +237,9 @@ class ParseRequestOptions(BaseModel):
     The options used for scheduling the parse job.
     """
 
-    configuration: dict = Field(description="The configuration used for the parse job.")
+    configuration: ConfigurationOptions = Field(
+        description="The configuration used for the parse job. This is derived from the configuration settings submitted with the parse request. It can be used to understand how the parse job was configured, such as the parsing strategy, extraction methods, etc. Values not provided in the request will be set to their default values."
+    )
     file_id: Optional[str] = Field(None, description="The tensorlake file ID.")
     file_name: Optional[str] = Field(
         None, description="The name of the file used for the parse job."
@@ -242,7 +259,6 @@ class ParseResult(BaseModel):
     Result of a parse operation in the v2 API.
     """
 
-    # Inherited from TypedOrUntypedParsedDocument
     chunks: Optional[List[Chunk]] = Field(
         None, description="Chunks of layout text extracted from the document."
     )
