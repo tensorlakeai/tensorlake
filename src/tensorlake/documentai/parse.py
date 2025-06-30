@@ -84,21 +84,8 @@ class TableParsingFormat(str, Enum):
     VLM: Help for tables with merged cells or irregular structures.
     """
 
-    TSR = "table_structure_recognition"
-    VLM = "vlm"
-
-
-class TableParsingStrategy(str, Enum):
-    """
-    Algorithm to use for parsing tables in a document.
-
-    TSR: Table Structure Recognition. Great for structured tables.
-    VLM: Visual Layout Model. Great for unstructured tables or semi-structured tables.
-    """
-
     TSR = "tsr"
     VLM = "vlm"
-    UNKNOWN = "unknown"
 
 
 class TableOutputMode(str, Enum):
@@ -212,8 +199,3 @@ class ParseRequest(BaseModel):
     structured_extraction_options: Optional[StructuredExtractionOptions] = Field(
         None, description="Options for structured data extraction from a document."
     )
-
-    class Config:
-        arbitrary_types_allowed = (
-            True  # Allows the use of custom types like ParsingOptions
-        )
