@@ -190,7 +190,7 @@ class ParseRequest(BaseModel):
 
     page_range: Optional[str] = Field(
         None,
-        description='The range of pages to parse in the document. This should be a comma-separated list of page numbers or ranges (e.g., "1,2,3-5"). If not provided, all pages will be parsed.',
+        description='The range of pages to parse in the document. This should be a comma-separated list of page numbers or ranges (e.g., "1,2,3-5"). Ranges are inclusive, meaning "1-3" will parse pages 1, 2, and 3. If not provided, all pages will be parsed.',
     )
     labels: Optional[dict] = Field(
         None,
