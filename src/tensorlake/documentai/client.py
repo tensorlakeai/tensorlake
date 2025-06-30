@@ -294,9 +294,6 @@ class DocumentAI:
 
             payload["structured_extraction_options"] = converted_options
 
-        # temp: for testing
-        print(f"Payload for parse request: {payload}")
-
         return payload
 
     def files(self, cursor: Optional[str] = None) -> PaginatedResult[FileInfo]:
