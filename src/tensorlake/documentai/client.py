@@ -14,11 +14,21 @@ import httpx
 from pydantic import BaseModel, Json
 from retry import retry
 
-from tensorlake.documentai.common import DOC_AI_BASE_URL, PaginatedResult
+from tensorlake.documentai.common import (
+    DOC_AI_BASE_URL,
+    DOC_AI_BASE_URL_V2,
+    PaginatedResult,
+)
 from tensorlake.documentai.datasets import Dataset, DatasetOptions
 from tensorlake.documentai.files import FileInfo, FileUploader
 from tensorlake.documentai.jobs import Job
-from tensorlake.documentai.parse import ParsingOptions
+from tensorlake.documentai.parse import (
+    EnrichmentOptions,
+    MimeType,
+    ParseRequest,
+    ParsingOptions,
+    StructuredExtractionOptions,
+)
 
 
 class DocumentAI:
@@ -196,12 +206,73 @@ class DocumentAI:
             ),
         }
 
-    def __create_parse_req__(self, file: str, options: ParsingOptions) -> dict:
-        payload = {
-            "file": file,
-            "pages": options.page_range,
-            "settings": self.__create_parse_settings__(options),
-        }
+    def __create_parse_req__(
+        self,
+        file: str,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            list[StructuredExtractionOptions]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> dict:
+        payload = {}
+
+        # file check
+        if file.startswith("http://") or file.startswith("https://"):
+            payload["file_url"] = file
+        elif file.startswith("tensorlake-"):
+            payload["file_id"] = file
+        else:
+            payload["raw_text"] = file
+
+        # optional field check
+        if labels:
+            payload["labels"] = labels
+
+        if page_range:
+            payload["page_range"] = page_range
+
+        if mime_type:
+            payload["mime_type"] = mime_type.value
+
+        # other parsing options
+        if parsing_options:
+            payload["parsing_options"] = parsing_options.model_dump(exclude_none=True)
+
+        if enrichment_options:
+            payload["enrichment_options"] = enrichment_options.model_dump(
+                exclude_none=True
+            )
+
+        if structured_extraction_options:
+            converted_options = []
+            for structured_extraction_option in structured_extraction_options:
+                option_dict = structured_extraction_option.model_dump(exclude_none=True)
+
+                # Handle json_schema conversion
+                if hasattr(structured_extraction_option, "json_schema"):
+                    json_schema = structured_extraction_option.json_schema
+                    if inspect.isclass(json_schema) and issubclass(
+                        json_schema, BaseModel
+                    ):
+                        option_dict["json_schema"] = json_schema.model_json_schema()
+                    elif isinstance(json_schema, BaseModel):
+                        option_dict["json_schema"] = json_schema.model_json_schema()
+                    elif isinstance(json_schema, str):
+                        try:
+                            option_dict["json_schema"] = json.loads(json_schema)
+                        except json.JSONDecodeError:
+                            option_dict["json_schema"] = json_schema
+
+                converted_options.append(option_dict)
+
+            payload["structured_extraction_options"] = converted_options
+
+        # temp: for testing
+        print(f"Payload for parse request: {payload}")
 
         return payload
 
@@ -230,16 +301,32 @@ class DocumentAI:
     def parse(
         self,
         file: str,
-        options: ParsingOptions,
-        timeout: int = 5,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            list[StructuredExtractionOptions]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
     ) -> str:
         """
-        Parse a document.
+        Parse a document using the v2 API endpoint.
         """
-        response = self._client.post(
+        v2_client = httpx.Client(base_url=DOC_AI_BASE_URL_V2, timeout=None)
+
+        response = v2_client.post(
             url="/parse",
             headers=self.__headers__(),
-            json=self.__create_parse_req__(file, options),
+            json=self.__create_parse_req__(
+                file,
+                parsing_options,
+                structured_extraction_options,
+                enrichment_options,
+                page_range,
+                labels,
+                mime_type,
+            ),
         )
 
         try:
@@ -247,8 +334,11 @@ class DocumentAI:
         except httpx.HTTPStatusError as e:
             print(e.response.text)
             raise e
+        finally:
+            v2_client.close()  # Clean up the temporary client
+
         resp = response.json()
-        return resp.get("jobId")
+        return resp.get("parse_id") or resp.get("jobId")
 
     def parse_and_wait(
         self,

@@ -158,7 +158,7 @@ class StructuredExtractionOptions(BaseModel):
     skip_ocr: bool = False
 
     class Config:
-        allow_population_by_field_name = True  # Enables usage of 'schema=' as well
+        validate_by_name = True  # Enables usage of 'schema=' as well
 
 
 class ParseRequest(BaseModel):
@@ -176,6 +176,22 @@ class ParseRequest(BaseModel):
     )
     raw_text: Optional[str] = Field(None, description="The raw text to parse.")
 
+    parsing_options: Optional[ParsingOptions] = Field(
+        None,
+        description="Additional options for tailoring the document parsing process.",
+    )
+    structured_extraction_options: Optional[list[StructuredExtractionOptions]] = Field(
+        None, description="List of structured extraction options for extraction."
+    )
+    enrichment_options: Optional[EnrichmentOptions] = Field(
+        None,
+        description="Options for enriching a document with additional information.",
+    )
+
+    page_range: Optional[str] = Field(
+        None,
+        description='The range of pages to parse in the document. This should be a comma-separated list of page numbers or ranges (e.g., "1,2,3-5"). If not provided, all pages will be parsed.',
+    )
     labels: Optional[dict] = Field(
         None,
         description='Labels to attach to the parse operation. These labels can be used to store metadata about the parse operation. The format should be a JSON object, e.g. {"key1": "value1", "key2": "value2"}.',
@@ -183,19 +199,4 @@ class ParseRequest(BaseModel):
     mime_type: Optional[MimeType] = Field(
         None,
         description="The MIME type of the document being parsed. It is optional if `file_id` or `file_url` are provided, as the MIME type will be inferred from the file extension or content.",
-    )
-    page_range: Optional[str] = Field(
-        None,
-        description='The range of pages to parse in the document. This should be a comma-separated list of page numbers or ranges (e.g., "1,2,3-5"). If not provided, all pages will be parsed.',
-    )
-    enrichment_options: Optional[EnrichmentOptions] = Field(
-        None,
-        description="Options for enriching a document with additional information.",
-    )
-    parsing_options: Optional[ParsingOptions] = Field(
-        None,
-        description="Additional options for tailoring the document parsing process.",
-    )
-    structured_extraction_options: Optional[StructuredExtractionOptions] = Field(
-        None, description="Options for structured data extraction from a document."
     )
