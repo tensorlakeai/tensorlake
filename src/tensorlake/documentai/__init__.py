@@ -16,7 +16,6 @@ from tensorlake.documentai.parse import (
     StructuredExtractionOptions,
     TableOutputMode,
     TableParsingFormat,
-    TableParsingStrategy,
 )
 
 __all__ = [
@@ -37,5 +36,4 @@ __all__ = [
     "StructuredExtractionOptions",
     "TableOutputMode",
     "TableParsingFormat",
-    "TableParsingStrategy",
 ]
