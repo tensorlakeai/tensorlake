@@ -53,16 +53,38 @@ class ParsingOptions(BaseModel):
     Options for parsing a document.
     """
 
-    chunking_strategy: Optional[ChunkingStrategy] = None
-    disable_layout_detection: Optional[bool] = False
-    form_detection_mode: Optional[FormDetectionMode] = (
-        FormDetectionMode.OBJECT_DETECTION
+    chunking_strategy: Optional[ChunkingStrategy] = Field(
+        ChunkingStrategy.NONE,
+        description="The chunking strategy determines how the document is chunked into smaller pieces. Different strategies can be used to optimize the parsing process. Choose the one that best fits your use case. The default is `None`, which means no chunking is applied.",
     )
-    remove_strikethrough: bool = False
-    signature_detection: Optional[bool] = False
-    skew_detection: bool = False
-    table_output_mode: TableOutputMode = TableOutputMode.MARKDOWN
-    table_parsing_format: TableParsingFormat = TableParsingFormat.TSR
+    disable_layout_detection: bool = Field(
+        False,
+        description="Useful flag for documents with a lot of tables or images. If set to `true`, the API will skip the layout detection step, and directly extract text from the document.",
+    )
+    form_detection_mode: FormDetectionMode = Field(
+        FormDetectionMode.VLM,
+        description="Algorithm to use for detecting forms in a document.",
+    )
+    remove_strikethrough: bool = Field(
+        False,
+        description="Flag to enable the detection, and removal, of strikethrough text in the document. This flag incurs additional billing costs. The default is `false`.",
+    )
+    signature_detection: bool = Field(
+        False,
+        description="Flag to enable the detection of signatures in the document. This flag incurs additional billing costs. The default is `false`.",
+    )
+    skew_detection: bool = Field(
+        False,
+        description="Boolean flag to detect and correct skewed or rotated pages in the document. The default is `false`. Setting this to `true` will increase the processing time of the document.",
+    )
+    table_output_mode: TableOutputMode = Field(
+        TableOutputMode.HTML,
+        description="The format for the tables extracted from the document. This options determines how the tables are represented in the json response. The default is `HTML`, which means the tables are represented as HTML strings.",
+    )
+    table_parsing_format: TableParsingFormat = Field(
+        TableParsingFormat.TSR,
+        description="Determines how the system identifies and extracts tables from the document. Default is `table_structure_recognition`, which is better suited for clean, grid-like tables.",
+    )
 
 
 class StructuredExtractionOptions(BaseModel):
