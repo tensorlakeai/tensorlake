@@ -134,7 +134,7 @@ class DocumentAI:
         """
         parse = await self.get_parse_async(parse_id)
         finished_parse = parse
-        while finished_parse["status"] in ["pending", "processing"]:
+        while finished_parse["status"] in ["pending", "in_progress"]:
             print("waiting 5s...")
             await asyncio.sleep(5)
             finished_parse = await self.get_parse_async(parse_id)
@@ -392,6 +392,32 @@ class DocumentAI:
             mime_type,
         )
         return self.wait_for_completion(parse_id)
+
+    async def parse_and_wait_async(
+        self,
+        file: str,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            list[StructuredExtractionOptions]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> ParseResult:
+        """
+        Parse a document and wait for completion asynchronously.
+        """
+        parse_id = await self.parse_async(
+            file,
+            parsing_options,
+            structured_extraction_options,
+            enrichment_options,
+            page_range,
+            labels,
+            mime_type,
+        )
+        return await self.wait_for_completion_async(parse_id)
 
     async def parse_async(
         self,
