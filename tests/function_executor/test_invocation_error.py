@@ -24,7 +24,6 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
 )
 from tensorlake.functions_sdk.functions import tensorlake_function
 from tensorlake.functions_sdk.graph_serialization import (
-    ZIPPED_GRAPH_CODE_CONTENT_TYPE,
     graph_code_dir_path,
     zip_graph_code,
 )
@@ -82,9 +81,13 @@ class TestInvocationError(unittest.TestCase):
                     run_task_response.failure_reason,
                     TaskFailureReason.TASK_FAILURE_REASON_INVOCATION_ERROR,
                 )
+                self.assertEqual(
+                    run_task_response.invocation_error_output.encoding,
+                    SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_TEXT,
+                )
                 self.assertIn(
                     "The invocation can't succeed: 10",
-                    run_task_response.failure_message,
+                    run_task_response.invocation_error_output.data.decode("utf-8"),
                 )
                 self.assertFalse(run_task_response.is_reducer)
                 fn_outputs = deserialized_function_output(
