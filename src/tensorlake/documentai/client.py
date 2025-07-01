@@ -181,6 +181,7 @@ class DocumentAI:
             list[StructuredExtractionOptions]
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[list[PageClassificationConfig]] = None,
         page_range: Optional[str] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
@@ -198,6 +199,7 @@ class DocumentAI:
                     parsing_options,
                     structured_extraction_options,
                     enrichment_options,
+                    page_classifications,
                     page_range,
                     labels,
                     mime_type,
@@ -220,6 +222,7 @@ class DocumentAI:
             list[StructuredExtractionOptions]
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[list[PageClassificationConfig]] = None,
         page_range: Optional[str] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
@@ -232,6 +235,7 @@ class DocumentAI:
             parsing_options,
             structured_extraction_options,
             enrichment_options,
+            page_classifications,
             page_range,
             labels,
             mime_type,
@@ -246,6 +250,7 @@ class DocumentAI:
             list[StructuredExtractionOptions]
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[list[PageClassificationConfig]] = None,
         page_range: Optional[str] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
@@ -258,6 +263,7 @@ class DocumentAI:
             parsing_options,
             structured_extraction_options,
             enrichment_options,
+            page_classifications,
             page_range,
             labels,
             mime_type,
