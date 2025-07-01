@@ -2,53 +2,39 @@
 This module contains the data models for parsing a document.
 """
 
-from typing import List, Optional
+from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from .enums import MimeType
-from .options import (
-    EnrichmentOptions,
-    PageClassConfig,
-    ParsingOptions,
-    StructuredExtractionOptions,
-)
+from .options import Options
 
 
-class ParseRequest(BaseModel):
+class ParseRequest(Options):
     """
     Request model for parsing a document.
+    This object defines the request body for the parse endpoint.
+
+    This class inherits from Options:
+     - enrichment_options
+     - parsing_options
+     - structured_extraction_options
+     - page_classifications
 
     A file ID, a file URL, or raw text must be provided.
     """
 
     file_id: Optional[str] = Field(
-        None, description="ID of the file previously uploaded to Tensorlake."
+        None,
+        description="ID of the file previously uploaded to Tensorlake. This is the ID of the file in Tensorlake's storage system. It has a tensorlake- prefix. This field must be provided if `file_url` and `raw_text` are not provided.",
     )
     file_url: Optional[str] = Field(
-        None, description="External URL of the file to parse."
-    )
-    raw_text: Optional[str] = Field(None, description="The raw text to parse.")
-
-    parsing_options: Optional[ParsingOptions] = Field(
         None,
-        description="Additional options for tailoring the document parsing process.",
+        description="External URL of the file to parse. This URL should point to a publicly accessible file that can be downloaded. This field must be provided if `file_id` and `raw_text` are not provided.",
     )
-    structured_extraction_options: Optional[list[StructuredExtractionOptions]] = Field(
-        None, description="List of structured extraction options for extraction."
-    )
-    enrichment_options: Optional[EnrichmentOptions] = Field(
+    raw_text: Optional[str] = Field(
         None,
-        description="Options for enriching a document with additional information.",
-    )
-    page_classifications: Optional[List[PageClassConfig]] = Field(
-        None,
-        description="The properties of this object define the settings for page classification. If this object is present, the API will perform page classification on the document.",
-    )
-
-    page_range: Optional[str] = Field(
-        None,
-        description='The range of pages to parse in the document. This should be a comma-separated list of page numbers or ranges (e.g., "1,2,3-5"). Ranges are inclusive, meaning "1-3" will parse pages 1, 2, and 3. If not provided, all pages will be parsed.',
+        description="The raw text to parse. This should be a free-text representation of the document. This field must be provided if `file_id` and `file_url` are not provided.",
     )
     labels: Optional[dict] = Field(
         None,
@@ -56,5 +42,9 @@ class ParseRequest(BaseModel):
     )
     mime_type: Optional[MimeType] = Field(
         None,
-        description="The MIME type of the document being parsed. It is optional if `file_id` or `file_url` are provided, as the MIME type will be inferred from the file extension or content.",
+        description="The MIME type of the content provided. This is required if `content` is provided. For content provided as a string, the MIME type should be of subtype `text` i.e. `text/plain` or `text/html`. It is optional if `file_id` or `file_url` are provided, as the MIME type will be inferred from the file. When using `file_id` or `file_url`, the MIME type will be inferred from the file. If provided, the value will have precedence over the inferred MIME type.",
+    )
+    page_range: Optional[str] = Field(
+        None,
+        description='The range of pages to parse in the document. This should be a comma-separated list of page numbers or ranges (e.g., "1,2,3-5"). If not provided, all pages will be parsed. This field is optional and can be used to limit the parsing to specific pages of the document. This field is only applicable if the document is a multi-page document i.e., a PDF or a PowerPoint file.',
     )
