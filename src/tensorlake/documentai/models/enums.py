@@ -74,9 +74,9 @@ class ModelProvider(str, Enum):
     """
     The model provider to use for structured data extraction.
 
-    TENSORLAKE: private models, running on Tensorlake infrastructure.
-    SONNET: Claude 3.7 Sonnet model.
-    GPT4OMINI: GPT-4o-mini model.
+    TENSORLAKE: Private models, running on Tensorlake infrastructure.
+    SONNET: Latest release of Claude 3.5 Sonnet model from Anthropic
+    GPT4OMINI: GPT-4o-mini model from OpenAI.
     """
 
     TENSORLAKE = "tensorlake"
@@ -99,10 +99,12 @@ class TableOutputMode(str, Enum):
     """
     Output mode for tables in a document.
 
+    JSON: The table is returned in JSON format.
     MARKDOWN: The table is returned in Markdown format.
     HTML: The table is returned in HTML format.
     """
 
+    JSON = "json"
     MARKDOWN = "markdown"
     HTML = "html"
 
