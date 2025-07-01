@@ -27,12 +27,12 @@ class FormDetectionMode(str, Enum):
 
     VLM: Uses a VLM to identify questions and answers in a form.
          Does not provide bounding boxes and is prone to hallucinations.
-    OBJECT_DETECTION: Uses a layout detector to identify questions and answers.
-                      Does not work well with very complex forms.
+    TSR: Uses a layout detector to identify questions and answers.
+         Does not work well with very complex forms.
     """
 
     VLM = "vlm"
-    OBJECT_DETECTION = "object_detection"
+    TSR = "tsr"
 
 
 class JobStatus(str, Enum):
