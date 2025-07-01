@@ -65,7 +65,7 @@ class ParsingOptions(BaseModel):
         FormDetectionMode.VLM,
         description="Algorithm to use for detecting forms in a document.",
     )
-    remove_strikethrough: bool = Field(
+    remove_strikethrough_lines: bool = Field(
         False,
         description="Flag to enable the detection, and removal, of strikethrough text in the document. This flag incurs additional billing costs. The default is `false`.",
     )
