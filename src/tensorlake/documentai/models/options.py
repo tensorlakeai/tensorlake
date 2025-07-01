@@ -70,17 +70,35 @@ class StructuredExtractionOptions(BaseModel):
     Options for structured data extraction from a document.
     """
 
-    chunking_strategy: Optional[ChunkingStrategy] = None
-    json_schema: Union[Type[BaseModel], Json] = Field(..., alias="schema")
-    model_provider: ModelProvider = ModelProvider.TENSORLAKE
-    page_class: Optional[str] = None
-    page_class_definition: Optional[str] = None
-    prompt: Optional[str] = None
-    schema_name: str
-    skip_ocr: bool = False
+    # Required fields
+    schema_name: str = Field(
+        description="The name of the schema. This is used to tag the structured data output with a name in the response."
+    )
+    json_schema: Union[Type[BaseModel], Json, dict] = Field(
+        description="The JSON schema to guide structured data extraction from the file. This schema should be a valid JSON schema that defines the structure of the data to be extracted. The API supports a subset of the JSON schema specification. This value must be provided if `structured_extraction` is present in the request."
+    )
 
-    class Config:
-        validate_by_name = True  # Enables usage of 'schema=' as well
+    # Optional fields
+    chunking_strategy: Optional[ChunkingStrategy] = Field(
+        None,
+        description="The chunking strategy determines how the document is chunked into smaller pieces. This is only supported in `markdown` mode. Not to be confused with the `chunking_strategy` in `DocumentParsingOptions`. which is used to chunk the document into smaller pieces for parsing. The default is `None`, which means no chunking is applied.",
+    )
+    model_provider: ModelProvider = Field(
+        ModelProvider.TENSORLAKE,
+        description="The model provider to use for structured data extraction. The default is `tensorlake`, which uses our private model, and runs on our servers.",
+    )
+    page_classes: Optional[List[str]] = Field(
+        None,
+        description="The page classes to use for structured data extraction. If not provided, all the pages will be used to extract structured data. The page_classification_config is used to classify the pages of the document.",
+    )
+    prompt: Optional[str] = Field(
+        None,
+        description="The prompt to use for structured data extraction. If not provided, the default prompt will be used.",
+    )
+    skip_ocr: bool = Field(
+        False,
+        description="Boolean flag to skip converting the document blob to OCR text before structured data extraction. If set to `true`, the API will skip the OCR step and directly extract structured data from the document. The default is `false`.",
+    )
 
 
 class Options(BaseModel):
