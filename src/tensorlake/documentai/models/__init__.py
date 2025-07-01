@@ -37,7 +37,7 @@ from .jobs import (
 from .options import (
     EnrichmentOptions,
     Options,
-    PageClassificationConfig,
+    PageClassConfig,
     ParsingOptions,
     StructuredExtractionOptions,
 )
@@ -61,7 +61,7 @@ __all__ = [
     # Options
     "EnrichmentOptions",
     "Options",
-    "PageClassificationConfig",
+    "PageClassConfig",
     "ParsingOptions",
     "StructuredExtractionOptions",
     # Parse models

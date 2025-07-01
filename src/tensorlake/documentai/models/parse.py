@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from .enums import MimeType
 from .options import (
     EnrichmentOptions,
-    PageClassificationConfig,
+    PageClassConfig,
     ParsingOptions,
     StructuredExtractionOptions,
 )
@@ -41,7 +41,7 @@ class ParseRequest(BaseModel):
         None,
         description="Options for enriching a document with additional information.",
     )
-    page_classifications: Optional[List[PageClassificationConfig]] = Field(
+    page_classifications: Optional[List[PageClassConfig]] = Field(
         None,
         description="The properties of this object define the settings for page classification. If this object is present, the API will perform page classification on the document.",
     )

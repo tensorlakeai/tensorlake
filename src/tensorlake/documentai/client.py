@@ -25,7 +25,7 @@ from tensorlake.documentai.models import (
     EnrichmentOptions,
     Job,
     MimeType,
-    PageClassificationConfig,
+    PageClassConfig,
     ParseResult,
     ParsingOptions,
     StructuredExtractionOptions,
@@ -63,7 +63,7 @@ class DocumentAI:
             list[StructuredExtractionOptions]
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
-        page_classifications: Optional[list[PageClassificationConfig]] = None,
+        page_classifications: Optional[list[PageClassConfig]] = None,
         page_range: Optional[str] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
@@ -137,7 +137,7 @@ class DocumentAI:
             list[StructuredExtractionOptions]
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
-        page_classifications: Optional[list[PageClassificationConfig]] = None,
+        page_classifications: Optional[list[PageClassConfig]] = None,
         page_range: Optional[str] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
@@ -181,7 +181,7 @@ class DocumentAI:
             list[StructuredExtractionOptions]
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
-        page_classifications: Optional[list[PageClassificationConfig]] = None,
+        page_classifications: Optional[list[PageClassConfig]] = None,
         page_range: Optional[str] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
@@ -222,7 +222,7 @@ class DocumentAI:
             list[StructuredExtractionOptions]
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
-        page_classifications: Optional[list[PageClassificationConfig]] = None,
+        page_classifications: Optional[list[PageClassConfig]] = None,
         page_range: Optional[str] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
@@ -250,7 +250,7 @@ class DocumentAI:
             list[StructuredExtractionOptions]
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
-        page_classifications: Optional[list[PageClassificationConfig]] = None,
+        page_classifications: Optional[list[PageClassConfig]] = None,
         page_range: Optional[str] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,

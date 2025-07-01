@@ -37,7 +37,7 @@ class EnrichmentOptions(BaseModel):
     )
 
 
-class PageClassificationConfig(BaseModel):
+class PageClassConfig(BaseModel):
     """
     Configuration for page classification.
     """
@@ -136,7 +136,7 @@ class Options(BaseModel):
         None,
         description="Additional options for tailoring the document parsing process. This object allows you to customize how the document is parsed, including table parsing, chunking strategies, and more. It is not required to provide this object, and the API will use default settings if it is not present.",
     )
-    page_classifications: Optional[List[PageClassificationConfig]] = Field(
+    page_classifications: Optional[List[PageClassConfig]] = Field(
         None,
         description="The properties of this object define the settings for page classification. If this object is present, the API will perform page classification on the document.",
     )
