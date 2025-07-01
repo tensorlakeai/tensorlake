@@ -76,7 +76,7 @@ class StructuredExtractionOptions(BaseModel):
     page_class: Optional[str] = None
     page_class_definition: Optional[str] = None
     prompt: Optional[str] = None
-    schema_name: str = "document_schema"
+    schema_name: str
     skip_ocr: bool = False
 
     class Config:
