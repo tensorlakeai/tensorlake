@@ -13,7 +13,6 @@ from .enums import JobStatus
 class JobListItem(BaseModel):
     """
     DocumentAI job item class.
-
     """
 
     id: str

@@ -37,6 +37,17 @@ class EnrichmentOptions(BaseModel):
     )
 
 
+class PageClassificationConfig(BaseModel):
+    """
+    Configuration for page classification.
+    """
+
+    name: str = Field(description="The name of the page class.")
+    description: str = Field(
+        description="The description of the page class to guide the model to classify the pages. Describe what the model should look for in the page to classify it."
+    )
+
+
 class ParsingOptions(BaseModel):
     """
     Options for parsing a document.
@@ -84,6 +95,10 @@ class Options(BaseModel):
     parsing_options: Optional[ParsingOptions] = Field(
         None,
         description="Additional options for tailoring the document parsing process. This object allows you to customize how the document is parsed, including table parsing, chunking strategies, and more. It is not required to provide this object, and the API will use default settings if it is not present.",
+    )
+    page_classifications: Optional[List[PageClassificationConfig]] = Field(
+        None,
+        description="The properties of this object define the settings for page classification. If this object is present, the API will perform page classification on the document.",
     )
     structured_extraction_options: Optional[List[StructuredExtractionOptions]] = Field(
         None,

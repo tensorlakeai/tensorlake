@@ -2,12 +2,17 @@
 This module contains the data models for parsing a document.
 """
 
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
 from .enums import MimeType
-from .options import EnrichmentOptions, ParsingOptions, StructuredExtractionOptions
+from .options import (
+    EnrichmentOptions,
+    PageClassificationConfig,
+    ParsingOptions,
+    StructuredExtractionOptions,
+)
 
 
 class ParseRequest(BaseModel):
@@ -35,6 +40,10 @@ class ParseRequest(BaseModel):
     enrichment_options: Optional[EnrichmentOptions] = Field(
         None,
         description="Options for enriching a document with additional information.",
+    )
+    page_classifications: Optional[List[PageClassificationConfig]] = Field(
+        None,
+        description="The properties of this object define the settings for page classification. If this object is present, the API will perform page classification on the document.",
     )
 
     page_range: Optional[str] = Field(

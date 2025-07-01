@@ -37,12 +37,16 @@ from .jobs import (
 from .options import (
     EnrichmentOptions,
     Options,
+    PageClassificationConfig,
     ParsingOptions,
     StructuredExtractionOptions,
 )
 
 # Parse models
 from .parse import ParseRequest
+
+# Results models
+from .results import ParseRequestOptions, ParseResult
 
 __all__ = [
     # Enums
@@ -57,10 +61,14 @@ __all__ = [
     # Options
     "EnrichmentOptions",
     "Options",
+    "PageClassificationConfig",
     "ParsingOptions",
     "StructuredExtractionOptions",
     # Parse models
     "ParseRequest",
+    # Results models
+    "ParseRequestOptions",
+    "ParseResult",
     # Job models
     "Chunk",
     "Document",
