@@ -5,7 +5,6 @@ DocumentAI models package.
 # Enums
 from .enums import (
     ChunkingStrategy,
-    FormDetectionMode,
     JobStatus,
     MimeType,
     ModelProvider,
@@ -51,7 +50,6 @@ from .results import PageClass, ParseRequestOptions, ParseResult
 __all__ = [
     # Enums
     "ChunkingStrategy",
-    "FormDetectionMode",
     "JobStatus",
     "MimeType",
     "ModelProvider",

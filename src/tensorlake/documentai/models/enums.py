@@ -21,20 +21,6 @@ class ChunkingStrategy(str, Enum):
     SECTION = "section"
 
 
-class FormDetectionMode(str, Enum):
-    """
-    Algorithm to use for detecting forms in a document.
-
-    VLM: Uses a VLM to identify questions and answers in a form.
-         Does not provide bounding boxes and is prone to hallucinations.
-    TSR: Uses a layout detector to identify questions and answers.
-         Does not work well with very complex forms.
-    """
-
-    VLM = "vlm"
-    TSR = "tsr"
-
-
 class JobStatus(str, Enum):
     """
     Status of a job.

@@ -2,13 +2,7 @@ from typing import List, Optional, Type, Union
 
 from pydantic import BaseModel, Field, Json
 
-from .enums import (
-    ChunkingStrategy,
-    FormDetectionMode,
-    ModelProvider,
-    TableOutputMode,
-    TableParsingFormat,
-)
+from .enums import ChunkingStrategy, ModelProvider, TableOutputMode, TableParsingFormat
 
 
 class EnrichmentOptions(BaseModel):
@@ -60,10 +54,6 @@ class ParsingOptions(BaseModel):
     disable_layout_detection: bool = Field(
         False,
         description="Useful flag for documents with a lot of tables or images. If set to `true`, the API will skip the layout detection step, and directly extract text from the document.",
-    )
-    form_detection_mode: FormDetectionMode = Field(
-        FormDetectionMode.VLM,
-        description="Algorithm to use for detecting forms in a document.",
     )
     remove_strikethrough_lines: bool = Field(
         False,
