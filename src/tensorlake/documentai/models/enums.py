@@ -76,7 +76,7 @@ class ParseStatus(str, Enum):
     """
 
     PENDING = "pending"
-    PROCESSING = "in_progress"
+    PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
 
