@@ -99,12 +99,10 @@ class TableOutputMode(str, Enum):
     """
     Output mode for tables in a document.
 
-    JSON: The table is returned in JSON format.
     MARKDOWN: The table is returned in Markdown format.
     HTML: The table is returned in HTML format.
     """
 
-    JSON = "json"
     MARKDOWN = "markdown"
     HTML = "html"
 
