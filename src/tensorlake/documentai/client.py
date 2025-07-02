@@ -27,6 +27,7 @@ from tensorlake.documentai.models import (
     MimeType,
     PageClassConfig,
     ParseResult,
+    ParseStatus,
     ParsingOptions,
     StructuredExtractionOptions,
 )
@@ -307,7 +308,7 @@ class DocumentAI:
         parse = self.get_parse(parse_id)
         finished_parse = parse
         print(f"Waiting for job {parse} to complete...")
-        while finished_parse["status"] in ["pending", "in_progress"]:
+        while finished_parse["status"] in [ParseStatus.PENDING, ParseStatus.PROCESSING]:
             print("waiting 5s...")
             time.sleep(5)
             finished_parse = self.get_parse(parse_id)
@@ -321,7 +322,7 @@ class DocumentAI:
         """
         parse = await self.get_parse_async(parse_id)
         finished_parse = parse
-        while finished_parse["status"] in ["pending", "in_progress"]:
+        while finished_parse["status"] in [ParseStatus.PENDING, ParseStatus.PROCESSING]:
             print("waiting 5s...")
             await asyncio.sleep(5)
             finished_parse = await self.get_parse_async(parse_id)
