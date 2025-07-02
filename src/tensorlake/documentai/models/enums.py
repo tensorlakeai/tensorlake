@@ -36,24 +36,28 @@ class MimeType(str, Enum):
     """
     Supported MIME types for document parsing.
 
-    PDF: Portable Document Format files.
+    CSV: Comma-separated values files.
     DOCX: Microsoft Word documents.
-    PPTX: Microsoft PowerPoint presentations.
-    KEYNOTE: Apple Keynote presentations.
-    JPEG: JPEG image files.
-    TEXT: Plain text files.
     HTML: HTML files.
+    JPEG: JPEG image files.
+    KEYNOTE: Apple Keynote presentations.
+    PDF: Portable Document Format files.
+    PNG: PNG image files.
+    PPTX: Microsoft PowerPoint presentations.
+    TEXT: Plain text files.
     XLS: Microsoft Excel spreadsheets (legacy format).
     XLSX: Microsoft Excel spreadsheets.
     """
 
-    PDF = "application/pdf"
+    CSV = "text/csv"
     DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-    KEYNOTE = "application/vnd.apple.keynote"
-    JPEG = "image/jpeg"
-    TEXT = "text/plain"
     HTML = "text/html"
+    JPEG = "image/jpeg"
+    KEYNOTE = "application/vnd.apple.keynote"
+    PDF = "application/pdf"
+    PNG = "image/png"
+    PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    TEXT = "text/plain"
     XLS = "application/vnd.ms-excel"
     XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
