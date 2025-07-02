@@ -46,7 +46,7 @@ from .options import (
 from .parse import ParseRequest
 
 # Results models
-from .results import ParseRequestOptions, ParseResult
+from .results import PageClass, ParseRequestOptions, ParseResult
 
 __all__ = [
     # Enums
@@ -67,6 +67,7 @@ __all__ = [
     # Parse models
     "ParseRequest",
     # Results models
+    "PageClass",
     "ParseRequestOptions",
     "ParseResult",
     # Job models
