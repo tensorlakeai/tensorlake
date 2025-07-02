@@ -43,6 +43,7 @@ class MimeType(str, Enum):
     JPEG: JPEG image files.
     TEXT: Plain text files.
     HTML: HTML files.
+    XLS: Microsoft Excel spreadsheets (legacy format).
     XLSX: Microsoft Excel spreadsheets.
     """
 
@@ -53,6 +54,7 @@ class MimeType(str, Enum):
     JPEG = "image/jpeg"
     TEXT = "text/plain"
     HTML = "text/html"
+    XLS = "application/vnd.ms-excel"
     XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
