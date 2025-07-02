@@ -81,10 +81,10 @@ class ParseStatus(str, Enum):
     Status of a parse job in the v2 API.
     """
 
+    FAILURE = "failure"
     PENDING = "pending"
     PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
+    SUCCESSFUL = "successful"
 
 
 class TableOutputMode(str, Enum):
