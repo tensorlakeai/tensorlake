@@ -10,13 +10,9 @@ from typing import Optional
 import httpx
 from pydantic import BaseModel, Field
 
-from tensorlake.documentai.common import (
-    DOC_AI_BASE_URL,
-    PaginatedResult,
-)
+from tensorlake.documentai.common import DOC_AI_BASE_URL, PaginatedResult
 from tensorlake.documentai.files import FileUploader
-from tensorlake.documentai.jobs import Job, JobStatus, Output
-from tensorlake.documentai.parse import ParsingOptions
+from tensorlake.documentai.models import Job, JobStatus, Output, ParsingOptions
 
 
 class DatasetOptions(BaseModel):

@@ -7,22 +7,12 @@ from typing import List, Optional, Tuple, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
-class JobStatus(str, Enum):
-    """
-    Status of a job.
-    """
-
-    FAILURE = "failure"
-    PENDING = "pending"
-    PROCESSING = "processing"
-    SUCCESSFUL = "successful"
+from .enums import JobStatus
 
 
 class JobListItem(BaseModel):
     """
     DocumentAI job item class.
-
     """
 
     id: str
