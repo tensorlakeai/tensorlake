@@ -39,7 +39,7 @@ def deploy(
     """Deploy a workflow to tensorlake."""
 
     click.echo(f"Preparing deployment for {workflow_file.name}")
-    builder_v2 = ImageBuilderV2Client.from_env() if builder_v2 else None
+    builder_v2 = ImageBuilderV2Client.from_env()
 
     try:
         workflow_module_info: WorkflowModuleInfo = load_workflow_module_info(
