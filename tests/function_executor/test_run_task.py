@@ -127,6 +127,7 @@ class TestRunTask(unittest.TestCase):
                     TaskOutcomeCode.TASK_OUTCOME_CODE_SUCCESS,
                 )
                 self.assertFalse(run_task_response.is_reducer)
+                self.assertFalse(run_task_response.HasField("invocation_error_output"))
 
                 fn_outputs = deserialized_function_output(
                     self, run_task_response.function_outputs
@@ -175,10 +176,7 @@ class TestRunTask(unittest.TestCase):
                     run_task_response.failure_reason,
                     TaskFailureReason.TASK_FAILURE_REASON_FUNCTION_ERROR,
                 )
-                self.assertIn(
-                    "this extractor throws an exception.",
-                    run_task_response.failure_message,
-                )
+                self.assertFalse(run_task_response.HasField("invocation_error_output"))
                 self.assertFalse(run_task_response.is_reducer)
                 self.assertTrue(
                     "this extractor throws an exception." in run_task_response.stderr
