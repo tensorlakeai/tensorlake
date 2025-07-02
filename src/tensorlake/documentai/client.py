@@ -529,7 +529,7 @@ class DocumentAI:
                 return existing_dataset
 
         client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
-        response = await client.post(
+        await client.post(
             url="datasets",
             headers=self.__headers__(),
             json={
