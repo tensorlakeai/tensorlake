@@ -125,6 +125,7 @@ class Service(FunctionExecutorServicer):
                 "function executor service initialization failed",
                 reason="failed to load customer function",
                 duration_sec=f"{time.monotonic() - start_time:.3f}",
+                exc_info=e,
             )
             return InitializeResponse(
                 outcome_code=InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_FAILURE,
