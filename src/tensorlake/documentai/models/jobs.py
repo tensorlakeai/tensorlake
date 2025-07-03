@@ -43,7 +43,7 @@ class TableCell(BaseModel):
     """
 
     text: str
-    bounding_box: dict[str, float]  # Changed from Tuple to match OpenAPI spec
+    bounding_box: dict[str, float]
 
 
 class Table(BaseModel):
@@ -54,8 +54,8 @@ class Table(BaseModel):
 
     content: str
     cells: List[TableCell]
-    html: Optional[str] = None  # Added from OpenAPI spec
-    markdown: Optional[str] = None  # Added from OpenAPI spec
+    html: Optional[str] = None
+    markdown: Optional[str] = None
     table_summary: Optional[str] = None
 
 
@@ -66,7 +66,7 @@ class Figure(BaseModel):
     """
 
     content: str
-    summary: Optional[str] = None  # Renamed from figure_summary to match OpenAPI spec
+    summary: Optional[str] = None
 
 
 class Signature(BaseModel):
@@ -140,7 +140,7 @@ class StructuredDataPage(BaseModel):
     DocumentAI structured data page class.
     """
 
-    page_number: Optional[Union[int, List[int]]] = Field(default=None)  # OneOrMany_i32
+    page_number: Optional[Union[int, List[int]]] = Field(default=None)
     data: dict = Field(alias="json_result", default_factory=dict)
 
 
