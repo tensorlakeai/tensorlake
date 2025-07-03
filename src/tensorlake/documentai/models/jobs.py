@@ -16,13 +16,16 @@ class JobListItem(BaseModel):
     """
 
     id: str
-    file_id: str = Field(alias="fileId")
-    file_name: str = Field(alias="fileName")
     status: JobStatus
-    job_type: str = Field(alias="jobType")
-    error_message: Optional[str] = Field(alias="errorMessage")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
+    dataset_id: Optional[str] = Field(alias="datasetId", default=None)
+    file_id: Optional[str] = Field(alias="fileId", default=None)
+    file_name: Optional[str] = Field(alias="fileName", default=None)
+    finished_at: Optional[str] = Field(alias="finishedAt", default=None)
+    message: Optional[str] = Field(default=None)
+    pages_parsed: Optional[int] = Field(alias="pagesParsed", default=None)
+    trace_id: Optional[str] = Field(alias="traceId", default=None)
 
 
 class Text(BaseModel):
@@ -118,10 +121,10 @@ class Page(BaseModel):
     Page in a document.
     """
 
-    dimensions: Optional[List[int]]
-    layout: Optional[dict] = {}
+    dimensions: Optional[List[int]] = None
+    layout: Optional[dict] = None
+    page_fragments: Optional[List[PageFragment]] = None
     page_number: int
-    page_fragments: Optional[List[PageFragment]] = []
 
 
 class Document(BaseModel):
@@ -134,10 +137,10 @@ class Document(BaseModel):
 
 class StructuredDataPage(BaseModel):
     """
-    DocumentAI structured data class.
+    DocumentAI structured data page class.
     """
 
-    page_number: int
+    page_number: Optional[Union[int, List[int]]] = Field(default=None)  # OneOrMany_i32
     data: dict = Field(alias="json_result", default_factory=dict)
 
 
