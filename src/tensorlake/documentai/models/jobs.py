@@ -135,15 +135,6 @@ class Document(BaseModel):
     pages: List[Page]
 
 
-class StructuredDataPage(BaseModel):
-    """
-    DocumentAI structured data page class.
-    """
-
-    page_number: Optional[Union[int, List[int]]] = Field(default=None)
-    data: dict = Field(alias="json_result", default_factory=dict)
-
-
 class StructuredData(BaseModel):
     """
     DocumentAI structured data class.
