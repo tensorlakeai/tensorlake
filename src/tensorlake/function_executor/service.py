@@ -3,6 +3,7 @@ import json
 import sys
 import tempfile
 import time
+import traceback
 import zipfile
 from typing import Any, Generator, Iterator, Optional
 
@@ -130,7 +131,7 @@ class Service(FunctionExecutorServicer):
             return InitializeResponse(
                 outcome_code=InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_FAILURE,
                 failure_reason=InitializationFailureReason.INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR,
-                stderr=str(e),
+                stderr="".join(traceback.format_exception(e)),
             )
 
         self._logger.info(
