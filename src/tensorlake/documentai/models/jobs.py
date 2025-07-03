@@ -3,7 +3,7 @@ DocumentAI job classes.
 """
 
 from enum import Enum
-from typing import List, Optional, Tuple, Union
+from typing import Any, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -34,27 +34,36 @@ class Text(BaseModel):
 
 
 class TableCell(BaseModel):
+    """
+    Table cell content with text and bounding box information.
+    Based on PageFragmentTableCell schema.
+    """
+
     text: str
-    bounding_box: Tuple[float, float, float, float]
+    bounding_box: dict[str, float]  # Changed from Tuple to match OpenAPI spec
 
 
 class Table(BaseModel):
     """
     Table content of a page fragment.
+    Based on PageFragmentTable schema with content, cells, and optional formatting fields.
     """
 
     content: str
-    table_summary: Optional[str] = None
     cells: List[TableCell]
+    html: Optional[str] = None  # Added from OpenAPI spec
+    markdown: Optional[str] = None  # Added from OpenAPI spec
+    table_summary: Optional[str] = None
 
 
 class Figure(BaseModel):
     """
     Figure content of a page fragment.
+    Based on PageFragmentFigure schema with content and optional summary.
     """
 
     content: str
-    figure_summary: Optional[str] = None
+    summary: Optional[str] = None  # Renamed from figure_summary to match OpenAPI spec
 
 
 class Signature(BaseModel):
@@ -101,7 +110,6 @@ class PageFragment(BaseModel):
     fragment_type: PageFragmentType
     content: Union[Text, Table, Figure, Signature]
     reading_order: Optional[int] = None
-    page_number: Optional[int] = None
     bbox: Optional[dict[str, float]] = None
 
 
@@ -110,9 +118,10 @@ class Page(BaseModel):
     Page in a document.
     """
 
+    dimensions: Optional[List[int]]
+    layout: Optional[dict] = {}
     page_number: int
     page_fragments: Optional[List[PageFragment]] = []
-    layout: Optional[dict] = {}
 
 
 class Document(BaseModel):
@@ -135,9 +144,12 @@ class StructuredDataPage(BaseModel):
 class StructuredData(BaseModel):
     """
     DocumentAI structured data class.
+    Can contain either a single data item or a list of data items.
     """
 
-    pages: List[StructuredDataPage] = Field(alias="pages", default_factory=list)
+    data: Any = Field()
+    page_numbers: Union[int, List[int]] = Field()
+    schema_name: Optional[str] = Field(default=None)
 
 
 class Chunk(BaseModel):
