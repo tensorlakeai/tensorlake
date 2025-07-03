@@ -48,7 +48,7 @@ class ParsingOptions(BaseModel):
     """
 
     chunking_strategy: Optional[ChunkingStrategy] = Field(
-        ChunkingStrategy.NONE,
+        None,
         description="The chunking strategy determines how the document is chunked into smaller pieces. Different strategies can be used to optimize the parsing process. Choose the one that best fits your use case. The default is `None`, which means no chunking is applied.",
     )
     disable_layout_detection: bool = Field(
