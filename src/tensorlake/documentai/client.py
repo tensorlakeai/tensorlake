@@ -282,7 +282,7 @@ class DocumentAI:
                 headers=self.__headers__(),
             )
             response.raise_for_status()
-            return response.json()
+            return ParseResult.model_validate(response.json())
         finally:
             client.close()
 
@@ -297,7 +297,7 @@ class DocumentAI:
                 headers=self.__headers__(),
             )
             response.raise_for_status()
-            return response.json()
+            return ParseResult.model_validate(response.json())
         finally:
             await client.aclose()
 
@@ -307,13 +307,11 @@ class DocumentAI:
         """
         parse = self.get_parse(parse_id)
         finished_parse = parse
-        print(f"Waiting for job {parse} to complete...")
-        while finished_parse["status"] in [ParseStatus.PENDING, ParseStatus.PROCESSING]:
+        while finished_parse.status in [ParseStatus.PENDING, ParseStatus.PROCESSING]:
             print("waiting 5s...")
             time.sleep(5)
             finished_parse = self.get_parse(parse_id)
-            print(f"parse status: {finished_parse['status']}")
-
+            print(f"parse status: {finished_parse.status}")
         return finished_parse
 
     async def wait_for_completion_async(self, parse_id: str) -> ParseResult:
@@ -322,12 +320,11 @@ class DocumentAI:
         """
         parse = await self.get_parse_async(parse_id)
         finished_parse = parse
-        while finished_parse["status"] in [ParseStatus.PENDING, ParseStatus.PROCESSING]:
+        while finished_parse.status in [ParseStatus.PENDING, ParseStatus.PROCESSING]:
             print("waiting 5s...")
             await asyncio.sleep(5)
             finished_parse = await self.get_parse_async(parse_id)
-            print(f"parse_id: {parse_id}, job status: {finished_parse['status']}")
-
+            print(f"parse status: {finished_parse.status}")
         return finished_parse
 
     # -------------------------------------------------------------------------

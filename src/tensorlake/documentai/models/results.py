@@ -13,14 +13,12 @@ from .options import Options
 
 class PageClass(BaseModel):
     """
-    Page class classification result.
-
-    Contains page numbers (1-indexed) where a specific page class appears in the document.
+    Page class information containing the class name and page numbers.
     """
 
-    pages: List[int] = Field(
-        description="Vector of page numbers (1-indexed) where this page class appears.",
-        default=[],
+    page_class: str = Field(description="The name of the page class")
+    page_numbers: List[int] = Field(
+        description="List of page numbers (1-indexed) where this page class appears"
     )
 
 
@@ -68,13 +66,13 @@ class ParseResult(BaseModel):
         default=None,
         description="Chunks of layout text extracted from the document. This is a vector of `Chunk` objects, each containing a piece of text extracted from the document. The chunks are typically used for further processing, such as indexing or searching. The value will vary depending on the chunking strategy used during parsing.",
     )
-    document: Optional[Document] = Field(
+    document_layout: Optional[Document] = Field(
         default=None,
         description="The layout of the document. This is a JSON object that contains the layout information of the document. It can be used to understand the structure of the document, such as the position of text, tables, figures, etc.",
     )
     page_classes: Optional[Dict[str, PageClass]] = Field(
         default=None,
-        description="Page classes extracted from the document. This is a map where the keys are page class names provided in the parse request under the `page_classification_options` field, and the values are vectors of page numbers (1-indexed) where each page class appears. This is used to categorize pages in the document based on the classification options provided.",
+        description="Page classes extracted from the document. This is a map where the keys are page class names provided in the parse request under the `page_classification_options` field, and the values are PageClass objects containing the class name and page numbers where each page class appears.",
     )
     structured_data: Optional[
         Dict[str, Union[StructuredData, List[StructuredData]]]
