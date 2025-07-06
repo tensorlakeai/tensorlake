@@ -3,9 +3,40 @@ This module contains the data models for data sets.
 """
 
 from enum import Enum
-from typing import Optional, Type, Union
+from typing import List, Optional, Type, Union
 
 from pydantic import BaseModel, Field, Json
+
+from tensorlake.documentai.models.jobs import Chunk, Document
+
+
+class DatasetStructuredDataPage(BaseModel):
+    """
+    DocumentAI structured data class.
+    """
+
+    page_numbers: List[int] = Field(default_factory=list)
+    data: dict = Field(default_factory=dict)
+
+
+class DatasetStructuredData(BaseModel):
+    """
+    DocumentAI structured data class.
+    """
+
+    pages: List[DatasetStructuredDataPage] = Field(alias="pages", default_factory=list)
+
+
+class DatasetOutput(BaseModel):
+    """
+    Output of a job.
+    """
+
+    chunks: List[Chunk] = Field(alias="chunks", default_factory=list)
+    document: Optional[Document] = None
+    num_pages: Optional[int] = 0
+    structured_data: Optional[DatasetStructuredData] = None
+    error_message: Optional[str] = Field(alias="errorMessage", default="")
 
 
 class ChunkingStrategy(str, Enum):

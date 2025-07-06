@@ -12,9 +12,9 @@ from pydantic import BaseModel, Field
 
 from tensorlake.documentai.common import DOC_AI_BASE_URL, PaginatedResult
 from tensorlake.documentai.files import FileUploader
-from tensorlake.documentai.models.dataset_options import ParsingOptions
+from tensorlake.documentai.models.dataset_options import DatasetOutput, ParsingOptions
 from tensorlake.documentai.models.enums import JobStatus
-from tensorlake.documentai.models.jobs import Job, Output
+from tensorlake.documentai.models.jobs import Job
 
 
 class DatasetOptions(BaseModel):
@@ -114,7 +114,7 @@ class DatasetItems(BaseModel):
     """
 
     cursor: Optional[str] = None
-    items: dict[DatasetItemInfo, Output] = {}
+    items: dict[DatasetItemInfo, DatasetOutput] = {}
 
 
 class DatasetOutputFormat(str, Enum):
@@ -266,11 +266,11 @@ class Dataset:
                 resp.raise_for_status()
 
                 resp_json = resp.json()
-                downloaded_output = Output.model_validate(resp_json)
+                downloaded_output = DatasetOutput.model_validate(resp_json)
                 outputs[key_info] = downloaded_output
 
             if job.status == JobStatus.FAILURE:
-                outputs[key_info] = Output(error_message=job.error_message)
+                outputs[key_info] = DatasetOutput(error_message=job.error_message)
 
         return DatasetItems(
             cursor=jobs.next_cursor,

@@ -408,7 +408,7 @@ class DocumentAI:
         response.raise_for_status()
 
     # -------------------------------------------------------------------------
-    # Dataset Management, will be removed in this module in the future
+    # Dataset Management
     # -------------------------------------------------------------------------
 
     def __create_parse_settings__(self, options: ParsingOptions) -> dict:
