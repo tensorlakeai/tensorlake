@@ -1,5 +1,5 @@
 """
-This module contains the data models for data sets.
+This module contains the data models for datasets.
 """
 
 from enum import Enum
