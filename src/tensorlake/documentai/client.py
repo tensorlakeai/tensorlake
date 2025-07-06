@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, Json
 from retry import retry
 
 from tensorlake.documentai.common import (
@@ -19,6 +19,7 @@ from tensorlake.documentai.common import (
     DOC_AI_BASE_URL_V2,
     PaginatedResult,
 )
+from tensorlake.documentai.datasets import Dataset, DatasetOptions
 from tensorlake.documentai.files import FileInfo, FileUploader
 from tensorlake.documentai.models import (
     EnrichmentOptions,
@@ -402,6 +403,183 @@ class DocumentAI:
         client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
         response = await client.delete(
             url=f"files/{file_id}",
+            headers=self.__headers__(),
+        )
+        response.raise_for_status()
+
+    # -------------------------------------------------------------------------
+    # Dataset Management, will be removed in this module in the future
+    # -------------------------------------------------------------------------
+
+    def __create_parse_settings__(self, options: ParsingOptions) -> dict:
+        json_schema = None
+        if options.extraction_options:
+            if isinstance(options.extraction_options.json_schema, str):
+                json_schema = json.loads(options.extraction_options.json_schema)
+            elif isinstance(options.extraction_options.json_schema, dict):
+                json_schema = options.extraction_options.json_schema
+            elif isinstance(options.extraction_options.json_schema, Json):
+                json_schema = json.loads(options.extraction_options.json_schema)
+            elif inspect.isclass(options.extraction_options.json_schema) and issubclass(
+                options.extraction_options.json_schema, BaseModel
+            ):
+                json_schema = options.extraction_options.json_schema.model_json_schema()
+            elif isinstance(options.extraction_options.json_schema, BaseModel):
+                json_schema = options.extraction_options.json_schema.model_json_schema()
+
+        return {
+            "chunkStrategy": (
+                options.chunking_strategy.value if options.chunking_strategy else None
+            ),
+            "tableOutputMode": options.table_output_mode.value,
+            "tableParsingMode": options.table_parsing_strategy.value,
+            "tableSummarizationPrompt": options.table_parsing_prompt,
+            "figureSummarizationPrompt": options.figure_summarization_prompt,
+            "deliverWebhook": options.deliver_webhook,
+            "jsonSchema": json_schema,
+            "structuredExtractionPrompt": (
+                options.extraction_options.prompt
+                if options.extraction_options
+                else None
+            ),
+            "modelProvider": (
+                options.extraction_options.provider.value
+                if options.extraction_options
+                else None
+            ),
+            "skewCorrection": (
+                options.skew_correction
+                if options.skew_correction is not None
+                else False
+            ),
+            "detectSignature": (
+                options.detect_signature
+                if options.detect_signature is not None
+                else False
+            ),
+            "structuredExtractionSkipOcr": (
+                options.extraction_options.skip_ocr
+                if options.extraction_options is not None
+                and options.extraction_options.skip_ocr is not None
+                else False
+            ),
+            "disableLayoutDetection": (
+                options.disable_layout_detection
+                if options.disable_layout_detection is not None
+                else False
+            ),
+            "formDetectionMode": (
+                options.form_detection_mode.value
+                if options.form_detection_mode is not None
+                else "object_detection"
+            ),
+        }
+
+    def __dataset_from_response__(self, response: httpx.Response) -> Dataset:
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return None
+
+        print(response)
+        print(response.json())
+        resp = response.json()
+
+        settings = ParsingOptions.model_validate(resp.get("settings"))
+        return Dataset(
+            dataset_id=resp.get("id"),
+            name=resp.get("name"),
+            api_key=self.api_key,
+            settings=settings,
+            status=resp.get("status"),
+        )
+
+    def create_dataset(
+        self, dataset: DatasetOptions, ignore_if_exists=False
+    ) -> Dataset:
+        """
+        Create a new dataset.
+
+        Args:
+            dataset: The dataset to create.
+        Returns:
+            str: The ID of the created dataset.
+        """
+        return asyncio.run(self.create_dataset_async(dataset, ignore_if_exists))
+
+    async def create_dataset_async(
+        self, dataset: DatasetOptions, ignore_if_exists=False
+    ) -> Dataset:
+        """
+        Create a new dataset asynchronously.
+
+        Args:
+            dataset: The dataset to create.
+
+        Returns:
+            str: The ID of the created dataset.
+        """
+
+        if ignore_if_exists:
+            existing_dataset = await self.get_dataset_async(dataset.name)
+            if existing_dataset:
+                return existing_dataset
+
+        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
+        await client.post(
+            url="datasets",
+            headers=self.__headers__(),
+            json={
+                "name": dataset.name,
+                "description": dataset.description,
+                "settings": self.__create_parse_settings__(dataset.options),
+            },
+        )
+
+        return await self.get_dataset_async(dataset.name)
+
+    def get_dataset(self, name: str) -> Optional[Dataset]:
+        """
+        Get a dataset by its ID.
+
+        Args:
+            dataset_id: The ID of the dataset.
+
+        Returns:
+            Dataset: The dataset.
+        """
+
+        return asyncio.run(self.get_dataset_async(name))
+
+    async def get_dataset_async(self, name: str) -> Optional[Dataset]:
+        """
+        Get a dataset by its ID asynchronously.
+        """
+        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
+        response = await client.get(
+            url=f"datasets/{name}",
+            headers=self.__headers__(),
+        )
+
+        return self.__dataset_from_response__(response)
+
+    def delete_dataset(self, name: str):
+        """
+        Delete a dataset by its ID.
+
+        Args:
+            dataset_id: The ID of the dataset.
+        """
+        asyncio.run(self.delete_dataset_async(name))
+
+    async def delete_dataset_async(self, name: str):
+        """
+        Delete a dataset by its ID asynchronously.
+        """
+        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
+        response = await client.delete(
+            url=f"datasets/{name}",
             headers=self.__headers__(),
         )
         response.raise_for_status()
