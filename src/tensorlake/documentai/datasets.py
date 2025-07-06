@@ -12,7 +12,9 @@ from pydantic import BaseModel, Field
 
 from tensorlake.documentai.common import DOC_AI_BASE_URL, PaginatedResult
 from tensorlake.documentai.files import FileUploader
-from tensorlake.documentai.models import Job, JobStatus, Output, ParsingOptions
+from tensorlake.documentai.models.dataset_options import ParsingOptions
+from tensorlake.documentai.models.enums import JobStatus
+from tensorlake.documentai.models.jobs import Job, Output
 
 
 class DatasetOptions(BaseModel):
