@@ -90,9 +90,6 @@ class ParseResult(BaseModel):
     created_at: str = Field(
         description="The date and time when the parse job was created in RFC 3339 format."
     )
-    options: ParseRequestOptions = Field(
-        description="The options used for scheduling the parse job."
-    )
 
     # Optional fields
     errors: Optional[dict] = Field(
@@ -104,14 +101,4 @@ class ParseResult(BaseModel):
     )
     labels: Optional[dict] = Field(
         None, description="Labels associated with the parse job."
-    )
-    tasks_completed_count: Optional[int] = Field(
-        None,
-        description="The number of tasks that have been completed for the parse job.",
-        ge=0,
-    )
-    tasks_total_count: Optional[int] = Field(
-        None,
-        description="The total number of tasks that are expected to be completed for the parse job.",
-        ge=0,
     )
