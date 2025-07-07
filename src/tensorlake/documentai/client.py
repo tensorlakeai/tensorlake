@@ -39,7 +39,7 @@ class DocumentAI:
     Document AI client for Tensorlake.
     """
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, server_url: Optional[str] = None):
         self.api_key = api_key or os.getenv("TENSORLAKE_API_KEY")
 
         if not self.api_key:
@@ -52,6 +52,10 @@ class DocumentAI:
         self._aclient: httpx.AsyncClient = httpx.AsyncClient(
             base_url=DOC_AI_BASE_URL_V2, timeout=None
         )
+        if server_url:
+            self._client.base_url = f"{server_url}/documents/v1"
+            self._client_v2.base_url = f"{server_url}/documents/v2"
+            self._aclient.base_url = f"{server_url}/documents/v2"
 
         self.__file_uploader__ = FileUploader(api_key=self.api_key)
 
@@ -521,6 +525,8 @@ class DocumentAI:
             body["page_classifications"] = [
                 pc.model_dump(exclude_none=True) for pc in page_classifications
             ]
+
+        print(f"Creating dataset with body: {body}")
         return body
 
     def get_dataset(
