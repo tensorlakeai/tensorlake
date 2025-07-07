@@ -87,6 +87,18 @@ class ParseStatus(str, Enum):
     SUCCESSFUL = "successful"
 
 
+class PartitionStrategy(str, Enum):
+    """
+    Partition strategy for parsing a document.
+
+    NONE: No partitioning is applied.
+    PAGE: Partition the document into pages.
+    """
+
+    NONE = "none"
+    PAGE = "page"
+
+
 class TableOutputMode(str, Enum):
     """
     Output mode for tables in a document.

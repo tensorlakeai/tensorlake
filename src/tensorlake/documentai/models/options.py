@@ -2,7 +2,13 @@ from typing import List, Optional, Type, Union
 
 from pydantic import BaseModel, Field, Json
 
-from .enums import ChunkingStrategy, ModelProvider, TableOutputMode, TableParsingFormat
+from .enums import (
+    ChunkingStrategy,
+    ModelProvider,
+    PartitionStrategy,
+    TableOutputMode,
+    TableParsingFormat,
+)
 
 
 class EnrichmentOptions(BaseModel):
@@ -91,9 +97,9 @@ class StructuredExtractionOptions(BaseModel):
     )
 
     # Optional fields
-    chunking_strategy: Optional[ChunkingStrategy] = Field(
+    partition_strategy: Optional[PartitionStrategy] = Field(
         None,
-        description="The chunking strategy determines how the document is chunked into smaller pieces. This is only supported in `markdown` mode. Not to be confused with the `chunking_strategy` in `DocumentParsingOptions`. which is used to chunk the document into smaller pieces for parsing. The default is `None`, which means no chunking is applied.",
+        description="Strategy to partition the document before structured data extraction. The API will return one structured data object per partition. This is useful when you want to extract certain fields from every page.",
     )
     model_provider: ModelProvider = Field(
         ModelProvider.TENSORLAKE,

@@ -9,6 +9,7 @@ from .enums import (
     MimeType,
     ModelProvider,
     ParseStatus,
+    PartitionStrategy,
     TableOutputMode,
     TableParsingFormat,
 )
@@ -53,6 +54,7 @@ __all__ = [
     "MimeType",
     "ModelProvider",
     "ParseStatus",
+    "PartitionStrategy",
     "TableOutputMode",
     "TableParsingFormat",
     # Options
