@@ -8,10 +8,11 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Union, Any, Dict, MutableMapping, List
 
 import httpx
-from pydantic import BaseModel, Json
+import anyio
+from pydantic import BaseModel
 from retry import retry
 
 from tensorlake.documentai.common import (
@@ -19,7 +20,6 @@ from tensorlake.documentai.common import (
     DOC_AI_BASE_URL_V2,
     PaginatedResult,
 )
-from tensorlake.documentai.datasets import Dataset, DatasetOptions
 from tensorlake.documentai.files import FileInfo, FileUploader
 from tensorlake.documentai.models import (
     EnrichmentOptions,
@@ -30,6 +30,7 @@ from tensorlake.documentai.models import (
     ParseStatus,
     ParsingOptions,
     StructuredExtractionOptions,
+    Dataset,
 )
 
 
@@ -47,7 +48,37 @@ class DocumentAI:
             )
 
         self._client = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None)
+        self._client_v2 = httpx.Client(base_url=DOC_AI_BASE_URL_V2, timeout=None)
+        self._aclient: httpx.AsyncClient = httpx.AsyncClient(
+            base_url=DOC_AI_BASE_URL_V2, timeout=None
+        )
+
         self.__file_uploader__ = FileUploader(api_key=self.api_key)
+
+    def _headers(self) -> Dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Connection": "close",
+        }
+
+    def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        resp = self._client.request(method, url, headers=self._headers(), **kwargs)
+        resp.raise_for_status()
+        return resp
+
+    async def _arequest(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        if self._aclient is None:
+            self._aclient = httpx.AsyncClient(base_url=DOC_AI_BASE_URL_V2)
+        resp = await self._aclient.request(
+            method, url, headers=self._headers(), **kwargs
+        )
+        resp.raise_for_status()
+        return resp
+
+    def __del__(self) -> None:
+        self._client.close()
+        anyio.run(self._aclient.aclose)
 
     def __headers__(self):
         return {
@@ -411,178 +442,191 @@ class DocumentAI:
     # Dataset Management, will be removed in this module in the future
     # -------------------------------------------------------------------------
 
-    def __create_parse_settings__(self, options: ParsingOptions) -> dict:
-        json_schema = None
-        if options.extraction_options:
-            if isinstance(options.extraction_options.json_schema, str):
-                json_schema = json.loads(options.extraction_options.json_schema)
-            elif isinstance(options.extraction_options.json_schema, dict):
-                json_schema = options.extraction_options.json_schema
-            elif isinstance(options.extraction_options.json_schema, Json):
-                json_schema = json.loads(options.extraction_options.json_schema)
-            elif inspect.isclass(options.extraction_options.json_schema) and issubclass(
-                options.extraction_options.json_schema, BaseModel
-            ):
-                json_schema = options.extraction_options.json_schema.model_json_schema()
-            elif isinstance(options.extraction_options.json_schema, BaseModel):
-                json_schema = options.extraction_options.json_schema.model_json_schema()
-
-        return {
-            "chunkStrategy": (
-                options.chunking_strategy.value if options.chunking_strategy else None
-            ),
-            "tableOutputMode": options.table_output_mode.value,
-            "tableParsingMode": options.table_parsing_strategy.value,
-            "tableSummarizationPrompt": options.table_parsing_prompt,
-            "figureSummarizationPrompt": options.figure_summarization_prompt,
-            "deliverWebhook": options.deliver_webhook,
-            "jsonSchema": json_schema,
-            "structuredExtractionPrompt": (
-                options.extraction_options.prompt
-                if options.extraction_options
-                else None
-            ),
-            "modelProvider": (
-                options.extraction_options.provider.value
-                if options.extraction_options
-                else None
-            ),
-            "skewCorrection": (
-                options.skew_correction
-                if options.skew_correction is not None
-                else False
-            ),
-            "detectSignature": (
-                options.detect_signature
-                if options.detect_signature is not None
-                else False
-            ),
-            "structuredExtractionSkipOcr": (
-                options.extraction_options.skip_ocr
-                if options.extraction_options is not None
-                and options.extraction_options.skip_ocr is not None
-                else False
-            ),
-            "disableLayoutDetection": (
-                options.disable_layout_detection
-                if options.disable_layout_detection is not None
-                else False
-            ),
-            "formDetectionMode": (
-                options.form_detection_mode.value
-                if options.form_detection_mode is not None
-                else "object_detection"
-            ),
-        }
-
-    def __dataset_from_response__(self, response: httpx.Response) -> Dataset:
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                return None
-
-        print(response)
-        print(response.json())
-        resp = response.json()
-
-        settings = ParsingOptions.model_validate(resp.get("settings"))
-        return Dataset(
-            dataset_id=resp.get("id"),
-            name=resp.get("name"),
-            api_key=self.api_key,
-            settings=settings,
-            status=resp.get("status"),
+    def create_dataset(
+        self,
+        name: str,
+        description: Optional[str] = None,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            List[StructuredExtractionOptions]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+    ) -> Dataset:
+        body = self._create_dataset_req(
+            name,
+            description,
+            parsing_options,
+            structured_extraction_options,
+            enrichment_options,
+            page_classifications,
         )
 
-    def create_dataset(
-        self, dataset: DatasetOptions, ignore_if_exists=False
-    ) -> Dataset:
-        """
-        Create a new dataset.
+        response = self._request("POST", "/datasets", json=body).json()
 
-        Args:
-            dataset: The dataset to create.
-        Returns:
-            str: The ID of the created dataset.
-        """
-        return asyncio.run(self.create_dataset_async(dataset, ignore_if_exists))
+        return self.get_dataset(response["slug"])
 
     async def create_dataset_async(
-        self, dataset: DatasetOptions, ignore_if_exists=False
+        self,
+        name: str,
+        description: Optional[str] = None,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            List[StructuredExtractionOptions]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
     ) -> Dataset:
-        """
-        Create a new dataset asynchronously.
-
-        Args:
-            dataset: The dataset to create.
-
-        Returns:
-            str: The ID of the created dataset.
-        """
-
-        if ignore_if_exists:
-            existing_dataset = await self.get_dataset_async(dataset.name)
-            if existing_dataset:
-                return existing_dataset
-
-        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
-        await client.post(
-            url="datasets",
-            headers=self.__headers__(),
-            json={
-                "name": dataset.name,
-                "description": dataset.description,
-                "settings": self.__create_parse_settings__(dataset.options),
-            },
+        body = self._create_dataset_req(
+            name,
+            description,
+            parsing_options,
+            structured_extraction_options,
+            enrichment_options,
+            page_classifications,
         )
 
-        return await self.get_dataset_async(dataset.name)
+        response = await self._arequest("POST", "/datasets", json=body)
+        response_json = response.json()
 
-    def get_dataset(self, name: str) -> Optional[Dataset]:
+        return await self.get_dataset_async(response_json["slug"])
+
+    def _create_dataset_req(
+        self,
+        name: str,
+        description: Optional[str] = None,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            List[StructuredExtractionOptions]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+    ) -> Dict[str, Any]:
         """
-        Get a dataset by its ID.
-
-        Args:
-            dataset_id: The ID of the dataset.
-
-        Returns:
-            Dataset: The dataset.
+        Create a request body for creating a dataset.
         """
+        body: Dict[str, Any] = _drop_none({"name": name, "description": description})
+        if parsing_options:
+            body["parsing_options"] = parsing_options.model_dump(exclude_none=True)
+        if structured_extraction_options:
+            body["structured_extraction_options"] = [
+                opt.model_dump(exclude_none=True)
+                for opt in structured_extraction_options
+            ]
+        if enrichment_options:
+            body["enrichment_options"] = enrichment_options.model_dump(
+                exclude_none=True
+            )
+        if page_classifications:
+            body["page_classifications"] = [
+                pc.model_dump(exclude_none=True) for pc in page_classifications
+            ]
+        return body
 
-        return asyncio.run(self.get_dataset_async(name))
+    def get_dataset(
+        self,
+        slug: str,
+    ) -> Dataset:
+        data = self._request("GET", f"/datasets/{slug}").json()
+        return Dataset.model_validate(data)
 
-    async def get_dataset_async(self, name: str) -> Optional[Dataset]:
-        """
-        Get a dataset by its ID asynchronously.
-        """
-        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
-        response = await client.get(
-            url=f"datasets/{name}",
-            headers=self.__headers__(),
+    async def get_dataset_async(self, slug: str) -> Dataset:
+        data = (await self._arequest("GET", f"/datasets/{slug}")).json()
+        return Dataset.model_validate(data)
+
+    def delete_dataset(self, slug: str) -> None:
+        self._request("DELETE", f"/datasets/{slug}")
+
+    async def delete_dataset_async(self, slug: str) -> None:
+        await self._arequest("DELETE", f"/datasets/{slug}")
+
+    def parse_dataset_file(
+        self,
+        dataset: Dataset,
+        file: str,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+        wait_for_completion: bool = False,
+    ) -> Union[str, ParseResult]:
+
+        dataset_parse_req = self._create_dataset_parse_req(
+            file,
+            page_range,
+            labels,
+            mime_type,
         )
 
-        return self.__dataset_from_response__(response)
+        response = self._request(
+            "POST",
+            f"/datasets/{dataset.slug}/parse",
+            json=dataset_parse_req,
+        ).json()
 
-    def delete_dataset(self, name: str):
-        """
-        Delete a dataset by its ID.
+        if not wait_for_completion:
+            return response["parse_id"]
 
-        Args:
-            dataset_id: The ID of the dataset.
-        """
-        asyncio.run(self.delete_dataset_async(name))
+        return self.wait_for_completion(response["parse_id"])
 
-    async def delete_dataset_async(self, name: str):
-        """
-        Delete a dataset by its ID asynchronously.
-        """
-        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
-        response = await client.delete(
-            url=f"datasets/{name}",
-            headers=self.__headers__(),
+    async def parse_dataset_file_async(
+        self,
+        dataset: Dataset,
+        file: str,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+        wait_for_completion: bool = False,
+    ) -> Union[str, ParseResult]:
+        dataset_parse_req = self._create_dataset_parse_req(
+            file,
+            page_range,
+            labels,
+            mime_type,
         )
-        response.raise_for_status()
+
+        response = await self._arequest(
+            "POST",
+            f"/datasets/{dataset.slug}/parse",
+            json=dataset_parse_req,
+        )
+        response_json = response.json()
+
+        if not wait_for_completion:
+            return response_json["parse_id"]
+
+        return await self.wait_for_completion_async(response_json["parse_id"])
+
+    def _create_dataset_parse_req(
+        self,
+        file: str,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a request body for parsing a file in a dataset.
+        """
+        payload = {}
+
+        # file check
+        if file.startswith("http://") or file.startswith("https://"):
+            payload["file_url"] = file
+        elif file.startswith("tensorlake-"):
+            payload["file_id"] = file
+        else:
+            payload["raw_text"] = file
+
+        # optional field check
+        if labels:
+            payload["labels"] = labels
+
+        if page_range:
+            payload["page_range"] = page_range
+
+        if mime_type:
+            payload["mime_type"] = mime_type.value
+
+        return payload
 
     # -------------------------------------------------------------------------
     # Job Management, will be deprecated in the future
@@ -647,3 +691,9 @@ class DocumentAI:
         response.raise_for_status()
         result = PaginatedResult[Job].model_validate(response.json())
         return result
+
+
+def _drop_none(mapping: MutableMapping[str, Any]) -> Dict[str, Any]:
+    """Return a copy of *mapping* without keys whose values are ``None``."""
+
+    return {k: v for k, v in mapping.items() if v is not None}

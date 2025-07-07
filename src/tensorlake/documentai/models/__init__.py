@@ -12,6 +12,7 @@ from .enums import (
     PartitionStrategy,
     TableOutputMode,
     TableParsingFormat,
+    DatasetStatus,
 )
 
 # Job models
@@ -46,6 +47,8 @@ from .parse import ParseRequest
 
 # Results models
 from .results import PageClass, ParseRequestOptions, ParseResult
+
+from .datasets import Dataset
 
 __all__ = [
     # Enums
@@ -84,4 +87,7 @@ __all__ = [
     "Table",
     "TableCell",
     "Text",
+    # Datasets
+    "Dataset",
+    "DatasetStatus",
 ]
