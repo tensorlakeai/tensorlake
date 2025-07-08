@@ -14,6 +14,7 @@ enum SerializedObjectEncoding {
     SERIALIZED_OBJECT_ENCODING_BINARY_ZIP = 4;
 }
 
+// Complete serialized object passed in a single message without any chunking.
 message SerializedObject {
     optional bytes data = 1;
     optional SerializedObjectEncoding encoding = 2;
@@ -173,7 +174,8 @@ service FunctionExecutor {
     // Executes the task defined in the request.
     // Multiple tasks can be running in parallel.
     rpc run_task(RunTaskRequest) returns (RunTaskResponse);
-    // Health check method to check if the Function Executor is healthy.
+    // Health check method to check if the FE is able to run tasks.
+    // The FE should be initialized before calling this method.
     rpc check_health(HealthCheckRequest) returns (HealthCheckResponse);
     // Information about this Function Executor.
     rpc get_info(InfoRequest) returns (InfoResponse);

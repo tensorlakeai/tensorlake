@@ -30,11 +30,7 @@ check:
 	@poetry run black --check .
 	@poetry run isort . --check-only --profile black
 
-lint:
-	@poetry run pylint tensorlake
-	@poetry run black --check .
-
 test:
 	cd tests && ./run_tests.sh
 
-.PHONY: all build build_proto fmt lint test
+.PHONY: all build build_proto fmt test

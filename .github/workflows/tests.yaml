@@ -8,10 +8,6 @@ on:
     types: [opened, synchronize, reopened, labeled, unlabeled]
     branches:
       - 'main'
-    paths:
-      - 'src/**'
-      - 'tests/**'
-      - '.github/workflows/tests.yaml'
 
 env:
   INDEXIFY_URL: http://localhost:8900
