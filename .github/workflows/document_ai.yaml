@@ -33,7 +33,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   test_document_ai_dispatch:
