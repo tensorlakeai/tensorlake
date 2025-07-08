@@ -28,6 +28,7 @@ def validate_args(args, logger: Any):
 
 
 def main():
+    # Set "spawn" method because grpc Server only works correctly if there's exec after fork.
     mp.set_start_method("spawn")
     parser = argparse.ArgumentParser(
         description="Runs Function Executor with the specified API server address"
