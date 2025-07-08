@@ -23,6 +23,7 @@ else
   enable_workflows_sdk_test_suite=true
   enable_cli_test_suite=true
   enable_utils_test_suite=true
+  enable_document_ai_test_suite=true
 fi
 
 tests_exit_code=0
