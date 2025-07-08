@@ -2,9 +2,12 @@
 DocumentAI models package.
 """
 
+from .datasets import Dataset
+
 # Enums
 from .enums import (
     ChunkingStrategy,
+    DatasetStatus,
     JobStatus,
     MimeType,
     ModelProvider,
@@ -12,7 +15,6 @@ from .enums import (
     PartitionStrategy,
     TableOutputMode,
     TableParsingFormat,
-    DatasetStatus,
 )
 
 # Job models
@@ -47,8 +49,6 @@ from .parse import ParseRequest
 
 # Results models
 from .results import PageClass, ParseRequestOptions, ParseResult
-
-from .datasets import Dataset
 
 __all__ = [
     # Enums

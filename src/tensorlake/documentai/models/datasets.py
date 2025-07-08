@@ -1,7 +1,8 @@
 from typing import Optional
 
-from .enums import DatasetStatus
 from pydantic import BaseModel
+
+from .enums import DatasetStatus
 
 
 class Dataset(BaseModel):

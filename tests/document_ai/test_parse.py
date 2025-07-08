@@ -1,14 +1,14 @@
-import unittest
 import os
+import unittest
+
+from json_schemas.bank_statement import BankStatement
 
 from tensorlake.documentai import DocumentAI
 from tensorlake.documentai.models.enums import ParseStatus
 from tensorlake.documentai.models.options import (
-    StructuredExtractionOptions,
     PageClassConfig,
+    StructuredExtractionOptions,
 )
-
-from json_schemas.bank_statement import BankStatement
 
 
 class TestParse(unittest.TestCase):

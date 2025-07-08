@@ -8,10 +8,10 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Optional, Union, Any, Dict, MutableMapping, List
+from typing import Any, Dict, List, MutableMapping, Optional, Union
 
-import httpx
 import anyio
+import httpx
 from pydantic import BaseModel
 from retry import retry
 
@@ -22,6 +22,7 @@ from tensorlake.documentai.common import (
 )
 from tensorlake.documentai.files import FileInfo, FileUploader
 from tensorlake.documentai.models import (
+    Dataset,
     EnrichmentOptions,
     MimeType,
     PageClassConfig,
@@ -29,7 +30,6 @@ from tensorlake.documentai.models import (
     ParseStatus,
     ParsingOptions,
     StructuredExtractionOptions,
-    Dataset,
 )
 
 

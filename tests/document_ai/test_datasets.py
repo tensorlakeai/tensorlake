@@ -1,14 +1,14 @@
-import unittest
 import os
-
-from tensorlake.documentai.client import DocumentAI
-from tensorlake.documentai.models.options import (
-    StructuredExtractionOptions,
-    PageClassConfig,
-)
-from tensorlake.documentai.models.enums import ParseStatus
+import unittest
 
 from json_schemas.bank_statement import BankStatement
+
+from tensorlake.documentai.client import DocumentAI
+from tensorlake.documentai.models.enums import ParseStatus
+from tensorlake.documentai.models.options import (
+    PageClassConfig,
+    StructuredExtractionOptions,
+)
 
 
 class TestDatasets(unittest.TestCase):
