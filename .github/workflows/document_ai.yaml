@@ -21,16 +21,6 @@ on:
       - "pyproject.toml"
       - ".github/workflows/document_ai.yaml"
 
-  pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
-    branches:
-      - "main"
-    paths:
-      - "tests/document_ai/**"
-      - "src/tensorlake/documentai/**"
-      - "pyproject.toml"
-      - ".github/workflows/document_ai.yaml"
-
 permissions:
   contents: read
 
