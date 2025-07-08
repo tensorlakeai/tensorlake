@@ -22,18 +22,12 @@ class Handler:
     def __init__(
         self,
         request: RunTaskRequest,
-        graph_name: str,
-        graph_version: str,
-        function_name: str,
         invocation_state: InvocationState,
         function_wrapper: TensorlakeFunctionWrapper,
         graph_metadata: ComputeGraphMetadata,
         logger: Any,
     ):
-        self._invocation_id: str = request.graph_invocation_id
-        self._graph_name: str = graph_name
-        self._graph_version: str = graph_version
-        self._function_name: str = function_name
+        self._request: RunTaskRequest = request
         self._invocation_state: InvocationState = invocation_state
         self._logger = logger.bind(
             module=__name__,
@@ -47,7 +41,7 @@ class Handler:
         self._input_loader = FunctionInputsLoader(request)
         self._response_helper = ResponseHelper(
             task_id=request.task_id,
-            function_name=function_name,
+            function_name=request.function_name,
             graph_metadata=graph_metadata,
             logger=self._logger,
         )
@@ -115,9 +109,9 @@ class Handler:
 
     def _run_func(self, inputs: FunctionInputs) -> FunctionCallResult:
         ctx: GraphInvocationContext = GraphInvocationContext(
-            invocation_id=self._invocation_id,
-            graph_name=self._graph_name,
-            graph_version=self._graph_version,
+            invocation_id=self._request.graph_invocation_id,
+            graph_name=self._request.graph_name,
+            graph_version=self._request.graph_version,
             invocation_state=self._invocation_state,
         )
         return self._function_wrapper.invoke_fn_ser(

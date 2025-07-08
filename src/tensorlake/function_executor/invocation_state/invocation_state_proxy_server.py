@@ -16,7 +16,6 @@ from ..proto.function_executor_pb2 import (
     SerializedObjectEncoding,
     SetInvocationStateRequest,
 )
-from ..proto.message_validator import MessageValidator
 from .response_validator import ResponseValidator
 
 
