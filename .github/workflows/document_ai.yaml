@@ -31,6 +31,10 @@ on:
       - "pyproject.toml"
       - ".github/workflows/document_ai.yaml"
 
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   test_document_ai_dispatch:
     if: github.event_name == 'workflow_dispatch'
