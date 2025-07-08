@@ -103,7 +103,9 @@ class FunctionExecutorServicer(object):
         raise NotImplementedError("Method not implemented!")
 
     def check_health(self, request, context):
-        """Health check method to check if the Function Executor is healthy."""
+        """Health check method to check if the FE is able to run tasks.
+        The FE should be initialized before calling this method.
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
