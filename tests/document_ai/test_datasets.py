@@ -196,5 +196,5 @@ class TestDatasets(unittest.TestCase):
         self.assertIn("form140", parsed_result.page_classes)
 
 
-if __name__ == "__main__":
-    unittest.main()
+# if __name__ == "__main__":
+#     unittest.main()

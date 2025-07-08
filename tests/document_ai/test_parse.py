@@ -58,7 +58,7 @@ class TestParse(unittest.TestCase):
         )
 
         file_id = doc_ai.upload(
-            "./testdata/example_bank_statement.pdf",
+            "./document_ai/testdata/example_bank_statement.pdf",
         )
         self.assertIsNotNone(file_id)
 
@@ -95,7 +95,7 @@ class TestParse(unittest.TestCase):
         )
 
         file_id = doc_ai.upload(
-            path="./tests/document_ai/testdata/example_bank_statement.pdf"
+            path="./document_ai/testdata/example_bank_statement.pdf"
         )
         self.assertIsNotNone(file_id)
 
