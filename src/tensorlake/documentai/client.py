@@ -23,7 +23,6 @@ from tensorlake.documentai.common import (
 from tensorlake.documentai.files import FileInfo, FileUploader
 from tensorlake.documentai.models import (
     EnrichmentOptions,
-    Job,
     MimeType,
     PageClassConfig,
     ParseResult,
@@ -47,17 +46,22 @@ class DocumentAI:
                 "API key is required. Set the TENSORLAKE_API_KEY environment variable or pass it as an argument."
             )
 
-        self._client = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None)
-        self._client_v2 = httpx.Client(base_url=DOC_AI_BASE_URL_V2, timeout=None)
+        self._client_v1 = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None)
+        self._aclient_v1: httpx.AsyncClient = httpx.AsyncClient(
+            base_url=DOC_AI_BASE_URL, timeout=None
+        )
+        self._client = httpx.Client(base_url=DOC_AI_BASE_URL_V2, timeout=None)
         self._aclient: httpx.AsyncClient = httpx.AsyncClient(
             base_url=DOC_AI_BASE_URL_V2, timeout=None
         )
+
         if server_url:
-            self._client.base_url = f"{server_url}/documents/v1"
-            self._client_v2.base_url = f"{server_url}/documents/v2"
+            self._client_v1.base_url = f"{server_url}/documents/v1"
+            self._aclient_v1.base_url = f"{server_url}/documents/v1"
+            self._client.base_url = f"{server_url}/documents/v2"
             self._aclient.base_url = f"{server_url}/documents/v2"
 
-        self.__file_uploader__ = FileUploader(api_key=self.api_key)
+        self._file_uploader = FileUploader(api_key=self.api_key)
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -66,15 +70,44 @@ class DocumentAI:
             "Connection": "close",
         }
 
+    def _request_v1(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """
+        Make a request to the v1 API endpoint.
+        """
+        resp = self._client_v1.request(method, url, headers=self._headers(), **kwargs)
+
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            print(f"Error in request to {url}: {e}")
+            print(e.response.text)
+            raise e
+
+        return resp
+
     def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         resp = self._client.request(method, url, headers=self._headers(), **kwargs)
-        resp.raise_for_status()
+
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            print(f"Error in request to {url}: {e}")
+            print(e.response.text)
+            raise e
+
         return resp
 
     async def _arequest(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
-        if self._aclient is None:
-            self._aclient = httpx.AsyncClient(base_url=DOC_AI_BASE_URL_V2)
         resp = await self._aclient.request(
+            method, url, headers=self._headers(), **kwargs
+        )
+        resp.raise_for_status()
+        return resp
+
+    async def _arequest_v1(
+        self, method: str, url: str, **kwargs: Any
+    ) -> httpx.Response:
+        resp = await self._aclient_v1.request(
             method, url, headers=self._headers(), **kwargs
         )
         resp.raise_for_status()
@@ -82,16 +115,11 @@ class DocumentAI:
 
     def __del__(self) -> None:
         self._client.close()
+        self._client_v1.close()
         anyio.run(self._aclient.aclose)
+        anyio.run(self._aclient_v1.aclose)
 
-    def __headers__(self):
-        return {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "Connection": "close",
-        }
-
-    def __create_parse_req__(
+    def _create_parse_req(
         self,
         file: str,
         parsing_options: Optional[ParsingOptions] = None,
@@ -181,33 +209,24 @@ class DocumentAI:
         """
         Parse a document using the v2 API endpoint.
         """
-        client = httpx.Client(base_url=DOC_AI_BASE_URL_V2, timeout=None)
-
-        response = client.post(
-            url="/parse",
-            headers=self.__headers__(),
-            json=self.__create_parse_req__(
-                file,
-                parsing_options,
-                structured_extraction_options,
-                enrichment_options,
-                page_classifications,
-                page_range,
-                labels,
-                mime_type,
-            ),
+        body = self._create_parse_req(
+            file,
+            parsing_options,
+            structured_extraction_options,
+            enrichment_options,
+            page_classifications,
+            page_range,
+            labels,
+            mime_type,
         )
 
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            print(e.response.text)
-            raise e
-        finally:
-            client.close()
+        response = self._request(
+            "POST",
+            "/parse",
+            json=body,
+        )
 
-        resp = response.json()
-        return resp.get("parse_id")
+        return response.json().get("parse_id")
 
     async def parse_async(
         self,
@@ -225,30 +244,26 @@ class DocumentAI:
         """
         Parse a document asynchronously using the v2 API endpoint.
         """
-        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL_V2, timeout=None)
-        try:
-            response = await client.post(
-                url="/parse",
-                headers=self.__headers__(),
-                json=self.__create_parse_req__(
-                    file,
-                    parsing_options,
-                    structured_extraction_options,
-                    enrichment_options,
-                    page_classifications,
-                    page_range,
-                    labels,
-                    mime_type,
-                ),
-            )
-            response.raise_for_status()
-            resp = response.json()
-            return resp.get("parse_id")
-        except httpx.HTTPStatusError as e:
-            print(e.response.text)
-            raise e
-        finally:
-            await client.aclose()
+        body = (
+            self._create_parse_req(
+                file,
+                parsing_options,
+                structured_extraction_options,
+                enrichment_options,
+                page_classifications,
+                page_range,
+                labels,
+                mime_type,
+            ),
+        )
+
+        response = await self._arequest(
+            "POST",
+            "/parse",
+            json=body,
+        )
+
+        return response.json().get("parse_id")
 
     def parse_and_wait(
         self,
@@ -310,31 +325,15 @@ class DocumentAI:
         """
         Get the result of a parse job by its parse ID.
         """
-        client = httpx.Client(base_url=DOC_AI_BASE_URL_V2, timeout=None)
-        try:
-            response = client.get(
-                url=f"parse/{parse_id}",
-                headers=self.__headers__(),
-            )
-            response.raise_for_status()
-            return ParseResult.model_validate(response.json())
-        finally:
-            client.close()
+        response = self._request("GET", f"parse/{parse_id}")
+        return ParseResult.model_validate(response.json())
 
     async def get_parsed_result_async(self, parse_id: str) -> ParseResult:
         """
         Get the result of a parse job by its parse ID asynchronously.
         """
-        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL_V2, timeout=None)
-        try:
-            response = await client.get(
-                url=f"parse/{parse_id}",
-                headers=self.__headers__(),
-            )
-            response.raise_for_status()
-            return ParseResult.model_validate(response.json())
-        finally:
-            await client.aclose()
+        response = await self._arequest("GET", f"parse/{parse_id}")
+        return ParseResult.model_validate(response.json())
 
     def wait_for_completion(self, parse_id) -> ParseResult:
         """
@@ -346,7 +345,7 @@ class DocumentAI:
             print("waiting 5s...")
             time.sleep(5)
             finished_parse = self.get_parsed_result(parse_id)
-            print(f"parse status: {finished_parse.status}")
+            print(f"parse status: {finished_parse.status.name.lower()}")
         return finished_parse
 
     async def wait_for_completion_async(self, parse_id: str) -> ParseResult:
@@ -370,7 +369,15 @@ class DocumentAI:
         """
         Get a list of files.
         """
-        return asyncio.run(self.files_async(cursor))
+        response = self._request_v1(
+            "GET",
+            "files",
+            params={"cursor": cursor} if cursor else None,
+        )
+
+        response.raise_for_status()
+
+        return PaginatedResult[FileInfo].model_validate(response.json())
 
     async def files_async(
         self, cursor: Optional[str] = None
@@ -378,15 +385,15 @@ class DocumentAI:
         """
         Get a list of files asynchronously.
         """
-        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
-        response = await client.get(
-            url="/files",
-            headers=self.__headers__(),
+        response = await self._arequest_v1(
+            "GET",
+            "files",
             params={"cursor": cursor} if cursor else None,
         )
+
         response.raise_for_status()
-        result = PaginatedResult[FileInfo].model_validate(response.json())
-        return result
+
+        return PaginatedResult[FileInfo].model_validate(response.json())
 
     @retry(tries=10, delay=2)
     def upload(self, path: Union[str, Path]) -> str:
@@ -404,7 +411,7 @@ class DocumentAI:
             httpx.HTTPError: If the request fails
             FileNotFoundError: If the file doesn't exist
         """
-        return self.__file_uploader__.upload_file(path)
+        return self._file_uploader.upload_file(path)
 
     @retry(tries=10, delay=2)
     async def upload_async(self, path: Union[str, Path]) -> str:
@@ -429,16 +436,19 @@ class DocumentAI:
         """
         Delete a file by its ID.
         """
-        asyncio.run(self.delete_file_async(file_id))
+        response = self._request_v1(
+            "DELETE",
+            f"files/{file_id}",
+        )
+        response.raise_for_status()
 
     async def delete_file_async(self, file_id: str):
         """
         Delete a file by its ID asynchronously.
         """
-        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
-        response = await client.delete(
-            url=f"files/{file_id}",
-            headers=self.__headers__(),
+        response = await self._arequest_v1(
+            "DELETE",
+            f"files/{file_id}",
         )
         response.raise_for_status()
 
@@ -540,8 +550,8 @@ class DocumentAI:
         data = (await self._arequest("GET", f"/datasets/{slug}")).json()
         return Dataset.model_validate(data)
 
-    def delete_dataset(self, slug: str) -> None:
-        self._request("DELETE", f"/datasets/{slug}")
+    def delete_dataset(self, dataset: Dataset) -> None:
+        self._request("DELETE", f"/datasets/{dataset.slug}")
 
     async def delete_dataset_async(self, slug: str) -> None:
         await self._arequest("DELETE", f"/datasets/{slug}")
@@ -633,70 +643,6 @@ class DocumentAI:
             payload["mime_type"] = mime_type.value
 
         return payload
-
-    # -------------------------------------------------------------------------
-    # Job Management, will be deprecated in the future
-    # -------------------------------------------------------------------------
-
-    def get_job(self, job_id: str) -> Job:
-        """
-        Get the result of a job by its ID.
-        """
-        response = self._client.get(
-            url=f"jobs/{job_id}",
-            headers=self.__headers__(),
-        )
-        response.raise_for_status()
-        return Job.model_validate(response.json())
-
-    async def get_job_async(self, job_id: str) -> Job:
-        """
-        Get the result of a job by its ID asynchronously.
-        """
-        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
-        response = await client.get(
-            url=f"jobs/{job_id}",
-            headers=self.__headers__(),
-        )
-        response.raise_for_status()
-        return Job.model_validate(response.json())
-
-    def delete_job(self, job_id: str):
-        """
-        Delete a job by its ID.
-        """
-        asyncio.run(self.delete_job_async(job_id))
-
-    async def delete_job_async(self, job_id: str):
-        """
-        Delete a job by its ID asynchronously.
-        """
-        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
-        response = await client.delete(
-            url=f"jobs/{job_id}",
-            headers=self.__headers__(),
-        )
-        response.raise_for_status()
-
-    def jobs(self, cursor: Optional[str] = None) -> PaginatedResult[Job]:
-        """
-        Get a list of jobs.
-        """
-        return asyncio.run(self.jobs_async(cursor))
-
-    async def jobs_async(self, cursor: Optional[str] = None) -> PaginatedResult[Job]:
-        """
-        Get a list of jobs asynchronously.
-        """
-        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
-        response = await client.get(
-            url="/jobs",
-            headers=self.__headers__(),
-            params={"cursor": cursor} if cursor else None,
-        )
-        response.raise_for_status()
-        result = PaginatedResult[Job].model_validate(response.json())
-        return result
 
 
 def _drop_none(mapping: MutableMapping[str, Any]) -> Dict[str, Any]:
