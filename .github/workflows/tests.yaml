@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - 'main'
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - '.github/workflows/tests.yaml'
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
     branches:
