@@ -104,16 +104,22 @@ def wait_health_check_failure(test_case: unittest.TestCase, stub: FunctionExecut
 
 
 class TestHealthCheck(unittest.TestCase):
-    def test_not_initialized_success(self):
+    def test_not_initialized_fails(self):
         with FunctionExecutorProcessContextManager(
             DEFAULT_FUNCTION_EXECUTOR_PORT
         ) as process:
             with rpc_channel(process) as channel:
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
-                response: HealthCheckResponse = stub.check_health(
-                    HealthCheckRequest(), timeout=HEALTH_CHECK_TIMEOUT_SEC
-                )
-                self.assertTrue(response.healthy)
+                try:
+                    stub.check_health(
+                        HealthCheckRequest(), timeout=HEALTH_CHECK_TIMEOUT_SEC
+                    )
+                    self.fail("Health check should have failed for not initialized FE.")
+                except RpcError as e:
+                    self.assertIn(
+                        "Function Executor is not initialized",
+                        str(e),
+                    )
 
     def test_function_deadlock_success(self):
         with FunctionExecutorProcessContextManager(

@@ -46,6 +46,7 @@ from .proto.function_executor_pb2_grpc import FunctionExecutorServicer
 
 class Service(FunctionExecutorServicer):
     def __init__(self, logger: Any):
+        # All the fields are set during the initialization call.
         self._logger = logger.bind(module=__name__, **info_response_kv_args())
         self._namespace: Optional[str] = None
         self._graph_name: Optional[str] = None
@@ -54,7 +55,7 @@ class Service(FunctionExecutorServicer):
         self._function_wrapper: Optional[TensorlakeFunctionWrapper] = None
         self._graph_metadata: Optional[ComputeGraphMetadata] = None
         self._invocation_state_proxy_server: Optional[InvocationStateProxyServer] = None
-        self._check_health_handler = CheckHealthHandler(self._logger)
+        self._check_health_handler: Optional[CheckHealthHandler] = None
 
     def initialize(
         self, request: InitializeRequest, context: grpc.ServicerContext
@@ -71,11 +72,6 @@ class Service(FunctionExecutorServicer):
         self._graph_name = request.graph_name
         self._graph_version = request.graph_version
         self._function_name = request.function_name
-        # The function is only loaded once per Function Executor. It's important to use a single
-        # loaded function so all the tasks when executed are sharing the same memory. This allows
-        # implementing smart caching in customer code. E.g. load a model into GPU only once and
-        # share the model's file descriptor between all tasks or download function configuration
-        # only once.
         self._logger = self._logger.bind(
             namespace=request.namespace,
             graph=request.graph_name,
@@ -119,6 +115,12 @@ class Service(FunctionExecutorServicer):
                 function_module, function_manifest.class_import_name
             )
 
+            # The function is only loaded once per Function Executor. It's important to use a single
+            # loaded function so all the tasks when executed are sharing the same memory. This allows
+            # implementing smart caching in customer code. E.g. load a model into GPU only once and
+            # share the model's file descriptor between all tasks or download function configuration
+            # only once.
+            #
             # TODO: capture stdout and stderr the same way as when we run tasks.
             self._function_wrapper = TensorlakeFunctionWrapper(function_class)
         except Exception as e:
@@ -126,7 +128,7 @@ class Service(FunctionExecutorServicer):
                 "function executor service initialization failed",
                 reason="failed to load customer function",
                 duration_sec=f"{time.monotonic() - start_time:.3f}",
-                exc_info=e,
+                # Don't log the exception to FE log as it contains customer data
             )
             return InitializeResponse(
                 outcome_code=InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_FAILURE,
@@ -134,6 +136,8 @@ class Service(FunctionExecutorServicer):
                 stderr="".join(traceback.format_exception(e)),
             )
 
+        # Only pass health checks if FE was initialized successfully.
+        self._check_health_handler = CheckHealthHandler(self._logger)
         self._logger.info(
             "initialized function executor service",
             duration_sec=f"{time.monotonic() - start_time:.3f}",
@@ -178,22 +182,7 @@ class Service(FunctionExecutorServicer):
         # If our code raises an exception the grpc framework converts it into GRPC_STATUS_UNKNOWN
         # error with the exception message. Differentiating errors is not needed for now.
         RunTaskRequestValidator(request=request).check()
-        self._check_task_routed_correctly(request)
 
-        return RunTaskHandler(
-            request=request,
-            graph_name=self._graph_name,
-            graph_version=self._graph_version,
-            function_name=self._function_name,
-            invocation_state=ProxiedInvocationState(
-                request.task_id, self._invocation_state_proxy_server
-            ),
-            function_wrapper=self._function_wrapper,
-            graph_metadata=self._graph_metadata,
-            logger=self._logger,
-        ).run()
-
-    def _check_task_routed_correctly(self, request: RunTaskRequest):
         # Fail with internal error as this happened due to wrong task routing to this Server.
         # If we run the wrongly routed task then it can steal data from this Server if it belongs
         # to a different customer.
@@ -214,9 +203,24 @@ class Service(FunctionExecutorServicer):
                 f"This Function Executor is not initialized for this function_name {request.function_name}"
             )
 
+        return RunTaskHandler(
+            request=request,
+            invocation_state=ProxiedInvocationState(
+                request.task_id, self._invocation_state_proxy_server
+            ),
+            function_wrapper=self._function_wrapper,
+            graph_metadata=self._graph_metadata,
+            logger=self._logger,
+        ).run()
+
     def check_health(
         self, request: HealthCheckRequest, context: grpc.ServicerContext
     ) -> HealthCheckResponse:
+        if self._check_health_handler is None:
+            context.abort(
+                grpc.StatusCode.UNAVAILABLE,
+                "Function Executor is not initialized, please initialize it first",
+            )
         return self._check_health_handler.run(request)
 
     def get_info(
