@@ -1,6 +1,13 @@
-from tensorlake.documentai import DocumentAI
-from tensorlake.documentai.parse import ParsingOptions, ExtractionOptions, ChunkingStrategy, TableParsingStrategy, TableOutputMode
 import json
+
+from tensorlake.documentai import DocumentAI
+from tensorlake.documentai.parse import (
+    ChunkingStrategy,
+    ExtractionOptions,
+    ParsingOptions,
+    TableOutputMode,
+    TableParsingStrategy,
+)
 
 # Initialize Tensorlake with your API key
 api_key = "your_tensorlake_api_key"
@@ -33,9 +40,9 @@ job_id = doc_ai.parse(file_id, options)
 result = doc_ai.get_job(job_id)
 
 while True:
-  result = doc_ai.get_job(job_id)
-  if result.status == "successful":
-    break
+    result = doc_ai.get_job(job_id)
+    if result.status == "successful":
+        break
 
 # Save the result
 with open("output.json", "w") as f:
