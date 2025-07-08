@@ -2,19 +2,30 @@ import unittest
 import os
 
 from tensorlake.documentai.client import DocumentAI
-from tensorlake.documentai.models.options import StructuredExtractionOptions
+from tensorlake.documentai.models.options import (
+    StructuredExtractionOptions,
+    PageClassConfig,
+)
+from tensorlake.documentai.models.enums import ParseStatus
 
 from json_schemas.bank_statement import BankStatement
 
 
 class TestDatasets(unittest.TestCase):
     def test_create_dataset(self):
-        os.environ["TENSORLAKE_API_KEY"] = "DEV_API_KEY"
-        os.environ["INDEXIFY_URL"] = "https://api.tensorlake.dev"
+        server_url = os.getenv("INDEXIFY_URL")
+        self.assertIsNotNone(
+            server_url, "INDEXIFY_URL environment variable is not set."
+        )
+
+        api_key = os.getenv("TENSORLAKE_API_KEY")
+        self.assertIsNotNone(
+            api_key, "TENSORLAKE_API_KEY environment variable is not set."
+        )
 
         doc_ai = DocumentAI(
-            server_url="https://api.tensorlake.dev",
-            api_key="DEV_API_KEY",
+            server_url=server_url,
+            api_key=api_key,
         )
 
         dataset = doc_ai.create_dataset(
@@ -40,12 +51,19 @@ class TestDatasets(unittest.TestCase):
         )
 
     def test_parse_documents(self):
-        os.environ["TENSORLAKE_API_KEY"] = "DEV_API_KEY"
-        os.environ["INDEXIFY_URL"] = "https://api.tensorlake.dev"
+        server_url = os.getenv("INDEXIFY_URL")
+        self.assertIsNotNone(
+            server_url, "INDEXIFY_URL environment variable is not set."
+        )
+
+        api_key = os.getenv("TENSORLAKE_API_KEY")
+        self.assertIsNotNone(
+            api_key, "TENSORLAKE_API_KEY environment variable is not set."
+        )
 
         doc_ai = DocumentAI(
-            server_url="https://api.tensorlake.dev",
-            api_key="DEV_API_KEY",
+            server_url=server_url,
+            api_key=api_key,
         )
 
         dataset = doc_ai.create_dataset(
@@ -71,14 +89,17 @@ class TestDatasets(unittest.TestCase):
         self.assertRaises(Exception, doc_ai.get_parsed_result, parse_id)
 
     def test_structured_extraction_dataset(self):
-        os.environ["TENSORLAKE_API_KEY"] = "DEV_API_KEY"
-        os.environ["INDEXIFY_URL"] = "https://api.tensorlake.dev"
-
-        doc_ai = DocumentAI(
-            server_url="https://api.tensorlake.dev",
-            api_key="DEV_API_KEY",
+        server_url = os.getenv("INDEXIFY_URL")
+        self.assertIsNotNone(
+            server_url, "INDEXIFY_URL environment variable is not set."
         )
 
+        api_key = os.getenv("TENSORLAKE_API_KEY")
+        self.assertIsNotNone(
+            api_key, "TENSORLAKE_API_KEY environment variable is not set."
+        )
+
+        doc_ai = DocumentAI(server_url=server_url, api_key=api_key)
         structured_extraction_options = StructuredExtractionOptions(
             schema_name="form125-basic", json_schema=BankStatement
         )
@@ -91,7 +112,9 @@ class TestDatasets(unittest.TestCase):
 
         self.assertIsNotNone(dataset)
 
-        file_id = doc_ai.upload(path="./testdata/example_bank_statement.pdf")
+        file_id = doc_ai.upload(
+            path="./document_ai/testdata/example_bank_statement.pdf"
+        )
         self.assertIsNotNone(file_id)
 
         parse_id = doc_ai.parse_dataset_file(dataset=dataset, file=file_id)
@@ -116,10 +139,61 @@ class TestDatasets(unittest.TestCase):
             parse_id,
         )
 
-    def test_list_datasets(self):
-        # List the datasets
-        # Assert the datasets are listed
-        pass
+    def test_page_classification_dataset(self):
+        server_url = os.getenv("INDEXIFY_URL")
+        self.assertIsNotNone(
+            server_url, "INDEXIFY_URL environment variable is not set."
+        )
+
+        api_key = os.getenv("TENSORLAKE_API_KEY")
+        self.assertIsNotNone(
+            api_key, "TENSORLAKE_API_KEY environment variable is not set."
+        )
+
+        doc_ai = DocumentAI(
+            server_url=server_url,
+            api_key=api_key,
+        )
+
+        form125_page_class_config = PageClassConfig(
+            name="form125",
+            description="ACORD 125: Applicant Information Section — captures general insured information, business details, and contacts",
+        )
+
+        form140_page_class_config = PageClassConfig(
+            name="form140",
+            description="ACORD 140: Property Section — includes details about property coverage, location, valuation, and limit",
+        )
+
+        dataset = doc_ai.create_dataset(
+            name="Test Dataset with Page Classification",
+            description="This is a test dataset for unit testing with page classification.",
+            page_classifications=[
+                form125_page_class_config,
+                form140_page_class_config,
+            ],
+        )
+
+        self.assertIsNotNone(dataset)
+
+        accord_file_id = doc_ai.upload(path="./document_ai/testdata/acord.pdf")
+        self.assertIsNotNone(accord_file_id)
+
+        parsed_result = doc_ai.parse_dataset_file(
+            dataset=dataset,
+            file=accord_file_id,
+            wait_for_completion=True,
+        )
+        self.assertIsNotNone(parsed_result)
+        self.assertEqual(parsed_result.status, ParseStatus.SUCCESSFUL)
+
+        self.assertIsNotNone(parsed_result.document_layout)
+        self.assertIsNotNone(parsed_result.page_classes)
+        self.assertEqual(
+            len(parsed_result.page_classes), 2, "Expected two page classes"
+        )
+        self.assertIn("form125", parsed_result.page_classes)
+        self.assertIn("form140", parsed_result.page_classes)
 
 
 if __name__ == "__main__":

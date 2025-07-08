@@ -61,7 +61,7 @@ class DocumentAI:
             self._client.base_url = f"{server_url}/documents/v2"
             self._aclient.base_url = f"{server_url}/documents/v2"
 
-        self._file_uploader = FileUploader(api_key=self.api_key)
+        self._file_uploader = FileUploader(api_key=self.api_key, server_url=server_url)
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -522,11 +522,7 @@ class DocumentAI:
         body: Dict[str, Any] = _drop_none({"name": name, "description": description})
         if parsing_options:
             body["parsing_options"] = parsing_options.model_dump(exclude_none=True)
-        if structured_extraction_options:
-            body["structured_extraction_options"] = [
-                opt.model_dump(exclude_none=True)
-                for opt in structured_extraction_options
-            ]
+
         if enrichment_options:
             body["enrichment_options"] = enrichment_options.model_dump(
                 exclude_none=True
@@ -535,6 +531,30 @@ class DocumentAI:
             body["page_classifications"] = [
                 pc.model_dump(exclude_none=True) for pc in page_classifications
             ]
+
+        if structured_extraction_options:
+            converted_options = []
+            for structured_extraction_option in structured_extraction_options:
+                option_dict = structured_extraction_option.model_dump(exclude_none=True)
+
+                # Handle json_schema conversion
+                if hasattr(structured_extraction_option, "json_schema"):
+                    json_schema = structured_extraction_option.json_schema
+                    if inspect.isclass(json_schema) and issubclass(
+                        json_schema, BaseModel
+                    ):
+                        option_dict["json_schema"] = json_schema.model_json_schema()
+                    elif isinstance(json_schema, BaseModel):
+                        option_dict["json_schema"] = json_schema.model_json_schema()
+                    elif isinstance(json_schema, str):
+                        try:
+                            option_dict["json_schema"] = json.loads(json_schema)
+                        except json.JSONDecodeError:
+                            option_dict["json_schema"] = json_schema
+
+                converted_options.append(option_dict)
+
+            body["structured_extraction_options"] = converted_options
 
         print(f"Creating dataset with body: {body}")
         return body

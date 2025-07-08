@@ -11,9 +11,12 @@ enable_fe_test_suite=false
 enable_workflows_sdk_test_suite=false
 enable_cli_test_suite=false
 enable_utils_test_suite=false
+enable_document_ai_test_suite=false
 
 if [[ "$1" == "--function-executor" ]]; then
   enable_fe_test_suite=true
+elif [ "$1" == "--document-ai" ]; then
+  enable_document_ai_test_suite=true
 else
   # All by default
   enable_fe_test_suite=true
@@ -53,6 +56,7 @@ function_executor_test_files=$(find ./function_executor -name 'test_*.py')
 workflows_sdk_test_files=$(find ./workflows_sdk -name 'test_*.py')
 cli_test_files=$(find ./cli -name 'test_*.py')
 utils_test_files=$(find ./utils -name 'test_*.py')
+document_ai_test_files=$(find ./document_ai -name 'test_*.py')
 
 if [ "$enable_fe_test_suite" = true ]; then
   run_test_suite "$function_executor_test_files" "Function Executor"
@@ -69,6 +73,11 @@ fi
 if [ "$enable_utils_test_suite" = true ]; then
   run_test_suite "$utils_test_files" "Utils"
 fi
+
+if [ "$enable_document_ai_test_suite" = true ]; then
+  run_test_suite "$document_ai_test_files" "Document AI"
+fi
+
 
 if [ $tests_exit_code -eq 0 ]; then
   echo "All tests passed!" >> $summary_file

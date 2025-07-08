@@ -6,7 +6,7 @@ import hashlib
 import mimetypes
 import sys
 from pathlib import Path
-from typing import Union
+from typing import Union, Optional
 
 import aiofiles
 import httpx
@@ -45,10 +45,17 @@ class FileUploader:
     Private class for uploading files to DocumentAI.
     """
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, server_url: Optional[str] = None):
+        if not api_key:
+            raise ValueError("API key is required for FileUploader.")
+
         self.api_key = api_key
         self._client = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None)
         self._async_client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
+
+        if server_url:
+            self._client.base_url = f"{server_url}/documents/v1"
+            self._async_client.base_url = f"{server_url}/documents/v1"
 
     def upload_file(self, file_path: str):
         """
