@@ -2,9 +2,12 @@
 DocumentAI models package.
 """
 
+from .datasets import Dataset
+
 # Enums
 from .enums import (
     ChunkingStrategy,
+    DatasetStatus,
     JobStatus,
     MimeType,
     ModelProvider,
@@ -84,4 +87,7 @@ __all__ = [
     "Table",
     "TableCell",
     "Text",
+    # Datasets
+    "Dataset",
+    "DatasetStatus",
 ]

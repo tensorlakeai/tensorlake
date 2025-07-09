@@ -121,3 +121,8 @@ class TableParsingFormat(str, Enum):
 
     TSR = "tsr"
     VLM = "vlm"
+
+
+class DatasetStatus(str, Enum):
+    idle = "idle"
+    processing = "processing"

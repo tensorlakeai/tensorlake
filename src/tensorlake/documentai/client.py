@@ -8,10 +8,11 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Dict, List, MutableMapping, Optional, Union
 
+import anyio
 import httpx
-from pydantic import BaseModel, Json
+from pydantic import BaseModel
 from retry import retry
 
 from tensorlake.documentai.common import (
@@ -19,11 +20,10 @@ from tensorlake.documentai.common import (
     DOC_AI_BASE_URL_V2,
     PaginatedResult,
 )
-from tensorlake.documentai.datasets import Dataset, DatasetOptions
 from tensorlake.documentai.files import FileInfo, FileUploader
 from tensorlake.documentai.models import (
+    Dataset,
     EnrichmentOptions,
-    Job,
     MimeType,
     PageClassConfig,
     ParseResult,
@@ -38,7 +38,7 @@ class DocumentAI:
     Document AI client for Tensorlake.
     """
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, server_url: Optional[str] = None):
         self.api_key = api_key or os.getenv("TENSORLAKE_API_KEY")
 
         if not self.api_key:
@@ -46,17 +46,80 @@ class DocumentAI:
                 "API key is required. Set the TENSORLAKE_API_KEY environment variable or pass it as an argument."
             )
 
-        self._client = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None)
-        self.__file_uploader__ = FileUploader(api_key=self.api_key)
+        self._client_v1 = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None)
+        self._aclient_v1: httpx.AsyncClient = httpx.AsyncClient(
+            base_url=DOC_AI_BASE_URL, timeout=None
+        )
+        self._client = httpx.Client(base_url=DOC_AI_BASE_URL_V2, timeout=None)
+        self._aclient: httpx.AsyncClient = httpx.AsyncClient(
+            base_url=DOC_AI_BASE_URL_V2, timeout=None
+        )
 
-    def __headers__(self):
+        if server_url:
+            self._client_v1.base_url = f"{server_url}/documents/v1"
+            self._aclient_v1.base_url = f"{server_url}/documents/v1"
+            self._client.base_url = f"{server_url}/documents/v2"
+            self._aclient.base_url = f"{server_url}/documents/v2"
+
+        self._file_uploader = FileUploader(api_key=self.api_key, server_url=server_url)
+
+    def _headers(self) -> Dict[str, str]:
         return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "Connection": "close",
         }
 
-    def __create_parse_req__(
+    def _request_v1(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """
+        Make a request to the v1 API endpoint.
+        """
+        resp = self._client_v1.request(method, url, headers=self._headers(), **kwargs)
+
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            print(f"Error in request to {url}: {e}")
+            print(e.response.text)
+            raise e
+
+        return resp
+
+    def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        resp = self._client.request(method, url, headers=self._headers(), **kwargs)
+
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            print(f"Error in request to {url}: {e}")
+            print(e.response.text)
+            raise e
+
+        return resp
+
+    async def _arequest(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        resp = await self._aclient.request(
+            method, url, headers=self._headers(), **kwargs
+        )
+        resp.raise_for_status()
+        return resp
+
+    async def _arequest_v1(
+        self, method: str, url: str, **kwargs: Any
+    ) -> httpx.Response:
+        resp = await self._aclient_v1.request(
+            method, url, headers=self._headers(), **kwargs
+        )
+        resp.raise_for_status()
+        return resp
+
+    def __del__(self) -> None:
+        self._client.close()
+        self._client_v1.close()
+        anyio.run(self._aclient.aclose)
+        anyio.run(self._aclient_v1.aclose)
+
+    def _create_parse_req(
         self,
         file: str,
         parsing_options: Optional[ParsingOptions] = None,
@@ -146,33 +209,24 @@ class DocumentAI:
         """
         Parse a document using the v2 API endpoint.
         """
-        client = httpx.Client(base_url=DOC_AI_BASE_URL_V2, timeout=None)
-
-        response = client.post(
-            url="/parse",
-            headers=self.__headers__(),
-            json=self.__create_parse_req__(
-                file,
-                parsing_options,
-                structured_extraction_options,
-                enrichment_options,
-                page_classifications,
-                page_range,
-                labels,
-                mime_type,
-            ),
+        body = self._create_parse_req(
+            file,
+            parsing_options,
+            structured_extraction_options,
+            enrichment_options,
+            page_classifications,
+            page_range,
+            labels,
+            mime_type,
         )
 
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            print(e.response.text)
-            raise e
-        finally:
-            client.close()
+        response = self._request(
+            "POST",
+            "/parse",
+            json=body,
+        )
 
-        resp = response.json()
-        return resp.get("parse_id")
+        return response.json().get("parse_id")
 
     async def parse_async(
         self,
@@ -190,30 +244,26 @@ class DocumentAI:
         """
         Parse a document asynchronously using the v2 API endpoint.
         """
-        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL_V2, timeout=None)
-        try:
-            response = await client.post(
-                url="/parse",
-                headers=self.__headers__(),
-                json=self.__create_parse_req__(
-                    file,
-                    parsing_options,
-                    structured_extraction_options,
-                    enrichment_options,
-                    page_classifications,
-                    page_range,
-                    labels,
-                    mime_type,
-                ),
-            )
-            response.raise_for_status()
-            resp = response.json()
-            return resp.get("parse_id")
-        except httpx.HTTPStatusError as e:
-            print(e.response.text)
-            raise e
-        finally:
-            await client.aclose()
+        body = (
+            self._create_parse_req(
+                file,
+                parsing_options,
+                structured_extraction_options,
+                enrichment_options,
+                page_classifications,
+                page_range,
+                labels,
+                mime_type,
+            ),
+        )
+
+        response = await self._arequest(
+            "POST",
+            "/parse",
+            json=body,
+        )
+
+        return response.json().get("parse_id")
 
     def parse_and_wait(
         self,
@@ -275,31 +325,15 @@ class DocumentAI:
         """
         Get the result of a parse job by its parse ID.
         """
-        client = httpx.Client(base_url=DOC_AI_BASE_URL_V2, timeout=None)
-        try:
-            response = client.get(
-                url=f"parse/{parse_id}",
-                headers=self.__headers__(),
-            )
-            response.raise_for_status()
-            return ParseResult.model_validate(response.json())
-        finally:
-            client.close()
+        response = self._request("GET", f"parse/{parse_id}")
+        return ParseResult.model_validate(response.json())
 
     async def get_parsed_result_async(self, parse_id: str) -> ParseResult:
         """
         Get the result of a parse job by its parse ID asynchronously.
         """
-        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL_V2, timeout=None)
-        try:
-            response = await client.get(
-                url=f"parse/{parse_id}",
-                headers=self.__headers__(),
-            )
-            response.raise_for_status()
-            return ParseResult.model_validate(response.json())
-        finally:
-            await client.aclose()
+        response = await self._arequest("GET", f"parse/{parse_id}")
+        return ParseResult.model_validate(response.json())
 
     def wait_for_completion(self, parse_id) -> ParseResult:
         """
@@ -311,7 +345,7 @@ class DocumentAI:
             print("waiting 5s...")
             time.sleep(5)
             finished_parse = self.get_parsed_result(parse_id)
-            print(f"parse status: {finished_parse.status}")
+            print(f"parse status: {finished_parse.status.name.lower()}")
         return finished_parse
 
     async def wait_for_completion_async(self, parse_id: str) -> ParseResult:
@@ -335,7 +369,15 @@ class DocumentAI:
         """
         Get a list of files.
         """
-        return asyncio.run(self.files_async(cursor))
+        response = self._request_v1(
+            "GET",
+            "files",
+            params={"cursor": cursor} if cursor else None,
+        )
+
+        response.raise_for_status()
+
+        return PaginatedResult[FileInfo].model_validate(response.json())
 
     async def files_async(
         self, cursor: Optional[str] = None
@@ -343,15 +385,15 @@ class DocumentAI:
         """
         Get a list of files asynchronously.
         """
-        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
-        response = await client.get(
-            url="/files",
-            headers=self.__headers__(),
+        response = await self._arequest_v1(
+            "GET",
+            "files",
             params={"cursor": cursor} if cursor else None,
         )
+
         response.raise_for_status()
-        result = PaginatedResult[FileInfo].model_validate(response.json())
-        return result
+
+        return PaginatedResult[FileInfo].model_validate(response.json())
 
     @retry(tries=10, delay=2)
     def upload(self, path: Union[str, Path]) -> str:
@@ -369,7 +411,7 @@ class DocumentAI:
             httpx.HTTPError: If the request fails
             FileNotFoundError: If the file doesn't exist
         """
-        return self.__file_uploader__.upload_file(path)
+        return self._file_uploader.upload_file(path)
 
     @retry(tries=10, delay=2)
     async def upload_async(self, path: Union[str, Path]) -> str:
@@ -394,16 +436,19 @@ class DocumentAI:
         """
         Delete a file by its ID.
         """
-        asyncio.run(self.delete_file_async(file_id))
+        response = self._request_v1(
+            "DELETE",
+            f"files/{file_id}",
+        )
+        response.raise_for_status()
 
     async def delete_file_async(self, file_id: str):
         """
         Delete a file by its ID asynchronously.
         """
-        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
-        response = await client.delete(
-            url=f"files/{file_id}",
-            headers=self.__headers__(),
+        response = await self._arequest_v1(
+            "DELETE",
+            f"files/{file_id}",
         )
         response.raise_for_status()
 
@@ -411,239 +456,216 @@ class DocumentAI:
     # Dataset Management, will be removed in this module in the future
     # -------------------------------------------------------------------------
 
-    def __create_parse_settings__(self, options: ParsingOptions) -> dict:
-        json_schema = None
-        if options.extraction_options:
-            if isinstance(options.extraction_options.json_schema, str):
-                json_schema = json.loads(options.extraction_options.json_schema)
-            elif isinstance(options.extraction_options.json_schema, dict):
-                json_schema = options.extraction_options.json_schema
-            elif isinstance(options.extraction_options.json_schema, Json):
-                json_schema = json.loads(options.extraction_options.json_schema)
-            elif inspect.isclass(options.extraction_options.json_schema) and issubclass(
-                options.extraction_options.json_schema, BaseModel
-            ):
-                json_schema = options.extraction_options.json_schema.model_json_schema()
-            elif isinstance(options.extraction_options.json_schema, BaseModel):
-                json_schema = options.extraction_options.json_schema.model_json_schema()
-
-        return {
-            "chunkStrategy": (
-                options.chunking_strategy.value if options.chunking_strategy else None
-            ),
-            "tableOutputMode": options.table_output_mode.value,
-            "tableParsingMode": options.table_parsing_strategy.value,
-            "tableSummarizationPrompt": options.table_parsing_prompt,
-            "figureSummarizationPrompt": options.figure_summarization_prompt,
-            "deliverWebhook": options.deliver_webhook,
-            "jsonSchema": json_schema,
-            "structuredExtractionPrompt": (
-                options.extraction_options.prompt
-                if options.extraction_options
-                else None
-            ),
-            "modelProvider": (
-                options.extraction_options.provider.value
-                if options.extraction_options
-                else None
-            ),
-            "skewCorrection": (
-                options.skew_correction
-                if options.skew_correction is not None
-                else False
-            ),
-            "detectSignature": (
-                options.detect_signature
-                if options.detect_signature is not None
-                else False
-            ),
-            "structuredExtractionSkipOcr": (
-                options.extraction_options.skip_ocr
-                if options.extraction_options is not None
-                and options.extraction_options.skip_ocr is not None
-                else False
-            ),
-            "disableLayoutDetection": (
-                options.disable_layout_detection
-                if options.disable_layout_detection is not None
-                else False
-            ),
-            "formDetectionMode": (
-                options.form_detection_mode.value
-                if options.form_detection_mode is not None
-                else "object_detection"
-            ),
-        }
-
-    def __dataset_from_response__(self, response: httpx.Response) -> Dataset:
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                return None
-
-        print(response)
-        print(response.json())
-        resp = response.json()
-
-        settings = ParsingOptions.model_validate(resp.get("settings"))
-        return Dataset(
-            dataset_id=resp.get("id"),
-            name=resp.get("name"),
-            api_key=self.api_key,
-            settings=settings,
-            status=resp.get("status"),
+    def create_dataset(
+        self,
+        name: str,
+        description: Optional[str] = None,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            List[StructuredExtractionOptions]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+    ) -> Dataset:
+        body = self._create_dataset_req(
+            name,
+            description,
+            parsing_options,
+            structured_extraction_options,
+            enrichment_options,
+            page_classifications,
         )
 
-    def create_dataset(
-        self, dataset: DatasetOptions, ignore_if_exists=False
-    ) -> Dataset:
-        """
-        Create a new dataset.
+        response = self._request("POST", "/datasets", json=body).json()
 
-        Args:
-            dataset: The dataset to create.
-        Returns:
-            str: The ID of the created dataset.
-        """
-        return asyncio.run(self.create_dataset_async(dataset, ignore_if_exists))
+        return self.get_dataset(response["slug"])
 
     async def create_dataset_async(
-        self, dataset: DatasetOptions, ignore_if_exists=False
+        self,
+        name: str,
+        description: Optional[str] = None,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            List[StructuredExtractionOptions]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
     ) -> Dataset:
-        """
-        Create a new dataset asynchronously.
-
-        Args:
-            dataset: The dataset to create.
-
-        Returns:
-            str: The ID of the created dataset.
-        """
-
-        if ignore_if_exists:
-            existing_dataset = await self.get_dataset_async(dataset.name)
-            if existing_dataset:
-                return existing_dataset
-
-        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
-        await client.post(
-            url="datasets",
-            headers=self.__headers__(),
-            json={
-                "name": dataset.name,
-                "description": dataset.description,
-                "settings": self.__create_parse_settings__(dataset.options),
-            },
+        body = self._create_dataset_req(
+            name,
+            description,
+            parsing_options,
+            structured_extraction_options,
+            enrichment_options,
+            page_classifications,
         )
 
-        return await self.get_dataset_async(dataset.name)
+        response = await self._arequest("POST", "/datasets", json=body)
+        response_json = response.json()
 
-    def get_dataset(self, name: str) -> Optional[Dataset]:
+        return await self.get_dataset_async(response_json["slug"])
+
+    def _create_dataset_req(
+        self,
+        name: str,
+        description: Optional[str] = None,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            List[StructuredExtractionOptions]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+    ) -> Dict[str, Any]:
         """
-        Get a dataset by its ID.
-
-        Args:
-            dataset_id: The ID of the dataset.
-
-        Returns:
-            Dataset: The dataset.
+        Create a request body for creating a dataset.
         """
+        body: Dict[str, Any] = _drop_none({"name": name, "description": description})
+        if parsing_options:
+            body["parsing_options"] = parsing_options.model_dump(exclude_none=True)
 
-        return asyncio.run(self.get_dataset_async(name))
+        if enrichment_options:
+            body["enrichment_options"] = enrichment_options.model_dump(
+                exclude_none=True
+            )
+        if page_classifications:
+            body["page_classifications"] = [
+                pc.model_dump(exclude_none=True) for pc in page_classifications
+            ]
 
-    async def get_dataset_async(self, name: str) -> Optional[Dataset]:
-        """
-        Get a dataset by its ID asynchronously.
-        """
-        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
-        response = await client.get(
-            url=f"datasets/{name}",
-            headers=self.__headers__(),
+        if structured_extraction_options:
+            converted_options = []
+            for structured_extraction_option in structured_extraction_options:
+                option_dict = structured_extraction_option.model_dump(exclude_none=True)
+
+                # Handle json_schema conversion
+                if hasattr(structured_extraction_option, "json_schema"):
+                    json_schema = structured_extraction_option.json_schema
+                    if inspect.isclass(json_schema) and issubclass(
+                        json_schema, BaseModel
+                    ):
+                        option_dict["json_schema"] = json_schema.model_json_schema()
+                    elif isinstance(json_schema, BaseModel):
+                        option_dict["json_schema"] = json_schema.model_json_schema()
+                    elif isinstance(json_schema, str):
+                        try:
+                            option_dict["json_schema"] = json.loads(json_schema)
+                        except json.JSONDecodeError:
+                            option_dict["json_schema"] = json_schema
+
+                converted_options.append(option_dict)
+
+            body["structured_extraction_options"] = converted_options
+
+        print(f"Creating dataset with body: {body}")
+        return body
+
+    def get_dataset(
+        self,
+        slug: str,
+    ) -> Dataset:
+        data = self._request("GET", f"/datasets/{slug}").json()
+        return Dataset.model_validate(data)
+
+    async def get_dataset_async(self, slug: str) -> Dataset:
+        data = (await self._arequest("GET", f"/datasets/{slug}")).json()
+        return Dataset.model_validate(data)
+
+    def delete_dataset(self, dataset: Dataset) -> None:
+        self._request("DELETE", f"/datasets/{dataset.slug}")
+
+    async def delete_dataset_async(self, slug: str) -> None:
+        await self._arequest("DELETE", f"/datasets/{slug}")
+
+    def parse_dataset_file(
+        self,
+        dataset: Dataset,
+        file: str,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+        wait_for_completion: bool = False,
+    ) -> Union[str, ParseResult]:
+
+        dataset_parse_req = self._create_dataset_parse_req(
+            file,
+            page_range,
+            labels,
+            mime_type,
         )
 
-        return self.__dataset_from_response__(response)
+        response = self._request(
+            "POST",
+            f"/datasets/{dataset.slug}/parse",
+            json=dataset_parse_req,
+        ).json()
 
-    def delete_dataset(self, name: str):
-        """
-        Delete a dataset by its ID.
+        if not wait_for_completion:
+            return response["parse_id"]
 
-        Args:
-            dataset_id: The ID of the dataset.
-        """
-        asyncio.run(self.delete_dataset_async(name))
+        return self.wait_for_completion(response["parse_id"])
 
-    async def delete_dataset_async(self, name: str):
-        """
-        Delete a dataset by its ID asynchronously.
-        """
-        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
-        response = await client.delete(
-            url=f"datasets/{name}",
-            headers=self.__headers__(),
+    async def parse_dataset_file_async(
+        self,
+        dataset: Dataset,
+        file: str,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+        wait_for_completion: bool = False,
+    ) -> Union[str, ParseResult]:
+        dataset_parse_req = self._create_dataset_parse_req(
+            file,
+            page_range,
+            labels,
+            mime_type,
         )
-        response.raise_for_status()
 
-    # -------------------------------------------------------------------------
-    # Job Management, will be deprecated in the future
-    # -------------------------------------------------------------------------
-
-    def get_job(self, job_id: str) -> Job:
-        """
-        Get the result of a job by its ID.
-        """
-        response = self._client.get(
-            url=f"jobs/{job_id}",
-            headers=self.__headers__(),
+        response = await self._arequest(
+            "POST",
+            f"/datasets/{dataset.slug}/parse",
+            json=dataset_parse_req,
         )
-        response.raise_for_status()
-        return Job.model_validate(response.json())
+        response_json = response.json()
 
-    async def get_job_async(self, job_id: str) -> Job:
-        """
-        Get the result of a job by its ID asynchronously.
-        """
-        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
-        response = await client.get(
-            url=f"jobs/{job_id}",
-            headers=self.__headers__(),
-        )
-        response.raise_for_status()
-        return Job.model_validate(response.json())
+        if not wait_for_completion:
+            return response_json["parse_id"]
 
-    def delete_job(self, job_id: str):
-        """
-        Delete a job by its ID.
-        """
-        asyncio.run(self.delete_job_async(job_id))
+        return await self.wait_for_completion_async(response_json["parse_id"])
 
-    async def delete_job_async(self, job_id: str):
+    def _create_dataset_parse_req(
+        self,
+        file: str,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> Dict[str, Any]:
         """
-        Delete a job by its ID asynchronously.
+        Create a request body for parsing a file in a dataset.
         """
-        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
-        response = await client.delete(
-            url=f"jobs/{job_id}",
-            headers=self.__headers__(),
-        )
-        response.raise_for_status()
+        payload = {}
 
-    def jobs(self, cursor: Optional[str] = None) -> PaginatedResult[Job]:
-        """
-        Get a list of jobs.
-        """
-        return asyncio.run(self.jobs_async(cursor))
+        # file check
+        if file.startswith("http://") or file.startswith("https://"):
+            payload["file_url"] = file
+        elif file.startswith("tensorlake-"):
+            payload["file_id"] = file
+        else:
+            payload["raw_text"] = file
 
-    async def jobs_async(self, cursor: Optional[str] = None) -> PaginatedResult[Job]:
-        """
-        Get a list of jobs asynchronously.
-        """
-        client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
-        response = await client.get(
-            url="/jobs",
-            headers=self.__headers__(),
-            params={"cursor": cursor} if cursor else None,
-        )
-        response.raise_for_status()
-        result = PaginatedResult[Job].model_validate(response.json())
-        return result
+        # optional field check
+        if labels:
+            payload["labels"] = labels
+
+        if page_range:
+            payload["page_range"] = page_range
+
+        if mime_type:
+            payload["mime_type"] = mime_type.value
+
+        return payload
+
+
+def _drop_none(mapping: MutableMapping[str, Any]) -> Dict[str, Any]:
+    """Return a copy of *mapping* without keys whose values are ``None``."""
+
+    return {k: v for k, v in mapping.items() if v is not None}
