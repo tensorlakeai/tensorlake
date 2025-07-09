@@ -97,7 +97,7 @@ class TensorlakeCompute:
 
     name: str = ""
     description: str = ""
-    image: Optional[Image] = None
+    image: Image = Image()
     secrets: Optional[List[str]] = None
     accumulate: Optional[Type[Any]] = None
     input_encoder: Optional[str] = "cloudpickle"
@@ -166,7 +166,7 @@ def _process_dict_arg(dict_arg: dict, sig: inspect.Signature) -> Tuple[list, dic
 def tensorlake_function(
     name: Optional[str] = None,
     description: Optional[str] = "",
-    image: Optional[Image] = None,
+    image: Image = Image(),
     accumulate: Optional[Type[BaseModel]] = None,
     input_encoder: Optional[str] = "cloudpickle",
     output_encoder: Optional[str] = "cloudpickle",

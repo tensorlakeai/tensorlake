@@ -70,7 +70,7 @@ class BuildOp(BaseModel):
 
 class Image:
     def __init__(self):
-        self._image_name = None
+        self._image_name = BASE_IMAGE_NAME
         self._tag = "latest"
         self._base_image = BASE_IMAGE_NAME
         self._python_version = LOCAL_PYTHON_VERSION
