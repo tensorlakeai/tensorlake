@@ -2,12 +2,12 @@
 This module contains the data models for the parsing results of a document.
 """
 
-from typing import Dict, List, Optional, Union
+from typing import List, Optional, Union, Any
+from enum import Enum
 
 from pydantic import BaseModel, Field
 
 from .enums import ParseStatus
-from .jobs import Chunk, Document, StructuredData
 from .options import Options
 
 
@@ -20,6 +20,124 @@ class PageClass(BaseModel):
     page_numbers: List[int] = Field(
         description="List of page numbers (1-indexed) where this page class appears"
     )
+
+
+class Text(BaseModel):
+    """
+    Text content of a page fragment.
+    """
+
+    content: str
+
+
+class TableCell(BaseModel):
+    """
+    Table cell content with text and bounding box information.
+    Based on PageFragmentTableCell schema.
+    """
+
+    text: str
+    bounding_box: dict[str, float]
+
+
+class Table(BaseModel):
+    """
+    Table content of a page fragment.
+    Based on PageFragmentTable schema with content, cells, and optional formatting fields.
+    """
+
+    content: str
+    cells: List[TableCell]
+    html: Optional[str] = None
+    markdown: Optional[str] = None
+    table_summary: Optional[str] = None
+
+
+class Figure(BaseModel):
+    """
+    Figure content of a page fragment.
+    Based on PageFragmentFigure schema with content and optional summary.
+    """
+
+    content: str
+    summary: Optional[str] = None
+
+
+class Signature(BaseModel):
+    """
+    Signature content of a page fragment.
+    """
+
+    content: str
+
+
+class PageFragmentType(str, Enum):
+    """
+    Type of a page fragment.
+    """
+
+    SECTION_HEADER = "section_header"
+    TITLE = "title"
+
+    TEXT = "text"
+    TABLE = "table"
+    FIGURE = "figure"
+    FORMULA = "formula"
+    FORM = "form"
+    KEY_VALUE_REGION = "key_value_region"
+    DOCUMENT_INDEX = "document_index"
+    LIST_ITEM = "list_item"
+
+    TABLE_CAPTION = "table_caption"
+    FIGURE_CAPTION = "figure_caption"
+    FORMULA_CAPTION = "formula_caption"
+
+    PAGE_FOOTER = "page_footer"
+    PAGE_HEADER = "page_header"
+    PAGE_NUMBER = "page_number"
+    SIGNATURE = "signature"
+    STRIKETHROUGH = "strikethrough"
+
+
+class PageFragment(BaseModel):
+    """
+    Page fragment in a document.
+    """
+
+    fragment_type: PageFragmentType
+    content: Union[Text, Table, Figure, Signature]
+    reading_order: Optional[int] = None
+    bbox: Optional[dict[str, float]] = None
+
+
+class Page(BaseModel):
+    """
+    Page in a document.
+    """
+
+    dimensions: Optional[List[int]] = None
+    page_fragments: Optional[List[PageFragment]] = None
+    page_number: int
+
+
+class StructuredData(BaseModel):
+    """
+    DocumentAI structured data class.
+    Can contain either a single data item or a list of data items.
+    """
+
+    data: Any = Field()
+    page_numbers: Union[int, List[int]] = Field()
+    schema_name: Optional[str] = Field(default=None)
+
+
+class Chunk(BaseModel):
+    """
+    Chunk of a Page in a Document.
+    """
+
+    page_number: int
+    content: str
 
 
 class ParseRequestOptions(BaseModel):
@@ -66,7 +184,7 @@ class ParseResult(BaseModel):
         default=None,
         description="Chunks of layout text extracted from the document. This is a vector of `Chunk` objects, each containing a piece of text extracted from the document. The chunks are typically used for further processing, such as indexing or searching. The value will vary depending on the chunking strategy used during parsing.",
     )
-    document_layout: Optional[Document] = Field(
+    pages: Optional[List[Page]] = Field(
         default=None,
         description="The layout of the document. This is a JSON object that contains the layout information of the document. It can be used to understand the structure of the document, such as the position of text, tables, figures, etc.",
     )
