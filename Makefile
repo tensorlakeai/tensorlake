@@ -33,4 +33,7 @@ check:
 test:
 	cd tests && ./run_tests.sh
 
-.PHONY: all build build_proto fmt test
+test_document_ai:
+	cd tests && ./run_tests.sh --document-ai
+
+.PHONY: all build build_proto fmt test test_document_ai
