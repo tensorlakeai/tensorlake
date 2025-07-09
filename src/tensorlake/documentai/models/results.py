@@ -70,15 +70,13 @@ class ParseResult(BaseModel):
         default=None,
         description="The layout of the document. This is a JSON object that contains the layout information of the document. It can be used to understand the structure of the document, such as the position of text, tables, figures, etc.",
     )
-    page_classes: Optional[Dict[str, PageClass]] = Field(
+    page_classes: Optional[List[PageClass]] = Field(
         default=None,
-        description="Page classes extracted from the document. This is a map where the keys are page class names provided in the parse request under the `page_classification_options` field, and the values are PageClass objects containing the class name and page numbers where each page class appears.",
+        description="Page classes extracted from the document. This is a list of `PageClass` objects containing the class name and page numbers where each page class appears.",
     )
-    structured_data: Optional[
-        Dict[str, Union[StructuredData, List[StructuredData]]]
-    ] = Field(
+    structured_data: Optional[List[StructuredData]] = Field(
         default=None,
-        description="Structured data extracted from the document. The structured data is a map where the keys are the names of the json schema provided in the parse request, and the values are `StructuredData` objects containing the structured data extracted from the document; formatted according to the schema. When the `structured_extraction` option uses a `chunking_strategy` of `None`, the structured data will be extracted from the entire document, and it will be represented as a single entry in the map with the schema name as the key. When the `structured_extraction` option uses a `chunking_strategy`, the structured data will be extracted from each chunk of text, and it will be represented as multiple entries in the map, with the schema name as the key and a vector of `StructuredData` objects as the value. This is used to extract structured information from the document, such as tables, forms, or other structured content.",
+        description="Structured data extracted from the document. The structured data is a list of `StructuredData` objects containing the structured data extracted from the document; formatted according to the schema. This is used to extract structured information from the document, such as tables, forms, or other structured content.",
     )
 
     # ParseResult specific fields
