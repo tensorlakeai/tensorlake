@@ -9,6 +9,8 @@ from google.protobuf import message as _message
 from google.protobuf.internal import containers as _containers
 from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 
+from tensorlake.function_executor.proto.google.rpc import status_pb2 as _status_pb2
+
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class SerializedObjectEncoding(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
@@ -130,8 +132,12 @@ class SetInvocationStateRequest(_message.Message):
     ) -> None: ...
 
 class SetInvocationStateResponse(_message.Message):
-    __slots__ = ()
-    def __init__(self) -> None: ...
+    __slots__ = ("status",)
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    status: _status_pb2.Status
+    def __init__(
+        self, status: _Optional[_Union[_status_pb2.Status, _Mapping]] = ...
+    ) -> None: ...
 
 class GetInvocationStateRequest(_message.Message):
     __slots__ = ("key",)
@@ -140,15 +146,18 @@ class GetInvocationStateRequest(_message.Message):
     def __init__(self, key: _Optional[str] = ...) -> None: ...
 
 class GetInvocationStateResponse(_message.Message):
-    __slots__ = ("key", "value")
+    __slots__ = ("key", "value", "status")
     KEY_FIELD_NUMBER: _ClassVar[int]
     VALUE_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
     key: str
     value: SerializedObject
+    status: _status_pb2.Status
     def __init__(
         self,
         key: _Optional[str] = ...,
         value: _Optional[_Union[SerializedObject, _Mapping]] = ...,
+        status: _Optional[_Union[_status_pb2.Status, _Mapping]] = ...,
     ) -> None: ...
 
 class InvocationStateRequest(_message.Message):
@@ -346,4 +355,287 @@ class InfoResponse(_message.Message):
         sdk_version: _Optional[str] = ...,
         sdk_language: _Optional[str] = ...,
         sdk_language_version: _Optional[str] = ...,
+    ) -> None: ...
+
+class SerializedObjectID(_message.Message):
+    __slots__ = ("value",)
+    VALUE_FIELD_NUMBER: _ClassVar[int]
+    value: str
+    def __init__(self, value: _Optional[str] = ...) -> None: ...
+
+class SerializedObjectManifest(_message.Message):
+    __slots__ = ("id", "encoding", "encoding_version", "size", "sha256_hash")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    ENCODING_FIELD_NUMBER: _ClassVar[int]
+    ENCODING_VERSION_FIELD_NUMBER: _ClassVar[int]
+    SIZE_FIELD_NUMBER: _ClassVar[int]
+    SHA256_HASH_FIELD_NUMBER: _ClassVar[int]
+    id: SerializedObjectID
+    encoding: SerializedObjectEncoding
+    encoding_version: int
+    size: int
+    sha256_hash: str
+    def __init__(
+        self,
+        id: _Optional[_Union[SerializedObjectID, _Mapping]] = ...,
+        encoding: _Optional[_Union[SerializedObjectEncoding, str]] = ...,
+        encoding_version: _Optional[int] = ...,
+        size: _Optional[int] = ...,
+        sha256_hash: _Optional[str] = ...,
+    ) -> None: ...
+
+class SerializedObjectChunk(_message.Message):
+    __slots__ = ("id", "data")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    DATA_FIELD_NUMBER: _ClassVar[int]
+    id: SerializedObjectID
+    data: bytes
+    def __init__(
+        self,
+        id: _Optional[_Union[SerializedObjectID, _Mapping]] = ...,
+        data: _Optional[bytes] = ...,
+    ) -> None: ...
+
+class UploadSerializedObjectRequest(_message.Message):
+    __slots__ = ("manifest", "chunk")
+    MANIFEST_FIELD_NUMBER: _ClassVar[int]
+    CHUNK_FIELD_NUMBER: _ClassVar[int]
+    manifest: SerializedObjectManifest
+    chunk: SerializedObjectChunk
+    def __init__(
+        self,
+        manifest: _Optional[_Union[SerializedObjectManifest, _Mapping]] = ...,
+        chunk: _Optional[_Union[SerializedObjectChunk, _Mapping]] = ...,
+    ) -> None: ...
+
+class UploadSerializedObjectResponse(_message.Message):
+    __slots__ = ("status", "id")
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    ID_FIELD_NUMBER: _ClassVar[int]
+    status: _status_pb2.Status
+    id: SerializedObjectID
+    def __init__(
+        self,
+        status: _Optional[_Union[_status_pb2.Status, _Mapping]] = ...,
+        id: _Optional[_Union[SerializedObjectID, _Mapping]] = ...,
+    ) -> None: ...
+
+class OpenSessionRequest(_message.Message):
+    __slots__ = ("session_id",)
+    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    session_id: str
+    def __init__(self, session_id: _Optional[str] = ...) -> None: ...
+
+class LeaveSessionRequest(_message.Message):
+    __slots__ = ("close",)
+    CLOSE_FIELD_NUMBER: _ClassVar[int]
+    close: bool
+    def __init__(self, close: bool = ...) -> None: ...
+
+class TaskAllocationInput(_message.Message):
+    __slots__ = (
+        "graph_invocation_id",
+        "task_id",
+        "allocation_id",
+        "function_input",
+        "function_init_value",
+    )
+    GRAPH_INVOCATION_ID_FIELD_NUMBER: _ClassVar[int]
+    TASK_ID_FIELD_NUMBER: _ClassVar[int]
+    ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_INPUT_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_INIT_VALUE_FIELD_NUMBER: _ClassVar[int]
+    graph_invocation_id: str
+    task_id: str
+    allocation_id: str
+    function_input: SerializedObjectID
+    function_init_value: SerializedObjectID
+    def __init__(
+        self,
+        graph_invocation_id: _Optional[str] = ...,
+        task_id: _Optional[str] = ...,
+        allocation_id: _Optional[str] = ...,
+        function_input: _Optional[_Union[SerializedObjectID, _Mapping]] = ...,
+        function_init_value: _Optional[_Union[SerializedObjectID, _Mapping]] = ...,
+    ) -> None: ...
+
+class RunTaskAllocationsRequest(_message.Message):
+    __slots__ = ("allocations",)
+    ALLOCATIONS_FIELD_NUMBER: _ClassVar[int]
+    allocations: _containers.RepeatedCompositeFieldContainer[TaskAllocationInput]
+    def __init__(
+        self,
+        allocations: _Optional[_Iterable[_Union[TaskAllocationInput, _Mapping]]] = ...,
+    ) -> None: ...
+
+class RunTaskAllocationsSessionClientMessage(_message.Message):
+    __slots__ = (
+        "open_session_request",
+        "upload_serialized_object_request",
+        "upload_serialized_object_response",
+        "run_task_allocations_request",
+        "set_invocation_state_response",
+        "get_invocation_state_response",
+        "leave_session_request",
+    )
+    OPEN_SESSION_REQUEST_FIELD_NUMBER: _ClassVar[int]
+    UPLOAD_SERIALIZED_OBJECT_REQUEST_FIELD_NUMBER: _ClassVar[int]
+    UPLOAD_SERIALIZED_OBJECT_RESPONSE_FIELD_NUMBER: _ClassVar[int]
+    RUN_TASK_ALLOCATIONS_REQUEST_FIELD_NUMBER: _ClassVar[int]
+    SET_INVOCATION_STATE_RESPONSE_FIELD_NUMBER: _ClassVar[int]
+    GET_INVOCATION_STATE_RESPONSE_FIELD_NUMBER: _ClassVar[int]
+    LEAVE_SESSION_REQUEST_FIELD_NUMBER: _ClassVar[int]
+    open_session_request: OpenSessionRequest
+    upload_serialized_object_request: UploadSerializedObjectRequest
+    upload_serialized_object_response: UploadSerializedObjectResponse
+    run_task_allocations_request: RunTaskAllocationsRequest
+    set_invocation_state_response: SetInvocationStateResponse
+    get_invocation_state_response: GetInvocationStateResponse
+    leave_session_request: LeaveSessionRequest
+    def __init__(
+        self,
+        open_session_request: _Optional[_Union[OpenSessionRequest, _Mapping]] = ...,
+        upload_serialized_object_request: _Optional[
+            _Union[UploadSerializedObjectRequest, _Mapping]
+        ] = ...,
+        upload_serialized_object_response: _Optional[
+            _Union[UploadSerializedObjectResponse, _Mapping]
+        ] = ...,
+        run_task_allocations_request: _Optional[
+            _Union[RunTaskAllocationsRequest, _Mapping]
+        ] = ...,
+        set_invocation_state_response: _Optional[
+            _Union[SetInvocationStateResponse, _Mapping]
+        ] = ...,
+        get_invocation_state_response: _Optional[
+            _Union[GetInvocationStateResponse, _Mapping]
+        ] = ...,
+        leave_session_request: _Optional[_Union[LeaveSessionRequest, _Mapping]] = ...,
+    ) -> None: ...
+
+class OpenSessionResponse(_message.Message):
+    __slots__ = ("status", "is_new")
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    IS_NEW_FIELD_NUMBER: _ClassVar[int]
+    status: _status_pb2.Status
+    is_new: bool
+    def __init__(
+        self,
+        status: _Optional[_Union[_status_pb2.Status, _Mapping]] = ...,
+        is_new: bool = ...,
+    ) -> None: ...
+
+class LeaveSessionResponse(_message.Message):
+    __slots__ = ("status",)
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    status: _status_pb2.Status
+    def __init__(
+        self, status: _Optional[_Union[_status_pb2.Status, _Mapping]] = ...
+    ) -> None: ...
+
+class TaskAllocationOutput(_message.Message):
+    __slots__ = (
+        "graph_invocation_id",
+        "task_id",
+        "allocation_id",
+        "outcome_code",
+        "failure_reason",
+        "function_outputs",
+        "invocation_error_output",
+        "stdout",
+        "stderr",
+        "next_functions",
+        "metrics",
+    )
+    GRAPH_INVOCATION_ID_FIELD_NUMBER: _ClassVar[int]
+    TASK_ID_FIELD_NUMBER: _ClassVar[int]
+    ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
+    OUTCOME_CODE_FIELD_NUMBER: _ClassVar[int]
+    FAILURE_REASON_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_OUTPUTS_FIELD_NUMBER: _ClassVar[int]
+    INVOCATION_ERROR_OUTPUT_FIELD_NUMBER: _ClassVar[int]
+    STDOUT_FIELD_NUMBER: _ClassVar[int]
+    STDERR_FIELD_NUMBER: _ClassVar[int]
+    NEXT_FUNCTIONS_FIELD_NUMBER: _ClassVar[int]
+    METRICS_FIELD_NUMBER: _ClassVar[int]
+    graph_invocation_id: str
+    task_id: str
+    allocation_id: str
+    outcome_code: TaskOutcomeCode
+    failure_reason: TaskFailureReason
+    function_outputs: _containers.RepeatedCompositeFieldContainer[SerializedObjectID]
+    invocation_error_output: SerializedObjectID
+    stdout: SerializedObjectID
+    stderr: SerializedObjectID
+    next_functions: _containers.RepeatedScalarFieldContainer[str]
+    metrics: Metrics
+    def __init__(
+        self,
+        graph_invocation_id: _Optional[str] = ...,
+        task_id: _Optional[str] = ...,
+        allocation_id: _Optional[str] = ...,
+        outcome_code: _Optional[_Union[TaskOutcomeCode, str]] = ...,
+        failure_reason: _Optional[_Union[TaskFailureReason, str]] = ...,
+        function_outputs: _Optional[
+            _Iterable[_Union[SerializedObjectID, _Mapping]]
+        ] = ...,
+        invocation_error_output: _Optional[_Union[SerializedObjectID, _Mapping]] = ...,
+        stdout: _Optional[_Union[SerializedObjectID, _Mapping]] = ...,
+        stderr: _Optional[_Union[SerializedObjectID, _Mapping]] = ...,
+        next_functions: _Optional[_Iterable[str]] = ...,
+        metrics: _Optional[_Union[Metrics, _Mapping]] = ...,
+    ) -> None: ...
+
+class RunTaskAllocationsResponse(_message.Message):
+    __slots__ = ("allocations",)
+    ALLOCATIONS_FIELD_NUMBER: _ClassVar[int]
+    allocations: _containers.RepeatedCompositeFieldContainer[TaskAllocationOutput]
+    def __init__(
+        self,
+        allocations: _Optional[_Iterable[_Union[TaskAllocationOutput, _Mapping]]] = ...,
+    ) -> None: ...
+
+class RunTaskAllocationsSessionServerMessage(_message.Message):
+    __slots__ = (
+        "open_session_response",
+        "upload_serialized_object_request",
+        "upload_serialized_object_response",
+        "run_task_allocations_response",
+        "set_invocation_state_request",
+        "get_invocation_state_request",
+        "leave_session_response",
+    )
+    OPEN_SESSION_RESPONSE_FIELD_NUMBER: _ClassVar[int]
+    UPLOAD_SERIALIZED_OBJECT_REQUEST_FIELD_NUMBER: _ClassVar[int]
+    UPLOAD_SERIALIZED_OBJECT_RESPONSE_FIELD_NUMBER: _ClassVar[int]
+    RUN_TASK_ALLOCATIONS_RESPONSE_FIELD_NUMBER: _ClassVar[int]
+    SET_INVOCATION_STATE_REQUEST_FIELD_NUMBER: _ClassVar[int]
+    GET_INVOCATION_STATE_REQUEST_FIELD_NUMBER: _ClassVar[int]
+    LEAVE_SESSION_RESPONSE_FIELD_NUMBER: _ClassVar[int]
+    open_session_response: OpenSessionResponse
+    upload_serialized_object_request: UploadSerializedObjectRequest
+    upload_serialized_object_response: UploadSerializedObjectResponse
+    run_task_allocations_response: RunTaskAllocationsResponse
+    set_invocation_state_request: SetInvocationStateRequest
+    get_invocation_state_request: GetInvocationStateRequest
+    leave_session_response: LeaveSessionResponse
+    def __init__(
+        self,
+        open_session_response: _Optional[_Union[OpenSessionResponse, _Mapping]] = ...,
+        upload_serialized_object_request: _Optional[
+            _Union[UploadSerializedObjectRequest, _Mapping]
+        ] = ...,
+        upload_serialized_object_response: _Optional[
+            _Union[UploadSerializedObjectResponse, _Mapping]
+        ] = ...,
+        run_task_allocations_response: _Optional[
+            _Union[RunTaskAllocationsResponse, _Mapping]
+        ] = ...,
+        set_invocation_state_request: _Optional[
+            _Union[SetInvocationStateRequest, _Mapping]
+        ] = ...,
+        get_invocation_state_request: _Optional[
+            _Union[GetInvocationStateRequest, _Mapping]
+        ] = ...,
+        leave_session_response: _Optional[_Union[LeaveSessionResponse, _Mapping]] = ...,
     ) -> None: ...
