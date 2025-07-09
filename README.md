@@ -1,7 +1,7 @@
 <a name="readme-top"></a>
 # Tensorlake SDK
 
-[![Discord](https://dcbadge.vercel.app/api/server/VXkY7zVmTD?style=flat&compact=true)](https://discord.gg/VXkY7zVmTD) ![PyPI - Version](https://img.shields.io/pypi/v/tensorlake)
+![PyPI - Version](https://img.shields.io/pypi/v/tensorlake)
 
 Tensorlake provides Document Ingestion APIs and a runtime to build and deploy data workflows on a fully managed compute infrastructure including GPUs.
 
@@ -79,7 +79,7 @@ options = ParsingOptions(
 job_id = doc_ai.parse(file_id, options=options)
 ```
 
-Structured Extraction is guided by the provided schema. We support Pydantic Models as well JSON Schema. All the levers for structured extraction are (documented here)[https://docs.tensorlake.ai/api-reference/extract/extract-file-async].
+Structured Extraction is guided by the provided schema. We support Pydantic Models as well JSON Schema. All the levers for structured extraction are (documented here)[https://docs.tensorlake.ai/document-ingestion/parsing/structured-extraction].
 
 We recommend adding a description to each field in the schema, as it helps the model to learn the context of the field.
 

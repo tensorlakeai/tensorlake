@@ -12,10 +12,13 @@ from testing import (
 
 from tensorlake import Graph
 from tensorlake.function_executor.proto.function_executor_pb2 import (
+    InitializationOutcomeCode,
     InitializeRequest,
     InitializeResponse,
     RunTaskResponse,
     SerializedObject,
+    SerializedObjectEncoding,
+    TaskOutcomeCode,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
@@ -60,14 +63,18 @@ class TestMemoryUsage(unittest.TestCase):
                         graph_version="1",
                         function_name="process_rss_mb",
                         graph=SerializedObject(
-                            bytes=zip_graph_code(
+                            data=zip_graph_code(
                                 graph=graph, code_dir_path=GRAPH_CODE_DIR_PATH
                             ),
-                            content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
+                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                            encoding_version=0,
                         ),
                     )
                 )
-                self.assertTrue(initialize_response.success)
+                self.assertEqual(
+                    initialize_response.outcome_code,
+                    InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_SUCCESS,
+                )
 
                 run_task_response: RunTaskResponse = run_task(
                     stub,
@@ -75,10 +82,13 @@ class TestMemoryUsage(unittest.TestCase):
                     input=0,
                 )
 
-                self.assertTrue(run_task_response.success)
+                self.assertEqual(
+                    run_task_response.outcome_code,
+                    TaskOutcomeCode.TASK_OUTCOME_CODE_SUCCESS,
+                )
 
                 fn_outputs = deserialized_function_output(
-                    self, run_task_response.function_output
+                    self, run_task_response.function_outputs
                 )
                 self.assertEqual(len(fn_outputs), 1)
                 fe_process_rss_mb = fn_outputs[0]

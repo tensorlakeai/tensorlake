@@ -19,7 +19,7 @@ class RequestValidator:
             .required_field("function_name")
             .required_field("graph_invocation_id")
             .required_field("task_id")
+            .required_field("allocation_id")
             .required_serialized_object("function_input")
             .optional_serialized_object("function_init_value")
         )
-        # TODO: make allocation_id required once Executor is updated to pass it.

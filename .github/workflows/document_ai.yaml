@@ -1,0 +1,88 @@
+name: Document AI Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to run the tests against"
+        required: true
+        default: prod
+        type: choice
+        options:
+          - dev
+          - prod
+
+  push:
+    branches:
+      - "main"
+    paths:
+      - "tests/document_ai/**"
+      - "src/tensorlake/documentai/**"
+      - "pyproject.toml"
+      - ".github/workflows/document_ai.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  test_document_ai_dispatch:
+    if: github.event_name == 'workflow_dispatch'
+    environment: ${{ inputs.environment }}
+    name: Document AI Tests (manual)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 2.0.0
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Build and lint tensorlake
+        run: make build && make check
+
+      - name: Run Document AI tests
+        run: make test_document_ai
+        env:
+          INDEXIFY_URL: ${{ secrets.INDEXIFY_URL }}
+          TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
+
+  test_document_ai_main:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'workflow_dispatch'
+    environment: prod
+    name: Document AI Tests (main branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 2.0.0
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Build and lint tensorlake
+        run: make build && make check
+
+      - name: Run Document AI tests
+        run: make test_document_ai
+        env:
+          INDEXIFY_URL: ${{ secrets.INDEXIFY_URL }}
+          TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}

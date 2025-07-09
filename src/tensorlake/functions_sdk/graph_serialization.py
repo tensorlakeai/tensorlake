@@ -4,13 +4,14 @@ import os
 import pathlib
 import stat
 import zipfile
-from typing import Dict, List, Union
+from typing import Dict, List
 
 import click
 from pydantic import BaseModel
 
 from .functions import TensorlakeCompute
 from .graph import Graph
+from .graph_definition import ComputeGraphMetadata
 
 
 class FunctionManifest(BaseModel):
@@ -21,6 +22,10 @@ class FunctionManifest(BaseModel):
     module_import_name: str
     # The string used to import the function class from its module.
     class_import_name: str
+
+
+GRAPH_MANIFEST_FILE_NAME = "graph_manifest.json"
+GRAPH_METADATA_FILE_NAME = "graph_metadata.json"
 
 
 class GraphManifest(BaseModel):
@@ -61,6 +66,7 @@ def zip_graph_code(graph: Graph, code_dir_path: str) -> bytes:
         _zip_graph_code(
             zip_buffer=zip_buffer,
             graph_manifest=graph_manifest,
+            graph_metadata=graph.definition(),
             code_dir_path=code_dir_path,
         )
         return zip_buffer.getvalue()
@@ -70,9 +76,12 @@ def zip_graph_code(graph: Graph, code_dir_path: str) -> bytes:
 
 
 def _zip_graph_code(
-    zip_buffer: io.BytesIO, graph_manifest: GraphManifest, code_dir_path: str
+    zip_buffer: io.BytesIO,
+    graph_manifest: GraphManifest,
+    graph_metadata: ComputeGraphMetadata,
+    code_dir_path: str,
 ) -> None:
-    """Zips the graph code directory and writes it to the ZIP buffer.
+    """Zips the graph code directory and metadata and writes it to the ZIP buffer.
 
     Raises ValueError if failed to create the ZIP archive due to graph code directory issues.
     """
@@ -85,7 +94,8 @@ def _zip_graph_code(
         allowZip64=False,
         compresslevel=5,
     ) as zipf:
-        zipf.writestr("graph_manifest.json", graph_manifest.model_dump_json())
+        zipf.writestr(GRAPH_MANIFEST_FILE_NAME, graph_manifest.model_dump_json())
+        zipf.writestr(GRAPH_METADATA_FILE_NAME, graph_metadata.model_dump_json())
         for dir_path, _, file_names in os.walk(
             code_dir_path, followlinks=_FOLLOW_LINKS
         ):

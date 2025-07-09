@@ -1,4 +1,8 @@
-from .proto.function_executor_pb2 import InitializeRequest
+from .proto.function_executor_pb2 import (
+    InitializeRequest,
+    SerializedObject,
+    SerializedObjectEncoding,
+)
 from .proto.message_validator import MessageValidator
 
 
@@ -19,3 +23,11 @@ class InitializeRequestValidator:
             .required_field("function_name")
             .required_serialized_object("graph")
         )
+        graph: SerializedObject = self._request.graph
+        if (
+            graph.encoding
+            != SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP
+        ):
+            raise ValueError(
+                f"Invalid graph encoding: {SerializedObjectEncoding.Name(graph.encoding)}. Expected: BINARY_ZIP"
+            )

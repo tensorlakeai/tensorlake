@@ -1,4 +1,3 @@
-import datetime
 import hashlib
 import importlib
 import logging
@@ -69,29 +68,9 @@ class BuildOp(BaseModel):
             raise ValueError(f"Unsupported build op type {self.op_type}")
 
 
-class Build(BaseModel):
-    """
-    Model for talking with the build service.
-    """
-
-    id: Optional[int] = None
-    namespace: str
-    image_name: str
-    image_hash: str
-    status: Optional[str] = None
-    result: Optional[str] = None
-    error_message: Optional[str] = None  # Only provided when result is "failed"
-
-    created_at: Optional[datetime.datetime] = None
-    started_at: Optional[datetime.datetime] = None
-    build_completed_at: Optional[datetime.datetime] = None
-    push_completed_at: Optional[datetime.datetime] = None
-    uri: Optional[str] = None
-
-
 class Image:
     def __init__(self):
-        self._image_name = None
+        self._image_name = BASE_IMAGE_NAME
         self._tag = "latest"
         self._base_image = BASE_IMAGE_NAME
         self._python_version = LOCAL_PYTHON_VERSION

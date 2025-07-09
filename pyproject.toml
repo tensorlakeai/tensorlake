@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tensorlake"
-version = "0.2.6"
+version = "0.2.18"
 description = "Tensorlake SDK for Document Ingestion API and Serverless Workflows"
 authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
 homepage = "https://github.com/tensorlakeai/tensorlake"
@@ -37,10 +37,10 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.group.dev.dependencies]
 black = "25.1.0"
-pylint = "3.3.7"
 parameterized = "^0.9.0"
 respx = "^0.22.0"
 psutil = "^7.0.0"
+isort = "^6.0.1"
 
 [tool.poetry.plugins."poetry.command"]
 postinstall = "scripts:install_deps"

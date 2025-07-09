@@ -1,4 +1,3 @@
-import os
 import threading
 import time
 import unittest
@@ -18,14 +17,17 @@ from tensorlake import Graph
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     GetInvocationStateRequest,
     GetInvocationStateResponse,
+    InitializationOutcomeCode,
     InitializeRequest,
     InitializeResponse,
     InvocationStateRequest,
     InvocationStateResponse,
     RunTaskResponse,
     SerializedObject,
+    SerializedObjectEncoding,
     SetInvocationStateRequest,
     SetInvocationStateResponse,
+    TaskOutcomeCode,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
@@ -75,10 +77,10 @@ def invocation_state_client_stub(
                 # into models that have corretly functioning equality operator.
                 test_case.assertEqual(
                     CloudPickleSerializer.deserialize(
-                        request.set.value.bytes
+                        request.set.value.data
                     ).model_dump(),
                     CloudPickleSerializer.deserialize(
-                        expected_request.set.value.bytes
+                        expected_request.set.value.data
                     ).model_dump(),
                 )
             else:
@@ -116,14 +118,16 @@ class TestSetInvocationState(unittest.TestCase):
                 graph_version="1",
                 function_name="set_invocation_state",
                 graph=SerializedObject(
-                    bytes=zip_graph_code(
-                        graph=graph, code_dir_path=GRAPH_CODE_DIR_PATH
-                    ),
-                    content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
+                    data=zip_graph_code(graph=graph, code_dir_path=GRAPH_CODE_DIR_PATH),
+                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                    encoding_version=0,
                 ),
             )
         )
-        self.assertTrue(initialize_response.success)
+        self.assertEqual(
+            initialize_response.outcome_code,
+            InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_SUCCESS,
+        )
 
     def test_success(self):
         with FunctionExecutorProcessContextManager(
@@ -139,8 +143,7 @@ class TestSetInvocationState(unittest.TestCase):
                         set=SetInvocationStateRequest(
                             key="test_state_key",
                             value=SerializedObject(
-                                content_type=CloudPickleSerializer.content_type,
-                                bytes=CloudPickleSerializer.serialize(
+                                data=CloudPickleSerializer.serialize(
                                     StructuredState(
                                         string="hello",
                                         integer=42,
@@ -149,6 +152,8 @@ class TestSetInvocationState(unittest.TestCase):
                                         ),
                                     )
                                 ),
+                                encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
+                                encoding_version=0,
                             ),
                         ),
                     ),
@@ -164,9 +169,12 @@ class TestSetInvocationState(unittest.TestCase):
                 run_task_response: RunTaskResponse = run_task(
                     stub, function_name="set_invocation_state", input=42
                 )
-                self.assertTrue(run_task_response.success)
+                self.assertEqual(
+                    run_task_response.outcome_code,
+                    TaskOutcomeCode.TASK_OUTCOME_CODE_SUCCESS,
+                )
                 fn_outputs = deserialized_function_output(
-                    self, run_task_response.function_output
+                    self, run_task_response.function_outputs
                 )
                 self.assertEqual(len(fn_outputs), 1)
                 self.assertEqual("success", fn_outputs[0])
@@ -190,8 +198,7 @@ class TestSetInvocationState(unittest.TestCase):
                         set=SetInvocationStateRequest(
                             key="test_state_key",
                             value=SerializedObject(
-                                content_type=CloudPickleSerializer.content_type,
-                                bytes=CloudPickleSerializer.serialize(
+                                data=CloudPickleSerializer.serialize(
                                     StructuredState(
                                         string="hello",
                                         integer=42,
@@ -200,6 +207,8 @@ class TestSetInvocationState(unittest.TestCase):
                                         ),
                                     )
                                 ),
+                                encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
+                                encoding_version=0,
                             ),
                         ),
                     ),
@@ -215,7 +224,10 @@ class TestSetInvocationState(unittest.TestCase):
                 run_task_response: RunTaskResponse = run_task(
                     stub, function_name="set_invocation_state", input=42
                 )
-                self.assertFalse(run_task_response.success)
+                self.assertEqual(
+                    run_task_response.outcome_code,
+                    TaskOutcomeCode.TASK_OUTCOME_CODE_FAILURE,
+                )
                 self.assertTrue(
                     'RuntimeError("failed to set the invocation state for key")'
                     in run_task_response.stderr
@@ -266,14 +278,16 @@ class TestGetInvocationState(unittest.TestCase):
                 graph_version="1",
                 function_name=function_name,
                 graph=SerializedObject(
-                    bytes=zip_graph_code(
-                        graph=graph, code_dir_path=GRAPH_CODE_DIR_PATH
-                    ),
-                    content_type=ZIPPED_GRAPH_CODE_CONTENT_TYPE,
+                    data=zip_graph_code(graph=graph, code_dir_path=GRAPH_CODE_DIR_PATH),
+                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                    encoding_version=0,
                 ),
             )
         )
-        self.assertTrue(initialize_response.success)
+        self.assertEqual(
+            initialize_response.outcome_code,
+            InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_SUCCESS,
+        )
 
     def test_success(self):
         with FunctionExecutorProcessContextManager(
@@ -302,8 +316,7 @@ class TestGetInvocationState(unittest.TestCase):
                         get=GetInvocationStateResponse(
                             key="test_state_key",
                             value=SerializedObject(
-                                content_type=CloudPickleSerializer.content_type,
-                                bytes=CloudPickleSerializer.serialize(
+                                data=CloudPickleSerializer.serialize(
                                     StructuredState(
                                         string="hello",
                                         integer=33,
@@ -312,6 +325,8 @@ class TestGetInvocationState(unittest.TestCase):
                                         ),
                                     )
                                 ),
+                                encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
+                                encoding_version=0,
                             ),
                         ),
                     ),
@@ -322,9 +337,12 @@ class TestGetInvocationState(unittest.TestCase):
                 run_task_response: RunTaskResponse = run_task(
                     stub, function_name="check_invocation_state_is_expected", input=33
                 )
-                self.assertTrue(run_task_response.success)
+                self.assertEqual(
+                    run_task_response.outcome_code,
+                    TaskOutcomeCode.TASK_OUTCOME_CODE_SUCCESS,
+                )
                 fn_outputs = deserialized_function_output(
-                    self, run_task_response.function_output
+                    self, run_task_response.function_outputs
                 )
                 self.assertEqual(len(fn_outputs), 1)
                 self.assertEqual("success", fn_outputs[0])
@@ -374,9 +392,12 @@ class TestGetInvocationState(unittest.TestCase):
                 run_task_response: RunTaskResponse = run_task(
                     stub, function_name="check_invocation_state_is_none", input=33
                 )
-                self.assertTrue(run_task_response.success)
+                self.assertEqual(
+                    run_task_response.outcome_code,
+                    TaskOutcomeCode.TASK_OUTCOME_CODE_SUCCESS,
+                )
                 fn_outputs = deserialized_function_output(
-                    self, run_task_response.function_output
+                    self, run_task_response.function_outputs
                 )
                 self.assertEqual(len(fn_outputs), 1)
                 self.assertEqual("success", fn_outputs[0])
@@ -419,7 +440,10 @@ class TestGetInvocationState(unittest.TestCase):
                 run_task_response: RunTaskResponse = run_task(
                     stub, function_name="check_invocation_state_is_expected", input=14
                 )
-                self.assertFalse(run_task_response.success)
+                self.assertEqual(
+                    run_task_response.outcome_code,
+                    TaskOutcomeCode.TASK_OUTCOME_CODE_FAILURE,
+                )
                 self.assertTrue(
                     'RuntimeError("failed to get the invocation state for key")'
                     in run_task_response.stderr

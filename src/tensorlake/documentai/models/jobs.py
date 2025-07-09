@@ -3,36 +3,29 @@ DocumentAI job classes.
 """
 
 from enum import Enum
-from typing import List, Optional, Tuple, Union
+from typing import Any, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
-class JobStatus(str, Enum):
-    """
-    Status of a job.
-    """
-
-    FAILURE = "failure"
-    PENDING = "pending"
-    PROCESSING = "processing"
-    SUCCESSFUL = "successful"
+from .enums import JobStatus
 
 
 class JobListItem(BaseModel):
     """
     DocumentAI job item class.
-
     """
 
     id: str
-    file_id: str = Field(alias="fileId")
-    file_name: str = Field(alias="fileName")
     status: JobStatus
-    job_type: str = Field(alias="jobType")
-    error_message: Optional[str] = Field(alias="errorMessage")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
+    dataset_id: Optional[str] = Field(alias="datasetId", default=None)
+    file_id: Optional[str] = Field(alias="fileId", default=None)
+    file_name: Optional[str] = Field(alias="fileName", default=None)
+    finished_at: Optional[str] = Field(alias="finishedAt", default=None)
+    message: Optional[str] = Field(default=None)
+    pages_parsed: Optional[int] = Field(alias="pagesParsed", default=None)
+    trace_id: Optional[str] = Field(alias="traceId", default=None)
 
 
 class Text(BaseModel):
@@ -44,27 +37,36 @@ class Text(BaseModel):
 
 
 class TableCell(BaseModel):
+    """
+    Table cell content with text and bounding box information.
+    Based on PageFragmentTableCell schema.
+    """
+
     text: str
-    bounding_box: Tuple[float, float, float, float]
+    bounding_box: dict[str, float]
 
 
 class Table(BaseModel):
     """
     Table content of a page fragment.
+    Based on PageFragmentTable schema with content, cells, and optional formatting fields.
     """
 
     content: str
-    table_summary: Optional[str] = None
     cells: List[TableCell]
+    html: Optional[str] = None
+    markdown: Optional[str] = None
+    table_summary: Optional[str] = None
 
 
 class Figure(BaseModel):
     """
     Figure content of a page fragment.
+    Based on PageFragmentFigure schema with content and optional summary.
     """
 
     content: str
-    figure_summary: Optional[str] = None
+    summary: Optional[str] = None
 
 
 class Signature(BaseModel):
@@ -111,7 +113,6 @@ class PageFragment(BaseModel):
     fragment_type: PageFragmentType
     content: Union[Text, Table, Figure, Signature]
     reading_order: Optional[int] = None
-    page_number: Optional[int] = None
     bbox: Optional[dict[str, float]] = None
 
 
@@ -120,9 +121,10 @@ class Page(BaseModel):
     Page in a document.
     """
 
+    dimensions: Optional[List[int]] = None
+    layout: Optional[dict] = None
+    page_fragments: Optional[List[PageFragment]] = None
     page_number: int
-    page_fragments: Optional[List[PageFragment]] = []
-    layout: Optional[dict] = {}
 
 
 class Document(BaseModel):
@@ -133,21 +135,15 @@ class Document(BaseModel):
     pages: List[Page]
 
 
-class StructuredDataPage(BaseModel):
-    """
-    DocumentAI structured data class.
-    """
-
-    page_number: int
-    data: dict = Field(alias="json_result", default_factory=dict)
-
-
 class StructuredData(BaseModel):
     """
     DocumentAI structured data class.
+    Can contain either a single data item or a list of data items.
     """
 
-    pages: List[StructuredDataPage] = Field(alias="pages", default_factory=list)
+    data: Any = Field()
+    page_numbers: Union[int, List[int]] = Field()
+    schema_name: Optional[str] = Field(default=None)
 
 
 class Chunk(BaseModel):
