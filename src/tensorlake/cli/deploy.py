@@ -67,13 +67,6 @@ def deploy(
 def _validate_workflow_module(
     workflow_module_info: WorkflowModuleInfo, auth: AuthContext
 ):
-    # Validate the workflow module contents for compatibility with Tensorlake Cloud requirements.
-    for graph in workflow_module_info.graphs:
-        for node in graph.nodes.values():
-            if node.image is None:
-                raise click.ClickException(
-                    f"graph {graph.name} function {node.name} needs to use an image"
-                )
     if len(workflow_module_info.graphs) == 0:
         raise click.UsageError(
             "No graphs found in the workflow file, make sure at least one graph is defined as a global variable."
