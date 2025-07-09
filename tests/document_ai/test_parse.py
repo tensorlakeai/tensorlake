@@ -113,7 +113,11 @@ class TestParse(unittest.TestCase):
         self.assertIsNotNone(parse_result.chunks)
         self.assertIsNotNone(parse_result.structured_data)
 
-        self.assertIsNotNone(parse_result.structured_data.get("form125-basic"))
+        structured_extraction_schemas = {}
+        for schema in parse_result.structured_data:
+            structured_extraction_schemas[schema.schema_name] = schema
+
+        self.assertIsNotNone(structured_extraction_schemas.get("form125-basic"))
 
     def test_page_classification(self):
         server_url = os.getenv("INDEXIFY_URL")
@@ -156,8 +160,13 @@ class TestParse(unittest.TestCase):
         self.assertEqual(
             len(parsed_result.page_classes), 2, "Expected two page classes"
         )
-        self.assertIn("form125", parsed_result.page_classes)
-        self.assertIn("form140", parsed_result.page_classes)
+
+        page_classes = {}
+        for pc in parsed_result.page_classes:
+            page_classes[pc.page_class] = pc
+
+        self.assertIn("form125", page_classes)
+        self.assertIn("form140", page_classes)
 
 
 if __name__ == "__main__":
