@@ -113,12 +113,6 @@ class DocumentAI:
         resp.raise_for_status()
         return resp
 
-    def __del__(self) -> None:
-        self._client.close()
-        self._client_v1.close()
-        anyio.run(self._aclient.aclose)
-        anyio.run(self._aclient_v1.aclose)
-
     def _create_parse_req(
         self,
         file: str,
