@@ -17,23 +17,6 @@ from .enums import (
     TableParsingFormat,
 )
 
-# Job models
-from .jobs import (
-    Chunk,
-    Document,
-    Figure,
-    Job,
-    JobListItem,
-    Output,
-    Page,
-    PageFragment,
-    PageFragmentType,
-    Signature,
-    StructuredData,
-    Table,
-    TableCell,
-    Text,
-)
 
 # Options
 from .options import (
@@ -48,7 +31,21 @@ from .options import (
 from .parse import ParseRequest
 
 # Results models
-from .results import PageClass, ParseRequestOptions, ParseResult
+from .results import (
+    PageClass,
+    ParseRequestOptions,
+    ParseResult,
+    Chunk,
+    Figure,
+    Page,
+    PageFragment,
+    PageFragmentType,
+    Signature,
+    StructuredData,
+    Table,
+    TableCell,
+    Text,
+)
 
 __all__ = [
     # Enums
@@ -72,13 +69,8 @@ __all__ = [
     "PageClass",
     "ParseRequestOptions",
     "ParseResult",
-    # Job models
     "Chunk",
-    "Document",
     "Figure",
-    "Job",
-    "JobListItem",
-    "Output",
     "Page",
     "PageFragment",
     "PageFragmentType",
