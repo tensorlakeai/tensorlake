@@ -62,14 +62,6 @@ def is_pydantic_model_from_annotation(type_annotation):
     return False
 
 
-# Placeholder for None image information until Server accepts Optional image information.
-_none_image_information = ImageInformation(
-    image_name="fake_image",
-    image_hash="fake_hash",
-    sdk_version="0.0.1",
-)
-
-
 class Graph:
     def __init__(
         self,
@@ -178,11 +170,7 @@ class Graph:
             fn_name=start_node.name,
             description=start_node.description,
             reducer=is_reducer,
-            image_information=(
-                start_node.image.to_image_information()
-                if start_node.image
-                else _none_image_information
-            ),
+            image_information=start_node.image.to_image_information(),
             input_encoder=start_node.input_encoder,
             output_encoder=start_node.output_encoder,
             secret_names=start_node.secrets,
@@ -212,11 +200,7 @@ class Graph:
                 fn_name=node.name,
                 description=node.description,
                 reducer=node.accumulate is not None,
-                image_information=(
-                    node.image.to_image_information()
-                    if node.image
-                    else _none_image_information
-                ),
+                image_information=node.image.to_image_information(),
                 input_encoder=node.input_encoder,
                 output_encoder=node.output_encoder,
                 secret_names=node.secrets,

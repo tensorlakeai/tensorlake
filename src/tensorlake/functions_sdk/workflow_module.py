@@ -69,20 +69,19 @@ def _load_workflow_module_info(workflow_module: ModuleType) -> WorkflowModuleInf
             for secret in node_obj.secrets or []:
                 workflow_module_info.secret_names.add(secret)
 
-            image: Optional[Image] = node_obj.image
-            if image is not None:
-                if image not in workflow_module_info.images:
-                    workflow_module_info.images[image] = ImageInfo(
-                        image=image,
-                        build_contexts=[],
-                    )
-
-                workflow_module_info.images[image].build_contexts.append(
-                    BuildContext(
-                        graph_name=graph.name,
-                        graph_version=graph.version,
-                        function_name=node_name,
-                    )
+            image: Image = node_obj.image
+            if image not in workflow_module_info.images:
+                workflow_module_info.images[image] = ImageInfo(
+                    image=image,
+                    build_contexts=[],
                 )
+
+            workflow_module_info.images[image].build_contexts.append(
+                BuildContext(
+                    graph_name=graph.name,
+                    graph_version=graph.version,
+                    function_name=node_name,
+                )
+            )
 
     return workflow_module_info
