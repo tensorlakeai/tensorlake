@@ -10,7 +10,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, MutableMapping, Optional, Union
 
-import anyio
 import httpx
 from pydantic import BaseModel
 from retry import retry
@@ -116,8 +115,6 @@ class DocumentAI:
     def __del__(self) -> None:
         self._client.close()
         self._client_v1.close()
-        anyio.run(self._aclient.aclose)
-        anyio.run(self._aclient_v1.aclose)
 
     def _create_parse_req(
         self,
