@@ -2,6 +2,15 @@ syntax = "proto3";
 
 package function_executor_service;
 
+message Status {
+  // The status code, which should be an enum value of google.rpc.Code.
+  // See https://cloud.google.com/tasks/docs/reference/rpc/google.rpc
+  int32 code = 1;
+
+  // A human-readable error message explaining the error if there's any.
+  string message = 2;
+}
+
 // The messages should not use any Python SDK objects. Only Function Executor implemented
 // in Python is allowed to import Python SDK to run customer functions. This ensures that
 // all the other components can be written in any language.
@@ -55,7 +64,9 @@ message SetInvocationStateRequest {
     optional SerializedObject value = 2;
 }
 
-message SetInvocationStateResponse {}
+message SetInvocationStateResponse {
+    optional Status status = 1;
+}
 
 message GetInvocationStateRequest {
     optional string key = 1;
@@ -64,6 +75,7 @@ message GetInvocationStateRequest {
 message GetInvocationStateResponse {
     optional string key = 1;
     optional SerializedObject value = 2;
+    optional Status status = 3;
 }
 
 // InvocationStateRequest is sent by RPC Server to the client
@@ -161,6 +173,128 @@ message InfoResponse {
     optional string sdk_language_version = 4;
 }
 
+// === run_task_allocations_session RPC === //
+
+message SerializedObjectID {
+    optional string id = 1;
+}
+
+message SerializedObjectManifest {
+    optional SerializedObjectID id = 1;
+    optional SerializedObjectEncoding encoding = 2;
+    optional uint64 encoding_version = 3;
+    optional uint64 size = 4;
+    optional string sha256_hash = 5;
+    optional uint32 chunk_count = 6;
+}
+
+message SerializedObjectChunk {
+    // The ID of the serialized object this chunk belongs to.
+    optional SerializedObjectID id = 1;
+    // The chunk data.
+    optional bytes data = 2;
+    // The index of the chunk in the serialized object. 0 based.
+    optional uint32 index = 3;
+}
+
+// Used for uploading a serialized object from initiating side to the accepting side.
+message UploadSerializedObjectRequest {
+    oneof message {
+        SerializedObjectManifest manifest = 1;
+        SerializedObjectChunk chunk = 2;
+    }
+}
+
+// The accepting side sends a response per request.
+message UploadSerializedObjectResponse {
+    optional Status status = 1;
+    optional SerializedObjectID id = 2;
+}
+
+// Joins the streams returned by run_task_allocations_session RPC to a session with a given ID.
+// A new session is created if a session with this ID is not known to the Function Executor.
+// Otherwise, the session streams join the existing session. Each session can only have a single
+// pair of streams joined to it.
+message OpenSessionRequest {
+    // The ID of the session to associate the session streams with.
+    optional string session_id = 1;
+}
+
+// Closes the session associated with the session streams and release all session resources.
+// Example resources: function inputs, function outputs, etc.
+message CloseSessionRequest {}
+
+message TaskAllocationInput {
+    optional string graph_invocation_id = 1;
+    optional string task_id = 2;
+    optional string allocation_id = 3;
+    optional SerializedObjectID function_input = 4;
+    optional SerializedObjectID function_init_value = 5;
+}
+
+message RunTaskAllocationsRequest {
+    // The list of task allocations to run.
+    // Currently, only one task allocation is allowed until batching gets implemented.
+    repeated TaskAllocationInput allocations = 1;
+}
+
+// A session message sent by the client to the Function Executor in run task allocations session.
+message RunTaskAllocationsSessionClientMessage {
+    oneof message {
+        OpenSessionRequest open_session_request = 1;
+        UploadSerializedObjectRequest upload_serialized_object_request = 2;
+        UploadSerializedObjectResponse upload_serialized_object_response = 3;
+        RunTaskAllocationsRequest run_task_allocations_request = 4;
+        SetInvocationStateResponse set_invocation_state_response = 5;
+        GetInvocationStateResponse get_invocation_state_response = 6;
+        CloseSessionRequest close_session_request = 7;
+    }
+}
+
+message OpenSessionResponse {
+    optional Status status = 1;
+    // True if a new session was created.
+    optional bool is_new = 2;
+}
+
+message CloseSessionResponse {
+    optional Status status = 1;
+}
+
+message TaskAllocationOutput {
+    optional string graph_invocation_id = 1;
+    optional string task_id = 2;
+    optional string allocation_id = 3;
+    optional TaskOutcomeCode outcome_code = 4;
+    optional TaskFailureReason failure_reason = 5;
+    repeated SerializedObjectID function_outputs = 6;
+    // User payload for invocation error if task failed with invocation error.
+    optional SerializedObjectID invocation_error_output = 7;
+    optional SerializedObjectID stdout = 8;
+    optional SerializedObjectID stderr = 9;
+    // Edges that the function wants the invocation to be routed to.
+    repeated string next_functions = 10;
+    optional Metrics metrics = 11;
+}
+
+message RunTaskAllocationsResponse {
+    // The list of task allocations finished to run.
+    repeated TaskAllocationOutput allocations = 1;
+}
+
+// A session message sent by the Function Executor to the client in run task allocations session.
+message RunTaskAllocationsSessionServerMessage {
+    oneof message {
+        OpenSessionResponse open_session_response = 1;
+        UploadSerializedObjectRequest upload_serialized_object_request = 2;
+        UploadSerializedObjectResponse upload_serialized_object_response = 3;
+        RunTaskAllocationsResponse run_task_allocations_response = 4;
+        SetInvocationStateRequest set_invocation_state_request = 5;
+        GetInvocationStateRequest get_invocation_state_request = 6;
+        CloseSessionResponse close_session_response = 7;
+    }
+}
+
 service FunctionExecutor {
     // Initializes the Function Executor to run tasks
     // for a particular function. This method is called only
@@ -170,10 +304,32 @@ service FunctionExecutor {
     // Initializes a server that sends requests to the client to perform actions on
     // a task's graph invocation state. This method is called only once per Function Executor
     // It should be called before calling RunTask for the function.
+    // Deprecated.
     rpc initialize_invocation_state_server(stream InvocationStateResponse) returns (stream InvocationStateRequest);
     // Executes the task defined in the request.
     // Multiple tasks can be running in parallel.
+    // Deprecated.
     rpc run_task(RunTaskRequest) returns (RunTaskResponse);
+
+    // Creates session streams for running task allocations on Function Executor.
+    // A typical message flow is:
+    // 1. Client sends OpenSessionRequest to join a session by ID. The session is created if it does not exist.
+    // 2. Function Executor responds with OpenSessionResponse.
+    // 3. Client uploads task allocation inputs using UploadSerializedObjectRequest.
+    // 4. Function Executor responds with UploadSerializedObjectResponse for each UploadSerializedObjectRequest.
+    // 5. Client sends RunTaskAllocationsRequest with task allocations to run. The task allocations reference their inputs by SerializedObjectID.
+    // 6. Function Executor is running the task allocations.
+    // 7. Function Executor may send InvocationStateRequest to the client to perform actions on the task's graph invocation state.
+    // 8. Client responds to each InvocationStateRequest with InvocationStateResponse.
+    // 9. Once the Function Executor finishes running a task allocation, it sends its outputs using UploadSerializedObjectRequest to client.
+    // 10. Client responds to each UploadSerializedObjectRequest with UploadSerializedObjectResponse.
+    // 11. After a task allocations' outputs were uploaded to client, Function Executor sends RunTaskAllocationsResponse with details of
+    //     the task allocation outputs. The outputs reference their serialized objects by SerializedObjectID.
+    // 12. Client closes the session using CloseSessionRequest.
+    // 13. Function Executor release all resources associated with the session (e.g. task allocations' inputs and outputs) and responds with
+    //     CloseSessionResponse.
+    rpc run_task_allocations_session(stream RunTaskAllocationsSessionClientMessage) returns (stream RunTaskAllocationsSessionServerMessage);
+
     // Health check method to check if the FE is able to run tasks.
     // The FE should be initialized before calling this method.
     rpc check_health(HealthCheckRequest) returns (HealthCheckResponse);

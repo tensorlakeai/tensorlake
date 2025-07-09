@@ -1,14 +1,13 @@
 import importlib
 import io
 import json
-import os
 import sys
 import tempfile
 import time
 import traceback
 import zipfile
 from contextlib import redirect_stderr, redirect_stdout
-from typing import Any, Generator, Iterator, Optional
+from typing import Any, Dict, Generator, Iterator, Optional
 
 import grpc
 
@@ -41,10 +40,21 @@ from .proto.function_executor_pb2 import (
     InitializeResponse,
     InvocationStateRequest,
     InvocationStateResponse,
+    OpenSessionResponse,
+    RunTaskAllocationsSessionClientMessage,
+    RunTaskAllocationsSessionServerMessage,
     RunTaskRequest,
     RunTaskResponse,
+    Status,
 )
 from .proto.function_executor_pb2_grpc import FunctionExecutorServicer
+from .run_task_allocations_session.message_validators import (
+    validate_client_session_message,
+)
+from .run_task_allocations_session.session import (
+    CloseSession,
+    RunTaskAllocationsSession,
+)
 from .std_outputs_capture import flush_logs, read_till_the_end
 
 
@@ -62,6 +72,8 @@ class Service(FunctionExecutorServicer):
         self._graph_metadata: Optional[ComputeGraphMetadata] = None
         self._invocation_state_proxy_server: Optional[InvocationStateProxyServer] = None
         self._check_health_handler: Optional[CheckHealthHandler] = None
+        # Session ID -> Session.
+        self._run_task_allocations_sessions: Dict[str, RunTaskAllocationsSession] = {}
 
     def initialize(
         self, request: InitializeRequest, context: grpc.ServicerContext
@@ -241,6 +253,48 @@ class Service(FunctionExecutorServicer):
             graph_metadata=self._graph_metadata,
             logger=self._logger,
         ).run()
+
+    def run_task_allocations_session(
+        self,
+        client_stream: Iterator[RunTaskAllocationsSessionClientMessage],
+        context: grpc.ServicerContext,
+    ) -> Generator[RunTaskAllocationsSessionServerMessage, None, None]:
+        if self._function_wrapper is None:
+            context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "Function Executor is not initialized, please initialize it first",
+            )
+
+        first_message: RunTaskAllocationsSessionClientMessage = next(client_stream)
+        validate_client_session_message(first_message)
+        if not first_message.HasField("open_session_request"):
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "First message in the session stream must be OpenSessionRequest",
+            )
+
+        session_id: str = first_message.open_session_request.session_id
+        is_new: bool = False
+        if session_id not in self._run_task_allocations_sessions:
+            self._run_task_allocations_sessions[session_id] = RunTaskAllocationsSession(
+                id=session_id, logger=self._logger
+            )
+            is_new = True
+
+        session: RunTaskAllocationsSession = self._run_task_allocations_sessions[
+            session_id
+        ]
+        yield RunTaskAllocationsSessionServerMessage(
+            open_session_response=OpenSessionResponse(
+                status=Status(code=grpc.StatusCode.OK.value[0]),
+                is_new=is_new,
+            )
+        )
+
+        try:
+            yield from session.join(client_stream)
+        except CloseSession:
+            self._run_task_allocations_sessions.pop(session_id)
 
     def check_health(
         self, request: HealthCheckRequest, context: grpc.ServicerContext

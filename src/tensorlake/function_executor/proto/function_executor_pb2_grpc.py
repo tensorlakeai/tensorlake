@@ -58,6 +58,12 @@ class FunctionExecutorStub(object):
             response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskResponse.FromString,
             _registered_method=True,
         )
+        self.run_task_allocations_session = channel.stream_stream(
+            "/function_executor_service.FunctionExecutor/run_task_allocations_session",
+            request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskAllocationsSessionClientMessage.SerializeToString,
+            response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskAllocationsSessionServerMessage.FromString,
+            _registered_method=True,
+        )
         self.check_health = channel.unary_unary(
             "/function_executor_service.FunctionExecutor/check_health",
             request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.HealthCheckRequest.SerializeToString,
@@ -89,6 +95,7 @@ class FunctionExecutorServicer(object):
         """Initializes a server that sends requests to the client to perform actions on
         a task's graph invocation state. This method is called only once per Function Executor
         It should be called before calling RunTask for the function.
+        Deprecated.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
@@ -97,6 +104,30 @@ class FunctionExecutorServicer(object):
     def run_task(self, request, context):
         """Executes the task defined in the request.
         Multiple tasks can be running in parallel.
+        Deprecated.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def run_task_allocations_session(self, request_iterator, context):
+        """Creates session streams for running task allocations on Function Executor.
+        A typical message flow is:
+        1. Client sends OpenSessionRequest to join a session by ID. The session is created if it does not exist.
+        2. Function Executor responds with OpenSessionResponse.
+        3. Client uploads task allocation inputs using UploadSerializedObjectRequest.
+        4. Function Executor responds with UploadSerializedObjectResponse for each UploadSerializedObjectRequest.
+        5. Client sends RunTaskAllocationsRequest with task allocations to run. The task allocations reference their inputs by SerializedObjectID.
+        6. Function Executor is running the task allocations.
+        7. Function Executor may send InvocationStateRequest to the client to perform actions on the task's graph invocation state.
+        8. Client responds to each InvocationStateRequest with InvocationStateResponse.
+        9. Once the Function Executor finishes running a task allocation, it sends its outputs using UploadSerializedObjectRequest to client.
+        10. Client responds to each UploadSerializedObjectRequest with UploadSerializedObjectResponse.
+        11. After a task allocations' outputs were uploaded to client, Function Executor sends RunTaskAllocationsResponse with details of
+        the task allocation outputs. The outputs reference their serialized objects by SerializedObjectID.
+        12. Client closes the session using CloseSessionRequest.
+        13. Function Executor release all resources associated with the session (e.g. task allocations' inputs and outputs) and responds with
+        CloseSessionResponse.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
@@ -133,6 +164,11 @@ def add_FunctionExecutorServicer_to_server(servicer, server):
             servicer.run_task,
             request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskRequest.FromString,
             response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskResponse.SerializeToString,
+        ),
+        "run_task_allocations_session": grpc.stream_stream_rpc_method_handler(
+            servicer.run_task_allocations_session,
+            request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskAllocationsSessionClientMessage.FromString,
+            response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskAllocationsSessionServerMessage.SerializeToString,
         ),
         "check_health": grpc.unary_unary_rpc_method_handler(
             servicer.check_health,
@@ -237,6 +273,36 @@ class FunctionExecutor(object):
             "/function_executor_service.FunctionExecutor/run_task",
             tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskRequest.SerializeToString,
             tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True,
+        )
+
+    @staticmethod
+    def run_task_allocations_session(
+        request_iterator,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.stream_stream(
+            request_iterator,
+            target,
+            "/function_executor_service.FunctionExecutor/run_task_allocations_session",
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskAllocationsSessionClientMessage.SerializeToString,
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskAllocationsSessionServerMessage.FromString,
             options,
             channel_credentials,
             insecure,
