@@ -40,7 +40,7 @@ We welcome many types of contributions, including:
 
 ### Prerequisites
 
-- Python 3.8 or higher
+- Python 3.10 or higher
 - [Poetry](https://python-poetry.org/) for dependency management
 - Git
 
@@ -70,8 +70,12 @@ We welcome many types of contributions, including:
 
 5. **Run tests to verify setup**
    ```bash
-   make test
    make test_document_ai
+   ```
+
+   For more detailed test output, you can also use:
+   ```
+   cd tests && ./run_tests.sh
    ```
 
 ### Project Structure
@@ -102,17 +106,8 @@ make build
 # Format code with Black and isort
 make fmt
 
-# Check code formatting and style
-make check
-
-# Run all tests
-make test
-
 # Run Document AI specific tests
 make test_document_ai
-
-# Build protocol buffer files (for development)
-make build_proto
 ```
 
 ## Contributing Guidelines
@@ -234,22 +229,7 @@ Examples:
 3. **Feedback** - Address any requested changes
 4. **Approval** - Once approved, a maintainer will merge your PR
 
-## Testing
-
-### Running Tests
-
-```bash
-# Run Workflow specific tests
-make test
-
-# Run Document AI specific tests
-make test_document_ai
-
-# For more detailed test output, you can also use:
-cd tests && ./run_tests.sh
-```
-
-### Writing Tests
+## Writing Tests
 
 - **Unit tests** - Test individual functions and classes
 - **Integration tests** - Test interactions between components
@@ -323,7 +303,7 @@ def process_document(document_path: str, options: Dict[str, Any]) -> Dict[str, A
 ### Getting Help
 
 - 📖 **Documentation** - Check our [docs](https://docs.tensorlake.ai)
-- 💬 **Discord** - Join our [community Discord](https://discord.gg/tensorlake)
+- 💬 **Slack** - Join our [community Slack](https://tensorlakecloud.slack.com/)
 - 📧 **Email** - Reach out to [support@tensorlake.ai](mailto:support@tensorlake.ai)
 - 🐛 **Issues** - Create a [GitHub issue](https://github.com/tensorlakeai/tensorlake/issues)
 
@@ -349,7 +329,7 @@ Maintainers follow this checklist for releases:
 
 - [ ] Update version in `pyproject.toml`
 - [ ] Update `CHANGELOG.md`
-- [ ] Run full test suite (`make test`)
+- [ ] Run full test suite (`make test_document_ai`)
 - [ ] Check code quality (`make check`)
 - [ ] Build the project (`make build`)
 - [ ] Create release PR
@@ -362,8 +342,8 @@ Maintainers follow this checklist for releases:
 
 Don't hesitate to ask questions! We're here to help:
 
-- Create a [GitHub Discussion](https://github.com/tensorlakeai/tensorlake/discussions)
-- Join our [Discord community](https://discord.gg/tensorlake)
+- Open a [GitHub Issue](https://github.com/tensorlakeai/tensorlake/issues)
+- Join our [Slack community](https://tensorlakecloud.slack.com/)
 - Email us at [support@tensorlake.ai](mailto:support@tensorlake.ai)
 
 Thank you for contributing to TensorLake! 🚀
