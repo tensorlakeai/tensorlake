@@ -472,7 +472,7 @@ class DocumentAI:
 
         response = self._request("POST", "/datasets", json=body).json()
 
-        return self.get_dataset(response["slug"])
+        return self.get_dataset(response["dataset_id"])
 
     async def create_dataset_async(
         self,
@@ -497,7 +497,7 @@ class DocumentAI:
         response = await self._arequest("POST", "/datasets", json=body)
         response_json = response.json()
 
-        return await self.get_dataset_async(response_json["slug"])
+        return await self.get_dataset_async(response_json["dataset_id"])
 
     def _create_dataset_req(
         self,
@@ -555,20 +555,20 @@ class DocumentAI:
 
     def get_dataset(
         self,
-        slug: str,
+        dataset_id: str,
     ) -> Dataset:
-        data = self._request("GET", f"/datasets/{slug}").json()
+        data = self._request("GET", f"/datasets/{dataset_id}").json()
         return Dataset.model_validate(data)
 
-    async def get_dataset_async(self, slug: str) -> Dataset:
-        data = (await self._arequest("GET", f"/datasets/{slug}")).json()
+    async def get_dataset_async(self, dataset_id: str) -> Dataset:
+        data = (await self._arequest("GET", f"/datasets/{dataset_id}")).json()
         return Dataset.model_validate(data)
 
     def delete_dataset(self, dataset: Dataset) -> None:
-        self._request("DELETE", f"/datasets/{dataset.slug}")
+        self._request("DELETE", f"/datasets/{dataset.dataset_id}")
 
-    async def delete_dataset_async(self, slug: str) -> None:
-        await self._arequest("DELETE", f"/datasets/{slug}")
+    async def delete_dataset_async(self, dataset_id: str) -> None:
+        await self._arequest("DELETE", f"/datasets/{dataset_id}")
 
     def parse_dataset_file(
         self,
@@ -589,7 +589,7 @@ class DocumentAI:
 
         response = self._request(
             "POST",
-            f"/datasets/{dataset.slug}/parse",
+            f"/datasets/{dataset.dataset_id}/parse",
             json=dataset_parse_req,
         ).json()
 
@@ -616,7 +616,7 @@ class DocumentAI:
 
         response = await self._arequest(
             "POST",
-            f"/datasets/{dataset.slug}/parse",
+            f"/datasets/{dataset.dataset_id}/parse",
             json=dataset_parse_req,
         )
         response_json = response.json()

@@ -7,7 +7,7 @@ from .enums import DatasetStatus
 
 class Dataset(BaseModel):
     name: str
-    slug: str
+    dataset_id: str
     status: DatasetStatus
     description: Optional[str] = None
     created_at: str

@@ -40,14 +40,14 @@ class TestDatasets(unittest.TestCase):
         )
         self.assertEqual(dataset.status, "idle")
         self.assertIsNotNone(dataset.created_at)
-        self.assertTrue(dataset.slug.startswith("test-dataset"))
+        self.assertTrue(dataset.dataset_id.startswith("dataset_"))
 
         doc_ai.delete_dataset(dataset)
 
         self.assertRaises(
             Exception,
             doc_ai.get_dataset,
-            dataset.slug,
+            dataset.dataset_id,
         )
 
     def test_parse_documents(self):
