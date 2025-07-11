@@ -28,13 +28,15 @@ class TestDatasets(unittest.TestCase):
             api_key=api_key,
         )
 
+        random_name = f"test_dataset_{os.urandom(4).hex()}"
+
         dataset = doc_ai.create_dataset(
-            name="Test Dataset",
+            name=random_name,
             description="This is a test dataset for unit testing.",
         )
 
         self.assertIsNotNone(dataset)
-        self.assertEqual(dataset.name, "Test Dataset")
+        self.assertEqual(dataset.name, random_name)
         self.assertEqual(
             dataset.description, "This is a test dataset for unit testing."
         )
@@ -66,8 +68,10 @@ class TestDatasets(unittest.TestCase):
             api_key=api_key,
         )
 
+        random_name = f"test_dataset_{os.urandom(4).hex()}"
+
         dataset = doc_ai.create_dataset(
-            name="Test Dataset",
+            name=random_name,
             description="This is a test dataset for unit testing.",
         )
         self.assertIsNotNone(dataset)
@@ -104,8 +108,9 @@ class TestDatasets(unittest.TestCase):
             schema_name="form125-basic", json_schema=BankStatement
         )
 
+        random_name = f"test_dataset_{os.urandom(4).hex()}_structured_extraction"
         dataset = doc_ai.create_dataset(
-            name="Test Dataset with Structured Extraction",
+            name=random_name,
             description="This is a test dataset for unit testing with structured extraction.",
             structured_extraction_options=[structured_extraction_options],
         )
@@ -169,8 +174,9 @@ class TestDatasets(unittest.TestCase):
             description="ACORD 140: Property Section — includes details about property coverage, location, valuation, and limit",
         )
 
+        random_name = f"test_dataset_{os.urandom(4).hex()}_page_classification"
         dataset = doc_ai.create_dataset(
-            name="Test Dataset with Page Classification",
+            name=random_name,
             description="This is a test dataset for unit testing with page classification.",
             page_classifications=[
                 form125_page_class_config,
@@ -205,5 +211,5 @@ class TestDatasets(unittest.TestCase):
         self.assertIn("form140", page_classes)
 
 
-# if __name__ == "__main__":
-#     unittest.main()
+if __name__ == "__main__":
+    unittest.main()
