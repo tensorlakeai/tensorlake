@@ -24,12 +24,11 @@ TENSORLAKE_API_KEY = os.getenv("TENSORLAKE_API_KEY")
 # to process the document and answer questions about detected signatures.
 # The agent is designed to handle questions related to signature detection, such as the number of signatures
 # found, the parties involved, and any missing signatures.
-async def analyze_signatures_agents(path: str, questions: str):
+async def analyze_signatures_agents(questions: str):
     """Parses the given document for signature data and analyzes it using a LangGraph agent
     powered by the langchain-tensorlake tool.
 
     Args:
-        path (str): Path to the document (PDF).
         questions (str): Questions to ask about the detected signatures.
 
     Returns:
@@ -55,7 +54,7 @@ async def analyze_signatures_agents(path: str, questions: str):
                 - Which property is missing signatures?
                 - Who is the agent for the properties missing signatures?
 
-                Please analyze the above parsed output and answer the questions provided by the user.
+                Please analyze the parsed output and answer the questions provided by the user.
                 """
 
     agent = create_react_agent(
@@ -85,4 +84,4 @@ if __name__ == "__main__":
         3. Are there any missing signatures on any pages in the document found at {path}?"
 
     # run the example
-    asyncio.run(analyze_signatures_agents(path, questions))
+    asyncio.run(analyze_signatures_agents(questions))
