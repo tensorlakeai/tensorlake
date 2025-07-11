@@ -57,6 +57,10 @@ class _INTERNAL_SESSION_COMMAND(Enum):
     LEAVE_SESSION = 2
 
 
+# If the timeout expired we assume that the thread is not healthy and the session is in an inconsistent state.
+_CLIENT_MESSAGE_PROCESSOR_THREAD_NORMAL_EXIT_TIMEOUT_SEC = 5
+
+
 class RunTaskAllocationsSession:
     def __init__(
         self,
@@ -73,19 +77,27 @@ class RunTaskAllocationsSession:
         self._function_stderr = function_stderr
         self._graph_metadata = graph_metadata
         self._logger = logger.bind(module=__name__, session_id=id)
+
         # Session state, preserved until the session is closed.
         self._server_messages: queue.SimpleQueue = queue.SimpleQueue()
+        self._client_messages: queue.SimpleQueue = queue.SimpleQueue()
         # Serialized object ID -> ChunkedSerializedObject
         self._serialized_objects: Dict[str, ChunkedSerializedObject] = {}
+        self._client_messages_processor_thread: threading.Thread = threading.Thread(
+            target=self._process_client_messages,
+            name=f"run_task_allocations_session_{self._id}_client_message_processor_thread",
+            daemon=True,
+        )
+        self._client_messages_processor_thread.start()
 
         # Joined state, fields are initialized when the session is joined.
-        self._process_client_messages_thread: Optional[threading.Thread] = None
+        self._read_client_messages_thread: Optional[threading.Thread] = None
 
         self._logger.info("created session")
 
     def is_joined(self) -> bool:
         """Returns True if the session is joined, False otherwise."""
-        return self._process_client_messages_thread is not None
+        return self._read_client_messages_thread is not None
 
     def join(
         self, client_stream: Iterator[RunTaskAllocationsSessionClientMessage]
@@ -93,17 +105,15 @@ class RunTaskAllocationsSession:
         """Starts processing the client messages in the scope of the session
 
         Raises CloseSession when the session is fully closed."""
-        if self.is_joined():
-            raise RuntimeError("Session is already joined")
         self._logger.info("joined session")
 
-        self._process_client_messages_thread = threading.Thread(
-            target=self._process_client_messages,
-            name=f"run_task_allocations_session_{self._id}_client_message_processor_thread",
+        self._read_client_messages_thread = threading.Thread(
+            target=self._read_client_messages,
+            name=f"run_task_allocations_session_{self._id}_read_client_messages_thread",
             args=(client_stream,),
             daemon=True,
         )
-        self._process_client_messages_thread.start()
+        self._read_client_messages_thread.start()
 
         while True:
             server_message: Union[
@@ -121,8 +131,8 @@ class RunTaskAllocationsSession:
         self,
     ) -> Generator[RunTaskAllocationsSessionServerMessage, None, None]:
         self._logger.info("client is leaving session")
-        self._process_client_messages_thread.join()
-        self._process_client_messages_thread = None
+        self._read_client_messages_thread.join()
+        self._read_client_messages_thread = None
         yield RunTaskAllocationsSessionServerMessage(
             leave_session_response=LeaveSessionResponse(
                 status=Status(
@@ -144,14 +154,38 @@ class RunTaskAllocationsSession:
                     "closing session with pending messages from server",
                     num_messages=self._server_messages.qsize(),
                 )
-            yield RunTaskAllocationsSessionServerMessage(
-                leave_session_response=LeaveSessionResponse(
-                    status=Status(
-                        code=Code.OK,
-                        message="Session closed successfully",
+            if not self._client_messages.empty():
+                self._logger.warning(
+                    "closing session with pending messages from client",
+                    num_messages=self._client_messages.qsize(),
+                )
+            if (
+                self._client_messages_processor_thread.join(
+                    timeout=_CLIENT_MESSAGE_PROCESSOR_THREAD_NORMAL_EXIT_TIMEOUT_SEC
+                )
+                and self._read_client_messages_thread.is_alive()
+            ):
+                # This typically happens when customer code hangs so the thread can't exit.
+                yield RunTaskAllocationsSessionServerMessage(
+                    leave_session_response=LeaveSessionResponse(
+                        status=Status(
+                            code=Code.INTERNAL,
+                            message="Client messages processor thread is still running, cannot close session",
+                        )
                     )
                 )
-            )
+            else:
+                yield RunTaskAllocationsSessionServerMessage(
+                    leave_session_response=LeaveSessionResponse(
+                        status=Status(
+                            code=Code.OK,
+                            message="Session closed successfully",
+                        )
+                    )
+                )
+                # All the session resources are freed when the service removes its
+                # reference to the session object.
+                raise CloseSession()
         except Exception as e:
             self._logger.error("error while closing session", exc_info=e)
             yield RunTaskAllocationsSessionServerMessage(
@@ -162,41 +196,47 @@ class RunTaskAllocationsSession:
                     )
                 )
             )
-        finally:
-            # All the session resources are freed when the service removes its
-            # reference to the session object.
-            raise CloseSession()
 
-    def _process_client_messages(
+    def _read_client_messages(
         self, client_stream: Iterator[RunTaskAllocationsSessionClientMessage]
     ) -> None:
         """Processes client messages in the session."""
         try:
             for message in client_stream:
                 message: RunTaskAllocationsSessionClientMessage
-                self._handle_client_message(message)
+                self._client_messages.put(message)
         except grpc.RpcError as e:
             # The stream is closed, it's usually due to a network error or client disconnect.
+            # This implies leaving the session.
             self._server_messages.put(_INTERNAL_SESSION_COMMAND.LEAVE_SESSION)
-        except CloseSession:
-            # Client requested to close the session.
-            self._server_messages.put(_INTERNAL_SESSION_COMMAND.CLOSE_SESSION)
-        except LeaveSession:
-            # Client requested to leave the session.
-            self._server_messages.put(_INTERNAL_SESSION_COMMAND.LEAVE_SESSION)
-        except Exception as e:
-            self._logger.error(
-                "unexpected exception during client message stream processing",
-                exc_info=e,
+
+    def _process_client_messages(self) -> None:
+        """Processes client messages in the session."""
+        while True:
+            message: RunTaskAllocationsSessionClientMessage = (
+                self._client_messages.get()
             )
-            # The session is inconsistent state now, forcibly close it.
-            self._server_messages.put(_INTERNAL_SESSION_COMMAND.CLOSE_SESSION)
+            try:
+                self._handle_client_message(message)
+            except CloseSession:
+                self._server_messages.put(_INTERNAL_SESSION_COMMAND.CLOSE_SESSION)
+                return
+            except Exception as e:
+                self._logger.error(
+                    "unexpected exception during handling of client message",
+                    exc_info=e,
+                )
+                # The session is inconsistent state now, forcibly close it.
+                self._server_messages.put(_INTERNAL_SESSION_COMMAND.CLOSE_SESSION)
+                return
 
     def _handle_client_message(
         self, message: RunTaskAllocationsSessionClientMessage
     ) -> None:
         """Handles a client message in the session.
 
+        The handlers can read any number of client messages from the client queue
+        and add any number of server messages to the server queue.
         Doesn't raise any exceptions.
         """
         try:
@@ -385,23 +425,31 @@ class RunTaskAllocationsSession:
                 )
             )
 
-        self._run_function_inputs(function_inputs)
+        self._run_function(function_inputs)
 
-    def _run_function_inputs(self, function_inputs: List[FunctionInput]) -> None:
+    def _run_function(self, inputs: List[FunctionInput]) -> None:
         """Runs the function with the supplied inputs in the session.
 
-        Doesn't raise any exceptions.
+        Function stdout and stderr are captured so they don't get into Function Executor process stdout
+        and stderr. Exceptions in customer function are passed in the responses. Only exceptions in our
+        own code are handled locally. Doesn't raise any exceptions.
         """
-        # No batching yet.
-        function_input: FunctionInput = function_inputs[0]
+        # [0] only, no batching yet.
+        input: FunctionInput = inputs[0]
         logger = self._logger.bind(
-            invocation_id=function_input.task_allocation_input.graph_invocation_id,
-            task_id=function_input.task_allocation_input.task_id,
-            allocation_id=function_input.task_allocation_input.allocation_id,
+            invocation_id=input.task_allocation_input.graph_invocation_id,
+            task_id=input.task_allocation_input.task_id,
+            allocation_id=input.task_allocation_input.allocation_id,
         )
         self._logger.info("running function")
         start_time = time.monotonic()
-        # TODO: implement
+        # response: RunTaskResponse = self._run_task(inputs)
+        # TODO: run the function and use self._server_messages to send
+        # the response and self._client_messages to get requests.
+        logger.info(
+            "function finished",
+            duration_sec=f"{time.monotonic() - start_time:.3f}",
+        )
 
     def _handle_set_invocation_state_response(
         self, response: SetInvocationStateResponse
@@ -427,9 +475,10 @@ class RunTaskAllocationsSession:
         Doesn't raise any exceptions.
         """
         if request.close:
+            # Signals client message processor thread to close the session.
             raise CloseSession()
         else:
-            raise LeaveSession()
+            self._server_messages.put(_INTERNAL_SESSION_COMMAND.LEAVE_SESSION)
 
 
 def _upload_serialized_object_response(
