@@ -1,0 +1,46 @@
+name: Release Tensorlake SDK package.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+  packages: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: test-pypi
+      url: https://test.pypi.org/p/tensorlake
+    permissions:
+      id-token: write  # Required for OIDC authentication to PyPI
+      contents: read   # Required for private repository access
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 2.0.0
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Install dependencies
+        run: |
+          poetry install --no-interaction
+          
+      - name: Build package
+        run: |
+          poetry build
+
+      - name: Publish package distributions to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
