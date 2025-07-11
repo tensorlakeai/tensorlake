@@ -126,64 +126,17 @@ class DocumentAI:
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> dict:
-        payload = {}
-
-        # file check
-        if file.startswith("http://") or file.startswith("https://"):
-            payload["file_url"] = file
-        elif file.startswith("tensorlake-"):
-            payload["file_id"] = file
-        else:
-            payload["raw_text"] = file
-
-        # optional field check
-        if labels:
-            payload["labels"] = labels
-
-        if page_range:
-            payload["page_range"] = page_range
-
-        if mime_type:
-            payload["mime_type"] = mime_type.value
-
-        # other parsing options
-        if parsing_options:
-            payload["parsing_options"] = parsing_options.model_dump(exclude_none=True)
-
-        if enrichment_options:
-            payload["enrichment_options"] = enrichment_options.model_dump(
-                exclude_none=True
-            )
-
-        if page_classifications:
-            payload["page_classifications"] = [
-                page_classification.model_dump(exclude_none=True)
-                for page_classification in page_classifications
-            ]
-
-        if structured_extraction_options:
-            converted_options = []
-            for structured_extraction_option in structured_extraction_options:
-                option_dict = structured_extraction_option.model_dump(exclude_none=True)
-
-                # Handle json_schema conversion
-                if hasattr(structured_extraction_option, "json_schema"):
-                    json_schema = structured_extraction_option.json_schema
-                    if inspect.isclass(json_schema) and issubclass(
-                        json_schema, BaseModel
-                    ):
-                        option_dict["json_schema"] = json_schema.model_json_schema()
-                    elif isinstance(json_schema, BaseModel):
-                        option_dict["json_schema"] = json_schema.model_json_schema()
-                    elif isinstance(json_schema, str):
-                        try:
-                            option_dict["json_schema"] = json.loads(json_schema)
-                        except json.JSONDecodeError:
-                            option_dict["json_schema"] = json_schema
-
-                converted_options.append(option_dict)
-
-            payload["structured_extraction_options"] = converted_options
+        payload = self._validate_or_upload_file(file)
+        common_payload = self._create_parse_req_common(
+            parsing_options,
+            structured_extraction_options,
+            enrichment_options,
+            page_classifications,
+            page_range,
+            labels,
+            mime_type,
+        )
+        payload.update(common_payload)
 
         return payload
 
@@ -238,17 +191,15 @@ class DocumentAI:
         """
         Parse a document asynchronously using the v2 API endpoint.
         """
-        body = (
-            self._create_parse_req(
-                file,
-                parsing_options,
-                structured_extraction_options,
-                enrichment_options,
-                page_classifications,
-                page_range,
-                labels,
-                mime_type,
-            ),
+        body = await self._create_parse_req_async(
+            file,
+            parsing_options,
+            structured_extraction_options,
+            enrichment_options,
+            page_classifications,
+            page_range,
+            labels,
+            mime_type,
         )
 
         response = await self._arequest(
@@ -607,7 +558,7 @@ class DocumentAI:
         mime_type: Optional[MimeType] = None,
         wait_for_completion: bool = False,
     ) -> Union[str, ParseResult]:
-        dataset_parse_req = self._create_dataset_parse_req(
+        dataset_parse_req = await self._create_dataset_parse_req_async(
             file,
             page_range,
             labels,
@@ -626,6 +577,10 @@ class DocumentAI:
 
         return await self.wait_for_completion_async(response_json["parse_id"])
 
+    # -------------------------------------------------------------------------
+    # Helpers for creating dataset parse requests
+    # -------------------------------------------------------------------------
+
     def _create_dataset_parse_req(
         self,
         file: str,
@@ -636,15 +591,48 @@ class DocumentAI:
         """
         Create a request body for parsing a file in a dataset.
         """
-        payload = {}
+        payload = self._validate_or_upload_file(file)
 
-        # file check
-        if file.startswith("http://") or file.startswith("https://"):
-            payload["file_url"] = file
-        elif file.startswith("tensorlake-"):
-            payload["file_id"] = file
-        else:
-            payload["raw_text"] = file
+        common_payload = self._create_dataset_parse_req_common(
+            page_range,
+            labels,
+            mime_type,
+        )
+        payload.update(common_payload)
+
+        return payload
+
+    async def _create_dataset_parse_req_async(
+        self,
+        file: str,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a request body for parsing a file in a dataset asynchronously.
+        """
+        payload = await self._validate_or_upload_file_async(file)
+
+        common_payload = self._create_dataset_parse_req_common(
+            page_range,
+            labels,
+            mime_type,
+        )
+        payload.update(common_payload)
+
+        return payload
+
+    def _create_dataset_parse_req_common(
+        self,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a common request body for parsing a file in a dataset.
+        """
+        payload = {}
 
         # optional field check
         if labels:
@@ -655,6 +643,134 @@ class DocumentAI:
 
         if mime_type:
             payload["mime_type"] = mime_type.value
+
+        return payload
+
+    def _validate_or_upload_file(self, file: str) -> dict:
+        """
+        Validate if the file is a valid URL or a Tensorlake file ID.
+        If it's a local file, upload it and return the file ID.
+        """
+        if file.startswith("http://") or file.startswith("https://"):
+            return {"file_url": file}
+        elif file.startswith("tensorlake-"):
+            return {"file_id": file}
+        elif Path(file).exists():
+            # If it's a local file, upload it
+            file_id = self.upload(file)
+            return {"file_id": file_id}
+        else:
+            return {"raw_text": file}
+
+    async def _validate_or_upload_file_async(self, file: str) -> dict:
+        """
+        Validate if the file is a valid URL or a Tensorlake file ID.
+        If it's a local file, upload it and return the file ID asynchronously.
+        """
+        if file.startswith("http://") or file.startswith("https://"):
+            return {"file_url": file}
+        elif file.startswith("tensorlake-"):
+            return {"file_id": file}
+        elif Path(file).exists():
+            # If it's a local file, upload it
+            file_id = await self.upload_async(file)
+            return {"file_id": file_id}
+        else:
+            return {"raw_text": file}
+
+    async def _create_parse_req_async(
+        self,
+        file: str,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            list[StructuredExtractionOptions]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[list[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> dict:
+        """
+        Create a request body for parsing a document.
+        """
+        payload = await self._validate_or_upload_file_async(file)
+
+        common_payload = self._create_parse_req_common(
+            parsing_options,
+            structured_extraction_options,
+            enrichment_options,
+            page_classifications,
+            page_range,
+            labels,
+            mime_type,
+        )
+        payload.update(common_payload)
+
+        return payload
+
+    def _create_parse_req_common(
+        self,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            list[StructuredExtractionOptions]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[list[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> Dict[str, Any]:
+        payload = {}
+
+        # optional field check
+        if labels:
+            payload["labels"] = labels
+
+        if page_range:
+            payload["page_range"] = page_range
+
+        if mime_type:
+            payload["mime_type"] = mime_type.value
+
+        # other parsing options
+        if parsing_options:
+            payload["parsing_options"] = parsing_options.model_dump(exclude_none=True)
+
+        if enrichment_options:
+            payload["enrichment_options"] = enrichment_options.model_dump(
+                exclude_none=True
+            )
+
+        if page_classifications:
+            payload["page_classifications"] = [
+                page_classification.model_dump(exclude_none=True)
+                for page_classification in page_classifications
+            ]
+
+        if structured_extraction_options:
+            converted_options = []
+            for structured_extraction_option in structured_extraction_options:
+                option_dict = structured_extraction_option.model_dump(exclude_none=True)
+
+                # Handle json_schema conversion
+                if hasattr(structured_extraction_option, "json_schema"):
+                    json_schema = structured_extraction_option.json_schema
+                    if inspect.isclass(json_schema) and issubclass(
+                        json_schema, BaseModel
+                    ):
+                        option_dict["json_schema"] = json_schema.model_json_schema()
+                    elif isinstance(json_schema, BaseModel):
+                        option_dict["json_schema"] = json_schema.model_json_schema()
+                    elif isinstance(json_schema, str):
+                        try:
+                            option_dict["json_schema"] = json.loads(json_schema)
+                        except json.JSONDecodeError:
+                            option_dict["json_schema"] = json_schema
+
+                converted_options.append(option_dict)
+
+            payload["structured_extraction_options"] = converted_options
 
         return payload
 

@@ -204,6 +204,54 @@ class TestDatasets(unittest.TestCase):
         self.assertIn("form125", page_classes)
         self.assertIn("form140", page_classes)
 
+    def test_parse_dataset_file_from_filesystem(self):
+        server_url = os.getenv("INDEXIFY_URL")
+        self.assertIsNotNone(
+            server_url, "INDEXIFY_URL environment variable is not set."
+        )
+
+        api_key = os.getenv("TENSORLAKE_API_KEY")
+        self.assertIsNotNone(
+            api_key, "TENSORLAKE_API_KEY environment variable is not set."
+        )
+
+        doc_ai = DocumentAI(
+            server_url=server_url,
+            api_key=api_key,
+        )
+
+        dataset = doc_ai.create_dataset(
+            name="Test Dataset",
+            description="This is a test dataset for unit testing.",
+        )
+        self.assertIsNotNone(dataset)
+
+        parse_id = doc_ai.parse_dataset_file(
+            dataset=dataset, file="./document_ai/testdata/example_bank_statement.pdf"
+        )
+        self.assertIsNotNone(parse_id)
+
+        parse_result = doc_ai.wait_for_completion(parse_id=parse_id)
+        self.assertIsNotNone(parse_result)
+
+        self.assertIsNotNone(parse_result.pages)
+        self.assertIsNotNone(parse_result.chunks)
+        self.assertIsNotNone(parse_result.structured_data)
+
+        structured_extraction_schemas = {}
+        for schema in parse_result.structured_data:
+            structured_extraction_schemas[schema.schema_name] = schema
+
+        self.assertIsNotNone(structured_extraction_schemas.get("form125-basic"))
+
+        doc_ai.delete_dataset(dataset)
+
+        self.assertRaises(
+            Exception,
+            doc_ai.get_parsed_result,
+            parse_id,
+        )
+
 
 # if __name__ == "__main__":
 #     unittest.main()
