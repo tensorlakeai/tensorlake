@@ -219,8 +219,8 @@ message TaskAllocationInput {
     optional string graph_invocation_id = 1;
     optional string task_id = 2;
     optional string allocation_id = 3;
-    optional SerializedObjectID function_input = 4;
-    optional SerializedObjectID function_init_value = 5;
+    optional SerializedObjectID function_input_id = 4;
+    optional SerializedObjectID function_init_value_id = 5;
 }
 
 message RunTaskAllocationsRequest {

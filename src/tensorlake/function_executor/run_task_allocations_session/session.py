@@ -8,6 +8,7 @@ from typing import Any, Dict, Generator, Iterator, List, Optional, Union
 
 import grpc
 
+from tensorlake.functions_sdk.data_objects import TensorlakeData
 from tensorlake.functions_sdk.functions import (
     FunctionCallResult,
     GraphInvocationContext,
@@ -16,7 +17,6 @@ from tensorlake.functions_sdk.functions import (
 from tensorlake.functions_sdk.graph_definition import ComputeGraphMetadata
 from tensorlake.functions_sdk.invocation_state.invocation_state import InvocationState
 
-from ..handlers.run_function.response_helper import ResponseHelper
 from ..proto.function_executor_pb2 import (
     GetInvocationStateResponse,
     LeaveSessionRequest,
@@ -38,6 +38,7 @@ from ..proto.google.rpc.code_pb2 import Code
 from ..proto.google.rpc.status_pb2 import Status
 from ..std_outputs_capture import flush_logs, read_till_the_end
 from .chunked_serialized_object import ChunkedSerializedObject
+from .function_inputs import FunctionInputs
 from .message_validators import validate_client_session_message
 
 
@@ -317,15 +318,83 @@ class RunTaskAllocationsSession:
 
         Doesn't raise any exceptions.
         """
-        if len(request.allocations) != 1:
+        if len(request.inputs) != 1:
             return self._server_messages.put(
                 _run_task_allocations_response(
                     code=Code.INVALID_ARGUMENT,
-                    message="Only one task allocation is supported per request",
+                    message=f"One task allocation is required per request, got {len(request.inputs)}",
                 )
             )
 
-        allocation: TaskAllocationInput = request.allocations[0]
+        allocation_inputs: TaskAllocationInput = request.inputs[0]
+        if allocation_inputs.function_input_id.value not in self._serialized_objects:
+            return self._server_messages.put(
+                _run_task_allocations_response(
+                    code=Code.NOT_FOUND,
+                    message=f"Serialized object with ID '{allocation_inputs.function_input_id.value}' not found",
+                )
+            )
+        obj: ChunkedSerializedObject = self._serialized_objects[
+            allocation_inputs.function_input_id.value
+        ]
+        try:
+            obj.validate()
+            func_input: TensorlakeData = obj.to_tensorlake_data()
+        except ValueError as e:
+            return self._server_messages.put(
+                _run_task_allocations_response(
+                    code=Code.INVALID_ARGUMENT,
+                    message=f"Serialized object with ID '{allocation_inputs.function_input_id.value}' is invalid: {str(e)}",
+                )
+            )
+
+        func_init_value: Optional[TensorlakeData] = None
+        if allocation_inputs.HasField("function_init_value_id"):
+            if (
+                allocation_inputs.function_init_value_id.value
+                not in self._serialized_objects
+            ):
+                return self._server_messages.put(
+                    _run_task_allocations_response(
+                        code=Code.NOT_FOUND,
+                        message=f"Serialized object with ID '{allocation_inputs.function_init_value_id.value}' not found",
+                    )
+                )
+            obj: ChunkedSerializedObject = self._serialized_objects[
+                allocation_inputs.function_init_value_id.value
+            ]
+            try:
+                obj.validate()
+                func_init_value = obj.to_tensorlake_data()
+            except ValueError as e:
+                return self._server_messages.put(
+                    _run_task_allocations_response(
+                        code=Code.INVALID_ARGUMENT,
+                        message=f"Serialized object with ID '{allocation_inputs.function_init_value_id.value}' is invalid: {str(e)}",
+                    )
+                )
+
+        self._run_function_inputs(
+            FunctionInputs(
+                task_allocation_input=allocation_inputs,
+                input=func_input,
+                init_value=func_init_value,
+            )
+        )
+
+    def _run_function_inputs(self, function_inputs: FunctionInputs) -> None:
+        """Runs the task allocation in the session.
+
+        The request should be validated before the call.
+        Doesn't raise any exceptions.
+        """
+        logger = self._logger.bind(
+            invocation_id=function_inputs.task_allocation_input.graph_invocation_id,
+            task_id=function_inputs.task_allocation_input.task_id,
+            allocation_id=function_inputs.task_allocation_input.allocation_id,
+        )
+        self._logger.info("running function")
+        start_time = time.monotonic()
 
     def _handle_set_invocation_state_response(
         self, response: SetInvocationStateResponse

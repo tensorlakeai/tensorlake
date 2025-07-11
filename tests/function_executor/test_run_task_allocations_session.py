@@ -152,7 +152,7 @@ class TestOpenSession(unittest.TestCase):
             yield RunTaskAllocationsSessionClientMessage(
                 upload_serialized_object_request=UploadSerializedObjectRequest(
                     manifest=SerializedObjectManifest(
-                        id=SerializedObjectID(id="test_object_id"),
+                        id=SerializedObjectID(value="test_object_id"),
                         encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_TEXT,
                         encoding_version=0,
                         size=9,

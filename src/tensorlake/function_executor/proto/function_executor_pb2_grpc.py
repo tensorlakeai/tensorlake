@@ -125,7 +125,8 @@ class FunctionExecutorServicer(object):
         Chunks are sent in original order they appear in the data.
         10. Client responds to each UploadSerializedObjectRequest with UploadSerializedObjectResponse.
         11. After a task allocations' outputs were uploaded to client, Function Executor sends RunTaskAllocationsResponse with details of
-        the task allocation outputs. The outputs reference their serialized objects by SerializedObjectID.
+        the task allocation outputs. The outputs reference their serialized objects by SerializedObjectID. Currently only one RunTaskAllocationsResponse
+        is sent per RunTaskAllocationsRequest.
         12. Client closes the session using LeaveSessionRequest with close=true.
         13. Function Executor release all resources associated with the session (e.g. task allocations' inputs and outputs) and responds with
         LeaveSessionResponse.

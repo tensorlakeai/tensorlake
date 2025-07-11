@@ -289,7 +289,12 @@ class Service(FunctionExecutorServicer):
         is_new: bool = False
         if session_id not in self._run_task_allocations_sessions:
             self._run_task_allocations_sessions[session_id] = RunTaskAllocationsSession(
-                id=session_id, logger=self._logger
+                id=session_id,
+                function_wrapper=self._function_wrapper,
+                function_stdout=self._function_stdout,
+                function_stderr=self._function_stderr,
+                graph_metadata=self._graph_metadata,
+                logger=self._logger,
             )
             is_new = True
 

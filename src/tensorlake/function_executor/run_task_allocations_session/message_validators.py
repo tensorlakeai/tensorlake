@@ -87,7 +87,7 @@ def validate_serialized_object_manifest(manifest: SerializedObjectManifest) -> N
         .required_field("size")
         .required_field("sha256_hash")
     )
-    MessageValidator(manifest.id).required_field("id")
+    validate_serialized_object_id(manifest.id)
 
 
 def validate_serialized_object_chunk(chunk: SerializedObjectChunk) -> None:
@@ -119,8 +119,8 @@ def validate_task_allocation_input(allocation_input: TaskAllocationInput) -> Non
         .required_field("graph_invocation_id")
         .required_field("task_id")
         .required_field("allocation_id")
-        .required_field("function_input")
+        .required_field("function_input_id")
     )
-    validate_serialized_object_id(allocation_input.function_input)
-    if allocation_input.HasField("function_init_value"):
-        validate_serialized_object_id(allocation_input.function_init_value)
+    validate_serialized_object_id(allocation_input.function_input_id)
+    if allocation_input.HasField("function_init_value_id"):
+        validate_serialized_object_id(allocation_input.function_init_value_id)

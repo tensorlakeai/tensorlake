@@ -437,35 +437,34 @@ class TaskAllocationInput(_message.Message):
         "graph_invocation_id",
         "task_id",
         "allocation_id",
-        "function_input",
-        "function_init_value",
+        "function_input_id",
+        "function_init_value_id",
     )
     GRAPH_INVOCATION_ID_FIELD_NUMBER: _ClassVar[int]
     TASK_ID_FIELD_NUMBER: _ClassVar[int]
     ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
-    FUNCTION_INPUT_FIELD_NUMBER: _ClassVar[int]
-    FUNCTION_INIT_VALUE_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_INPUT_ID_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_INIT_VALUE_ID_FIELD_NUMBER: _ClassVar[int]
     graph_invocation_id: str
     task_id: str
     allocation_id: str
-    function_input: SerializedObjectID
-    function_init_value: SerializedObjectID
+    function_input_id: SerializedObjectID
+    function_init_value_id: SerializedObjectID
     def __init__(
         self,
         graph_invocation_id: _Optional[str] = ...,
         task_id: _Optional[str] = ...,
         allocation_id: _Optional[str] = ...,
-        function_input: _Optional[_Union[SerializedObjectID, _Mapping]] = ...,
-        function_init_value: _Optional[_Union[SerializedObjectID, _Mapping]] = ...,
+        function_input_id: _Optional[_Union[SerializedObjectID, _Mapping]] = ...,
+        function_init_value_id: _Optional[_Union[SerializedObjectID, _Mapping]] = ...,
     ) -> None: ...
 
 class RunTaskAllocationsRequest(_message.Message):
-    __slots__ = ("allocations",)
-    ALLOCATIONS_FIELD_NUMBER: _ClassVar[int]
-    allocations: _containers.RepeatedCompositeFieldContainer[TaskAllocationInput]
+    __slots__ = ("inputs",)
+    INPUTS_FIELD_NUMBER: _ClassVar[int]
+    inputs: _containers.RepeatedCompositeFieldContainer[TaskAllocationInput]
     def __init__(
-        self,
-        allocations: _Optional[_Iterable[_Union[TaskAllocationInput, _Mapping]]] = ...,
+        self, inputs: _Optional[_Iterable[_Union[TaskAllocationInput, _Mapping]]] = ...
     ) -> None: ...
 
 class RunTaskAllocationsSessionClientMessage(_message.Message):
@@ -587,12 +586,15 @@ class TaskAllocationOutput(_message.Message):
     ) -> None: ...
 
 class RunTaskAllocationsResponse(_message.Message):
-    __slots__ = ("allocations",)
-    ALLOCATIONS_FIELD_NUMBER: _ClassVar[int]
-    allocations: _containers.RepeatedCompositeFieldContainer[TaskAllocationOutput]
+    __slots__ = ("status", "outputs")
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    OUTPUTS_FIELD_NUMBER: _ClassVar[int]
+    status: _status_pb2.Status
+    outputs: _containers.RepeatedCompositeFieldContainer[TaskAllocationOutput]
     def __init__(
         self,
-        allocations: _Optional[_Iterable[_Union[TaskAllocationOutput, _Mapping]]] = ...,
+        status: _Optional[_Union[_status_pb2.Status, _Mapping]] = ...,
+        outputs: _Optional[_Iterable[_Union[TaskAllocationOutput, _Mapping]]] = ...,
     ) -> None: ...
 
 class RunTaskAllocationsSessionServerMessage(_message.Message):
