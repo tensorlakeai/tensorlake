@@ -5,10 +5,12 @@ A comprehensive system for detecting and analyzing signatures in documents using
 langchain-tensorlake and LangGraph for conversational agent.
 """
 
+import asyncio
+
 # Helper packages
 import os
+
 from dotenv import load_dotenv
-import asyncio
 
 # LangGraph packages
 from langchain_tensorlake import document_markdown_tool
@@ -18,6 +20,7 @@ from langgraph.prebuilt import create_react_agent
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TENSORLAKE_API_KEY = os.getenv("TENSORLAKE_API_KEY")
+
 
 # Function to analyze signatures in a document using LangGraph agent
 # This function creates a LangGraph agent that uses the document_markdown_tool from langchain_tensorlake
@@ -61,7 +64,7 @@ async def analyze_signatures_agents(questions: str):
         model="openai:gpt-4o-mini",
         tools=[document_markdown_tool],
         prompt=(prompt),
-        name="real-estate-agent"
+        name="real-estate-agent",
     )
 
     print("Processing document with signature detection...")
@@ -71,6 +74,7 @@ async def analyze_signatures_agents(questions: str):
 
     # Print the result
     print("Analysis results:\n", result["messages"][-1].content)
+
 
 # Run an example analysis on a real estate document for signature insights
 if __name__ == "__main__":
