@@ -1,4 +1,4 @@
-name: Release Tensorlake SDK package.
+name: Release Tensorlake SDK package to TestPyPi.
 
 on:
   workflow_dispatch:
