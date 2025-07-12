@@ -190,13 +190,13 @@ message RunTaskRequestFrame {
     repeated string task_ids = 1;
 }
 
-message RunTaskResponseFrame {
+message TaskResponsesInitFrame {
     optional TaskOutcomeCode outcome_code = 1;
     optional TaskFailureReason failure_reason = 2;
     optional uint64 output_size = 3;
 }
 
-message RunTaskResponseFrameEnd {
+message TaskResponsesEndFrame {
 }
 
 message HealthCheckRequestFrame {}
@@ -231,11 +231,11 @@ message ProgressUpdate {
 // 5. After receiving the last BlobTxFin, the FE should start running the tasks. 
 // 6. As the tasks are running, if the user code wants to send progress updates, it will call and API on the context to send Progress Update. THe FE 
 // will translate this to a ProgressUpdate frame and send it to the executor. 
-// 7. Once the tasks are finished, the FE will send RunTaskResponseFrame to initiate sending task results back to the executor.
-// The RunTaskResponseFrame is the metadata of the output, and the outcome. For every task that has finished(successfully or not), the FE will send the following frames:
-// RunTaskResponseFrame, BlobTxInit, [BlobChunk ..], BlobTxFin for the output payload of the task. 
+// 7. Once the tasks are finished, the FE will send TaskResponsesInitFrame to initiate sending task results back to the executor.
+// The TaskResponsesInitFrame is the metadata of the output, and the outcome. For every task that has finished(successfully or not), the FE will send the following frames:
+// TaskResponsesInitFrame, BlobTxInit, [BlobChunk ..], BlobTxFin for the output payload of the task. 
 // The Blob* Frames are optional and only sent if there are outputs, logs, etc. 
-// After all the blobs of the tasks are sent the FE will send RunTaskResponseFrameEnd to indicate that all the tasks are finished.
+// After all the blobs of the tasks are sent the FE will send TaskResponsesEndFrame to indicate that all the tasks are finished.
 // 8. At that point the executor can consider the FE is done running everything. 
 // Note on resuming stream - 
 // It is expected that a stream can break at any point. We don't want to lose valuable work done by the FE. 
@@ -249,8 +249,8 @@ message FunctionExecutorIO {
         BlobChunk chunk = 2;
         BlobTxFin fin = 3;
         RunTaskRequestFrame task = 4;
-        RunTaskResponseFrame response = 5;
-        RunTaskResponseFrameEnd response_end = 6;
+        TaskResponsesInitFrame response = 5;
+        TaskResponsesEndFrame response_end = 6;
         HealthCheckRequestFrame health_check = 7;
         HealthCheckResponseFrame health_check_response = 8;
         ProgressUpdate progress = 9;
