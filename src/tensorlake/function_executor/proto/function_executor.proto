@@ -245,14 +245,25 @@ message ProgressUpdate {
 // or for progress updates, or for health check results. 
 message FunctionExecutorIO {
     oneof frame {
+        // Messages sent by FE and Executors to each other for exchanging function I/O and logs.
         BlobTxInit init = 1;
         BlobChunk chunk = 2;
         BlobTxFin fin = 3;
+
+        // Messages sent by Executor to FE to initiate running tasks.
         RunTaskRequestFrame task = 4;
+
+        // Messages sent by FE to Executor to send task results.
         TaskResponsesInitFrame response = 5;
         TaskResponsesEndFrame response_end = 6;
+
+        // Messages sent by Executor to FE to get health check results.
         HealthCheckRequestFrame health_check = 7;
+
+        // Messages sent by FE to Executor to send health check results.
         HealthCheckResponseFrame health_check_response = 8;
+
+        // Messages sent by FE to Executor to send progress updates.
         ProgressUpdate progress = 9;
     }
 }
