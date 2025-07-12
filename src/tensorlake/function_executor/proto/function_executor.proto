@@ -223,7 +223,7 @@ message ProgressUpdate {
 // 1. Executor starts a bi-directional stream with the FE when it has to run tasks or get health check results if the FE is already initialized but idle.
 // 2. Executor receives a request from Indexify server to run Task T1, T2, T3
 // 3. Executor sends RunTaskRequestFrame with task_ids T1, T2, T3
-// 4. Executor sends BlobTxInit, BlobChunk, BlobTxFin for input payload of T1, T2, T3
+// 4. Executor sends BlobTxInit, [BlobChunk ...], BlobTxFin for input payload of T1, T2, T3
 // Note that each of these blob messages has to be sent in sequence. That is the frames for T1 has to be sent first, T2 next, and so on.enum
 // At this point, the FE should buffer and store the input payloads for each task **In-Memory** of the container. 
 // We are not going to advertise any disk caching for large inputs right now. We will have to think about the semantics of streaming large inputs from storag
