@@ -21,6 +21,19 @@ message SerializedObject {
     optional uint64 encoding_version = 3;
 }
 
+/// Serializes the whole output object in a single binary blob.
+// The size is the total size of the serialized object.
+// Start offset is the offset of the output of a specific object if the function 
+// output has multiple objects, for ex. List. 
+// For the most common case, if the function output has a single object, the start_offset is 0.
+message SerializedObjectUrl {
+    optional string url = 1;
+    optional uint64 size = 2;
+    optional uint64 start_offset = 3;
+    optional SerializedObjectEncoding encoding = 4;
+    optional uint64 encoding_version = 5;
+}
+
 // InitializeRequest contains information about the function
 // that Function Executor is going to run the tasks for.
 message InitializeRequest {
@@ -161,42 +174,22 @@ message InfoResponse {
     optional string sdk_language_version = 4;
 }
 
-enum BlobType {
-    BLOB_TYPE_UNKNOWN = 0;
-    BLOB_TYPE_INPUT = 1;
-    BLOB_TYPE_INIT = 2;
-    BLOB_TYPE_OUTPUT = 3;
-    BLOB_TYPE_STDOUT = 4;
-    BLOB_TYPE_STDERR = 5;
-}
-
-message BlobTxInit {
-    optional uint64 size = 1;
-    optional string mime_type = 2;
-    optional string task_id = 3;
-    optional BlobType type = 4;
-}
-
-message BlobChunk {
-    optional bytes data = 1;
-}
-
-message BlobTxFin {
-    optional string checksum = 1;
-}
-
-
 message RunTaskRequestFrame {
-    repeated string task_ids = 1;
+    optional string task_id = 1;
+    optional SerializedObjectUrl input_url = 2;
+    optional SerializedObjectUrl init_val_url = 3;
 }
 
-message TaskResponsesInitFrame {
-    optional TaskOutcomeCode outcome_code = 1;
-    optional TaskFailureReason failure_reason = 2;
-    optional uint64 output_size = 3;
+message BatchedRunTaskRequestFrame {
+    repeated RunTaskRequestFrame requests = 1;
 }
 
-message TaskResponsesEndFrame {
+message RunTaskResponseFrame {
+    optional string task_id = 1;
+    optional SerializedObjectUrl output_url = 2;
+    optional SerializedObjectUrl stdout_url = 3;
+    optional SerializedObjectUrl stderr_url = 4;
+    optional TaskOutcomeCode outcome_code = 5;
 }
 
 message HealthCheckRequestFrame {}
@@ -212,31 +205,28 @@ message ProgressUpdate {
     optional uint64 current = 2;
 }
 
-// The semantics of Executor <> FE remains the same. Executor forks a FE, and initializes it using the existing RPC API - initialize
+// The semantics of Executor <> FE processes remains the same. Executor forks a FE, and initializes it using the existing RPC API - initialize
 // From there on the executor starts a stream with the FE for 1. Running tasks 2. Getting On-Demand Health Check results 3. Progress updates of tasks. 
 // Not everything in this protocol has to be implemented at once. For example, we can keep using the existing Health Check RPCs for now.
 // We also don't need to implement the progress update frames for now. 
 // The MVP of this protocol to ship support for large files are the following frames:
-// BlobTxInit, BlobChunk, BlobTxFin, RunTaskRequestFrame, RunTaskResponseFrame, RunTaskResponseFrameEnd, HealthCheckRequestFrame, HealthCheckResponseFrame, ProgressUpdate
+// RunTaskRequestFrame, RunTaskResponseFrame, HealthCheckRequestFrame, HealthCheckResponseFrame, ProgressUpdate
 //
 // State Machine of the Protocol: 
 // 1. Executor starts a bi-directional stream with the FE when it has to run tasks or get health check results if the FE is already initialized but idle.
 // 2. Executor receives a request from Indexify server to run Task T1, T2, T3
-// 3. Executor sends RunTaskRequestFrame with task_ids T1, T2, T3
-// 4. Executor sends BlobTxInit, [BlobChunk ...], BlobTxFin for input payload of T1, T2, T3
-// Note that each of these blob messages has to be sent in sequence. That is the frames for T1 has to be sent first, T2 next, and so on.enum
-// At this point, the FE should buffer and store the input payloads for each task **In-Memory** of the container. 
-// We are not going to advertise any disk caching for large inputs right now. We will have to think about the semantics of streaming large inputs from storag
-// at a later point. We will likely have to introduce them using a Generator API. It's out of scope for now. 
-// 5. After receiving the last BlobTxFin, the FE should start running the tasks. 
-// 6. As the tasks are running, if the user code wants to send progress updates, it will call and API on the context to send Progress Update. THe FE 
+// 3. Executor sends BatchedRunTaskRequestFrame with task_ids T1, T2, T3. The request has the URLs of the inputs and the init value
+// 4. FE reads the blobs from the URLs and stores them in memory.
+// We are not going to advertise any disk caching for large inputs right now. We will have to think about the semantics of streaming large inputs from 
+// storage at a later point. We will likely have to introduce them using a Generator API. It's out of scope for now. 
+// 5. After downloading the inputs, the FE starts running the tasks. 
+// 6. As the tasks are running, if the user code wants to send progress updates, it will call and API on the context to send Progress Update. The FE 
 // will translate this to a ProgressUpdate frame and send it to the executor. 
-// 7. Once the tasks are finished, the FE will send TaskResponsesInitFrame to initiate sending task results back to the executor.
-// The TaskResponsesInitFrame is the metadata of the output, and the outcome. For every task that has finished(successfully or not), the FE will send the following frames:
-// TaskResponsesInitFrame, BlobTxInit, [BlobChunk ..], BlobTxFin for the output payload of the task. 
-// The Blob* Frames are optional and only sent if there are outputs, logs, etc. 
-// After all the blobs of the tasks are sent the FE will send TaskResponsesEndFrame to indicate that all the tasks are finished.
-// 8. At that point the executor can consider the FE is done running everything. 
+// 7. The FE requests the executor for a pre-signed URL to upload the outputs of the tasks.
+// 8. The executor sends the pre-signed URL to the FE.
+// 9. The FE uploads the outputs to the pre-signed URL.
+// 10. Once the tasks are finished, the FE will send RunTaskResponseFrame for each task that has finished(successfully or not).
+// 12. At that point the executor can consider the FE is done running everything.
 // Note on resuming stream - 
 // It is expected that a stream can break at any point. We don't want to lose valuable work done by the FE. 
 // If the stream is resumed by reconnecting to the FE. the executor should first send a HealthCheckRequestFrame to the FE to check if the FE is healthy.
@@ -245,17 +235,11 @@ message ProgressUpdate {
 // or for progress updates, or for health check results. 
 message FunctionExecutorIO {
     oneof frame {
-        // Messages sent by FE and Executors to each other for exchanging function I/O and logs.
-        BlobTxInit init = 1;
-        BlobChunk chunk = 2;
-        BlobTxFin fin = 3;
-
         // Messages sent by Executor to FE to initiate running tasks.
-        RunTaskRequestFrame task = 4;
+        BatchedRunTaskRequestFrame task = 4;
 
         // Messages sent by FE to Executor to send task results.
-        TaskResponsesInitFrame response = 5;
-        TaskResponsesEndFrame response_end = 6;
+        RunTaskResponseFrame response = 5;
 
         // Messages sent by Executor to FE to get health check results.
         HealthCheckRequestFrame health_check = 7;
