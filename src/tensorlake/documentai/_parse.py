@@ -291,6 +291,48 @@ class _ParseMixin(_BaseClient):
         resp = await self._arequest("GET", f"parse/{parse_id}")
         return ParseResult.model_validate(resp.json())
 
+    def delete_parse(self, parse_id: str) -> None:
+        """
+        Delete a parse operation.
+
+        This will remove the parse and its associated data from the system and it cannot be recovered.
+
+        If the parse operation is still pending or processing, this method will raise an error.
+
+        Args:
+            parse_id: The ID of the parse operation to delete. This is the string returned by the parse method.
+        """
+        parse = self.get_parsed_result(parse_id)
+
+        if parse.status in {ParseStatus.PENDING, ParseStatus.PROCESSING}:
+            raise ValueError(
+                "Cannot delete a parse operation that is still pending or processing. "
+                "Please wait for the operation to complete before deleting."
+            )
+
+        self._request("DELETE", f"parse/{parse.parse_id}")
+
+    def delete_parse_async(self, parse_id: str) -> None:
+        """
+        Delete a parse operation asynchronously.
+
+        This will remove the parse and its associated data from the system and it cannot be recovered.
+
+        If the parse operation is still pending or processing, this method will raise an error.
+
+        Args:
+            parse_id: The ID of the parse operation to delete. This is the string returned by the parse method.
+        """
+        parse = self.get_parsed_result(parse_id)
+
+        if parse.status in {ParseStatus.PENDING, ParseStatus.PROCESSING}:
+            raise ValueError(
+                "Cannot delete a parse operation that is still pending or processing. "
+                "Please wait for the operation to complete before deleting."
+            )
+
+        return self._arequest("DELETE", f"parse/{parse.parse_id}")
+
 
 def _create_parse_req(
     file: str,
