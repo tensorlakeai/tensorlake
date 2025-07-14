@@ -9,9 +9,9 @@ from typing import Optional, Union
 
 from retry import retry
 
-from .files import FileInfo, FileUploader
-from .common import PaginatedResult
 from ._base import _BaseClient
+from .common import PaginatedResult
+from .files import FileInfo, FileUploader
 
 
 class _FilesMixin(_BaseClient):

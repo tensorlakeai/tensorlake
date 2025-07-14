@@ -7,9 +7,9 @@ from __future__ import annotations
 from typing import Optional
 
 from ._base import _BaseClient
-from ._parse import _ParseMixin
-from ._files import _FilesMixin
 from ._datasets import _DatasetMixin
+from ._files import _FilesMixin
+from ._parse import _ParseMixin
 
 
 class DocumentAI(_ParseMixin, _FilesMixin, _DatasetMixin, _BaseClient):

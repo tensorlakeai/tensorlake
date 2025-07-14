@@ -6,22 +6,21 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Union
 
-
-from .models import (
-    Dataset,
-    EnrichmentOptions,
-    MimeType,
-    PageClassConfig,
-    ParseResult,
-    ParsingOptions,
-    StructuredExtractionOptions,
-    PaginatedResult,
-    PaginationDirection,
-    DatasetStatus,
-)
 from ._base import _BaseClient
 from ._parse import _convert_seo
 from ._utils import _drop_none
+from .models import (
+    Dataset,
+    DatasetStatus,
+    EnrichmentOptions,
+    MimeType,
+    PageClassConfig,
+    PaginatedResult,
+    PaginationDirection,
+    ParseResult,
+    ParsingOptions,
+    StructuredExtractionOptions,
+)
 
 
 class _DatasetMixin(_BaseClient):

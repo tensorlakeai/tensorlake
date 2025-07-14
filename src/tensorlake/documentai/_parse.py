@@ -8,19 +8,19 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
+from ._base import _BaseClient
+from ._utils import _drop_none
 from .models import (
     EnrichmentOptions,
     MimeType,
     PageClassConfig,
+    PaginatedResult,
+    PaginationDirection,
     ParseResult,
     ParseStatus,
     ParsingOptions,
     StructuredExtractionOptions,
-    PaginationDirection,
-    PaginatedResult,
 )
-from ._base import _BaseClient
-from ._utils import _drop_none
 
 
 class _ParseMixin(_BaseClient):

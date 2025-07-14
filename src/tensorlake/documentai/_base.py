@@ -33,6 +33,46 @@ class _BaseClient:
             self._client.base_url = f"{server_url}/documents/v2"
             self._aclient.base_url = f"{server_url}/documents/v2"
 
+    def close(self):
+        """
+        Close the HTTP clients.
+        """
+        self._client_v1.close()
+        self._client.close()
+
+    async def _aclose(self):
+        """
+        Close the asynchronous HTTP clients.
+        """
+        await self._aclient_v1.aclose()
+        await self._aclient.aclose()
+
+    def __enter__(self):
+        """
+        Context manager entry point.
+        """
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        """
+        Context manager exit point.
+        Closes the HTTP clients.
+        """
+        self.close()
+
+    async def __aenter__(self):
+        """
+        Asynchronous context manager entry point.
+        """
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        """
+        Asynchronous context manager exit point.
+        Closes the asynchronous HTTP clients.
+        """
+        await self._aclose()
+
     def _headers(self) -> Dict[str, str]:
         return {
             "Authorization": f"Bearer {self.api_key}",

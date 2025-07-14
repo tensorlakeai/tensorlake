@@ -12,7 +12,7 @@ from tensorlake.documentai.models.options import (
 
 
 class TestDatasets(unittest.TestCase):
-    def test_create_dataset(self):
+    def setUp(self):
         server_url = os.getenv("INDEXIFY_URL")
         self.assertIsNotNone(
             server_url, "INDEXIFY_URL environment variable is not set."
@@ -23,14 +23,16 @@ class TestDatasets(unittest.TestCase):
             api_key, "TENSORLAKE_API_KEY environment variable is not set."
         )
 
-        doc_ai = DocumentAI(
+        self.doc_ai = DocumentAI(
             server_url=server_url,
             api_key=api_key,
         )
+        self.addCleanup(self.doc_ai.close)
 
+    def test_create_dataset(self):
         random_name = f"test_dataset_{os.urandom(4).hex()}"
 
-        dataset = doc_ai.create_dataset(
+        dataset = self.doc_ai.create_dataset(
             name=random_name,
             description="This is a test dataset for unit testing.",
         )
@@ -44,7 +46,7 @@ class TestDatasets(unittest.TestCase):
         self.assertIsNotNone(dataset.created_at)
         self.assertTrue(dataset.dataset_id.startswith("dataset_"))
 
-        datasets_list = doc_ai.list_datasets()
+        datasets_list = self.doc_ai.list_datasets()
         self.assertIsNotNone(datasets_list)
         self.assertGreater(len(datasets_list.items), 0)
 
@@ -55,39 +57,24 @@ class TestDatasets(unittest.TestCase):
         self.assertIsNotNone(found_dataset)
         self.assertEqual(found_dataset.name, random_name)
 
-        doc_ai.delete_dataset(dataset)
+        self.doc_ai.delete_dataset(dataset)
 
         self.assertRaises(
             Exception,
-            doc_ai.get_dataset,
+            self.doc_ai.get_dataset,
             dataset.dataset_id,
         )
 
     def test_parse_documents(self):
-        server_url = os.getenv("INDEXIFY_URL")
-        self.assertIsNotNone(
-            server_url, "INDEXIFY_URL environment variable is not set."
-        )
-
-        api_key = os.getenv("TENSORLAKE_API_KEY")
-        self.assertIsNotNone(
-            api_key, "TENSORLAKE_API_KEY environment variable is not set."
-        )
-
-        doc_ai = DocumentAI(
-            server_url=server_url,
-            api_key=api_key,
-        )
-
         random_name = f"test_dataset_{os.urandom(4).hex()}"
 
-        dataset = doc_ai.create_dataset(
+        dataset = self.doc_ai.create_dataset(
             name=random_name,
             description="This is a test dataset for unit testing.",
         )
         self.assertIsNotNone(dataset)
 
-        parse_id = doc_ai.parse_dataset_file(
+        parse_id = self.doc_ai.parse_dataset_file(
             dataset=dataset,
             file="https://pub-226479de18b2493f96b64c6674705dd8.r2.dev/real-estate-purchase-all-signed.pdf",
             page_range="1-2",
@@ -95,32 +82,22 @@ class TestDatasets(unittest.TestCase):
         )
         self.assertIsNotNone(parse_id)
         print(f"Parse ID: {parse_id}")
-        parse_result = doc_ai.wait_for_completion(parse_id=parse_id)
+
+        parse_result = self.doc_ai.wait_for_completion(parse_id=parse_id)
         self.assertIsNotNone(parse_result)
         self.assertIsNotNone(parse_result.pages)
         self.assertIsNotNone(parse_result.chunks)
 
-        doc_ai.delete_dataset(dataset)
-        self.assertRaises(Exception, doc_ai.get_parsed_result, parse_id)
+        self.doc_ai.delete_dataset(dataset)
+        self.assertRaises(Exception, self.doc_ai.get_parsed_result, parse_id)
 
     def test_structured_extraction_dataset(self):
-        server_url = os.getenv("INDEXIFY_URL")
-        self.assertIsNotNone(
-            server_url, "INDEXIFY_URL environment variable is not set."
-        )
-
-        api_key = os.getenv("TENSORLAKE_API_KEY")
-        self.assertIsNotNone(
-            api_key, "TENSORLAKE_API_KEY environment variable is not set."
-        )
-
-        doc_ai = DocumentAI(server_url=server_url, api_key=api_key)
         structured_extraction_options = StructuredExtractionOptions(
             schema_name="form125-basic", json_schema=BankStatement
         )
 
         random_name = f"test_dataset_{os.urandom(4).hex()}_structured_extraction"
-        dataset = doc_ai.create_dataset(
+        dataset = self.doc_ai.create_dataset(
             name=random_name,
             description="This is a test dataset for unit testing with structured extraction.",
             structured_extraction_options=[structured_extraction_options],
@@ -128,17 +105,17 @@ class TestDatasets(unittest.TestCase):
 
         self.assertIsNotNone(dataset)
 
-        file_id = doc_ai.upload(
+        file_id = self.doc_ai.upload(
             path="./document_ai/testdata/example_bank_statement.pdf"
         )
         self.assertIsNotNone(file_id)
 
-        parse_id = doc_ai.parse_dataset_file(dataset=dataset, file=file_id)
+        parse_id = self.doc_ai.parse_dataset_file(dataset=dataset, file=file_id)
 
         self.assertIsNotNone(parse_id)
         print(f"Parse ID: {parse_id}")
 
-        parse_result = doc_ai.wait_for_completion(parse_id=parse_id)
+        parse_result = self.doc_ai.wait_for_completion(parse_id=parse_id)
         self.assertIsNotNone(parse_result)
 
         self.assertIsNotNone(parse_result.pages)
@@ -151,30 +128,15 @@ class TestDatasets(unittest.TestCase):
 
         self.assertIsNotNone(structured_extraction_schemas.get("form125-basic"))
 
-        doc_ai.delete_dataset(dataset)
+        self.doc_ai.delete_dataset(dataset)
 
         self.assertRaises(
             Exception,
-            doc_ai.get_parsed_result,
+            self.doc_ai.get_parsed_result,
             parse_id,
         )
 
     def test_page_classification_dataset(self):
-        server_url = os.getenv("INDEXIFY_URL")
-        self.assertIsNotNone(
-            server_url, "INDEXIFY_URL environment variable is not set."
-        )
-
-        api_key = os.getenv("TENSORLAKE_API_KEY")
-        self.assertIsNotNone(
-            api_key, "TENSORLAKE_API_KEY environment variable is not set."
-        )
-
-        doc_ai = DocumentAI(
-            server_url=server_url,
-            api_key=api_key,
-        )
-
         form125_page_class_config = PageClassConfig(
             name="form125",
             description="ACORD 125: Applicant Information Section — captures general insured information, business details, and contacts",
@@ -186,7 +148,7 @@ class TestDatasets(unittest.TestCase):
         )
 
         random_name = f"test_dataset_{os.urandom(4).hex()}_page_classification"
-        dataset = doc_ai.create_dataset(
+        dataset = self.doc_ai.create_dataset(
             name=random_name,
             description="This is a test dataset for unit testing with page classification.",
             page_classifications=[
@@ -197,10 +159,10 @@ class TestDatasets(unittest.TestCase):
 
         self.assertIsNotNone(dataset)
 
-        accord_file_id = doc_ai.upload(path="./document_ai/testdata/acord.pdf")
+        accord_file_id = self.doc_ai.upload(path="./document_ai/testdata/acord.pdf")
         self.assertIsNotNone(accord_file_id)
 
-        parsed_result = doc_ai.parse_dataset_file(
+        parsed_result = self.doc_ai.parse_dataset_file(
             dataset=dataset,
             file=accord_file_id,
             wait_for_completion=True,
