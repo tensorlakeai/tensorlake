@@ -42,6 +42,16 @@ class TestParse(unittest.TestCase):
         self.assertIsNotNone(parse_result.pages)
         self.assertIsNotNone(parse_result.chunks)
 
+        parse_list = doc_ai.list_parse_results()
+        self.assertIsNotNone(parse_list)
+        self.assertGreater(len(parse_list.items), 0)
+
+        found_parse = next(
+            (p for p in parse_list.items if p.parse_id == parse_id), None
+        )
+        self.assertIsNotNone(found_parse)
+        self.assertEqual(found_parse.parse_id, parse_id)
+
         doc_ai.delete_parse(parse_id)
         self.assertRaises(Exception, doc_ai.get_parsed_result, parse_id)
 

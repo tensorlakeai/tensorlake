@@ -21,6 +21,7 @@ from .models import (
 )
 from ._base import _BaseClient
 from ._parse import _convert_seo
+from ._utils import _drop_none
 
 
 class _DatasetMixin(_BaseClient):
@@ -320,13 +321,7 @@ class _DatasetMixin(_BaseClient):
 
         resp = await self._arequest("GET", "/datasets", params=params)
         data = resp.json()
-        datasets = [Dataset.model_validate(d) for d in data["items"]]
-        return PaginatedResult[Dataset](
-            items=datasets,
-            has_more=data.get("has_more", False),
-            next_cursor=data.get("next_cursor"),
-            prev_cursor=data.get("prev_cursor"),
-        )
+        return PaginatedResult[Dataset].model_validate(data, from_attributes=True)
 
 
 def _create_dataset_parse_req(
@@ -376,8 +371,3 @@ def _create_dataset_req(
             _convert_seo(opt) for opt in structured_extraction_options
         ]
     return body
-
-
-@staticmethod
-def _drop_none(m: Dict[str, Any]) -> Dict[str, Any]:
-    return {k: v for k, v in m.items() if v is not None}
