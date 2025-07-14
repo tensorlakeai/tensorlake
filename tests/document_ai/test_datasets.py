@@ -44,6 +44,17 @@ class TestDatasets(unittest.TestCase):
         self.assertIsNotNone(dataset.created_at)
         self.assertTrue(dataset.dataset_id.startswith("dataset_"))
 
+        datasets_list = doc_ai.list_datasets()
+        self.assertIsNotNone(datasets_list)
+        self.assertGreater(len(datasets_list.items), 0)
+
+        found_dataset = next(
+            (d for d in datasets_list.items if d.dataset_id == dataset.dataset_id),
+            None,
+        )
+        self.assertIsNotNone(found_dataset)
+        self.assertEqual(found_dataset.name, random_name)
+
         doc_ai.delete_dataset(dataset)
 
         self.assertRaises(

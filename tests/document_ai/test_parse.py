@@ -37,9 +37,13 @@ class TestParse(unittest.TestCase):
         print(f"Parse ID: {parse_id}")
 
         parse_result = doc_ai.wait_for_completion(parse_id=parse_id)
+        self.assertEqual(parse_result.status, ParseStatus.SUCCESSFUL)
         self.assertIsNotNone(parse_result)
         self.assertIsNotNone(parse_result.pages)
         self.assertIsNotNone(parse_result.chunks)
+
+        doc_ai.delete_parse(parse_id)
+        self.assertRaises(Exception, doc_ai.get_parsed_result, parse_id)
 
     def test_remove_file_can_still_access_parsed_results(self):
         server_url = os.getenv("INDEXIFY_URL")
@@ -77,6 +81,9 @@ class TestParse(unittest.TestCase):
         self.assertIsNotNone(parsed_result)
         self.assertEqual(parsed_result.status, ParseStatus.SUCCESSFUL)
         self.assertIsNotNone(parsed_result.pages)
+
+        doc_ai.delete_parse(parsed_result.parse_id)
+        self.assertRaises(Exception, doc_ai.get_parsed_result, parsed_result.parse_id)
 
     def test_parse_structured_extraction(self):
         server_url = os.getenv("INDEXIFY_URL")
@@ -118,6 +125,9 @@ class TestParse(unittest.TestCase):
             structured_extraction_schemas[schema.schema_name] = schema
 
         self.assertIsNotNone(structured_extraction_schemas.get("form125-basic"))
+
+        doc_ai.delete_parse(parsed_result.parse_id)
+        self.assertRaises(Exception, doc_ai.get_parsed_result, parsed_result.parse_id)
 
     def test_page_classification(self):
         server_url = os.getenv("INDEXIFY_URL")
@@ -167,6 +177,9 @@ class TestParse(unittest.TestCase):
 
         self.assertIn("form125", page_classes)
         self.assertIn("form140", page_classes)
+
+        doc_ai.delete_parse(parsed_result.parse_id)
+        self.assertRaises(Exception, doc_ai.get_parsed_result, parsed_result.parse_id)
 
 
 if __name__ == "__main__":

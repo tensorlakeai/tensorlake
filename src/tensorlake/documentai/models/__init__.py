@@ -47,6 +47,8 @@ from .results import (
     Text,
 )
 
+from .pagination import PaginatedResult, PaginationDirection
+
 __all__ = [
     # Enums
     "ChunkingStrategy",
@@ -82,4 +84,7 @@ __all__ = [
     # Datasets
     "Dataset",
     "DatasetStatus",
+    # Pagination
+    "PaginatedResult",
+    "PaginationDirection",
 ]
