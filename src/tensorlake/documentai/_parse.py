@@ -154,6 +154,118 @@ class _ParseMixin(_BaseClient):
             print(f"parse status: {parse.status}")
         return parse
 
+    def parse_and_wait(
+        self,
+        file: str,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            List[StructuredExtractionOptions]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> ParseResult:
+        """
+        Parse a document and wait for the result.
+
+        This method combines the parse and wait_for_completion methods to parse a document and return the final
+        ParseResult once the parsing operation is complete.
+
+        Args:
+            file: The file to parse. This can be a URL, a file ID (from Tensorlake), or raw text.
+
+             parsing_options: Optional parsing options to customize how documents in the dataset are parsed. Tensorlake
+                provides default parsing options, but you can specify custom options to tailor the parsing process.
+
+            structured_extraction_options: Optional structured extraction options to guide the extraction of structured
+                data from documents in the dataset. This allows you to define schemas and extraction strategies for
+                structured data.
+
+            enrichment_options: Optional enrichment options to extend the output of the document parsing process with
+                additional information, such as summarization of tables and figures.
+
+            page_classifications: Optional list of page classification configurations. If provided, the API will perform
+                page classification on the documents in the dataset. This can help in organizing and understanding the
+                content of the documents based on their page types.
+
+            page_range: Optional page range to parse. This can be a string like "1,2,3-5" to specify specific pages or ranges.
+
+            labels: Optional labels to attach to the parsed document. This can be a dictionary of key-value pairs.
+
+            mime_type: Optional MIME type of the file. This can be used to specify the type of content being parsed, such as "application/pdf" or "text/plain".
+        """
+        parse_id = self.parse(
+            file,
+            parsing_options,
+            structured_extraction_options,
+            enrichment_options,
+            page_classifications,
+            page_range,
+            labels,
+            mime_type,
+        )
+        return self.wait_for_completion(parse_id)
+
+    async def parse_and_wait_async(
+        self,
+        file: str,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            List[StructuredExtractionOptions]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> ParseResult:
+        """
+        Parse a document and wait for the result asynchronously.
+
+        This method combines the parse_async and wait_for_completion_async methods to parse a document and return the final
+        ParseResult once the parsing operation is complete.
+
+        Args:
+            file: The file to parse. This can be a URL, a file ID (from Tensorlake), or raw text.
+            parsing_options: Optional parsing options to customize how documents in the dataset are parsed.
+            structured_extraction_options: Optional structured extraction options to guide the extraction of structured data.
+            enrichment_options: Optional enrichment options to extend the output of the document parsing process.
+            page_classificat            file: The file to parse. This can be a URL, a file ID (from Tensorlake), or raw text.
+
+             parsing_options: Optional parsing options to customize how documents in the dataset are parsed. Tensorlake
+                provides default parsing options, but you can specify custom options to tailor the parsing process.
+
+            structured_extraction_options: Optional structured extraction options to guide the extraction of structured
+                data from documents in the dataset. This allows you to define schemas and extraction strategies for
+                structured data.
+
+            enrichment_options: Optional enrichment options to extend the output of the document parsing process with
+                additional information, such as summarization of tables and figures.
+
+            page_classifications: Optional list of page classification configurations. If provided, the API will perform
+                page classification on the documents in the dataset. This can help in organizing and understanding the
+                content of the documents based on their page types.
+
+            page_range: Optional page range to parse. This can be a string like "1,2,3-5" to specify specific pages or ranges.
+
+            labels: Optional labels to attach to the parsed document. This can be a dictionary of key-value pairs.
+
+            mime_type: Optional MIME type of the file. This can be used to specify the type of content being parsed, such as "application/pdf" or "text/plain".
+        """
+        parse_id = await self.parse_async(
+            file,
+            parsing_options,
+            structured_extraction_options,
+            enrichment_options,
+            page_classifications,
+            page_range,
+            labels,
+            mime_type,
+        )
+        return await self.wait_for_completion_async(parse_id)
+
     def get_parsed_result(self, parse_id: str) -> ParseResult:
         """
         Get the result of a parse operation.
