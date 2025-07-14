@@ -82,7 +82,7 @@ class FileUploader:
             return self.upload_large_file(path)
 
         with open(path, "rb") as f:
-            files = {"file": (f.name, f)}
+            files = {"file": (path.name, f)}
             response = self._client.post(
                 url="files",
                 headers={
