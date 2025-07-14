@@ -17,7 +17,6 @@ from .enums import (
     TableParsingFormat,
 )
 
-
 # Options
 from .options import (
     EnrichmentOptions,
@@ -32,14 +31,14 @@ from .parse import ParseRequest
 
 # Results models
 from .results import (
-    PageClass,
-    ParseRequestOptions,
-    ParseResult,
     Chunk,
     Figure,
     Page,
+    PageClass,
     PageFragment,
     PageFragmentType,
+    ParseRequestOptions,
+    ParseResult,
     Signature,
     StructuredData,
     Table,

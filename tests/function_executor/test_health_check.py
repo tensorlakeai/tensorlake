@@ -10,6 +10,7 @@ from testing import (
     FunctionExecutorProcessContextManager,
     rpc_channel,
     run_task,
+    tmp_local_file_blob,
 )
 
 from tensorlake import Graph
@@ -22,6 +23,7 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     RunTaskResponse,
     SerializedObject,
     SerializedObjectEncoding,
+    SerializedObjectManifest,
     TaskOutcomeCode,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
@@ -29,7 +31,6 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
 )
 from tensorlake.functions_sdk.functions import tensorlake_function
 from tensorlake.functions_sdk.graph_serialization import (
-    ZIPPED_GRAPH_CODE_CONTENT_TYPE,
     graph_code_dir_path,
     zip_graph_code,
 )
@@ -62,6 +63,10 @@ def action_function(action: str) -> str:
 
 
 def initialize(test_case: unittest.TestCase, stub: FunctionExecutorStub):
+    graph_data: bytes = zip_graph_code(
+        graph=Graph(name="test", description="test", start_node=action_function),
+        code_dir_path=GRAPH_CODE_DIR_PATH,
+    )
     initialize_response: InitializeResponse = stub.initialize(
         InitializeRequest(
             namespace="test",
@@ -69,15 +74,15 @@ def initialize(test_case: unittest.TestCase, stub: FunctionExecutorStub):
             graph_version="1",
             function_name="action_function",
             graph=SerializedObject(
-                data=zip_graph_code(
-                    graph=Graph(
-                        name="test", description="test", start_node=action_function
-                    ),
-                    code_dir_path=GRAPH_CODE_DIR_PATH,
+                manifest=SerializedObjectManifest(
+                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                    encoding_version=0,
+                    size=len(graph_data),
                 ),
-                encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
-                encoding_version=0,
+                data=graph_data,
             ),
+            stdout=tmp_local_file_blob(),
+            stderr=tmp_local_file_blob(),
         )
     )
     test_case.assertEqual(
@@ -135,7 +140,7 @@ class TestHealthCheck(unittest.TestCase):
                             stub,
                             function_name="action_function",
                             input="deadlock",
-                            timeout=HEALTH_CHECK_TIMEOUT_SEC,
+                            timeout_sec=HEALTH_CHECK_TIMEOUT_SEC,
                         )
                         self.fail("Run task should have timed out.")
                     except RpcError:

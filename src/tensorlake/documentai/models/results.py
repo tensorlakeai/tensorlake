@@ -2,8 +2,8 @@
 This module contains the data models for the parsing results of a document.
 """
 
-from typing import List, Optional, Union, Any
 from enum import Enum
+from typing import Any, List, Optional, Union
 
 from pydantic import BaseModel, Field
 

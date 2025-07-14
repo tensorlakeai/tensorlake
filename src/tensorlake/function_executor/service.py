@@ -1,7 +1,6 @@
 import importlib
 import io
 import json
-import os
 import sys
 import tempfile
 import time
@@ -21,6 +20,7 @@ from tensorlake.functions_sdk.graph_serialization import (
     GraphManifest,
 )
 
+from .blob_store.blob_store import BLOBStore
 from .handlers.check_health.handler import Handler as CheckHealthHandler
 from .handlers.run_function.handler import Handler as RunTaskHandler
 from .handlers.run_function.request_validator import (
@@ -57,6 +57,7 @@ class Service(FunctionExecutorServicer):
         self._graph_version: Optional[str] = None
         self._function_name: Optional[str] = None
         self._function_wrapper: Optional[TensorlakeFunctionWrapper] = None
+        self._blob_store: Optional[BLOBStore] = None
         self._function_stdout: Optional[io.StringIO] = None
         self._function_stderr: Optional[io.StringIO] = None
         self._graph_metadata: Optional[ComputeGraphMetadata] = None
@@ -84,6 +85,7 @@ class Service(FunctionExecutorServicer):
             graph_version=request.graph_version,
             fn=request.function_name,
         )
+        self._blob_store = BLOBStore()
 
         # The files don't have paths in filesystem so they get deleted on process exit including crashes.
         # Using buffered files instead of memory buffers for stdout, stderr puts a natural rate limit on the rate
@@ -152,7 +154,8 @@ class Service(FunctionExecutorServicer):
                 # Don't log the exception to FE log as it contains customer data
             )
             formatted_exception: str = "".join(traceback.format_exception(e))
-            return InitializeResponse(
+            return self._initialize_response(
+                request=request,
                 outcome_code=InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_FAILURE,
                 failure_reason=InitializationFailureReason.INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR,
                 stdout=read_till_the_end(self._function_stdout, 0),
@@ -167,10 +170,59 @@ class Service(FunctionExecutorServicer):
             "initialized function executor service",
             duration_sec=f"{time.monotonic() - start_time:.3f}",
         )
-        return InitializeResponse(
+        return self._initialize_response(
+            request=request,
             outcome_code=InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_SUCCESS,
+            failure_reason=None,
             stdout=read_till_the_end(self._function_stdout, 0),
             stderr=read_till_the_end(self._function_stderr, 0),
+        )
+
+    def _initialize_response(
+        self,
+        request: InitializeRequest,
+        outcome_code: InitializationOutcomeCode,
+        failure_reason: InitializationFailureReason,  # Optional
+        stdout: str,
+        stderr: str,
+    ) -> InitializeResponse:
+        start_time = time.monotonic()
+        try:
+            self._blob_store.put(
+                uri=request.stdout.uri,
+                offset=0,
+                data=stdout.encode("utf-8"),
+                logger=self._logger,
+            )
+        except Exception as e:
+            self._logger.error(
+                "failed to write function executor startup stdout to blob store",
+                exc_info=e,
+            )
+            # Don't fail the initialization as this is not a critical error.
+
+        try:
+            self._blob_store.put(
+                uri=request.stderr.uri,
+                offset=0,
+                data=stderr.encode("utf-8"),
+                logger=self._logger,
+            )
+        except Exception as e:
+            self._logger.error(
+                "failed to write function executor startup stderr to blob store",
+                exc_info=e,
+            )
+            # Don't fail the initialization as this is not a critical error.
+
+        self._logger.info(
+            "uploaded function executor startup logs to blob store",
+            duration_sec=f"{time.monotonic() - start_time:.3f}",
+        )
+
+        return InitializeResponse(
+            outcome_code=outcome_code,
+            failure_reason=failure_reason,
         )
 
     def initialize_invocation_state_server(
@@ -239,6 +291,7 @@ class Service(FunctionExecutorServicer):
             function_stdout=self._function_stdout,
             function_stderr=self._function_stderr,
             graph_metadata=self._graph_metadata,
+            blob_store=self._blob_store,
             logger=self._logger,
         ).run()
 

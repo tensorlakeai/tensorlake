@@ -1,7 +1,7 @@
 import io
 import time
 from contextlib import redirect_stderr, redirect_stdout
-from typing import Any
+from typing import Any, Optional
 
 from tensorlake.functions_sdk.functions import (
     FunctionCallResult,
@@ -11,6 +11,7 @@ from tensorlake.functions_sdk.functions import (
 from tensorlake.functions_sdk.graph_definition import ComputeGraphMetadata
 from tensorlake.functions_sdk.invocation_state.invocation_state import InvocationState
 
+from ...blob_store.blob_store import BLOBStore
 from ...proto.function_executor_pb2 import RunTaskRequest, RunTaskResponse
 from ...std_outputs_capture import flush_logs, read_till_the_end
 from .function_inputs_loader import FunctionInputs, FunctionInputsLoader
@@ -26,6 +27,7 @@ class Handler:
         function_stdout: io.StringIO,
         function_stderr: io.StringIO,
         graph_metadata: ComputeGraphMetadata,
+        blob_store: BLOBStore,
         logger: Any,
     ):
         self._request: RunTaskRequest = request
@@ -39,11 +41,11 @@ class Handler:
         self._function_wrapper: TensorlakeFunctionWrapper = function_wrapper
         self._function_stdout: io.StringIO = function_stdout
         self._function_stderr: io.StringIO = function_stderr
-        self._input_loader = FunctionInputsLoader(request)
+        self._input_loader = FunctionInputsLoader(request, blob_store, self._logger)
         self._response_helper = ResponseHelper(
-            task_id=request.task_id,
-            function_name=request.function_name,
+            request=request,
             graph_metadata=graph_metadata,
+            blob_store=blob_store,
             logger=self._logger,
         )
 
@@ -53,15 +55,8 @@ class Handler:
         Raises an exception if our own code failed, customer function failure doesn't result in any exception.
         Details of customer function failure are returned in the response.
         """
-        self._logger.info("running function")
-        start_time = time.monotonic()
         inputs: FunctionInputs = self._input_loader.load()
-        response: RunTaskResponse = self._run_task(inputs)
-        self._logger.info(
-            "function finished",
-            duration_sec=f"{time.monotonic() - start_time:.3f}",
-        )
-        return response
+        return self._run_task(inputs)
 
     def _run_task(self, inputs: FunctionInputs) -> RunTaskResponse:
         """Runs the customer function while capturing what happened in it.
@@ -70,32 +65,45 @@ class Handler:
         and stderr. Raises an exception if our own code failed, customer function failure doesn't result in any exception.
         Details of customer function failure are returned in the response.
         """
+        self._logger.info("running function")
+        start_time = time.monotonic()
+
         # Flush any logs buffered in memory before doing stdout, stderr capture.
         # Otherwise our logs logged before this point will end up in the function's stdout capture.
         flush_logs(self._function_stdout, self._function_stderr)
         stdout_start: int = self._function_stdout.tell()
         stderr_start: int = self._function_stderr.tell()
+        result: Optional[FunctionCallResult] = None
 
         try:
             with redirect_stdout(self._function_stdout), redirect_stderr(
                 self._function_stderr
             ):
-                result: FunctionCallResult = self._run_func(inputs)
+                result = self._run_func(inputs)
                 # Ensure that whatever outputted by the function gets captured.
                 flush_logs(self._function_stdout, self._function_stderr)
-                return self._response_helper.from_function_call(
-                    result=result,
-                    is_reducer=_function_is_reducer(self._function_wrapper),
-                    stdout=read_till_the_end(self._function_stdout, stdout_start),
-                    stderr=read_till_the_end(self._function_stderr, stderr_start),
-                )
         except BaseException as e:
+            self._logger.info(
+                "function finished",
+                duration_sec=f"{time.monotonic() - start_time:.3f}",
+            )
             return self._response_helper.from_function_exception(
                 exception=e,
                 stdout=read_till_the_end(self._function_stdout, stdout_start),
                 stderr=read_till_the_end(self._function_stderr, stderr_start),
                 metrics=None,
             )
+
+        self._logger.info(
+            "function finished",
+            duration_sec=f"{time.monotonic() - start_time:.3f}",
+        )
+        return self._response_helper.from_function_call(
+            result=result,
+            is_reducer=_function_is_reducer(self._function_wrapper),
+            stdout=read_till_the_end(self._function_stdout, stdout_start),
+            stderr=read_till_the_end(self._function_stderr, stderr_start),
+        )
 
     def _run_func(self, inputs: FunctionInputs) -> FunctionCallResult:
         ctx: GraphInvocationContext = GraphInvocationContext(

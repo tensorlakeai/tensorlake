@@ -63,33 +63,78 @@ TASK_FAILURE_REASON_INTERNAL_ERROR: TaskFailureReason
 TASK_FAILURE_REASON_FUNCTION_ERROR: TaskFailureReason
 TASK_FAILURE_REASON_INVOCATION_ERROR: TaskFailureReason
 
-class SerializedObject(_message.Message):
-    __slots__ = ("data", "encoding", "encoding_version")
-    DATA_FIELD_NUMBER: _ClassVar[int]
+class SerializedObjectManifest(_message.Message):
+    __slots__ = ("encoding", "encoding_version", "size")
     ENCODING_FIELD_NUMBER: _ClassVar[int]
     ENCODING_VERSION_FIELD_NUMBER: _ClassVar[int]
-    data: bytes
+    SIZE_FIELD_NUMBER: _ClassVar[int]
     encoding: SerializedObjectEncoding
     encoding_version: int
+    size: int
     def __init__(
         self,
-        data: _Optional[bytes] = ...,
         encoding: _Optional[_Union[SerializedObjectEncoding, str]] = ...,
         encoding_version: _Optional[int] = ...,
+        size: _Optional[int] = ...,
+    ) -> None: ...
+
+class SerializedObject(_message.Message):
+    __slots__ = ("manifest", "data")
+    MANIFEST_FIELD_NUMBER: _ClassVar[int]
+    DATA_FIELD_NUMBER: _ClassVar[int]
+    manifest: SerializedObjectManifest
+    data: bytes
+    def __init__(
+        self,
+        manifest: _Optional[_Union[SerializedObjectManifest, _Mapping]] = ...,
+        data: _Optional[bytes] = ...,
+    ) -> None: ...
+
+class BLOB(_message.Message):
+    __slots__ = ("uri",)
+    URI_FIELD_NUMBER: _ClassVar[int]
+    uri: str
+    def __init__(self, uri: _Optional[str] = ...) -> None: ...
+
+class SerializedObjectInsideBLOB(_message.Message):
+    __slots__ = ("manifest", "blob", "offset")
+    MANIFEST_FIELD_NUMBER: _ClassVar[int]
+    BLOB_FIELD_NUMBER: _ClassVar[int]
+    OFFSET_FIELD_NUMBER: _ClassVar[int]
+    manifest: SerializedObjectManifest
+    blob: BLOB
+    offset: int
+    def __init__(
+        self,
+        manifest: _Optional[_Union[SerializedObjectManifest, _Mapping]] = ...,
+        blob: _Optional[_Union[BLOB, _Mapping]] = ...,
+        offset: _Optional[int] = ...,
     ) -> None: ...
 
 class InitializeRequest(_message.Message):
-    __slots__ = ("namespace", "graph_name", "graph_version", "function_name", "graph")
+    __slots__ = (
+        "namespace",
+        "graph_name",
+        "graph_version",
+        "function_name",
+        "graph",
+        "stdout",
+        "stderr",
+    )
     NAMESPACE_FIELD_NUMBER: _ClassVar[int]
     GRAPH_NAME_FIELD_NUMBER: _ClassVar[int]
     GRAPH_VERSION_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_NAME_FIELD_NUMBER: _ClassVar[int]
     GRAPH_FIELD_NUMBER: _ClassVar[int]
+    STDOUT_FIELD_NUMBER: _ClassVar[int]
+    STDERR_FIELD_NUMBER: _ClassVar[int]
     namespace: str
     graph_name: str
     graph_version: str
     function_name: str
     graph: SerializedObject
+    stdout: BLOB
+    stderr: BLOB
     def __init__(
         self,
         namespace: _Optional[str] = ...,
@@ -97,24 +142,20 @@ class InitializeRequest(_message.Message):
         graph_version: _Optional[str] = ...,
         function_name: _Optional[str] = ...,
         graph: _Optional[_Union[SerializedObject, _Mapping]] = ...,
+        stdout: _Optional[_Union[BLOB, _Mapping]] = ...,
+        stderr: _Optional[_Union[BLOB, _Mapping]] = ...,
     ) -> None: ...
 
 class InitializeResponse(_message.Message):
-    __slots__ = ("outcome_code", "failure_reason", "stdout", "stderr")
+    __slots__ = ("outcome_code", "failure_reason")
     OUTCOME_CODE_FIELD_NUMBER: _ClassVar[int]
     FAILURE_REASON_FIELD_NUMBER: _ClassVar[int]
-    STDOUT_FIELD_NUMBER: _ClassVar[int]
-    STDERR_FIELD_NUMBER: _ClassVar[int]
     outcome_code: InitializationOutcomeCode
     failure_reason: InitializationFailureReason
-    stdout: str
-    stderr: str
     def __init__(
         self,
         outcome_code: _Optional[_Union[InitializationOutcomeCode, str]] = ...,
         failure_reason: _Optional[_Union[InitializationFailureReason, str]] = ...,
-        stdout: _Optional[str] = ...,
-        stderr: _Optional[str] = ...,
     ) -> None: ...
 
 class SetInvocationStateRequest(_message.Message):
@@ -198,6 +239,9 @@ class RunTaskRequest(_message.Message):
         "allocation_id",
         "function_input",
         "function_init_value",
+        "stdout",
+        "stderr",
+        "function_outputs",
     )
     NAMESPACE_FIELD_NUMBER: _ClassVar[int]
     GRAPH_NAME_FIELD_NUMBER: _ClassVar[int]
@@ -208,6 +252,9 @@ class RunTaskRequest(_message.Message):
     ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_INPUT_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_INIT_VALUE_FIELD_NUMBER: _ClassVar[int]
+    STDOUT_FIELD_NUMBER: _ClassVar[int]
+    STDERR_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_OUTPUTS_FIELD_NUMBER: _ClassVar[int]
     namespace: str
     graph_name: str
     graph_version: str
@@ -215,8 +262,11 @@ class RunTaskRequest(_message.Message):
     graph_invocation_id: str
     task_id: str
     allocation_id: str
-    function_input: SerializedObject
-    function_init_value: SerializedObject
+    function_input: SerializedObjectInsideBLOB
+    function_init_value: SerializedObjectInsideBLOB
+    stdout: BLOB
+    stderr: BLOB
+    function_outputs: BLOB
     def __init__(
         self,
         namespace: _Optional[str] = ...,
@@ -226,8 +276,13 @@ class RunTaskRequest(_message.Message):
         graph_invocation_id: _Optional[str] = ...,
         task_id: _Optional[str] = ...,
         allocation_id: _Optional[str] = ...,
-        function_input: _Optional[_Union[SerializedObject, _Mapping]] = ...,
-        function_init_value: _Optional[_Union[SerializedObject, _Mapping]] = ...,
+        function_input: _Optional[_Union[SerializedObjectInsideBLOB, _Mapping]] = ...,
+        function_init_value: _Optional[
+            _Union[SerializedObjectInsideBLOB, _Mapping]
+        ] = ...,
+        stdout: _Optional[_Union[BLOB, _Mapping]] = ...,
+        stderr: _Optional[_Union[BLOB, _Mapping]] = ...,
+        function_outputs: _Optional[_Union[BLOB, _Mapping]] = ...,
     ) -> None: ...
 
 class Metrics(_message.Message):
@@ -268,8 +323,6 @@ class RunTaskResponse(_message.Message):
         "task_id",
         "function_outputs",
         "next_functions",
-        "stdout",
-        "stderr",
         "is_reducer",
         "metrics",
         "outcome_code",
@@ -279,37 +332,35 @@ class RunTaskResponse(_message.Message):
     TASK_ID_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_OUTPUTS_FIELD_NUMBER: _ClassVar[int]
     NEXT_FUNCTIONS_FIELD_NUMBER: _ClassVar[int]
-    STDOUT_FIELD_NUMBER: _ClassVar[int]
-    STDERR_FIELD_NUMBER: _ClassVar[int]
     IS_REDUCER_FIELD_NUMBER: _ClassVar[int]
     METRICS_FIELD_NUMBER: _ClassVar[int]
     OUTCOME_CODE_FIELD_NUMBER: _ClassVar[int]
     FAILURE_REASON_FIELD_NUMBER: _ClassVar[int]
     INVOCATION_ERROR_OUTPUT_FIELD_NUMBER: _ClassVar[int]
     task_id: str
-    function_outputs: _containers.RepeatedCompositeFieldContainer[SerializedObject]
+    function_outputs: _containers.RepeatedCompositeFieldContainer[
+        SerializedObjectInsideBLOB
+    ]
     next_functions: _containers.RepeatedScalarFieldContainer[str]
-    stdout: str
-    stderr: str
     is_reducer: bool
     metrics: Metrics
     outcome_code: TaskOutcomeCode
     failure_reason: TaskFailureReason
-    invocation_error_output: SerializedObject
+    invocation_error_output: SerializedObjectInsideBLOB
     def __init__(
         self,
         task_id: _Optional[str] = ...,
         function_outputs: _Optional[
-            _Iterable[_Union[SerializedObject, _Mapping]]
+            _Iterable[_Union[SerializedObjectInsideBLOB, _Mapping]]
         ] = ...,
         next_functions: _Optional[_Iterable[str]] = ...,
-        stdout: _Optional[str] = ...,
-        stderr: _Optional[str] = ...,
         is_reducer: bool = ...,
         metrics: _Optional[_Union[Metrics, _Mapping]] = ...,
         outcome_code: _Optional[_Union[TaskOutcomeCode, str]] = ...,
         failure_reason: _Optional[_Union[TaskFailureReason, str]] = ...,
-        invocation_error_output: _Optional[_Union[SerializedObject, _Mapping]] = ...,
+        invocation_error_output: _Optional[
+            _Union[SerializedObjectInsideBLOB, _Mapping]
+        ] = ...,
     ) -> None: ...
 
 class HealthCheckRequest(_message.Message):

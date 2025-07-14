@@ -9,12 +9,15 @@ from testing import (
     DEFAULT_FUNCTION_EXECUTOR_PORT,
     FunctionExecutorProcessContextManager,
     deserialized_function_output,
+    read_local_blob_str,
     rpc_channel,
     run_task,
+    tmp_local_file_blob,
 )
 
 from tensorlake import Graph
 from tensorlake.function_executor.proto.function_executor_pb2 import (
+    BLOB,
     GetInvocationStateRequest,
     GetInvocationStateResponse,
     InitializationOutcomeCode,
@@ -25,6 +28,7 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     RunTaskResponse,
     SerializedObject,
     SerializedObjectEncoding,
+    SerializedObjectManifest,
     SetInvocationStateRequest,
     SetInvocationStateResponse,
     TaskOutcomeCode,
@@ -37,7 +41,6 @@ from tensorlake.functions_sdk.functions import (
     tensorlake_function,
 )
 from tensorlake.functions_sdk.graph_serialization import (
-    ZIPPED_GRAPH_CODE_CONTENT_TYPE,
     graph_code_dir_path,
     zip_graph_code,
 )
@@ -111,6 +114,10 @@ class TestSetInvocationState(unittest.TestCase):
             description="test",
             start_node=set_invocation_state,
         )
+        graph_data: bytes = zip_graph_code(
+            graph=graph,
+            code_dir_path=GRAPH_CODE_DIR_PATH,
+        )
         initialize_response: InitializeResponse = stub.initialize(
             InitializeRequest(
                 namespace="test",
@@ -118,10 +125,15 @@ class TestSetInvocationState(unittest.TestCase):
                 graph_version="1",
                 function_name="set_invocation_state",
                 graph=SerializedObject(
-                    data=zip_graph_code(graph=graph, code_dir_path=GRAPH_CODE_DIR_PATH),
-                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
-                    encoding_version=0,
+                    manifest=SerializedObjectManifest(
+                        encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                        encoding_version=0,
+                        size=len(graph_data),
+                    ),
+                    data=graph_data,
                 ),
+                stdout=tmp_local_file_blob(),
+                stderr=tmp_local_file_blob(),
             )
         )
         self.assertEqual(
@@ -143,6 +155,11 @@ class TestSetInvocationState(unittest.TestCase):
                         set=SetInvocationStateRequest(
                             key="test_state_key",
                             value=SerializedObject(
+                                manifest=SerializedObjectManifest(
+                                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
+                                    encoding_version=0,
+                                    size=0,
+                                ),
                                 data=CloudPickleSerializer.serialize(
                                     StructuredState(
                                         string="hello",
@@ -152,8 +169,6 @@ class TestSetInvocationState(unittest.TestCase):
                                         ),
                                     )
                                 ),
-                                encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-                                encoding_version=0,
                             ),
                         ),
                     ),
@@ -198,6 +213,11 @@ class TestSetInvocationState(unittest.TestCase):
                         set=SetInvocationStateRequest(
                             key="test_state_key",
                             value=SerializedObject(
+                                manifest=SerializedObjectManifest(
+                                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
+                                    encoding_version=0,
+                                    size=0,
+                                ),
                                 data=CloudPickleSerializer.serialize(
                                     StructuredState(
                                         string="hello",
@@ -207,8 +227,6 @@ class TestSetInvocationState(unittest.TestCase):
                                         ),
                                     )
                                 ),
-                                encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-                                encoding_version=0,
                             ),
                         ),
                     ),
@@ -221,16 +239,20 @@ class TestSetInvocationState(unittest.TestCase):
                 client_thread = invocation_state_client_stub(
                     self, stub, expected_requests, responses
                 )
+                stderr_blob: BLOB = tmp_local_file_blob()
                 run_task_response: RunTaskResponse = run_task(
-                    stub, function_name="set_invocation_state", input=42
+                    stub,
+                    function_name="set_invocation_state",
+                    input=42,
+                    stderr_blob=stderr_blob,
                 )
                 self.assertEqual(
                     run_task_response.outcome_code,
                     TaskOutcomeCode.TASK_OUTCOME_CODE_FAILURE,
                 )
-                self.assertTrue(
-                    'RuntimeError("failed to set the invocation state for key")'
-                    in run_task_response.stderr
+                self.assertIn(
+                    'RuntimeError("failed to set the invocation state for key")',
+                    read_local_blob_str(stderr_blob),
                 )
 
                 print(
@@ -271,6 +293,10 @@ class TestGetInvocationState(unittest.TestCase):
     def _initialize_function_executor(
         self, graph: Graph, function_name: str, stub: FunctionExecutorStub
     ):
+        graph_data: bytes = zip_graph_code(
+            graph=graph,
+            code_dir_path=GRAPH_CODE_DIR_PATH,
+        )
         initialize_response: InitializeResponse = stub.initialize(
             InitializeRequest(
                 namespace="test",
@@ -278,10 +304,15 @@ class TestGetInvocationState(unittest.TestCase):
                 graph_version="1",
                 function_name=function_name,
                 graph=SerializedObject(
-                    data=zip_graph_code(graph=graph, code_dir_path=GRAPH_CODE_DIR_PATH),
-                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
-                    encoding_version=0,
+                    manifest=SerializedObjectManifest(
+                        encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                        encoding_version=0,
+                        size=len(graph_data),
+                    ),
+                    data=graph_data,
                 ),
+                stdout=tmp_local_file_blob(),
+                stderr=tmp_local_file_blob(),
             )
         )
         self.assertEqual(
@@ -316,6 +347,11 @@ class TestGetInvocationState(unittest.TestCase):
                         get=GetInvocationStateResponse(
                             key="test_state_key",
                             value=SerializedObject(
+                                manifest=SerializedObjectManifest(
+                                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
+                                    encoding_version=0,
+                                    size=0,
+                                ),
                                 data=CloudPickleSerializer.serialize(
                                     StructuredState(
                                         string="hello",
@@ -325,8 +361,6 @@ class TestGetInvocationState(unittest.TestCase):
                                         ),
                                     )
                                 ),
-                                encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-                                encoding_version=0,
                             ),
                         ),
                     ),
@@ -437,16 +471,20 @@ class TestGetInvocationState(unittest.TestCase):
                 client_thread = invocation_state_client_stub(
                     self, stub, expected_requests, responses
                 )
+                stderr_blob: BLOB = tmp_local_file_blob()
                 run_task_response: RunTaskResponse = run_task(
-                    stub, function_name="check_invocation_state_is_expected", input=14
+                    stub,
+                    function_name="check_invocation_state_is_expected",
+                    input=14,
+                    stderr_blob=stderr_blob,
                 )
                 self.assertEqual(
                     run_task_response.outcome_code,
                     TaskOutcomeCode.TASK_OUTCOME_CODE_FAILURE,
                 )
-                self.assertTrue(
-                    'RuntimeError("failed to get the invocation state for key")'
-                    in run_task_response.stderr
+                self.assertIn(
+                    'RuntimeError("failed to get the invocation state for key")',
+                    read_local_blob_str(stderr_blob),
                 )
 
                 print(

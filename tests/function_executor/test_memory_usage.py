@@ -8,6 +8,7 @@ from testing import (
     deserialized_function_output,
     rpc_channel,
     run_task,
+    tmp_local_file_blob,
 )
 
 from tensorlake import Graph
@@ -18,6 +19,7 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     RunTaskResponse,
     SerializedObject,
     SerializedObjectEncoding,
+    SerializedObjectManifest,
     TaskOutcomeCode,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
@@ -25,7 +27,6 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
 )
 from tensorlake.functions_sdk.functions import tensorlake_function
 from tensorlake.functions_sdk.graph_serialization import (
-    ZIPPED_GRAPH_CODE_CONTENT_TYPE,
     graph_code_dir_path,
     zip_graph_code,
 )
@@ -50,6 +51,10 @@ def process_rss_mb(x: int) -> int:
 class TestMemoryUsage(unittest.TestCase):
     def test_memory_usage_is_below_max_threshold(self):
         graph = Graph(name="test", description="test", start_node=process_rss_mb)
+        graph_data: bytes = zip_graph_code(
+            graph=graph,
+            code_dir_path=GRAPH_CODE_DIR_PATH,
+        )
 
         with FunctionExecutorProcessContextManager(
             DEFAULT_FUNCTION_EXECUTOR_PORT
@@ -63,12 +68,15 @@ class TestMemoryUsage(unittest.TestCase):
                         graph_version="1",
                         function_name="process_rss_mb",
                         graph=SerializedObject(
-                            data=zip_graph_code(
-                                graph=graph, code_dir_path=GRAPH_CODE_DIR_PATH
+                            manifest=SerializedObjectManifest(
+                                encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                                encoding_version=0,
+                                size=len(graph_data),
                             ),
-                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
-                            encoding_version=0,
+                            data=graph_data,
                         ),
+                        stdout=tmp_local_file_blob(),
+                        stderr=tmp_local_file_blob(),
                     )
                 )
                 self.assertEqual(
