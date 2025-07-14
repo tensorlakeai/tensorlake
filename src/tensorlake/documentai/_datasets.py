@@ -15,6 +15,9 @@ from .models import (
     ParseResult,
     ParsingOptions,
     StructuredExtractionOptions,
+    PaginatedResult,
+    PaginationDirection,
+    DatasetStatus,
 )
 from ._base import _BaseClient
 from ._parse import _convert_seo
@@ -178,10 +181,15 @@ class _DatasetMixin(_BaseClient):
         Args:
             dataset: The Dataset object to use for parsing. This should be the dataset created with create_dataset, or
               the result of get_dataset.
+
             file: The file to parse. This can be a URL, a file ID (from Tensorlake), or raw text.
+
             page_range: Optional page range to parse. This can be a string like "1,2,3-5" to specify specific pages or ranges.
+
             labels: Optional labels to attach to the parsed document. This can be a dictionary of key-value pairs.
+
             mime_type: Optional MIME type of the file. This can be used to specify the type of content being parsed, such as "application/pdf" or "text/plain".
+
             wait_for_completion: If True, the method will wait for the parsing to complete and return the full ParseResult.
                 If False, it will return the parse ID immediately.
         """
@@ -231,6 +239,94 @@ class _DatasetMixin(_BaseClient):
             # wait_for_completion_async lives in _ParseMixin
             return await self.wait_for_completion_async(parse_id)
         return parse_id
+
+    def list_datasets(
+        self,
+        cursor: Optional[str] = None,
+        direction: Optional[PaginationDirection] = None,
+        limit: Optional[int] = None,
+        status: Optional[DatasetStatus] = None,
+        name: Optional[str] = None,
+    ) -> PaginatedResult[Dataset]:
+        """
+        List datasets in your Tensorlake project.
+
+        This method retrieves a paginated list of datasets, allowing you to filter by status and name.
+
+        Args:
+            cursor: Optional cursor for pagination. If provided, the method will return the next page of
+                results starting from this cursor. If not provided, it will return the first page of results.
+            direction: Optional pagination direction. If provided, it can be "next" or "prev" to navigate through the pages.
+            status: Optional status to filter datasets by. If provided, only datasets with this status will
+                be returned. If not provided, all datasets will be returned.
+            name: Optional name to filter datasets by. If provided, only datasets that resemble this name will be returned.
+                If not provided, all datasets will be returned.
+        Returns:
+            A PaginatedResult object containing a list of Dataset objects and pagination information.
+        """
+        params: Dict[str, Any] = _drop_none(
+            {
+                "cursor": cursor,
+                "direction": direction.value if direction else None,
+                "limit": limit,
+                "status": status.value if status else None,
+                "name": name,
+            }
+        )
+
+        response = self._request("GET", "/datasets", params=params)
+        data = response.json()
+        datasets = [Dataset.model_validate(d) for d in data["items"]]
+        return PaginatedResult[Dataset](
+            items=datasets,
+            has_more=data.get("has_more", False),
+            next_cursor=data.get("next_cursor"),
+            prev_cursor=data.get("prev_cursor"),
+        )
+
+    async def list_datasets_async(
+        self,
+        cursor: Optional[str] = None,
+        direction: Optional[PaginationDirection] = None,
+        limit: Optional[int] = None,
+        status: Optional[DatasetStatus] = None,
+        name: Optional[str] = None,
+    ) -> PaginatedResult[Dataset]:
+        """
+        List datasets in your Tensorlake project asynchronously.
+
+        This method retrieves a paginated list of datasets, allowing you to filter by status and name.
+
+        Args:
+            cursor: Optional cursor for pagination. If provided, the method will return the next page of
+                results starting from this cursor. If not provided, it will return the first page of results.
+            direction: Optional pagination direction. If provided, it can be "next" or "prev" to navigate through the pages.
+            status: Optional status to filter datasets by. If provided, only datasets with this status will
+                be returned. If not provided, all datasets will be returned.
+            name: Optional name to filter datasets by. If provided, only datasets that resemble this name will be returned.
+                If not provided, all datasets will be returned.
+        Returns:
+            A PaginatedResult object containing a list of Dataset objects and pagination information.
+        """
+        params: Dict[str, Any] = _drop_none(
+            {
+                "cursor": cursor,
+                "direction": direction.value if direction else None,
+                "limit": limit,
+                "status": status.value if status else None,
+                "name": name,
+            }
+        )
+
+        resp = await self._arequest("GET", "/datasets", params=params)
+        data = resp.json()
+        datasets = [Dataset.model_validate(d) for d in data["items"]]
+        return PaginatedResult[Dataset](
+            items=datasets,
+            has_more=data.get("has_more", False),
+            next_cursor=data.get("next_cursor"),
+            prev_cursor=data.get("prev_cursor"),
+        )
 
 
 def _create_dataset_parse_req(
