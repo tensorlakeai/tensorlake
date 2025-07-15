@@ -10,10 +10,10 @@ from typing import Optional, Union
 from retry import retry
 
 from ._base import _BaseClient
-from .common import PaginatedResult
-from .models.pagination import PaginationDirection
-from .files import FileInfo, FileUploader
 from ._utils import _drop_none
+from .common import PaginatedResult
+from .files import FileInfo, FileUploader
+from .models.pagination import PaginationDirection
 
 
 class _FilesMixin(_BaseClient):
