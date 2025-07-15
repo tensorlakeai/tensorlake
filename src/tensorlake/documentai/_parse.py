@@ -4,7 +4,7 @@ import asyncio
 import inspect
 import json
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Mapping
 
 from pydantic import BaseModel
 
@@ -505,18 +505,26 @@ def _create_parse_req(
     return payload
 
 
-def _convert_seo(opt: StructuredExtractionOptions) -> Dict[str, Any]:
+def _convert_seo(opt) -> Dict[str, Any]:
     """Convert StructuredExtractionOptions to plain dict with JSON schema resolved."""
     d = opt.model_dump(exclude_none=True)
+
     if hasattr(opt, "json_schema"):
         schema = opt.json_schema
+
         if inspect.isclass(schema) and issubclass(schema, BaseModel):
             d["json_schema"] = schema.model_json_schema()
+
         elif isinstance(schema, BaseModel):
             d["json_schema"] = schema.model_json_schema()
-        else:  # assume str
+
+        elif isinstance(schema, Mapping):
+            d["json_schema"] = dict(schema)
+
+        else:
             try:
                 d["json_schema"] = json.loads(schema)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
                 d["json_schema"] = schema
+
     return d
