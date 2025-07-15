@@ -17,7 +17,9 @@ build_proto:
 		--python_out=. \
 		--pyi_out=. \
 		--grpc_python_out=. \
-		${PROTO_DIR_PATH_INSIDE_PACKAGE}/function_executor.proto
+		${PROTO_DIR_PATH_INSIDE_PACKAGE}/function_executor.proto \
+		${PROTO_DIR_PATH_INSIDE_PACKAGE}/google/rpc/code.proto \
+		${PROTO_DIR_PATH_INSIDE_PACKAGE}/google/rpc/status.proto
 	@#The generated proto files don't pass linter checks and need to get reformatted.
 	@poetry run black ${PROTO_DIR_PATH}
 	@poetry run isort ${PROTO_DIR_PATH} --profile black
