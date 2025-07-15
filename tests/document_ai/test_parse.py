@@ -157,6 +157,170 @@ class TestParse(unittest.TestCase):
             Exception, self.doc_ai.get_parsed_result, parsed_result.parse_id
         )
 
+    def test_parse_structured_extraction_dict_json_schema(self):
+        file_id = self.doc_ai.upload(
+            path="./document_ai/testdata/example_bank_statement.pdf"
+        )
+        self.assertIsNotNone(file_id)
+
+        bank_statement_schema: dict = {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "BankStatementData",
+            "type": "object",
+            "properties": {
+                "accountHolder": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Full name of the account holder",
+                        },
+                        "address": {
+                            "type": "string",
+                            "description": "Address of the account holder",
+                        },
+                    },
+                    "required": ["name"],
+                },
+                "accountInfo": {
+                    "type": "object",
+                    "properties": {
+                        "accountNumber": {
+                            "type": "string",
+                            "description": "Account number",
+                        },
+                        "sortCode": {
+                            "type": "string",
+                            "description": "Sort code (UK format)",
+                        },
+                        "accountType": {
+                            "type": "string",
+                            "description": "Type of account (e.g., Current, Savings)",
+                        },
+                        "statementPeriod": {
+                            "type": "object",
+                            "properties": {
+                                "startDate": {
+                                    "type": "string",
+                                    "description": "Start of the statement period (YYYY-MM-DD)",
+                                },
+                                "endDate": {
+                                    "type": "string",
+                                    "description": "End of the statement period (YYYY-MM-DD)",
+                                },
+                            },
+                        },
+                    },
+                    "required": ["accountNumber"],
+                },
+                "bankInfo": {
+                    "type": "object",
+                    "properties": {
+                        "bankName": {
+                            "type": "string",
+                            "description": "Name of the bank",
+                        },
+                        "branchAddress": {
+                            "type": "string",
+                            "description": "Branch address",
+                        },
+                    },
+                },
+                "balanceSummary": {
+                    "type": "object",
+                    "properties": {
+                        "openingBalance": {
+                            "type": "number",
+                            "description": "Balance at the start of the period",
+                        },
+                        "closingBalance": {
+                            "type": "number",
+                            "description": "Balance at the end of the period",
+                        },
+                        "totalCredits": {
+                            "type": "number",
+                            "description": "Total money received in the period",
+                        },
+                        "totalDebits": {
+                            "type": "number",
+                            "description": "Total money spent in the period",
+                        },
+                    },
+                },
+                "transactions": {
+                    "type": "array",
+                    "description": "All transactions in the statement period",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "date": {
+                                "type": "string",
+                                "description": "Transaction date (YYYY-MM-DD)",
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "Transaction description or reference",
+                            },
+                            "amount": {
+                                "type": "number",
+                                "description": "Amount (credit, debit)",
+                            },
+                            "type": {
+                                "type": "string",
+                                "enum": ["credit", "debit"],
+                                "description": "Transaction type",
+                            },
+                            "balance": {
+                                "type": "number",
+                                "description": "Balance after this transaction",
+                            },
+                            "reference": {
+                                "type": "string",
+                                "description": "Transaction reference number",
+                            },
+                        },
+                        "required": ["date", "description", "amount", "type"],
+                    },
+                },
+                "metadata": {
+                    "type": "object",
+                    "properties": {
+                        "statementDate": {
+                            "type": "string",
+                            "description": "Date the statement was generated",
+                        },
+                        "pageCount": {
+                            "type": "integer",
+                            "description": "Number of pages in the statement",
+                        },
+                        "extractionMethod": {
+                            "type": "string",
+                            "description": "Extraction method (e.g., pdfplumber, vision-api)",
+                        },
+                    },
+                },
+            },
+            "required": ["accountHolder", "accountInfo", "transactions"],
+        }
+
+        bank_statement_extraction_options = StructuredExtractionOptions(
+            schema_name="BankStatementData",
+            json_schema=bank_statement_schema,
+        )
+
+        result = self.doc_ai.parse_and_wait(
+            file_id,
+            structured_extraction_options=[bank_statement_extraction_options],
+        )
+
+        self.assertIsNotNone(result)
+        self.assertIsNotNone(result.structured_data)
+        self.assertEqual(len(result.structured_data), 1)
+        self.assertEqual(result.structured_data[0].schema_name, "BankStatementData")
+
+        self.doc_ai.delete_parse(result.parse_id)
+        self.assertRaises(Exception, self.doc_ai.get_parsed_result, result.parse_id)
+
 
 if __name__ == "__main__":
     unittest.main()
