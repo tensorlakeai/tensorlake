@@ -6,18 +6,21 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Union
 
-
+from ._base import _BaseClient
+from ._parse import _convert_seo
+from ._utils import _drop_none
 from .models import (
     Dataset,
+    DatasetStatus,
     EnrichmentOptions,
     MimeType,
     PageClassConfig,
+    PaginatedResult,
+    PaginationDirection,
     ParseResult,
     ParsingOptions,
     StructuredExtractionOptions,
 )
-from ._base import _BaseClient
-from ._parse import _convert_seo
 
 
 class _DatasetMixin(_BaseClient):
@@ -178,10 +181,15 @@ class _DatasetMixin(_BaseClient):
         Args:
             dataset: The Dataset object to use for parsing. This should be the dataset created with create_dataset, or
               the result of get_dataset.
+
             file: The file to parse. This can be a URL, a file ID (from Tensorlake), or raw text.
+
             page_range: Optional page range to parse. This can be a string like "1,2,3-5" to specify specific pages or ranges.
+
             labels: Optional labels to attach to the parsed document. This can be a dictionary of key-value pairs.
+
             mime_type: Optional MIME type of the file. This can be used to specify the type of content being parsed, such as "application/pdf" or "text/plain".
+
             wait_for_completion: If True, the method will wait for the parsing to complete and return the full ParseResult.
                 If False, it will return the parse ID immediately.
         """
@@ -232,6 +240,182 @@ class _DatasetMixin(_BaseClient):
             return await self.wait_for_completion_async(parse_id)
         return parse_id
 
+    def list_datasets(
+        self,
+        cursor: Optional[str] = None,
+        direction: Optional[PaginationDirection] = None,
+        limit: Optional[int] = None,
+        status: Optional[DatasetStatus] = None,
+        name: Optional[str] = None,
+    ) -> PaginatedResult[Dataset]:
+        """
+        List datasets in your Tensorlake project.
+
+        This method retrieves a paginated list of datasets, allowing you to filter by status and name.
+
+        Args:
+            cursor: Optional cursor for pagination. If provided, the method will return the next page of
+                results starting from this cursor. If not provided, it will return the first page of results.
+            direction: Optional pagination direction. If provided, it can be "next" or "prev" to navigate through the pages.
+            status: Optional status to filter datasets by. If provided, only datasets with this status will
+                be returned. If not provided, all datasets will be returned.
+            name: Optional name to filter datasets by. If provided, only datasets that resemble this name will be returned.
+                If not provided, all datasets will be returned.
+        Returns:
+            A PaginatedResult object containing a list of Dataset objects and pagination information.
+        """
+        params: Dict[str, Any] = _drop_none(
+            {
+                "cursor": cursor,
+                "direction": direction.value if direction else None,
+                "limit": limit,
+                "status": status.value if status else None,
+                "name": name,
+            }
+        )
+
+        response = self._request("GET", "/datasets", params=params)
+        data = response.json()
+        datasets = [Dataset.model_validate(d) for d in data["items"]]
+        return PaginatedResult[Dataset](
+            items=datasets,
+            has_more=data.get("has_more", False),
+            next_cursor=data.get("next_cursor"),
+            prev_cursor=data.get("prev_cursor"),
+        )
+
+    async def list_datasets_async(
+        self,
+        cursor: Optional[str] = None,
+        direction: Optional[PaginationDirection] = None,
+        limit: Optional[int] = None,
+        status: Optional[DatasetStatus] = None,
+        name: Optional[str] = None,
+    ) -> PaginatedResult[Dataset]:
+        """
+        List datasets in your Tensorlake project asynchronously.
+
+        This method retrieves a paginated list of datasets, allowing you to filter by status and name.
+
+        Args:
+            cursor: Optional cursor for pagination. If provided, the method will return the next page of
+                results starting from this cursor. If not provided, it will return the first page of results.
+            direction: Optional pagination direction. If provided, it can be "next" or "prev" to navigate through the pages.
+            status: Optional status to filter datasets by. If provided, only datasets with this status will
+                be returned. If not provided, all datasets will be returned.
+            name: Optional name to filter datasets by. If provided, only datasets that resemble this name will be returned.
+                If not provided, all datasets will be returned.
+        Returns:
+            A PaginatedResult object containing a list of Dataset objects and pagination information.
+        """
+        params: Dict[str, Any] = _drop_none(
+            {
+                "cursor": cursor,
+                "direction": direction.value if direction else None,
+                "limit": limit,
+                "status": status.value if status else None,
+                "name": name,
+            }
+        )
+
+        resp = await self._arequest("GET", "/datasets", params=params)
+        data = resp.json()
+        return PaginatedResult[Dataset].model_validate(data, from_attributes=True)
+
+    def update_dataset(
+        self,
+        dataset: Dataset,
+        description: Optional[str] = None,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            List[StructuredExtractionOptions]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+    ) -> Dataset:
+        """
+        Update an existing dataset.
+
+        This method allows you to modify the properties of an existing dataset, such as its name, description,
+        parsing options, structured extraction options, enrichment options, and page classifications.
+
+        Updating a dataset does not change previously parsed files or their results, but it will affect future parsing operations.
+
+        Args:
+            dataset: The Dataset object to update. This should be the dataset created with create_dataset,
+                or the result of get_dataset.
+            description: Optional new description for the dataset. If provided, this will update the dataset's description.
+            parsing_options: Optional new parsing options to customize how documents in the dataset are parsed.
+                If provided, this will update the dataset's parsing options. The previous parsing options will be kept
+                if not provided.
+            structured_extraction_options: Optional new structured extraction options to guide the extraction of structured
+                data from documents in the dataset. If provided, this will update the dataset's structured extraction
+                options. The previous structured extraction options will be kept if not provided.
+            enrichment_options: Optional new enrichment options to extend the output of the document parsing process with
+                additional information, such as summarization of tables and figures. If provided, this will update
+                the dataset's enrichment options. The previous enrichment options will be kept if not provided.
+            page_classifications: Optional new list of page classification configurations. If provided, this will update
+                the dataset's page classifications. The previous page classifications will be kept if not provided.
+        """
+        body = _create_dataset_req(
+            None,
+            description,
+            parsing_options,
+            structured_extraction_options,
+            enrichment_options,
+            page_classifications,
+        )
+
+        response = self._request("PUT", f"/datasets/{dataset.dataset_id}", json=body)
+        return Dataset.model_validate(response.json())
+
+    async def update_dataset_async(
+        self,
+        dataset: Dataset,
+        description: Optional[str] = None,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            List[StructuredExtractionOptions]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+    ) -> Dataset:
+        """
+        Update an existing dataset asynchronously.
+
+        This method allows you to modify the properties of an existing dataset, such as its name, description,
+        parsing options, structured extraction options, enrichment options, and page classifications.
+
+        Updating a dataset does not change previously parsed files or their results, but it will affect future parsing operations.
+
+        Args:
+            dataset: The Dataset object to update. This should be the dataset created with create_dataset,
+                or the result of get_dataset.
+            description: Optional new description for the dataset. If provided, this will update the dataset's description.
+            parsing_options: Optional new parsing options to customize how documents in the dataset are parsed.
+                If provided, this will update the dataset's parsing options. The previous parsing options will be kept
+                if not provided.
+            structured_extraction_options: Optional new structured extraction options to guide the extraction of structured
+                data from documents in the dataset. If provided, this will update the dataset's structured extraction
+                options. The previous structured extraction options will be kept if not provided.
+            enrichment_options: Optional new enrichment options to extend the output of the document parsing process with
+                additional information, such as summarization of tables and figures. If provided, this will update
+                the dataset's enrichment options. The previous enrichment options will be kept if not provided.
+            page_classifications: Optional new list of page classification configurations. If provided, this will update
+                the dataset's page classifications. The previous page classifications will be kept if not provided.
+        """
+        body = _create_dataset_req(
+            None,
+            description,
+            parsing_options,
+            structured_extraction_options,
+            enrichment_options,
+            page_classifications,
+        )
+
+        resp = await self._arequest("PUT", f"/datasets/{dataset.dataset_id}", json=body)
+        return Dataset.model_validate(resp.json())
+
 
 def _create_dataset_parse_req(
     file: str,
@@ -258,7 +442,7 @@ def _create_dataset_parse_req(
 
 
 def _create_dataset_req(
-    name: str,
+    name: Optional[str],
     description: Optional[str],
     parsing_options: Optional[ParsingOptions],
     structured_extraction_options: Optional[List[StructuredExtractionOptions]],
@@ -280,8 +464,3 @@ def _create_dataset_req(
             _convert_seo(opt) for opt in structured_extraction_options
         ]
     return body
-
-
-@staticmethod
-def _drop_none(m: Dict[str, Any]) -> Dict[str, Any]:
-    return {k: v for k, v in m.items() if v is not None}

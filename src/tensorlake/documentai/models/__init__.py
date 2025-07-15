@@ -17,7 +17,6 @@ from .enums import (
     TableParsingFormat,
 )
 
-
 # Options
 from .options import (
     EnrichmentOptions,
@@ -26,20 +25,21 @@ from .options import (
     ParsingOptions,
     StructuredExtractionOptions,
 )
+from .pagination import PaginatedResult, PaginationDirection
 
 # Parse models
 from .parse import ParseRequest
 
 # Results models
 from .results import (
-    PageClass,
-    ParseRequestOptions,
-    ParseResult,
     Chunk,
     Figure,
     Page,
+    PageClass,
     PageFragment,
     PageFragmentType,
+    ParseRequestOptions,
+    ParseResult,
     Signature,
     StructuredData,
     Table,
@@ -82,4 +82,7 @@ __all__ = [
     # Datasets
     "Dataset",
     "DatasetStatus",
+    # Pagination
+    "PaginatedResult",
+    "PaginationDirection",
 ]

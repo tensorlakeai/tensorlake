@@ -9,9 +9,11 @@ from typing import Optional, Union
 
 from retry import retry
 
-from .files import FileInfo, FileUploader
-from .common import PaginatedResult
 from ._base import _BaseClient
+from .common import PaginatedResult
+from .models.pagination import PaginationDirection
+from .files import FileInfo, FileUploader
+from ._utils import _drop_none
 
 
 class _FilesMixin(_BaseClient):
@@ -22,30 +24,72 @@ class _FilesMixin(_BaseClient):
         super().__init__(api_key, server_url)
         self._uploader = FileUploader(api_key=self.api_key, server_url=server_url)
 
-    def files(self, cursor: Optional[str] = None) -> PaginatedResult[FileInfo]:
+    def files(
+        self,
+        cursor: Optional[str] = None,
+        direction: Optional[PaginationDirection] = None,
+        limit: Optional[int] = None,
+        filename: Optional[str] = None,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
+    ) -> PaginatedResult[FileInfo]:
         """
         List files uploaded to Tensorlake.
 
         Args:
             cursor: Optional cursor for pagination. If not provided, returns the first page.
+            direction: Optional pagination direction (next or prev). Defaults to next.
+            limit: Optional limit on the number of results per page. Defaults to 25.
+            filename: Optional filter to return only files with a specific name. Name is case-sensitive.
+            created_after: Optional filter to return only files created after a specific date (RFC 3339 format).
+            created_before: Optional filter to return only files created before a specific date (RFC 3339 format).
         """
-        resp = self._request_v1(
-            "GET", "files", params={"cursor": cursor} if cursor else None
+        params = _drop_none(
+            {
+                "cursor": cursor,
+                "direction": direction.value if direction else None,
+                "limit": limit,
+                "filename": filename,
+                "createdAfter": created_after,
+                "createdBefore": created_before,
+            }
         )
+
+        resp = self._request_v1("GET", "files", params=params)
         return PaginatedResult[FileInfo].model_validate(resp.json())
 
     async def files_async(
-        self, cursor: Optional[str] = None
+        self,
+        cursor: Optional[str] = None,
+        direction: Optional[PaginationDirection] = None,
+        limit: Optional[int] = None,
+        filename: Optional[str] = None,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
     ) -> PaginatedResult[FileInfo]:
         """
         List files uploaded to Tensorlake asynchronously.
 
         Args:
             cursor: Optional cursor for pagination. If not provided, returns the first page.
+            direction: Optional pagination direction (next or prev). Defaults to next.
+            limit: Optional limit on the number of results per page. Defaults to 25.
+            filename: Optional filter to return only files with a specific name. Name is case-sensitive.
+            created_after: Optional filter to return only files created after a specific date (RFC 3339 format).
+            created_before: Optional filter to return only files created before a specific date (RFC 3339 format).
         """
-        resp = await self._arequest_v1(
-            "GET", "files", params={"cursor": cursor} if cursor else None
+        params = _drop_none(
+            {
+                "cursor": cursor,
+                "direction": direction.value if direction else None,
+                "limit": limit,
+                "filename": filename,
+                "createdAfter": created_after,
+                "createdBefore": created_before,
+            }
         )
+
+        resp = await self._arequest_v1("GET", "files", params=params)
         return PaginatedResult[FileInfo].model_validate(resp.json())
 
     @retry(tries=10, delay=2)
