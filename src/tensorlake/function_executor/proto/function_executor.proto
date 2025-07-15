@@ -14,11 +14,32 @@ enum SerializedObjectEncoding {
     SERIALIZED_OBJECT_ENCODING_BINARY_ZIP = 4;
 }
 
-// Complete serialized object passed in a single message without any chunking.
+message SerializedObjectManifest {
+    optional SerializedObjectEncoding encoding = 1;
+    optional uint64 encoding_version = 2;
+    optional uint64 size = 3;
+}
+
+// Full serialized object with all its data.
 message SerializedObject {
-    optional bytes data = 1;
-    optional SerializedObjectEncoding encoding = 2;
-    optional uint64 encoding_version = 3;
+    optional SerializedObjectManifest manifest = 1;
+    optional bytes data = 2;
+}
+
+// A BLOB in a BLOB store.
+message BLOB {
+    // URI of the blob.
+    // S3 URI if the data is stored in S3.
+    // Starts with "file://"" prefix if the data is stored on a local file system.
+    optional string uri = 1;
+}
+
+// Serialized object stored inside a BLOB.
+message SerializedObjectInsideBLOB {
+    optional SerializedObjectManifest manifest = 1;
+    optional BLOB blob = 2;
+    // Offset inside the BLOB where the serialized object data starts.
+    optional uint64 offset = 3;
 }
 
 // InitializeRequest contains information about the function
@@ -27,8 +48,12 @@ message InitializeRequest {
     optional string namespace = 1;
     optional string graph_name = 2;
     optional string graph_version = 3;
-    optional string function_name = 5;
-    optional SerializedObject graph = 7;
+    optional string function_name = 4;
+    optional SerializedObject graph = 5;
+    // Only used during FE startup.
+    // The following BLOBs should be writable by FE.
+    optional BLOB stdout = 6; 
+    optional BLOB stderr = 7;
 }
 
 enum InitializationOutcomeCode {
@@ -46,8 +71,6 @@ enum InitializationFailureReason {
 message InitializeResponse {
     optional InitializationOutcomeCode outcome_code = 1;
     optional InitializationFailureReason failure_reason = 2;
-    optional string stdout = 3;
-    optional string stderr = 4;
 }
 
 message SetInvocationStateRequest {
@@ -100,9 +123,14 @@ message RunTaskRequest {
     optional string function_name = 4;
     optional string graph_invocation_id = 5;
     optional string task_id = 6;
-    optional string allocation_id = 9;
-    optional SerializedObject function_input = 7;
-    optional SerializedObject function_init_value = 8;
+    optional string allocation_id = 7;
+    // The following BLOBs should be readable by FE.
+    optional SerializedObjectInsideBLOB function_input = 8;
+    optional SerializedObjectInsideBLOB function_init_value = 9;
+    // The following BLOBs should be writable by FE.
+    optional BLOB stdout = 10; 
+    optional BLOB stderr = 11;
+    optional BLOB function_outputs = 12;
 }
 
 message Metrics {
@@ -125,17 +153,15 @@ enum TaskFailureReason {
 
 message RunTaskResponse {
     optional string task_id = 1;
-    repeated SerializedObject function_outputs = 2;
+    repeated SerializedObjectInsideBLOB function_outputs = 2;
     // Edges that the function wants the invocation to be routed to.
     repeated string next_functions = 3;
-    optional string stdout = 4;
-    optional string stderr = 5;
-    optional bool is_reducer = 6;
-    optional Metrics metrics = 7;
-    optional TaskOutcomeCode outcome_code = 8;
-    optional TaskFailureReason failure_reason = 9;
+    optional bool is_reducer = 4;
+    optional Metrics metrics = 5;
+    optional TaskOutcomeCode outcome_code = 6;
+    optional TaskFailureReason failure_reason = 7;
     // User payload for invocation error if task failed with invocation error.
-    optional SerializedObject invocation_error_output = 10;
+    optional SerializedObjectInsideBLOB invocation_error_output = 8;
 }
 
 message HealthCheckRequest {}

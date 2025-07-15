@@ -1,7 +1,5 @@
 from typing import Any
 
-from .function_executor_pb2 import SerializedObject
-
 
 class MessageValidator:
     def __init__(self, message: Any):
@@ -27,11 +25,58 @@ class MessageValidator:
         Raises: ValueError: If the SerializedObject is invalid."""
         if not self._message.HasField(field_name):
             return self
+        (
+            MessageValidator(getattr(self._message, field_name))
+            .required_serialized_object_manifest("manifest")
+            .required_field("data")
+        )
 
-        so: SerializedObject = getattr(self._message, field_name)
-        so_validator: MessageValidator = MessageValidator(so)
-        so_validator.required_field("encoding")
-        so_validator.required_field("data")
-        so_validator.required_field("encoding_version")
+        return self
+
+    def required_serialized_object_manifest(
+        self, field_name: str
+    ) -> "MessageValidator":
+        """Validates the SerializedObjectManifest.
+
+        Raises: ValueError: If the SerializedObjectManifest is invalid or not present.
+        """
+        self.required_field(field_name)
+        (
+            MessageValidator(getattr(self._message, field_name))
+            .required_field("encoding")
+            .required_field("encoding_version")
+            .required_field("size")
+        )
+
+        return self
+
+    def required_blob(self, field_name: str) -> "MessageValidator":
+        """Validates the BLOB.
+
+        Raises: ValueError: If the BLOB is invalid or not present."""
+        self.required_field(field_name)
+        (MessageValidator(getattr(self._message, field_name)).required_field("uri"))
+
+        return self
+
+    def required_serialized_object_blob(self, field_name: str) -> "MessageValidator":
+        """Validates the SerializedObjectBLOB.
+
+        Raises: ValueError: If the SerializedObjectBLOB is invalid or not present."""
+        self.required_field(field_name)
+        return self.optional_serialized_object_blob(field_name)
+
+    def optional_serialized_object_blob(self, field_name: str) -> "MessageValidator":
+        """Validates the SerializedObjectBLOB.
+
+        Raises: ValueError: If the SerializedObjectBLOB is invalid."""
+        if not self._message.HasField(field_name):
+            return self
+        (
+            MessageValidator(getattr(self._message, field_name))
+            .required_serialized_object_manifest("manifest")
+            .required_blob("blob")
+            .required_field("offset")
+        )
 
         return self

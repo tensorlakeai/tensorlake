@@ -6,10 +6,7 @@ from testing import (
     rpc_channel,
 )
 
-from tensorlake.function_executor.proto.function_executor_pb2 import (
-    InfoRequest,
-    InfoResponse,
-)
+from tensorlake.function_executor.proto.function_executor_pb2 import InfoRequest
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
@@ -25,7 +22,7 @@ class TestCLIArgs(unittest.TestCase):
             with rpc_channel(process) as channel:
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 stub.get_info(InfoRequest())
-                # The test fails if the request fails with any exception
+                # The test fails if the request fails with any exception because FE didn't start up.
 
 
 if __name__ == "__main__":

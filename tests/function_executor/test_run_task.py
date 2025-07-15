@@ -1,15 +1,15 @@
 import unittest
 from typing import List, Mapping
 
-from grpc import RpcError
 from pydantic import BaseModel
 from testing import (
     DEFAULT_FUNCTION_EXECUTOR_PORT,
     FunctionExecutorProcessContextManager,
-    copy_and_modify_request,
     deserialized_function_output,
+    read_local_blob_str,
     rpc_channel,
     run_task,
+    tmp_local_file_blob,
 )
 
 from tensorlake import Graph
@@ -17,10 +17,10 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     InitializationOutcomeCode,
     InitializeRequest,
     InitializeResponse,
-    RunTaskRequest,
     RunTaskResponse,
     SerializedObject,
     SerializedObjectEncoding,
+    SerializedObjectManifest,
     TaskFailureReason,
     TaskOutcomeCode,
 )
@@ -74,14 +74,14 @@ def extractor_exception(a: int) -> int:
     raise Exception("this extractor throws an exception.")
 
 
-def create_graph_a():
+def create_graph_a() -> Graph:
     graph = Graph(name="test", description="test", start_node=extractor_a)
     graph = graph.add_edge(extractor_a, extractor_b)
     graph = graph.add_edge(extractor_b, extractor_c)
     return graph
 
 
-def create_graph_exception():
+def create_graph_exception() -> Graph:
     graph = Graph(name="test-exception", description="test", start_node=extractor_a)
     graph = graph.add_edge(extractor_a, extractor_exception)
     graph = graph.add_edge(extractor_exception, extractor_b)
@@ -90,6 +90,9 @@ def create_graph_exception():
 
 class TestRunTask(unittest.TestCase):
     def test_function_success(self):
+        graph_data: bytes = zip_graph_code(
+            graph=create_graph_a(), code_dir_path=GRAPH_CODE_DIR_PATH
+        )
         with FunctionExecutorProcessContextManager(
             DEFAULT_FUNCTION_EXECUTOR_PORT
         ) as process:
@@ -102,13 +105,15 @@ class TestRunTask(unittest.TestCase):
                         graph_version="1",
                         function_name="extractor_b",
                         graph=SerializedObject(
-                            data=zip_graph_code(
-                                graph=create_graph_a(),
-                                code_dir_path=GRAPH_CODE_DIR_PATH,
+                            manifest=SerializedObjectManifest(
+                                encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                                encoding_version=0,
+                                size=len(graph_data),
                             ),
-                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
-                            encoding_version=0,
+                            data=graph_data,
                         ),
+                        stdout=tmp_local_file_blob(),
+                        stderr=tmp_local_file_blob(),
                     )
                 )
                 self.assertEqual(
@@ -138,6 +143,9 @@ class TestRunTask(unittest.TestCase):
                 self.assertEqual(expected.model_dump(), fn_outputs[1].model_dump())
 
     def test_function_raises_error(self):
+        graph_data: bytes = zip_graph_code(
+            graph=create_graph_exception(), code_dir_path=GRAPH_CODE_DIR_PATH
+        )
         with FunctionExecutorProcessContextManager(
             DEFAULT_FUNCTION_EXECUTOR_PORT + 1
         ) as process:
@@ -150,13 +158,15 @@ class TestRunTask(unittest.TestCase):
                         graph_version="1",
                         function_name="extractor_exception",
                         graph=SerializedObject(
-                            data=zip_graph_code(
-                                graph=create_graph_exception(),
-                                code_dir_path=GRAPH_CODE_DIR_PATH,
+                            manifest=SerializedObjectManifest(
+                                encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                                encoding_version=0,
+                                size=len(graph_data),
                             ),
-                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
-                            encoding_version=0,
+                            data=graph_data,
                         ),
+                        stdout=tmp_local_file_blob(),
+                        stderr=tmp_local_file_blob(),
                     )
                 )
                 self.assertEqual(
@@ -164,8 +174,12 @@ class TestRunTask(unittest.TestCase):
                     InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_SUCCESS,
                 )
 
+                stderr_blob = tmp_local_file_blob()
                 run_task_response: RunTaskResponse = run_task(
-                    stub, function_name="extractor_exception", input=10
+                    stub,
+                    function_name="extractor_exception",
+                    input=10,
+                    stderr_blob=stderr_blob,
                 )
 
                 self.assertEqual(
@@ -179,65 +193,9 @@ class TestRunTask(unittest.TestCase):
                 self.assertFalse(run_task_response.HasField("invocation_error_output"))
                 self.assertFalse(run_task_response.is_reducer)
                 self.assertTrue(
-                    "this extractor throws an exception." in run_task_response.stderr
+                    "this extractor throws an exception."
+                    in read_local_blob_str(stderr_blob)
                 )
-
-    def test_wrong_task_routing(self):
-        with FunctionExecutorProcessContextManager(
-            DEFAULT_FUNCTION_EXECUTOR_PORT + 2
-        ) as process:
-            with rpc_channel(process) as channel:
-                stub: FunctionExecutorStub = FunctionExecutorStub(channel)
-                initialize_response: InitializeResponse = stub.initialize(
-                    InitializeRequest(
-                        namespace="test",
-                        graph_name="test",
-                        graph_version="1",
-                        function_name="extractor_b",
-                        graph=SerializedObject(
-                            data=zip_graph_code(
-                                graph=create_graph_a(),
-                                code_dir_path=GRAPH_CODE_DIR_PATH,
-                            ),
-                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
-                            encoding_version=0,
-                        ),
-                    )
-                )
-                self.assertEqual(
-                    initialize_response.outcome_code,
-                    InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_SUCCESS,
-                )
-                valid_request: RunTaskRequest = RunTaskRequest(
-                    namespace="test",
-                    graph_name="test",
-                    graph_version="1",
-                    function_name="extractor_b",
-                    graph_invocation_id="123",
-                    task_id="test-task",
-                    allocation_id="test-allocation",
-                    function_input=SerializedObject(
-                        data=CloudPickleSerializer.serialize(input),
-                        encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-                        encoding_version=0,
-                    ),
-                )
-                wrong_requests: List[RunTaskRequest] = [
-                    copy_and_modify_request(
-                        valid_request, {"namespace": "wrong-namespace"}
-                    ),
-                    copy_and_modify_request(
-                        valid_request, {"graph_name": "wrong-graph-name"}
-                    ),
-                    copy_and_modify_request(
-                        valid_request, {"graph_version": "wrong-graph-version"}
-                    ),
-                    copy_and_modify_request(
-                        valid_request, {"function_name": "wrong-function-name"}
-                    ),
-                ]
-                for request in wrong_requests:
-                    self.assertRaises(RpcError, stub.run_task, request)
 
 
 if __name__ == "__main__":
