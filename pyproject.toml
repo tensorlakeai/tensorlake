@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tensorlake"
-version = "0.2.24"
+version = "0.2.25"
 description = "Tensorlake SDK for Document Ingestion API and Serverless Workflows"
 authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
 homepage = "https://github.com/tensorlakeai/tensorlake"
@@ -29,8 +29,8 @@ grpcio = "1.73.1"
 grpcio-tools = "1.73.1"
 
 # Packages pinned to mitigate vulnerabilities, not a direct dependcy of tensorlake
-requests="^2.32.4"
-urllib3="^2.5.0"
+requests = "^2.32.4"
+urllib3 = "^2.5.0"
 
 [tool.poetry.scripts]
 tensorlake = "tensorlake.cli:cli"
