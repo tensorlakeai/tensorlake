@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tensorlake"
-version = "0.2.23"
+version = "0.2.24"
 description = "Tensorlake SDK for Document Ingestion API and Serverless Workflows"
 authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
 homepage = "https://github.com/tensorlakeai/tensorlake"
@@ -9,12 +9,13 @@ repository = "https://github.com/tensorlakeai/tensorlake"
 [tool.poetry.dependencies]
 python = "^3.10"
 python-magic = "^0.4.27"
+# mTLS support for httpx 0.28.1 is broken, wait for 0.28.2 to see if the bug is fixed
 httpx = { version = "0.27.2", extras = ["http2"] }
 cloudpickle = "^3.1.0"
 pydantic = "^2.0"
 docker = "^7.1.0"
 nanoid = "^2.0.0"
-httpx-sse = "^0.4.0"
+httpx-sse = "^0.4.1"
 rich = "14.0.0"                                    # TODO: Look into consolidating this with click
 pyyaml = "^6.0.2"
 click = "8.2.1"
@@ -24,8 +25,12 @@ tqdm = "^4.67.1"
 
 # Required only by Function Executor
 structlog = "25.4.0"
-grpcio = "1.73.0"
-grpcio-tools = "1.73.0"
+grpcio = "1.73.1"
+grpcio-tools = "1.73.1"
+
+# Packages pinned to mitigate vulnerabilities, not a direct dependcy of tensorlake
+requests="^2.32.4"
+urllib3="^2.5.0"
 
 [tool.poetry.scripts]
 tensorlake = "tensorlake.cli:cli"
