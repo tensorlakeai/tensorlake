@@ -322,6 +322,100 @@ class _DatasetMixin(_BaseClient):
         data = resp.json()
         return PaginatedResult[Dataset].model_validate(data, from_attributes=True)
 
+    def update_dataset(
+        self,
+        dataset: Dataset,
+        description: Optional[str] = None,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            List[StructuredExtractionOptions]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+    ) -> Dataset:
+        """
+        Update an existing dataset.
+
+        This method allows you to modify the properties of an existing dataset, such as its name, description,
+        parsing options, structured extraction options, enrichment options, and page classifications.
+
+        Updating a dataset does not change previously parsed files or their results, but it will affect future parsing operations.
+
+        Args:
+            dataset: The Dataset object to update. This should be the dataset created with create_dataset,
+                or the result of get_dataset.
+            description: Optional new description for the dataset. If provided, this will update the dataset's description.
+            parsing_options: Optional new parsing options to customize how documents in the dataset are parsed.
+                If provided, this will update the dataset's parsing options. The previous parsing options will be kept
+                if not provided.
+            structured_extraction_options: Optional new structured extraction options to guide the extraction of structured
+                data from documents in the dataset. If provided, this will update the dataset's structured extraction
+                options. The previous structured extraction options will be kept if not provided.
+            enrichment_options: Optional new enrichment options to extend the output of the document parsing process with
+                additional information, such as summarization of tables and figures. If provided, this will update
+                the dataset's enrichment options. The previous enrichment options will be kept if not provided.
+            page_classifications: Optional new list of page classification configurations. If provided, this will update
+                the dataset's page classifications. The previous page classifications will be kept if not provided.
+        """
+        body = _create_dataset_req(
+            None,
+            description,
+            parsing_options,
+            structured_extraction_options,
+            enrichment_options,
+            page_classifications,
+        )
+
+        response = self._request("PUT", f"/datasets/{dataset.dataset_id}", json=body)
+        return Dataset.model_validate(response.json())
+
+    async def update_dataset_async(
+        self,
+        dataset: Dataset,
+        description: Optional[str] = None,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            List[StructuredExtractionOptions]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+    ) -> Dataset:
+        """
+        Update an existing dataset asynchronously.
+
+        This method allows you to modify the properties of an existing dataset, such as its name, description,
+        parsing options, structured extraction options, enrichment options, and page classifications.
+
+        Updating a dataset does not change previously parsed files or their results, but it will affect future parsing operations.
+
+        Args:
+            dataset: The Dataset object to update. This should be the dataset created with create_dataset,
+                or the result of get_dataset.
+            description: Optional new description for the dataset. If provided, this will update the dataset's description.
+            parsing_options: Optional new parsing options to customize how documents in the dataset are parsed.
+                If provided, this will update the dataset's parsing options. The previous parsing options will be kept
+                if not provided.
+            structured_extraction_options: Optional new structured extraction options to guide the extraction of structured
+                data from documents in the dataset. If provided, this will update the dataset's structured extraction
+                options. The previous structured extraction options will be kept if not provided.
+            enrichment_options: Optional new enrichment options to extend the output of the document parsing process with
+                additional information, such as summarization of tables and figures. If provided, this will update
+                the dataset's enrichment options. The previous enrichment options will be kept if not provided.
+            page_classifications: Optional new list of page classification configurations. If provided, this will update
+                the dataset's page classifications. The previous page classifications will be kept if not provided.
+        """
+        body = _create_dataset_req(
+            None,
+            description,
+            parsing_options,
+            structured_extraction_options,
+            enrichment_options,
+            page_classifications,
+        )
+
+        resp = await self._arequest("PUT", f"/datasets/{dataset.dataset_id}", json=body)
+        return Dataset.model_validate(resp.json())
+
 
 def _create_dataset_parse_req(
     file: str,
@@ -348,7 +442,7 @@ def _create_dataset_parse_req(
 
 
 def _create_dataset_req(
-    name: str,
+    name: Optional[str],
     description: Optional[str],
     parsing_options: Optional[ParsingOptions],
     structured_extraction_options: Optional[List[StructuredExtractionOptions]],
