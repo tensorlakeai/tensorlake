@@ -1,4 +1,4 @@
-from typing import List, Optional, Type, Union
+from typing import List, Optional, Type, Union, Set
 
 from pydantic import BaseModel, Field, Json
 
@@ -8,6 +8,7 @@ from .enums import (
     PartitionStrategy,
     TableOutputMode,
     TableParsingFormat,
+    PageFragmentType,
 )
 
 
@@ -80,6 +81,10 @@ class ParsingOptions(BaseModel):
     table_parsing_format: TableParsingFormat = Field(
         TableParsingFormat.TSR,
         description="Determines how the system identifies and extracts tables from the document. Default is `table_structure_recognition`, which is better suited for clean, grid-like tables.",
+    )
+    ignore_sections: Optional[Set[PageFragmentType]] = Field(
+        None,
+        description="Set of page fragment types to ignore during parsing. This can be used to skip certain types of content, such as headers, footers, or other non-essential elements. If not provided, all page fragment types will be considered.",
     )
 
 
