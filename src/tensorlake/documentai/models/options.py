@@ -2,10 +2,10 @@ from typing import List, Optional, Set, Type, Union
 
 from pydantic import BaseModel, Field, Json
 
+from . import PageFragmentType
 from .enums import (
     ChunkingStrategy,
     ModelProvider,
-    PageFragmentType,
     PartitionStrategy,
     TableOutputMode,
     TableParsingFormat,
