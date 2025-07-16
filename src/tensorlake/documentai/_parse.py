@@ -315,7 +315,7 @@ class _ParseMixin(_BaseClient):
 
         self._request("DELETE", f"parse/{parse.parse_id}")
 
-    def delete_parse_async(self, parse_id: str) -> None:
+    async def delete_parse_async(self, parse_id: str) -> None:
         """
         Delete a parse operation asynchronously.
 
@@ -334,7 +334,7 @@ class _ParseMixin(_BaseClient):
                 "Please wait for the operation to complete before deleting."
             )
 
-        return self._arequest("DELETE", f"parse/{parse.parse_id}")
+        return await self._arequest("DELETE", f"parse/{parse.parse_id}")
 
     def list_parse_results(
         self,

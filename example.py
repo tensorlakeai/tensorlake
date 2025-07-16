@@ -1,0 +1,16 @@
+from tensorlake.documentai import DocumentAI
+
+doc_ai = DocumentAI(
+    api_key="tl_apiKey_QQFwQr8TTjpDNtW7B7mtm_Re2K_YDgdNGiAyWHQmXiZlyqgq7D2L"
+)
+
+parse_id = doc_ai.parse(
+    file="https://storage.googleapis.com/miguel_tensorlake_test_bucket/attention_is_all_you_need.pdf?x-goog-signature=00c485420cad09db5595b7d6ec930040d22007c3705475ea47d98f29417bc8f27174b2a8fd5ffad760932ec3751fccd82aec5be15bffdacdec3ecd0ecf6718ab0205cfd68854df066d9a41a0d8e927e98f3c8ea80c037482851af4eeec648de9b6bc070896c9937e656785e1fcb8a6934f4fac19781c6ad981434d492c9382d0651a510e005b3771ebc2c55ffce6f77268c784d33470e8872c26eb2fe66206524463597a1b75d3400bd6bc2d0993d0d410b4455d581e08a8bd02b98f80f9b06cc34a145dd02dd8fb197a2b633023142078804f2a2bfcf8aa01a3947463b6e27f5facb6022e08ccbe34b7fa37ab3e78f6c811f7296187411924c783a7db3fab30&x-goog-algorithm=GOOG4-RSA-SHA256&x-goog-credential=storage-miguel-test%40macro-deck-466109-d0.iam.gserviceaccount.com%2F20250716%2Feurope-west3%2Fstorage%2Fgoog4_request&x-goog-date=20250716T100724Z&x-goog-expires=3600&x-goog-signedheaders=host",
+    page_range="1",
+)
+
+print(parse_id)
+
+parsed_result = doc_ai.wait_for_completion(parse_id=parse_id)
+
+print(parsed_result)

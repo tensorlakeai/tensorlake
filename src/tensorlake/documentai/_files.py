@@ -55,7 +55,7 @@ class _FilesMixin(_BaseClient):
             }
         )
 
-        resp = self._request_v1("GET", "files", params=params)
+        resp = self._request("GET", "files", params=params)
         return PaginatedResult[FileInfo].model_validate(resp.json())
 
     async def files_async(

@@ -5,7 +5,7 @@ from typing import Any, Dict
 
 import httpx
 
-from .common import DOC_AI_BASE_URL, DOC_AI_BASE_URL_V2
+from .common import DOC_AI_BASE_URL_V2
 
 
 class _BaseClient:
@@ -21,15 +21,10 @@ class _BaseClient:
                 "API key is required. Set TENSORLAKE_API_KEY or pass api_key."
             )
 
-        self._client_v1 = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None)
-        self._aclient_v1 = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
-
         self._client = httpx.Client(base_url=DOC_AI_BASE_URL_V2, timeout=None)
         self._aclient = httpx.AsyncClient(base_url=DOC_AI_BASE_URL_V2, timeout=None)
 
         if server_url:
-            self._client_v1.base_url = f"{server_url}/documents/v1"
-            self._aclient_v1.base_url = f"{server_url}/documents/v1"
             self._client.base_url = f"{server_url}/documents/v2"
             self._aclient.base_url = f"{server_url}/documents/v2"
 
@@ -37,14 +32,12 @@ class _BaseClient:
         """
         Close the HTTP clients.
         """
-        self._client_v1.close()
         self._client.close()
 
     async def _aclose(self):
         """
         Close the asynchronous HTTP clients.
         """
-        await self._aclient_v1.aclose()
         await self._aclient.aclose()
 
     def __enter__(self):
@@ -80,20 +73,8 @@ class _BaseClient:
             "Connection": "close",
         }
 
-    def _request_v1(self, method: str, url: str, **kw: Any) -> httpx.Response:
-        resp = self._client_v1.request(method, url, headers=self._headers(), **kw)
-        resp.raise_for_status()
-        return resp
-
     def _request(self, method: str, url: str, **kw: Any) -> httpx.Response:
         resp = self._client.request(method, url, headers=self._headers(), **kw)
-        resp.raise_for_status()
-        return resp
-
-    async def _arequest_v1(self, method: str, url: str, **kw: Any) -> httpx.Response:
-        resp = await self._aclient_v1.request(
-            method, url, headers=self._headers(), **kw
-        )
         resp.raise_for_status()
         return resp
 
