@@ -2,11 +2,12 @@
 This module contains the data models for the parsing results of a document.
 """
 
+from enum import Enum
 from typing import Any, List, Optional, Union
 
 from pydantic import BaseModel, Field
 
-from .enums import PageFragmentType, ParseStatus
+from .enums import ParseStatus
 from .options import Options
 
 
@@ -68,6 +69,34 @@ class Signature(BaseModel):
     """
 
     content: str
+
+
+class PageFragmentType(str, Enum):
+    """
+    Type of a page fragment.
+    """
+
+    SECTION_HEADER = "section_header"
+    TITLE = "title"
+
+    TEXT = "text"
+    TABLE = "table"
+    FIGURE = "figure"
+    FORMULA = "formula"
+    FORM = "form"
+    KEY_VALUE_REGION = "key_value_region"
+    DOCUMENT_INDEX = "document_index"
+    LIST_ITEM = "list_item"
+
+    TABLE_CAPTION = "table_caption"
+    FIGURE_CAPTION = "figure_caption"
+    FORMULA_CAPTION = "formula_caption"
+
+    PAGE_FOOTER = "page_footer"
+    PAGE_HEADER = "page_header"
+    PAGE_NUMBER = "page_number"
+    SIGNATURE = "signature"
+    STRIKETHROUGH = "strikethrough"
 
 
 class PageFragment(BaseModel):

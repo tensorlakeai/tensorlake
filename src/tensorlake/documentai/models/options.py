@@ -5,11 +5,12 @@ from pydantic import BaseModel, Field, Json
 from .enums import (
     ChunkingStrategy,
     ModelProvider,
-    PageFragmentType,
     PartitionStrategy,
     TableOutputMode,
     TableParsingFormat,
 )
+
+from . import PageFragmentType
 
 
 class EnrichmentOptions(BaseModel):
