@@ -6,7 +6,7 @@ from typing import Any, List, Optional, Union
 
 from pydantic import BaseModel, Field
 
-from .enums import ParseStatus, PageFragmentType
+from .enums import PageFragmentType, ParseStatus
 from .options import Options
 
 

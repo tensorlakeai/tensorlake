@@ -1,14 +1,14 @@
-from typing import List, Optional, Type, Union, Set
+from typing import List, Optional, Set, Type, Union
 
 from pydantic import BaseModel, Field, Json
 
 from .enums import (
     ChunkingStrategy,
     ModelProvider,
+    PageFragmentType,
     PartitionStrategy,
     TableOutputMode,
     TableParsingFormat,
-    PageFragmentType,
 )
 
 
