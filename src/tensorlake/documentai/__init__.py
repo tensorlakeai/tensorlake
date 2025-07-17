@@ -8,7 +8,6 @@ from tensorlake.documentai.models import (
     ChunkingStrategy,
     EnrichmentOptions,
     Figure,
-    JobStatus,
     MimeType,
     ModelProvider,
     Options,
@@ -36,7 +35,6 @@ __all__ = [
     "DocumentAI",
     # Enums
     "ChunkingStrategy",
-    "JobStatus",
     "MimeType",
     "ModelProvider",
     "ParseStatus",

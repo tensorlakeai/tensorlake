@@ -2,12 +2,14 @@
 DocumentAI models package.
 """
 
-from ._datasets import Dataset
+from ._datasets import (
+    Dataset,
+    DatasetStatus,
+)
 
 # Enums
 from ._enums import (
     ChunkingStrategy,
-    DatasetStatus,
     MimeType,
     ModelProvider,
     ParseStatus,
