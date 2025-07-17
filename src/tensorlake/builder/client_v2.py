@@ -181,6 +181,7 @@ class ImageBuilderV2Client:
             "graph_version": context.graph_version,
             "graph_function_name": context.function_name,
             "image_hash": image.hash(),
+            "image_name": image.image_name
         }
 
         res = await self._client.put(
