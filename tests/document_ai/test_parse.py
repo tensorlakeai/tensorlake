@@ -3,10 +3,12 @@ import unittest
 
 from json_schemas.bank_statement import BankStatement
 
-from tensorlake.documentai import DocumentAI
-from tensorlake.documentai.models.enums import ParseStatus
-from tensorlake.documentai.models.options import (
+from tensorlake.documentai import (
+    DocumentAI,
+)
+from tensorlake.documentai.models import (
     PageClassConfig,
+    ParseStatus,
     StructuredExtractionOptions,
 )
 

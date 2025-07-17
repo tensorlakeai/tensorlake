@@ -2,13 +2,12 @@
 DocumentAI models package.
 """
 
-from .datasets import Dataset
+from ._datasets import Dataset
 
 # Enums
-from .enums import (
+from ._enums import (
     ChunkingStrategy,
     DatasetStatus,
-    JobStatus,
     MimeType,
     ModelProvider,
     ParseStatus,
@@ -18,20 +17,17 @@ from .enums import (
 )
 
 # Options
-from .options import (
+from ._options import (
     EnrichmentOptions,
     Options,
     PageClassConfig,
     ParsingOptions,
     StructuredExtractionOptions,
 )
-from .pagination import PaginatedResult, PaginationDirection
-
-# Parse models
-from .parse import ParseRequest
+from ._pagination import PaginatedResult, PaginationDirection
 
 # Results models
-from .results import (
+from ._results import (
     Chunk,
     Figure,
     Page,
@@ -50,7 +46,6 @@ from .results import (
 __all__ = [
     # Enums
     "ChunkingStrategy",
-    "JobStatus",
     "MimeType",
     "ModelProvider",
     "ParseStatus",
@@ -63,8 +58,6 @@ __all__ = [
     "PageClassConfig",
     "ParsingOptions",
     "StructuredExtractionOptions",
-    # Parse models
-    "ParseRequest",
     # Results models
     "PageClass",
     "ParseRequestOptions",

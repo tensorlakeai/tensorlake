@@ -13,7 +13,7 @@ from ._base import _BaseClient
 from ._utils import _drop_none
 from .common import PaginatedResult
 from .files import FileInfo, FileUploader
-from .models.pagination import PaginationDirection
+from .models import PaginationDirection
 
 
 class _FilesMixin(_BaseClient):
