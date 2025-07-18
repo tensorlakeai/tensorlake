@@ -9,9 +9,9 @@ repository = "https://github.com/tensorlakeai/tensorlake"
 [tool.poetry.dependencies]
 python = "^3.10"
 python-magic = "^0.4.27"
-httpx = { version = ">=0.27.2", extras = ["http2"] }
+httpx = { version = ">=0.27.2, < 1.0", extras = ["http2"] }
 cloudpickle = "^3.1.0"
-pydantic = ">=2.0"
+pydantic = ">=2.0, <3.0"
 docker = "^7.1.0"
 nanoid = "^2.0.0"
 httpx-sse = "^0.4.1"
