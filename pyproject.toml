@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tensorlake"
-version = "0.2.27"
+version = "0.2.28"
 description = "Tensorlake SDK for Document Ingestion API and Serverless Workflows"
 authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
 homepage = "https://github.com/tensorlakeai/tensorlake"
@@ -9,8 +9,7 @@ repository = "https://github.com/tensorlakeai/tensorlake"
 [tool.poetry.dependencies]
 python = "^3.10"
 python-magic = "^0.4.27"
-# mTLS support for httpx 0.28.1 is broken, wait for 0.28.2 to see if the bug is fixed
-httpx = { version = "0.27.2", extras = ["http2"] }
+httpx = { version = ">=0.27.2", extras = ["http2"] }
 cloudpickle = "^3.1.0"
 pydantic = "^2.0"
 docker = "^7.1.0"
