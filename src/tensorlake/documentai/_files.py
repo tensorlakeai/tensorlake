@@ -92,7 +92,6 @@ class _FilesMixin(_BaseClient):
         resp = await self._arequest_v1("GET", "files", params=params)
         return PaginatedResult[FileInfo].model_validate(resp.json())
 
-    @retry(tries=10, delay=2)
     def upload(self, path: Union[str, Path]) -> str:
         """
         Upload a file to Tensorlake.
