@@ -1,6 +1,6 @@
 from typing import List, Optional, Set, Type, Union
 
-from pydantic import BaseModel, Field, Json
+from pydantic import BaseModel, Field, Json, field_serializer
 
 from ._enums import (
     ChunkingStrategy,
@@ -86,6 +86,12 @@ class ParsingOptions(BaseModel):
         None,
         description="Set of page fragment types to ignore during parsing. This can be used to skip certain types of content, such as headers, footers, or other non-essential elements. If not provided, all page fragment types will be considered.",
     )
+
+    @field_serializer("ignore_sections")
+    def serialize_ignore_sections(
+        self, ignore_sections: Set[PageFragmentType]
+    ) -> List[str]:
+        return [section.value for section in ignore_sections]
 
 
 class StructuredExtractionOptions(BaseModel):
