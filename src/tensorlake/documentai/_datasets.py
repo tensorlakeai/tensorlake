@@ -486,8 +486,30 @@ class _DatasetMixin(_BaseClient):
         List every parse result in the Tensorlake project asynchronously.
 
         Args:
-            dataset: The dataset to list parse results from.
-            **kwargs: Additional filter parameters for the query.
+            cursor: Optional cursor for pagination. If provided, the method will return the next page of
+                results starting from this cursor. If not provided, it will return the first page of results.
+
+            direction: Optional pagination direction. If provided, it can be "next" or "prev" to navigate through the pages.
+
+            dataset_name: Optional name of the dataset to filter the results by. If provided, only parse results
+                associated with this dataset will be returned.
+            limit: Optional limit on the number of results to return. If not provided, a default limit will be used.
+
+            file_name: Optional filename to filter the results by. If provided, only parse results associated with this filename will be returned.
+
+            status: Optional status to filter the results by. If provided, only parse results with this status will be returned.
+
+            created_after: Optional timestamp to filter the results by creation time. If provided, only parse results created after this timestamp will be
+                returned. The date should be in RFC3339 format (e.g., "2023-10-01T00:00:00Z").
+
+            created_before: Optional timestamp to filter the results by creation time. If provided, only parse results created before this timestamp will be
+                returned. The date should be in RFC3339 format (e.g., "2023-10-01T00:00:00Z").
+
+            finished_after: Optional timestamp to filter the results by finish time. If provided, only parse results finished after this timestamp will be
+                returned. The date should be in RFC3339 format (e.g., "2023-10-01T00:00:00Z").
+
+            finished_before: Optional timestamp to filter the results by finish time. If provided, only parse results finished before this timestamp will be
+                returned. The date should be in RFC3339 format (e.g., "2023-10-01T00:00:00Z").
         """
         params: Dict[str, Any] = _drop_none(kwargs)
         response = await self._arequest(
