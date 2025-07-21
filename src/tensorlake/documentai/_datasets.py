@@ -18,6 +18,7 @@ from .models import (
     PaginatedResult,
     PaginationDirection,
     ParseResult,
+    ParseStatus,
     ParsingOptions,
     StructuredExtractionOptions,
 )
@@ -415,6 +416,78 @@ class _DatasetMixin(_BaseClient):
 
         resp = await self._arequest("PUT", f"/datasets/{dataset.dataset_id}", json=body)
         return Dataset.model_validate(resp.json())
+
+    def get_dataset_data(
+        self,
+        dataset: Dataset,
+        cursor: Optional[str] = None,
+        direction: Optional[PaginationDirection] = None,
+        dataset_name: Optional[str] = None,
+        limit: Optional[int] = None,
+        file_name: Optional[str] = None,
+        status: Optional[ParseStatus] = None,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
+        finished_after: Optional[str] = None,
+        finished_before: Optional[str] = None,
+    ) -> PaginatedResult[ParseResult]:
+        """
+        List every parse result in the Tensorlake project.
+
+        Args:
+            cursor: Optional cursor for pagination. If provided, the method will return the next page of
+                results starting from this cursor. If not provided, it will return the first page of results.
+
+            direction: Optional pagination direction. If provided, it can be "next" or "prev" to navigate through the pages.
+
+            dataset_name: Optional name of the dataset to filter the results by. If provided, only parse results
+                associated with this dataset will be returned.
+            limit: Optional limit on the number of results to return. If not provided, a default limit will be used.
+
+            file_name: Optional filename to filter the results by. If provided, only parse results associated with this filename will be returned.
+
+            status: Optional status to filter the results by. If provided, only parse results with this status will be returned.
+
+            created_after: Optional timestamp to filter the results by creation time. If provided, only parse results created after this timestamp will be
+                returned. The date should be in RFC3339 format (e.g., "2023-10-01T00:00:00Z").
+
+            created_before: Optional timestamp to filter the results by creation time. If provided, only parse results created before this timestamp will be
+                returned. The date should be in RFC3339 format (e.g., "2023-10-01T00:00:00Z").
+
+            finished_after: Optional timestamp to filter the results by finish time. If provided, only parse results finished after this timestamp will be
+                returned. The date should be in RFC3339 format (e.g., "2023-10-01T00:00:00Z").
+
+            finished_before: Optional timestamp to filter the results by finish time. If provided, only parse results finished before this timestamp will be
+                returned. The date should be in RFC3339 format (e.g., "2023-10-01T00:00:00Z").
+        """
+        params: Dict[str, Any] = _drop_none(
+            {
+                "cursor": cursor,
+                "direction": direction.value if direction else None,
+                "dataset_name": dataset_name,
+                "limit": limit,
+                "file_name": file_name,
+                "status": status.value if status else None,
+                "created_after": created_after,
+                "created_before": created_before,
+                "finished_after": finished_after,
+                "finished_before": finished_before,
+            }
+        )
+        response = self._request("GET", f"/datasets/{dataset.dataset_id}/data", params=params)
+        return PaginatedResult[ParseResult].model_validate(response.json())
+
+    async def get_dataset_data_async(self, dataset: Dataset, **kwargs) -> PaginatedResult[ParseResult]:
+        """
+        List every parse result in the Tensorlake project asynchronously.
+
+        Args:
+            dataset: The dataset to list parse results from.
+            **kwargs: Additional filter parameters for the query.
+        """
+        params: Dict[str, Any] = _drop_none(kwargs)
+        response = await self._arequest("GET", f"/datasets/{dataset.dataset_id}/data", params=params)
+        return PaginatedResult[ParseResult].model_validate(response.json())
 
 
 def _create_dataset_parse_req(
