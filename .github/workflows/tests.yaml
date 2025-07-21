@@ -74,7 +74,6 @@ jobs:
         with:
           run: |
             indexify-cli executor --dev &
-            echo $! > /tmp/executor.pid &
 
           wait-on: |
             tcp:localhost:8900
