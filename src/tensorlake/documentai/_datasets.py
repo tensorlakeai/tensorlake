@@ -435,6 +435,9 @@ class _DatasetMixin(_BaseClient):
         List every parse result in the Tensorlake project.
 
         Args:
+            dataset: The Dataset object to filter the results by. This should be the dataset created with create_dataset,
+                or the result of get_dataset.
+
             cursor: Optional cursor for pagination. If provided, the method will return the next page of
                 results starting from this cursor. If not provided, it will return the first page of results.
 
@@ -486,6 +489,9 @@ class _DatasetMixin(_BaseClient):
         List every parse result in the Tensorlake project asynchronously.
 
         Args:
+            dataset: The Dataset object to filter the results by. This should be the dataset created with create_dataset,
+                or the result of get_dataset.
+
             cursor: Optional cursor for pagination. If provided, the method will return the next page of
                 results starting from this cursor. If not provided, it will return the first page of results.
 
