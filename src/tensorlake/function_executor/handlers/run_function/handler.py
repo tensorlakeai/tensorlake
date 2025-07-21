@@ -5,11 +5,11 @@ from typing import Any
 
 from tensorlake.functions_sdk.functions import (
     FunctionCallResult,
-    GraphInvocationContext,
+    GraphRequestContext,
     TensorlakeFunctionWrapper,
 )
 from tensorlake.functions_sdk.graph_definition import ComputeGraphMetadata
-from tensorlake.functions_sdk.invocation_state.invocation_state import InvocationState
+from tensorlake.functions_sdk.invocation_state.invocation_state import RequestState
 
 from ...proto.function_executor_pb2 import RunTaskRequest, RunTaskResponse
 from ...std_outputs_capture import flush_logs, read_till_the_end
@@ -21,7 +21,7 @@ class Handler:
     def __init__(
         self,
         request: RunTaskRequest,
-        invocation_state: InvocationState,
+        invocation_state: RequestState,
         function_wrapper: TensorlakeFunctionWrapper,
         function_stdout: io.StringIO,
         function_stderr: io.StringIO,
@@ -29,7 +29,7 @@ class Handler:
         logger: Any,
     ):
         self._request: RunTaskRequest = request
-        self._invocation_state: InvocationState = invocation_state
+        self._invocation_state: RequestState = invocation_state
         self._logger = logger.bind(
             module=__name__,
             invocation_id=request.graph_invocation_id,
@@ -98,11 +98,11 @@ class Handler:
             )
 
     def _run_func(self, inputs: FunctionInputs) -> FunctionCallResult:
-        ctx: GraphInvocationContext = GraphInvocationContext(
-            invocation_id=self._request.graph_invocation_id,
+        ctx: GraphRequestContext = GraphRequestContext(
+            request_id=self._request.graph_invocation_id,
             graph_name=self._request.graph_name,
             graph_version=self._request.graph_version,
-            invocation_state=self._invocation_state,
+            request_state=self._invocation_state,
         )
         return self._function_wrapper.invoke_fn_ser(
             ctx, inputs.input, inputs.init_value

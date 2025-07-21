@@ -8,9 +8,12 @@ from httpx_sse import ServerSentEvent, connect_sse
 from pydantic import BaseModel
 from rich import print  # TODO: Migrate to use click.echo
 
-from tensorlake.error import ApiException, GraphStillProcessing
 from tensorlake.functions_sdk.data_objects import TensorlakeData
-from tensorlake.functions_sdk.function_errors import InvocationError
+from tensorlake.functions_sdk.exceptions import (
+    ApiException,
+    GraphStillProcessing,
+    RequestException,
+)
 from tensorlake.functions_sdk.graph import (
     ComputeGraphMetadata,
     Graph,
@@ -20,8 +23,6 @@ from tensorlake.functions_sdk.graph_serialization import (
     zip_graph_code,
 )
 from tensorlake.functions_sdk.object_serializer import get_serializer
-from tensorlake.functions_sdk.runtime_definition import InvocationMetadata
-from tensorlake.settings import DEFAULT_SERVICE_URL
 from tensorlake.utils.http_client import (
     _TRANSIENT_HTTPX_ERRORS,
     get_httpx_client,
@@ -32,12 +33,54 @@ from tensorlake.utils.retries import exponential_backoff
 logger = logging.getLogger("tensorlake")
 
 
-class InvocationFinishedEvent(BaseModel):
-    invocation_id: str
+DEFAULT_SERVICE_URL = os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")
 
 
-class InvocationEventPayload(BaseModel):
-    invocation_id: str
+class GraphOutputMetadata(BaseModel):
+    id: str
+    num_outputs: int
+    compute_fn: str
+
+
+class RequestProgress(BaseModel):
+    pending_tasks: int
+    successful_tasks: int
+    failed_tasks: int
+
+
+class RequestError(BaseModel):
+    function_name: str
+    message: str
+
+
+class ShallowRequestMetadata(BaseModel):
+    id: str
+    status: str
+    outcome: str
+    created_at: int
+
+
+class RequestMetadata(BaseModel):
+    id: str
+    completed: bool
+    status: str
+    outcome: str
+    failure_reason: str
+    outstanding_tasks: int
+    request_progress: dict[str, RequestProgress]
+    graph_version: str
+    created_at: str
+    request_error: Optional[RequestError] = None
+    outputs: List[GraphOutputMetadata] = []
+    created_at: int
+
+
+class RequestFinishedEvent(BaseModel):
+    request_id: str
+
+
+class RequestProgressPayload(BaseModel):
+    request_id: str
     fn_name: str
     task_id: str
     allocation_id: Optional[str] = None
@@ -45,11 +88,11 @@ class InvocationEventPayload(BaseModel):
     outcome: Optional[str] = None
 
 
-class InvocationEvent(BaseModel):
+class WorkflowEvent(BaseModel):
     event_name: str
     stdout: Optional[str] = None
     stderr: Optional[str] = None
-    payload: Union[InvocationEventPayload, InvocationFinishedEvent]
+    payload: Union[RequestProgressPayload, RequestFinishedEvent]
 
     def __str__(self) -> str:
         stdout = (
@@ -64,17 +107,6 @@ class InvocationEvent(BaseModel):
         )
 
         return f"{stdout}{stderr}[bold green]{self.event_name}[/bold green]: {self.payload}"
-
-
-class GraphOutputMetadata(BaseModel):
-    id: str
-    compute_fn: str
-
-
-class GraphOutputs(BaseModel):
-    invocation: InvocationMetadata
-    outputs: List[GraphOutputMetadata]
-    cursor: Optional[str] = None
 
 
 def log_retries(e: BaseException, sleep_time: float, retries: int):
@@ -215,7 +247,7 @@ class TensorlakeClient:
         graph_metadata: ComputeGraphMetadata = graph.definition()
         graph_code: bytes = zip_graph_code(graph=graph, code_dir_path=code_dir_path)
         response = self._post(
-            f"namespaces/{self.namespace}/compute_graphs",
+            f"v1/namespaces/{self.namespace}/compute-graphs",
             files={"code": graph_code},
             data={
                 "compute_graph": graph_metadata.model_dump_json(exclude_none=True),
@@ -236,14 +268,14 @@ class TensorlakeClient:
         WARNING: This operation is irreversible.
         """
         response = self._delete(
-            f"namespaces/{self.namespace}/compute_graphs/{graph_name}",
+            f"v1/namespaces/{self.namespace}/compute-graphs/{graph_name}",
         )
         response.raise_for_status()
 
     def graphs(self) -> List[ComputeGraphMetadata]:
-        graphs_json = self._get(f"namespaces/{self.namespace}/compute_graphs").json()[
-            "compute_graphs"
-        ]
+        graphs_json = self._get(
+            f"v1/namespaces/{self.namespace}/compute-graphs"
+        ).json()["compute_graphs"]
         graphs = []
         for graph in graphs_json:
             graphs.append(ComputeGraphMetadata(**graph))
@@ -251,19 +283,8 @@ class TensorlakeClient:
         return graphs
 
     def graph(self, name: str) -> ComputeGraphMetadata:
-        response = self._get(f"namespaces/{self.namespace}/compute_graphs/{name}")
+        response = self._get(f"v1/namespaces/{self.namespace}/compute-graphs/{name}")
         return ComputeGraphMetadata(**response.json())
-
-    def namespaces(self) -> List[str]:
-        response = self._get("namespaces")
-        namespaces_dict = response.json()["namespaces"]
-        namespaces = []
-        for item in namespaces_dict:
-            namespaces.append(item["name"])
-        return namespaces
-
-    def create_namespace(self, namespace: str):
-        self._post("namespaces", json={"name": namespace})
 
     def logs(
         self, cg_name: str, invocation_id: str, allocation_id: str, file: str
@@ -278,26 +299,24 @@ class TensorlakeClient:
             print(f"failed to fetch logs: {e}")
             return None
 
-    def invocations(self, graph: str) -> List[InvocationMetadata]:
+    def requests(self, graph: str) -> List[RequestMetadata]:
         response = self._get(
-            f"namespaces/{self.namespace}/compute_graphs/{graph}/invocations"
+            f"v1/namespaces/{self.namespace}/compute-graphs/{graph}/requests"
         )
-        invocations = []
-        for invocation in response.json()["invocations"]:
-            invocations.append(InvocationMetadata(**invocation))
+        requests: List[ShallowRequestMetadata] = []
+        for request in response.json()["requests"]:
+            print(request)
+            requests.append(ShallowRequestMetadata(**request))
 
-        return invocations
+        return requests
 
-    def invocation(self, graph: str, invocation: str) -> InvocationMetadata:
+    def request(self, graph: str, request_id: str) -> RequestMetadata:
         response = self._get(
-            f"namespaces/{self.namespace}/compute_graphs/{graph}/invocations/{invocation}"
+            f"v1/namespaces/{self.namespace}/compute-graphs/{graph}/requests/{request_id}"
         )
-        return InvocationMetadata(**response.json())
+        return RequestMetadata(**response.json())
 
-    def replay_invocations(self, graph: str):
-        self._post(f"namespaces/{self.namespace}/compute_graphs/{graph}/replay")
-
-    def invoke_graph_with_object(
+    def call(
         self,
         graph: str,
         block_until_done: bool = False,
@@ -321,7 +340,7 @@ class TensorlakeClient:
         block_until_done: bool = False,
         input_encoding: str = "cloudpickle",
         **kwargs,
-    ) -> Generator[InvocationEvent, None, str]:
+    ) -> Generator[WorkflowEvent, None, str]:
         serializer = get_serializer(input_encoding)
         ser_input = serializer.serialize(kwargs)
         params = {"block_until_finish": block_until_done}
@@ -338,7 +357,7 @@ class TensorlakeClient:
             with connect_sse(
                 self._client,
                 "POST",
-                f"{self.service_url}/namespaces/{self.namespace}/compute_graphs/{graph}/invoke_object",
+                f"{self.service_url}/v1/namespaces/{self.namespace}/compute-graphs/{graph}",
                 **kwargs,
             ) as event_source:
                 if not event_source.response.is_success:
@@ -349,7 +368,7 @@ class TensorlakeClient:
                         graph, sse
                     ):
                         if invocation_id is None:
-                            invocation_id = event.payload.invocation_id
+                            invocation_id = event.payload.request_id
                         yield event
 
         except _TRANSIENT_HTTPX_ERRORS:
@@ -367,46 +386,38 @@ class TensorlakeClient:
 
     def _parse_invocation_events_from_sse_event(
         self, graph: str, sse: ServerSentEvent
-    ) -> Iterator[InvocationEvent]:
+    ) -> Iterator[WorkflowEvent]:
         obj = json.loads(sse.data)
 
         for event_name, event_data in obj.items():
             # Handle InvocationFinished events
-            if event_name == "InvocationFinished":
-                yield InvocationEvent(
+            if event_name == "RequestFinished":
+                yield WorkflowEvent(
                     event_name=event_name,
-                    payload=InvocationFinishedEvent(invocation_id=event_data["id"]),
-                )
-                continue
-
-            # Handle legacy 'id' events (backwards compatibility)
-            if event_name == "id":
-                yield InvocationEvent(
-                    event_name="InvocationFinished",  # Normalize event name
-                    payload=InvocationFinishedEvent(invocation_id=event_data),
+                    payload=RequestFinishedEvent(request_id=event_data["id"]),
                 )
                 continue
 
             # Handle all other event types
-            event_payload = InvocationEventPayload.model_validate(event_data)
-            event = InvocationEvent(event_name=event_name, payload=event_payload)
+            event_payload = RequestProgressPayload.model_validate(event_data)
+            event = WorkflowEvent(event_name=event_name, payload=event_payload)
 
             # Log failures with their stdout/stderr
             if (
                 event.event_name == "TaskCompleted"
-                and isinstance(event.payload, InvocationEventPayload)
+                and isinstance(event.payload, RequestProgressPayload)
                 and event.payload.outcome == "Failure"
             ):
                 event.stdout = self.logs(
                     graph,
-                    event.payload.invocation_id,
+                    event.payload.request_id,
                     event.payload.allocation_id,
                     "stdout",
                 )
 
                 event.stderr = self.logs(
                     graph,
-                    event.payload.invocation_id,
+                    event.payload.request_id,
                     event.payload.allocation_id,
                     "stderr",
                 )
@@ -440,28 +451,32 @@ class TensorlakeClient:
                     if event.event_name == "InvocationFinished":
                         break
 
-    def _download_output(
+    def _download_outputs(
         self,
         graph: str,
-        invocation_id: str,
+        request_id: str,
         fn_name: str,
-        output_id: str,
-    ) -> TensorlakeData:
-        response = self._get(
-            f"namespaces/{self.namespace}/compute_graphs/{graph}/invocations/{invocation_id}/fn/{fn_name}/output/{output_id}",
-        )
-        response.raise_for_status()
-        content_type = response.headers.get("Content-Type")
-        if content_type == "application/json":
-            encoding = "json"
-        else:
-            encoding = "cloudpickle"
-        return TensorlakeData(id=output_id, payload=response.content, encoder=encoding)
+        output_metadata: GraphOutputMetadata,
+    ) -> List[Any]:
+        outputs = []
+        for i in range(output_metadata.num_outputs):
+            response = self._get(
+                f"v1/namespaces/{self.namespace}/compute-graphs/{graph}/requests/{request_id}/fn/{fn_name}/outputs/{output_metadata.id}/index/{i}",
+            )
+            response.raise_for_status()
+            content_type = response.headers.get("Content-Type")
+            if content_type == "application/json":
+                encoding = "json"
+            else:
+                encoding = "cloudpickle"
+            serializer = get_serializer(encoding)
+            outputs.append(serializer.deserialize(response.content))
+        return outputs
 
     def graph_outputs(
         self,
         graph: str,
-        invocation_id: str,
+        request_id: str,
         fn_name: str,
     ) -> List[Any]:
         """
@@ -473,26 +488,20 @@ class TensorlakeClient:
         return: Union[Dict[str, List[Any]], List[Any]]: The extracted objects. If the extractor name is provided, the output is a list of extracted objects by the extractor. If the extractor name is not provided, the output is a dictionary with the extractor name as the key and the extracted objects as the value. If no objects are found, an empty list is returned.
         """
         response = self._get(
-            f"namespaces/{self.namespace}/compute_graphs/{graph}/invocations/{invocation_id}/outputs",
+            f"v1/namespaces/{self.namespace}/compute-graphs/{graph}/requests/{request_id}",
         )
         response.raise_for_status()
-        graph_outputs = GraphOutputs(**response.json())
-        if graph_outputs.invocation.status in ["Pending", "Running"]:
+        request = RequestMetadata(**response.json())
+        if request.status in ["Pending", "Running"]:
             raise GraphStillProcessing()
 
-        if graph_outputs.invocation.invocation_error is not None:
-            raise InvocationError(graph_outputs.invocation.invocation_error.message)
+        if request.request_error is not None:
+            raise RequestException(request.request_error.message)
 
-        graph_metadata: ComputeGraphMetadata = self.graph(graph)
-        output_encoder = graph_metadata.nodes[fn_name].output_encoder
-
-        outputs = []
-        for output in graph_outputs.outputs:
-            if output.compute_fn == fn_name:
-                indexify_data = self._download_output(
-                    graph, invocation_id, fn_name, output.id
+        all_outputs = []
+        for output_metadata in request.outputs:
+            if output_metadata.compute_fn == fn_name:
+                all_outputs.extend(
+                    self._download_outputs(graph, request_id, fn_name, output_metadata)
                 )
-                serializer = get_serializer(output_encoder)
-                output = serializer.deserialize(indexify_data.payload)
-                outputs.append(output)
-        return outputs
+        return all_outputs

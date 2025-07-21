@@ -8,7 +8,7 @@ from testing import (
     run_task,
 )
 
-from tensorlake import Graph, InvocationError
+from tensorlake import Graph, RequestException
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     InitializationOutcomeCode,
     InitializeRequest,
@@ -33,7 +33,7 @@ GRAPH_CODE_DIR_PATH = graph_code_dir_path(__file__)
 
 @tensorlake_function()
 def raise_invocation_error(x: int) -> str:
-    raise InvocationError(f"The invocation can't succeed: {x}")
+    raise RequestException(f"The invocation can't succeed: {x}")
 
 
 class TestInvocationError(unittest.TestCase):

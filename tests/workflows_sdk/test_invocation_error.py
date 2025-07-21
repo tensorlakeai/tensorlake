@@ -3,13 +3,13 @@ import unittest
 import parameterized
 from testing import remote_or_local_graph, test_graph_name
 
-from tensorlake import Graph, InvocationError, tensorlake_function
+from tensorlake import Graph, RequestException, tensorlake_function
 
 
 @tensorlake_function()
 def start_func(cmd: str) -> str:
     if cmd == "fail_invocation":
-        raise InvocationError("Got command to fail the invocation")
+        raise RequestException("Got command to fail the invocation")
     return f"start_func: {cmd}"
 
 
@@ -35,7 +35,7 @@ class TestInvocationError(unittest.TestCase):
             self.fail(
                 f"Expected InvocationError from start_func, but got output: {output}"
             )
-        except InvocationError as e:
+        except RequestException as e:
             self.assertEqual(e.message, "Got command to fail the invocation")
 
         try:
@@ -43,7 +43,7 @@ class TestInvocationError(unittest.TestCase):
             self.fail(
                 f"Expected InvocationError from end_func, but got output: {output}"
             )
-        except InvocationError as e:
+        except RequestException as e:
             self.assertEqual(e.message, "Got command to fail the invocation")
 
 
