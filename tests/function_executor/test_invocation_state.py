@@ -33,7 +33,7 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
 from tensorlake.functions_sdk.functions import (
-    GraphInvocationContext,
+    GraphRequestContext,
     tensorlake_function,
 )
 from tensorlake.functions_sdk.graph_serialization import (
@@ -92,8 +92,8 @@ def invocation_state_client_stub(
 
 
 @tensorlake_function(inject_ctx=True)
-def set_invocation_state(ctx: GraphInvocationContext, x: int) -> str:
-    ctx.invocation_state.set(
+def set_invocation_state(ctx: GraphRequestContext, x: int) -> str:
+    ctx.request_state.set(
         "test_state_key",
         StructuredState(
             string="hello",
@@ -240,8 +240,8 @@ class TestSetInvocationState(unittest.TestCase):
 
 
 @tensorlake_function(inject_ctx=True)
-def check_invocation_state_is_expected(ctx: GraphInvocationContext, x: int) -> str:
-    got_state: StructuredState = ctx.invocation_state.get("test_state_key")
+def check_invocation_state_is_expected(ctx: GraphRequestContext, x: int) -> str:
+    got_state: StructuredState = ctx.request_state.get("test_state_key")
     expected_state: StructuredState = StructuredState(
         string="hello",
         integer=x,
@@ -255,8 +255,8 @@ def check_invocation_state_is_expected(ctx: GraphInvocationContext, x: int) -> s
 
 
 @tensorlake_function(inject_ctx=True)
-def check_invocation_state_is_none(ctx: GraphInvocationContext, x: int) -> str:
-    got_state: StructuredState = ctx.invocation_state.get("test_state_key")
+def check_invocation_state_is_none(ctx: GraphRequestContext, x: int) -> str:
+    got_state: StructuredState = ctx.request_state.get("test_state_key")
     return "success" if got_state is None else "failure"
 
 

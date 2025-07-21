@@ -1,7 +1,7 @@
 from typing import Any, Dict, Optional
 
 
-class InvocationState:
+class RequestState:
     """Abstract interface for Graph invocation state key-value API.
 
     The API allows to set and get key-value pairs from Indexify functions.

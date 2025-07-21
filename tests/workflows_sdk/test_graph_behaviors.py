@@ -9,7 +9,7 @@ from typing_extensions import TypedDict
 
 from tensorlake import (
     Graph,
-    GraphInvocationContext,
+    GraphRequestContext,
     RemoteGraph,
     RouteTo,
     TensorlakeCompute,
@@ -70,21 +70,21 @@ class ComplexObject(BaseModel):
 
 @tensorlake_function(inject_ctx=True)
 def simple_function_ctx(
-    ctx: GraphInvocationContext, x: SimpleModelObjectStr
+    ctx: GraphRequestContext, x: SimpleModelObjectStr
 ) -> ComplexObject:
-    ctx.invocation_state.set("my_key", 10)
-    ctx.invocation_state.timer("test_timer", 1.8)
-    ctx.invocation_state.counter("test_counter", 8)
+    ctx.request_state.set("my_key", 10)
+    ctx.request_state.timer("test_timer", 1.8)
+    ctx.request_state.counter("test_counter", 8)
     return ComplexObject(
-        invocation_id=ctx.invocation_id,
+        invocation_id=ctx.request_id,
         graph_name=ctx.graph_name,
         graph_version=ctx.graph_version,
     )
 
 
 @tensorlake_function(inject_ctx=True)
-def simple_function_ctx_b(ctx: GraphInvocationContext, x: ComplexObject) -> int:
-    val = ctx.invocation_state.get("my_key")
+def simple_function_ctx_b(ctx: GraphRequestContext, x: ComplexObject) -> int:
+    val = ctx.request_state.get("my_key")
     return val + 1
 
 
@@ -95,11 +95,11 @@ class SimpleFunctionCtxC(TensorlakeCompute):
     def __init__(self):
         super().__init__()
 
-    def run(self, ctx: GraphInvocationContext, x: ComplexObject) -> int:
+    def run(self, ctx: GraphRequestContext, x: ComplexObject) -> int:
         print(f"ctx: {ctx}")
-        val = ctx.invocation_state.get("my_key")
+        val = ctx.request_state.get("my_key")
         assert val == 10
-        not_present = ctx.invocation_state.get("not_present")
+        not_present = ctx.request_state.get("not_present")
         assert not_present is None
         return val + 1
 

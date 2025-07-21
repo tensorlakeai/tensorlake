@@ -1,11 +1,11 @@
 from typing import Any, Optional
 
-from tensorlake.functions_sdk.invocation_state.invocation_state import InvocationState
+from tensorlake.functions_sdk.invocation_state.invocation_state import RequestState
 
 from .invocation_state_proxy_server import InvocationStateProxyServer
 
 
-class ProxiedInvocationState(InvocationState):
+class ProxiedInvocationState(RequestState):
     """InvocationState that proxies the calls via InvocationStateProxyServer."""
 
     def __init__(self, task_id: str, proxy_server: InvocationStateProxyServer):

@@ -4,15 +4,15 @@ from testing import test_graph_name
 
 from tensorlake import (
     Graph,
-    GraphInvocationContext,
+    GraphRequestContext,
     tensorlake_function,
 )
 
 
 @tensorlake_function(inject_ctx=True)
-def node_with_metrics(ctx: GraphInvocationContext, x: int) -> int:
-    ctx.invocation_state.timer("test_timer", 1.8)
-    ctx.invocation_state.counter("test_counter", 8)
+def node_with_metrics(ctx: GraphRequestContext, x: int) -> int:
+    ctx.request_state.timer("test_timer", 1.8)
+    ctx.request_state.counter("test_counter", 8)
     return x + 1
 
 
@@ -29,13 +29,13 @@ class TestGraphMetrics(unittest.TestCase):
         self.assertEqual(output[0], 2)
 
         self.assertEqual(
-            graph._metrics[graph._local_graph_ctx.invocation_id].timers.get(
+            graph._metrics[graph._local_graph_ctx.request_id].timers.get(
                 "test_timer"
             ),
             1.8,
         )
         self.assertEqual(
-            graph._metrics[graph._local_graph_ctx.invocation_id].counters.get(
+            graph._metrics[graph._local_graph_ctx.request_id].counters.get(
                 "test_counter"
             ),
             8,

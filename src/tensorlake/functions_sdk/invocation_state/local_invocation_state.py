@@ -1,10 +1,10 @@
 from typing import Any, Dict, Optional
 
 from ..object_serializer import CloudPickleSerializer
-from .invocation_state import InvocationState
+from .invocation_state import RequestState
 
 
-class LocalInvocationState(InvocationState):
+class LocalInvocationState(RequestState):
     """InvocationState that stores the key-value pairs in memory.
 
     This is intended to be used with local graphs."""

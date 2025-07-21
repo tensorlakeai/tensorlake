@@ -2,10 +2,10 @@ import time
 import unittest
 from typing import Any, Union
 
-from tensorlake.error import GraphStillProcessing
+from tensorlake.functions_sdk.exceptions import GraphStillProcessing
 from tensorlake.functions_sdk.graph import Graph
 from tensorlake.functions_sdk.graph_serialization import graph_code_dir_path
-from tensorlake.remote_graph import RemoteGraph
+from tensorlake.functions_sdk.remote_graph import RemoteGraph
 
 
 def remote_or_local_graph(graph, remote=True) -> Union[RemoteGraph, Graph]:

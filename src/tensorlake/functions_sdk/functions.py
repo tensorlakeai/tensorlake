@@ -20,23 +20,23 @@ from typing_extensions import get_type_hints
 
 from .data_objects import Metrics, TensorlakeData
 from .image import Image
-from .invocation_state.invocation_state import InvocationState
+from .invocation_state.invocation_state import RequestState
 from .object_serializer import get_serializer
 from .retries import Retries
 
 
-class GraphInvocationContext:
+class GraphRequestContext:
     def __init__(
         self,
-        invocation_id: str,
+        request_id: str,
         graph_name: str,
         graph_version: str,
-        invocation_state: InvocationState,
+        request_state: RequestState,
     ):
-        self.invocation_id = invocation_id
+        self.request_id = request_id
         self.graph_name = graph_name
         self.graph_version = graph_version
-        self.invocation_state = invocation_state
+        self.request_state = request_state
 
 
 def is_pydantic_model_from_annotation(type_annotation):
@@ -302,7 +302,7 @@ class TensorlakeFunctionWrapper:
 
     def _run_fn(
         self,
-        ctx: GraphInvocationContext,
+        ctx: GraphRequestContext,
         input: Union[Dict, Type[BaseModel], List, Tuple],
         acc: Optional[Type[Any]] = None,
     ) -> Tuple[List[Any], Optional[Exception], Optional[List[str]]]:
@@ -358,7 +358,7 @@ class TensorlakeFunctionWrapper:
 
     def invoke_fn_ser(
         self,
-        ctx: GraphInvocationContext,
+        ctx: GraphRequestContext,
         input: TensorlakeData,
         acc: Optional[Any] = None,
     ) -> FunctionCallResult:
@@ -372,8 +372,8 @@ class TensorlakeFunctionWrapper:
         outputs, exception, edges = self._run_fn(ctx, input, acc=acc)
 
         metrics = Metrics(
-            timers=ctx.invocation_state.timers,
-            counters=ctx.invocation_state.counters,
+            timers=ctx.request_state.timers,
+            counters=ctx.request_state.counters,
         )
 
         ser_outputs = [

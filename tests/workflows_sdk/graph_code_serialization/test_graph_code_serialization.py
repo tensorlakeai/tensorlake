@@ -17,7 +17,7 @@ from testing_symlink import test_graph_name
 
 from tensorlake import Graph, tensorlake_function
 from tensorlake.functions_sdk.graph_serialization import graph_code_dir_path
-from tensorlake.remote_graph import RemoteGraph
+from tensorlake.functions_sdk.remote_graph import RemoteGraph
 
 # Warning: this test file is not a part of Python package so relative import from it are not possible.
 # Some subdirs in this code directory are Python packages (they have __init__.py file) and some are not.

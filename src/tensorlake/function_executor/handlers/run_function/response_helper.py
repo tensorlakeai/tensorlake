@@ -2,7 +2,7 @@ import traceback
 from typing import Any, List, Optional
 
 from tensorlake.functions_sdk.data_objects import Metrics, TensorlakeData
-from tensorlake.functions_sdk.function_errors import InvocationError
+from tensorlake.functions_sdk.exceptions import RequestException
 from tensorlake.functions_sdk.functions import FunctionCallResult
 from tensorlake.functions_sdk.graph_definition import ComputeGraphMetadata
 from tensorlake.functions_sdk.object_serializer import (
@@ -72,7 +72,7 @@ class ResponseHelper:
         self, exception: Exception, stdout: str, stderr: str, metrics: Optional[Metrics]
     ) -> RunTaskResponse:
         invocation_error_output: Optional[SerializedObject] = None
-        if isinstance(exception, InvocationError):
+        if isinstance(exception, RequestException):
             failure_reason: TaskFailureReason = (
                 TaskFailureReason.TASK_FAILURE_REASON_INVOCATION_ERROR
             )
