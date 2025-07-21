@@ -4,7 +4,7 @@ import unittest
 from testing import test_graph_name, wait_function_output
 
 from tensorlake import Graph, RemoteGraph, TensorlakeCompute, tensorlake_function
-from tensorlake.error import ApiException
+from tensorlake.functions_sdk.exceptions import ApiException
 from tensorlake.functions_sdk.graph_serialization import graph_code_dir_path
 
 
