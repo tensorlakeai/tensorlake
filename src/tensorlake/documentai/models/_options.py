@@ -1,10 +1,11 @@
-from typing import List, Optional, Type, Union
+from typing import List, Optional, Set, Type, Union
 
-from pydantic import BaseModel, Field, Json
+from pydantic import BaseModel, Field, Json, field_serializer
 
-from .enums import (
+from ._enums import (
     ChunkingStrategy,
     ModelProvider,
+    PageFragmentType,
     PartitionStrategy,
     TableOutputMode,
     TableParsingFormat,
@@ -81,6 +82,16 @@ class ParsingOptions(BaseModel):
         TableParsingFormat.TSR,
         description="Determines how the system identifies and extracts tables from the document. Default is `table_structure_recognition`, which is better suited for clean, grid-like tables.",
     )
+    ignore_sections: Optional[Set[PageFragmentType]] = Field(
+        None,
+        description="Set of page fragment types to ignore during parsing. This can be used to skip certain types of content, such as headers, footers, or other non-essential elements. If not provided, all page fragment types will be considered.",
+    )
+
+    @field_serializer("ignore_sections")
+    def serialize_ignore_sections(
+        self, ignore_sections: Set[PageFragmentType]
+    ) -> List[str]:
+        return [section.value for section in ignore_sections]
 
 
 class StructuredExtractionOptions(BaseModel):

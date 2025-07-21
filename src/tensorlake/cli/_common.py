@@ -12,7 +12,7 @@ except importlib.metadata.PackageNotFoundError:
     VERSION = "unknown"
 
 
-from tensorlake.http_client import TensorlakeClient
+from tensorlake.functions_sdk.http_client import TensorlakeClient
 
 
 @dataclass

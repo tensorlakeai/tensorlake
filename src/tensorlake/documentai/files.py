@@ -73,6 +73,11 @@ class FileUploader:
             FileNotFoundError: If the file doesn't exist
         """
 
+        if file_path.startswith("http://") or file_path.startswith("https://"):
+            raise ValueError(
+                "file upload supports only local files. If you want to parse a remote file, please call the parse method with the remote file URL."
+            )
+
         path = Path(file_path)
         if not path.exists():
             raise FileNotFoundError(f"File not found: {path}")
@@ -82,7 +87,7 @@ class FileUploader:
             return self.upload_large_file(path)
 
         with open(path, "rb") as f:
-            files = {"file": (f.name, f)}
+            files = {"file": (path.name, f)}
             response = self._client.post(
                 url="files",
                 headers={

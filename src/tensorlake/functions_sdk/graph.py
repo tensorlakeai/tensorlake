@@ -22,10 +22,10 @@ from pydantic import BaseModel
 from typing_extensions import get_args, get_origin
 
 from .data_objects import Metrics, TensorlakeData
-from .function_errors import InvocationError
+from .exceptions import RequestException
 from .functions import (
     FunctionCallResult,
-    GraphInvocationContext,
+    GraphRequestContext,
     TensorlakeCompute,
     TensorlakeFunctionWrapper,
 )
@@ -36,7 +36,6 @@ from .graph_definition import (
     RuntimeInformation,
 )
 from .graph_validation import validate_node
-from .image import ImageInformation
 from .invocation_state.local_invocation_state import LocalInvocationState
 from .object_serializer import get_serializer
 from .resources import resource_metadata_for_graph_node
@@ -97,8 +96,8 @@ class Graph:
         # Storage for local execution
         self._results: Dict[str, Dict[str, List[TensorlakeData]]] = {}
         self._accumulator_values: Dict[str, TensorlakeData] = {}
-        self._local_graph_ctx: Optional[GraphInvocationContext] = None
-        self._invocation_error: Optional[InvocationError] = None
+        self._local_graph_ctx: Optional[GraphRequestContext] = None
+        self._invocation_error: Optional[RequestException] = None
 
         # Invocation ID -> Metrics
         # For local graphs
@@ -226,8 +225,8 @@ class Graph:
         return ComputeGraphMetadata(
             name=self.name,
             description=self.description or "",
-            start_node=start_node,
-            nodes=metadata_nodes,
+            entrypoint=start_node,
+            functions=metadata_nodes,
             edges=metadata_edges,
             tags=self.tags,
             runtime_information=RuntimeInformation(
@@ -256,11 +255,11 @@ class Graph:
                 payload=serializer.serialize(v), encoder=node.input_encoder
             )
         self._results[input.id] = outputs
-        self._local_graph_ctx = GraphInvocationContext(
-            invocation_id=input.id,
+        self._local_graph_ctx = GraphRequestContext(
+            request_id=input.id,
             graph_name=self.name,
             graph_version=self.version,
-            invocation_state=LocalInvocationState(),
+            request_state=LocalInvocationState(),
         )
         self._invocation_error = None
         self._run(input, outputs)
@@ -310,13 +309,13 @@ class Graph:
             # Store metrics for local graph execution
             if function_outputs.metrics is not None:
                 metrics = self._metrics.get(
-                    self._local_graph_ctx.invocation_id, Metrics(timers={}, counters={})
+                    self._local_graph_ctx.request_id, Metrics(timers={}, counters={})
                 )
                 metrics.timers.update(function_outputs.metrics.timers)
                 metrics.counters.update(function_outputs.metrics.counters)
-                self._metrics[self._local_graph_ctx.invocation_id] = metrics
+                self._metrics[self._local_graph_ctx.request_id] = metrics
 
-            if isinstance(function_outputs.exception, InvocationError):
+            if isinstance(function_outputs.exception, RequestException):
                 self._invocation_error = function_outputs.exception
                 print(
                     f'InvocationError in function {function_name}: "{function_outputs.exception.message}"'

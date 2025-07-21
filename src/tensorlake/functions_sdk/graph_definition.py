@@ -39,19 +39,19 @@ class RuntimeInformation(BaseModel):
 class ComputeGraphMetadata(BaseModel):
     name: str
     description: str
-    start_node: FunctionMetadata
+    entrypoint: FunctionMetadata
     tags: Dict[str, str] = {}
-    nodes: Dict[str, FunctionMetadata]
+    functions: Dict[str, FunctionMetadata]
     edges: Dict[str, List[str]]
     accumulator_zero_values: Dict[str, bytes] = {}
     runtime_information: RuntimeInformation
     version: str
 
     def get_input_payload_serializer(self):
-        return get_serializer(self.start_node.compute_fn.input_encoder)
+        return get_serializer(self.entrypoint.compute_fn.input_encoder)
 
     def get_input_encoder(self) -> str:
-        if self.start_node.input_encoder:
-            return self.start_node.input_encoder
+        if self.entrypoint.input_encoder:
+            return self.entrypoint.input_encoder
 
         raise ValueError("start node is not set on the graph")

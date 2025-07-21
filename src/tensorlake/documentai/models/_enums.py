@@ -21,17 +21,6 @@ class ChunkingStrategy(str, Enum):
     SECTION = "section"
 
 
-class JobStatus(str, Enum):
-    """
-    Status of a job.
-    """
-
-    FAILURE = "failure"
-    PENDING = "pending"
-    PROCESSING = "processing"
-    SUCCESSFUL = "successful"
-
-
 class MimeType(str, Enum):
     """
     Supported MIME types for document parsing.
@@ -60,6 +49,7 @@ class MimeType(str, Enum):
     TEXT = "text/plain"
     XLS = "application/vnd.ms-excel"
     XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    XLSM = "application/vnd.ms-excel.sheet.macroEnabled.12"
 
 
 class ModelProvider(str, Enum):
@@ -72,8 +62,8 @@ class ModelProvider(str, Enum):
     """
 
     TENSORLAKE = "tensorlake"
-    SONNET = "claude-3-5-sonnet-latest"
-    GPT4OMINI = "gpt-4o-mini"
+    SONNET = "sonnet"
+    GPT4OMINI = "gpt_4o_mini"
 
 
 class ParseStatus(str, Enum):
@@ -123,6 +113,29 @@ class TableParsingFormat(str, Enum):
     VLM = "vlm"
 
 
-class DatasetStatus(str, Enum):
-    idle = "idle"
-    processing = "processing"
+class PageFragmentType(str, Enum):
+    """
+    Type of a page fragment.
+    """
+
+    SECTION_HEADER = "section_header"
+    TITLE = "title"
+
+    TEXT = "text"
+    TABLE = "table"
+    FIGURE = "figure"
+    FORMULA = "formula"
+    FORM = "form"
+    KEY_VALUE_REGION = "key_value_region"
+    DOCUMENT_INDEX = "document_index"
+    LIST_ITEM = "list_item"
+
+    TABLE_CAPTION = "table_caption"
+    FIGURE_CAPTION = "figure_caption"
+    FORMULA_CAPTION = "formula_caption"
+
+    PAGE_FOOTER = "page_footer"
+    PAGE_HEADER = "page_header"
+    PAGE_NUMBER = "page_number"
+    SIGNATURE = "signature"
+    STRIKETHROUGH = "strikethrough"
