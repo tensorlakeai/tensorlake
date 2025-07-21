@@ -8,12 +8,12 @@ from tensorlake.builder.client_v2 import ImageBuilderV2Client
 from tensorlake.cli._common import AuthContext, pass_auth
 from tensorlake.cli.secrets import warning_missing_secrets
 from tensorlake.functions_sdk.graph_serialization import graph_code_dir_path
+from tensorlake.functions_sdk.remote_graph import RemoteGraph
 from tensorlake.functions_sdk.workflow_module import (
     ImageInfo,
     WorkflowModuleInfo,
     load_workflow_module_info,
 )
-from tensorlake.functions_sdk.remote_graph import RemoteGraph
 
 
 @click.command()

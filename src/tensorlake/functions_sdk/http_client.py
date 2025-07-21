@@ -8,9 +8,12 @@ from httpx_sse import ServerSentEvent, connect_sse
 from pydantic import BaseModel
 from rich import print  # TODO: Migrate to use click.echo
 
-from tensorlake.functions_sdk.exceptions import ApiException, GraphStillProcessing
 from tensorlake.functions_sdk.data_objects import TensorlakeData
-from tensorlake.functions_sdk.exceptions import RequestException
+from tensorlake.functions_sdk.exceptions import (
+    ApiException,
+    GraphStillProcessing,
+    RequestException,
+)
 from tensorlake.functions_sdk.graph import (
     ComputeGraphMetadata,
     Graph,
@@ -38,10 +41,12 @@ class GraphOutputMetadata(BaseModel):
     num_outputs: int
     compute_fn: str
 
+
 class RequestProgress(BaseModel):
     pending_tasks: int
     successful_tasks: int
     failed_tasks: int
+
 
 class RequestError(BaseModel):
     function_name: str
@@ -53,6 +58,7 @@ class ShallowRequestMetadata(BaseModel):
     status: str
     outcome: str
     created_at: int
+
 
 class RequestMetadata(BaseModel):
     id: str
@@ -68,8 +74,10 @@ class RequestMetadata(BaseModel):
     outputs: List[GraphOutputMetadata] = []
     created_at: int
 
+
 class RequestFinishedEvent(BaseModel):
     request_id: str
+
 
 class RequestProgressPayload(BaseModel):
     request_id: str
@@ -265,9 +273,9 @@ class TensorlakeClient:
         response.raise_for_status()
 
     def graphs(self) -> List[ComputeGraphMetadata]:
-        graphs_json = self._get(f"v1/namespaces/{self.namespace}/compute-graphs").json()[
-            "compute_graphs"
-        ]
+        graphs_json = self._get(
+            f"v1/namespaces/{self.namespace}/compute-graphs"
+        ).json()["compute_graphs"]
         graphs = []
         for graph in graphs_json:
             graphs.append(ComputeGraphMetadata(**graph))
@@ -489,11 +497,11 @@ class TensorlakeClient:
 
         if request.request_error is not None:
             raise RequestException(request.request_error.message)
-        
+
         all_outputs = []
         for output_metadata in request.outputs:
             if output_metadata.compute_fn == fn_name:
-                all_outputs.extend(self._download_outputs(
-                    graph, request_id, fn_name, output_metadata
-                ))
+                all_outputs.extend(
+                    self._download_outputs(graph, request_id, fn_name, output_metadata)
+                )
         return all_outputs

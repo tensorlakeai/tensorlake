@@ -3,7 +3,7 @@ from typing import Any, Generator, List, Optional
 from tensorlake.functions_sdk.graph import Graph
 from tensorlake.functions_sdk.graph_definition import ComputeGraphMetadata
 
-from .http_client import WorkflowEvent, TensorlakeClient, DEFAULT_SERVICE_URL
+from .http_client import DEFAULT_SERVICE_URL, TensorlakeClient, WorkflowEvent
 
 
 class RemoteGraph:

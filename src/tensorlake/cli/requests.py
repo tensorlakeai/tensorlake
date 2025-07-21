@@ -36,9 +36,7 @@ def list(auth: AuthContext, verbose: bool, use_json: bool, graph_name: str):
     if verbose and use_json:
         raise click.UsageError("--verbose and --json are incompatible")
 
-    invocations: List[RequestMetadata] = auth.tensorlake_client.requests(
-        graph_name
-    )
+    invocations: List[RequestMetadata] = auth.tensorlake_client.requests(graph_name)
 
     if use_json:
         all_invocations = json.dumps(invocations, default=pydantic_encoder)
@@ -80,9 +78,7 @@ def info(auth: AuthContext, use_json: bool, graph_name: str, request_id: str):
     """
     Info about a remote request
     """
-    request: RequestMetadata = auth.tensorlake_client.request(
-        graph_name, request_id
-    )
+    request: RequestMetadata = auth.tensorlake_client.request(graph_name, request_id)
 
     if use_json:
         print_json(request.model_dump_json())

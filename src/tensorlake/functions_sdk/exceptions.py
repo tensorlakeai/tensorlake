@@ -11,6 +11,7 @@ class GraphStillProcessing(Exception):
     def __init__(self) -> None:
         super().__init__("graph is still processing")
 
+
 class RequestException(Exception):
     """
     Raised when the current graph request cannot complete.

@@ -29,9 +29,7 @@ class TestGraphMetrics(unittest.TestCase):
         self.assertEqual(output[0], 2)
 
         self.assertEqual(
-            graph._metrics[graph._local_graph_ctx.request_id].timers.get(
-                "test_timer"
-            ),
+            graph._metrics[graph._local_graph_ctx.request_id].timers.get("test_timer"),
             1.8,
         )
         self.assertEqual(
