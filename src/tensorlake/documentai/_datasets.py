@@ -474,10 +474,14 @@ class _DatasetMixin(_BaseClient):
                 "finished_before": finished_before,
             }
         )
-        response = self._request("GET", f"/datasets/{dataset.dataset_id}/data", params=params)
+        response = self._request(
+            "GET", f"/datasets/{dataset.dataset_id}/data", params=params
+        )
         return PaginatedResult[ParseResult].model_validate(response.json())
 
-    async def get_dataset_data_async(self, dataset: Dataset, **kwargs) -> PaginatedResult[ParseResult]:
+    async def get_dataset_data_async(
+        self, dataset: Dataset, **kwargs
+    ) -> PaginatedResult[ParseResult]:
         """
         List every parse result in the Tensorlake project asynchronously.
 
@@ -486,7 +490,9 @@ class _DatasetMixin(_BaseClient):
             **kwargs: Additional filter parameters for the query.
         """
         params: Dict[str, Any] = _drop_none(kwargs)
-        response = await self._arequest("GET", f"/datasets/{dataset.dataset_id}/data", params=params)
+        response = await self._arequest(
+            "GET", f"/datasets/{dataset.dataset_id}/data", params=params
+        )
         return PaginatedResult[ParseResult].model_validate(response.json())
 
 

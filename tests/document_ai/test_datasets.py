@@ -92,7 +92,8 @@ class TestDatasets(unittest.TestCase):
         self.assertIsNotNone(dataset_data)
 
         found_parse_id = next(
-            (item.parse_id for item in dataset_data.items if item.parse_id == parse_id), None
+            (item.parse_id for item in dataset_data.items if item.parse_id == parse_id),
+            None,
         )
         self.assertIsNotNone(found_parse_id)
 
@@ -140,7 +141,8 @@ class TestDatasets(unittest.TestCase):
         self.assertIsNotNone(dataset_data)
 
         found_parse_id = next(
-            (item.parse_id for item in dataset_data.items if item.parse_id == parse_id), None
+            (item.parse_id for item in dataset_data.items if item.parse_id == parse_id),
+            None,
         )
         self.assertIsNotNone(found_parse_id)
 
@@ -203,7 +205,12 @@ class TestDatasets(unittest.TestCase):
         self.assertIsNotNone(dataset_data)
 
         found_parse_id = next(
-            (item.parse_id for item in dataset_data.items if item.parse_id == parsed_result.parse_id), None
+            (
+                item.parse_id
+                for item in dataset_data.items
+                if item.parse_id == parsed_result.parse_id
+            ),
+            None,
         )
         self.assertIsNotNone(found_parse_id)
 
