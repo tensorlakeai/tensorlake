@@ -17,6 +17,7 @@ from ._enums import (
     TableOutputMode,
     TableParsingFormat,
 )
+from ._filters import DatasetDataFilter
 
 # Options
 from ._options import (
@@ -80,4 +81,6 @@ __all__ = [
     # Pagination
     "PaginatedResult",
     "PaginationDirection",
+    # Filters
+    "DatasetDataFilter",
 ]
