@@ -8,6 +8,7 @@ from tensorlake.documentai.models import (
     PageClassConfig,
     ParseStatus,
     StructuredExtractionOptions,
+    DatasetDataFilter,
 )
 
 
@@ -96,6 +97,12 @@ class TestDatasets(unittest.TestCase):
             None,
         )
         self.assertIsNotNone(found_parse_id)
+
+        pending_dataset_data = self.doc_ai.get_dataset_data(
+            dataset=dataset, filters=DatasetDataFilter(status=ParseStatus.PENDING)
+        )
+        self.assertIsNotNone(pending_dataset_data)
+        self.assertEqual(len(pending_dataset_data.items), 0)
 
         self.doc_ai.delete_dataset(dataset)
         self.assertRaises(Exception, self.doc_ai.get_parsed_result, parse_id)
