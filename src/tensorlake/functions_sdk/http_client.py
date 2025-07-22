@@ -75,6 +75,10 @@ class RequestMetadata(BaseModel):
     created_at: int
 
 
+class RequestCreatedEvent(BaseModel):
+    request_id: str
+
+
 class RequestFinishedEvent(BaseModel):
     request_id: str
 
@@ -92,7 +96,7 @@ class WorkflowEvent(BaseModel):
     event_name: str
     stdout: Optional[str] = None
     stderr: Optional[str] = None
-    payload: Union[RequestProgressPayload, RequestFinishedEvent]
+    payload: Union[RequestCreatedEvent, RequestProgressPayload, RequestFinishedEvent]
 
     def __str__(self) -> str:
         stdout = (
@@ -390,11 +394,19 @@ class TensorlakeClient:
         obj = json.loads(sse.data)
 
         for event_name, event_data in obj.items():
-            # Handle InvocationFinished events
+            # Handle bare ID events
+            if event_name == "id":
+                yield WorkflowEvent(
+                    event_name="RequestCreated",
+                    payload=RequestCreatedEvent(request_id=event_data),
+                )
+                continue
+
+            # Handle RequestFinished events
             if event_name == "RequestFinished":
                 yield WorkflowEvent(
                     event_name=event_name,
-                    payload=RequestFinishedEvent(request_id=event_data["id"]),
+                    payload=RequestFinishedEvent(request_id=event_data["request_id"]),
                 )
                 continue
 
