@@ -49,7 +49,7 @@ class Table(BaseModel):
     cells: List[TableCell]
     html: Optional[str] = None
     markdown: Optional[str] = None
-    table_summary: Optional[str] = None
+    summary: Optional[str] = None
 
 
 class Figure(BaseModel):
