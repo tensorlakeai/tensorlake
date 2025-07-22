@@ -5,10 +5,10 @@ from json_schemas.bank_statement import BankStatement
 
 from tensorlake.documentai import DocumentAI
 from tensorlake.documentai.models import (
+    DatasetDataFilter,
     PageClassConfig,
     ParseStatus,
     StructuredExtractionOptions,
-    DatasetDataFilter,
 )
 
 
