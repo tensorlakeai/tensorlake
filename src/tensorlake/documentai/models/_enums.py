@@ -35,6 +35,7 @@ class MimeType(str, Enum):
     PPTX: Microsoft PowerPoint presentations.
     TEXT: Plain text files.
     XLS: Microsoft Excel spreadsheets (legacy format).
+    XLSM: Microsoft Excel spreadsheets (macros enabled).
     XLSX: Microsoft Excel spreadsheets.
     """
 
@@ -48,8 +49,8 @@ class MimeType(str, Enum):
     PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     TEXT = "text/plain"
     XLS = "application/vnd.ms-excel"
-    XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     XLSM = "application/vnd.ms-excel.sheet.macroEnabled.12"
+    XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 class ModelProvider(str, Enum):
