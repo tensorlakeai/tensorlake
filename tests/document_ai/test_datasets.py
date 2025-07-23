@@ -5,6 +5,7 @@ from json_schemas.bank_statement import BankStatement
 
 from tensorlake.documentai import DocumentAI
 from tensorlake.documentai.models import (
+    DatasetDataFilter,
     PageClassConfig,
     ParseStatus,
     StructuredExtractionOptions,
@@ -88,6 +89,21 @@ class TestDatasets(unittest.TestCase):
         self.assertIsNotNone(parse_result.pages)
         self.assertIsNotNone(parse_result.chunks)
 
+        dataset_data = self.doc_ai.get_dataset_data(dataset=dataset)
+        self.assertIsNotNone(dataset_data)
+
+        found_parse_id = next(
+            (item.parse_id for item in dataset_data.items if item.parse_id == parse_id),
+            None,
+        )
+        self.assertIsNotNone(found_parse_id)
+
+        pending_dataset_data = self.doc_ai.get_dataset_data(
+            dataset=dataset, filters=DatasetDataFilter(status=ParseStatus.PENDING)
+        )
+        self.assertIsNotNone(pending_dataset_data)
+        self.assertEqual(len(pending_dataset_data.items), 0)
+
         self.doc_ai.delete_dataset(dataset)
         self.assertRaises(Exception, self.doc_ai.get_parsed_result, parse_id)
 
@@ -127,6 +143,15 @@ class TestDatasets(unittest.TestCase):
             structured_extraction_schemas[schema.schema_name] = schema
 
         self.assertIsNotNone(structured_extraction_schemas.get("form125-basic"))
+
+        dataset_data = self.doc_ai.get_dataset_data(dataset=dataset)
+        self.assertIsNotNone(dataset_data)
+
+        found_parse_id = next(
+            (item.parse_id for item in dataset_data.items if item.parse_id == parse_id),
+            None,
+        )
+        self.assertIsNotNone(found_parse_id)
 
         self.doc_ai.delete_dataset(dataset)
 
@@ -182,6 +207,27 @@ class TestDatasets(unittest.TestCase):
 
         self.assertIn("form125", page_classes)
         self.assertIn("form140", page_classes)
+
+        dataset_data = self.doc_ai.get_dataset_data(dataset=dataset)
+        self.assertIsNotNone(dataset_data)
+
+        found_parse_id = next(
+            (
+                item.parse_id
+                for item in dataset_data.items
+                if item.parse_id == parsed_result.parse_id
+            ),
+            None,
+        )
+        self.assertIsNotNone(found_parse_id)
+
+        self.doc_ai.delete_dataset(dataset)
+
+        self.assertRaises(
+            Exception,
+            self.doc_ai.get_parsed_result,
+            parsed_result.parse_id,
+        )
 
     def test_update_dataset(self):
         random_name = f"test_dataset_{os.urandom(4).hex()}"

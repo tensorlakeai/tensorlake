@@ -6,6 +6,7 @@ from tensorlake.documentai.client import DocumentAI
 from tensorlake.documentai.models import (
     Chunk,
     ChunkingStrategy,
+    DatasetDataFilter,
     EnrichmentOptions,
     Figure,
     MimeType,
@@ -61,4 +62,6 @@ __all__ = [
     "Table",
     "TableCell",
     "Text",
+    # Filters
+    "DatasetDataFilter",
 ]

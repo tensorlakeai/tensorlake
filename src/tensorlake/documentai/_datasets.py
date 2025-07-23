@@ -11,6 +11,7 @@ from ._parse import _convert_seo
 from ._utils import _drop_none
 from .models import (
     Dataset,
+    DatasetDataFilter,
     DatasetStatus,
     EnrichmentOptions,
     MimeType,
@@ -163,7 +164,7 @@ class _DatasetMixin(_BaseClient):
 
     def parse_dataset_file(
         self,
-        dataset: Dataset,
+        dataset: Dataset | str,
         file: str,
         page_range: Optional[str] = None,
         labels: Optional[dict] = None,
@@ -179,7 +180,7 @@ class _DatasetMixin(_BaseClient):
         The file can be provided as a URL, a file ID (from Tensorlake), or as raw text.
 
         Args:
-            dataset: The Dataset object to use for parsing. This should be the dataset created with create_dataset, or
+            dataset: The Dataset object or dataset ID to use for parsing. This should be the dataset created with create_dataset, or
               the result of get_dataset.
 
             file: The file to parse. This can be a URL, a file ID (from Tensorlake), or raw text.
@@ -195,8 +196,10 @@ class _DatasetMixin(_BaseClient):
         """
 
         body = _create_dataset_parse_req(file, page_range, labels, mime_type)
+
+        did = dataset.dataset_id if isinstance(dataset, Dataset) else dataset
         parse_id = self._request(
-            "POST", f"/datasets/{dataset.dataset_id}/parse", json=body
+            "POST", f"/datasets/{did}/parse", json=body
         ).json()["parse_id"]
         if wait_for_completion:
             return self.wait_for_completion(parse_id)  # from _ParseMixin
@@ -204,7 +207,7 @@ class _DatasetMixin(_BaseClient):
 
     async def parse_dataset_file_async(
         self,
-        dataset: Dataset,
+        dataset: Dataset | str,
         file: str,
         page_range: Optional[str] = None,
         labels: Optional[dict] = None,
@@ -220,7 +223,7 @@ class _DatasetMixin(_BaseClient):
         The file can be provided as a URL, a file ID (from Tensorlake), or as raw text.
 
         Args:
-            dataset: The Dataset object to use for parsing. This should be the dataset created with create_dataset, or
+            dataset: The Dataset object or dataset ID to use for parsing. This should be the dataset created with create_dataset, or
               the result of get_dataset.
             file: The file to parse. This can be a URL, a file ID (from Tensorlake), or raw text.
             page_range: Optional page range to parse. This can be a string like "1,2,3-5" to specify specific pages or ranges.
@@ -231,8 +234,9 @@ class _DatasetMixin(_BaseClient):
                 If False, it will return the parse ID immediately.
         """
         body = _create_dataset_parse_req(file, page_range, labels, mime_type)
+        did = dataset.dataset_id if isinstance(dataset, Dataset) else dataset
         resp = await self._arequest(
-            "POST", f"/datasets/{dataset.dataset_id}/parse", json=body
+            "POST", f"/datasets/{did}/parse", json=body
         )
         parse_id = resp.json()["parse_id"]
         if wait_for_completion:
@@ -324,7 +328,7 @@ class _DatasetMixin(_BaseClient):
 
     def update_dataset(
         self,
-        dataset: Dataset,
+        dataset: Dataset | str,
         description: Optional[str] = None,
         parsing_options: Optional[ParsingOptions] = None,
         structured_extraction_options: Optional[
@@ -342,7 +346,7 @@ class _DatasetMixin(_BaseClient):
         Updating a dataset does not change previously parsed files or their results, but it will affect future parsing operations.
 
         Args:
-            dataset: The Dataset object to update. This should be the dataset created with create_dataset,
+            dataset: The Dataset object or dataset ID to update. This should be the dataset created with create_dataset,
                 or the result of get_dataset.
             description: Optional new description for the dataset. If provided, this will update the dataset's description.
             parsing_options: Optional new parsing options to customize how documents in the dataset are parsed.
@@ -366,12 +370,13 @@ class _DatasetMixin(_BaseClient):
             page_classifications,
         )
 
-        response = self._request("PUT", f"/datasets/{dataset.dataset_id}", json=body)
+        did = dataset.dataset_id if isinstance(dataset, Dataset) else dataset
+        response = self._request("PUT", f"/datasets/{did}", json=body)
         return Dataset.model_validate(response.json())
 
     async def update_dataset_async(
         self,
-        dataset: Dataset,
+        dataset: Dataset | str,
         description: Optional[str] = None,
         parsing_options: Optional[ParsingOptions] = None,
         structured_extraction_options: Optional[
@@ -389,7 +394,7 @@ class _DatasetMixin(_BaseClient):
         Updating a dataset does not change previously parsed files or their results, but it will affect future parsing operations.
 
         Args:
-            dataset: The Dataset object to update. This should be the dataset created with create_dataset,
+            dataset: The Dataset object or dataset ID to update. This should be the dataset created with create_dataset,
                 or the result of get_dataset.
             description: Optional new description for the dataset. If provided, this will update the dataset's description.
             parsing_options: Optional new parsing options to customize how documents in the dataset are parsed.
@@ -413,8 +418,55 @@ class _DatasetMixin(_BaseClient):
             page_classifications,
         )
 
-        resp = await self._arequest("PUT", f"/datasets/{dataset.dataset_id}", json=body)
+        did = dataset.dataset_id if isinstance(dataset, Dataset) else dataset
+        resp = await self._arequest("PUT", f"/datasets/{did}", json=body)
         return Dataset.model_validate(resp.json())
+
+    def get_dataset_data(
+        self,
+        dataset: Dataset | str,
+        filters: DatasetDataFilter | None = None,
+    ) -> PaginatedResult[ParseResult]:
+        """
+        List every parse result in the Tensorlake project.
+
+        Args:
+            dataset: The Dataset object or dataset ID to filter the results by. This should be the dataset created with create_dataset,
+                or the result of get_dataset.
+
+            filters: Optional set of query filters wrapped in a `DatasetDataFilter`
+                    object. Omit or leave attributes as `None` for default behaviour.
+        """
+        filters = filters or DatasetDataFilter()
+        did = dataset.dataset_id if isinstance(dataset, Dataset) else dataset
+        response = self._request(
+            "GET",
+            f"/datasets/{did}/data",
+            params=filters.to_query_params(),
+        )
+        return PaginatedResult[ParseResult].model_validate(response.json())
+
+    async def get_dataset_data_async(
+        self, dataset: Dataset | str, filters: DatasetDataFilter | None = None
+    ) -> PaginatedResult[ParseResult]:
+        """
+        List every parse result in the Tensorlake project asynchronously.
+
+        Args:
+            dataset: The Dataset object or dataset ID to filter the results by. This should be the dataset created with create_dataset,
+                or the result of get_dataset.
+
+            filters: Optional set of query filters wrapped in a `DatasetDataFilter`
+                    object. Omit or leave attributes as `None` for default behaviour.
+        """
+        filters = filters or DatasetDataFilter()
+        did = dataset.dataset_id if isinstance(dataset, Dataset) else dataset
+        response = await self._arequest(
+            "GET",
+            f"/datasets/{did}/data",
+            params=filters.to_query_params(),
+        )
+        return PaginatedResult[ParseResult].model_validate(response.json())
 
 
 def _create_dataset_parse_req(
