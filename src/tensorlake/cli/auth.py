@@ -2,7 +2,7 @@ import json
 
 import click
 
-from tensorlake.cli._common import AuthContext, pass_auth
+from tensorlake.cli._common import Context, pass_auth
 
 
 @click.group()
@@ -22,18 +22,18 @@ def auth():
     help="Output format",
 )
 @pass_auth
-def status(auth: AuthContext, output: str):
+def status(ctx: Context, output: str):
     if output == "json":
         print(
             json.dumps(
                 {
-                    "organizationId": auth.organization_id,
-                    "projectId": auth.project_id,
-                    "apiKeyId": auth.api_key_id,
+                    "organizationId": ctx.organization_id,
+                    "projectId": ctx.project_id,
+                    "apiKeyId": ctx.api_key_id,
                 }
             )
         )
         return
-    click.echo(f"Organization ID: {auth.organization_id}")
-    click.echo(f"Project ID     : {auth.project_id}")
-    click.echo(f"API Key ID     : {auth.api_key_id}")
+    click.echo(f"Organization ID: {ctx.organization_id}")
+    click.echo(f"Project ID     : {ctx.project_id}")
+    click.echo(f"API Key ID     : {ctx.api_key_id}")

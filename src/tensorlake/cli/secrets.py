@@ -5,7 +5,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from tensorlake.cli._common import AuthContext, pass_auth
+from tensorlake.cli._common import Context, pass_auth
 
 
 @click.group()
@@ -20,7 +20,7 @@ def secrets():
 
 @secrets.command()
 @pass_auth
-def list(auth: AuthContext):
+def list(ctx: Context):
     """
     List all secrets in the current project.
     """
@@ -56,7 +56,7 @@ def list(auth: AuthContext):
 @secrets.command()
 @click.argument("secrets", nargs=-1)
 @pass_auth
-def set(auth: AuthContext, secrets: str):
+def set(ctx: Context, secrets: str):
     """
     Set one of many secrets in the current project.
 
@@ -86,8 +86,8 @@ def set(auth: AuthContext, secrets: str):
         upsert_secrets.append({"name": name, "value": value})
 
     # Upsert secrets
-    resp = auth.client.put(
-        f"/platform/v1/organizations/{auth.organization_id}/projects/{auth.project_id}/secrets",
+    resp = ctx.client.put(
+        f"/platform/v1/organizations/{ctx.organization_id}/projects/{ctx.project_id}/secrets",
         json=upsert_secrets,
     )
     if resp.status_code >= 400 and resp.status_code < 500:
@@ -105,7 +105,7 @@ def set(auth: AuthContext, secrets: str):
 @secrets.command()
 @click.argument("secret_names", nargs=-1)
 @pass_auth
-def unset(auth: AuthContext, secret_names: str):
+def unset(ctx: Context, secret_names: str):
     """
     Unset one or many secrets in the current project.
 
@@ -119,8 +119,8 @@ def unset(auth: AuthContext, secret_names: str):
         if name not in secrets_dict:
             continue
         secret_id = secrets_dict[name]["id"]
-        resp = auth.client.delete(
-            f"/platform/v1/organizations/{auth.organization_id}/projects/{auth.project_id}/secrets/{secret_id}"
+        resp = ctx.client.delete(
+            f"/platform/v1/organizations/{ctx.organization_id}/projects/{ctx.project_id}/secrets/{secret_id}"
         )
         resp.raise_for_status()
         num += 1
@@ -131,16 +131,16 @@ def unset(auth: AuthContext, secret_names: str):
         click.echo(f"{num} secrets unset")
 
 
-def _get_all_existing_secrets(auth: AuthContext) -> List[dict]:
-    resp = auth.client.get(
-        f"/platform/v1/organizations/{auth.organization_id}/projects/{auth.project_id}/secrets?pageSize=100"
+def _get_all_existing_secrets(ctx: Context) -> List[dict]:
+    resp = ctx.client.get(
+        f"/platform/v1/organizations/{ctx.organization_id}/projects/{ctx.project_id}/secrets?pageSize=100"
     )
     resp.raise_for_status()
     return resp.json()["items"]
 
 
 def warning_missing_secrets(
-    auth: AuthContext, secrets: List[str]
+    auth: Context, secrets: List[str]
 ) -> Tuple[bool, List[str]]:
     existing_secrets = _get_all_existing_secrets(auth)
     existing_secret_names = [s["name"] for s in existing_secrets]

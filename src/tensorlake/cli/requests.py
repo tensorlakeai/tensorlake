@@ -6,7 +6,7 @@ from pydantic.json import pydantic_encoder
 from rich import print, print_json
 from rich.table import Table
 
-from tensorlake.cli._common import AuthContext, pass_auth
+from tensorlake.cli._common import Context, pass_auth
 from tensorlake.functions_sdk.http_client import RequestMetadata
 
 
@@ -18,7 +18,12 @@ def request():
     pass
 
 
-@request.command()
+@request.command(
+    epilog="""
+\b
+Use 'tensorlake config set default.graph <name>' to set a default graph name.
+"""
+)
 @pass_auth
 @click.option("--verbose", "-v", is_flag=True, help="Include all graph information")
 @click.option(
@@ -28,15 +33,24 @@ def request():
     is_flag=True,
     help="Export invocation information as JSON-encoded data",
 )
-@click.argument("graph-name")
-def list(auth: AuthContext, verbose: bool, use_json: bool, graph_name: str):
+@click.argument("graph-name", required=False)
+def list(ctx: Context, verbose: bool, use_json: bool, graph_name: str):
     """
     List remote invocations
     """
     if verbose and use_json:
         raise click.UsageError("--verbose and --json are incompatible")
 
-    invocations: List[RequestMetadata] = auth.tensorlake_client.requests(graph_name)
+    if not graph_name:
+        if ctx.default_graph:
+            graph_name = ctx.default_graph
+            click.echo(f"Using default graph from config: {graph_name}")
+        else:
+            raise click.UsageError(
+                "No graph name provided and no default.graph configured"
+            )
+
+    invocations: List[RequestMetadata] = ctx.tensorlake_client.requests(graph_name)
 
     if use_json:
         all_invocations = json.dumps(invocations, default=pydantic_encoder)
@@ -63,7 +77,13 @@ def list(auth: AuthContext, verbose: bool, use_json: bool, graph_name: str):
         print(table)
 
 
-@request.command()
+@request.command(
+    epilog="""
+\b
+Use 'tensorlake config set default.graph <name>' to set a default graph name.
+Use 'tensorlake config set default.request <id>' to set a default request ID.
+"""
+)
 @click.option(
     "--json",
     "use_json",
@@ -71,14 +91,32 @@ def list(auth: AuthContext, verbose: bool, use_json: bool, graph_name: str):
     is_flag=True,
     help="Export invocation information as JSON-encoded data",
 )
-@click.argument("graph-name")
-@click.argument("request-id")
+@click.argument("graph-name", required=False)
+@click.argument("request-id", required=False)
 @pass_auth
-def info(auth: AuthContext, use_json: bool, graph_name: str, request_id: str):
+def info(ctx: Context, use_json: bool, graph_name: str, request_id: str):
     """
     Info about a remote request
     """
-    request: RequestMetadata = auth.tensorlake_client.request(graph_name, request_id)
+    if not graph_name:
+        if ctx.default_graph:
+            graph_name = ctx.default_graph
+            click.echo(f"Using default graph from config: {graph_name}")
+        else:
+            raise click.UsageError(
+                "No graph name provided and no default.graph configured"
+            )
+
+    if not request_id:
+        if ctx.default_request:
+            request_id = ctx.default_request
+            click.echo(f"Using default request from config: {request_id}")
+        else:
+            raise click.UsageError(
+                "No request ID provided and no default.request configured"
+            )
+
+    request: RequestMetadata = ctx.tensorlake_client.request(graph_name, request_id)
 
     if use_json:
         print_json(request.model_dump_json())
