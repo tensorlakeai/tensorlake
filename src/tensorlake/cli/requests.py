@@ -18,7 +18,12 @@ def request():
     pass
 
 
-@request.command()
+@request.command(
+    epilog="""
+\b
+Use 'tensorlake config set default.graph <name>' to set a default graph name.
+"""
+)
 @pass_auth
 @click.option("--verbose", "-v", is_flag=True, help="Include all graph information")
 @click.option(
@@ -72,7 +77,13 @@ def list(ctx: Context, verbose: bool, use_json: bool, graph_name: str):
         print(table)
 
 
-@request.command()
+@request.command(
+    epilog="""
+\b
+Use 'tensorlake config set default.graph <name>' to set a default graph name.
+Use 'tensorlake config set default.request <id>' to set a default request ID.
+"""
+)
 @click.option(
     "--json",
     "use_json",

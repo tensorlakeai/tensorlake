@@ -5,7 +5,17 @@ import click
 from . import _common, auth, config, deploy, graphs, requests, secrets
 
 
-@click.group()
+@click.group(
+    epilog="""
+\b
+Use 'tensorlake config' to manage settings:
+  tensorlake.apikey     - API key for authentication
+  indexify.url          - Server URL (default: 'https://api.tensorlake.ai')
+  indexify.namespace    - Namespace (default: 'default')
+  default.graph         - Default graph name for commands
+  default.request       - Default request ID for request info
+"""
+)
 @click.version_option(
     version=_common.VERSION, package_name="tensorlake", prog_name="tensorlake"
 )

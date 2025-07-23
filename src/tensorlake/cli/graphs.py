@@ -53,7 +53,12 @@ def list(ctx: Context, verbose: bool, use_json: bool):
         print(table)
 
 
-@graph.command()
+@graph.command(
+    epilog="""
+\b
+Use 'tensorlake config set default.graph <name>' to set a default graph name.
+"""
+)
 @click.option(
     "--json", "-j", is_flag=True, help="Export graph information as JSON-encoded data"
 )
