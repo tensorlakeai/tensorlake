@@ -469,11 +469,38 @@ Running workflows on Tensorlake Cloud comes with the following benefits:
 * Automated workflow deployments using a few CLI commands.
 * High availability of Tensorlake Cloud.
 
+## Webhooks
+
+Get real-time notifications when document processing completes. Webhooks are configured at the project level in TensorLake Cloud and will notify your application about job status changes.
+
+**Supported Events:**
+- `tensorlake.document_ingestion.job.created` - Job started
+- `tensorlake.document_ingestion.job.failed` - Job failed  
+- `tensorlake.document_ingestion.job.completed` - Job completed successfully
+
+**Quick Setup:**
+1. Go to your project's Webhooks tab in [TensorLake Cloud](https://cloud.tensorlake.ai)
+2. Create a webhook with your endpoint URL
+3. Select which events to receive
+4. Use the provided secret for signature verification
+
+**Webhook Payload Example:**
+```json
+{
+    "job_id": "parse_XXX",
+    "status": "successful",
+    "created_at": "2023-10-01T12:00:00Z",
+    "finished_at": "2023-10-01T12:05:00Z"
+}
+```
+
+You can get notified by Tensorlake when documents are ingested. Here is a [code example](examples/webhook.py).
+
 ## Learn more
 
 * [More examples](examples/)
 * [Tensorlake Documentation](https://docs.tensorlake.ai)
-* [Serverless Workflows Documentation](https://docs.tensorlake.ai/serverless/overview)
-* [Key programming concepts in Tensorlake Workflows](https://docs.tensorlake.ai/serverless/key-concepts)
-* [Dependencies and container images in Tensorlake Workflows](https://docs.tensorlake.ai/serverless/dependencies)
+* [Serverless Workflows Documentation](https://docs.tensorlake.ai/workflows/overview)
+* [Key programming concepts in Tensorlake Workflows](https://docs.tensorlake.ai/workflows/functions)
+* [Dependencies and container images in Tensorlake Workflows](https://docs.tensorlake.ai/workflows/dependencies)
 * [Open Source Indexify documentation for self-hosting](https://docs.tensorlake.ai/opensource/indexify)
