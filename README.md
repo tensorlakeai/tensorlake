@@ -1,89 +1,234 @@
 <a name="readme-top"></a>
 # Tensorlake SDK
 
-![PyPI - Version](https://img.shields.io/pypi/v/tensorlake)
+[![PyPI Version](https://img.shields.io/pypi/v/tensorlake)](https://pypi.org/project/tensorlake/)
+[![Python Support](https://img.shields.io/pypi/pyversions/tensorlake)](https://pypi.org/project/tensorlake/)
+[![License](https://img.shields.io/github/license/tensorlakeai/tensorlake)](LICENSE)
+[![Documentation](https://img.shields.io/badge/docs-tensorlake.ai-blue)](https://docs.tensorlake.ai)
 
-Tensorlake provides Document Ingestion APIs and a runtime to build and deploy data workflows on a fully managed compute infrastructure including GPUs.
+TensorLake transforms unstructured documents into AI-ready data through Document Ingestion APIs and enables building scalable data processing pipelines with a serverless workflow runtime. The platform handles the complexity of document parsing, data extraction, and workflow orchestration on fully managed infrastructure including GPU acceleration.
 
-## Quick Start
+It consists of two core capabilities:
 
-1. Install the SDK
+- **Document Ingestion** - Parse documents (PDFs, DOCX, PPT, etc.) to markdown, extract structured data with schemas, and manage document collections
+- **Serverless Workflows** - Build and deploy data processing pipelines that scale automatically on cloud infrastructure
+---
+
+## Table of Contents
+
+- [Features](#features)
+- [Getting Started](#getting-started)
+- [Document Ingestion](#document-ingestion)
+  - [Document Parsing](#document-parsing)
+  - [Structured Extraction](#structured-extraction)
+  - [Datasets](#datasets)
+- [Serverless Workflows](#serverless-workflows)
+  - [Creating Workflows](#creating-workflows)
+  - [Local Development](#local-development)
+  - [Cloud Deployment](#cloud-deployment)
+- [Additional Features](#additional-features)
+  - [Webhooks](#webhooks)
+  - [Batch Processing](#batch-processing)
+- [Configuration Reference](#configuration-reference)
+- [Examples](#examples)
+- [Resources](#resources)
+
+---
+
+## Features
+
+- Parse PDFs, DOCX, or PPT files into markdown
+- Extract structured data using JSON Schema or Pydantic models
+- Page classification, figure summarization, table extraction, signature detection
+- Organize documents into auto-parsed datasets
+- Deploy and run scalable workflows using a serverless cloud runtime
+
+---
+
+## Getting Started
+
+### Installation
+
 ```bash
 pip install tensorlake
 ```
 
-2. Sign up and get an Tensorlake [API Key](https://cloud.tensorlake.ai/)
+### Get API Key
+
+Sign up at [cloud.tensorlake.ai](https://cloud.tensorlake.ai/) for your API key.
 
 ## Document Ingestion
 
-Document Ingestion APIs enable building RAG or Knowledge Assistants from information in PDFs, Docx or Presentations. It offers mainly the following capabilities - 
+Document Ingestion provides APIs to convert unstructured documents into structured, processable formats. This is the foundation for building RAG systems, knowledge bases, and document analysis applications.
 
-1. Document Parsing - Converts documents to text, and optionally chunk them. It can also extract information from Figure, Charts and Tables.
+### Document Parsing
 
-2. Structured Extraction - Extracts JSON from documents, guided by JSON schemas or Pydantic models.
+Convert documents to clean markdown or JSON while preserving layout, tables, and structure:
 
-## Quickstart 
+#### Quickstart
 
-If you want to dive into code, here is an [example](examples/readme_documentai.py).
-
-#### Document Parsing
-
-Convert a PDF to markdown and chunk it. The API has no limits of file size or number of pages in a document.
+This uses default `ParsingOptions` to parse the document.
 
 ```python
-from tensorlake.documentai import DocumentAI, ParsingOptions
+from tensorlake.documentai import DocumentAI
+from tensorlake.documentai.models import ParseStatus
 
-doc_ai = DocumentAI(api_key="xxxx")
+doc_ai = DocumentAI(api_key="your-api-key")
+
+# Upload and parse document
+file_id = doc_ai.upload("/path/to/document.pdf")
+
+# Get parse ID
+parse_id = doc_ai.parse(file_id)
+
+# Wait for completion and get results
+result = doc_ai.get_parsed_result(parse_id=parse_id)
+while result.status in [ParseStatus.PENDING, ParseStatus.PROCESSING]:
+    result = doc_ai.get_parsed_result(parse_id)
+
+if result.status == ParseStatus.SUCCESSFUL:
+    for chunk in result.chunks:
+        print(chunk.content)  # Clean markdown output
+```
+
+#### Document Parsing with custom Parsing Options
+
+You can set custom parsing strategy for your document by configuring `ParsingOptions` and `EnrichmentOptions`. The API is documented [here](https://docs.tensorlake.ai/documentai/parsing#parse-api-reference)
+
+```python
+from tensorlake.documentai import DocumentAI
+from tensorlake.documentai.models import ParsingOptions, EnrichmentOptions, ParseStatus
+from tensorlake.documentai.models.enums import ChunkingStrategy, TableOutputMode
+
+doc_ai = DocumentAI(api_key="your-api-key")
 
 # Skip the upload step, if you are passing pre-signed URLs or HTTPS accessible files.
-file_id = doc_ai.upload(path="/path/to/file.pdf")
+file_id = doc_ai.upload("/path/to/document.pdf")
 
-# Get a Job ID back, and poll it to get the results.
-job_id = doc_ai.parse(file_id, options=ParsingOptions())
-```
-
-The default chunking strategy is by Page, you can change the chunking strategy, the prompts for table and figure summarization by configuring `ParsingOptions`. The API is [documented here](https://docs.tensorlake.ai/documentai/parsing#parse-api-reference)
-
-#### Getting Back Parsed Data
-
-Document AI APIs are async to be able to handle large volumes of documents with many pages. You can use a Job ID to retrieve results, or configure a webhook endpoint to receive updates.
-
-```python
-
-from tensorlake.documentai import Job
-
-data: JobResult = doc_ai.get_job(job_id="job-xxxx")
-```
-
-The SDK includes [Pydantic models](src/tensorlake/documentai/common.py) that describes Document chunks, and individual page elements(including bounding boxes).
-
-#### Structured Extraction 
-
-Extract structured data from a document.
-
-```python
-from tensorlake.documentai import ParsingOptions, ExtractionOptions
-from pydantic import BaseModel, Field
-
-# Provide a schema to guide structured extraction.
-class LoanSchema(BaseModel):
-    account_number: str = Field(description="Account number of the customer")
-    customer_name: str = Field(description="Name of the customer")
-    amount_due: str = Field(description="Total amount due in the current statement")
-    due_data: str = Field(description="Due Date")
-
-options = ParsingOptions(
-    extraction_options=ExtractionOptions(schema=LoanSchema)
+# Configure parsing options
+parsing_options = ParsingOptions(
+    chunking_strategy=ChunkingStrategy.SECTION,
+    table_output_mode=TableOutputMode.HTML,
+    signature_detection=True
 )
 
-job_id = doc_ai.parse(file_id, options=options)
+# Configure enrichment options
+enrichment_options = EnrichmentOptions(
+    figure_summarization=True,
+    table_summarization=True
+)
+
+# Parse and wait for completion
+result = doc_ai.parse_and_wait(
+    file_id, 
+    parsing_options=parsing_options,
+    enrichment_options=enrichment_options
+)
+
+if result.status == ParseStatus.SUCCESSFUL:
+    for chunk in result.chunks:
+        print(chunk.content)
 ```
 
-Structured Extraction is guided by the provided schema. We support Pydantic Models as well JSON Schema. All the levers for structured extraction are (documented here)[https://docs.tensorlake.ai/document-ingestion/parsing/structured-extraction].
+**Supported Formats:** PDF, DOCX, PPTX, images, spreadsheets, handwritten notes
+
+**Key Features:**
+- Multiple chunking strategies (page, section, fragment)
+- Table extraction and structure preservation
+- Figure and chart summarization
+- Signature detection
+- Reading order preservation
+- No limits on file size or page count
+
+**Getting Results:**
+```python
+from tensorlake.documentai.models import ParseStatus
+
+result = doc_ai.get_parsed_result(parse_id)
+
+if result.status == ParseStatus.SUCCESSFUL:
+    # Access parsed content
+    if result.chunks:
+        for chunk in result.chunks:
+            print(f"Page {chunk.page_number}: {chunk.content}")
+    
+    # Access structured data if configured
+    if result.structured_data:
+        for data in result.structured_data:
+            print(f"Schema: {data.schema_name}")
+            print(f"Data: {data.data}")
+    
+    # Access page layout information
+    if result.pages:
+        for page in result.pages:
+            print(f"Page {page.page_number} has {len(page.page_fragments)} fragments")
+```
+
+> **Note:** Document AI APIs are async to be able to handle large volumes of documents with many pages. You can use a Parse ID to retrieve results, or configure a webhook endpoint to receive updates.
+
+### Structured Extraction 
+
+Extract specific data fields from documents using JSON schemas or Pydantic models:
+
+#### Using Pydantic Models
+```python
+from tensorlake.documentai import DocumentAI
+from tensorlake.documentai.models import StructuredExtractionOptions, ParseStatus
+from pydantic import BaseModel, Field
+
+# Define Pydantic model
+class InvoiceData(BaseModel):
+    invoice_number: str = Field(description="Invoice number")
+    total_amount: float = Field(description="Total amount due")
+    due_date: str = Field(description="Payment due date")
+    vendor_name: str = Field(description="Vendor company name")
+
+doc_ai = DocumentAI(api_key="your-api-key")
+
+# Passing https accessible file directly (no need to upload to Tensorlake)
+file_id = "https://...."   # publicly available URL of the invoice data file
+
+# Configure structured extraction using Pydantic model
+structured_extraction_options = StructuredExtractionOptions(
+    schema_name="Invoice Data",
+    json_schema=InvoiceData  # Can pass Pydantic model directly
+)
+
+# Parse and wait for completion
+result = doc_ai.parse_and_wait(
+    file_id,
+    structured_extraction_options=[structured_extraction_options]
+)
+
+if result.status == ParseStatus.SUCCESSFUL:
+    print(result.structured_data)
+```
+
+#### Using JSON Schema
+```python
+# Define JSON schema directly
+invoice_schema = {
+    "title": "InvoiceData",
+    "type": "object",
+    "properties": {
+        "invoice_number": {"type": "string", "description": "Invoice number"},
+        "total_amount": {"type": "number", "description": "Total amount due"},
+        "due_date": {"type": "string", "description": "Payment due date"},
+        "vendor_name": {"type": "string", "description": "Vendor company name"}
+    }
+}
+
+structured_extraction_options = StructuredExtractionOptions(
+    schema_name="Invoice Data",
+    json_schema=invoice_schema
+)
+```
+
+Structured Extraction is guided by the provided schema. We support Pydantic Models as well JSON Schema. All the levers for structured extraction are documented [here](https://docs.tensorlake.ai/document-ingestion/parsing/structured-extraction).
 
 We recommend adding a description to each field in the schema, as it helps the model to learn the context of the field.
 
-#### Datasets 
+### Datasets 
 
 Datasets are a named collection that you can attach some ingestion actions, such as document parsing or structured extraction. These operations are automatically applied whenever new files are uploaded to the datasets.
 
