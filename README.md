@@ -10,7 +10,7 @@ TensorLake transforms unstructured documents into AI-ready data through Document
 
 It consists of two core capabilities:
 
-- **Document Ingestion** - Parse documents (PDFs, DOCX, PPT, etc.) to markdown, extract structured data with schemas, and manage document collections
+- **Document Ingestion** - Parse documents (PDFs, DOCX, spreadsheets, presentations, images, and raw text) to markdown, extract structured data with schemas, and manage document collections
 - **Serverless Workflows** - Build and deploy data processing pipelines that scale automatically on cloud infrastructure
 ---
 
@@ -37,7 +37,7 @@ It consists of two core capabilities:
 
 ## Features
 
-- Parse PDFs, DOCX, or PPT files into markdown
+- Parse PDFs, DOCX, spreadsheets, presentations, images, and raw text into markdown
 - Extract structured data using JSON Schema or Pydantic models
 - Page classification, figure summarization, table extraction, signature detection
 - Organize documents into auto-parsed datasets
@@ -59,7 +59,7 @@ Sign up at [cloud.tensorlake.ai](https://cloud.tensorlake.ai/) for your API key.
 
 ## Document Ingestion
 
-Document Ingestion provides APIs to convert unstructured documents into structured, processable formats. This is the foundation for building RAG systems, knowledge bases, and document analysis applications.
+The Document Ingestion API converts unstructured documents into structured, processable formats. This is the foundation for building RAG systems, knowledge bases, and document analysis applications.
 
 ### Document Parsing
 
@@ -82,9 +82,7 @@ file_id = doc_ai.upload("/path/to/document.pdf")
 parse_id = doc_ai.parse(file_id)
 
 # Wait for completion and get results
-result = doc_ai.get_parsed_result(parse_id=parse_id)
-while result.status in [ParseStatus.PENDING, ParseStatus.PROCESSING]:
-    result = doc_ai.get_parsed_result(parse_id)
+result = doc_ai.wait_for_completion(parse_id)
 
 if result.status == ParseStatus.SUCCESSFUL:
     for chunk in result.chunks:
@@ -133,10 +131,11 @@ if result.status == ParseStatus.SUCCESSFUL:
 **Supported Formats:** PDF, DOCX, PPTX, images, spreadsheets, handwritten notes
 
 **Key Features:**
-- Multiple chunking strategies (page, section, fragment)
+- Multiple chunking strategies (entire document, page, section, fragment)
 - Table extraction and structure preservation
-- Figure and chart summarization
+- Figure and table summarization
 - Signature detection
+- Strikethrough removal
 - Reading order preservation
 - No limits on file size or page count
 
@@ -230,7 +229,7 @@ We recommend adding a description to each field in the schema, as it helps the m
 
 ### Datasets 
 
-Datasets in Tensorlake are named collections of documents that allow you to apply ingestion actions, such as document parsing and structured extraction—automatically to all files within the dataset. They are ideal for batch processing at scale.
+Tensorlake Datasets are named collections of parse settings and results that allow you to apply ingestion actions, such as document parsing and structured extraction to any file parsed through the dataset. They are ideal for batch processing at scale.
 
 When you create a dataset, you specify a configuration for parsing or extraction options. Every document added to the dataset inherits this configuration and is processed asynchronously by the Tensorlake backend.
 
