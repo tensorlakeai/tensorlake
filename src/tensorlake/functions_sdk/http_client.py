@@ -5,7 +5,7 @@ from typing import Any, Dict, Generator, Iterator, List, Optional, Union
 
 import httpx
 from httpx_sse import ServerSentEvent, connect_sse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from rich import print  # TODO: Migrate to use click.echo
 
 from tensorlake.functions_sdk.data_objects import TensorlakeData
@@ -59,6 +59,20 @@ class ShallowRequestMetadata(BaseModel):
     outcome: str
     created_at: int
 
+class Allocation(BaseModel):
+    id: str
+    server_id: str = Field(alias="executor_id")
+    container_id: str = Field(alias="function_executor_id")
+    created_at: int
+    outcome: Optional[str] = None
+    attempt_number: int
+
+class Task(BaseModel):
+    id: str
+    status: str
+    outcome: str
+    created_at: int = Field(alias="creation_time_ns")
+    allocations: Optional[List[Allocation]] = None
 
 class RequestMetadata(BaseModel):
     id: str
@@ -276,6 +290,12 @@ class TensorlakeClient:
         )
         response.raise_for_status()
 
+    def tasks(self, graph: str, request_id: str) -> List[Task]:
+        response = self._get(
+            f"v1/namespaces/{self.namespace}/compute-graphs/{graph}/requests/{request_id}/tasks"
+        )
+        return [Task(**task) for task in response.json()["tasks"]]
+
     def graphs(self) -> List[ComputeGraphMetadata]:
         graphs_json = self._get(
             f"v1/namespaces/{self.namespace}/compute-graphs"
@@ -309,7 +329,6 @@ class TensorlakeClient:
         )
         requests: List[ShallowRequestMetadata] = []
         for request in response.json()["requests"]:
-            print(request)
             requests.append(ShallowRequestMetadata(**request))
 
         return requests

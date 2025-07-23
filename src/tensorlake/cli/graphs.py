@@ -81,6 +81,29 @@ def info(ctx: Context, json: bool, graph_name: str):
 
     if json:
         print_json(g.model_dump_json())
+        return
+    
+    from rich import print
 
-    else:
-        print(g)
+    print(f"[bold][red]Graph:[/red][/bold] {g.name}")
+    if g.description:
+        print(f"[bold][red]Description:[/red][/bold] {g.description}")
+    print(f"[bold][red]Version:[/red][/bold] {g.version}")
+    if g.tags:
+        print(f"[bold][red]Tags:[/red][/bold] {g.tags}")
+
+    print(f"[bold][red]Entrypoint Function:[/red][/bold] {g.entrypoint.name}")
+    print(f"[bold][red]Entrypoint Function Encoding:[/red][/bold] {g.entrypoint.input_encoder}")
+
+    from rich.table import Table
+
+    table = Table()
+    table.add_column("Name")
+    table.add_column("Edges")
+
+    for function in g.functions:
+        edges = g.edges.get(function, [])
+        edge_names = [edge for edge in edges]
+        table.add_row(function, ", ".join(edge_names))
+
+    print(table)
