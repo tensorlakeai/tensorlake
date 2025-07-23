@@ -6,7 +6,7 @@ from pydantic.json import pydantic_encoder
 from rich import print, print_json
 from rich.table import Table
 
-from tensorlake.cli._common import AuthContext, pass_auth
+from tensorlake.cli._common import Context, pass_auth
 from tensorlake.functions_sdk.http_client import RequestMetadata
 
 
@@ -29,14 +29,14 @@ def request():
     help="Export invocation information as JSON-encoded data",
 )
 @click.argument("graph-name")
-def list(auth: AuthContext, verbose: bool, use_json: bool, graph_name: str):
+def list(ctx: Context, verbose: bool, use_json: bool, graph_name: str):
     """
     List remote invocations
     """
     if verbose and use_json:
         raise click.UsageError("--verbose and --json are incompatible")
 
-    invocations: List[RequestMetadata] = auth.tensorlake_client.requests(graph_name)
+    invocations: List[RequestMetadata] = ctx.tensorlake_client.requests(graph_name)
 
     if use_json:
         all_invocations = json.dumps(invocations, default=pydantic_encoder)
@@ -74,11 +74,11 @@ def list(auth: AuthContext, verbose: bool, use_json: bool, graph_name: str):
 @click.argument("graph-name")
 @click.argument("request-id")
 @pass_auth
-def info(auth: AuthContext, use_json: bool, graph_name: str, request_id: str):
+def info(ctx: Context, use_json: bool, graph_name: str, request_id: str):
     """
     Info about a remote request
     """
-    request: RequestMetadata = auth.tensorlake_client.request(graph_name, request_id)
+    request: RequestMetadata = ctx.tensorlake_client.request(graph_name, request_id)
 
     if use_json:
         print_json(request.model_dump_json())

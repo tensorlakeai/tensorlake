@@ -14,10 +14,12 @@ except importlib.metadata.PackageNotFoundError:
 
 from tensorlake.functions_sdk.http_client import TensorlakeClient
 
+from .config import get_nested_value, load_config
+
 
 @dataclass
-class AuthContext:
-    """Class for CLI authentication context."""
+class Context:
+    """Class for CLI context."""
 
     base_url: str
     namespace: str
@@ -76,6 +78,33 @@ class AuthContext:
             self._introspect_response = introspect_response
         return self._introspect_response
 
+    @classmethod
+    def default(
+        cls,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        namespace: Optional[str] = None,
+    ) -> "Context":
+        """Create a Context with values from CLI args, environment, saved config, or defaults."""
+        config_data = load_config()
 
-"""Pass the AuthContext object to the click command"""
-pass_auth = click.make_pass_decorator(AuthContext)
+        # Use CLI/env values first, then saved config, then hardcoded defaults
+        final_base_url = (
+            base_url
+            or get_nested_value(config_data, "indexify.url")
+            or "https://api.tensorlake.ai"
+        )
+        final_api_key = api_key or get_nested_value(config_data, "tensorlake.apikey")
+        final_namespace = (
+            namespace
+            or get_nested_value(config_data, "indexify.namespace")
+            or "default"
+        )
+
+        return cls(
+            base_url=final_base_url, api_key=final_api_key, namespace=final_namespace
+        )
+
+
+"""Pass the Context object to the click command"""
+pass_auth = click.make_pass_decorator(Context)

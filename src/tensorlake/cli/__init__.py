@@ -14,7 +14,6 @@ from . import _common, auth, config, deploy, graphs, namespaces, requests, secre
     "base_url",
     envvar="INDEXIFY_URL",
     help="The Indexify server URL",
-    default="https://api.tensorlake.ai",
 )
 @click.option(
     "--api-key",
@@ -25,14 +24,18 @@ from . import _common, auth, config, deploy, graphs, namespaces, requests, secre
     "--namespace",
     envvar="INDEXIFY_NAMESPACE",
     help="The namespace to use",
-    default="default",
 )
 @click.pass_context
-def cli(ctx: click.Context, base_url: str, api_key: Optional[str], namespace: str):
+def cli(
+    ctx: click.Context,
+    base_url: Optional[str],
+    api_key: Optional[str],
+    namespace: Optional[str],
+):
     """
     Tensorlake CLI to manage and deploy workflows to Tensorlake Serverless Workflows.
     """
-    ctx.obj = _common.AuthContext(
+    ctx.obj = _common.Context.default(
         base_url=base_url, api_key=api_key, namespace=namespace
     )
 

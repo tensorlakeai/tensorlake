@@ -2,7 +2,7 @@ import click
 from rich import print
 from rich.table import Table
 
-from tensorlake.cli._common import AuthContext, pass_auth
+from tensorlake.cli._common import Context, pass_auth
 
 
 @click.group()
@@ -15,11 +15,11 @@ def namespace():
 
 @namespace.command()
 @pass_auth
-def list(auth: AuthContext):
+def list(ctx: Context):
     """
     List remote namespaces
     """
-    namespaces = auth.tensorlake_client.namespaces()
+    namespaces = ctx.tensorlake_client.namespaces()
 
     table = Table(title="Namespaces")
     table.add_column(" ", justify="center")
@@ -27,7 +27,7 @@ def list(auth: AuthContext):
 
     for namespace in namespaces:
         table.add_row(
-            "*" if namespace == auth.tensorlake_client.namespace else "", namespace
+            "*" if namespace == ctx.tensorlake_client.namespace else "", namespace
         )
 
     print(table)
@@ -36,9 +36,9 @@ def list(auth: AuthContext):
 @namespace.command()
 @click.argument("namespace-name")
 @pass_auth
-def create(auth: AuthContext, namespace_name: str):
+def create(ctx: Context, namespace_name: str):
     """
     Create a remote namespace
     """
-    auth.tensorlake_client.create_namespace(namespace_name)
+    ctx.tensorlake_client.create_namespace(namespace_name)
     click.echo(f"Created namespace: {namespace_name}")

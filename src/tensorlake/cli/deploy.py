@@ -5,7 +5,7 @@ import click
 
 from tensorlake import Graph, Image
 from tensorlake.builder.client_v2 import ImageBuilderV2Client
-from tensorlake.cli._common import AuthContext, pass_auth
+from tensorlake.cli._common import Context, pass_auth
 from tensorlake.cli.secrets import warning_missing_secrets
 from tensorlake.functions_sdk.graph_serialization import graph_code_dir_path
 from tensorlake.functions_sdk.remote_graph import RemoteGraph
@@ -24,7 +24,7 @@ from tensorlake.functions_sdk.workflow_module import (
 @click.argument("workflow_file", type=click.File("r"))
 @pass_auth
 def deploy(
-    auth: AuthContext,
+    auth: Context,
     workflow_file: click.File,
     # TODO: implement with image builder v2
     parallel_builds: bool,
@@ -64,14 +64,12 @@ def deploy(
     )
 
 
-def _validate_workflow_module(
-    workflow_module_info: WorkflowModuleInfo, auth: AuthContext
-):
+def _validate_workflow_module(workflow_module_info: WorkflowModuleInfo, ctx: Context):
     if len(workflow_module_info.graphs) == 0:
         raise click.UsageError(
             "No graphs found in the workflow file, make sure at least one graph is defined as a global variable."
         )
-    warning_missing_secrets(auth, list(workflow_module_info.secret_names))
+    warning_missing_secrets(ctx, list(workflow_module_info.secret_names))
 
 
 async def _prepare_images_v2(
