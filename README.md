@@ -230,41 +230,89 @@ We recommend adding a description to each field in the schema, as it helps the m
 
 ### Datasets 
 
-Datasets are a named collection that you can attach some ingestion actions, such as document parsing or structured extraction. These operations are automatically applied whenever new files are uploaded to the datasets.
+Datasets in Tensorlake are named collections of documents that allow you to apply ingestion actions, such as document parsing and structured extraction—automatically to all files within the dataset. They are ideal for batch processing at scale.
 
-1. Create a Dataset 
+When you create a dataset, you specify a configuration for parsing or extraction options. Every document added to the dataset inherits this configuration and is processed asynchronously by the Tensorlake backend.
+
+> **Note:** You can attach webhooks to a dataset to receive status updates when documents are successfully processed.
+
+#### 1. Create a Dataset 
 ```python
-from tensorlake.documentai import DatasetOptions, ParsingOptions, OutputFormat, TableOutputMode, TableParsingStrategy
-    dataset = await doc_ai.create_dataset_async(
-        DatasetOptions(
-            name="My Dataset",
-            description="A dataset of documents",
-            options=ParsingOptions(
-                format=OutputFormat.MARKDOWN,
-                table_output_mode=TableOutputMode.JSON,
-                table_parsing_strategy=TableParsingStrategy.VLM,
-            ),
-        )
+from tensorlake.documentai import DocumentAI
+from tensorlake.documentai.models import ParsingOptions, EnrichmentOptions
+from tensorlake.documentai.models.enums import TableOutputMode, TableParsingFormat
+from pydantic import BaseModel, Field
+
+# Define schema for structured extraction
+class DocumentSchema(BaseModel):
+    title: str = Field(description="Document title")
+    summary: str = Field(description="Document summary")
+
+doc_ai = DocumentAI(api_key="your-api-key")
+
+# Create dataset with configuration
+dataset = doc_ai.create_dataset(
+    name="My Dataset",
+    description="A dataset of documents",
+    parsing_options=ParsingOptions(
+        table_output_mode=TableOutputMode.HTML,
+        table_parsing_format=TableParsingFormat.VLM,
+    ),
+    enrichment_options=EnrichmentOptions(
+        table_summarization=True,
+        figure_summarization=True
     )
+)
 ```
 
-2. Add a document to a dataset 
-```python
-from tensorlake.documentai import IngestArgs
+For async operation, use `create_dataset_async` instead of `create_dataset`.
 
-job = dataset.ingest(IngestArgs(file_path=file.path))
+#### 2. Add a document to a dataset 
+```python
+# Parse a single file using dataset configuration
+parse_id = doc_ai.parse_dataset_file(
+    dataset, 
+    "/path/to/document.pdf",  # Or you can use URLs
+    wait_for_completion=False  # Returns parse_id immediately
+)
+
+# Or wait for completion
+result = doc_ai.parse_dataset_file(
+    dataset,
+    "/path/to/document.pdf", 
+    wait_for_completion=True  # Returns ParseResult
+)
 ```
 
-3. Retrieve Dataset output and metadata 
+#### 3. Retrieve Dataset output and metadata 
 ```python
-items = dataset.items()
+# Get dataset information
+dataset_info = doc_ai.get_dataset(dataset.dataset_id)
+print(f"Dataset status: {dataset_info.status}")  # idle or processing
+
+# List all parse results for this dataset
+results = doc_ai.list_parse_results(dataset_name=dataset.name)
+for result in results.items:
+    print(f"Parse {result.parse_id}: {result.status}")
+    if result.structured_data:
+        print(f"Extracted data: {result.structured_data}")
+
+# List all datasets in your project
+datasets = doc_ai.list_datasets()
+for ds in datasets.items:
+    print(f"Dataset: {ds.name} - Status: {ds.status}")
+
+# Update dataset configuration
+updated_dataset = doc_ai.update_dataset(
+    dataset,
+    description="Updated description",
+    parsing_options=ParsingOptions(
+        table_output_mode=TableOutputMode.MARKDOWN  # Changed table output mode
+    )
+)
 ```
 
 A dataset can be in any of these states - `idle`, `processing`. You can also configure a webhook to receive updates for each file that is processed.
-
-## Webhooks
-
-You can get notified by Tensorlake when documents are ingested. Here is a [code example](examples/webhook.py).
 
 ## Custom Data Workflows
 
