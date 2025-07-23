@@ -24,6 +24,8 @@ class Context:
     base_url: str
     namespace: str
     api_key: Optional[str] = None
+    default_graph: Optional[str] = None
+    default_request: Optional[str] = None
     version: str = VERSION
     _client: Optional[httpx.Client] = None
     _introspect_response: Optional[httpx.Response] = None
@@ -100,9 +102,15 @@ class Context:
             or get_nested_value(config_data, "indexify.namespace")
             or "default"
         )
+        final_default_graph = get_nested_value(config_data, "default.graph")
+        final_default_request = get_nested_value(config_data, "default.request")
 
         return cls(
-            base_url=final_base_url, api_key=final_api_key, namespace=final_namespace
+            base_url=final_base_url,
+            api_key=final_api_key,
+            namespace=final_namespace,
+            default_graph=final_default_graph,
+            default_request=final_default_request,
         )
 
 

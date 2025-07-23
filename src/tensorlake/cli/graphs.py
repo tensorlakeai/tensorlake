@@ -57,12 +57,21 @@ def list(ctx: Context, verbose: bool, use_json: bool):
 @click.option(
     "--json", "-j", is_flag=True, help="Export graph information as JSON-encoded data"
 )
-@click.argument("graph-name")
+@click.argument("graph-name", required=False)
 @pass_auth
 def info(ctx: Context, json: bool, graph_name: str):
     """
     Info about a remote graph
     """
+    if not graph_name:
+        if ctx.default_graph:
+            graph_name = ctx.default_graph
+            click.echo(f"Using default graph from config: {graph_name}")
+        else:
+            raise click.UsageError(
+                "No graph name provided and no default.graph configured"
+            )
+
     g = ctx.tensorlake_client.graph(graph_name)
 
     if json:
