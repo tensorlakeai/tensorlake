@@ -21,8 +21,6 @@ click = "8.2.1"
 retry = "^0.9.2"
 aiofiles = "^24.1.0"
 tqdm = "^4.67.1"
-tomli = "^2.2.1"
-tomli-w = "^1.2.0"
 
 # Required only by Function Executor
 structlog = "25.4.0"
