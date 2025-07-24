@@ -3,9 +3,7 @@ import unittest
 
 from json_schemas.bank_statement import BankStatement
 
-from tensorlake.documentai import (
-    DocumentAI,
-)
+from tensorlake.documentai import DocumentAI
 from tensorlake.documentai.models import (
     PageClassConfig,
     ParseStatus,
@@ -97,6 +95,41 @@ class TestParse(unittest.TestCase):
 
         parse_id = self.doc_ai.parse(
             file=file_id, structured_extraction_options=[structured_extraction_options]
+        )
+
+        self.assertIsNotNone(parse_id)
+        print(f"Parse ID: {parse_id}")
+
+        parse_result = self.doc_ai.wait_for_completion(parse_id=parse_id)
+        self.assertIsNotNone(parse_result)
+
+        self.assertIsNotNone(parse_result.pages)
+        self.assertIsNotNone(parse_result.chunks)
+        self.assertIsNotNone(parse_result.structured_data)
+
+        structured_extraction_schemas = {}
+        for schema in parse_result.structured_data:
+            structured_extraction_schemas[schema.schema_name] = schema
+
+        self.assertIsNotNone(structured_extraction_schemas.get("form125-basic"))
+
+        self.doc_ai.delete_parse(parse_result.parse_id)
+        self.assertRaises(
+            Exception, self.doc_ai.get_parsed_result, parse_result.parse_id
+        )
+
+    def test_parse_single_object_structured_extraction(self):
+        structured_extraction_options = StructuredExtractionOptions(
+            schema_name="form125-basic", json_schema=BankStatement
+        )
+
+        file_id = self.doc_ai.upload(
+            path="./document_ai/testdata/example_bank_statement.pdf"
+        )
+        self.assertIsNotNone(file_id)
+
+        parse_id = self.doc_ai.parse(
+            file=file_id, structured_extraction_options=structured_extraction_options
         )
 
         self.assertIsNotNone(parse_id)
