@@ -494,8 +494,6 @@ Get real-time notifications when document processing completes. Webhooks are con
 }
 ```
 
-You can get notified by Tensorlake when documents are ingested. Here is a [code example](examples/webhook.py).
-
 ## Learn more
 
 * [More examples](examples/)
