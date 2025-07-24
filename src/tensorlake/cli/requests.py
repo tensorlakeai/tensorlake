@@ -98,7 +98,7 @@ Use 'tensorlake config set default.request <id>' to set a default request ID.
 @click.option("--outputs", "-o", is_flag=True, help="Show outputs")
 @pass_auth
 def info(
-    auth: Context,
+    ctx: Context,
     use_json: bool,
     tasks: bool,
     outputs: bool,
