@@ -1,17 +1,21 @@
 import io
 import time
 from contextlib import redirect_stderr, redirect_stdout
-from typing import Any
+from typing import Any, Optional
 
 from tensorlake.functions_sdk.functions import (
     FunctionCallResult,
     GraphRequestContext,
+    ProgressReporter,
     TensorlakeFunctionWrapper,
 )
 from tensorlake.functions_sdk.graph_definition import ComputeGraphMetadata
 from tensorlake.functions_sdk.invocation_state.invocation_state import RequestState
 
-from ...proto.function_executor_pb2 import RunTaskRequest, RunTaskResponse
+from ...proto.function_executor_pb2 import (
+    Task,
+    TaskResult,
+)
 from ...std_outputs_capture import flush_logs, read_till_the_end
 from .function_inputs_loader import FunctionInputs, FunctionInputsLoader
 from .response_helper import ResponseHelper
@@ -20,34 +24,35 @@ from .response_helper import ResponseHelper
 class Handler:
     def __init__(
         self,
-        request: RunTaskRequest,
+        task: Task,
         invocation_state: RequestState,
         function_wrapper: TensorlakeFunctionWrapper,
         function_stdout: io.StringIO,
         function_stderr: io.StringIO,
         graph_metadata: ComputeGraphMetadata,
+        progress_reporter: Optional[ProgressReporter],
         logger: Any,
     ):
-        self._request: RunTaskRequest = request
+        self._task: Task = task
         self._invocation_state: RequestState = invocation_state
         self._logger = logger.bind(
             module=__name__,
-            invocation_id=request.graph_invocation_id,
-            task_id=request.task_id,
-            allocation_id=request.allocation_id,
+            invocation_id=task.graph_invocation_id,
+            task_id=task.task_id,
+            allocation_id=task.allocation_id,
         )
         self._function_wrapper: TensorlakeFunctionWrapper = function_wrapper
         self._function_stdout: io.StringIO = function_stdout
         self._function_stderr: io.StringIO = function_stderr
-        self._input_loader = FunctionInputsLoader(request)
+        self._input_loader = FunctionInputsLoader(task)
         self._response_helper = ResponseHelper(
-            task_id=request.task_id,
-            function_name=request.function_name,
+            function_name=task.function_name,
             graph_metadata=graph_metadata,
             logger=self._logger,
         )
+        self._progress_reporter = progress_reporter
 
-    def run(self) -> RunTaskResponse:
+    def run(self) -> TaskResult:
         """Runs the task.
 
         Raises an exception if our own code failed, customer function failure doesn't result in any exception.
@@ -56,14 +61,14 @@ class Handler:
         self._logger.info("running function")
         start_time = time.monotonic()
         inputs: FunctionInputs = self._input_loader.load()
-        response: RunTaskResponse = self._run_task(inputs)
+        result: TaskResult = self._run_task(inputs)
         self._logger.info(
             "function finished",
             duration_sec=f"{time.monotonic() - start_time:.3f}",
         )
-        return response
+        return result
 
-    def _run_task(self, inputs: FunctionInputs) -> RunTaskResponse:
+    def _run_task(self, inputs: FunctionInputs) -> TaskResult:
         """Runs the customer function while capturing what happened in it.
 
         Function stdout and stderr are captured so they don't get into Function Executor process stdout
@@ -99,10 +104,11 @@ class Handler:
 
     def _run_func(self, inputs: FunctionInputs) -> FunctionCallResult:
         ctx: GraphRequestContext = GraphRequestContext(
-            request_id=self._request.graph_invocation_id,
-            graph_name=self._request.graph_name,
-            graph_version=self._request.graph_version,
+            request_id=self._task.graph_invocation_id,
+            graph_name=self._task.graph_name,
+            graph_version=self._task.graph_version,
             request_state=self._invocation_state,
+            progress_reporter=self._progress_reporter,
         )
         return self._function_wrapper.invoke_fn_ser(
             ctx, inputs.input, inputs.init_value
