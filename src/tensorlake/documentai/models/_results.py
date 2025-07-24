@@ -111,40 +111,6 @@ class Chunk(BaseModel):
     content: str
 
 
-class ParseRequestOptions(BaseModel):
-    """
-    The options used for scheduling the parse job.
-    """
-
-    configuration: Options = Field(
-        description="The configuration used for the parse job. This is derived from the configuration settings submitted with the parse request. It can be used to understand how the parse job was configured, such as the parsing strategy, extraction methods, etc. Values not provided in the request will be set to their default values."
-    )
-    file_id: Optional[str] = Field(
-        None,
-        description="The tensorlake file ID. This is the ID of the file used for the parse job. It has `tensorlake_` prefix. It can be undefined if the parse operation was created with a `file_url` or `raw_text` field instead of a file ID.",
-    )
-    file_name: Optional[str] = Field(
-        None,
-        description="The name of the file used for the parse job. This is only populated if the parse operation was created with a `file_id`.",
-    )
-    file_url: Optional[str] = Field(
-        None,
-        description="The URL of the file used for the parse job. It can be undefined if the parse operation was created with a `file_id` or `raw_text` field instead of a file URL.",
-    )
-    page_range: Optional[str] = Field(
-        None,
-        description="The page range that was requested for parsing. This is the same as the value provided in the `pages` field of the request. It can be undefined if the parse operation was created without a specific page range. Meaning the whole document was parsed.",
-    )
-    raw_text: Optional[str] = Field(
-        None,
-        description="The raw_text for the parse job. This is only populated if the parse operation was created with a `raw_text` field. And the mime type is of a text-based format (e.g., plain text, HTML). It can be undefined if the parse operation was created with a `file_id` or `file_url` field instead of raw_text.",
-    )
-    trace_id: Optional[str] = Field(
-        None,
-        description="The trace ID for the parse job. It can be undefined if the operation is still in pending state. This is used for debugging purposes.",
-    )
-
-
 class ParseResult(BaseModel):
     """
     Result of a parse operation in the v2 API.
