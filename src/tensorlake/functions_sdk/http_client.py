@@ -59,6 +59,7 @@ class ShallowRequestMetadata(BaseModel):
     outcome: str
     created_at: int
 
+
 class Allocation(BaseModel):
     id: str
     server_id: str = Field(alias="executor_id")
@@ -67,12 +68,14 @@ class Allocation(BaseModel):
     outcome: Optional[str] = None
     attempt_number: int
 
+
 class Task(BaseModel):
     id: str
     status: str
     outcome: str
     created_at: int = Field(alias="creation_time_ns")
     allocations: Optional[List[Allocation]] = None
+
 
 class RequestMetadata(BaseModel):
     id: str

@@ -57,26 +57,25 @@ def list(ctx: Context, verbose: bool, use_json: bool, graph_name: str):
         print_json(all_invocations)
         return
 
-    elif verbose:
+    if verbose:
         print(invocations)
         return
 
-    else:
-        table = Table(title="Requests")
-        table.add_column("Request")
-        table.add_column("Created At")
-        table.add_column("Status")
-        table.add_column("Outcome")
+    table = Table(title="Requests")
+    table.add_column("Request")
+    table.add_column("Created At")
+    table.add_column("Status")
+    table.add_column("Outcome")
 
-        for invocation in invocations:
-            table.add_row(
-                invocation.id,
-                str(invocation.created_at),
-                invocation.status,
-                invocation.outcome,
-            )
+    for invocation in invocations:
+        table.add_row(
+            invocation.id,
+            str(invocation.created_at),
+            invocation.status,
+            invocation.outcome,
+        )
 
-        print(table)
+    print(table)
 
 
 @request.command(
@@ -98,7 +97,14 @@ Use 'tensorlake config set default.request <id>' to set a default request ID.
 @click.option("--tasks", "-t", is_flag=True, help="Show tasks")
 @click.option("--outputs", "-o", is_flag=True, help="Show outputs")
 @pass_auth
-def info(ctx: Context, use_json: bool, graph_name: str, request_id: str):
+def info(
+    auth: Context,
+    use_json: bool,
+    tasks: bool,
+    outputs: bool,
+    graph_name: str,
+    request_id: str,
+):
     """
     Info about a remote request
     """
@@ -145,7 +151,12 @@ def info(ctx: Context, use_json: bool, graph_name: str, request_id: str):
     progress_table.add_column("Failed")
 
     for function, progress in request.request_progress.items():
-        progress_table.add_row(function, str(progress.pending_tasks), str(progress.successful_tasks), str(progress.failed_tasks))
+        progress_table.add_row(
+            function,
+            str(progress.pending_tasks),
+            str(progress.successful_tasks),
+            str(progress.failed_tasks),
+        )
 
     print(progress_table)
 
@@ -156,7 +167,9 @@ def info(ctx: Context, use_json: bool, graph_name: str, request_id: str):
         outputs_table.add_column("Num Outputs")
 
         for output in request.outputs:
-            outputs_table.add_row(output.compute_fn, str(output.id), str(output.num_outputs))
+            outputs_table.add_row(
+                output.compute_fn, str(output.id), str(output.num_outputs)
+            )
 
         print(outputs_table)
 
@@ -177,6 +190,13 @@ def info(ctx: Context, use_json: bool, graph_name: str, request_id: str):
             allocations_table.add_column("Outcome")
             allocations_table.add_column("Attempt Number")
             for allocation in task.allocations:
-                allocations_table.add_row(allocation.id, allocation.server_id, allocation.container_id, str(allocation.created_at), allocation.outcome, str(allocation.attempt_number))
+                allocations_table.add_row(
+                    allocation.id,
+                    allocation.server_id,
+                    allocation.container_id,
+                    str(allocation.created_at),
+                    allocation.outcome,
+                    str(allocation.attempt_number),
+                )
 
             print(allocations_table)

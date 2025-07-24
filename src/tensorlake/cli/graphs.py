@@ -1,6 +1,7 @@
 import json
 
 import click
+import rich
 from pydantic.json import pydantic_encoder
 from rich import print, print_json
 from rich.table import Table
@@ -82,8 +83,6 @@ def info(ctx: Context, json: bool, graph_name: str):
     if json:
         print_json(g.model_dump_json())
         return
-    
-    from rich import print
 
     print(f"[bold][red]Graph:[/red][/bold] {g.name}")
     if g.description:
@@ -93,7 +92,9 @@ def info(ctx: Context, json: bool, graph_name: str):
         print(f"[bold][red]Tags:[/red][/bold] {g.tags}")
 
     print(f"[bold][red]Entrypoint Function:[/red][/bold] {g.entrypoint.name}")
-    print(f"[bold][red]Entrypoint Function Encoding:[/red][/bold] {g.entrypoint.input_encoder}")
+    print(
+        f"[bold][red]Entrypoint Function Encoding:[/red][/bold] {g.entrypoint.input_encoder}"
+    )
 
     from rich.table import Table
 
