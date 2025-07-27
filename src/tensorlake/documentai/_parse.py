@@ -499,8 +499,6 @@ def _create_parse_req(
             pc.model_dump(exclude_none=True) for pc in page_classifications
         ]
 
-    print("structured_extraction_options:", structured_extraction_options)
-
     if structured_extraction_options:
         if isinstance(structured_extraction_options, StructuredExtractionOptions):
             payload["structured_extraction_options"] = [
