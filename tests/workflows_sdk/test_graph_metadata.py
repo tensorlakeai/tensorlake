@@ -237,23 +237,23 @@ class TestGraphMetadataParameterExtraction(unittest.TestCase):
             description="test parameter extraction",
             start_node=process_data,
         )
-        
+
         graph_metadata: ComputeGraphMetadata = graph.definition()
         parameters = graph_metadata.entrypoint.parameters
-        
+
         self.assertIsNotNone(parameters)
         self.assertEqual(len(parameters), 3)
-        
+
         # Check text parameter
         text_param = next(p for p in parameters if p.name == "text")
         self.assertEqual(text_param.data_type, {"type": "string"})
         self.assertTrue(text_param.required)
-        
-        # Check count parameter  
+
+        # Check count parameter
         count_param = next(p for p in parameters if p.name == "count")
         self.assertEqual(count_param.data_type, {"type": "integer"})
         self.assertTrue(count_param.required)
-        
+
         # Check factor parameter with default
         factor_param = next(p for p in parameters if p.name == "factor")
         self.assertEqual(factor_param.data_type, {"type": "number", "default": 1.5})
@@ -269,9 +269,12 @@ class TestGraphMetadataParameterExtraction(unittest.TestCase):
             description="test return type extraction",
             start_node=get_numbers,
         )
-        
+
         graph_metadata: ComputeGraphMetadata = graph.definition()
-        self.assertEqual(graph_metadata.entrypoint.return_type, {"type": "array", "items": {"type": "integer"}})
+        self.assertEqual(
+            graph_metadata.entrypoint.return_type,
+            {"type": "array", "items": {"type": "integer"}},
+        )
 
     def test_parameter_extraction_complex_types(self):
         @tensorlake_function()
@@ -283,21 +286,27 @@ class TestGraphMetadataParameterExtraction(unittest.TestCase):
             description="test complex types",
             start_node=process_items,
         )
-        
+
         graph_metadata: ComputeGraphMetadata = graph.definition()
         parameters = graph_metadata.entrypoint.parameters
-        
+
         self.assertEqual(len(parameters), 2)
-        
+
         # Check List[str] parameter
         items_param = next(p for p in parameters if p.name == "items")
-        self.assertEqual(items_param.data_type, {"type": "array", "items": {"type": "string"}})
+        self.assertEqual(
+            items_param.data_type, {"type": "array", "items": {"type": "string"}}
+        )
         self.assertTrue(items_param.required)
-        
+
         # Check dict parameter with default None
         mapping_param = next(p for p in parameters if p.name == "mapping")
-        self.assertEqual(mapping_param.data_type, {"type": "object", "description": "dict object", "default": None})
+        self.assertEqual(
+            mapping_param.data_type,
+            {"type": "object", "description": "dict object", "default": None},
+        )
         self.assertFalse(mapping_param.required)
+
 
 if __name__ == "__main__":
     unittest.main()
