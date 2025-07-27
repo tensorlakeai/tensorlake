@@ -14,11 +14,13 @@ class ParameterMetadata(BaseModel):
     description: Optional[str] = None
     required: bool = True
 
+
 class RetryPolicyMetadata(BaseModel):
     max_retries: int
     initial_delay_sec: float
     max_delay_sec: float
     delay_multiplier: float
+
 
 class FunctionMetadata(BaseModel):
     name: str
