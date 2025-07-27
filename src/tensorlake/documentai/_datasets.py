@@ -198,9 +198,9 @@ class _DatasetMixin(_BaseClient):
         body = _create_dataset_parse_req(file, page_range, labels, mime_type)
 
         did = dataset.dataset_id if isinstance(dataset, Dataset) else dataset
-        parse_id = self._request(
-            "POST", f"/datasets/{did}/parse", json=body
-        ).json()["parse_id"]
+        parse_id = self._request("POST", f"/datasets/{did}/parse", json=body).json()[
+            "parse_id"
+        ]
         if wait_for_completion:
             return self.wait_for_completion(parse_id)  # from _ParseMixin
         return parse_id
@@ -235,9 +235,7 @@ class _DatasetMixin(_BaseClient):
         """
         body = _create_dataset_parse_req(file, page_range, labels, mime_type)
         did = dataset.dataset_id if isinstance(dataset, Dataset) else dataset
-        resp = await self._arequest(
-            "POST", f"/datasets/{did}/parse", json=body
-        )
+        resp = await self._arequest("POST", f"/datasets/{did}/parse", json=body)
         parse_id = resp.json()["parse_id"]
         if wait_for_completion:
             # wait_for_completion_async lives in _ParseMixin
