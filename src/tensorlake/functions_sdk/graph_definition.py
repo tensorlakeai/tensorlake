@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
@@ -8,12 +8,17 @@ from .object_serializer import get_serializer
 from .resources import ResourceMetadata
 
 
+class ParameterMetadata(BaseModel):
+    name: str
+    data_type: Dict[str, Any]  # JSON Schema object with optional "default" property
+    description: Optional[str] = None
+    required: bool = True
+
 class RetryPolicyMetadata(BaseModel):
     max_retries: int
     initial_delay_sec: float
     max_delay_sec: float
     delay_multiplier: float
-
 
 class FunctionMetadata(BaseModel):
     name: str
@@ -28,6 +33,8 @@ class FunctionMetadata(BaseModel):
     resources: Optional[ResourceMetadata] = None
     retry_policy: Optional[RetryPolicyMetadata] = None
     cache_key: Optional[str] = None
+    parameters: Optional[List[ParameterMetadata]] = None
+    return_type: Optional[Dict[str, Any]] = None  # JSON Schema object
 
 
 class RuntimeInformation(BaseModel):
