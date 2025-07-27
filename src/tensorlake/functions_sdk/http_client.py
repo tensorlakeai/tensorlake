@@ -349,8 +349,10 @@ class TensorlakeClient:
         input_encoding: str = "cloudpickle",
         **kwargs,
     ) -> str:
-        events = self.stream_invoke_graph_with_object(
-            graph, block_until_done, input_encoding, **kwargs
+        if not block_until_done:
+            return self._call(graph, input_encoding, **kwargs)
+        events = self.call_stream(
+            graph, input_encoding, **kwargs
         )
         try:
             while True:
@@ -359,23 +361,41 @@ class TensorlakeClient:
             # TODO: Once we only support Python >= 3.13, we can just return events.close().
             events.close()
             return result.value
-
-    def stream_invoke_graph_with_object(
+        
+    def _call(
         self,
         graph: str,
-        block_until_done: bool = False,
+        input_encoding: str = "cloudpickle",
+        **kwargs,
+    ) -> str:
+        serializer = get_serializer(input_encoding)
+        ser_input = serializer.serialize(kwargs)
+        kwargs = {
+            "headers": {
+                "Content-Type": serializer.content_type,
+                "Accept": "application/json",
+            },
+            "data": ser_input,
+        }
+        response = self._post(
+            f"v1/namespaces/{self.namespace}/compute-graphs/{graph}",
+            **kwargs,
+        )
+        return response.json()["id"]
+        
+    def call_stream(
+        self,
+        graph: str,
         input_encoding: str = "cloudpickle",
         **kwargs,
     ) -> Generator[WorkflowEvent, None, str]:
         serializer = get_serializer(input_encoding)
         ser_input = serializer.serialize(kwargs)
-        params = {"block_until_finish": block_until_done}
         kwargs = {
             "headers": {
                 "Content-Type": serializer.content_type,
             },
             "data": ser_input,
-            "params": params,
         }
         self._add_api_key(kwargs)
         invocation_id: Optional[str] = None
