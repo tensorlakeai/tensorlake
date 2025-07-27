@@ -7,7 +7,7 @@ from rich import print, print_json
 from rich.table import Table
 
 from tensorlake.cli._common import Context, pass_auth
-from tensorlake.functions_sdk.http_client import RequestMetadata
+from tensorlake.functions_sdk.http_client import RequestMetadata, Task
 
 
 @click.group()
@@ -55,26 +55,27 @@ def list(ctx: Context, verbose: bool, use_json: bool, graph_name: str):
     if use_json:
         all_invocations = json.dumps(invocations, default=pydantic_encoder)
         print_json(all_invocations)
+        return
 
-    elif verbose:
+    if verbose:
         print(invocations)
+        return
 
-    else:
-        table = Table(title="Requests")
-        table.add_column("Request")
-        table.add_column("Created At")
-        table.add_column("Status")
-        table.add_column("Outcome")
+    table = Table(title="Requests")
+    table.add_column("Request")
+    table.add_column("Created At")
+    table.add_column("Status")
+    table.add_column("Outcome")
 
-        for invocation in invocations:
-            table.add_row(
-                invocation.id,
-                str(invocation.created_at),
-                invocation.status,
-                invocation.outcome,
-            )
+    for invocation in invocations:
+        table.add_row(
+            invocation.id,
+            str(invocation.created_at),
+            invocation.status,
+            invocation.outcome,
+        )
 
-        print(table)
+    print(table)
 
 
 @request.command(
@@ -93,8 +94,17 @@ Use 'tensorlake config set default.request <id>' to set a default request ID.
 )
 @click.argument("graph-name", required=False)
 @click.argument("request-id", required=False)
+@click.option("--tasks", "-t", is_flag=True, help="Show tasks")
+@click.option("--outputs", "-o", is_flag=True, help="Show outputs")
 @pass_auth
-def info(ctx: Context, use_json: bool, graph_name: str, request_id: str):
+def info(
+    ctx: Context,
+    use_json: bool,
+    tasks: bool,
+    outputs: bool,
+    graph_name: str,
+    request_id: str,
+):
     """
     Info about a remote request
     """
@@ -120,6 +130,73 @@ def info(ctx: Context, use_json: bool, graph_name: str, request_id: str):
 
     if use_json:
         print_json(request.model_dump_json())
+        return
 
-    else:
-        print(request)
+    from rich import print
+
+    print(f"[bold][red]Request:[/red][/bold] {request.id}")
+    print(f"[bold][red]Graph Version:[/red][/bold] {request.graph_version}")
+    print(f"[bold][red]Created At:[/red][/bold] {request.created_at}")
+    print(f"[bold][red]Status:[/red][/bold] {request.status}")
+    print(f"[bold][red]Outcome:[/red][/bold] {request.outcome}")
+    if request.failure_reason:
+        print(f"[bold][red]Failure Reason:[/red][/bold] {request.failure_reason}")
+    if request.request_error:
+        print(f"[bold][red]Error:[/red][/bold] {request.request_error.message}")
+
+    progress_table = Table(title="[bold][red]Progress[/red][/bold]")
+    progress_table.add_column("Function")
+    progress_table.add_column("Pending")
+    progress_table.add_column("Successful")
+    progress_table.add_column("Failed")
+
+    for function, progress in request.request_progress.items():
+        progress_table.add_row(
+            function,
+            str(progress.pending_tasks),
+            str(progress.successful_tasks),
+            str(progress.failed_tasks),
+        )
+
+    print(progress_table)
+
+    if outputs:
+        outputs_table = Table(title="[bold][red]Outputs[/red][/bold]")
+        outputs_table.add_column("Function")
+        outputs_table.add_column("Output ID")
+        outputs_table.add_column("Num Outputs")
+
+        for output in request.outputs:
+            outputs_table.add_row(
+                output.compute_fn, str(output.id), str(output.num_outputs)
+            )
+
+        print(outputs_table)
+
+    if tasks:
+        tasks: List[Task] = auth.tensorlake_client.tasks(graph_name, request_id)
+
+        for task in tasks:
+            print(f"[bold][red]Task:[/red][/bold] {task.id}")
+            print(f"[bold][red]Status:[/red][/bold] {task.status}")
+            print(f"[bold][red]Outcome:[/red][/bold] {task.outcome}")
+            print(f"[bold][red]Created At:[/red][/bold] {task.created_at}")
+
+            allocations_table = Table(title="[bold][red]Allocations[/red][/bold]")
+            allocations_table.add_column("Allocation ID")
+            allocations_table.add_column("Server ID")
+            allocations_table.add_column("Container ID")
+            allocations_table.add_column("Created At")
+            allocations_table.add_column("Outcome")
+            allocations_table.add_column("Attempt Number")
+            for allocation in task.allocations:
+                allocations_table.add_row(
+                    allocation.id,
+                    allocation.server_id,
+                    allocation.container_id,
+                    str(allocation.created_at),
+                    allocation.outcome,
+                    str(allocation.attempt_number),
+                )
+
+            print(allocations_table)
