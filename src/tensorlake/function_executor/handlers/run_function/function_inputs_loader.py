@@ -1,3 +1,5 @@
+import hashlib
+import time
 from typing import Optional, Union
 
 from tensorlake.functions_sdk.data_objects import TensorlakeData
@@ -6,8 +8,9 @@ from tensorlake.functions_sdk.object_serializer import (
     JsonSerializer,
 )
 
+from ...blob_store.blob_store import BLOBStore
+from ...logger import FunctionExecutorLogger
 from ...proto.function_executor_pb2 import (
-    SerializedObject,
     SerializedObjectEncoding,
     Task,
 )
@@ -17,55 +20,93 @@ class FunctionInputs:
     def __init__(
         self, input: TensorlakeData, init_value: Optional[TensorlakeData] = None
     ):
-        self.input = input
-        self.init_value = init_value
+        self.input: TensorlakeData = input
+        self.init_value: Optional[TensorlakeData] = init_value
 
 
 class FunctionInputsLoader:
-    def __init__(self, task: Task):
-        self._task = task
+    def __init__(
+        self,
+        task: Task,
+        blob_store: BLOBStore,
+        logger: FunctionExecutorLogger,
+    ):
+        self._task: Task = task
+        self._blob_store: BLOBStore = blob_store
+        self._logger: FunctionExecutorLogger = logger.bind(module=__name__)
 
     def load(self) -> FunctionInputs:
+        start_time = time.monotonic()
+        self._logger.info("downloading function inputs")
+        function_input: TensorlakeData = self._function_input()
+        init_value: Optional[TensorlakeData] = self._accumulator_input()
+        self._logger.info(
+            "function inputs downloaded",
+            duration_sec=time.monotonic() - start_time,
+        )
+
         return FunctionInputs(
-            input=self._function_input(),
-            init_value=self._accumulator_input(),
+            input=function_input,
+            init_value=init_value,
         )
 
     def _function_input(self) -> TensorlakeData:
+        data: bytes = self._blob_store.get(
+            blob=self._task.request.function_input_blob,
+            offset=self._task.request.function_input.offset,
+            size=self._task.request.function_input.manifest.size,
+            logger=self._logger,
+        )
+
+        data_hash: str = _sha256_hexdigest(data)
+        if data_hash != self._task.request.function_input.manifest.sha256_hash:
+            raise ValueError(
+                f"Function input data hash {data_hash} does not match expected hash {self._task.request.function_input.manifest.sha256_hash}."
+            )
+
         return _to_tensorlake_data(
-            self._task.graph_invocation_id, self._task.request.function_input
+            input_id=self._task.allocation_id,
+            encoding=self._task.request.function_input.manifest.encoding,
+            data=data,
         )
 
     def _accumulator_input(self) -> Optional[TensorlakeData]:
-        return (
-            _to_tensorlake_data(
-                self._task.graph_invocation_id, self._task.request.function_init_value
+        if not self._task.request.HasField("function_init_value"):
+            return None
+
+        data: bytes = self._blob_store.get(
+            blob=self._task.request.function_init_value_blob,
+            offset=self._task.request.function_init_value.offset,
+            size=self._task.request.function_init_value.manifest.size,
+            logger=self._logger,
+        )
+
+        data_hash: str = _sha256_hexdigest(data)
+        if data_hash != self._task.request.function_init_value.manifest.sha256_hash:
+            raise ValueError(
+                f"Reducer init value hash {data_hash} does not match expected hash {self._task.request.function_init_value.manifest.sha256_hash}."
             )
-            if self._task.request and self._task.request.HasField("function_init_value")
-            else None
+
+        return _to_tensorlake_data(
+            input_id=self._task.allocation_id,
+            encoding=self._task.request.function_init_value.manifest.encoding,
+            data=data,
         )
 
 
 def _to_tensorlake_data(
-    input_id: str, serialized_object: SerializedObject
+    input_id: str, encoding: SerializedObjectEncoding, data: bytes
 ) -> TensorlakeData:
-    data: Union[str, bytes] = None
+    data: Union[str, bytes]
     encoder: str = None
-    if (
-        serialized_object.encoding
-        == SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE
-    ):
-        data = serialized_object.data
+    if encoding == SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE:
         encoder = CloudPickleSerializer.encoding_type
-    elif (
-        serialized_object.encoding
-        == SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON
-    ):
-        data = serialized_object.data.decode("utf-8")
+    elif encoding == SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON:
+        data = data.decode("utf-8")  # str
         encoder = JsonSerializer.encoding_type
     else:
         raise ValueError(
-            f"Unsupported serialized object encoding: {SerializedObjectEncoding.Name(serialized_object.encoding)}"
+            f"Unsupported serialized object encoding: {SerializedObjectEncoding.Name(encoding)}"
         )
 
     return TensorlakeData(
@@ -73,3 +114,7 @@ def _to_tensorlake_data(
         payload=data,
         encoder=encoder,
     )
+
+
+def _sha256_hexdigest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()

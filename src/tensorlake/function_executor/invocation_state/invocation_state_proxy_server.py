@@ -1,3 +1,4 @@
+import hashlib
 import queue
 import threading
 from typing import Any, Iterator, Optional
@@ -14,6 +15,7 @@ from ..proto.function_executor_pb2 import (
     InvocationStateResponse,
     SerializedObject,
     SerializedObjectEncoding,
+    SerializedObjectManifest,
     SetInvocationStateRequest,
 )
 from .response_validator import ResponseValidator
@@ -94,15 +96,20 @@ class InvocationStateProxyServer:
 
             # We currently use CloudPickleSerializer for function inputs,
             # outputs and invocation state values. This provides consistent UX.
+            data: bytes = CloudPickleSerializer.serialize(value)
             request = InvocationStateRequest(
                 request_id=request_id,
                 task_id=task_id,
                 set=SetInvocationStateRequest(
                     key=key,
                     value=SerializedObject(
-                        data=CloudPickleSerializer.serialize(value),
-                        encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-                        encoding_version=0,
+                        manifest=SerializedObjectManifest(
+                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
+                            encoding_version=0,
+                            size=len(data),
+                            sha256_hash=hashlib.sha256(data).hexdigest(),
+                        ),
+                        data=data,
                     ),
                 ),
             )
@@ -178,13 +185,13 @@ class InvocationStateProxyServer:
 
             so_value: SerializedObject = response.get.value
             if (
-                so_value.encoding
+                so_value.manifest.encoding
                 != SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE
             ):
                 self._logger.error(
                     "unexpected encoding of the invocation state value",
                     key=key,
-                    encoding=SerializedObjectEncoding.Name(so_value.encoding),
+                    encoding=SerializedObjectEncoding.Name(so_value.manifest.encoding),
                 )
                 raise RuntimeError("unexpected encoding of the invocation state value")
 

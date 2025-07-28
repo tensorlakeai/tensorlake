@@ -1,18 +1,9 @@
-from tensorlake.utils.logging import (
-    configure_development_mode_logging,
-    configure_logging_early,
-    configure_production_mode_logging,
-)
-
-configure_logging_early()
-
 import argparse
 import multiprocessing as mp
 from typing import Any
 
-import structlog
-
 from .info import info_response_kv_args
+from .logger import FunctionExecutorLogger
 from .server import Server
 from .service import Service
 
@@ -45,19 +36,11 @@ def main():
         default="",
     )
     parser.add_argument("--address", help="API server address to listen on", type=str)
-    parser.add_argument(
-        "-d", "--dev", help="Run in development mode", action="store_true"
-    )
 
     # Don't fail if unknown arguments are present. This supports backward compatibility when new args are added.
     args, ignored_args = parser.parse_known_args()
 
-    if args.dev:
-        configure_development_mode_logging()
-    else:
-        configure_production_mode_logging()
-
-    logger = structlog.get_logger(module=__name__)
+    logger = FunctionExecutorLogger.get_logger(module=__name__)
     validate_args(args, logger)
 
     logger = logger.bind(
@@ -65,7 +48,7 @@ def main():
         fn_executor_id=args.function_executor_id,
         **info_response_kv_args()
     )
-    logger.info("starting function executor server", address=args.address, dev=args.dev)
+    logger.info("starting function executor server", address=args.address)
     if len(ignored_args) > 0:
         logger.warning("ignored cli arguments", ignored_args=ignored_args)
 
