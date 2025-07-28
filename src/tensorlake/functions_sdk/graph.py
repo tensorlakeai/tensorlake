@@ -16,10 +16,10 @@ from typing import (
     get_origin,
 )
 
-import nanoid
-from nanoid import generate
 from pydantic import BaseModel
 from typing_extensions import get_args, get_origin
+
+from tensorlake.vendor.nanoid import generate as nanoid
 
 from .data_objects import Metrics, TensorlakeData
 from .exceptions import RequestException
@@ -73,9 +73,9 @@ class Graph:
     ):
         if version is None:
             # Update graph on every deployment unless user wants to manage the version manually.
-            # nonoid.generate() should be called inside function body, otherwise it'll be called
+            # nanoid() should be called inside function body, otherwise it'll be called
             # only once during module loading.
-            version = nanoid.generate()
+            version = nanoid()
 
         _validate_identifier(version, "version")
         _validate_identifier(name, "name")
@@ -242,7 +242,7 @@ class Graph:
         start_node = self.nodes[self._start_node]
         serializer = get_serializer(start_node.input_encoder)
         input = TensorlakeData(
-            id=generate(),
+            id=nanoid(),
             payload=serializer.serialize(kwargs),
             encoder=start_node.input_encoder,
         )
