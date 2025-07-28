@@ -4,6 +4,7 @@ import os
 import pathlib
 import stat
 import zipfile
+from pathlib import Path
 from typing import Dict, List
 
 import click
@@ -12,7 +13,6 @@ from pydantic import BaseModel
 from .functions import TensorlakeCompute
 from .graph import Graph
 from .graph_definition import ComputeGraphMetadata
-from pathlib import Path
 
 
 class FunctionManifest(BaseModel):
@@ -75,6 +75,7 @@ def zip_graph_code(graph: Graph, code_dir_path: str) -> bytes:
         _save_zip_for_debugging(zip_buffer)
         raise
 
+
 def _detect_files_to_exclude(root_dir: str) -> List[str]:
     root = Path(root_dir).resolve()
     exclude_paths = set()
@@ -114,6 +115,7 @@ def _detect_files_to_exclude(root_dir: str) -> List[str]:
 
     return list(exclude_paths)
 
+
 def _zip_graph_code(
     zip_buffer: io.BytesIO,
     graph_manifest: GraphManifest,
@@ -145,8 +147,7 @@ def _zip_graph_code(
         ):
             # Prevent walking into excluded directories
             dir_names[:] = [
-                d for d in dir_names
-                if os.path.join(dir_path, d) not in exclude
+                d for d in dir_names if os.path.join(dir_path, d) not in exclude
             ]
             for file_name in file_names:
                 # Only include Python files.

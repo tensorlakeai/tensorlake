@@ -1,10 +1,11 @@
+import hashlib
 import math
 import unittest
 
 import psutil
 from testing import (
-    DEFAULT_FUNCTION_EXECUTOR_PORT,
     FunctionExecutorProcessContextManager,
+    create_tmp_blob,
     deserialized_function_output,
     rpc_channel,
     run_task,
@@ -12,20 +13,21 @@ from testing import (
 
 from tensorlake import Graph
 from tensorlake.function_executor.proto.function_executor_pb2 import (
+    BLOB,
     InitializationOutcomeCode,
     InitializeRequest,
     InitializeResponse,
-    RunTaskResponse,
     SerializedObject,
     SerializedObjectEncoding,
+    SerializedObjectManifest,
     TaskOutcomeCode,
+    TaskResult,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
 from tensorlake.functions_sdk.functions import tensorlake_function
 from tensorlake.functions_sdk.graph_serialization import (
-    ZIPPED_GRAPH_CODE_CONTENT_TYPE,
     graph_code_dir_path,
     zip_graph_code,
 )
@@ -50,10 +52,12 @@ def process_rss_mb(x: int) -> int:
 class TestMemoryUsage(unittest.TestCase):
     def test_memory_usage_is_below_max_threshold(self):
         graph = Graph(name="test", description="test", start_node=process_rss_mb)
+        graph_data: bytes = zip_graph_code(
+            graph=graph,
+            code_dir_path=GRAPH_CODE_DIR_PATH,
+        )
 
-        with FunctionExecutorProcessContextManager(
-            DEFAULT_FUNCTION_EXECUTOR_PORT
-        ) as process:
+        with FunctionExecutorProcessContextManager() as process:
             with rpc_channel(process) as channel:
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 initialize_response: InitializeResponse = stub.initialize(
@@ -63,32 +67,37 @@ class TestMemoryUsage(unittest.TestCase):
                         graph_version="1",
                         function_name="process_rss_mb",
                         graph=SerializedObject(
-                            data=zip_graph_code(
-                                graph=graph, code_dir_path=GRAPH_CODE_DIR_PATH
+                            manifest=SerializedObjectManifest(
+                                encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                                encoding_version=0,
+                                size=len(graph_data),
+                                sha256_hash=hashlib.sha256(graph_data).hexdigest(),
                             ),
-                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
-                            encoding_version=0,
+                            data=graph_data,
                         ),
                     )
                 )
                 self.assertEqual(
                     initialize_response.outcome_code,
-                    InitializationOutcomeCode.INITIALIZE_OUTCOME_CODE_SUCCESS,
+                    InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
                 )
 
-                run_task_response: RunTaskResponse = run_task(
+                function_outputs_blob: BLOB = create_tmp_blob()
+                task_result: TaskResult = run_task(
                     stub,
                     function_name="process_rss_mb",
                     input=0,
+                    function_outputs_blob=function_outputs_blob,
+                    invocation_error_blob=create_tmp_blob(),
                 )
 
                 self.assertEqual(
-                    run_task_response.outcome_code,
+                    task_result.outcome_code,
                     TaskOutcomeCode.TASK_OUTCOME_CODE_SUCCESS,
                 )
 
                 fn_outputs = deserialized_function_output(
-                    self, run_task_response.function_outputs
+                    self, task_result.function_outputs, function_outputs_blob
                 )
                 self.assertEqual(len(fn_outputs), 1)
                 fe_process_rss_mb = fn_outputs[0]

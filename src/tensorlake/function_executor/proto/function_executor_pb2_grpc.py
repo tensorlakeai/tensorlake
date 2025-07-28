@@ -52,12 +52,6 @@ class FunctionExecutorStub(object):
             response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.InvocationStateRequest.FromString,
             _registered_method=True,
         )
-        self.run_task = channel.unary_unary(
-            "/function_executor_service.FunctionExecutor/run_task",
-            request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskRequest.SerializeToString,
-            response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskResponse.FromString,
-            _registered_method=True,
-        )
         self.list_tasks = channel.unary_unary(
             "/function_executor_service.FunctionExecutor/list_tasks",
             request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.ListTasksRequest.SerializeToString,
@@ -118,15 +112,6 @@ class FunctionExecutorServicer(object):
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def run_task(self, request, context):
-        """Executes the task defined in the request.
-        Multiple tasks can be running in parallel.
-        This is logically equivalent to start_task / await_task / delete_task.
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details("Method not implemented!")
-        raise NotImplementedError("Method not implemented!")
-
     def list_tasks(self, request, context):
         """Lists the currently-running tasks."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -140,9 +125,8 @@ class FunctionExecutorServicer(object):
         raise NotImplementedError("Method not implemented!")
 
     def await_task(self, request, context):
-        """Waits for the indicated task to reach a completed state
-        (outcome != unknown), returning a stream of task progress
-        updates.
+        """Sends progress updates for the task.
+        Sends its result once it's complete.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
@@ -180,11 +164,6 @@ def add_FunctionExecutorServicer_to_server(servicer, server):
             servicer.initialize_invocation_state_server,
             request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.InvocationStateResponse.FromString,
             response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.InvocationStateRequest.SerializeToString,
-        ),
-        "run_task": grpc.unary_unary_rpc_method_handler(
-            servicer.run_task,
-            request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskRequest.FromString,
-            response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskResponse.SerializeToString,
         ),
         "list_tasks": grpc.unary_unary_rpc_method_handler(
             servicer.list_tasks,
@@ -279,36 +258,6 @@ class FunctionExecutor(object):
             "/function_executor_service.FunctionExecutor/initialize_invocation_state_server",
             tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.InvocationStateResponse.SerializeToString,
             tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.InvocationStateRequest.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True,
-        )
-
-    @staticmethod
-    def run_task(
-        request,
-        target,
-        options=(),
-        channel_credentials=None,
-        call_credentials=None,
-        insecure=False,
-        compression=None,
-        wait_for_ready=None,
-        timeout=None,
-        metadata=None,
-    ):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            "/function_executor_service.FunctionExecutor/run_task",
-            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskRequest.SerializeToString,
-            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskResponse.FromString,
             options,
             channel_credentials,
             insecure,
