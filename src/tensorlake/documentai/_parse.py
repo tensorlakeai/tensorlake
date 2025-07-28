@@ -4,7 +4,7 @@ import asyncio
 import inspect
 import json
 import time
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Union
 
 from pydantic import BaseModel
 
@@ -465,7 +465,9 @@ class _ParseMixin(_BaseClient):
 def _create_parse_req(
     file: str,
     parsing_options: Optional[ParsingOptions] = None,
-    structured_extraction_options: Optional[List[StructuredExtractionOptions]] = None,
+    structured_extraction_options: Optional[
+        Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
+    ] = None,
     enrichment_options: Optional[EnrichmentOptions] = None,
     page_classifications: Optional[List[PageClassConfig]] = None,
     page_range: Optional[str] = None,
@@ -498,9 +500,14 @@ def _create_parse_req(
         ]
 
     if structured_extraction_options:
-        payload["structured_extraction_options"] = [
-            _convert_seo(opt) for opt in structured_extraction_options
-        ]
+        if isinstance(structured_extraction_options, StructuredExtractionOptions):
+            payload["structured_extraction_options"] = [
+                _convert_seo(structured_extraction_options)
+            ]
+        else:
+            payload["structured_extraction_options"] = [
+                _convert_seo(opt) for opt in structured_extraction_options
+            ]
 
     return payload
 

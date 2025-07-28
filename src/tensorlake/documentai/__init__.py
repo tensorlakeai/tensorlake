@@ -17,7 +17,6 @@ from tensorlake.documentai.models import (
     PageClassConfig,
     PageFragment,
     PageFragmentType,
-    ParseRequestOptions,
     ParseResult,
     ParseStatus,
     ParsingOptions,
@@ -50,7 +49,6 @@ __all__ = [
     "StructuredExtractionOptions",
     # Results models
     "PageClass",
-    "ParseRequestOptions",
     "ParseResult",
     "Chunk",
     "Figure",

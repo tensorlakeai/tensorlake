@@ -2,10 +2,7 @@
 DocumentAI models package.
 """
 
-from ._datasets import (
-    Dataset,
-    DatasetStatus,
-)
+from ._datasets import Dataset, DatasetStatus
 
 # Enums
 from ._enums import (
@@ -37,7 +34,6 @@ from ._results import (
     PageClass,
     PageFragment,
     PageFragmentType,
-    ParseRequestOptions,
     ParseResult,
     Signature,
     StructuredData,
@@ -63,7 +59,6 @@ __all__ = [
     "StructuredExtractionOptions",
     # Results models
     "PageClass",
-    "ParseRequestOptions",
     "ParseResult",
     "Chunk",
     "Figure",
