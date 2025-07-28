@@ -25,9 +25,9 @@ class InitializeRequestValidator:
         )
         graph: SerializedObject = self._request.graph
         if (
-            graph.encoding
+            graph.manifest.encoding
             != SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP
         ):
             raise ValueError(
-                f"Invalid graph encoding: {SerializedObjectEncoding.Name(graph.encoding)}. Expected: BINARY_ZIP"
+                f"Invalid graph encoding: {SerializedObjectEncoding.Name(graph.manifest.encoding)}. Expected: BINARY_ZIP"
             )

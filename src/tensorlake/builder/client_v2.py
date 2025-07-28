@@ -16,6 +16,7 @@
 
 import asyncio
 import os
+import signal
 import tempfile
 from dataclasses import dataclass
 from typing import Dict, Optional
@@ -27,7 +28,6 @@ from httpx_sse import aconnect_sse
 from pydantic import BaseModel
 
 from tensorlake import Image
-import signal
 
 
 @dataclass
@@ -291,13 +291,12 @@ class ImageBuilderV2Client:
 
             if response.status_code == 202:
                 click.secho(
-                    f"Build for image {image.image_name} cancelled successfully", fg="green"
+                    f"Build for image {image.image_name} cancelled successfully",
+                    fg="green",
                 )
             else:
                 click.secho(f"Failed to cancel build {build.id}", fg="red")
-            click.secho(
-                f"Cancelled build for image {image.image_name}", fg="yellow"
-            )
+            click.secho(f"Cancelled build for image {image.image_name}", fg="yellow")
         except Exception as e:
             click.secho(
                 f"Failed to cancel build for image {image.image_name}: {e}",
