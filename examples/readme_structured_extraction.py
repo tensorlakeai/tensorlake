@@ -1,14 +1,12 @@
-import time
 from datetime import date
 from typing import Dict, List, Optional
-
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
-from tensorlake.documentai import DocumentAI, ExtractionOptions, ParsingOptions
+from tensorlake.documentai import DocumentAI
+from tensorlake.documentai.models import ParsingOptions, StructuredExtractionOptions, ChunkingStrategy
 
-API_KEY = "tl_apiKey_XXXX"
-
-# Or set this in the environment variable TENSORLAKE_API_KEY
+load_dotenv()
 
 
 class Address(BaseModel):
@@ -69,26 +67,34 @@ class BankStatement(BaseModel):
     )
 
 
-# if you don't pass an api key, it will look for the TENSORLAKE_API_KEY environment variable
-doc_ai = DocumentAI(api_key=API_KEY)
-# Skip this if you are passing a pre-signed URL to the `DocumentParser`.
-# or pass an external URL
+# If you don't pass an api key, it will look for the TENSORLAKE_API_KEY environment variable
+doc_ai = DocumentAI()
+
+# Skip this if you are passing a pre-signed URL to the parse method or pass an external URL
 file_id = doc_ai.upload(path="./examples/documents/example_bank_statement.pdf")
 
-job_id = doc_ai.parse(
-    file_id,
-    options=ParsingOptions(extraction_options=ExtractionOptions(schema=BankStatement)),
+# Configure parsing options
+parsing_options = ParsingOptions(
+    chunking_strategy=ChunkingStrategy.PAGE
 )
 
-result = doc_ai.get_job(job_id=job_id)
-print(f"job status: {result.status}")
-while True:
-    if result.status in ["processing", "pending"]:
-        print("waiting 5s...")
-        time.sleep(5)
-        result = doc_ai.get_job(job_id)
-        print(f"job status: {result.status}")
-    else:
-        if result.status == "successful":
-            print(result)
-        break
+# Configure structured extraction options
+structured_extraction_options = StructuredExtractionOptions(
+    schema_name="Bank Statement",
+    json_schema=BankStatement  # Can pass Pydantic model directly
+)
+
+# Parse the document
+parse_id = doc_ai.parse(
+    file_id,
+    parsing_options=parsing_options,
+    structured_extraction_options=[structured_extraction_options]
+)
+
+# Wait for completion
+result = doc_ai.wait_for_completion(parse_id=parse_id)
+
+print(f"Parse status: {result.status}")
+
+if result.structured_data:
+    print(result.structured_data[0].model_dump())
