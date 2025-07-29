@@ -81,6 +81,10 @@ def list(ctx: Context, verbose: bool, use_json: bool, graph_name: str):
 @request.command(
     epilog="""
 \b
+Arguments:
+  tensorlake request info <request-id>              # Uses default graph
+  tensorlake request info <graph-name> <request-id> # Explicit graph name
+\b
 Use 'tensorlake config set default.graph <name>' to set a default graph name.
 Use 'tensorlake config set default.request <id>' to set a default request ID.
 """
@@ -92,8 +96,7 @@ Use 'tensorlake config set default.request <id>' to set a default request ID.
     is_flag=True,
     help="Export invocation information as JSON-encoded data",
 )
-@click.argument("graph-name", required=False)
-@click.argument("request-id", required=False)
+@click.argument("args", nargs=-1, required=False)
 @click.option("--tasks", "-t", is_flag=True, help="Show tasks")
 @click.option("--outputs", "-o", is_flag=True, help="Show outputs")
 @pass_auth
@@ -102,12 +105,23 @@ def info(
     use_json: bool,
     tasks: bool,
     outputs: bool,
-    graph_name: str,
-    request_id: str,
+    args: tuple,
 ):
     """
     Info about a remote request
     """
+    # Parse arguments: if one arg provided, treat it as request_id
+    # If two args provided, treat them as graph_name and request_id
+    if len(args) == 1:
+        graph_name = None
+        request_id = args[0]
+    elif len(args) == 2:
+        graph_name = args[0]
+        request_id = args[1]
+    else:
+        graph_name = None
+        request_id = None
+
     if not graph_name:
         if ctx.default_graph:
             graph_name = ctx.default_graph
@@ -131,8 +145,6 @@ def info(
     if use_json:
         print_json(request.model_dump_json())
         return
-
-    from rich import print
 
     print(f"[bold][red]Request:[/red][/bold] {request.id}")
     print(f"[bold][red]Graph Version:[/red][/bold] {request.graph_version}")
@@ -174,7 +186,7 @@ def info(
         print(outputs_table)
 
     if tasks:
-        tasks: List[Task] = auth.tensorlake_client.tasks(graph_name, request_id)
+        tasks: List[Task] = ctx.tensorlake_client.tasks(graph_name, request_id)
 
         for task in tasks:
             print(f"[bold][red]Task:[/red][/bold] {task.id}")
