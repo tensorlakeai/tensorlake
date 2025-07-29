@@ -515,7 +515,7 @@ class TensorlakeClient:
         outputs = []
         for i in range(output_metadata.num_outputs):
             response = self._get(
-                f"v1/namespaces/{self.namespace}/compute-graphs/{graph}/requests/{request_id}/fn/{fn_name}/outputs/{output_metadata.id}/index/{i}",
+                f"v1/namespaces/{self.namespace}/compute-graphs/{graph}/requests/{request_id}/output/{fn_name}/id/{output_metadata.id}/index/{i}",
             )
             response.raise_for_status()
             content_type = response.headers.get("Content-Type")
