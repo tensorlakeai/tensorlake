@@ -16,6 +16,7 @@ from tqdm.asyncio import tqdm as async_tqdm
 
 from tensorlake.documentai.common import DOC_AI_BASE_URL
 
+
 class FileInfo(BaseModel):
     """
     Metadata from a file uploaded to DocumentAI.

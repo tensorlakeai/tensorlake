@@ -3,6 +3,7 @@ import unittest
 
 from tensorlake.documentai import DocumentAI
 
+
 class TestFiles(unittest.TestCase):
     def setUp(self):
         server_url = os.getenv("INDEXIFY_URL")
@@ -34,5 +35,5 @@ class TestFiles(unittest.TestCase):
         self.assertIsNotNone(file_id)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
