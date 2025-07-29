@@ -3,7 +3,7 @@ from typing import Any, Generator, List, Optional
 from tensorlake.functions_sdk.graph import Graph
 from tensorlake.functions_sdk.graph_definition import ComputeGraphMetadata
 
-from .http_client import DEFAULT_SERVICE_URL, TensorlakeClient, WorkflowEvent
+from .http_client import DEFAULT_SERVICE_URL, TensorlakeClient, WorkflowEvent, RequestMetadata
 
 
 class RemoteGraph:
@@ -175,4 +175,17 @@ class RemoteGraph:
             graph=self._name,
             request_id=invocation_id,
             fn_name=fn_name,
+        )
+    
+    def get_output(self, request_id: str, fn_name: str) -> Any:
+        return self._client.graph_outputs(
+            graph=self._name,
+            request_id=request_id,
+            fn_name=fn_name,
+        )
+    
+    def request(self, request_id: str) -> RequestMetadata:
+        return self._client.request(
+            graph=self._name,
+            request_id=request_id,
         )
