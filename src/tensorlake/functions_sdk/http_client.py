@@ -381,7 +381,7 @@ class TensorlakeClient:
             f"v1/namespaces/{self.namespace}/compute-graphs/{graph}",
             **kwargs,
         )
-        return response.json()["id"]
+        return response.json()["request_id"]
         
     def call_stream(
         self,
