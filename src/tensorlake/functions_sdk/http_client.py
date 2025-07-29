@@ -460,7 +460,7 @@ class TensorlakeClient:
             if (
                 event.event_name == "TaskCompleted"
                 and isinstance(event.payload, RequestProgressPayload)
-                and event.payload.outcome == "Failure"
+                and event.payload.outcome == "failure"
             ):
                 event.stdout = self.logs(
                     graph,
@@ -546,7 +546,7 @@ class TensorlakeClient:
         )
         response.raise_for_status()
         request = RequestMetadata(**response.json())
-        if request.status in ["Pending", "Running"]:
+        if request.status in ["pending", "running"]:
             raise GraphStillProcessing()
 
         if request.request_error is not None:
