@@ -351,9 +351,7 @@ class TensorlakeClient:
     ) -> str:
         if not block_until_done:
             return self._call(graph, input_encoding, **kwargs)
-        events = self.call_stream(
-            graph, input_encoding, **kwargs
-        )
+        events = self.call_stream(graph, input_encoding, **kwargs)
         try:
             while True:
                 print(str(next(events)))
@@ -361,7 +359,7 @@ class TensorlakeClient:
             # TODO: Once we only support Python >= 3.13, we can just return events.close().
             events.close()
             return result.value
-        
+
     def _call(
         self,
         graph: str,

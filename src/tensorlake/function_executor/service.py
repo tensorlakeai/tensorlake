@@ -1,18 +1,18 @@
 import importlib
 import io
 import json
-import os
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import zipfile
 from contextlib import redirect_stderr, redirect_stdout
-from typing import Any, Generator, Iterator, Optional
+from typing import Any, Dict, Generator, Iterator, Optional
 
 import grpc
 
-from tensorlake.functions_sdk.functions import TensorlakeFunctionWrapper
+from tensorlake.functions_sdk.functions import Progress, TensorlakeFunctionWrapper
 from tensorlake.functions_sdk.graph_definition import ComputeGraphMetadata
 from tensorlake.functions_sdk.graph_serialization import (
     GRAPH_MANIFEST_FILE_NAME,
@@ -23,14 +23,17 @@ from tensorlake.functions_sdk.graph_serialization import (
 
 from .handlers.check_health.handler import Handler as CheckHealthHandler
 from .handlers.run_function.handler import Handler as RunTaskHandler
-from .handlers.run_function.request_validator import (
-    RequestValidator as RunTaskRequestValidator,
-)
 from .info import info_response_kv_args
 from .initialize_request_validator import InitializeRequestValidator
 from .invocation_state.invocation_state_proxy_server import InvocationStateProxyServer
 from .invocation_state.proxied_invocation_state import ProxiedInvocationState
 from .proto.function_executor_pb2 import (
+    AwaitTaskProgress,
+    AwaitTaskRequest,
+    CreateTaskRequest,
+    DeleteTaskRequest,
+    Empty,
+    FunctionInputs,
     HealthCheckRequest,
     HealthCheckResponse,
     InfoRequest,
@@ -41,11 +44,85 @@ from .proto.function_executor_pb2 import (
     InitializeResponse,
     InvocationStateRequest,
     InvocationStateResponse,
+    ListTasksRequest,
+    ListTasksResponse,
+    ProgressUpdate,
     RunTaskRequest,
     RunTaskResponse,
+    Task,
+    TaskFailureReason,
+    TaskOutcomeCode,
+    TaskResult,
 )
 from .proto.function_executor_pb2_grpc import FunctionExecutorServicer
+from .proto.message_validator import MessageValidator
 from .std_outputs_capture import flush_logs, read_till_the_end
+
+
+def _run_task_request_to_function_inputs(run_request: RunTaskRequest) -> FunctionInputs:
+    """Convert RunTaskRequest to FunctionInputs."""
+    request = FunctionInputs()
+
+    if run_request.HasField("function_input"):
+        request.function_input.CopyFrom(run_request.function_input)
+
+    if run_request.HasField("function_init_value"):
+        request.function_init_value.CopyFrom(run_request.function_init_value)
+
+    return request
+
+
+def _run_task_request_to_task(run_request: RunTaskRequest) -> Task:
+    """Convert RunTaskRequest to Task."""
+    return Task(
+        task_id=run_request.task_id,
+        namespace=run_request.namespace,
+        graph_name=run_request.graph_name,
+        graph_version=run_request.graph_version,
+        function_name=run_request.function_name,
+        graph_invocation_id=run_request.graph_invocation_id,
+        allocation_id=run_request.allocation_id,
+        request=_run_task_request_to_function_inputs(run_request),
+    )
+
+
+def _task_result_to_run_task_response(
+    task_id: str, result: TaskResult
+) -> RunTaskResponse:
+    """Convert TaskResult to RunTaskResponse."""
+    response = RunTaskResponse(
+        task_id=task_id,
+        function_outputs=list(result.function_outputs),
+        next_functions=list(result.next_functions),
+        stdout=result.stdout,
+        stderr=result.stderr,
+        is_reducer=result.is_reducer,
+        outcome_code=result.outcome_code,
+        failure_reason=result.failure_reason,
+    )
+
+    if result.HasField("metrics"):
+        response.metrics.CopyFrom(result.metrics)
+
+    if result.HasField("invocation_error_output"):
+        response.invocation_error_output.CopyFrom(result.invocation_error_output)
+
+    return response
+
+
+class _TaskExecution:
+    def __init__(self):
+        self.complete = False
+        self.thread: threading.Thread | None = None
+        self.updated = threading.Condition()
+        self.progress = ProgressUpdate(current=0.0, total=1.0)
+
+
+class _TaskInfo:
+    def __init__(self, task: Task):
+        self.task = task
+        self.execution = _TaskExecution()
+        self.task.result.Clear()
 
 
 class Service(FunctionExecutorServicer):
@@ -62,6 +139,9 @@ class Service(FunctionExecutorServicer):
         self._graph_metadata: Optional[ComputeGraphMetadata] = None
         self._invocation_state_proxy_server: Optional[InvocationStateProxyServer] = None
         self._check_health_handler: Optional[CheckHealthHandler] = None
+        # Task management for create_task/await_task/delete_task
+        self._tasks: Dict[str, _TaskInfo] = {}
+        self._tasks_lock = threading.Lock()
 
     def initialize(
         self, request: InitializeRequest, context: grpc.ServicerContext
@@ -201,46 +281,67 @@ class Service(FunctionExecutorServicer):
         yield from self._invocation_state_proxy_server.run()
         self._invocation_state_proxy_server = None
 
-    def run_task(
-        self, request: RunTaskRequest, context: grpc.ServicerContext
-    ) -> RunTaskResponse:
+    def _validate_task(self, task: Task):
         # Customer function code never raises an exception because we catch all of them and add
         # their details to the response. We can only get an exception here if our own code failed.
         # If our code raises an exception the grpc framework converts it into GRPC_STATUS_UNKNOWN
         # error with the exception message. Differentiating errors is not needed for now.
-        RunTaskRequestValidator(request=request).check()
+
+        # Validate required fields
+        validator = MessageValidator(task)
+        validator.required_field("namespace")
+        validator.required_field("graph_name")
+        validator.required_field("graph_version")
+        validator.required_field("function_name")
+        validator.required_field("graph_invocation_id")
+        validator.required_field("task_id")
+        validator.required_field("allocation_id")
+        validator.required_field("request")
+
+        # Validate task request (input data)
+        request_validator = MessageValidator(task.request)
+        request_validator.required_serialized_object("function_input")
 
         # Fail with internal error as this happened due to wrong task routing to this Server.
         # If we run the wrongly routed task then it can steal data from this Server if it belongs
         # to a different customer.
-        if request.namespace != self._namespace:
+        if task.namespace != self._namespace:
             raise ValueError(
-                f"This Function Executor is not initialized for this namespace {request.namespace}"
+                f"This Function Executor is not initialized for this namespace {task.namespace}"
             )
-        if request.graph_name != self._graph_name:
+        if task.graph_name != self._graph_name:
             raise ValueError(
-                f"This Function Executor is not initialized for this graph_name {request.graph_name}"
+                f"This Function Executor is not initialized for this graph_name {task.graph_name}"
             )
-        if request.graph_version != self._graph_version:
+        if task.graph_version != self._graph_version:
             raise ValueError(
-                f"This Function Executor is not initialized for this graph_version {request.graph_version}"
+                f"This Function Executor is not initialized for this graph_version {task.graph_version}"
             )
-        if request.function_name != self._function_name:
+        if task.function_name != self._function_name:
             raise ValueError(
-                f"This Function Executor is not initialized for this function_name {request.function_name}"
+                f"This Function Executor is not initialized for this function_name {task.function_name}"
             )
 
-        return RunTaskHandler(
-            request=request,
-            invocation_state=ProxiedInvocationState(
-                request.task_id, self._invocation_state_proxy_server
-            ),
-            function_wrapper=self._function_wrapper,
-            function_stdout=self._function_stdout,
-            function_stderr=self._function_stderr,
-            graph_metadata=self._graph_metadata,
-            logger=self._logger,
-        ).run()
+    def run_task(
+        self, request: RunTaskRequest, context: grpc.ServicerContext
+    ) -> RunTaskResponse:
+        # Convert RunTaskRequest to Task for create_task
+        task = _run_task_request_to_task(request)
+        self.create_task(CreateTaskRequest(task=task), context)
+
+        try:
+            for response in self.await_task(
+                AwaitTaskRequest(task_id=request.task_id), context
+            ):
+                last_response = response
+        finally:
+            self.delete_task(DeleteTaskRequest(task_id=request.task_id), context)
+
+        assert last_response.WhichOneof("response") == "task_result"
+        # Convert TaskResult back to RunTaskResponse for backward compatibility
+        return _task_result_to_run_task_response(
+            request.task_id, last_response.task_result
+        )
 
     def check_health(
         self, request: HealthCheckRequest, context: grpc.ServicerContext
@@ -256,3 +357,159 @@ class Service(FunctionExecutorServicer):
         self, request: InfoRequest, context: grpc.ServicerContext
     ) -> InfoResponse:
         return InfoResponse(**info_response_kv_args())
+
+    def _execute_task_in_thread(self, task_info: _TaskInfo):
+        def progress_reporter(progress: Progress):
+            with task_info.execution.updated:
+                task_info.execution.progress = ProgressUpdate(
+                    current=progress.current, total=progress.total
+                )
+                task_info.execution.updated.notify_all()
+            # sleep(0) here momentarily releases the GIL, giving other
+            # threads a chance to run - e.g. allowing the FE to handle
+            # incoming RPCs, to report back await_task() progress
+            # messages, &c.
+            time.sleep(0)
+
+        try:
+            # Run the task handler
+            result = RunTaskHandler(
+                task=task_info.task,
+                invocation_state=ProxiedInvocationState(
+                    task_info.task.task_id, self._invocation_state_proxy_server
+                ),
+                function_wrapper=self._function_wrapper,
+                function_stdout=self._function_stdout,
+                function_stderr=self._function_stderr,
+                graph_metadata=self._graph_metadata,
+                progress_reporter=progress_reporter,
+                logger=self._logger,
+            ).run()
+
+            task_info.task.result.CopyFrom(result)
+
+        except BaseException as e:
+            # Handle any errors by creating a failed task result
+            self._logger.error(
+                "task execution failed in background thread",
+                task_id=task_info.task.task_id,
+                exc_info=e,
+            )
+
+            raise
+
+        finally:
+            with task_info.execution.updated:
+                task_info.execution.complete = True
+                task_info.execution.updated.notify_all()
+
+    def list_tasks(
+        self, request: ListTasksRequest, context: grpc.ServicerContext
+    ) -> ListTasksResponse:
+        with self._tasks_lock:
+            tasks = []
+            for task_info in self._tasks.values():
+                with task_info.execution.updated:
+                    # Create a copy of the task without the request field for listing
+                    task_copy = Task()
+                    task_copy.CopyFrom(task_info.task)
+                    task_copy.ClearField(
+                        "request"
+                    )  # Don't return input data when listing
+                    task_copy.ClearField(
+                        "response"
+                    )  # Don't return output data when listing
+                    tasks.append(task_copy)
+
+            return ListTasksResponse(tasks=tasks)
+
+    def create_task(
+        self, request: CreateTaskRequest, context: grpc.ServicerContext
+    ) -> Task:
+        task = request.task
+
+        self._validate_task(task)
+
+        with self._tasks_lock:
+            if task.task_id in self._tasks:
+                context.abort(
+                    grpc.StatusCode.ALREADY_EXISTS,
+                    f"Task {task.task_id} already exists",
+                )
+
+            task_info = _TaskInfo(task)
+            self._tasks[task.task_id] = task_info
+
+            task_info.execution.thread = threading.Thread(
+                target=self._execute_task_in_thread,
+                args=(task_info,),
+                daemon=True,
+            )
+            task_info.execution.thread.start()
+
+        # Return a minimal task with no optional fields set; we'll
+        # extend this iff the server provides new info.
+        return Task()
+
+    def await_task(
+        self, request: AwaitTaskRequest, context: grpc.ServicerContext
+    ) -> Generator[AwaitTaskProgress, None, None]:
+        """Wait for task completion and stream progress updates."""
+        task_id = request.task_id
+
+        with self._tasks_lock:
+            task_info = self._tasks.get(task_id)
+
+        if task_info is None:
+            context.abort(
+                grpc.StatusCode.NOT_FOUND,
+                f"Task {task_id} not found",
+            )
+
+        # Stream progress updates until task completes
+        final_result = None
+        sent_first_progress = False
+        while True:
+            with task_info.execution.updated:
+                if task_info.execution.complete:
+                    # Use TaskResult directly
+                    final_result = task_info.task.result
+                    break
+
+                if sent_first_progress:
+                    task_info.execution.updated.wait()
+                else:
+                    sent_first_progress = True
+
+                progress = task_info.execution.progress
+
+            if progress:
+                yield AwaitTaskProgress(progress=progress)
+
+        yield AwaitTaskProgress(task_result=final_result)
+
+    def delete_task(
+        self, request: DeleteTaskRequest, context: grpc.ServicerContext
+    ) -> Empty:
+        """Delete a task and clean up resources."""
+        task_id = request.task_id
+
+        with self._tasks_lock:
+            task_info = self._tasks.get(task_id)
+
+            if task_info is None:
+                context.abort(
+                    grpc.StatusCode.NOT_FOUND,
+                    f"Task {task_id} not found",
+                )
+
+            with task_info.execution.updated:
+                if not task_info.execution.complete:
+                    context.abort(
+                        grpc.StatusCode.FAILED_PRECONDITION,
+                        f"Task {task_id} is still running",
+                    )
+
+            self._tasks.pop(task_id, None)
+
+        return Empty()
