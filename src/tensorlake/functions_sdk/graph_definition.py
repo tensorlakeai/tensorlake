@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
@@ -6,6 +6,13 @@ from tensorlake.functions_sdk.image import ImageInformation
 
 from .object_serializer import get_serializer
 from .resources import ResourceMetadata
+
+
+class ParameterMetadata(BaseModel):
+    name: str
+    data_type: Dict[str, Any]  # JSON Schema object with optional "default" property
+    description: Optional[str] = None
+    required: bool = True
 
 
 class RetryPolicyMetadata(BaseModel):
@@ -28,6 +35,8 @@ class FunctionMetadata(BaseModel):
     resources: Optional[ResourceMetadata] = None
     retry_policy: Optional[RetryPolicyMetadata] = None
     cache_key: Optional[str] = None
+    parameters: Optional[List[ParameterMetadata]] = None
+    return_type: Optional[Dict[str, Any]] = None  # JSON Schema object
 
 
 class RuntimeInformation(BaseModel):

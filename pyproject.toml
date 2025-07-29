@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tensorlake"
-version = "0.2.31"
+version = "0.2.33"
 description = "Tensorlake SDK for Document Ingestion API and Serverless Workflows"
 authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
 homepage = "https://github.com/tensorlakeai/tensorlake"
@@ -12,8 +12,6 @@ python-magic = "^0.4.27"
 httpx = { version = ">=0.27.2, < 1.0", extras = ["http2"] }
 cloudpickle = "^3.1.0"
 pydantic = ">=2.0, <3.0"
-docker = "^7.1.0"
-nanoid = "^2.0.0"
 httpx-sse = "^0.4.1"
 rich = "14.0.0"                                    # TODO: Look into consolidating this with click
 pyyaml = "^6.0.2"
@@ -24,12 +22,8 @@ tqdm = "^4.67.1"
 
 # Required only by Function Executor
 structlog = "25.4.0"
-grpcio = "1.73.1"
-grpcio-tools = "1.73.1"
-
-# Packages pinned to mitigate vulnerabilities, not a direct dependcy of tensorlake
-requests = "^2.32.4"
-urllib3 = "^2.5.0"
+grpcio = "1.74.0"
+grpcio-tools = "1.74.0"
 
 [tool.poetry.scripts]
 tensorlake = "tensorlake.cli:cli"

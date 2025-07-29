@@ -9,8 +9,6 @@ from io import BytesIO
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
-import docker
-import docker.api.build
 from pydantic import BaseModel
 
 
@@ -93,6 +91,13 @@ class Image:
         self._tag = tag
         return self
 
+    @property
+    def image_tag(self) -> str:
+        """
+        Get the tag of the image.
+        """
+        return self._tag
+
     def base_image(self, base_image):
         self._base_image = base_image
         return self
@@ -150,13 +155,14 @@ class Image:
                     logging.info("Adding (ADD) %s", src)
                     tf.add(src, arcname=src)
 
-            dockerfile = self._generate_dockerfile()
+            dockerfile = self.dockerfile()
             tarinfo = tarfile.TarInfo("Dockerfile")
             tarinfo.size = len(dockerfile)
 
             tf.addfile(tarinfo, BytesIO(dockerfile.encode()))
 
-    def _generate_dockerfile(self):
+    def dockerfile(self) -> str:
+        """Generate the Dockerfile content based on the build operations."""
         docker_contents = [
             f"FROM {self._base_image}",
             "WORKDIR /app",
@@ -171,26 +177,6 @@ class Image:
 
         docker_file = "\n".join(docker_contents)
         return docker_file
-
-    def build(self, docker_client=None):
-        if docker_client is None:
-            docker_client = docker.from_env()
-            docker_client.ping()
-
-        docker_file = self._generate_dockerfile()
-        image_name = f"{self._image_name}:{self._tag}"
-
-        docker.api.build.process_dockerfile = lambda dockerfile, path: (
-            "Dockerfile",
-            dockerfile,
-        )
-
-        return docker_client.images.build(
-            path=".",
-            dockerfile=docker_file,
-            tag=image_name,
-            rm=True,
-        )
 
     def hash(self) -> str:
         hash = hashlib.sha256(

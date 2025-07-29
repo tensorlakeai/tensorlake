@@ -1,4 +1,5 @@
 import importlib
+import inspect
 import re
 import sys
 import time
@@ -11,15 +12,17 @@ from typing import (
     Dict,
     List,
     Optional,
+    Tuple,
     Type,
+    Union,
     get_args,
     get_origin,
 )
 
-import nanoid
-from nanoid import generate
 from pydantic import BaseModel
-from typing_extensions import get_args, get_origin
+from typing_extensions import get_args, get_origin, get_type_hints
+
+from tensorlake.vendor.nanoid import generate as nanoid
 
 from .data_objects import Metrics, TensorlakeData
 from .exceptions import RequestException
@@ -32,6 +35,7 @@ from .functions import (
 from .graph_definition import (
     ComputeGraphMetadata,
     FunctionMetadata,
+    ParameterMetadata,
     RetryPolicyMetadata,
     RuntimeInformation,
 )
@@ -61,6 +65,165 @@ def is_pydantic_model_from_annotation(type_annotation):
     return False
 
 
+def _parse_docstring_parameters(docstring: str) -> Dict[str, str]:
+    """Parse parameter descriptions from docstring.
+
+    Supports Google-style, NumPy-style, and simple parameter descriptions.
+
+    Args:
+        docstring: The function's docstring
+
+    Returns:
+        Dictionary mapping parameter names to their descriptions
+    """
+    if not docstring:
+        return {}
+
+    param_descriptions = {}
+    lines = docstring.strip().split("\n")
+
+    # Try Google-style docstring (Args: section)
+    in_args_section = False
+    for line in lines:
+        stripped = line.strip()
+
+        if stripped.lower() in ["args:", "arguments:", "parameters:"]:
+            in_args_section = True
+            continue
+        elif stripped.lower().endswith(":") and in_args_section:
+            # New section started, exit args section
+            break
+        elif in_args_section and stripped:
+            # Parse parameter line: "param_name: description" or "param_name (type): description"
+            if ":" in stripped:
+                parts = stripped.split(":", 1)
+                param_part = parts[0].strip()
+                description = parts[1].strip()
+
+                # Remove type annotation if present: "param_name (type)" -> "param_name"
+                if "(" in param_part and ")" in param_part:
+                    param_name = param_part.split("(")[0].strip()
+                else:
+                    param_name = param_part
+
+                param_descriptions[param_name] = description
+
+    # If no Args section found, try simple line-by-line parsing
+    if not param_descriptions:
+        for line in lines:
+            stripped = line.strip()
+            if ":" in stripped and not stripped.endswith(":"):
+                parts = stripped.split(":", 1)
+                if len(parts) == 2:
+                    param_part = parts[0].strip()
+                    description = parts[1].strip()
+
+                    # Remove type annotation if present
+                    if "(" in param_part and ")" in param_part:
+                        param_name = param_part.split("(")[0].strip()
+                    else:
+                        param_name = param_part
+
+                    param_descriptions[param_name] = description
+
+    return param_descriptions
+
+
+def _extract_function_parameters(
+    node: TensorlakeCompute,
+) -> Tuple[List[ParameterMetadata], Optional[str]]:
+    """Extract parameter names, types, and return type from TensorlakeCompute function."""
+    signature = inspect.signature(node.run)
+    type_hints = get_type_hints(node.run)
+
+    # Extract parameter descriptions from docstring
+    docstring = inspect.getdoc(node.run) or ""
+    param_descriptions = _parse_docstring_parameters(docstring)
+
+    parameters = []
+    for param_name, param in signature.parameters.items():
+        if param_name == "self":
+            continue
+
+        param_type = type_hints.get(param_name, Any)
+        schema = _format_type_annotation(param_type)
+
+        is_required = param.default == inspect.Parameter.empty
+        if not is_required:
+            # Add default value to JSON Schema
+            schema["default"] = param.default
+
+        # Get description from docstring
+        description = param_descriptions.get(param_name, None)
+
+        parameters.append(
+            ParameterMetadata(
+                name=param_name,
+                data_type=schema,
+                description=description,
+                required=is_required,
+            )
+        )
+
+    # Extract return type
+    return_type = type_hints.get("return", Any)
+    return_type_str = _format_type_annotation(return_type)
+
+    return parameters, return_type_str
+
+
+def _format_type_annotation(type_annotation) -> dict:
+    """Format type annotation as JSON Schema for MCP compatibility."""
+    if type_annotation == Any:
+        return {"type": "string", "description": "Any type"}
+
+    # Handle typing generics like List, Dict, etc. first
+    origin = get_origin(type_annotation)
+    args = get_args(type_annotation)
+
+    if origin:
+        if origin is list:
+            if args:
+                return {"type": "array", "items": _format_type_annotation(args[0])}
+            else:
+                return {"type": "array", "items": {"type": "string"}}
+        elif origin is dict:
+            if len(args) >= 2:
+                return {
+                    "type": "object",
+                    "additionalProperties": _format_type_annotation(args[1]),
+                }
+            else:
+                return {"type": "object"}
+        elif origin is Union:
+            # Handle Union types like Union[str, int]
+            non_none_types = [arg for arg in args if arg is not type(None)]
+            if len(non_none_types) == 1:
+                # Optional type (Union[T, None])
+                schema = _format_type_annotation(non_none_types[0])
+                return schema
+            else:
+                # Multiple types - use anyOf
+                return {
+                    "anyOf": [_format_type_annotation(arg) for arg in non_none_types]
+                }
+
+    # Handle simple types
+    if type_annotation is str:
+        return {"type": "string"}
+    elif type_annotation is int:
+        return {"type": "integer"}
+    elif type_annotation is float:
+        return {"type": "number"}
+    elif type_annotation is bool:
+        return {"type": "boolean"}
+    elif hasattr(type_annotation, "__name__"):
+        # For custom classes, assume object type
+        return {"type": "object", "description": f"{type_annotation.__name__} object"}
+    else:
+        return {"type": "string", "description": str(type_annotation)}
+
+
 class Graph:
     def __init__(
         self,
@@ -73,9 +236,9 @@ class Graph:
     ):
         if version is None:
             # Update graph on every deployment unless user wants to manage the version manually.
-            # nonoid.generate() should be called inside function body, otherwise it'll be called
+            # nanoid() should be called inside function body, otherwise it'll be called
             # only once during module loading.
-            version = nanoid.generate()
+            version = nanoid()
 
         _validate_identifier(version, "version")
         _validate_identifier(name, "name")
@@ -164,6 +327,12 @@ class Graph:
             max_delay_sec=self.retries.max_delay,
             delay_multiplier=self.retries.delay_multiplier,
         )
+
+        # Extract parameter information for start node
+        start_node_params, start_node_return_type = _extract_function_parameters(
+            start_node
+        )
+
         start_node = FunctionMetadata(
             name=start_node.name,
             fn_name=start_node.name,
@@ -190,10 +359,15 @@ class Graph:
                 if start_node.cacheable
                 else None
             ),
+            parameters=start_node_params,
+            return_type=start_node_return_type,
         )
         metadata_edges = self.edges.copy()
         metadata_nodes = {}
         for node_name, node in self.nodes.items():
+            # Extract parameter information for each node
+            node_params, node_return_type = _extract_function_parameters(node)
+
             metadata_nodes[node_name] = FunctionMetadata(
                 name=node_name,
                 fn_name=node.name,
@@ -220,6 +394,8 @@ class Graph:
                     if node.cacheable
                     else None
                 ),
+                parameters=node_params,
+                return_type=node_return_type,
             )
 
         return ComputeGraphMetadata(
@@ -242,7 +418,7 @@ class Graph:
         start_node = self.nodes[self._start_node]
         serializer = get_serializer(start_node.input_encoder)
         input = TensorlakeData(
-            id=generate(),
+            id=nanoid(),
             payload=serializer.serialize(kwargs),
             encoder=start_node.input_encoder,
         )

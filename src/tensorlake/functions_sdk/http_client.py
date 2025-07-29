@@ -5,7 +5,7 @@ from typing import Any, Dict, Generator, Iterator, List, Optional, Union
 
 import httpx
 from httpx_sse import ServerSentEvent, connect_sse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from rich import print  # TODO: Migrate to use click.echo
 
 from tensorlake.functions_sdk.data_objects import TensorlakeData
@@ -58,6 +58,23 @@ class ShallowRequestMetadata(BaseModel):
     status: str
     outcome: str
     created_at: int
+
+
+class Allocation(BaseModel):
+    id: str
+    server_id: str = Field(alias="executor_id")
+    container_id: str = Field(alias="function_executor_id")
+    created_at: int
+    outcome: Optional[str] = None
+    attempt_number: int
+
+
+class Task(BaseModel):
+    id: str
+    status: str
+    outcome: str
+    created_at: int = Field(alias="creation_time_ns")
+    allocations: Optional[List[Allocation]] = None
 
 
 class RequestMetadata(BaseModel):
@@ -276,6 +293,12 @@ class TensorlakeClient:
         )
         response.raise_for_status()
 
+    def tasks(self, graph: str, request_id: str) -> List[Task]:
+        response = self._get(
+            f"v1/namespaces/{self.namespace}/compute-graphs/{graph}/requests/{request_id}/tasks"
+        )
+        return [Task(**task) for task in response.json()["tasks"]]
+
     def graphs(self) -> List[ComputeGraphMetadata]:
         graphs_json = self._get(
             f"v1/namespaces/{self.namespace}/compute-graphs"
@@ -309,7 +332,6 @@ class TensorlakeClient:
         )
         requests: List[ShallowRequestMetadata] = []
         for request in response.json()["requests"]:
-            print(request)
             requests.append(ShallowRequestMetadata(**request))
 
         return requests
@@ -327,8 +349,10 @@ class TensorlakeClient:
         input_encoding: str = "cloudpickle",
         **kwargs,
     ) -> str:
-        events = self.stream_invoke_graph_with_object(
-            graph, block_until_done, input_encoding, **kwargs
+        if not block_until_done:
+            return self._call(graph, input_encoding, **kwargs)
+        events = self.call_stream(
+            graph, input_encoding, **kwargs
         )
         try:
             while True:
@@ -337,23 +361,41 @@ class TensorlakeClient:
             # TODO: Once we only support Python >= 3.13, we can just return events.close().
             events.close()
             return result.value
-
-    def stream_invoke_graph_with_object(
+        
+    def _call(
         self,
         graph: str,
-        block_until_done: bool = False,
+        input_encoding: str = "cloudpickle",
+        **kwargs,
+    ) -> str:
+        serializer = get_serializer(input_encoding)
+        ser_input = serializer.serialize(kwargs)
+        kwargs = {
+            "headers": {
+                "Content-Type": serializer.content_type,
+                "Accept": "application/json",
+            },
+            "data": ser_input,
+        }
+        response = self._post(
+            f"v1/namespaces/{self.namespace}/compute-graphs/{graph}",
+            **kwargs,
+        )
+        return response.json()["id"]
+        
+    def call_stream(
+        self,
+        graph: str,
         input_encoding: str = "cloudpickle",
         **kwargs,
     ) -> Generator[WorkflowEvent, None, str]:
         serializer = get_serializer(input_encoding)
         ser_input = serializer.serialize(kwargs)
-        params = {"block_until_finish": block_until_done}
         kwargs = {
             "headers": {
                 "Content-Type": serializer.content_type,
             },
             "data": ser_input,
-            "params": params,
         }
         self._add_api_key(kwargs)
         invocation_id: Optional[str] = None
