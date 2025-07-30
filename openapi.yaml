@@ -1,0 +1,4655 @@
+openapi: "3.1.0"
+servers:
+  - url: https://api.tensorlake.ai/
+info:
+  title: Tensorlake API
+  description: Tensorlake Cloud APIs for Document Ingestion and Serverless Workflows
+  license:
+    name: ""
+  version: "0.1.0"
+security:
+  - bearerAuth: []
+paths:
+  /documents/v1/datasets:
+    get:
+      tags:
+        - datasets
+      operationId: list_datasets
+      parameters:
+        - name: cursor
+          in: query
+          description: Cursor to paginate through the list of jobs
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Limit the number of jobs to return
+          required: false
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: direction
+          in: query
+          description: Direction to paginate through the list of jobs
+          required: false
+          schema:
+            type: string
+            enum:
+              - next
+              - prev
+        - name: status
+          in: query
+          description: Filter datasets by status
+          required: false
+          schema:
+            type: string
+            enum:
+              - idle
+              - processing
+      responses:
+        "200":
+          description: List datasets
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Page_DatasetListItem"
+        "400":
+          description: Invalid request parameters. Check the cursor and direction values
+          content:
+            text/plain: {}
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "404":
+          description: Dataset not found
+        "500":
+          description: Internal server error
+    post:
+      tags:
+        - datasets
+      summary: |-
+        Create a new dataset. They are used in conjunction with the Structurued Data
+        or Documetn Parsing API requests. Behavior of datasets when used with the
+        APIs:
+        * Structured Extraction API - Structured Data from files are automatically
+          inserted into datasets. A JSON schema is required to guide the extraction.
+        * Document Parsing API - Chunks of parsed documents from the Document
+          Parsing API automatically.
+      operationId: create_dataset
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDatasetRequest"
+        required: true
+      responses:
+        "200":
+          description: Create a new dataset. Reference the name to insert structured data from documents extracted by the Structured Extraction API automatically.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateDatasetResponse"
+        "400":
+          description: Invalid request. The dataset name must be alphanumeric, hyphens, and underscores, and the JSON schema must be valid.
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "404":
+          description: Dataset not found
+        "500":
+          description: Internal server error
+  /documents/v1/datasets/{dataset_name}:
+    get:
+      tags:
+        - datasets
+      operationId: find_dataset
+      parameters:
+        - name: dataset_name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Get a dataset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DatasetResponse"
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "404":
+          description: Dataset not found
+        "500":
+          description: Internal server error
+    put:
+      tags:
+        - datasets
+      operationId: update_dataset
+      parameters:
+        - name: dataset_name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateDatasetRequest"
+        required: true
+      responses:
+        "200":
+          description: Get a dataset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DatasetResponse"
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "404":
+          description: Dataset not found
+        "500":
+          description: Internal server error
+    post:
+      tags:
+        - datasets
+      operationId: add_file_to_dataset
+      parameters:
+        - name: dataset_name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type:
+                    - string
+                    - "null"
+                  format: binary
+                  description: |-
+                    The file to ingest into the dataset.
+
+                    This field must be provided if the `file_id` is not provided.
+
+                    The file should be a binary file, and it will be uploaded to the server.
+                file_id:
+                  type:
+                    - string
+                    - "null"
+                  description: |-
+                    The Tensorlake file ID to ingest into the dataset.
+
+                    This field must be provided if the `file` is not provided.
+
+                    The file ID should be a valid Tensorlake file ID.
+                    A valid file ID is a string that starts with `tensorlake-` (if uploaded
+                    via Files V1), or `file_` (if uploaded via Files V2); followed by a
+                    readable identifier.
+                pages:
+                  type:
+                    - string
+                    - "null"
+                  description: |-
+                    The page range to ingest into the dataset.
+
+                    This field is optional and defaults to `None`, which means all pages
+                    will be ingested. If provided, it should be a string in the format
+                    "start-end", where `start` and `end` are page numbers. For example,
+                    "1-10" will ingest pages 1 to 10.
+                labels:
+                  type:
+                    - object
+                    - "null"
+                  description: |-
+                    The labels to apply to the ingest operation of the file.
+
+                    Labels should be in the format of key=value pairs, e.g. key1=value1; or
+                    as a JSON object.
+
+                    For adding multiple labels, use different form-data fields with the same
+                    key.
+
+                    Example:
+                    POST /documents/v1/files
+                    Content-Type: multipart/form-data; boundary=----boundary
+
+                    ------boundary
+                    Content-Disposition: form-data; name="labels"
+                    owner=JohnDoe
+
+                    ------boundary
+                    Content-Disposition: form-data; name="labels"
+                    project=Tensorlake
+
+                    Labels can also be provided as a JSON object:
+                    ------boundary
+                    Content-Disposition: form-data; name="labels"
+                    {"owner": "JohnDoe", "project": "Tensorlake"}
+
+                    Labels are optional and can be used to store additional information
+                    about the file.
+                  additionalProperties: {}
+                  propertyNames:
+                    type: string
+        required: true
+      responses:
+        "200":
+          description: Extend a dataset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobDispatchedResponse"
+        "400":
+          description: Invalid request. Check the file and pages fields
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "404":
+          description: Dataset not found.
+        "500":
+          description: Internal server error
+    delete:
+      tags:
+        - datasets
+      summary: Delete a dataset. This will remove all data associated with the dataset.
+      operationId: delete_dataset
+      parameters:
+        - name: dataset_name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Delete a dataset
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "404":
+          description: Dataset not found
+        "500":
+          description: Internal server error
+  /documents/v1/datasets/{dataset_name}/jobs:
+    get:
+      tags:
+        - datasets
+      operationId: list_dataset_jobs
+      parameters:
+        - name: cursor
+          in: query
+          description: Cursor to paginate through the list of jobs
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Limit the number of jobs to return
+          required: false
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: direction
+          in: query
+          description: Direction to paginate through the list of jobs
+          required: false
+          schema:
+            type: string
+            enum:
+              - next
+              - prev
+        - name: status
+          in: query
+          description: Filter jobs by status
+          required: false
+          schema:
+            type: string
+            enum:
+              - failure
+              - pending
+              - processing
+              - successful
+        - name: job_id
+          in: query
+          description: Filter jobs by job ID
+          required: false
+          schema:
+            type: string
+        - name: filename
+          in: query
+          description: Filter jobs by filename
+          required: false
+          schema:
+            type: string
+        - name: without_outputs
+          in: query
+          description: Exclude outputs from the response
+          required: false
+          schema:
+            type: boolean
+        - name: created_after
+          in: query
+          description: Filter jobs created after a specific date. Date is inclusive and must be in RFC3339 format
+          required: false
+          schema:
+            type: string
+        - name: created_before
+          in: query
+          description: Filter jobs created before a specific date. Date is inclusive and must be in RFC3339 format
+          required: false
+          schema:
+            type: string
+        - name: dataset_name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List jobs for a dataset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Page_DatasetJobItem"
+        "400":
+          description: Invalid request parameters. Check the cursor and direction values
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "404":
+          description: Dataset not found
+        "500":
+          description: Internal server error
+  /documents/v1/files:
+    get:
+      tags:
+        - files
+      operationId: list_files
+      parameters:
+        - name: cursor
+          in: query
+          description: Cursor to paginate through the list of jobs
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Limit the number of jobs to return
+          required: false
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: direction
+          in: query
+          description: Direction to paginate through the list of jobs
+          required: false
+          schema:
+            type: string
+            enum:
+              - next
+              - prev
+        - name: filename
+          in: query
+          description: Filter by filename. The search is case-sensitive
+          required: false
+          schema:
+            type: string
+        - name: created_after
+          in: query
+          description: Filter by created after. The date is inclusive, and it must be in RFC3339 format
+          required: false
+          schema:
+            type: string
+        - name: created_before
+          in: query
+          description: Filter by created before. The date is inclusive, and it must be in RFC3339 format
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List all files
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Page_FileResponse"
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "500":
+          description: Internal server error
+    post:
+      tags:
+        - files
+      operationId: upload_file
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                labels:
+                  type:
+                    - object
+                    - "null"
+                  description: |-
+                    Labels for the file, can be used to store metadata
+
+                    Labels should be in the format of key=value pairs, e.g. key1=value1; or
+                    as a JSON object.
+
+                    For adding multiple labels, use different form-data fields with the same
+                    key.
+
+                    Example:
+                    POST /documents/v1/files
+                    Content-Type: multipart/form-data; boundary=----boundary
+
+                    ------boundary
+                    Content-Disposition: form-data; name="labels"
+                    owner=JohnDoe
+
+                    ------boundary
+                    Content-Disposition: form-data; name="labels"
+                    project=Tensorlake
+
+                    Labels can also be provided as a JSON object:
+                    ------boundary
+                    Content-Disposition: form-data; name="labels"
+                    {"owner": "JohnDoe", "project": "Tensorlake"}
+
+                    Labels are optional and can be used to store additional information
+                    about the file.
+                  additionalProperties: {}
+                  propertyNames:
+                    type: string
+                file:
+                  type: string
+                  format: binary
+                  description: |-
+                    The file to upload, must be a valid file
+
+                    The file should be sent as a binary file in the request body.
+                    The file will be stored in the database and can be accessed later.
+        required: true
+      responses:
+        "200":
+          description: File uploaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadFileResponse"
+        "400":
+          description: Invalid request
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "500":
+          description: Internal server error
+  /documents/v1/files/{id}:
+    get:
+      tags:
+        - files
+      operationId: download_file
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Download a file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadFileResponse"
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "404":
+          description: File not found
+        "500":
+          description: Internal server error
+    delete:
+      tags:
+        - files
+      operationId: delete_file
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Delete a file
+        "404":
+          description: File not found
+        "500":
+          description: Internal server error
+  /documents/v1/files_large:
+    post:
+      tags:
+        - files
+      summary: Start the upload process for any file larger than 10MB.
+      description: |-
+        This endpoint is the first step in the upload process. There are a total of
+        3 steps:
+        1. **Upload File Init**: This endpoint is called first to initiate the
+           upload process. The response
+         contains a presigned URL that can be used to upload the file.
+        2. **Upload File**: The file is uploaded to the presigned URL. This should
+           be done using a
+        multipart/form-data request via a PUT request.
+        3. **Upload File Finalize**: This endpoint is called to finalize the upload
+           process. It verifies the
+        file and updates the database with the file information.
+      operationId: upload_large_file_init
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadLargeFileInitRequest"
+        required: true
+      responses:
+        "200":
+          description: Response object with the temporary File ID and the presigned URL.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadLargeFileInitResponse"
+        "400":
+          description: Invalid request
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "422":
+          description: Invalid payload provided
+        "500":
+          description: Internal server error
+  /documents/v1/files_large/{presigned_id}:
+    post:
+      tags:
+        - files
+      summary: Finalize the upload process for a large file.
+      description: |-
+        This endpoint is the last step in the upload process. It verifies the file
+        and updates the database with the file information.
+
+        This endpoint is called after the file has been uploaded to the presigned
+        URL.
+
+        The expected id argument is the one returned from the upload_large_file_init
+        endpoint.
+      operationId: upload_large_file_finalize
+      parameters:
+        - name: presigned_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Response with the permanent File ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadFileResponse"
+        "400":
+          description: Invalid request
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "500":
+          description: Internal server error
+  /documents/v1/jobs:
+    get:
+      tags:
+        - jobs
+      operationId: list_jobs
+      parameters:
+        - name: cursor
+          in: query
+          description: Cursor to paginate through the list of jobs
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Limit the number of jobs to return
+          required: false
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: direction
+          in: query
+          description: Direction to paginate through the list of jobs
+          required: false
+          schema:
+            type: string
+            enum:
+              - next
+              - prev
+        - name: filename
+          in: query
+          description: Filter jobs based on the filename used
+          required: false
+          schema:
+            type: string
+        - name: job_id
+          in: query
+          description: Filter jobs based on the job id used
+          required: false
+          schema:
+            type: string
+        - name: dataset_name
+          in: query
+          description: Filter jobs based on the dataset name used
+          required: false
+          schema:
+            type: string
+        - name: status
+          in: query
+          description: Filter jobs based on the status
+          required: false
+          schema:
+            type: string
+            enum:
+              - failure
+              - pending
+              - processing
+              - successful
+        - name: created_after
+          in: query
+          description: Filter jobs created after the given date. Date should be in RFC3339 format
+          required: false
+          schema:
+            type: string
+        - name: created_before
+          in: query
+          description: Filter jobs created before the given date. Date should be in RFC3339 format
+          required: false
+          schema:
+            type: string
+        - name: updated_after
+          in: query
+          description: Filter jobs updated after the given date. Date should be in RFC3339 format
+          required: false
+          schema:
+            type: string
+        - name: updated_before
+          in: query
+          description: Filter jobs updated before the given date. Date should be in RFC3339 format
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List all jobs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Page_JobListItem"
+        "400":
+          description: Unable to list jobs
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "500":
+          description: Internal server error
+  /documents/v1/jobs/{job_id}:
+    get:
+      tags:
+        - jobs
+      operationId: fetch_job
+      parameters:
+        - name: job_id
+          in: path
+          description: The identifier of the job given at creation. Starts with job-
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Get Job Output
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobResponse"
+        "400":
+          description: Invalid request
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "500":
+          description: Internal server error
+    delete:
+      tags:
+        - jobs
+      operationId: delete_job
+      parameters:
+        - name: job_id
+          in: path
+          description: The identifier of the job given at creation. Starts with job-
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Job is deleted
+        "400":
+          description: Invalid request
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "404":
+          description: Job not found
+        "500":
+          description: Internal server error
+  /documents/v1/parse:
+    post:
+      tags:
+        - parse
+      operationId: parse
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                file:
+                  type:
+                    - string
+                    - "null"
+                  description: |-
+                    The file to parse.
+
+                    This can be a remote file URL or a tensorlake file (e.g. `file_***`).
+
+                    If a remote file URL is provided, the file will be downloaded and
+                    parsed.
+
+                    For a tensorlake file, the file needs to be uploaded to the server
+                    first.
+
+                    This field is optional and is only used if the `content` field is not
+                    provided.
+
+                    If both fields are provided, this field takes precedence.
+                content:
+                  type:
+                    - string
+                    - "null"
+                  description: |-
+                    The content to parse.
+
+                    This can be any kind of text e.g. an email content, or an HTML page.
+
+                    This field is optional and is only used if the `file` field is not
+                    provided.
+
+                    If both fields are provided, the `file` field takes precedence.
+                mimeType:
+                  oneOf:
+                    - $ref: "#/components/schemas/MimeType"
+                      description: |-
+                        The MIME type of the content.
+
+                        This is used to determine the type of file being parsed and
+                        to select the appropriate parsing strategy.
+
+                        If not provided, the MIME type will default to `text/plain`.
+
+                        This field is optional and is only used if the `content` field is
+                        provided.
+                  default: text/plain
+                pages:
+                  type:
+                    - string
+                    - "null"
+                  description: |-
+                    The page number to parse.
+
+                    This is only used if the `file` field is provided, and is a pageable
+                    file (e.g. PDF). If not provided, all pages will be parsed.
+                settings:
+                  $ref: "#/components/schemas/Settings"
+                labels:
+                  type:
+                    - object
+                    - "null"
+                  description: Additional metadata for the job.
+                  additionalProperties: {}
+                  propertyNames:
+                    type: string
+        required: true
+      responses:
+        "200":
+          description: Parse pages from a file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobDispatchedResponse"
+        "400":
+          description: Invalid request
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "500":
+          description: Internal server error
+  /documents/v1/webhooks:
+    post:
+      tags:
+        - webhook
+      summary: |-
+        Configure a webhook for receiving events from Tensorlake
+        You will get a URL to configure endpoints of your choice
+      operationId: configure_webhook
+      responses:
+        "200":
+          description: Webhook configured successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigureWebhookResponse"
+        "400":
+          description: Invalid request
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "500":
+          description: Internal server error
+  /documents/v2/datasets:
+    get:
+      tags:
+        - datasets
+      operationId: list_datasets_v2
+      parameters:
+        - name: cursor
+          in: query
+          description: |-
+            Optional cursor for pagination.
+
+            This is a base64-encoded string representing a timestamp.
+            It is used to paginate through the results.
+          required: false
+          schema:
+            oneOf:
+              - type: "null"
+              - $ref: "#/components/schemas/Cursor"
+        - name: direction
+          in: query
+          description: |-
+            The direction of pagination.
+
+            This can be either `next` or `prev`.
+
+            The default is `next`, which means the next page of results will be
+            returned.
+          required: false
+          schema:
+            $ref: "#/components/schemas/PaginationDirection"
+        - name: limit
+          in: query
+          description: |-
+            The maximum number of results to return per page.
+
+            The default is 25.
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+        - name: status
+          in: query
+          description: |-
+            The status dataset to filter the results by.
+
+            This is an optional parameter that can be used to filter the results
+            by the status of the dataset.
+
+            The possible values are `processing` and `idle``.
+          required: false
+          schema:
+            oneOf:
+              - type: "null"
+              - $ref: "#/components/schemas/DatasetStatus"
+        - name: name
+          in: query
+          description: |-
+            The name of the dataset to filter the results by.
+
+            This is an optional parameter that can be used to filter the results
+            by the name of the dataset.
+
+            Because dataset names are not unique, this will return all datasets
+            that match the provided name.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+      responses:
+        "200":
+          description: List of datasets retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaginatedResult_Dataset"
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    post:
+      tags:
+        - datasets
+      operationId: create_dataset_v2
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DatasetCreateRequest"
+        required: true
+      responses:
+        "200":
+          description: Dataset created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DatasetCreatedResponse"
+        "400":
+          description: Invalid dataset creation request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "404":
+          description: Resource not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "422":
+          description: Invalid properties in request body
+          content:
+            text/plain: {}
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /documents/v2/datasets/{dataset_id}:
+    get:
+      tags:
+        - datasets
+      operationId: get_dataset_v2
+      parameters:
+        - name: dataset_id
+          in: path
+          description: The ID of the dataset to retrieve
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Dataset retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Dataset"
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "404":
+          description: Dataset not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    put:
+      tags:
+        - datasets
+      operationId: update_dataset_v2
+      parameters:
+        - name: dataset_id
+          in: path
+          description: The ID of the dataset to update
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DatasetUpdateRequest"
+        required: true
+      responses:
+        "200":
+          description: Dataset updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Dataset"
+        "400":
+          description: Invalid dataset update request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "404":
+          description: Dataset not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "422":
+          description: Invalid properties in request body
+          content:
+            text/plain: {}
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    delete:
+      tags:
+        - datasets
+      operationId: delete_dataset_v2
+      parameters:
+        - name: dataset_id
+          in: path
+          description: The id of the dataset to delete
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Dataset deleted successfully
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "404":
+          description: Dataset not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /documents/v2/datasets/{dataset_id}/data:
+    get:
+      tags:
+        - datasets
+      operationId: get_dataset_data_v2
+      parameters:
+        - name: dataset_id
+          in: path
+          description: The id of the dataset to retrieve data for
+          required: true
+          schema:
+            type: string
+        - name: cursor
+          in: query
+          description: |-
+            Optional cursor for pagination.
+
+            This is a base64-encoded string representing a timestamp.
+            It is used to paginate through the results.
+          required: false
+          schema:
+            oneOf:
+              - type: "null"
+              - $ref: "#/components/schemas/Cursor"
+        - name: direction
+          in: query
+          description: |-
+            The direction of pagination.
+
+            This can be either `next` or `prev`.
+
+            The default is `next`, which means the next page of results will be
+            returned.
+          required: false
+          schema:
+            $ref: "#/components/schemas/PaginationDirection"
+        - name: limit
+          in: query
+          description: |-
+            The maximum number of results to return per page.
+
+            The default is 100.
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+        - name: status
+          in: query
+          description: |-
+            The status of the parse operation to filter the results by.
+
+            This is an optional parameter that can be used to filter the results
+            by the status of the parse operation.
+
+            The possible values are `running` and `idle``.
+          required: false
+          schema:
+            oneOf:
+              - type: "null"
+              - $ref: "#/components/schemas/ParseStatus"
+        - name: parse_id
+          in: query
+          description: |-
+            The ID of the parse operation to filter the results by.
+
+            This is an optional parameter that can be used to filter the results
+            by the ID of the parse operation.
+
+            Prefer using /documents/v2/parse/{parse_id} endpoint to get the details
+            of a specific parse operation instead of filtering by parse_id.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: file_name
+          in: query
+          description: |-
+            The name of the file to filter the results by.
+
+            This is an optional parameter that can be used to filter the results
+            by the name of the file associated with the parse operation.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: created_after
+          in: query
+          description: |-
+            The date and time after which the parse operation was created.
+
+            The date should be in RFC3339 format.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: created_before
+          in: query
+          description: |-
+            The date and time before which the parse operation was created.
+
+            The date should be in RFC3339 format.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: finished_after
+          in: query
+          description: |-
+            The date and time after which the parse operation was finished.
+
+            The date should be in RFC3339 format.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: finished_before
+          in: query
+          description: |-
+            The date and time before which the parse operation was finished.
+
+            The date should be in RFC3339 format.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+      responses:
+        "200":
+          description: List of dataset jobs retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaginatedResult_ParseResult"
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "404":
+          description: Dataset not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /documents/v2/datasets/{dataset_id}/parse:
+    post:
+      tags:
+        - datasets
+      operationId: parse_dataset_file_v2
+      parameters:
+        - name: dataset_id
+          in: path
+          description: The ID of the dataset to parse
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DatasetParseRequest"
+        required: true
+      responses:
+        "200":
+          description: Dataset file parsed successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DatasetParsedResponse"
+        "400":
+          description: Invalid dataset ingest request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "404":
+          description: Dataset not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "422":
+          description: Invalid properties in request body
+          content:
+            text/plain: {}
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /documents/v2/files:
+    get:
+      tags:
+        - files_v2
+      operationId: list_files_v2
+      parameters:
+        - name: cursor
+          in: query
+          description: |-
+            Optional cursor for pagination.
+
+            This is a base64-encoded string representing a timestamp.
+            It is used to paginate through the results.
+          required: false
+          schema:
+            oneOf:
+              - type: "null"
+              - $ref: "#/components/schemas/Cursor"
+        - name: direction
+          in: query
+          description: |-
+            Direction of pagination.
+
+            This can be either `next` or `prev`.
+
+            `next` means to get the next page of results,
+            while `prev` means to get the previous page of results.
+          required: false
+          schema:
+            $ref: "#/components/schemas/PaginationDirection"
+        - name: limit
+          in: query
+          description: |-
+            Optional limit for the number of results to return.
+
+            This is a positive integer that specifies the maximum number of results
+            to return. If not provided, a default value will be used.
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+        - name: file_name
+          in: query
+          description: |-
+            Optional file name to filter results by.
+
+            This is a case-sensitive substring that will be matched against the file
+            names.
+
+            If provided, only files with names containing this substring will be
+            returned.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: created_after
+          in: query
+          description: |-
+            The date and time after which the parse operation was created.
+
+            The date should be in RFC3339 format.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: created_before
+          in: query
+          description: |-
+            The date and time before which the parse operation was created.
+
+            The date should be in RFC3339 format.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+      responses:
+        "200":
+          description: List of files
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaginatedResult_FileMetadataResponse"
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "500":
+          description: Something went wrong on our side. Please reach out to support@tensorlake.ai for assistance.
+    put:
+      tags:
+        - files_v2
+      operationId: put_file_v2
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file_bytes
+              properties:
+                labels:
+                  type:
+                    - object
+                    - "null"
+                  description: |-
+                    Optional key‑value labels such as `owner=JohnDoe`
+                    or `{"owner":"JohnDoe","project":"Tensorlake"}`.
+                    Each label goes in its **own** form‑data part.
+                  additionalProperties:
+                    type: string
+                  propertyNames:
+                    type: string
+                  example:
+                    owner: JohnDoe
+                    project: Tensorlake
+                file_bytes:
+                  type: string
+                  format: binary
+                  description: Binary contents of the file to upload
+        required: true
+      responses:
+        "200":
+          description: File uploaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileCreatedResponse"
+        "400":
+          description: Invalid request. This error can occur if the multipart request is missing a file, or if the upload is interrupted.
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "499":
+          description: Client closed request. This error can occur if the client closes the connection before the upload is complete.
+        "500":
+          description: Something went wrong on our side. Please reach out to support@tensorlake.ai for assistance.
+  /documents/v2/files/{file_id}:
+    delete:
+      tags:
+        - files_v2
+      operationId: delete_file_v2
+      parameters:
+        - name: file_id
+          in: path
+          description: The public ID of the file to delete. Only files created with the V2 API will be deleted.
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: File deleted successfully
+        "400":
+          description: Invalid request. This error can occur if the file ID is not valid, or if the file does not exist.
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "500":
+          description: Something went wrong on our side. Please reach out to support@tensorlake.ai for assistance.
+  /documents/v2/files/{file_id}/metadata:
+    get:
+      tags:
+        - files_v2
+      operationId: get_file_metadata_v2
+      parameters:
+        - name: file_id
+          in: path
+          description: The public ID of the file to retrieve metadata for the file. Only files created with the V2 API will be returned.
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Information about the uploaded file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileMetadataResponse"
+        "400":
+          description: Invalid request. This error can occur if the file ID is not valid, or if the file does not exist.
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "500":
+          description: Something went wrong on our side. Please reach out to support@tensorlake.ai for assistance.
+  /documents/v2/parse:
+    get:
+      tags:
+        - parse
+      operationId: list_parse
+      parameters:
+        - name: cursor
+          in: query
+          description: |-
+            Optional cursor for pagination.
+
+            This is a base64-encoded string representing a timestamp.
+            It is used to paginate through the results.
+          required: false
+          schema:
+            oneOf:
+              - type: "null"
+              - $ref: "#/components/schemas/Cursor"
+        - name: direction
+          in: query
+          description: |-
+            The direction of pagination.
+
+            This can be either `next` or `prev`.
+
+            The default is `next`, which means the next page of results will be
+          required: false
+          schema:
+            oneOf:
+              - type: "null"
+              - $ref: "#/components/schemas/PaginationDirection"
+        - name: dataset_name
+          in: query
+          description: |-
+            The name of the dataset to filter the results by.
+
+            This is an optional parameter because not every parse operation is
+            associated with a dataset.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: limit
+          in: query
+          description: |-
+            The maximum number of results to return per page.
+
+            The default is 100.
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+        - name: filename
+          in: query
+          description: |-
+            The filename to filter the results by.
+
+            This is an optional parameter that can be used to filter the results
+            by the filename of the parsed document.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: status
+          in: query
+          description: |-
+            The status of the parse operation to filter the results by.
+
+            This is an optional parameter that can be used to filter the results
+            by the status of the parse operation.
+
+            The possible values are `pending`, `processing`, `failure`, and
+            `successful`.
+          required: false
+          schema:
+            oneOf:
+              - type: "null"
+              - $ref: "#/components/schemas/ParseStatus"
+        - name: id
+          in: query
+          description: The ID of the parse operation to filter the results by.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: created_after
+          in: query
+          description: |-
+            The date and time after which the parse operation was created.
+
+            The date should be in RFC3339 format.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: created_before
+          in: query
+          description: |-
+            The date and time before which the parse operation was created.
+
+            The date should be in RFC3339 format.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: finished_after
+          in: query
+          description: |-
+            The date and time after which the parse operation was finished.
+
+            The date should be in RFC3339 format.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: finished_before
+          in: query
+          description: |-
+            The date and time before which the parse operation was finished.
+
+            The date should be in RFC3339 format.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: include_configuration
+          in: query
+          required: false
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: List of parse jobs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaginatedResult_ParseResult"
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "422":
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    post:
+      tags:
+        - parse
+      operationId: post_parse
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ParseRequest"
+        required: true
+      responses:
+        "200":
+          description: Created parse job details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ParseCreatedResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "404":
+          description: Resource not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "422":
+          description: Invalid properties in request body
+          content:
+            text/plain: {}
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /documents/v2/parse/{parse_id}:
+    get:
+      tags:
+        - parse
+      operationId: get_parse
+      parameters:
+        - name: parse_id
+          in: path
+          description: The public ID of the parse job
+          required: true
+          schema:
+            type: string
+        - name: with_options
+          in: query
+          required: false
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Parse result details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ParseResult"
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "404":
+          description: Parse job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    delete:
+      tags:
+        - parse
+      operationId: delete_parse
+      parameters:
+        - name: parse_id
+          in: path
+          description: The public ID of the parse job
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Parse job deleted successfully
+        "401":
+          description: Unauthorized. Invalid or missing credentials
+        "403":
+          description: Forbidden. You do not have permission to access this resource
+        "404":
+          description: Parse job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+tags:
+  - name: Tensorlake Cloud API
+    description: Tensorlake Cloud APIs for Document Ingestion and Serverless Workflows
+components:
+  schemas:
+    ApiError:
+      type: object
+      required:
+        - message
+        - code
+        - timestamp
+      properties:
+        message:
+          type: string
+          description: A human-readable error message
+        code:
+          $ref: "#/components/schemas/ApiErrorCode"
+          description: The error code, which can be used to programmatically handle errors
+        timestamp:
+          type: integer
+          format: int64
+          description: Millis since Unix epoch; easy to parse in every language
+        trace_id:
+          type:
+            - string
+            - "null"
+          description: Optional request correlation-id for distributed tracing
+        details:
+          description: Optional field-level validation errors, etc.
+    ApiErrorCode:
+      oneOf:
+        - type: string
+          enum:
+            - QUOTA_EXCEEDED
+        - type: string
+          enum:
+            - INVALID_JSON_SCHEMA
+        - type: string
+          enum:
+            - INVALID_CONFIGURATION
+        - type: string
+          enum:
+            - INVALID_PAGE_CLASSIFICATION
+        - type: string
+          enum:
+            - ENTITY_NOT_FOUND
+        - type: string
+          enum:
+            - ENTITY_ALREADY_EXISTS
+        - type: string
+          enum:
+            - INVALID_FILE
+        - type: string
+          enum:
+            - INVALID_PAGE_RANGE
+        - type: string
+          enum:
+            - INVALID_MIME_TYPE
+        - type: string
+          enum:
+            - INVALID_DATASET_NAME
+        - type: string
+          enum:
+            - INTERNAL_ERROR
+        - type: string
+          enum:
+            - INVALID_MULTIPART
+        - type: string
+          enum:
+            - MULTIPART_STREAM_END
+        - type: object
+          required:
+            - INVALID_QUERY_PARAMS
+          properties:
+            INVALID_QUERY_PARAMS:
+              type: object
+              required:
+                - property
+              properties:
+                property:
+                  type: string
+                message:
+                  type:
+                    - string
+                    - "null"
+    Chunk:
+      type: object
+      required:
+        - content
+        - page_number
+      properties:
+        content:
+          type: string
+        page_number:
+          type: integer
+          format: int32
+          minimum: 0
+    ChunkOrString:
+      oneOf:
+        - type: array
+          items:
+            $ref: "#/components/schemas/Chunk"
+        - type: array
+          items:
+            type: string
+    ChunkStrategy:
+      type: string
+      description: |-
+        Chunking strategy determines how the document is chunked into smaller
+        pieces. This is only supported in Markdown mode.
+      enum:
+        - page
+        - section
+        - fragment
+    ChunkingStrategy:
+      type: string
+      enum:
+        - none
+        - page
+        - section
+        - fragment
+    ConfigureWebhookResponse:
+      type: object
+      required:
+        - url
+      properties:
+        url:
+          type: string
+    CreateDatasetRequest:
+      type: object
+      required:
+        - name
+        - settings
+      properties:
+        name:
+          type: string
+        description:
+          type:
+            - string
+            - "null"
+        settings:
+          $ref: "#/components/schemas/Settings"
+    CreateDatasetResponse:
+      type: object
+      required:
+        - id
+      properties:
+        id:
+          type: string
+    Cursor:
+      type: string
+    Dataset:
+      type: object
+      required:
+        - name
+        - dataset_id
+        - status
+        - created_at
+        - updated_at
+      properties:
+        name:
+          type: string
+          description: |-
+            The name of the dataset.
+
+            This is a human-readable name that identifies the dataset.
+          example: Invoices Dataset
+        dataset_id:
+          type: string
+          description: |-
+            The unique identifier for the dataset.
+
+            This identifier is used to refer to the dataset in API endpoints and
+            operations.
+
+            This value is automatically generated and is unique within the
+            organization and project context.
+          example: dataset_12345
+        description:
+          type:
+            - string
+            - "null"
+          description: |-
+            An optional description of the dataset.
+
+            This description is the one provided during dataset creation or update.
+          example: This dataset contains invoices for the year 2023.
+        status:
+          $ref: "#/components/schemas/DatasetStatus"
+          description: |-
+            The current status of the dataset.
+
+            This indicates whether the dataset is currently idle or processing.
+        created_at:
+          type: string
+          description: |-
+            The date and time when the dataset was created.
+
+            The data is in RFC 3339 format (e.g., "2023-10-01T12:00:00Z").
+          example: "2023-10-01T12:00:00Z"
+        updated_at:
+          type: string
+          description: |-
+            The date and time when the dataset was last updated.
+
+            The data is in RFC 3339 format (e.g., "2023-10-01T12:00:00Z").
+          example: "2023-10-01T12:00:00Z"
+    DatasetAnalytics:
+      type: object
+      required:
+        - totalJobs
+        - totalProcessingJobs
+        - totalErrorJobs
+        - totalSuccessfulJobs
+        - totalPendingJobs
+      properties:
+        totalJobs:
+          type: integer
+          format: int64
+          minimum: 0
+        totalProcessingJobs:
+          type: integer
+          format: int64
+          minimum: 0
+        totalErrorJobs:
+          type: integer
+          format: int64
+          minimum: 0
+        totalSuccessfulJobs:
+          type: integer
+          format: int64
+          minimum: 0
+        totalPendingJobs:
+          type: integer
+          format: int64
+          minimum: 0
+    DatasetCreateRequest:
+      allOf:
+        - $ref: "#/components/schemas/ParseConfiguration"
+        - type: object
+          required:
+            - name
+          properties:
+            name:
+              type: string
+              description: |-
+                The name of the dataset.
+
+                The name can only contain alphanumeric characters, hyphens, and
+                underscores.
+
+                The name must be unique within the organization and project context.
+              example: invoices dataset
+            description:
+              type:
+                - string
+                - "null"
+              description: |-
+                A description of the dataset.
+
+                This field is optional and can be used to provide additional context
+                about the dataset.
+              example: This dataset contains all invoices from 2023.
+      description: |-
+        This object defines the request body for creating a new dataset.
+
+        A Dataset is a collection of parsed results from files.
+
+        It can be used to store and manage related data, such as invoices, receipts,
+        or any other documents that need to be parsed and analyzed.
+
+        Once a dataset is created, you can use it to parse related files using the
+        same configuration and options, allowing for consistent and efficient data
+        extraction.
+    DatasetCreatedResponse:
+      type: object
+      required:
+        - name
+        - dataset_id
+        - created_at
+      properties:
+        name:
+          type: string
+          description: The human-readable name of the dataset provided during creation.
+          example: invoices dataset
+        dataset_id:
+          type: string
+          description: |-
+            The unique identifier for the dataset.
+
+            This identifier is used to refer to the dataset in API endpoints and
+            operations.
+
+            This value is automatically generated and is unique within the
+            organization and project context.
+          example: dataset_12345
+        created_at:
+          type: string
+          description: |-
+            The date and time when the dataset was created.
+
+            The date is in RFC 3339 format (e.g., "2023-10-01T12:00:00Z").
+          example: "2023-10-01T12:00:00Z"
+    DatasetJobItem:
+      type: object
+      required:
+        - id
+        - datasetId
+        - status
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+        datasetId:
+          type: string
+        fileId:
+          type:
+            - string
+            - "null"
+        fileName:
+          type:
+            - string
+            - "null"
+        outputsUrl:
+          type:
+            - string
+            - "null"
+        status:
+          $ref: "#/components/schemas/JobStatus"
+        errorMessage:
+          type:
+            - string
+            - "null"
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+    DatasetListItem:
+      type: object
+      required:
+        - id
+        - name
+        - created_at
+        - job_count
+        - status
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type:
+            - string
+            - "null"
+        created_at:
+          type: string
+        job_count:
+          type: integer
+          format: int64
+        status:
+          $ref: "#/components/schemas/DatasetStatus"
+    DatasetParseJobAnalytics:
+      type: object
+      required:
+        - total_processing_parse_jobs
+        - total_pending_parse_jobs
+        - total_error_parse_jobs
+        - total_successful_parse_jobs
+        - total_jobs
+      properties:
+        total_processing_parse_jobs:
+          type: integer
+          format: int64
+          description: The total number of parse jobs that are on the `processing` state.
+        total_pending_parse_jobs:
+          type: integer
+          format: int64
+          description: |-
+            The total number of parse jobs that are on the `pending` state.
+
+            Pending parse jobs are those that have been created but not yet started
+            processing.
+        total_error_parse_jobs:
+          type: integer
+          format: int64
+          description: |-
+            The total number of parse jobs that have encountered an error during
+            processing.
+
+            These jobs have failed to complete successfully and require attention.
+        total_successful_parse_jobs:
+          type: integer
+          format: int64
+          description: |-
+            The total number of parse jobs that have been successfully processed.
+
+            These jobs have completed without errors and have produced results.
+        total_jobs:
+          type: integer
+          format: int64
+          description: The total number of parse jobs that have been created for the dataset.
+    DatasetParseRequest:
+      type: object
+      properties:
+        file_id:
+          type:
+            - string
+            - "null"
+          description: |-
+            ID of the file previously uploaded to Tensorlake.
+
+            This is the ID of the file in Tensorlake's storage system. It has a
+            tensorlake- (for V1 files), or file_ (for V2 files) prefix.
+
+            This field must be provided if `file_url` and `raw_text` are not
+            provided.
+        file_url:
+          type:
+            - string
+            - "null"
+          description: |-
+            External URL of the file to parse.
+
+            This URL should point to a publicly accessible file that can be
+            downloaded.
+
+            This field must be provided if `file_id` and `raw_text` are not
+            provided.
+          examples:
+            - https://pub-226479de18b2493f96b64c6674705dd8.r2.dev/real-estate-purchase-all-signed.pdf
+        raw_text:
+          type:
+            - string
+            - "null"
+          description: |-
+            The raw text to parse.
+
+            This should be a free-text representation of the document.
+
+            This field must be provided if `file_id` and `file_url` are not
+            provided.
+        page_range:
+          type:
+            - string
+            - "null"
+          description: |-
+            The range of pages to parse in the document.
+            Default - All pages will be parsed.
+
+            This should be a comma-separated list of page numbers or ranges (e.g.,
+            "1,2,3-5").
+          example: "1"
+        mime_type:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/MimeType"
+              description: |-
+                The MIME type of the content provided. When provided, it overrides the
+                detected MIME type of the file.
+
+                **required** if `raw_text` is provided. Value must be one of
+                the text/* MIME types.
+        labels:
+          type:
+            - object
+            - "null"
+          description: |-
+            Additional metadata to identify the parse request. The labels are
+            returned in the parse response.
+          additionalProperties: {}
+          propertyNames:
+            type: string
+          example:
+            priority: high
+            source: email
+    DatasetParsedResponse:
+      type: object
+      required:
+        - parse_id
+        - created_at
+      properties:
+        parse_id:
+          type: string
+          description: |-
+            The unique identifier for the parse job.
+
+            Use this identifier to track the progress and results of the parse job
+            using the `/documents/v2/parse/{parse_id}` endpoint.
+
+            This identifier is used to track the parse job's progress and results.
+          example: parse_id-12345
+        created_at:
+          type: string
+          description: |-
+            The date and time when the parse job was scheduled.
+
+            The date is in RFC 3339 format (e.g., "2023-10-01T12:00:00Z").
+          example: "2023-10-01T12:00:00Z"
+    DatasetResponse:
+      type: object
+      required:
+        - id
+        - name
+        - settings
+        - createdAt
+        - analytics
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type:
+            - string
+            - "null"
+        settings:
+          $ref: "#/components/schemas/Settings"
+        status:
+          $ref: "#/components/schemas/DatasetStatus"
+        createdAt:
+          type: string
+        jobs:
+          $ref: "#/components/schemas/Page_DatasetJobItem"
+        analytics:
+          $ref: "#/components/schemas/DatasetAnalytics"
+    DatasetStatus:
+      type: string
+      enum:
+        - idle
+        - processing
+    DatasetUpdateRequest:
+      allOf:
+        - $ref: "#/components/schemas/ParseConfiguration"
+        - type: object
+          properties:
+            description:
+              type:
+                - string
+                - "null"
+              description: |-
+                A description of the dataset.
+
+                This field is optional and can be used to provide additional context
+                about the dataset.
+              example: This dataset contains all invoices from 2023.
+    DownloadFileResponse:
+      type: object
+      required:
+        - location
+        - filename
+        - mimeType
+        - pageCount
+      properties:
+        location:
+          type: string
+        filename:
+          type: string
+        mimeType:
+          type: string
+        pageCount:
+          type: integer
+          format: int32
+        fileSize:
+          type:
+            - integer
+            - "null"
+          format: int64
+    EnrichmentOptions:
+      type: object
+      properties:
+        table_summarization:
+          type: boolean
+          description: |-
+            Generate a summary for parsed tables.
+
+            The default is `false`.
+          default: false
+        table_summarization_prompt:
+          type:
+            - string
+            - "null"
+          description: |-
+            The prompt to guide the table summarization.
+            Ignored if `table_summarization` is `false`.
+            Default prompt - "Summarize the table in a concise manner."
+          default: null
+        figure_summarization:
+          type: boolean
+          description: |-
+            Generate a summary for parsed figures.
+
+            The default is `false`.
+          default: false
+        figure_summarization_prompt:
+          type:
+            - string
+            - "null"
+          description: |-
+            The prompt to guide the figure summarization.
+            Ignored if `figure_summarization` is `false`.
+            Default prompt - "Summarize the figure in a concise manner."
+          default: null
+      additionalProperties: false
+    FileCreatedResponse:
+      type: object
+      required:
+        - file_id
+        - created_at
+      properties:
+        file_id:
+          type: string
+          description: |-
+            The ID of the created file
+
+            Use this ID to reference the file in parse, datasets, and other
+            operations.
+          example: file_12345
+        created_at:
+          type: string
+          description: |-
+            The creation date and time of the file.
+
+            This is in RFC 3339 format.
+          example: "2023-10-01T12:00:00Z"
+    FileMetadataResponse:
+      type: object
+      required:
+        - file_id
+        - mime_type
+        - file_size
+        - checksum_sha256
+        - created_at
+      properties:
+        file_id:
+          type: string
+          description: |-
+            The ID of the file
+
+            This ID is used to reference the file in parse, datasets, and other
+            operations.
+          example: file_12345
+        file_name:
+          type:
+            - string
+            - "null"
+          description: |-
+            The name of the file.
+
+            This is taken from the multipart form data or the file metadata.
+
+            It is not guaranteed to be unique, and it may not match the original
+            file name.
+          example: example.pdf
+        mime_type:
+          $ref: "#/components/schemas/MimeType"
+          description: |-
+            The content type of the file.
+
+            This is determined from the multipart form data, or from the
+            file extension.
+        file_size:
+          type: integer
+          format: int64
+          description: |-
+            The file size in bytes.
+
+            This is determined from the `Content-Length` header of the request,
+            or from the file metadata.
+
+            This is not guaranteed to be accurate, as the file may be
+            compressed or encoded in a way that changes its size.
+          example: 100000
+          minimum: 0
+        checksum_sha256:
+          type: string
+          description: |-
+            The SHA256 checksum of the file.
+
+            This is calculated from the file content and is used to verify the
+            integrity of the file.
+          example: d3242c5c1d369d233fa65183bdd4c486eba109ceb13490ed291384eaffbe743b
+        created_at:
+          type: string
+          description: |-
+            The creation date and time of the file.
+
+            This is in RFC 3339 format.
+          example: "2023-10-01T12:00:00Z"
+        labels:
+          type: object
+          description: |-
+            Labels submitted at the time of file upload.
+
+            This is a map of label names to their values.
+          additionalProperties: {}
+          propertyNames:
+            type: string
+          example:
+            priority: high
+            source: email
+    FileResponse:
+      type: object
+      required:
+        - id
+        - fileSize
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        fileSize:
+          type: integer
+          format: int64
+          minimum: 0
+        mimeType:
+          type: string
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+    FormDetectionMode:
+      type: string
+      enum:
+        - vlm
+        - tsr
+        - unknown
+    GetDatasetQueryParams:
+      type: object
+      properties:
+        include_configuration:
+          type: boolean
+          description: |-
+            Return the dataset configuration.
+
+            When set to `true`, the response will include the dataset's
+            configuration options.
+
+            Defaults to `false`.
+          default: false
+        include_analytics:
+          type: boolean
+          description: |-
+            Retrieve the dataset analytics.
+
+            When set to `true`, the response will include the dataset's analytics
+            data. Including:
+            - Number of running parsing jobs
+            - Number of completed parsing jobs
+            - Number of failed parsing jobs
+            - Number of pending parsing jobs
+
+            Defaults to `false`.
+          default: false
+    JobDispatchedResponse:
+      type: object
+      required:
+        - jobId
+        - fileId
+        - status
+      properties:
+        jobId:
+          type: string
+        fileId:
+          type: string
+        status:
+          type: string
+    JobListItem:
+      type: object
+      required:
+        - id
+        - status
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+        status:
+          $ref: "#/components/schemas/JobStatus"
+        fileName:
+          type:
+            - string
+            - "null"
+        fileId:
+          type:
+            - string
+            - "null"
+        traceId:
+          type:
+            - string
+            - "null"
+        datasetId:
+          type:
+            - string
+            - "null"
+        message:
+          type:
+            - string
+            - "null"
+        pagesParsed:
+          type:
+            - integer
+            - "null"
+          format: int32
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+        finishedAt:
+          type:
+            - string
+            - "null"
+    JobResponse:
+      type: object
+      required:
+        - jobId
+        - status
+        - settings
+        - createdAt
+      properties:
+        message:
+          type:
+            - string
+            - "null"
+          description: |-
+            An error message if the job failed
+
+            This field is optional and will be `None` if the job was successful.
+        jobId:
+          type: string
+          description: |-
+            The unique identifier for the job
+
+            This is a public ID that can be used to reference the job in other API
+            calls. It has the format of job-<readable-id>
+        fileId:
+          type:
+            - string
+            - "null"
+          description: |-
+            The unique identifier for the file associated with the job
+
+            This is an optional field that will be `None` if the job was submitted
+            with a public URL file.
+        fileName:
+          type:
+            - string
+            - "null"
+          description: |-
+            The name of the file associated with the job
+
+            This is an optional field that will be `None` if the job was submitted
+            with a public URL
+        traceId:
+          type:
+            - string
+            - "null"
+          description: |-
+            The trace ID for the job
+
+            This value will be `None` if the job is in the `Pending` state.
+
+            This is used for tracing the job execution in the system.
+
+            Share this ID with the support team if you need help with a specific
+            job.
+        pageRange:
+          type:
+            - string
+            - "null"
+          description: |-
+            The page range for the job
+
+            This value will be `None` if the job was submitted for the entire
+            document. If the job was submitted with a specific page range, this
+            will be in the format "1-5" or "1,3,5"
+        parsedPages:
+          type:
+            - integer
+            - "null"
+          format: int32
+          description: |-
+            The number of pages that were parsed in the job
+
+            This value will be `None` if the job is still processing or if it
+            failed.
+        outputs:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/ParsedJobOutput"
+              description: |-
+                The outputs of the job
+
+                This field contains the parsed output of the job, which can include
+                chunks of text, structured data, and any errors that occurred during
+                processing.
+
+                Value will be `None` if the job is still processing or if it failed.
+        chunks:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: "#/components/schemas/Chunk"
+          description: |-
+            The chunks of text extracted from the document
+
+            This field is deprecated and will be removed in a future version. Use
+            `outputs` instead.
+          deprecated: true
+        document:
+          description: |-
+            The document output of the job
+
+            This field is deprecated and will be removed in a future version. Use
+            `outputs` instead.
+          deprecated: true
+        structuredOutput:
+          description: |-
+            The structured output of the job
+
+            This field is deprecated and will be removed in a future version. Use
+            `outputs` instead.
+          deprecated: true
+        status:
+          $ref: "#/components/schemas/JobStatus"
+          description: |-
+            The status of the job
+
+            This field indicates the current state of the job, such as `Pending`,
+            `Processing`, `Successful`, or `Failure`.
+        settings:
+          $ref: "#/components/schemas/Settings"
+          description: |-
+            The settings used for the job
+
+            This field contains the settings that were used to configure the job,
+            such as parsing options and other parameters.
+        tasksCompleted:
+          type:
+            - integer
+            - "null"
+          format: int32
+          description: |-
+            The number of tasks that have been completed for the job
+
+            This field is optional and will be `None` if the job is still processing
+            or if it failed.
+        tasksTotal:
+          type:
+            - integer
+            - "null"
+          format: int32
+          description: |-
+            The total number of tasks that are expected to be completed for the job
+
+            This field is optional and will be `None` if the job is still processing
+            or if it failed.
+        createdAt:
+          type: string
+          description: The timestamp when the job was created
+        finishedAt:
+          type:
+            - string
+            - "null"
+          description: The timestamp when the job was finished, if applicable
+        labels:
+          type: object
+          description: |-
+            Additional metadata for the job, that was provided during the parse
+            request.
+          additionalProperties: {}
+          propertyNames:
+            type: string
+    JobStatus:
+      type: string
+      enum:
+        - failure
+        - pending
+        - processing
+        - successful
+    ListDatasetJobsQueryParams:
+      type: object
+      properties:
+        cursor:
+          type:
+            - string
+            - "null"
+          description: |-
+            Optional cursor for pagination.
+
+            This is a base64-encoded string representing a timestamp.
+            It is used to paginate through the results.
+          default: null
+        direction:
+          oneOf:
+            - $ref: "#/components/schemas/PaginationDirection"
+              description: |-
+                The direction of pagination.
+
+                This can be either `next` or `prev`.
+
+                The default is `next`, which means the next page of results will be
+                returned.
+          default: next
+        limit:
+          type: integer
+          description: |-
+            The maximum number of results to return per page.
+
+            The default is 100.
+          default: 100
+          minimum: 0
+        status:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/ParseStatus"
+              description: |-
+                The status of the parse operation to filter the results by.
+
+                This is an optional parameter that can be used to filter the results
+                by the status of the parse operation.
+
+                The possible values are `running` and `idle``.
+          default: null
+        parse_id:
+          type:
+            - string
+            - "null"
+          description: |-
+            The ID of the parse operation to filter the results by.
+
+            This is an optional parameter that can be used to filter the results
+            by the ID of the parse operation.
+
+            Prefer using /documents/v2/parse/{parse_id} endpoint to get the details
+            of a specific parse operation instead of filtering by parse_id.
+          default: null
+        file_name:
+          type:
+            - string
+            - "null"
+          description: |-
+            The name of the file to filter the results by.
+
+            This is an optional parameter that can be used to filter the results
+            by the name of the file associated with the parse operation.
+          default: null
+        created_after:
+          type:
+            - string
+            - "null"
+          description: |-
+            The date and time after which the parse operation was created.
+
+            The date should be in RFC3339 format.
+          default: null
+        created_before:
+          type:
+            - string
+            - "null"
+          description: |-
+            The date and time before which the parse operation was created.
+
+            The date should be in RFC3339 format.
+          default: null
+        finished_after:
+          type:
+            - string
+            - "null"
+          description: |-
+            The date and time after which the parse operation was finished.
+
+            The date should be in RFC3339 format.
+          default: null
+        finished_before:
+          type:
+            - string
+            - "null"
+          description: |-
+            The date and time before which the parse operation was finished.
+
+            The date should be in RFC3339 format.
+          default: null
+        include_configuration:
+          type: boolean
+          default: false
+    ListDatasetQueryParams:
+      type: object
+      properties:
+        cursor:
+          type:
+            - string
+            - "null"
+          description: |-
+            Optional cursor for pagination.
+
+            This is a base64-encoded string representing a timestamp.
+            It is used to paginate through the results.
+          default: null
+        direction:
+          oneOf:
+            - $ref: "#/components/schemas/PaginationDirection"
+              description: |-
+                The direction of pagination.
+
+                This can be either `next` or `prev`.
+
+                The default is `next`, which means the next page of results will be
+                returned.
+          default: next
+        limit:
+          type: integer
+          description: |-
+            The maximum number of results to return per page.
+
+            The default is 25.
+          default: 25
+          minimum: 0
+        status:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/DatasetStatus"
+              description: |-
+                The status dataset to filter the results by.
+
+                This is an optional parameter that can be used to filter the results
+                by the status of the dataset.
+
+                The possible values are `processing` and `idle``.
+          default: null
+        name:
+          type:
+            - string
+            - "null"
+          description: |-
+            The name of the dataset to filter the results by.
+
+            This is an optional parameter that can be used to filter the results
+            by the name of the dataset.
+
+            Because dataset names are not unique, this will return all datasets
+            that match the provided name.
+          default: null
+    ListParseQueryParams:
+      type: object
+      properties:
+        cursor:
+          type:
+            - string
+            - "null"
+          description: |-
+            Optional cursor for pagination.
+
+            This is a base64-encoded string representing a timestamp.
+            It is used to paginate through the results.
+          default: null
+        direction:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/PaginationDirection"
+              description: |-
+                The direction of pagination.
+
+                This can be either `next` or `prev`.
+
+                The default is `next`, which means the next page of results will be
+          default: next
+        dataset_name:
+          type:
+            - string
+            - "null"
+          description: |-
+            The name of the dataset to filter the results by.
+
+            This is an optional parameter because not every parse operation is
+            associated with a dataset.
+          default: null
+        limit:
+          type: integer
+          description: |-
+            The maximum number of results to return per page.
+
+            The default is 100.
+          default: 100
+          minimum: 0
+        filename:
+          type:
+            - string
+            - "null"
+          description: |-
+            The filename to filter the results by.
+
+            This is an optional parameter that can be used to filter the results
+            by the filename of the parsed document.
+          default: null
+        status:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/ParseStatus"
+              description: |-
+                The status of the parse operation to filter the results by.
+
+                This is an optional parameter that can be used to filter the results
+                by the status of the parse operation.
+
+                The possible values are `pending`, `processing`, `failure`, and
+                `successful`.
+          default: null
+        id:
+          type:
+            - string
+            - "null"
+          description: The ID of the parse operation to filter the results by.
+          default: null
+        created_after:
+          type:
+            - string
+            - "null"
+          description: |-
+            The date and time after which the parse operation was created.
+
+            The date should be in RFC3339 format.
+          default: null
+        created_before:
+          type:
+            - string
+            - "null"
+          description: |-
+            The date and time before which the parse operation was created.
+
+            The date should be in RFC3339 format.
+          default: null
+        finished_after:
+          type:
+            - string
+            - "null"
+          description: |-
+            The date and time after which the parse operation was finished.
+
+            The date should be in RFC3339 format.
+          default: null
+        finished_before:
+          type:
+            - string
+            - "null"
+          description: |-
+            The date and time before which the parse operation was finished.
+
+            The date should be in RFC3339 format.
+          default: null
+    MimeType:
+      type: string
+      enum:
+        - application/pdf
+        - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+        - application/vnd.openxmlformats-officedocument.presentationml.presentation
+        - application/vnd.apple.keynote
+        - image/jpeg
+        - text/plain
+        - text/html
+        - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+        - application/vnd.ms-excel.sheet.macroEnabled.12
+        - application/vnd.ms-excel
+        - text/csv
+        - image/png
+    Model:
+      type: string
+      enum:
+        - tensorlake
+        - sonnet
+        - gpt4o_mini
+    ModelProvider:
+      type: string
+      description: The model provider to use for structured data extraction.
+      enum:
+        - tensorlake
+        - claude-3-5-sonnet-latest
+        - gpt-4o-mini
+    OneOrMany_i32:
+      oneOf:
+        - type: integer
+          format: int32
+        - type: array
+          items:
+            type: integer
+            format: int32
+    OneOrMany_usize:
+      oneOf:
+        - type: integer
+          minimum: 0
+        - type: array
+          items:
+            type: integer
+            minimum: 0
+      description: Common objects used across multiple endpoints in the API.
+    OutputErrorResponse:
+      type: object
+      required:
+        - context
+        - err_message
+      properties:
+        context:
+          type: string
+        err_message:
+          type: string
+    OutputErrorsResponse:
+      type: object
+      properties:
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/OutputErrorResponse"
+    Page:
+      type: object
+      required:
+        - page_number
+      properties:
+        page_number:
+          type: integer
+          description: "1-indexed page number in the document."
+          minimum: 0
+        page_fragments:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: "#/components/schemas/PageFragment"
+          description: |-
+            Vector of text fragments extracted from the page.
+
+            Each fragment represents a distinct section of text, such as titles,
+            paragraphs, tables, figures, etc.
+        dimensions:
+          type:
+            - array
+            - "null"
+          items:
+            type: integer
+            format: int32
+          description: |-
+            Dimensions is a 2-element vector representing the width and height of
+            the page in points.
+    PageClass:
+      type: object
+      required:
+        - page_class
+        - page_numbers
+      properties:
+        page_class:
+          type: string
+        page_numbers:
+          type: array
+          items:
+            type: integer
+            format: int32
+          description: A list of page numbers (1-indexed) where the page class was detected.
+    PageClassConfig:
+      type: object
+      required:
+        - name
+        - description
+      properties:
+        name:
+          type: string
+          description: The name of the page class.
+        description:
+          type: string
+          description: |-
+            The description of the page class to guide the model to classify the
+            pages. Describe what the model should look for in the page to
+            classify it.
+    PageFragment:
+      type: object
+      required:
+        - fragment_type
+        - content
+      properties:
+        fragment_type:
+          $ref: "#/components/schemas/PageFragmentType"
+        content:
+          $ref: "#/components/schemas/PageFragmentTypeContent"
+        reading_order:
+          type:
+            - integer
+            - "null"
+          format: int64
+        bbox:
+          type:
+            - object
+            - "null"
+          additionalProperties:
+            type: number
+            format: double
+          propertyNames:
+            type: string
+    PageFragmentFigure:
+      type: object
+      required:
+        - content
+      properties:
+        content:
+          type: string
+        summary:
+          type:
+            - string
+            - "null"
+    PageFragmentListItem:
+      type: object
+      required:
+        - content
+      properties:
+        content:
+          type: string
+    PageFragmentSignature:
+      type: object
+      required:
+        - content
+      properties:
+        content:
+          type: string
+    PageFragmentTable:
+      type: object
+      required:
+        - content
+        - cells
+      properties:
+        content:
+          type: string
+        summary:
+          type:
+            - string
+            - "null"
+        cells:
+          type: array
+          items:
+            $ref: "#/components/schemas/PageFragmentTableCell"
+        html:
+          type:
+            - string
+            - "null"
+        markdown:
+          type:
+            - string
+            - "null"
+    PageFragmentTableCell:
+      type: object
+      required:
+        - text
+        - bounding_box
+      properties:
+        text:
+          type: string
+        bounding_box:
+          type: object
+          additionalProperties:
+            type: number
+            format: double
+          propertyNames:
+            type: string
+    PageFragmentType:
+      type: string
+      enum:
+        - section_header
+        - title
+        - text
+        - table
+        - figure
+        - formula
+        - form
+        - key_value_region
+        - document_index
+        - list_item
+        - table_caption
+        - figure_caption
+        - formula_caption
+        - page_footer
+        - page_header
+        - page_number
+        - signature
+        - strikethrough
+    PageFragmentTypeContent:
+      oneOf:
+        - type: string
+        - $ref: "#/components/schemas/PageFragmentTable"
+        - $ref: "#/components/schemas/PageFragmentFigure"
+        - $ref: "#/components/schemas/PageFragmentListItem"
+        - $ref: "#/components/schemas/PageFragmentSignature"
+    Page_DatasetJobItem:
+      type: object
+      required:
+        - items
+        - hasMore
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required:
+              - id
+              - datasetId
+              - status
+              - createdAt
+              - updatedAt
+            properties:
+              id:
+                type: string
+              datasetId:
+                type: string
+              fileId:
+                type:
+                  - string
+                  - "null"
+              fileName:
+                type:
+                  - string
+                  - "null"
+              outputsUrl:
+                type:
+                  - string
+                  - "null"
+              status:
+                $ref: "#/components/schemas/JobStatus"
+              errorMessage:
+                type:
+                  - string
+                  - "null"
+              createdAt:
+                type: string
+              updatedAt:
+                type: string
+        hasMore:
+          type: boolean
+        prevCursor:
+          type:
+            - string
+            - "null"
+        nextCursor:
+          type:
+            - string
+            - "null"
+    Page_DatasetListItem:
+      type: object
+      required:
+        - items
+        - hasMore
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required:
+              - id
+              - name
+              - created_at
+              - job_count
+              - status
+            properties:
+              id:
+                type: string
+              name:
+                type: string
+              description:
+                type:
+                  - string
+                  - "null"
+              created_at:
+                type: string
+              job_count:
+                type: integer
+                format: int64
+              status:
+                $ref: "#/components/schemas/DatasetStatus"
+        hasMore:
+          type: boolean
+        prevCursor:
+          type:
+            - string
+            - "null"
+        nextCursor:
+          type:
+            - string
+            - "null"
+    Page_FileResponse:
+      type: object
+      required:
+        - items
+        - hasMore
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required:
+              - id
+              - fileSize
+              - createdAt
+              - updatedAt
+            properties:
+              id:
+                type: string
+              name:
+                type: string
+              fileSize:
+                type: integer
+                format: int64
+                minimum: 0
+              mimeType:
+                type: string
+              createdAt:
+                type: string
+              updatedAt:
+                type: string
+        hasMore:
+          type: boolean
+        prevCursor:
+          type:
+            - string
+            - "null"
+        nextCursor:
+          type:
+            - string
+            - "null"
+    Page_JobListItem:
+      type: object
+      required:
+        - items
+        - hasMore
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required:
+              - id
+              - status
+              - createdAt
+              - updatedAt
+            properties:
+              id:
+                type: string
+              status:
+                $ref: "#/components/schemas/JobStatus"
+              fileName:
+                type:
+                  - string
+                  - "null"
+              fileId:
+                type:
+                  - string
+                  - "null"
+              traceId:
+                type:
+                  - string
+                  - "null"
+              datasetId:
+                type:
+                  - string
+                  - "null"
+              message:
+                type:
+                  - string
+                  - "null"
+              pagesParsed:
+                type:
+                  - integer
+                  - "null"
+                format: int32
+              createdAt:
+                type: string
+              updatedAt:
+                type: string
+              finishedAt:
+                type:
+                  - string
+                  - "null"
+        hasMore:
+          type: boolean
+        prevCursor:
+          type:
+            - string
+            - "null"
+        nextCursor:
+          type:
+            - string
+            - "null"
+    PaginatedResult_Dataset:
+      type: object
+      required:
+        - items
+        - has_more
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required:
+              - name
+              - dataset_id
+              - status
+              - created_at
+              - updated_at
+            properties:
+              name:
+                type: string
+                description: |-
+                  The name of the dataset.
+
+                  This is a human-readable name that identifies the dataset.
+                example: Invoices Dataset
+              dataset_id:
+                type: string
+                description: |-
+                  The unique identifier for the dataset.
+
+                  This identifier is used to refer to the dataset in API endpoints and
+                  operations.
+
+                  This value is automatically generated and is unique within the
+                  organization and project context.
+                example: dataset_12345
+              description:
+                type:
+                  - string
+                  - "null"
+                description: |-
+                  An optional description of the dataset.
+
+                  This description is the one provided during dataset creation or update.
+                example: This dataset contains invoices for the year 2023.
+              status:
+                $ref: "#/components/schemas/DatasetStatus"
+                description: |-
+                  The current status of the dataset.
+
+                  This indicates whether the dataset is currently idle or processing.
+              created_at:
+                type: string
+                description: |-
+                  The date and time when the dataset was created.
+
+                  The data is in RFC 3339 format (e.g., "2023-10-01T12:00:00Z").
+                example: "2023-10-01T12:00:00Z"
+              updated_at:
+                type: string
+                description: |-
+                  The date and time when the dataset was last updated.
+
+                  The data is in RFC 3339 format (e.g., "2023-10-01T12:00:00Z").
+                example: "2023-10-01T12:00:00Z"
+        has_more:
+          type: boolean
+        next_cursor:
+          type:
+            - string
+            - "null"
+        prev_cursor:
+          type:
+            - string
+            - "null"
+    PaginatedResult_FileMetadataResponse:
+      type: object
+      required:
+        - items
+        - has_more
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required:
+              - file_id
+              - mime_type
+              - file_size
+              - checksum_sha256
+              - created_at
+            properties:
+              file_id:
+                type: string
+                description: |-
+                  The ID of the file
+
+                  This ID is used to reference the file in parse, datasets, and other
+                  operations.
+                example: file_12345
+              file_name:
+                type:
+                  - string
+                  - "null"
+                description: |-
+                  The name of the file.
+
+                  This is taken from the multipart form data or the file metadata.
+
+                  It is not guaranteed to be unique, and it may not match the original
+                  file name.
+                example: example.pdf
+              mime_type:
+                $ref: "#/components/schemas/MimeType"
+                description: |-
+                  The content type of the file.
+
+                  This is determined from the multipart form data, or from the
+                  file extension.
+              file_size:
+                type: integer
+                format: int64
+                description: |-
+                  The file size in bytes.
+
+                  This is determined from the `Content-Length` header of the request,
+                  or from the file metadata.
+
+                  This is not guaranteed to be accurate, as the file may be
+                  compressed or encoded in a way that changes its size.
+                example: 100000
+                minimum: 0
+              checksum_sha256:
+                type: string
+                description: |-
+                  The SHA256 checksum of the file.
+
+                  This is calculated from the file content and is used to verify the
+                  integrity of the file.
+                example: d3242c5c1d369d233fa65183bdd4c486eba109ceb13490ed291384eaffbe743b
+              created_at:
+                type: string
+                description: |-
+                  The creation date and time of the file.
+
+                  This is in RFC 3339 format.
+                example: "2023-10-01T12:00:00Z"
+              labels:
+                type: object
+                description: |-
+                  Labels submitted at the time of file upload.
+
+                  This is a map of label names to their values.
+                additionalProperties: {}
+                propertyNames:
+                  type: string
+                example:
+                  priority: high
+                  source: email
+        has_more:
+          type: boolean
+        next_cursor:
+          type:
+            - string
+            - "null"
+        prev_cursor:
+          type:
+            - string
+            - "null"
+    PaginatedResult_ParseResult:
+      type: object
+      required:
+        - items
+        - has_more
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              parse_id:
+                type: string
+                description: |-
+                  The unique identifier for the parse job
+
+                  This is the same as the value returned from the `POST /documents/v2/parse`
+                  endpoint.
+                default: ""
+                example: parse_abcd1234
+              dataset_id:
+                type:
+                  - string
+                  - "null"
+                description: |-
+                  If the parse job was scheduled from a dataset, this field contains the
+                  dataset id.
+
+                  This is the identifier used in URLs and API endpoints to refer to the
+                  dataset.
+                default: null
+              parsed_pages_count:
+                type: integer
+                description: |-
+                  The number of pages that were parsed successfully.
+
+                  This is the total number of pages that were successfully parsed in the
+                  document.
+                default: 0
+                example: 5
+                minimum: 0
+              status:
+                oneOf:
+                  - $ref: "#/components/schemas/ParseStatus"
+                    description: |-
+                      The status of the parse job.
+
+                      This indicates whether the job is pending, in progress, completed, or
+                      failed.
+
+                      This can be used to track the progress of the parse operation.
+                default: pending
+              error:
+                type:
+                  - string
+                  - "null"
+                description: |-
+                  Error ocurred during any part of the parse execution.
+
+                  This is only populated if the parse operation failed.
+                default: null
+              pages:
+                type:
+                  - array
+                  - "null"
+                items:
+                  $ref: "#/components/schemas/Page"
+                description: |-
+                  List of pages parsed from the document.
+
+                  Each page has a list of fragments, which are detected objects such as
+                  tables, text, figures, section headers, etc.
+
+                  We also return the detected text, structure of the table(if its a
+                  table), and the bounding box of the object.
+                default: null
+              chunks:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Chunk"
+                description: |-
+                  Chunks of the document.
+
+                  This is a vector of `Chunk` objects, each containing a chunk of the
+                  document.
+                  The number of chunks depend on the chunking strategy used during
+                  parsing.
+                default: []
+              structured_data:
+                type:
+                  - array
+                  - "null"
+                items:
+                  $ref: "#/components/schemas/StructuredData"
+                description: |-
+                  Structured data extracted from the document.
+
+                  The structured data is a map where the keys are the schema names
+                  provided in the parse request, and the values are
+                  `StructuredData` objects containing the structured data extracted from
+                  the document.
+
+                  The number of structured data objects depends on the partition strategy
+                  **None** - one structured data object for the entire document.
+                  **Page** - one structured data object for each page.
+                default: null
+              page_classes:
+                type:
+                  - array
+                  - "null"
+                items:
+                  $ref: "#/components/schemas/PageClass"
+                description: |-
+                  Page classes extracted from the document.
+
+                  This is a map where the keys are page class names provided in the parse
+                  request under the `page_classification_options` field,
+                  and the values are vectors of page numbers (1-indexed) where each page
+                  class appears.
+
+                  This is used to categorize pages in the document based on the
+                  classification options provided.
+                default: null
+              created_at:
+                type: string
+                description: |-
+                  The date and time when the parse job was created.
+
+                  The date is in RFC 3339 format.
+
+                  This can be used to track when the parse job was initiated.
+                default: ""
+              finished_at:
+                type:
+                  - string
+                  - "null"
+                description: |-
+                  The date and time when the parse job was finished.
+
+                  The date is in RFC 3339 format.
+
+                  This can be undefined if the parse job is still in progress or pending.
+                default: null
+              labels:
+                type: object
+                description: |-
+                  Labels associated with the parse job.
+
+                  These are the key-value, or json, pairs submitted with the parse
+                  request.
+
+                  This can be used to categorize or tag the parse job for easier
+                  identification and filtering.
+
+                  It can be undefined if no labels were provided in the request.
+                default: {}
+                additionalProperties: {}
+                propertyNames:
+                  type: string
+                example:
+                  priority: high
+                  source: email
+        has_more:
+          type: boolean
+        next_cursor:
+          type:
+            - string
+            - "null"
+        prev_cursor:
+          type:
+            - string
+            - "null"
+    PaginationDirection:
+      type: string
+      enum:
+        - next
+        - prev
+    ParseConfiguration:
+      type: object
+      properties:
+        parsing_options:
+          $ref: "#/components/schemas/ParsingOptions"
+          description: |-
+            The properties of this object define the configuration for the document
+            parsing process.
+
+            Tensorlake provides sane defaults that work well for most
+            documents, so this object is not required. However, every document
+            is different, and you may want to customize the parsing process to
+            better suit your needs.
+        structured_extraction_options:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: "#/components/schemas/StructuredExtractionOptions"
+          description: |-
+            The properties of this object define the configuration for structured
+            data extraction.
+
+            If this object is present, the API will perform structured data
+            extraction on the document.
+        page_classifications:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: "#/components/schemas/PageClassConfig"
+          description: |-
+            The properties of this object define the configuration for page
+            classification.
+
+            If this object is present, the API will perform page classification on
+            the document.
+        enrichment_options:
+          $ref: "#/components/schemas/EnrichmentOptions"
+          description: |-
+            The properties of this object help to extend the output of the document
+            parsing process with additional information.
+
+            This includes summarization of tables and figures, which can help to
+            provide a more comprehensive understanding of the document.
+
+            This object is not required, and the API will use default settings if it
+            is not present.
+    ParseCreatedResponse:
+      type: object
+      required:
+        - parse_id
+        - created_at
+      properties:
+        parse_id:
+          type: string
+          description: |-
+            The unique identifier for the parse job
+
+            This is the ID that can be used to track the status of the parse job.
+            Used in the `GET /documents/v2/parse/{parse_id}` endpoint to retrieve the
+            status and results of the parse job.
+        created_at:
+          type: string
+          description: |-
+            The creation date and time of the parse job.
+
+            The date is in RFC 3339 format.
+    ParseRequest:
+      allOf:
+        - $ref: "#/components/schemas/ParseConfiguration"
+        - type: object
+          properties:
+            file_id:
+              type:
+                - string
+                - "null"
+              description: |-
+                ID of the file previously uploaded to Tensorlake.
+
+                This is the ID of the file in Tensorlake's storage system. It has a
+                tensorlake- (for V1 files), or file_ (for V2 files) prefix.
+
+                This field must be provided if `file_url` and `raw_text` are not
+                provided.
+            file_url:
+              type:
+                - string
+                - "null"
+              description: |-
+                External URL of the file to parse.
+
+                This URL should point to a publicly accessible file that can be
+                downloaded.
+
+                This field must be provided if `file_id` and `raw_text` are not
+                provided.
+              examples:
+                - https://pub-226479de18b2493f96b64c6674705dd8.r2.dev/real-estate-purchase-all-signed.pdf
+            raw_text:
+              type:
+                - string
+                - "null"
+              description: |-
+                The raw text to parse.
+
+                This should be a free-text representation of the document.
+
+                This field must be provided if `file_id` and `file_url` are not
+                provided.
+            mime_type:
+              oneOf:
+                - type: "null"
+                - $ref: "#/components/schemas/MimeType"
+                  description: |-
+                    The MIME type of the content provided. When provided, it overrides the
+                    detected MIME type of the file.
+
+                    **required** if `raw_text` is provided. Value must be one of
+                    the text/* MIME types.
+            page_range:
+              type:
+                - string
+                - "null"
+              description: |-
+                The range of pages to parse in the document.
+                Default - All pages will be parsed.
+
+                This should be a comma-separated list of page numbers or ranges (e.g.,
+                "1,2,3-5").
+            labels:
+              type:
+                - object
+                - "null"
+              description: |-
+                Additional metadata to identify the parse request. The labels are
+                returned in the parse response.
+              additionalProperties: {}
+              propertyNames:
+                type: string
+              example:
+                priority: high
+                source: email
+      description: This object defines the request body for the parse endpoint.
+    ParseRequestOptions:
+      type: object
+      required:
+        - configuration
+      properties:
+        file_id:
+          type:
+            - string
+            - "null"
+          description: |-
+            The tensorlake file ID.
+
+            This is the ID of the file used for the parse job. It has `tensorlake_`
+            prefix.
+
+            It can be undefined if the parse operation was created with a `file_url`
+            or `raw_text` field instead of a file ID.
+        file_url:
+          type:
+            - string
+            - "null"
+          description: |-
+            The URL of the file used for the parse job.
+
+            It can be undefined if the parse operation was created with a `file_id`
+            or `raw_text` field instead of a file URL.
+        raw_text:
+          type:
+            - string
+            - "null"
+          description: |-
+            The raw_text for the parse job.
+
+            This is only populated if the parse operation was created with a
+            `raw_text` field. And the mime type is of a text-based format (e.g.,
+            plain text, HTML).
+
+            It can be undefined if the parse operation was created with a `file_id`
+            or `file_url` field instead of raw_text.
+        file_name:
+          type:
+            - string
+            - "null"
+          description: |-
+            The name of the file used for the parse job.
+
+            This is only populated if the parse operation was created with a
+            `file_id`.
+        file_labels:
+          type: object
+          description: |-
+            Labels associated to the file used for the parse job.
+
+            These are the key-value, or json, pairs submitted with the file
+            upload.
+          additionalProperties: {}
+          propertyNames:
+            type: string
+          example:
+            priority: high
+            source: email
+        mime_type:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/MimeType"
+              description: |-
+                The mime type of the file used for the parse job.
+
+                This can be undefined if the file has been removed since the parse job
+                was created, or if the parse operation was created with a `file_url`
+                field instead of a `file_id` or `raw_text`.
+        trace_id:
+          type:
+            - string
+            - "null"
+          description: |-
+            The trace ID for the parse job.
+
+            It can be undefined if the operation is still in pending state.
+
+            This is used for debugging purposes.
+        page_range:
+          type:
+            - string
+            - "null"
+          description: |-
+            The page range that was requested for parsing.
+
+            This is the same as the value provided in the `pages` field of the
+            request.
+
+            It can be undefined if the parse operation was created without a
+            specific page range. Meaning the whole document was parsed.
+        configuration:
+          $ref: "#/components/schemas/ParseConfiguration"
+          description: |-
+            The configuration used for the parse job.
+
+            This is derived from the configuration settings submitted with the parse
+            request.
+
+            It can be used to understand how the parse job was configured, such as
+            the parsing strategy, extraction methods, etc.
+
+            Values not provided in the request will be set to their default values.
+    ParseResult:
+      type: object
+      properties:
+        parse_id:
+          type: string
+          description: |-
+            The unique identifier for the parse job
+
+            This is the same as the value returned from the `POST /documents/v2/parse`
+            endpoint.
+          default: ""
+          example: parse_abcd1234
+        dataset_id:
+          type:
+            - string
+            - "null"
+          description: |-
+            If the parse job was scheduled from a dataset, this field contains the
+            dataset id.
+
+            This is the identifier used in URLs and API endpoints to refer to the
+            dataset.
+          default: null
+        parsed_pages_count:
+          type: integer
+          description: |-
+            The number of pages that were parsed successfully.
+
+            This is the total number of pages that were successfully parsed in the
+            document.
+          default: 0
+          example: 5
+          minimum: 0
+        status:
+          oneOf:
+            - $ref: "#/components/schemas/ParseStatus"
+              description: |-
+                The status of the parse job.
+
+                This indicates whether the job is pending, in progress, completed, or
+                failed.
+
+                This can be used to track the progress of the parse operation.
+          default: pending
+        error:
+          type:
+            - string
+            - "null"
+          description: |-
+            Error ocurred during any part of the parse execution.
+
+            This is only populated if the parse operation failed.
+          default: null
+        pages:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: "#/components/schemas/Page"
+          description: |-
+            List of pages parsed from the document.
+
+            Each page has a list of fragments, which are detected objects such as
+            tables, text, figures, section headers, etc.
+
+            We also return the detected text, structure of the table(if its a
+            table), and the bounding box of the object.
+          default: null
+        chunks:
+          type: array
+          items:
+            $ref: "#/components/schemas/Chunk"
+          description: |-
+            Chunks of the document.
+
+            This is a vector of `Chunk` objects, each containing a chunk of the
+            document.
+            The number of chunks depend on the chunking strategy used during
+            parsing.
+          default: []
+        structured_data:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: "#/components/schemas/StructuredData"
+          description: |-
+            Structured data extracted from the document.
+
+            The structured data is a map where the keys are the schema names
+            provided in the parse request, and the values are
+            `StructuredData` objects containing the structured data extracted from
+            the document.
+
+            The number of structured data objects depends on the partition strategy
+            **None** - one structured data object for the entire document.
+            **Page** - one structured data object for each page.
+          default: null
+        page_classes:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: "#/components/schemas/PageClass"
+          description: |-
+            Page classes extracted from the document.
+
+            This is a map where the keys are page class names provided in the parse
+            request under the `page_classification_options` field,
+            and the values are vectors of page numbers (1-indexed) where each page
+            class appears.
+
+            This is used to categorize pages in the document based on the
+            classification options provided.
+          default: null
+        created_at:
+          type: string
+          description: |-
+            The date and time when the parse job was created.
+
+            The date is in RFC 3339 format.
+
+            This can be used to track when the parse job was initiated.
+          default: ""
+        finished_at:
+          type:
+            - string
+            - "null"
+          description: |-
+            The date and time when the parse job was finished.
+
+            The date is in RFC 3339 format.
+
+            This can be undefined if the parse job is still in progress or pending.
+          default: null
+        labels:
+          type: object
+          description: |-
+            Labels associated with the parse job.
+
+            These are the key-value, or json, pairs submitted with the parse
+            request.
+
+            This can be used to categorize or tag the parse job for easier
+            identification and filtering.
+
+            It can be undefined if no labels were provided in the request.
+          default: {}
+          additionalProperties: {}
+          propertyNames:
+            type: string
+          example:
+            priority: high
+            source: email
+    ParseStatus:
+      type: string
+      enum:
+        - pending
+        - processing
+        - successful
+        - failure
+    ParsedJobOutput:
+      type: object
+      properties:
+        chunks:
+          oneOf:
+            - $ref: "#/components/schemas/ChunkOrString"
+          default: []
+        pages: {}
+        num_pages:
+          type:
+            - integer
+            - "null"
+          format: int32
+          default: null
+        structured_data:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/StructuredDataResponse"
+          default: null
+        errors:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/OutputErrorsResponse"
+          default: null
+    ParsingOptions:
+      type: object
+      properties:
+        table_output_mode:
+          oneOf:
+            - $ref: "#/components/schemas/TableOutputMode"
+              description: |-
+                The format for the tables extracted from the document.
+
+                `HTML`(*default*) - tables are represented as HTML strings.
+                `Markdown` - tables are represented as Markdown strings.
+          default: html
+        table_parsing_format:
+          oneOf:
+            - $ref: "#/components/schemas/TableParsingFormat"
+              description: |-
+                Determines which model the system uses to identify and extract tables
+                from the document.
+
+                `table_structure_recognition`(*default*) - identifies the structure of
+                the table first, and then the cells of the tables. Better suited for
+                dense, long or grid-like tables.
+                `vlm` - uses a VLM model to identify and extract the cells of the
+                tables. Better suited for tables with merged cells or irregular
+                structures.
+          default: tsr
+        chunking_strategy:
+          oneOf:
+            - $ref: "#/components/schemas/ChunkingStrategy"
+              description: |-
+                Determines how the document is chunked into smaller pieces.
+
+                `None`(*default*) - no chunking is applied.
+                `Page` - chunks the document into pages.
+                `Section` - chunks the document into sections.
+                `Fragment` - chunks the document by objects detected in the document.
+                Every text block, image, table, etc. is considered a fragment.
+          default: none
+        signature_detection:
+          type: boolean
+          description: |-
+            Flag to enable the detection of signatures in the document.
+
+            This flag incurs additional billing costs.
+
+            The default is `false`.
+          default: false
+        remove_strikethrough_lines:
+          type: boolean
+          description: |-
+            Flag to enable the detection, and removal, of strikethrough text in the
+            document.
+
+            This flag incurs additional billing costs.
+
+            The default is `false`.
+          default: false
+        skew_detection:
+          type: boolean
+          description: |-
+            Boolean flag to detect and correct skewed or rotated pages in the
+            document.
+
+            The default is `false`.
+
+            Setting this to `true` will increase the processing time of the
+            document.
+          default: false
+        disable_layout_detection:
+          type: boolean
+          description: |-
+            Disable bounding box detection for the document. Leads to faster
+            document parsing.
+
+            The default is `false`.
+          default: false
+        ignore_sections:
+          type: array
+          items:
+            $ref: "#/components/schemas/PageFragmentType"
+          description: |-
+            A set of page fragment types to ignore during parsing.
+
+            This can be used to skip certain types of content that are not relevant
+            for the parsing process, such as headers, footers, or other
+            non-essential elements.
+          default: []
+          uniqueItems: true
+      additionalProperties: false
+    Settings:
+      type: object
+      properties:
+        tableParsingMode:
+          oneOf:
+            - $ref: "#/components/schemas/TableParsingStrategy"
+              description: |-
+                The mode to use for table parsing - Table Structure Understanding or VLM
+                Table Structure Understanding is the default mode. It's great for
+                structured tables. VLM is great for unstructured or semi-structured
+                tables.
+          default: tsr
+        tableOutputMode:
+          oneOf:
+            - $ref: "#/components/schemas/TableOutputMode"
+              description: |-
+                The mode to use for table output - JSON, Markdown or HTML
+                JSON mode is great for structured tables.
+                Markdown mode is great for tables without merged cells.
+                HTML mode is great for tables with merged cells.
+          default: markdown
+        tableSummarization:
+          type: boolean
+          description: Whether to summarize the contents of the tables.
+        tableSummarizationPrompt:
+          type:
+            - string
+            - "null"
+          description: The prompt to use for table summarization.
+          default: none
+        figureSummarization:
+          type: boolean
+          description: Whether to summarize the contents of the figures.
+        figureSummarizationPrompt:
+          type:
+            - string
+            - "null"
+          description: |-
+            The prompt to use for figure summarization.
+
+            If not provided, the default prompt will be used.
+          default: none
+        formDetectionMode:
+          oneOf:
+            - $ref: "#/components/schemas/FormDetectionMode"
+              description: Whether to summarize the contents of the tables.
+          default: vlm
+        chunkStrategy:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/ChunkStrategy"
+              description: |-
+                The chunking strategy determines how the document is chunked into
+                smaller pieces. This is only supported in `markdown` mode.
+          default: none
+        jsonSchema:
+          description: |-
+            The JSON schema to guide structured data extraction from the file.
+            Encode the JSON schema as a string.
+
+            If provided, the pages argument will be ignored.
+        structuredExtractionPrompt:
+          type:
+            - string
+            - "null"
+          description: |-
+            Overide the prompt to customize structured extractions. Use this if you
+            want to extract data from a file using a different prompt than the one
+            we use to extract.
+          default: none
+        modelProvider:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/ModelProvider"
+              description: |-
+                The model provider to use for structured data extraction.
+                Specifying `tensorlake` will use a private model, which runs on our
+                servers.
+          default: tensorlake
+        deliverWebhook:
+          type: boolean
+          description: |-
+            Whether to deliver a webhook when the job is completed.
+            A webhook needs to be configured for this to work.
+
+            If a webhook is not configured, the job will still be processed but the
+            webhook will not be delivered.
+          default: false
+        detectSignature:
+          type: boolean
+          description: Boolean to perform signature detection.
+          default: false
+        skewCorrection:
+          type: boolean
+          description: Skew correction for the document.
+          default: false
+        disableLayoutDetection:
+          type: boolean
+          description: Whether to disable layout detection.
+          default: false
+        structuredExtractionSkipOcr:
+          type: boolean
+          description: Whether to skip OCR for structured extraction.
+          default: false
+        detectStrikethrough:
+          type: boolean
+          default: false
+    StructuredData:
+      type: object
+      required:
+        - data
+        - page_numbers
+      properties:
+        data:
+          description: |-
+            The structured data extracted from the document.
+
+            This is a JSON object containing the extracted data in the
+            shape of the JSON schema provided in the parse request.
+        page_numbers:
+          $ref: "#/components/schemas/OneOrMany_usize"
+          description: |-
+            A list of page numbers (1-indexed) where the structured data was
+            detected.
+
+            The value may be a single page number or a vector of page numbers.
+        schema_name:
+          type:
+            - string
+            - "null"
+          description: |-
+            The name of the schema provided in the structured extraction options of
+            the parse request.
+
+            This is used to identify the schema used for the structured data
+            extraction.
+    StructuredDataPage:
+      type: object
+      properties:
+        page_number:
+          oneOf:
+            - $ref: "#/components/schemas/OneOrMany_i32"
+          default: 0
+        json_result: {}
+    StructuredDataResponse:
+      type: object
+      properties:
+        pages:
+          type: array
+          items:
+            $ref: "#/components/schemas/StructuredDataPage"
+          default: []
+    StructuredExtractionOptions:
+      type: object
+      required:
+        - schema_name
+        - json_schema
+      properties:
+        schema_name:
+          type: string
+          description: |-
+            The name of the schema. This is used to tag the structured data output
+            with a name in the response.
+        json_schema:
+          description: |-
+            The JSON schema to guide structured data extraction from the file.
+
+            This schema should be a valid JSON schema that defines the structure of
+            the data to be extracted.
+
+            The API supports a subset of the JSON schema specification.
+
+            This value must be provided if `structured_extraction` is present in the
+            request.
+        skip_ocr:
+          type: boolean
+          description: |-
+            Boolean flag to skip converting the document blob to OCR text before
+            structured data extraction.
+
+            If set to `true`, the API will skip the OCR step and directly extract
+            structured data from the document.
+
+            The default is `false`.
+        prompt:
+          type:
+            - string
+            - "null"
+          description: |-
+            The prompt to use for structured data extraction.
+
+            If not provided, the default prompt will be used.
+        model_provider:
+          $ref: "#/components/schemas/Model"
+          description: |-
+            The model provider to use for structured data extraction.
+
+            The default is `tensorlake`, which uses our private model, and runs on
+            our servers.
+        partition_strategy:
+          $ref: "#/components/schemas/ChunkingStrategy"
+          description: |-
+            Strategy to partition the document before structured data extraction.
+            The API will return one structured data object per partition. This is
+            useful when you want to extract certain fields from every page.
+            Options -
+            * `None`(*default*) - no partitioning is applied.
+            * `Page` - partition the document into pages.
+        page_classes:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+          description: |-
+            Filter the pages of the document to be used for structured data
+            extraction by providing a list of page classes.
+
+            The default is `None`, which means all pages will be used.
+      additionalProperties: false
+    TableOutputMode:
+      type: string
+      enum:
+        - markdown
+        - html
+    TableParsingFormat:
+      type: string
+      enum:
+        - tsr
+        - vlm
+    TableParsingStrategy:
+      type: string
+      enum:
+        - tsr
+        - vlm
+        - unknown
+    UpdateDatasetRequest:
+      type: object
+      properties:
+        name:
+          type:
+            - string
+            - "null"
+        description:
+          type:
+            - string
+            - "null"
+        settings:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/Settings"
+    UploadFileResponse:
+      type: object
+      required:
+        - id
+      properties:
+        id:
+          type: string
+    UploadLargeFileInitRequest:
+      type: object
+      required:
+        - filename
+        - file_size
+        - sha256_checksum
+      properties:
+        filename:
+          type: string
+        file_size:
+          type: integer
+          format: int64
+        mime_type:
+          type:
+            - string
+            - "null"
+        sha256_checksum:
+          type: string
+    UploadLargeFileInitResponse:
+      type: object
+      required:
+        - id
+      properties:
+        id:
+          type: string
+        presigned_url:
+          type:
+            - string
+            - "null"
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  responses:
+    UnauthorizedError:
+      description: Access token is missing or invalid
