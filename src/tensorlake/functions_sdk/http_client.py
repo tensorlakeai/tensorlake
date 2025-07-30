@@ -380,7 +380,7 @@ class TensorlakeClient:
             **kwargs,
         )
         return response.json()["request_id"]
-        
+
     def call_stream(
         self,
         graph: str,
