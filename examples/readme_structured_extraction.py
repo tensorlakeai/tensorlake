@@ -1,10 +1,15 @@
 from datetime import date
 from typing import Dict, List, Optional
+
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 from tensorlake.documentai import DocumentAI
-from tensorlake.documentai.models import ParsingOptions, StructuredExtractionOptions, ChunkingStrategy
+from tensorlake.documentai.models import (
+    ChunkingStrategy,
+    ParsingOptions,
+    StructuredExtractionOptions,
+)
 
 load_dotenv()
 
@@ -74,21 +79,19 @@ doc_ai = DocumentAI()
 file_id = doc_ai.upload(path="./examples/documents/example_bank_statement.pdf")
 
 # Configure parsing options
-parsing_options = ParsingOptions(
-    chunking_strategy=ChunkingStrategy.PAGE
-)
+parsing_options = ParsingOptions(chunking_strategy=ChunkingStrategy.PAGE)
 
 # Configure structured extraction options
 structured_extraction_options = StructuredExtractionOptions(
     schema_name="Bank Statement",
-    json_schema=BankStatement  # Can pass Pydantic model directly
+    json_schema=BankStatement,  # Can pass Pydantic model directly
 )
 
 # Parse the document
 parse_id = doc_ai.parse(
     file_id,
     parsing_options=parsing_options,
-    structured_extraction_options=[structured_extraction_options]
+    structured_extraction_options=[structured_extraction_options],
 )
 
 # Wait for completion

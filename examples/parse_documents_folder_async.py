@@ -1,10 +1,13 @@
 """
 Example of how to parse all documents in a folder asynchronously using the Document AI API.
 """
+
 import asyncio
 import csv
+
 from dotenv import load_dotenv
 from requests.exceptions import HTTPError
+
 from tensorlake.data_loaders import LocalDirectoryLoader
 from tensorlake.documentai import DocumentAI
 
@@ -58,9 +61,9 @@ async def wait_for_completion():
     for parse_id, (file_name, file_id) in parse_ids.items():
         result = await document_parser.wait_for_completion_async(parse_id)
         results[parse_id] = {
-                'file_name': file_name,
-                'file_id': file_id,
-                'result': result
+            "file_name": file_name,
+            "file_id": file_id,
+            "result": result,
         }
         print(f"Completed {file_name}: {result.status}")
 
@@ -92,12 +95,9 @@ async def main():
         writer.writerow(["parse_id", "file_name", "file_id"])
 
         for parse_id, result in results.items():
-            writer.writerow([
-                parse_id,
-                result['file_name'],
-                result['file_id'],
-                result['result']
-            ])
+            writer.writerow(
+                [parse_id, result["file_name"], result["file_id"], result["result"]]
+            )
 
     print(f"Results written to {csv_filename}")
 
