@@ -14,13 +14,13 @@
 # and stream logs from a build.
 """
 
+import asyncio
 import os
 import tempfile
 from dataclasses import dataclass
 from typing import Dict, Optional
 
 import aiofiles
-import asyncio
 import click
 import httpx
 from httpx_sse import aconnect_sse
