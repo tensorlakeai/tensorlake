@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 import aiofiles
+import asyncio
 import click
 import httpx
 from httpx_sse import aconnect_sse
@@ -196,7 +197,16 @@ class ImageBuilderV2Client:
         build = BuildInfo.model_validate(res.json())
 
         click.secho(f"Build ID: {build.id}", fg="green")
-        return await self.stream_logs(build)
+        try:
+            return await self.stream_logs(build)
+        except (asyncio.CancelledError, KeyboardInterrupt, click.Abort):
+            try:
+                click.secho(f"Cancelling remote build {build.id}...", fg="yellow")
+                await self._cancel_build(build)
+                click.secho(f"Cancelled build {build.id}", fg="yellow")
+            except Exception as e:
+                click.secho(f"Failed to cancel build {build.id}: {e}", fg="red")
+            raise
 
     async def stream_logs(self, build: BuildInfo) -> BuildInfo:
         """
@@ -207,29 +217,33 @@ class ImageBuilderV2Client:
         """
         click.echo(f"Streaming logs for build {build.id}")
 
-        async with httpx.AsyncClient(timeout=120) as client:
-            async with aconnect_sse(
-                client,
-                "GET",
-                f"{self._build_service}/builds/{build.id}/logs",
-                headers=self._headers,
-            ) as event_source:
-                async for sse in event_source.aiter_sse():
-                    log_entry = BuildLogEvent.model_validate(sse.json())
-                    if log_entry.stream == "stdout":
-                        click.secho(
-                            log_entry.message,
-                            nl=False,
-                            err=False,
-                            fg="black",
-                            dim=True,
-                        )
-                    elif log_entry.stream == "stderr":
-                        click.secho(log_entry.message, fg="red", err=True)
-                    elif log_entry.stream == "info":
-                        click.secho(
-                            f"{log_entry.timestamp}: {log_entry.message}", fg="blue"
-                        )
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                async with aconnect_sse(
+                    client,
+                    "GET",
+                    f"{self._build_service}/builds/{build.id}/logs",
+                    headers=self._headers,
+                ) as event_source:
+                    async for sse in event_source.aiter_sse():
+                        log_entry = BuildLogEvent.model_validate(sse.json())
+                        if log_entry.stream == "stdout":
+                            click.secho(
+                                log_entry.message,
+                                nl=False,
+                                err=False,
+                                fg="black",
+                                dim=True,
+                            )
+                        elif log_entry.stream == "stderr":
+                            click.secho(log_entry.message, fg="red", err=True)
+                        elif log_entry.stream == "info":
+                            click.secho(
+                                f"{log_entry.timestamp}: {log_entry.message}", fg="blue"
+                            )
+        except asyncio.CancelledError:
+            # Propagate so `build()` can cancel the remote build.
+            raise
 
         return await self.build_info(build.id)
 
@@ -260,3 +274,10 @@ class ImageBuilderV2Client:
             )
 
         return build_info
+
+    async def _cancel_build(self, build: BuildInfo):
+        await self._client.post(
+            f"{self._build_service}/builds/{build.id}/cancel",
+            headers=self._headers,
+            timeout=60,
+        )
