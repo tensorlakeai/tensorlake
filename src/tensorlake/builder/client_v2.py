@@ -196,16 +196,24 @@ class ImageBuilderV2Client:
         res.raise_for_status()
         build = BuildInfo.model_validate(res.json())
 
+        click.secho(f"Starting build for image {image.image_name} ...", fg="green")
         click.secho(f"Build ID: {build.id}", fg="green")
         try:
             return await self.stream_logs(build)
         except (asyncio.CancelledError, KeyboardInterrupt, click.Abort):
             try:
-                click.secho(f"Cancelling remote build {build.id}...", fg="yellow")
-                await self._cancel_build(build)
-                click.secho(f"Cancelled build {build.id}", fg="yellow")
+                click.secho(
+                    f"Cancelling build for image {image.image_name} ...", fg="yellow"
+                )
+                await self._cancel_build(build, image)
+                click.secho(
+                    f"Cancelled build for image {image.image_name}", fg="yellow"
+                )
             except Exception as e:
-                click.secho(f"Failed to cancel build {build.id}: {e}", fg="red")
+                click.secho(
+                    f"Failed to cancel build for image {image.image_name}: {e}",
+                    fg="red",
+                )
             raise
 
     async def stream_logs(self, build: BuildInfo) -> BuildInfo:
@@ -275,9 +283,16 @@ class ImageBuilderV2Client:
 
         return build_info
 
-    async def _cancel_build(self, build: BuildInfo):
-        await self._client.post(
+    async def _cancel_build(self, build: BuildInfo, image: Image):
+        response = await self._client.post(
             f"{self._build_service}/builds/{build.id}/cancel",
             headers=self._headers,
             timeout=60,
         )
+
+        if response.status_code == 202:
+            click.secho(
+                f"Build for image {image.image_name} cancelled successfully", fg="green"
+            )
+        else:
+            click.secho(f"Failed to cancel build {build.id}", fg="red")

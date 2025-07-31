@@ -75,8 +75,9 @@ def _validate_workflow_module(workflow_module_info: WorkflowModuleInfo, ctx: Con
 async def _prepare_images_v2(
     builder_v2: ImageBuilderV2Client, images: Dict[Image, ImageInfo]
 ):
-    for image_info in images.values():
+    for image, image_info in images.items():
         for build_context in image_info.build_contexts:
+            click.secho(f"Building image {image.image_name}...", fg="yellow")
             await builder_v2.build(build_context, image_info.image)
 
     click.secho(f"Built {len(images)} images with builder v2", fg="green")
