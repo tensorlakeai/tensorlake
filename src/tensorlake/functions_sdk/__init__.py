@@ -1,6 +1,7 @@
 from .exceptions import ApiException, GraphStillProcessing, RequestException
 from .functions import (
     GraphRequestContext,
+    LabelsFilter,
     RouteTo,
     TensorlakeCompute,
     tensorlake_function,
@@ -21,6 +22,7 @@ __all__ = [
     "Retries",
     "RemotePipeline",
     "RouteTo",
+    "LabelsFilter",
     "tensorlake_function",
     "TensorlakeCompute",
     "TensorlakeClient",
