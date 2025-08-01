@@ -1,13 +1,18 @@
-import time
+import json
 
 from pydantic import BaseModel
 
 from tensorlake.documentai import DocumentAI
-from tensorlake.documentai.parse import (
-    ExtractionOptions,
+from tensorlake.documentai.models import (
     ParsingOptions,
-    TableParsingStrategy,
+    StructuredExtractionOptions,
+    TableOutputMode,
+    TableParsingFormat,
 )
+
+TENSORLAKE_API_KEY = "tl_apiKey_XXXXX"
+
+doc_ai = DocumentAI(api_key=TENSORLAKE_API_KEY)
 
 
 class PaperSchema(BaseModel):
@@ -21,35 +26,31 @@ class PaperSchema(BaseModel):
     abstract: str
 
 
-API_KEY = "tl_apiKey_XXXXX"
-
-doc_ai = DocumentAI(api_key=API_KEY)
-
-# Skip this if you are passing a pre-signed URL to the `DocumentParser`.
-# or pass an external URL
+# Skip this if you are passing a pre-signed URL to the parse method or pass an external URL
 file_id = doc_ai.upload(path="/path/to/files")
 
-job_id = doc_ai.parse(
-    file_id,  # You can pass in a publicly accessible URL instead of a file_id
-    # "https://arxiv.org/pdf/2409.13148",
-    options=ParsingOptions(
-        table_parsing_strategy=TableParsingStrategy.VLM,
-        extraction_options=ExtractionOptions(schema=PaperSchema),
-    ),
+# Configure parsing options
+parsing_options = ParsingOptions(
+    table_parsing_format=TableParsingFormat.VLM,
+    table_output_mode=TableOutputMode.MARKDOWN,
 )
 
-print(f"job id: {job_id}")
-result = doc_ai.get_job(job_id=job_id)
-print(f"job status: {result.status}")
-while True:
-    if result.status in ["pending", "processing"]:
-        print("waiting 5s...")
-        time.sleep(5)
-        result = doc_ai.get_job(job_id)
-        print(f"job status: {result.status}")
-    else:
-        if result.status == "successful":
-            # save the result to a file
-            with open(f"{job_id}.json", "w", encoding="utf-8") as f:
-                f.write(result.model_dump_json())
-        break
+structured_extraction_options = StructuredExtractionOptions(
+    schema_name="Research Paper", json_schema=PaperSchema
+)
+
+# Parse and extract structured data
+result = doc_ai.parse_and_wait(
+    file_id,  # You can pass in a publicly accessible URL instead of a file_id
+    # "https://arxiv.org/pdf/2409.13148",
+    parsing_options=parsing_options,
+    structured_extraction_options=[structured_extraction_options],
+)
+
+# Print the structured data output
+print(json.dumps(result.structured_data[0].data, indent=2))
+
+# Get the markdown from extracted data
+for index, chunk in enumerate(result.chunks):
+    print(f"Chunk {index}:")
+    print(chunk.content)
