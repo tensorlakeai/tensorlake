@@ -1,16 +1,13 @@
-import json
 import time
 
 from dotenv import load_dotenv
 
 from tensorlake.documentai import DocumentAI
 from tensorlake.documentai.models import (
+    ChunkingStrategy,
     ParseStatus,
     ParsingOptions,
     StructuredExtractionOptions,
-)
-from tensorlake.documentai.models.enums import (
-    ChunkingStrategy,
     TableOutputMode,
     TableParsingFormat,
 )
