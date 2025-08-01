@@ -3,7 +3,6 @@ import sys
 import unittest
 
 from testing import (
-    DEFAULT_FUNCTION_EXECUTOR_PORT,
     FunctionExecutorProcessContextManager,
     rpc_channel,
 )
@@ -19,9 +18,7 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
 
 class TestGetInfo(unittest.TestCase):
     def test_expected_info(self):
-        with FunctionExecutorProcessContextManager(
-            DEFAULT_FUNCTION_EXECUTOR_PORT
-        ) as process:
+        with FunctionExecutorProcessContextManager() as process:
             with rpc_channel(process) as channel:
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 response: InfoResponse = stub.get_info(InfoRequest())
