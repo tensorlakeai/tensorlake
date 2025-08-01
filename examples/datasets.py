@@ -8,12 +8,11 @@ import csv
 from pydantic import BaseModel, Field
 
 from tensorlake.data_loaders import LocalDirectoryLoader
-from tensorlake.documentai import (
-    DatasetOptions,
-    DocumentAI,
-    ExtractionOptions,
-    IngestArgs,
+from tensorlake.documentai import DocumentAI
+from tensorlake.documentai.models import (
+    ChunkingStrategy,
     ParsingOptions,
+    StructuredExtractionOptions,
 )
 
 TENSORLAKE_API_KEY = "tl_apiKey_XXXXXXX"
@@ -66,23 +65,19 @@ async def main():
     # The name of the dataset must be unique within a project so you
     # can retrieve the dataset later using the name.
     dataset = await document_ai.create_dataset_async(
-        DatasetOptions(
-            name="new_api",
-            description="A dataset of documents",
-            options=ParsingOptions(
-                extraction_options=ExtractionOptions(
-                    model=Statement,
-                )
-            ),
-        ),
-        ignore_if_exists=True,
+        name="new_api",
+        description="A dataset of documents",
+        parsing_options=ParsingOptions(chunking_strategy=ChunkingStrategy.PAGE),
+        structured_extraction_options=[
+            StructuredExtractionOptions(schema_name="Statement", json_schema=Statement)
+        ],
     )
 
-    print(f"Dataset created: {dataset.id}")
+    print(f"Dataset created: {dataset.dataset_id}")
 
     # Extend a existing dataset with some files. Tensorlake will automatically
     # parse the files or any other ingestion actions specified in the dataset.
-    tasks = [dataset.ingest_async(IngestArgs(file_path=file.path)) for file in files]
+    tasks = [document_ai.parse_dataset_file_async(dataset, file.path) for file in files]
     job_ids = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Debug: Print job results
@@ -99,28 +94,25 @@ async def main():
     wait_tasks = [
         document_ai.wait_for_completion_async(job_id) for job_id in valid_job_ids
     ]
-    await asyncio.gather(*wait_tasks)
+    results = await asyncio.gather(*wait_tasks)
 
-    # Retrieve the outputs of the dataset
-    # The output includes the job id and the extracted contents
+    # Retrieve the outputs
     items = {}
-    items_page = await dataset.items_async()
-    for key_info, data in items_page.items.items():
-        items[key_info] = data.model_dump_json()
-
-    cursor = items_page.cursor
-    while cursor is not None:
-        items_page = await dataset.items_async(cursor=cursor)
-        for key_info, data in items_page.items.items():
-            items[key_info] = data.model_dump_json()
-        cursor = items_page.cursor
+    for i, result in enumerate(results):
+        key_info = f"job_{valid_job_ids[i]}"
+        items[key_info] = (
+            result.model_dump_json()
+            if hasattr(result, "model_dump_json")
+            else str(result)
+        )
 
     csv_filename = f"{dataset.name}.csv"
     with open(csv_filename, "w", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["job_id", "file_name", "output"])
-        for key_info, data in items.items():
-            writer.writerow([key_info.id, key_info.file_name, data])
+        for i, (key_info, data) in enumerate(items.items()):
+            file_name = files[i].name if i < len(files) else f"file_{i}"
+            writer.writerow([valid_job_ids[i], file_name, data])
 
 
 asyncio.run(main())
