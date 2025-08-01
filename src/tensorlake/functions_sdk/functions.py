@@ -27,6 +27,52 @@ from .object_serializer import get_serializer
 from .retries import Retries
 
 
+class LabelsFilter:
+    """Represents execution environment label filters for function placement.
+
+    This class provides methods to specify placement constraints based on executor labels.
+    Currently supports simple "all_of" matching, with room for future filter expressions.
+    """
+
+    def __init__(self, *filter_expressions: str):
+        """Initialize with a list of label filter expressions.
+
+        Args:
+            *filter_expressions: Variable number of filter expression strings (e.g., "os==linux", "gpu_type==nvidia")
+        """
+        self._filter_expressions = list(filter_expressions)
+
+    @classmethod
+    def all_of(cls, **kwargs: str) -> "LabelsFilter":
+        """Create a filter that requires all specified labels to match.
+
+        Args:
+            **kwargs: Key-value pairs representing required labels (e.g., os="linux", region="us-west")
+
+        Returns:
+            LabelsFilter instance that matches executors having all specified labels
+
+        Example:
+            LabelsFilter.all_of(os="linux", gpu_type="nvidia", region="us-west")
+        """
+        filter_expressions = [f"{key}=={value}" for key, value in kwargs.items()]
+        return cls(*filter_expressions)
+
+    def get_filter_expressions(self) -> List[str]:
+        """Get the list of filter expression strings.
+
+        Returns:
+            List of filter expression strings like ["os==linux", "gpu_type==nvidia"]
+        """
+        return self._filter_expressions.copy()
+
+    def __repr__(self) -> str:
+        if not self._filter_expressions:
+            return "LabelsFilter()"
+        expressions_str = ", ".join(repr(expr) for expr in self._filter_expressions)
+        return f"LabelsFilter({expressions_str})"
+
+
 @dataclass(frozen=True)
 class Progress:
     """Progress information for a running task."""
@@ -115,6 +161,8 @@ class TensorlakeCompute:
         gpu (Optional[str]): GPU(s) available to the function. No GPU is allocated by default.
                              The value should be a string "GPU_MODEL:COUNT" representing the GPU model and the number of GPUs.
                              See supported GPU models and counts in Tensorlake Cloud documentation.
+        placement_constraints (Optional[LabelsFilter]): Execution environment label filter that specifies where this function can run.
+                                                     Use LabelsFilter.all_of(os="linux", region="us-west") to specify requirements.
         cacheable (bool): Declares that applications of this function are cacheable.
                           A function should only be marked cacheable if its outputs are a
                           pure function of its inputs.
@@ -134,6 +182,7 @@ class TensorlakeCompute:
     memory: float = _DEFAULT_MEMORY_GB
     ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK_GB
     gpu: Optional[Union[str, List[str]]] = _DEFAULT_GPU
+    placement_constraints: Optional[LabelsFilter] = None
     next: Optional[Union["TensorlakeCompute", List["TensorlakeCompute"]]] = None
     cacheable: bool = False
 
@@ -203,6 +252,7 @@ def tensorlake_function(
     memory: float = _DEFAULT_MEMORY_GB,
     ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK_GB,
     gpu: Optional[Union[str, List[str]]] = _DEFAULT_GPU,
+    placement_constraints: Optional[LabelsFilter] = None,
     next: Optional[Union["TensorlakeCompute", List["TensorlakeCompute"]]] = None,
     cacheable: bool = False,
 ):
@@ -227,6 +277,7 @@ def tensorlake_function(
             "memory": memory,
             "ephemeral_disk": ephemeral_disk,
             "gpu": gpu,
+            "placement_constraints": placement_constraints,
             "cacheable": cacheable,
             "run": staticmethod(fn),
             "next": next,
