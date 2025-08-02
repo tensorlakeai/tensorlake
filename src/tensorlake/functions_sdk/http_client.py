@@ -351,7 +351,7 @@ class TensorlakeClient:
     ) -> str:
         if not block_until_done:
             return self._call(graph, input_encoding, **kwargs)
-        events = self.call_stream(graph, input_encoding, **kwargs)
+        events = self.call_stream(graph, block_until_done, input_encoding, **kwargs)
         try:
             while True:
                 print(str(next(events)))
@@ -384,6 +384,7 @@ class TensorlakeClient:
     def call_stream(
         self,
         graph: str,
+        block_until_done: bool = False,
         input_encoding: str = "cloudpickle",
         **kwargs,
     ) -> Generator[WorkflowEvent, None, str]:
