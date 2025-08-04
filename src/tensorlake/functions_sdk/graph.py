@@ -364,9 +364,9 @@ class Graph:
             return_type=start_node_return_type,
             placement_constraints=(
                 PlacementConstraints(
-                    filter_expressions=start_node.placement_constraints.get_filter_expressions()
+                    filter_expressions=[f"region=={start_node.region}"]
                 )
-                if start_node.placement_constraints is not None
+                if start_node.region is not None
                 else None
             ),
         )
@@ -405,10 +405,8 @@ class Graph:
                 parameters=node_params,
                 return_type=node_return_type,
                 placement_constraints=(
-                    PlacementConstraints(
-                        filter_expressions=node.placement_constraints.get_filter_expressions()
-                    )
-                    if node.placement_constraints is not None
+                    PlacementConstraints(filter_expressions=[f"region=={node.region}"])
+                    if node.region is not None
                     else None
                 ),
             )
