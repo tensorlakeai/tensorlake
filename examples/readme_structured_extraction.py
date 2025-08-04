@@ -96,4 +96,4 @@ print(f"Parse status: {result.status}")
 
 print("Structured Extraction Results:")
 for structured_data in result.structured_data:
-    print(json.dumps(structured_data.data.model_dump(), indent=2))
+    print(json.dumps(structured_data.data, indent=2))
