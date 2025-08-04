@@ -9,6 +9,10 @@ on:
     branches:
       - 'main'
 
+permissions:
+  id-token: write
+  contents: read
+
 env:
   INDEXIFY_URL: http://localhost:8900
 
