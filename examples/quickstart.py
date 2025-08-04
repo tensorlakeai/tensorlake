@@ -1,20 +1,13 @@
-import time
-
-from dotenv import load_dotenv
-
+import json
 from tensorlake.documentai import DocumentAI
 from tensorlake.documentai.models import (
-    ChunkingStrategy,
-    ParseStatus,
     ParsingOptions,
     StructuredExtractionOptions,
-    TableOutputMode,
-    TableParsingFormat,
 )
 
-load_dotenv()
-
-doc_ai = DocumentAI()
+# Initialize DocumentAI with your API key
+# Replace with your actual API key
+doc_ai = DocumentAI(api_key="YOUR_TENSORLAKE_API_KEY")
 
 # Use this already uploaded file for testing
 file_url = "https://pub-226479de18b2493f96b64c6674705dd8.r2.dev/real-estate-purchase-all-signed.pdf"
@@ -61,14 +54,12 @@ schema = {
 
 # Configure parsing options
 parsing_options = ParsingOptions(
-    chunking_strategy=ChunkingStrategy.NONE,
-    table_parsing_format=TableParsingFormat.TSR,
-    table_output_mode=TableOutputMode.MARKDOWN,
     signature_detection=True,
 )
 
 structured_extraction_options = StructuredExtractionOptions(
-    schema_name="Leasing Agreement", json_schema=schema, skip_ocr=True
+    schema_name="Leasing Agreement", 
+    json_schema=schema, skip_ocr=True
 )
 
 # Parse the document
@@ -76,17 +67,18 @@ parse_id = doc_ai.parse(
     file_url,
     parsing_options=parsing_options,
     structured_extraction_options=[structured_extraction_options],
-    page_range="1",
+    page_range=None,  # Parse all pages
 )
 
 # Wait for the job to complete
-result = doc_ai.get_parsed_result(parse_id)
-while result.status in [ParseStatus.PENDING, ParseStatus.PROCESSING]:
-    time.sleep(5)
-    result = doc_ai.get_parsed_result(parse_id)
-    if result.status == ParseStatus.SUCCESSFUL:
-        print(f"Parse job {parse_id} is {result.status}")
-        break
-    print(f"Parse job {parse_id} is {result.status}, waiting...")
+result = doc_ai.wait_for_completion(parse_id)
 
 print(result)
+
+print("Structured Extraction Results:")
+for structured_data in result.structured_data:
+    print(json.dumps(structured_data.data, indent=2))
+
+print("Markdown Chunks:")
+for chunk in result.chunks:
+    print(chunk.content)
