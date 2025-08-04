@@ -7,9 +7,9 @@ from tensorlake.functions_sdk.object_serializer import (
 )
 
 from ...proto.function_executor_pb2 import (
-    RunTaskRequest,
     SerializedObject,
     SerializedObjectEncoding,
+    Task,
 )
 
 
@@ -22,8 +22,8 @@ class FunctionInputs:
 
 
 class FunctionInputsLoader:
-    def __init__(self, request: RunTaskRequest):
-        self._request = request
+    def __init__(self, task: Task):
+        self._task = task
 
     def load(self) -> FunctionInputs:
         return FunctionInputs(
@@ -33,15 +33,15 @@ class FunctionInputsLoader:
 
     def _function_input(self) -> TensorlakeData:
         return _to_tensorlake_data(
-            self._request.graph_invocation_id, self._request.function_input
+            self._task.graph_invocation_id, self._task.request.function_input
         )
 
     def _accumulator_input(self) -> Optional[TensorlakeData]:
         return (
             _to_tensorlake_data(
-                self._request.graph_invocation_id, self._request.function_init_value
+                self._task.graph_invocation_id, self._task.request.function_init_value
             )
-            if self._request.HasField("function_init_value")
+            if self._task.request and self._task.request.HasField("function_init_value")
             else None
         )
 

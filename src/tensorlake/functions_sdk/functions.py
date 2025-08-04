@@ -3,12 +3,14 @@ from dataclasses import dataclass
 from inspect import Parameter
 from typing import (
     Any,
+    Callable,
     Dict,
     Generic,
     List,
     Optional,
     Tuple,
     Type,
+    TypeAlias,
     TypeVar,
     Union,
     get_args,
@@ -25,6 +27,17 @@ from .object_serializer import get_serializer
 from .retries import Retries
 
 
+@dataclass(frozen=True)
+class Progress:
+    """Progress information for a running task."""
+
+    current: float
+    total: float
+
+
+ProgressReporter: TypeAlias = Callable[[Progress], None]
+
+
 class GraphRequestContext:
     def __init__(
         self,
@@ -32,11 +45,23 @@ class GraphRequestContext:
         graph_name: str,
         graph_version: str,
         request_state: RequestState,
+        progress_reporter: ProgressReporter | None = None,
     ):
         self.request_id = request_id
         self.graph_name = graph_name
         self.graph_version = graph_version
         self.request_state = request_state
+        self._progress_reporter = progress_reporter
+
+    def update_progress(self, current: float, total: float) -> None:
+        """Update the progress of the current task execution.
+
+        Args:
+            current: Current progress value
+            total: Total progress value
+        """
+        if self._progress_reporter:
+            self._progress_reporter(Progress(current=current, total=total))
 
 
 def is_pydantic_model_from_annotation(type_annotation):

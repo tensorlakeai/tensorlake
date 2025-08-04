@@ -63,6 +63,10 @@ TASK_FAILURE_REASON_INTERNAL_ERROR: TaskFailureReason
 TASK_FAILURE_REASON_FUNCTION_ERROR: TaskFailureReason
 TASK_FAILURE_REASON_INVOCATION_ERROR: TaskFailureReason
 
+class Empty(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
 class SerializedObject(_message.Message):
     __slots__ = ("data", "encoding", "encoding_version")
     DATA_FIELD_NUMBER: _ClassVar[int]
@@ -187,6 +191,18 @@ class InvocationStateResponse(_message.Message):
         get: _Optional[_Union[GetInvocationStateResponse, _Mapping]] = ...,
     ) -> None: ...
 
+class ListTasksRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class ListTasksResponse(_message.Message):
+    __slots__ = ("tasks",)
+    TASKS_FIELD_NUMBER: _ClassVar[int]
+    tasks: _containers.RepeatedCompositeFieldContainer[Task]
+    def __init__(
+        self, tasks: _Optional[_Iterable[_Union[Task, _Mapping]]] = ...
+    ) -> None: ...
+
 class RunTaskRequest(_message.Message):
     __slots__ = (
         "namespace",
@@ -263,6 +279,28 @@ class Metrics(_message.Message):
         counters: _Optional[_Mapping[str, int]] = ...,
     ) -> None: ...
 
+class ProgressUpdate(_message.Message):
+    __slots__ = ("current", "total")
+    CURRENT_FIELD_NUMBER: _ClassVar[int]
+    TOTAL_FIELD_NUMBER: _ClassVar[int]
+    current: float
+    total: float
+    def __init__(
+        self, current: _Optional[float] = ..., total: _Optional[float] = ...
+    ) -> None: ...
+
+class AwaitTaskProgress(_message.Message):
+    __slots__ = ("progress", "task_result")
+    PROGRESS_FIELD_NUMBER: _ClassVar[int]
+    TASK_RESULT_FIELD_NUMBER: _ClassVar[int]
+    progress: ProgressUpdate
+    task_result: TaskResult
+    def __init__(
+        self,
+        progress: _Optional[_Union[ProgressUpdate, _Mapping]] = ...,
+        task_result: _Optional[_Union[TaskResult, _Mapping]] = ...,
+    ) -> None: ...
+
 class RunTaskResponse(_message.Message):
     __slots__ = (
         "task_id",
@@ -311,6 +349,124 @@ class RunTaskResponse(_message.Message):
         failure_reason: _Optional[_Union[TaskFailureReason, str]] = ...,
         invocation_error_output: _Optional[_Union[SerializedObject, _Mapping]] = ...,
     ) -> None: ...
+
+class FunctionInputs(_message.Message):
+    __slots__ = ("function_input", "function_init_value")
+    FUNCTION_INPUT_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_INIT_VALUE_FIELD_NUMBER: _ClassVar[int]
+    function_input: SerializedObject
+    function_init_value: SerializedObject
+    def __init__(
+        self,
+        function_input: _Optional[_Union[SerializedObject, _Mapping]] = ...,
+        function_init_value: _Optional[_Union[SerializedObject, _Mapping]] = ...,
+    ) -> None: ...
+
+class TaskResult(_message.Message):
+    __slots__ = (
+        "function_outputs",
+        "next_functions",
+        "stdout",
+        "stderr",
+        "is_reducer",
+        "metrics",
+        "outcome_code",
+        "failure_reason",
+        "invocation_error_output",
+    )
+    FUNCTION_OUTPUTS_FIELD_NUMBER: _ClassVar[int]
+    NEXT_FUNCTIONS_FIELD_NUMBER: _ClassVar[int]
+    STDOUT_FIELD_NUMBER: _ClassVar[int]
+    STDERR_FIELD_NUMBER: _ClassVar[int]
+    IS_REDUCER_FIELD_NUMBER: _ClassVar[int]
+    METRICS_FIELD_NUMBER: _ClassVar[int]
+    OUTCOME_CODE_FIELD_NUMBER: _ClassVar[int]
+    FAILURE_REASON_FIELD_NUMBER: _ClassVar[int]
+    INVOCATION_ERROR_OUTPUT_FIELD_NUMBER: _ClassVar[int]
+    function_outputs: _containers.RepeatedCompositeFieldContainer[SerializedObject]
+    next_functions: _containers.RepeatedScalarFieldContainer[str]
+    stdout: str
+    stderr: str
+    is_reducer: bool
+    metrics: Metrics
+    outcome_code: TaskOutcomeCode
+    failure_reason: TaskFailureReason
+    invocation_error_output: SerializedObject
+    def __init__(
+        self,
+        function_outputs: _Optional[
+            _Iterable[_Union[SerializedObject, _Mapping]]
+        ] = ...,
+        next_functions: _Optional[_Iterable[str]] = ...,
+        stdout: _Optional[str] = ...,
+        stderr: _Optional[str] = ...,
+        is_reducer: bool = ...,
+        metrics: _Optional[_Union[Metrics, _Mapping]] = ...,
+        outcome_code: _Optional[_Union[TaskOutcomeCode, str]] = ...,
+        failure_reason: _Optional[_Union[TaskFailureReason, str]] = ...,
+        invocation_error_output: _Optional[_Union[SerializedObject, _Mapping]] = ...,
+    ) -> None: ...
+
+class Task(_message.Message):
+    __slots__ = (
+        "task_id",
+        "namespace",
+        "graph_name",
+        "graph_version",
+        "function_name",
+        "graph_invocation_id",
+        "allocation_id",
+        "request",
+        "result",
+    )
+    TASK_ID_FIELD_NUMBER: _ClassVar[int]
+    NAMESPACE_FIELD_NUMBER: _ClassVar[int]
+    GRAPH_NAME_FIELD_NUMBER: _ClassVar[int]
+    GRAPH_VERSION_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_NAME_FIELD_NUMBER: _ClassVar[int]
+    GRAPH_INVOCATION_ID_FIELD_NUMBER: _ClassVar[int]
+    ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_FIELD_NUMBER: _ClassVar[int]
+    RESULT_FIELD_NUMBER: _ClassVar[int]
+    task_id: str
+    namespace: str
+    graph_name: str
+    graph_version: str
+    function_name: str
+    graph_invocation_id: str
+    allocation_id: str
+    request: FunctionInputs
+    result: TaskResult
+    def __init__(
+        self,
+        task_id: _Optional[str] = ...,
+        namespace: _Optional[str] = ...,
+        graph_name: _Optional[str] = ...,
+        graph_version: _Optional[str] = ...,
+        function_name: _Optional[str] = ...,
+        graph_invocation_id: _Optional[str] = ...,
+        allocation_id: _Optional[str] = ...,
+        request: _Optional[_Union[FunctionInputs, _Mapping]] = ...,
+        result: _Optional[_Union[TaskResult, _Mapping]] = ...,
+    ) -> None: ...
+
+class CreateTaskRequest(_message.Message):
+    __slots__ = ("task",)
+    TASK_FIELD_NUMBER: _ClassVar[int]
+    task: Task
+    def __init__(self, task: _Optional[_Union[Task, _Mapping]] = ...) -> None: ...
+
+class AwaitTaskRequest(_message.Message):
+    __slots__ = ("task_id",)
+    TASK_ID_FIELD_NUMBER: _ClassVar[int]
+    task_id: str
+    def __init__(self, task_id: _Optional[str] = ...) -> None: ...
+
+class DeleteTaskRequest(_message.Message):
+    __slots__ = ("task_id",)
+    TASK_ID_FIELD_NUMBER: _ClassVar[int]
+    task_id: str
+    def __init__(self, task_id: _Optional[str] = ...) -> None: ...
 
 class HealthCheckRequest(_message.Message):
     __slots__ = ()
