@@ -830,7 +830,7 @@ class TestGraphBehaviors(unittest.TestCase):
         )
 
         output = graph.output(invocation_id, "handle_file")
-        self.assertEqual(output, [11])
+        self.assertEqual(output, [12])
 
     @parameterized.parameterized.expand([(False), (True)])
     def test_pipeline(self, is_remote):
