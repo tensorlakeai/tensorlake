@@ -6,6 +6,9 @@ package function_executor_service;
 // in Python is allowed to import Python SDK to run customer functions. This ensures that
 // all the other components can be written in any language.
 
+// The standard Empty message.
+message Empty {}
+
 enum SerializedObjectEncoding {
     SERIALIZED_OBJECT_ENCODING_UNKNOWN = 0;
     SERIALIZED_OBJECT_ENCODING_UTF8_JSON = 1;
@@ -93,6 +96,12 @@ message InvocationStateResponse {
     }
 }
 
+message ListTasksRequest {}
+
+message ListTasksResponse {
+  repeated Task tasks = 1;
+}
+
 message RunTaskRequest {
     optional string namespace = 1;
     optional string graph_name = 2;
@@ -123,6 +132,18 @@ enum TaskFailureReason {
     TASK_FAILURE_REASON_INVOCATION_ERROR = 3;
 }
 
+message ProgressUpdate {
+    float current = 1;
+    float total = 2;
+}
+
+message AwaitTaskProgress {
+    oneof response {
+        ProgressUpdate progress = 1;
+        TaskResult task_result = 2;
+    }
+}
+
 message RunTaskResponse {
     optional string task_id = 1;
     repeated SerializedObject function_outputs = 2;
@@ -136,6 +157,54 @@ message RunTaskResponse {
     optional TaskFailureReason failure_reason = 9;
     // User payload for invocation error if task failed with invocation error.
     optional SerializedObject invocation_error_output = 10;
+}
+
+// FunctionInputs contains the input data for task execution
+message FunctionInputs {
+    optional SerializedObject function_input = 1;
+    optional SerializedObject function_init_value = 2;
+}
+
+// TaskResult contains the execution outcome and outputs of a task
+message TaskResult {
+    repeated SerializedObject function_outputs = 1;
+    // Edges that the function wants the invocation to be routed to.
+    repeated string next_functions = 2;
+    optional string stdout = 3;
+    optional string stderr = 4;
+    optional bool is_reducer = 5;
+    optional Metrics metrics = 6;
+    optional TaskOutcomeCode outcome_code = 7;
+    optional TaskFailureReason failure_reason = 8;
+    // User payload for invocation error if task failed with invocation error.
+    optional SerializedObject invocation_error_output = 9;
+}
+
+// Task represents a task with its metadata and execution result
+message Task {
+    optional string task_id = 1;
+    optional string namespace = 2;
+    optional string graph_name = 3;
+    optional string graph_version = 4;
+    optional string function_name = 5;
+    optional string graph_invocation_id = 6;
+    optional string allocation_id = 7;
+    // Input data for task execution (not returned when getting/listing tasks)
+    optional FunctionInputs request = 8;
+    // Task execution result, initially empty when task is created
+    optional TaskResult result = 9;
+}
+
+message CreateTaskRequest {
+    optional Task task = 1;
+}
+
+message AwaitTaskRequest {
+    optional string task_id = 1;
+}
+
+message DeleteTaskRequest {
+    optional string task_id = 1;
 }
 
 message HealthCheckRequest {}
@@ -173,7 +242,18 @@ service FunctionExecutor {
     rpc initialize_invocation_state_server(stream InvocationStateResponse) returns (stream InvocationStateRequest);
     // Executes the task defined in the request.
     // Multiple tasks can be running in parallel.
+    // This is logically equivalent to start_task / await_task / delete_task.
     rpc run_task(RunTaskRequest) returns (RunTaskResponse);
+    // Lists the currently-running tasks.
+    rpc list_tasks(ListTasksRequest) returns (ListTasksResponse);
+    // Creates and starts the task specified in the request.
+    rpc create_task(CreateTaskRequest) returns (Task);
+    // Waits for the indicated task to reach a completed state
+    // (outcome != unknown), returning a stream of task progress
+    // updates.
+    rpc await_task(AwaitTaskRequest) returns (stream AwaitTaskProgress);
+    // Deletes the task.
+    rpc delete_task(DeleteTaskRequest) returns (Empty);
     // Health check method to check if the FE is able to run tasks.
     // The FE should be initialized before calling this method.
     rpc check_health(HealthCheckRequest) returns (HealthCheckResponse);

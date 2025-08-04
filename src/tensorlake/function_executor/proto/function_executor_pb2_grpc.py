@@ -58,6 +58,30 @@ class FunctionExecutorStub(object):
             response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskResponse.FromString,
             _registered_method=True,
         )
+        self.list_tasks = channel.unary_unary(
+            "/function_executor_service.FunctionExecutor/list_tasks",
+            request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.ListTasksRequest.SerializeToString,
+            response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.ListTasksResponse.FromString,
+            _registered_method=True,
+        )
+        self.create_task = channel.unary_unary(
+            "/function_executor_service.FunctionExecutor/create_task",
+            request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.CreateTaskRequest.SerializeToString,
+            response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Task.FromString,
+            _registered_method=True,
+        )
+        self.await_task = channel.unary_stream(
+            "/function_executor_service.FunctionExecutor/await_task",
+            request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitTaskRequest.SerializeToString,
+            response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitTaskProgress.FromString,
+            _registered_method=True,
+        )
+        self.delete_task = channel.unary_unary(
+            "/function_executor_service.FunctionExecutor/delete_task",
+            request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.DeleteTaskRequest.SerializeToString,
+            response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Empty.FromString,
+            _registered_method=True,
+        )
         self.check_health = channel.unary_unary(
             "/function_executor_service.FunctionExecutor/check_health",
             request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.HealthCheckRequest.SerializeToString,
@@ -97,7 +121,35 @@ class FunctionExecutorServicer(object):
     def run_task(self, request, context):
         """Executes the task defined in the request.
         Multiple tasks can be running in parallel.
+        This is logically equivalent to start_task / await_task / delete_task.
         """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def list_tasks(self, request, context):
+        """Lists the currently-running tasks."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def create_task(self, request, context):
+        """Creates and starts the task specified in the request."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def await_task(self, request, context):
+        """Waits for the indicated task to reach a completed state
+        (outcome != unknown), returning a stream of task progress
+        updates.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def delete_task(self, request, context):
+        """Deletes the task."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
@@ -133,6 +185,26 @@ def add_FunctionExecutorServicer_to_server(servicer, server):
             servicer.run_task,
             request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskRequest.FromString,
             response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskResponse.SerializeToString,
+        ),
+        "list_tasks": grpc.unary_unary_rpc_method_handler(
+            servicer.list_tasks,
+            request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.ListTasksRequest.FromString,
+            response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.ListTasksResponse.SerializeToString,
+        ),
+        "create_task": grpc.unary_unary_rpc_method_handler(
+            servicer.create_task,
+            request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.CreateTaskRequest.FromString,
+            response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Task.SerializeToString,
+        ),
+        "await_task": grpc.unary_stream_rpc_method_handler(
+            servicer.await_task,
+            request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitTaskRequest.FromString,
+            response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitTaskProgress.SerializeToString,
+        ),
+        "delete_task": grpc.unary_unary_rpc_method_handler(
+            servicer.delete_task,
+            request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.DeleteTaskRequest.FromString,
+            response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Empty.SerializeToString,
         ),
         "check_health": grpc.unary_unary_rpc_method_handler(
             servicer.check_health,
@@ -237,6 +309,126 @@ class FunctionExecutor(object):
             "/function_executor_service.FunctionExecutor/run_task",
             tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskRequest.SerializeToString,
             tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RunTaskResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True,
+        )
+
+    @staticmethod
+    def list_tasks(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/function_executor_service.FunctionExecutor/list_tasks",
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.ListTasksRequest.SerializeToString,
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.ListTasksResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True,
+        )
+
+    @staticmethod
+    def create_task(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/function_executor_service.FunctionExecutor/create_task",
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.CreateTaskRequest.SerializeToString,
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Task.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True,
+        )
+
+    @staticmethod
+    def await_task(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            "/function_executor_service.FunctionExecutor/await_task",
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitTaskRequest.SerializeToString,
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitTaskProgress.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True,
+        )
+
+    @staticmethod
+    def delete_task(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/function_executor_service.FunctionExecutor/delete_task",
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.DeleteTaskRequest.SerializeToString,
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Empty.FromString,
             options,
             channel_credentials,
             insecure,

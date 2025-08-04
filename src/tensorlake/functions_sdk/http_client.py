@@ -351,9 +351,7 @@ class TensorlakeClient:
     ) -> str:
         if not block_until_done:
             return self._call(graph, input_encoding, **kwargs)
-        events = self.call_stream(
-            graph, input_encoding, **kwargs
-        )
+        events = self.call_stream(graph, input_encoding, **kwargs)
         try:
             while True:
                 print(str(next(events)))
@@ -361,7 +359,7 @@ class TensorlakeClient:
             # TODO: Once we only support Python >= 3.13, we can just return events.close().
             events.close()
             return result.value
-        
+
     def _call(
         self,
         graph: str,
@@ -381,8 +379,8 @@ class TensorlakeClient:
             f"v1/namespaces/{self.namespace}/compute-graphs/{graph}",
             **kwargs,
         )
-        return response.json()["id"]
-        
+        return response.json()["request_id"]
+
     def call_stream(
         self,
         graph: str,
@@ -422,8 +420,7 @@ class TensorlakeClient:
                 print("invocation ID is unknown, cannot block until done")
                 raise
 
-            if block_until_done:
-                self.wait_on_invocation_completion(graph, invocation_id, **kwargs)
+            self.wait_on_invocation_completion(graph, invocation_id, **kwargs)
 
         if invocation_id is None:
             raise Exception("invocation ID not returned")
@@ -460,7 +457,7 @@ class TensorlakeClient:
             if (
                 event.event_name == "TaskCompleted"
                 and isinstance(event.payload, RequestProgressPayload)
-                and event.payload.outcome == "Failure"
+                and event.payload.outcome == "failure"
             ):
                 event.stdout = self.logs(
                     graph,
@@ -515,7 +512,7 @@ class TensorlakeClient:
         outputs = []
         for i in range(output_metadata.num_outputs):
             response = self._get(
-                f"v1/namespaces/{self.namespace}/compute-graphs/{graph}/requests/{request_id}/fn/{fn_name}/outputs/{output_metadata.id}/index/{i}",
+                f"v1/namespaces/{self.namespace}/compute-graphs/{graph}/requests/{request_id}/output/{fn_name}/id/{output_metadata.id}/index/{i}",
             )
             response.raise_for_status()
             content_type = response.headers.get("Content-Type")
@@ -546,7 +543,7 @@ class TensorlakeClient:
         )
         response.raise_for_status()
         request = RequestMetadata(**response.json())
-        if request.status in ["Pending", "Running"]:
+        if request.status in ["pending", "running"]:
             raise GraphStillProcessing()
 
         if request.request_error is not None:

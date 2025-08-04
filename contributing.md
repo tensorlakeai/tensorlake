@@ -195,7 +195,7 @@ Examples:
 
 4. **Test your changes**
    ```bash
-   make test 
+   make test
    make test_document_ai
    make check
    ```
@@ -249,10 +249,10 @@ class TestSomeClass:
     def test_method_returns_expected_value(self):
         # Arrange
         instance = SomeClass()
-        
+
         # Act
         result = instance.some_method()
-        
+
         # Assert
         assert result == expected_value
 ```
@@ -280,18 +280,18 @@ We use Google-style docstrings:
 ```python
 def process_document(document_path: str, options: Dict[str, Any]) -> Dict[str, Any]:
     """Process a document using TensorLake AI.
-    
+
     Args:
         document_path: Path to the document to process.
         options: Configuration options for processing.
-        
+
     Returns:
         Dictionary containing the processed document data.
-        
+
     Raises:
         ValueError: If document_path is invalid.
         APIError: If the API request fails.
-        
+
     Example:
         >>> result = process_document("contract.pdf", {"extract_signatures": True})
         >>> print(result["signatures"])

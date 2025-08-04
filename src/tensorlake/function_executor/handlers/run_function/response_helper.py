@@ -12,25 +12,23 @@ from tensorlake.functions_sdk.object_serializer import (
 
 from ...proto.function_executor_pb2 import Metrics as MetricsProto
 from ...proto.function_executor_pb2 import (
-    RunTaskResponse,
     SerializedObject,
     SerializedObjectEncoding,
     TaskFailureReason,
     TaskOutcomeCode,
+    TaskResult,
 )
 
 
 class ResponseHelper:
-    """Helper class for generating RunFunctionResponse."""
+    """Helper class for generating TaskResult."""
 
     def __init__(
         self,
-        task_id: str,
         function_name: str,
         graph_metadata: ComputeGraphMetadata,
         logger: Any,
     ):
-        self._task_id = task_id
         self._function_name = function_name
         self._graph_metadata: ComputeGraphMetadata = graph_metadata
         self._logger = logger.bind(module=__name__)
@@ -41,7 +39,7 @@ class ResponseHelper:
         is_reducer: bool,
         stdout: str,
         stderr: str,
-    ) -> RunTaskResponse:
+    ) -> TaskResult:
         if result.exception is not None:
             return self.from_function_exception(
                 exception=result.exception,
@@ -57,8 +55,7 @@ class ResponseHelper:
         else:
             next_functions = result.edges
 
-        return RunTaskResponse(
-            task_id=self._task_id,
+        return TaskResult(
             function_outputs=self._to_function_outputs(result.ser_outputs),
             next_functions=next_functions,
             stdout=stdout,
@@ -70,7 +67,7 @@ class ResponseHelper:
 
     def from_function_exception(
         self, exception: Exception, stdout: str, stderr: str, metrics: Optional[Metrics]
-    ) -> RunTaskResponse:
+    ) -> TaskResult:
         invocation_error_output: Optional[SerializedObject] = None
         if isinstance(exception, RequestException):
             failure_reason: TaskFailureReason = (
@@ -89,8 +86,7 @@ class ResponseHelper:
             formatted_exception: str = "".join(traceback.format_exception(exception))
             stderr = "\n".join([stderr, formatted_exception])
 
-        return RunTaskResponse(
-            task_id=self._task_id,
+        return TaskResult(
             stdout=stdout,
             stderr=stderr,
             is_reducer=False,

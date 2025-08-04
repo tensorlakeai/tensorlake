@@ -1,5 +1,5 @@
 # Signature Detection with a LangGraph Agent
-This is an example of a comprehensive document signature analysis system that combines Tensorlake's Contextual Signature Detection with LangGraph's conversational agent framework. 
+This is an example of a comprehensive document signature analysis system that combines Tensorlake's Contextual Signature Detection with LangGraph's conversational agent framework.
 
 The system provides automated signature detection and intelligent querying capabilities for document analysis workflows.
 
@@ -12,7 +12,7 @@ The system provides automated signature detection and intelligent querying capab
 - An [OpenAI API key](https://platform.openai.com/api-keys)
 - A [Tensorlake API key](https://docs.tensorlake.ai/accounts-and-access/api-keys)
 - Some [sample real estate documents](https://pub-226479de18b2493f96b64c6674705dd8.r2.dev/real-estate-purchase-all-signed.pdf)
-  - You can also find a few other documents to test with in the `/documents` folder 
+  - You can also find a few other documents to test with in the `/documents` folder
 - [Optional] A [virtual Python environment](https://docs.python.org/3/library/venv.html) to keep dependencies isolated
 
 ### 1. Set Environment Variables
@@ -45,7 +45,7 @@ works on both Mac and Windows
 
 ### 3. Python Dependencies
 You only need to install the `langchain-tensorlake` package, which will install the other
-needed LangChain dependencies. 
+needed LangChain dependencies.
 
 **Note: For this example we are loading environment variables using dotenv, so that also needs to be installed.**
 ```bash

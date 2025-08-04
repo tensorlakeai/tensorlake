@@ -96,8 +96,6 @@ def info(ctx: Context, json: bool, graph_name: str):
         f"[bold][red]Entrypoint Function Encoding:[/red][/bold] {g.entrypoint.input_encoder}"
     )
 
-    from rich.table import Table
-
     table = Table()
     table.add_column("Name")
     table.add_column("Edges")

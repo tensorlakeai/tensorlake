@@ -25,7 +25,7 @@ def list(ctx: Context):
     List all secrets in the current project.
     """
 
-    secrets = _get_all_existing_secrets(auth)
+    secrets = _get_all_existing_secrets(ctx)
     if len(secrets) == 0:
         click.echo("No secrets found")
         return
@@ -112,7 +112,7 @@ def unset(ctx: Context, secret_names: str):
     Example:
         tensorlake secrets unset NAME1 NAME2
     """
-    secrets = _get_all_existing_secrets(auth)
+    secrets = _get_all_existing_secrets(ctx)
     secrets_dict = {s["name"]: s for s in secrets}
     num = 0
     for name in secret_names:

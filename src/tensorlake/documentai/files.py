@@ -16,16 +16,6 @@ from tqdm.asyncio import tqdm as async_tqdm
 
 from tensorlake.documentai.common import DOC_AI_BASE_URL
 
-try:
-    import magic
-
-    _HAS_MAGIC = True
-except ImportError:
-    _HAS_MAGIC = False
-    print(
-        "Warning: `python-magic` (libmagic) is not installed. Falling back to `mimetypes`. Install it with `pip install python-magic` for better MIME detection."
-    )
-
 
 class FileInfo(BaseModel):
     """
@@ -178,7 +168,7 @@ class FileUploader:
                     url=init_response_json.get("presigned_url"),
                     data=f,
                     headers={
-                        "Content-Type": self.__get_mime_type__(path),
+                        "Content-Type": self._get_mime_type(path),
                     },
                     timeout=httpx.Timeout(None),
                 )
@@ -201,10 +191,9 @@ class FileUploader:
                 hasher.update(chunk)
         return hasher.hexdigest()
 
-    def __get_mime_type__(self, path: Union[str, Path]) -> str:
+    def _get_mime_type(self, path: Union[str, Path]) -> str:
         """
-        Get the MIME type of a file. If `python-magic` (libmagic) is installed, use it.
-        Otherwise, fall back to `mimetypes`.
+        Get the MIME type of a file.
 
         Args:
             path (Union[str, Path]): The file path to check.
@@ -212,11 +201,12 @@ class FileUploader:
         Returns:
             str: The MIME type of the file, or "application/octet-stream" if unknown.
         """
-        if sys.platform.startswith("win") or not _HAS_MAGIC:
-            return mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        p = Path(path)
+        if not p.is_file():
+            raise ValueError(f"Path is not a file: {p}")
 
-        mime = magic.Magic(mime=True)
-        return mime.from_file(str(path))
+        mime, _ = mimetypes.guess_type(p.as_posix(), strict=False)
+        return mime or "application/octet-stream"
 
     async def upload_large_file_async(self, path: Union[str, Path]) -> str:
         """
@@ -262,7 +252,7 @@ class FileUploader:
                     url=init_response_json.get("presigned_url"),
                     data=f,
                     headers={
-                        "Content-Type": self.__get_mime_type__(path),
+                        "Content-Type": self._get_mime_type(path),
                     },
                     timeout=httpx.Timeout(None),
                 )
