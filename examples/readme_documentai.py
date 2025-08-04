@@ -10,16 +10,12 @@ from tensorlake.documentai.models import (
     TableParsingFormat,
 )
 
-TENSORLAKE_API_KEY = "tl_apiKey_XXXXX"
-
-doc_ai = DocumentAI(api_key=TENSORLAKE_API_KEY)
-
+doc_ai = DocumentAI(api_key="tl_apiKey_XXXXX")
 
 class PaperSchema(BaseModel):
     """
     Paper schema for the Document AI API.
     """
-
     references: list[str]
     authors: list[str]
     title: str
@@ -36,13 +32,13 @@ parsing_options = ParsingOptions(
 )
 
 structured_extraction_options = StructuredExtractionOptions(
-    schema_name="Research Paper", json_schema=PaperSchema
+    schema_name="Research Paper", 
+    json_schema=PaperSchema
 )
 
 # Parse and extract structured data
 result = doc_ai.parse_and_wait(
     file_id,  # You can pass in a publicly accessible URL instead of a file_id
-    # "https://arxiv.org/pdf/2409.13148",
     parsing_options=parsing_options,
     structured_extraction_options=[structured_extraction_options],
 )
