@@ -161,8 +161,8 @@ class TensorlakeCompute:
         gpu (Optional[str]): GPU(s) available to the function. No GPU is allocated by default.
                              The value should be a string "GPU_MODEL:COUNT" representing the GPU model and the number of GPUs.
                              See supported GPU models and counts in Tensorlake Cloud documentation.
-        placement_constraints (Optional[LabelsFilter]): Execution environment label filter that specifies where this function can run.
-                                                     Use LabelsFilter.all_of(os="linux", region="us-west") to specify requirements.
+        region (Optional[str]): The region where this function should be executed (e.g., "us-west", "eu-central").
+                               If specified, the function will only run on executors in that region.
         cacheable (bool): Declares that applications of this function are cacheable.
                           A function should only be marked cacheable if its outputs are a
                           pure function of its inputs.
@@ -252,11 +252,15 @@ def tensorlake_function(
     memory: float = _DEFAULT_MEMORY_GB,
     ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK_GB,
     gpu: Optional[Union[str, List[str]]] = _DEFAULT_GPU,
-    placement_constraints: Optional[LabelsFilter] = None,
+    region: Optional[str] = None,
     next: Optional[Union["TensorlakeCompute", List["TensorlakeCompute"]]] = None,
     cacheable: bool = False,
 ):
     def construct(fn):
+        placement_constraints = None
+        if region is not None:
+            placement_constraints = LabelsFilter.all_of(region=region)
+
         attrs = {
             "_created_by_decorator": True,
             "name": name if name else fn.__name__,
