@@ -116,7 +116,8 @@ class TensorlakeCompute:
                              The value should be a string "GPU_MODEL:COUNT" representing the GPU model and the number of GPUs.
                              See supported GPU models and counts in Tensorlake Cloud documentation.
         region (Optional[str]): The region where this function should be executed (e.g., "us-west", "eu-central").
-                               If specified, the function will only run on executors in that region.
+                                If specified, the function will only run on executors in that region;
+                                otherwise, the function may run anywhere globally.
         cacheable (bool): Declares that applications of this function are cacheable.
                           A function should only be marked cacheable if its outputs are a
                           pure function of its inputs.
