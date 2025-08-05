@@ -1,14 +1,18 @@
-import time
+import json
 from datetime import date
 from typing import Dict, List, Optional
 
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
-from tensorlake.documentai import DocumentAI, ExtractionOptions, ParsingOptions
+from tensorlake.documentai import DocumentAI
+from tensorlake.documentai.models import (
+    ChunkingStrategy,
+    ParsingOptions,
+    StructuredExtractionOptions,
+)
 
-API_KEY = "tl_apiKey_XXXX"
-
-# Or set this in the environment variable TENSORLAKE_API_KEY
+load_dotenv()
 
 
 class Address(BaseModel):
@@ -69,26 +73,47 @@ class BankStatement(BaseModel):
     )
 
 
-# if you don't pass an api key, it will look for the TENSORLAKE_API_KEY environment variable
-doc_ai = DocumentAI(api_key=API_KEY)
-# Skip this if you are passing a pre-signed URL to the `DocumentParser`.
-# or pass an external URL
-file_id = doc_ai.upload(path="./examples/documents/example_bank_statement.pdf")
+# If you don't pass an api key, it will look for the TENSORLAKE_API_KEY environment variable
+doc_ai = DocumentAI()
 
-job_id = doc_ai.parse(
+# Use this already uploaded file for testing
+file_id = "https://pub-226479de18b2493f96b64c6674705dd8.r2.dev/510071197-TD-Bank-statement.pdf"
+
+# If you want to upload your own file, uncomment the following lines:
+# file_path = "path_to_your_file.pdf"
+# file_id = doc_ai.upload(file_path)
+
+# Configure parsing options
+parsing_options = ParsingOptions(chunking_strategy=ChunkingStrategy.PAGE)
+
+# Configure structured extraction options
+structured_extraction_options = [
+    StructuredExtractionOptions(
+        schema_name="address",
+        json_schema=Address,  # Can pass Pydantic model directly
+    ),
+    StructuredExtractionOptions(
+        schema_name="bank transaction",
+        json_schema=BankTransaction,
+    ),
+    StructuredExtractionOptions(
+        schema_name="bank statement",
+        json_schema=BankStatement,
+    ),
+]
+
+# Parse the document
+parse_id = doc_ai.parse(
     file_id,
-    options=ParsingOptions(extraction_options=ExtractionOptions(schema=BankStatement)),
+    parsing_options=parsing_options,
+    structured_extraction_options=structured_extraction_options,
 )
 
-result = doc_ai.get_job(job_id=job_id)
-print(f"job status: {result.status}")
-while True:
-    if result.status in ["processing", "pending"]:
-        print("waiting 5s...")
-        time.sleep(5)
-        result = doc_ai.get_job(job_id)
-        print(f"job status: {result.status}")
-    else:
-        if result.status == "successful":
-            print(result)
-        break
+# Wait for completion
+result = doc_ai.wait_for_completion(parse_id=parse_id)
+
+print(f"Parse status: {result.status}")
+
+print("Structured Extraction Results:")
+for structured_data in result.structured_data:
+    print(json.dumps(structured_data.data, indent=2))
