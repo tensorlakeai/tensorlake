@@ -5,6 +5,7 @@
 [![Python Support](https://img.shields.io/pypi/pyversions/tensorlake)](https://pypi.org/project/tensorlake/)
 [![License](https://img.shields.io/github/license/tensorlakeai/tensorlake)](LICENSE)
 [![Documentation](https://img.shields.io/badge/docs-tensorlake.ai-blue)](https://docs.tensorlake.ai)
+[![Slack](https://img.shields.io/badge/slack-TensorlakeCloud-purple?logo=slack)](https://join.slack.com/t/tensorlakecloud/shared_invite/zt-32fq4nmib-gO0OM5RIar3zLOBm~ZGqKg)
 
 TensorLake transforms unstructured documents into AI-ready data through Document Ingestion APIs and enables building scalable data processing pipelines with a serverless workflow runtime. The platform handles the complexity of document parsing, data extraction, and workflow orchestration on fully managed infrastructure including GPU acceleration.
 
