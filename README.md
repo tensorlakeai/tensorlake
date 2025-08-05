@@ -22,16 +22,12 @@ It consists of two core capabilities:
   - [Document Parsing](#document-parsing)
   - [Structured Extraction](#structured-extraction)
   - [Datasets](#datasets)
-- [Serverless Workflows](#serverless-workflows)
-  - [Creating Workflows](#creating-workflows)
-  - [Local Development](#local-development)
-  - [Cloud Deployment](#cloud-deployment)
-- [Additional Features](#additional-features)
-  - [Webhooks](#webhooks)
-  - [Batch Processing](#batch-processing)
-- [Configuration Reference](#configuration-reference)
-- [Examples](#examples)
-- [Resources](#resources)
+- [Custom Data Workflows](#custom-data-workflows)
+  - [Creating Workflows](#quickstart-1)
+  - [Local Development](#running-locally)
+  - [Cloud Deployment](#running-on-tensorlake-cloud)
+- [Webhooks](#webhooks)
+- [Resources](#learn-more)
 
 ---
 

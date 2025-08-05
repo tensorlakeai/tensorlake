@@ -1,4 +1,5 @@
 import json
+
 from tensorlake.documentai import DocumentAI
 from tensorlake.documentai.models import (
     ParsingOptions,
@@ -58,8 +59,7 @@ parsing_options = ParsingOptions(
 )
 
 structured_extraction_options = StructuredExtractionOptions(
-    schema_name="Leasing Agreement", 
-    json_schema=schema, skip_ocr=True
+    schema_name="Leasing Agreement", json_schema=schema, skip_ocr=True
 )
 
 # Parse the document

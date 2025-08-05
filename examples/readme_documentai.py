@@ -12,10 +12,12 @@ from tensorlake.documentai.models import (
 
 doc_ai = DocumentAI(api_key="tl_apiKey_XXXXX")
 
+
 class PaperSchema(BaseModel):
     """
     Paper schema for the Document AI API.
     """
+
     references: list[str]
     authors: list[str]
     title: str
@@ -32,8 +34,7 @@ parsing_options = ParsingOptions(
 )
 
 structured_extraction_options = StructuredExtractionOptions(
-    schema_name="Research Paper", 
-    json_schema=PaperSchema
+    schema_name="Research Paper", json_schema=PaperSchema
 )
 
 # Parse and extract structured data

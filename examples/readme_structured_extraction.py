@@ -1,6 +1,7 @@
-from datetime import date
 import json
+from datetime import date
 from typing import Dict, List, Optional
+
 from pydantic import BaseModel, Field
 
 from tensorlake.documentai import DocumentAI
@@ -10,11 +11,13 @@ from tensorlake.documentai.models import (
     StructuredExtractionOptions,
 )
 
+
 class Address(BaseModel):
     street: Optional[str] = Field(None, description="Street address")
     city: Optional[str] = Field(None, description="City")
     state: Optional[str] = Field(None, description="State/Province code or name")
     zip_code: Optional[str] = Field(None, description="Postal code")
+
 
 class BankTransaction(BaseModel):
     transaction_deposit: Optional[float] = Field(None, description="Deposit amount")
