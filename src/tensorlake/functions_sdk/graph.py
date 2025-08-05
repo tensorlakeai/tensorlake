@@ -36,6 +36,7 @@ from .graph_definition import (
     ComputeGraphMetadata,
     FunctionMetadata,
     ParameterMetadata,
+    PlacementConstraints,
     RetryPolicyMetadata,
     RuntimeInformation,
 )
@@ -361,6 +362,13 @@ class Graph:
             ),
             parameters=start_node_params,
             return_type=start_node_return_type,
+            placement_constraints=(
+                PlacementConstraints(
+                    filter_expressions=[f"region=={start_node.region}"]
+                )
+                if start_node.region is not None
+                else None
+            ),
         )
         metadata_edges = self.edges.copy()
         metadata_nodes = {}
@@ -396,6 +404,11 @@ class Graph:
                 ),
                 parameters=node_params,
                 return_type=node_return_type,
+                placement_constraints=(
+                    PlacementConstraints(filter_expressions=[f"region=={node.region}"])
+                    if node.region is not None
+                    else None
+                ),
             )
 
         return ComputeGraphMetadata(
