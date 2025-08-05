@@ -2,6 +2,7 @@ import json
 from datetime import date
 from typing import Dict, List, Optional
 
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 from tensorlake.documentai import DocumentAI
@@ -10,6 +11,8 @@ from tensorlake.documentai.models import (
     ParsingOptions,
     StructuredExtractionOptions,
 )
+
+load_dotenv()
 
 
 class Address(BaseModel):
@@ -71,25 +74,39 @@ class BankStatement(BaseModel):
 
 
 # If you don't pass an api key, it will look for the TENSORLAKE_API_KEY environment variable
-doc_ai = DocumentAI(api_key="YOUR_TENSORLAKE_API_KEY")
+doc_ai = DocumentAI()
 
-# Skip this if you are passing a pre-signed URL to the parse method or pass an external URL
-file_id = doc_ai.upload(path="./examples/documents/example_bank_statement.pdf")
+# Use this already uploaded file for testing
+file_id = "https://pub-226479de18b2493f96b64c6674705dd8.r2.dev/510071197-TD-Bank-statement.pdf"
+
+# If you want to upload your own file, uncomment the following lines:
+# file_path = "path_to_your_file.pdf"
+# file_id = doc_ai.upload(file_path)
 
 # Configure parsing options
 parsing_options = ParsingOptions(chunking_strategy=ChunkingStrategy.PAGE)
 
 # Configure structured extraction options
-structured_extraction_options = StructuredExtractionOptions(
-    schema_name="Bank Statement",
-    json_schema=BankStatement,  # Can pass Pydantic model directly
-)
+structured_extraction_options = [
+    StructuredExtractionOptions(
+        schema_name="address",
+        json_schema=Address,  # Can pass Pydantic model directly
+    ),
+    StructuredExtractionOptions(
+        schema_name="bank transaction",
+        json_schema=BankTransaction,
+    ),
+    StructuredExtractionOptions(
+        schema_name="bank statement",
+        json_schema=BankStatement,
+    ),
+]
 
 # Parse the document
 parse_id = doc_ai.parse(
     file_id,
     parsing_options=parsing_options,
-    structured_extraction_options=[structured_extraction_options],
+    structured_extraction_options=structured_extraction_options,
 )
 
 # Wait for completion
