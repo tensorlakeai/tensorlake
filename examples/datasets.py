@@ -4,9 +4,10 @@ This script demonstrates how to use the DocumentAI class to load and parse a dat
 
 import asyncio
 import csv
+from typing import List
+
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from typing import List
 
 from tensorlake.documentai import DocumentAI
 from tensorlake.documentai.models import (
@@ -23,43 +24,60 @@ files = [
     "https://pub-226479de18b2493f96b64c6674705dd8.r2.dev/CHI_13.pdf",
     "https://pub-226479de18b2493f96b64c6674705dd8.r2.dev/CSCW_14_1.pdf",
     "https://pub-226479de18b2493f96b64c6674705dd8.r2.dev/CSCW_14_2.pdf",
-    "https://pub-226479de18b2493f96b64c6674705dd8.r2.dev/CSCW_14_3.pdf"
+    "https://pub-226479de18b2493f96b64c6674705dd8.r2.dev/CSCW_14_3.pdf",
 ]
 
 
 class Author(BaseModel):
     """Author information for a research paper"""
+
     name: str = Field(description="Full name of the author")
     affiliation: str = Field(description="Institution or organization affiliation")
 
 
 class Conference(BaseModel):
     """Conference or journal information"""
+
     name: str = Field(description="Name of the conference or journal")
     year: str = Field(description="Year of publication")
-    location: str = Field(description="Location of the conference or journal publication")
+    location: str = Field(
+        description="Location of the conference or journal publication"
+    )
 
 
 class Reference(BaseModel):
     """Reference to another publication"""
-    author_names: List[str] = Field(description="List of author names for this reference")
+
+    author_names: List[str] = Field(
+        description="List of author names for this reference"
+    )
     title: str = Field(description="Title of the referenced publication")
-    publication: str = Field(description="Name of the publication venue (journal, conference, etc.)")
+    publication: str = Field(
+        description="Name of the publication venue (journal, conference, etc.)"
+    )
     year: str = Field(description="Year of publication")
 
 
 class ResearchPaper(BaseModel):
     """Complete schema for extracting research paper information"""
+
     authors: List[Author] = Field(
-        description="List of authors with their affiliations. Authors will be listed below the title and above the main text of the paper. Authors will often be in multiple columns and there may be multiple authors associated to a single affiliation.")
-    conference_journal: Conference = Field(description="Conference or journal information")
+        description="List of authors with their affiliations. Authors will be listed below the title and above the main text of the paper. Authors will often be in multiple columns and there may be multiple authors associated to a single affiliation."
+    )
+    conference_journal: Conference = Field(
+        description="Conference or journal information"
+    )
     title: str = Field(description="Title of the research paper")
     abstract: str = Field(description="Abstract or summary of the paper")
-    keywords: List[str] = Field(description="List of keywords associated with the paper")
+    keywords: List[str] = Field(
+        description="List of keywords associated with the paper"
+    )
     acm_classification: str = Field(description="ACM classification code or category")
     general_terms: List[str] = Field(description="List of general terms or categories")
     acknowledgments: str = Field(description="Acknowledgments section")
-    references: List[Reference] = Field(description="List of references cited in the paper")
+    references: List[Reference] = Field(
+        description="List of references cited in the paper"
+    )
 
 
 async def main():
@@ -76,10 +94,11 @@ async def main():
         structured_extraction_options=[
             StructuredExtractionOptions(
                 schema_name="ResearchPaper",
-                json_schema=ResearchPaper.model_json_schema())
+                json_schema=ResearchPaper.model_json_schema(),
+            )
         ],
         enrichment_options=None,
-        page_classifications=None
+        page_classifications=None,
     )
 
     print(f"Dataset created: {dataset.dataset_id}")
@@ -87,11 +106,8 @@ async def main():
     # Extend a existing dataset with some files. Tensorlake will automatically
     # parse the files or any other ingestion actions specified in the dataset.
     tasks = [
-        document_ai.parse_dataset_file_async(
-            dataset,
-            file,
-            wait_for_completion=False
-        ) for file in files
+        document_ai.parse_dataset_file_async(dataset, file, wait_for_completion=False)
+        for file in files
     ]
     parse_ids = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -127,29 +143,50 @@ async def main():
     # Save results to CSV
     if successful_results:
         csv_filename = f"{dataset.name}_results.csv"
-        with open(csv_filename, "w", encoding="utf-8", newline='') as f:
+        with open(csv_filename, "w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["parse_id", "file_name", "status", "structured_data", "chunks_count"])
+            writer.writerow(
+                ["parse_id", "file_name", "status", "structured_data", "chunks_count"]
+            )
 
             for parse_id, result in successful_results:
                 # Find corresponding file
-                file_idx = valid_parse_ids.index(parse_id) if parse_id in valid_parse_ids else 0
-                file_name = files[file_idx].split("/")[-1] if file_idx < len(files) else f"unknown_{parse_id}"
+                file_idx = (
+                    valid_parse_ids.index(parse_id)
+                    if parse_id in valid_parse_ids
+                    else 0
+                )
+                file_name = (
+                    files[file_idx].split("/")[-1]
+                    if file_idx < len(files)
+                    else f"unknown_{parse_id}"
+                )
 
                 # Extract key information
-                status = result.status if hasattr(result, 'status') else 'unknown'
-                chunks_count = len(result.chunks) if hasattr(result, 'chunks') and result.chunks else 0
+                status = result.status if hasattr(result, "status") else "unknown"
+                chunks_count = (
+                    len(result.chunks)
+                    if hasattr(result, "chunks") and result.chunks
+                    else 0
+                )
 
                 # Get structured data
                 structured_data = ""
-                if hasattr(result, 'structured_data') and result.structured_data:
-                    structured_data = str(result.structured_data[0].data) if result.structured_data else ""
+                if hasattr(result, "structured_data") and result.structured_data:
+                    structured_data = (
+                        str(result.structured_data[0].data)
+                        if result.structured_data
+                        else ""
+                    )
 
-                writer.writerow([parse_id, file_name, status, structured_data, chunks_count])
+                writer.writerow(
+                    [parse_id, file_name, status, structured_data, chunks_count]
+                )
 
         print(f"Results saved to {csv_filename}")
     else:
         print("No successful results to save.")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
