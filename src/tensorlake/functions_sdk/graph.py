@@ -234,6 +234,7 @@ class Graph:
         tags: Dict[str, str] = {},
         version: Optional[str] = None,
         retries: Retries = Retries(),
+        default_region: Optional[str] = None,
     ):
         if version is None:
             # Update graph on every deployment unless user wants to manage the version manually.
@@ -251,6 +252,7 @@ class Graph:
         self.tags = tags
         self.version = version
         self.retries = retries
+        self.default_region = default_region
 
         self._fn_cache: Dict[str, TensorlakeFunctionWrapper] = {}
 
@@ -367,7 +369,13 @@ class Graph:
                     filter_expressions=[f"region=={start_node.region}"]
                 )
                 if start_node.region is not None
-                else None
+                else (
+                    PlacementConstraints(
+                        filter_expressions=[f"region=={self.default_region}"]
+                    )
+                    if self.default_region is not None
+                    else None
+                )
             ),
         )
         metadata_edges = self.edges.copy()
@@ -407,7 +415,13 @@ class Graph:
                 placement_constraints=(
                     PlacementConstraints(filter_expressions=[f"region=={node.region}"])
                     if node.region is not None
-                    else None
+                    else (
+                        PlacementConstraints(
+                            filter_expressions=[f"region=={self.default_region}"]
+                        )
+                        if self.default_region is not None
+                        else None
+                    )
                 ),
             )
 
