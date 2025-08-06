@@ -22,6 +22,10 @@ class RetryPolicyMetadata(BaseModel):
     delay_multiplier: float
 
 
+class PlacementConstraints(BaseModel):
+    filter_expressions: List[str] = []
+
+
 class FunctionMetadata(BaseModel):
     name: str
     fn_name: str
@@ -37,6 +41,7 @@ class FunctionMetadata(BaseModel):
     cache_key: Optional[str] = None
     parameters: Optional[List[ParameterMetadata]] = None
     return_type: Optional[Dict[str, Any]] = None  # JSON Schema object
+    placement_constraints: Optional[PlacementConstraints] = None
 
 
 class RuntimeInformation(BaseModel):
