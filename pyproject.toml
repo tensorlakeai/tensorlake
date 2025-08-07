@@ -2,6 +2,7 @@
 name = "tensorlake"
 version = "0.2.37"
 description = "Tensorlake SDK for Document Ingestion API and Serverless Workflows"
+readme = "README.md"
 authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
 homepage = "https://github.com/tensorlakeai/tensorlake"
 repository = "https://github.com/tensorlakeai/tensorlake"
