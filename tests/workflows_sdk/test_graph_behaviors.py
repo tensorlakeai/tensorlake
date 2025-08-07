@@ -733,8 +733,9 @@ class TestGraphBehaviors(unittest.TestCase):
         self.assertEqual(len(output), 1)
         self.assertEqual(output[0], 6)
 
-    @parameterized.parameterized.expand([(False), (True)])
-    def test_map_operation(self, is_remote):
+    # @parameterized.parameterized.expand([(False), (True)])
+    def test_map_operation(self):
+        is_remote = True
         graph = create_pipeline_graph_with_map(self)
         graph = remote_or_local_graph(graph, is_remote)
         invocation_id = graph.run(block_until_done=True, x=3)

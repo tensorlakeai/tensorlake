@@ -22,7 +22,6 @@ aiofiles = "^24.1.0"
 tqdm = "^4.67.1"
 
 # Required only by Function Executor
-structlog = "25.4.0"
 grpcio = "1.74.0"
 grpcio-tools = "1.74.0"
 
