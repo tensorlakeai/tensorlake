@@ -3,7 +3,7 @@ import unittest
 
 from json_schemas.bank_statement import BankStatement
 
-from tensorlake.documentai import DocumentAI
+from tensorlake.documentai import DocumentAI, Region
 from tensorlake.documentai.models import (
     PageClassConfig,
     ParseStatus,
@@ -44,6 +44,35 @@ class TestParse(unittest.TestCase):
         self.assertIsNotNone(parse_result.chunks)
 
         parse_list = self.doc_ai.list_parse_results()
+        self.assertIsNotNone(parse_list)
+        self.assertGreater(len(parse_list.items), 0)
+
+        found_parse = next(
+            (p for p in parse_list.items if p.parse_id == parse_id), None
+        )
+        self.assertIsNotNone(found_parse)
+        self.assertEqual(found_parse.parse_id, parse_id)
+
+        self.doc_ai.delete_parse(parse_id)
+        self.assertRaises(Exception, self.doc_ai.get_parsed_result, parse_id)
+
+    def test_simple_parse_eu(self):
+        doc_ai_eu = DocumentAI(region=Region.EU)
+
+        parse_id = doc_ai_eu.parse(
+            file="https://pub-226479de18b2493f96b64c6674705dd8.r2.dev/real-estate-purchase-all-signed.pdf",
+            page_range="1-2",
+        )
+        self.assertIsNotNone(parse_id)
+        print(f"Parse ID: {parse_id}")
+
+        parse_result = doc_ai_eu.wait_for_completion(parse_id=parse_id)
+        self.assertEqual(parse_result.status, ParseStatus.SUCCESSFUL)
+        self.assertIsNotNone(parse_result)
+        self.assertIsNotNone(parse_result.pages)
+        self.assertIsNotNone(parse_result.chunks)
+
+        parse_list = doc_ai_eu.list_parse_results()
         self.assertIsNotNone(parse_list)
         self.assertGreater(len(parse_list.items), 0)
 

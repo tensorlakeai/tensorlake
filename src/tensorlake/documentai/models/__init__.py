@@ -11,6 +11,7 @@ from ._enums import (
     ModelProvider,
     ParseStatus,
     PartitionStrategy,
+    Region,
     TableOutputMode,
     TableParsingFormat,
 )
@@ -78,4 +79,5 @@ __all__ = [
     "PaginationDirection",
     # Filters
     "DatasetDataFilter",
+    "Region",
 ]

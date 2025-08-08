@@ -21,6 +21,7 @@ from tensorlake.documentai.models import (
     ParseStatus,
     ParsingOptions,
     PartitionStrategy,
+    Region,
     Signature,
     StructuredData,
     StructuredExtractionOptions,
@@ -33,6 +34,7 @@ from tensorlake.documentai.models import (
 
 __all__ = [
     "DocumentAI",
+    "Region",
     # Enums
     "ChunkingStrategy",
     "MimeType",

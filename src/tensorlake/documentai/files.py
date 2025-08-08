@@ -14,7 +14,8 @@ from pydantic import BaseModel, Field
 from tqdm import tqdm
 from tqdm.asyncio import tqdm as async_tqdm
 
-from tensorlake.documentai.common import DOC_AI_BASE_URL
+from .common import get_doc_ai_base_url_v1
+from .models import Region
 
 
 class FileInfo(BaseModel):
@@ -35,13 +36,17 @@ class FileUploader:
     Private class for uploading files to DocumentAI.
     """
 
-    def __init__(self, api_key: str, server_url: Optional[str] = None):
+    def __init__(
+        self, api_key: str, server_url: Optional[str] = None, region: Region = Region.US
+    ):
         if not api_key:
             raise ValueError("API key is required for FileUploader.")
 
         self.api_key = api_key
-        self._client = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None)
-        self._async_client = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
+
+        doc_ai_base_url = get_doc_ai_base_url_v1(region=region, server_url=server_url)
+        self._client = httpx.Client(base_url=doc_ai_base_url, timeout=None)
+        self._async_client = httpx.AsyncClient(base_url=doc_ai_base_url, timeout=None)
 
         if server_url:
             self._client.base_url = f"{server_url}/documents/v1"
