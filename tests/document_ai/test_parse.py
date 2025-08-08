@@ -3,7 +3,7 @@ import unittest
 
 from json_schemas.bank_statement import BankStatement
 
-from tensorlake.documentai import (DocumentAI, Region)
+from tensorlake.documentai import DocumentAI, Region
 from tensorlake.documentai.models import (
     PageClassConfig,
     ParseStatus,
@@ -57,9 +57,7 @@ class TestParse(unittest.TestCase):
         self.assertRaises(Exception, self.doc_ai.get_parsed_result, parse_id)
 
     def test_simple_parse_eu(self):
-        doc_ai_eu = DocumentAI(
-            region=Region.EU
-        )
+        doc_ai_eu = DocumentAI(region=Region.EU)
 
         parse_id = doc_ai_eu.parse(
             file="https://pub-226479de18b2493f96b64c6674705dd8.r2.dev/real-estate-purchase-all-signed.pdf",

@@ -5,8 +5,9 @@ from typing import Any, Dict
 
 import httpx
 
-from .models import Region
 from .common import get_doc_ai_base_url_v1, get_doc_ai_base_url_v2
+from .models import Region
+
 
 class _BaseClient:
     """
@@ -14,7 +15,9 @@ class _BaseClient:
     All high-level mixins inherit from this class.
     """
 
-    def __init__(self, api_key: str | None, server_url: str | None, region: Region = Region.US):
+    def __init__(
+        self, api_key: str | None, server_url: str | None, region: Region = Region.US
+    ):
         self.api_key: str = api_key or os.getenv("TENSORLAKE_API_KEY", "")
         if not self.api_key:
             raise ValueError(

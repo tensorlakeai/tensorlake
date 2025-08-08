@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from .models import Region
 
+
 def get_server_url(region: Region) -> str:
     """
     Returns the base URL for the Document AI API.
@@ -27,6 +28,7 @@ def get_server_url(region: Region) -> str:
 
     return "https://api.tensorlake.ai"
 
+
 def get_doc_ai_base_url_v1(region: Region, server_url: Optional[str] = None) -> str:
     """
     Returns the base URL for the Document AI API based on the region.
@@ -44,6 +46,7 @@ def get_doc_ai_base_url_v1(region: Region, server_url: Optional[str] = None) -> 
 
     return f"{get_server_url(region)}/documents/v1/"
 
+
 def get_doc_ai_base_url_v2(region: Region, server_url: Optional[str] = None) -> str:
     """
     Returns the base URL for the Document AI API v2 based on the region.
@@ -56,6 +59,7 @@ def get_doc_ai_base_url_v2(region: Region, server_url: Optional[str] = None) -> 
         return v2_url
 
     return f"{get_server_url(region)}/documents/v2/"
+
 
 T = TypeVar("T")
 
