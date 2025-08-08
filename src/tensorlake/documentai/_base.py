@@ -5,8 +5,8 @@ from typing import Any, Dict
 
 import httpx
 
-from .common import DOC_AI_BASE_URL, DOC_AI_BASE_URL_V2
-
+from .models import Region
+from .common import get_doc_ai_base_url_v1, get_doc_ai_base_url_v2
 
 class _BaseClient:
     """
@@ -14,24 +14,21 @@ class _BaseClient:
     All high-level mixins inherit from this class.
     """
 
-    def __init__(self, api_key: str | None, server_url: str | None):
+    def __init__(self, api_key: str | None, server_url: str | None, region: Region = Region.US):
         self.api_key: str = api_key or os.getenv("TENSORLAKE_API_KEY", "")
         if not self.api_key:
             raise ValueError(
                 "API key is required. Set TENSORLAKE_API_KEY or pass api_key."
             )
 
-        self._client_v1 = httpx.Client(base_url=DOC_AI_BASE_URL, timeout=None)
-        self._aclient_v1 = httpx.AsyncClient(base_url=DOC_AI_BASE_URL, timeout=None)
+        doc_ai_v1 = get_doc_ai_base_url_v1(region=region, server_url=server_url)
 
-        self._client = httpx.Client(base_url=DOC_AI_BASE_URL_V2, timeout=None)
-        self._aclient = httpx.AsyncClient(base_url=DOC_AI_BASE_URL_V2, timeout=None)
+        self._client_v1 = httpx.Client(base_url=doc_ai_v1, timeout=None)
+        self._aclient_v1 = httpx.AsyncClient(base_url=doc_ai_v1, timeout=None)
 
-        if server_url:
-            self._client_v1.base_url = f"{server_url}/documents/v1"
-            self._aclient_v1.base_url = f"{server_url}/documents/v1"
-            self._client.base_url = f"{server_url}/documents/v2"
-            self._aclient.base_url = f"{server_url}/documents/v2"
+        doc_ai_v2 = get_doc_ai_base_url_v2(region=region, server_url=server_url)
+        self._client = httpx.Client(base_url=doc_ai_v2, timeout=None)
+        self._aclient = httpx.AsyncClient(base_url=doc_ai_v2, timeout=None)
 
     def close(self):
         """

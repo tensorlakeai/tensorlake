@@ -13,6 +13,7 @@ from ._enums import (
     PartitionStrategy,
     TableOutputMode,
     TableParsingFormat,
+    Region,
 )
 from ._filters import DatasetDataFilter
 
@@ -78,4 +79,5 @@ __all__ = [
     "PaginationDirection",
     # Filters
     "DatasetDataFilter",
+    "Region"
 ]

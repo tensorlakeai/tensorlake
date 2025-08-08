@@ -4,6 +4,9 @@ Enums for document parsing.
 
 from enum import Enum
 
+class Region(str, Enum):
+    EU = "eu"
+    US = "us"
 
 class ChunkingStrategy(str, Enum):
     """

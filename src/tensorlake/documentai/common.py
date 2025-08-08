@@ -7,12 +7,55 @@ from typing import Generic, List, Optional, TypeVar
 
 from pydantic import BaseModel, Field
 
-# Get base URL from environment variable or use default
-_server_url = os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")
-DOC_AI_BASE_URL = os.getenv("TENSORLAKE_DOCAI_URL", f"{_server_url}/documents/v1/")
-DOC_AI_BASE_URL_V2 = os.getenv(
-    "TENSORLAKE_DOCAI_URL_V2", f"{_server_url}/documents/v2/"
-)
+from .models import Region
+
+def get_server_url(region: Region) -> str:
+    """
+    Returns the base URL for the Document AI API.
+    """
+
+    tensorlake_api_url = os.getenv("TENSORLAKE_API_URL")
+    if tensorlake_api_url:
+        return tensorlake_api_url
+
+    indexify_url = os.getenv("INDEXIFY_URL")
+    if indexify_url:
+        return indexify_url
+
+    if region == Region.EU:
+        return "https://api.eu.tensorlake.ai"
+
+    return "https://api.tensorlake.ai"
+
+def get_doc_ai_base_url_v1(region: Region, server_url: Optional[str] = None) -> str:
+    """
+    Returns the base URL for the Document AI API based on the region.
+
+    If server_url is provided, it will be used as the base URL.
+    Otherwise, it will fall back to the environment variable TENSORLAKE_DOCAI_URL
+    or the default server URL based on the region.
+    """
+    if server_url:
+        return f"{server_url}/documents/v1/"
+
+    v1_url = os.getenv("TENSORLAKE_DOCAI_URL")
+    if v1_url:
+        return v1_url
+
+    return f"{get_server_url(region)}/documents/v1/"
+
+def get_doc_ai_base_url_v2(region: Region, server_url: Optional[str] = None) -> str:
+    """
+    Returns the base URL for the Document AI API v2 based on the region.
+    """
+    if server_url:
+        return f"{server_url}/documents/v2/"
+
+    v2_url = os.getenv("TENSORLAKE_DOCAI_URL_V2")
+    if v2_url:
+        return v2_url
+
+    return f"{get_server_url(region)}/documents/v2/"
 
 T = TypeVar("T")
 
