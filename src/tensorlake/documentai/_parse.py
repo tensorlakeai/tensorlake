@@ -30,7 +30,7 @@ class _ParseMixin(_BaseClient):
         file: str,
         parsing_options: Optional[ParsingOptions] = None,
         structured_extraction_options: Optional[
-            List[StructuredExtractionOptions]
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
@@ -478,7 +478,7 @@ def _create_parse_req(
 
     if file.startswith(("http://", "https://")):
         payload["file_url"] = file
-    elif file.startswith("tensorlake-"):
+    elif file.startswith("tensorlake-") or file.startswith("file_"):
         payload["file_id"] = file
     else:
         payload["raw_text"] = file

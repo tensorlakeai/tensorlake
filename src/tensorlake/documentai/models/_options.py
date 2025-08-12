@@ -109,23 +109,23 @@ class StructuredExtractionOptions(BaseModel):
 
     # Optional fields
     partition_strategy: Optional[PartitionStrategy] = Field(
-        None,
+        default=None,
         description="Strategy to partition the document before structured data extraction. The API will return one structured data object per partition. This is useful when you want to extract certain fields from every page.",
     )
     model_provider: ModelProvider = Field(
-        ModelProvider.TENSORLAKE,
+        default=ModelProvider.TENSORLAKE,
         description="The model provider to use for structured data extraction. The default is `tensorlake`, which uses our private model, and runs on our servers.",
     )
     page_classes: Optional[List[str]] = Field(
-        None,
+        default=None,
         description="The page classes to use for structured data extraction. If not provided, all the pages will be used to extract structured data. The page_classification_config is used to classify the pages of the document.",
     )
     prompt: Optional[str] = Field(
-        None,
+        default=None,
         description="The prompt to use for structured data extraction. If not provided, the default prompt will be used.",
     )
     skip_ocr: bool = Field(
-        False,
+        default=False,
         description="Boolean flag to skip converting the document blob to OCR text before structured data extraction. If set to `true`, the API will skip the OCR step and directly extract structured data from the document. The default is `false`.",
     )
 
