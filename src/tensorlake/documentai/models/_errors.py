@@ -3,6 +3,17 @@ from enum import Enum
 from typing import Optional
 from pydantic import BaseModel, Field
 
+class DocumentAIError(Exception):
+    """
+    Base class for Document AI API errors.
+
+    This exception is raised for errors that occur during the operation of the Document AI API.
+    It can be used to catch and handle errors in a generic way.
+    """
+    def __init__(self, message: str, code: Optional[str] = None):
+        super().__init__(message)
+        self.code = code
+
 class ErrorCode(str, Enum):
     """
     Error codes for Document AI API.

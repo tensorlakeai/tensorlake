@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, Union
+import sys
+from typing import Any, Dict
 
 import httpx
 
 from .common import get_doc_ai_base_url_v1, get_doc_ai_base_url_v2
-from .models import (Region, ErrorResponse, ErrorCode)
+from .models import (Region, ErrorResponse, ErrorCode, DocumentAIError)
 
 
 class _BaseClient:
@@ -91,8 +92,11 @@ class _BaseClient:
             return resp
 
         error_response = _deserialize_error_response(resp)
-        raise ValueError(
-            f"Operation failed with code: {error_response.code}, message: {error_response.message}"
+        _print_error_line(error_response.code, error_response.message, error_response.trace_id)
+
+        raise DocumentAIError(
+            message=error_response.message,
+            code=error_response.code,
         )
 
     async def _arequest_v1(self, method: str, url: str, **kw: Any) -> httpx.Response:
@@ -108,9 +112,13 @@ class _BaseClient:
             return resp
 
         error_response = _deserialize_error_response(resp)
-        raise ValueError(
-            f"Operation failed with code: {error_response.code}, message: {error_response.message}"
+        _print_error_line(error_response.code, error_response.message, error_response.trace_id)
+
+        raise DocumentAIError(
+            message=error_response.message,
+            code=error_response.code,
         )
+
 
 def _deserialize_error_response(resp: httpx.Response) -> ErrorResponse:
     """
@@ -129,3 +137,26 @@ def _deserialize_error_response(resp: httpx.Response) -> ErrorResponse:
         )
 
         return error_response
+
+# --- simple color helpers ---
+_RESET = "\033[0m"
+_BOLD = "\033[1m"
+_RED = "\033[31m"
+_YELLOW = "\033[33m"
+
+def _use_color() -> bool:
+    env = os.getenv("TENSORLAKE_SDK_COLOR")
+    if env is not None:
+        return env.lower() not in ("0", "false", "no")
+    return hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
+
+def _c(s: str, color: str) -> str:
+    if not _use_color():
+        return s
+    return f"{color}{s}{_RESET}"
+
+def _print_error_line(code: Any, message: str, trace_id: str | None = None) -> None:
+    prefix = _c("Error:", _BOLD + _RED)
+    body = _c(f" {code}", _YELLOW) + f" — {message}"
+    suffix = f"  (trace_id={trace_id})" if trace_id else ""
+    print(prefix + body + suffix, file=sys.stderr)

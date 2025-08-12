@@ -46,6 +46,7 @@ from ._results import (
 from ._errors import (
     ErrorCode,
     ErrorResponse,
+    DocumentAIError
 )
 
 __all__ = [
@@ -88,4 +89,5 @@ __all__ = [
     # Errors
     "ErrorCode",
     "ErrorResponse",
+    "DocumentAIError"
 ]
