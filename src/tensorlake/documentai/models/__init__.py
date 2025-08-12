@@ -43,6 +43,11 @@ from ._results import (
     Text,
 )
 
+from ._errors import (
+    ErrorCode,
+    ErrorResponse,
+)
+
 __all__ = [
     # Enums
     "ChunkingStrategy",
@@ -80,4 +85,7 @@ __all__ = [
     # Filters
     "DatasetDataFilter",
     "Region",
+    # Errors
+    "ErrorCode",
+    "ErrorResponse",
 ]

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Union
 
 import httpx
 
 from .common import get_doc_ai_base_url_v1, get_doc_ai_base_url_v2
-from .models import Region
+from .models import (Region, ErrorResponse, ErrorCode)
 
 
 class _BaseClient:
@@ -87,8 +87,13 @@ class _BaseClient:
 
     def _request(self, method: str, url: str, **kw: Any) -> httpx.Response:
         resp = self._client.request(method, url, headers=self._headers(), **kw)
-        resp.raise_for_status()
-        return resp
+        if resp.is_success:
+            return resp
+
+        error_response = _deserialize_error_response(resp)
+        raise ValueError(
+            f"Operation failed with code: {error_response.code}, message: {error_response.message}"
+        )
 
     async def _arequest_v1(self, method: str, url: str, **kw: Any) -> httpx.Response:
         resp = await self._aclient_v1.request(
@@ -99,5 +104,28 @@ class _BaseClient:
 
     async def _arequest(self, method: str, url: str, **kw: Any) -> httpx.Response:
         resp = await self._aclient.request(method, url, headers=self._headers(), **kw)
-        resp.raise_for_status()
-        return resp
+        if resp.is_success:
+            return resp
+
+        error_response = _deserialize_error_response(resp)
+        raise ValueError(
+            f"Operation failed with code: {error_response.code}, message: {error_response.message}"
+        )
+
+def _deserialize_error_response(resp: httpx.Response) -> ErrorResponse:
+    """
+    Handle error responses and return a structured ErrorResponse.
+    """
+    try:
+        error_response = ErrorResponse.model_validate(resp.json())
+        return error_response
+    except Exception as e:
+        error_response = ErrorResponse(
+            message=str(e),
+            code=ErrorCode.INTERNAL_ERROR,
+            timestamp=int(resp.headers.get("Date", 0)),
+            trace_id=resp.headers.get("X-Trace-ID"),
+            details=None
+        )
+
+        return error_response
