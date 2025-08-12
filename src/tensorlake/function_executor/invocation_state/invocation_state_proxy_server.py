@@ -68,7 +68,7 @@ class InvocationStateProxyServer:
                     self._response_map[response.request_id] = response
                     self._new_response.notify_all()
         except grpc.RpcError:
-            self._logger.warning("shutting down, looks like client disconnected")
+            self._logger.info("shutting down, client disconnected")
             # This is the only shutdown path for the server.
             self._request_queue.put("shutdown")
         except Exception as e:
@@ -78,7 +78,7 @@ class InvocationStateProxyServer:
         while True:
             request: Any = self._request_queue.get()
             if request == "shutdown":
-                self._logger.warning("sender thread shutting down")
+                self._logger.info("sender thread shutting down")
                 return
 
             request: InvocationStateRequest
