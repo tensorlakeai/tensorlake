@@ -294,6 +294,38 @@ class TestDatasets(unittest.TestCase):
             parse_id,
         )
 
+    def test_dataset_accepts_files_from_files_v2(self):
+        file_id = os.getenv("FILES_V2_FILE_ID")
+        if not file_id:
+            self.skipTest("FILES_V2_FILE_ID environment variable is not set.")
+
+        if not file_id.startswith("file_"):
+            self.skipTest("FILES_V2_FILE_ID must start with 'file_'.")
+
+        random_name = f"test_dataset_{os.urandom(4).hex()}"
+
+        dataset = self.doc_ai.create_dataset(
+            name=random_name,
+            description="This is a test dataset for unit testing.",
+        )
+        self.assertIsNotNone(dataset)
+
+        parse_id = self.doc_ai.parse_dataset_file(
+            dataset=dataset,
+            file=file_id,
+            page_range="1-2",
+            wait_for_completion=False,
+        )
+        self.assertIsNotNone(parse_id)
+
+        parse_result = self.doc_ai.wait_for_completion(parse_id=parse_id)
+        self.assertIsNotNone(parse_result)
+        self.assertEqual(parse_result.status, ParseStatus.SUCCESSFUL)
+
+        self.doc_ai.delete_dataset(dataset)
+        self.assertRaises(Exception, self.doc_ai.get_parsed_result, parse_id)
+
+
 
 if __name__ == "__main__":
     unittest.main()

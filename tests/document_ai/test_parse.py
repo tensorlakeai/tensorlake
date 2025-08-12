@@ -385,6 +385,23 @@ class TestParse(unittest.TestCase):
         self.doc_ai.delete_parse(result.parse_id)
         self.assertRaises(Exception, self.doc_ai.get_parsed_result, result.parse_id)
 
+    def test_parse_accepts_files_from_files_v2(self):
+        file_id = os.getenv("FILES_V2_FILE_ID")
+        if not file_id:
+            self.skipTest("FILES_V2_FILE_ID environment variable is not set.")
+
+        if not file_id.startswith("file_"):
+            self.skipTest("FILES_V2_FILE_ID must start with 'file_'.")
+
+        parse_id = self.doc_ai.parse(
+            file=file_id,
+            page_range="1",
+        )
+        self.assertIsNotNone(parse_id)
+        print(f"Parse ID: {parse_id}")
+
+        parse_result = self.doc_ai.wait_for_completion(parse_id=parse_id)
+        self.assertEqual(parse_result.status, ParseStatus.SUCCESSFUL)
 
 if __name__ == "__main__":
     unittest.main()

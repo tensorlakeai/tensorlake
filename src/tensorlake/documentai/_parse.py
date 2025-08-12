@@ -478,7 +478,7 @@ def _create_parse_req(
 
     if file.startswith(("http://", "https://")):
         payload["file_url"] = file
-    elif file.startswith("tensorlake-"):
+    elif file.startswith("tensorlake-") or file.startswith("file_"):
         payload["file_id"] = file
     else:
         payload["raw_text"] = file
