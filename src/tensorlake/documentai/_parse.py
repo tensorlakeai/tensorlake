@@ -30,7 +30,7 @@ class _ParseMixin(_BaseClient):
         file: str,
         parsing_options: Optional[ParsingOptions] = None,
         structured_extraction_options: Optional[
-            List[StructuredExtractionOptions]
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
