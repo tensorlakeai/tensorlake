@@ -1,7 +1,8 @@
-
 from enum import Enum
 from typing import Optional
+
 from pydantic import BaseModel, Field
+
 
 class DocumentAIError(Exception):
     """
@@ -10,9 +11,11 @@ class DocumentAIError(Exception):
     This exception is raised for errors that occur during the operation of the Document AI API.
     It can be used to catch and handle errors in a generic way.
     """
+
     def __init__(self, message: str, code: Optional[str] = None):
         super().__init__(message)
         self.code = code
+
 
 class ErrorCode(str, Enum):
     """
@@ -21,6 +24,7 @@ class ErrorCode(str, Enum):
     These codes are used to identify specific error conditions in the API.
     They can be used for programmatic handling of errors.
     """
+
     QUOTA_EXCEEDED = "QUOTA_EXCEEDED"
     INVALID_JSON_SCHEMA = "INVALID_JSON_SCHEMA"
     INVALID_CONFIGURATION = "INVALID_CONFIGURATION"
@@ -44,8 +48,13 @@ class ErrorResponse(BaseModel):
     This model is used to return error information when the Document AI API encounters
     a user-facing error.
     """
+
     message: str = Field(..., description="A human-readable error message")
     code: ErrorCode = Field(..., description="The error code for programmatic handling")
     timestamp: int = Field(..., description="Millis since Unix epoch")
-    trace_id: Optional[str] = Field(None, description="Optional correlation ID for distributed tracing")
-    details: Optional[dict] = Field(None, description="Optional extra details (e.g., field-level validation errors)")
+    trace_id: Optional[str] = Field(
+        None, description="Optional correlation ID for distributed tracing"
+    )
+    details: Optional[dict] = Field(
+        None, description="Optional extra details (e.g., field-level validation errors)"
+    )

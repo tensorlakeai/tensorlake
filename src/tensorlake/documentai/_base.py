@@ -7,7 +7,7 @@ from typing import Any, Dict
 import httpx
 
 from .common import get_doc_ai_base_url_v1, get_doc_ai_base_url_v2
-from .models import (Region, ErrorResponse, ErrorCode, DocumentAIError)
+from .models import DocumentAIError, ErrorCode, ErrorResponse, Region
 
 
 class _BaseClient:
@@ -92,7 +92,9 @@ class _BaseClient:
             return resp
 
         error_response = _deserialize_error_response(resp)
-        _print_error_line(error_response.code, error_response.message, error_response.trace_id)
+        _print_error_line(
+            error_response.code, error_response.message, error_response.trace_id
+        )
 
         raise DocumentAIError(
             message=error_response.message,
@@ -112,7 +114,9 @@ class _BaseClient:
             return resp
 
         error_response = _deserialize_error_response(resp)
-        _print_error_line(error_response.code, error_response.message, error_response.trace_id)
+        _print_error_line(
+            error_response.code, error_response.message, error_response.trace_id
+        )
 
         raise DocumentAIError(
             message=error_response.message,
@@ -133,10 +137,11 @@ def _deserialize_error_response(resp: httpx.Response) -> ErrorResponse:
             code=ErrorCode.INTERNAL_ERROR,
             timestamp=int(resp.headers.get("Date", 0)),
             trace_id=resp.headers.get("X-Trace-ID"),
-            details=None
+            details=None,
         )
 
         return error_response
+
 
 # --- simple color helpers ---
 _RESET = "\033[0m"
@@ -144,16 +149,19 @@ _BOLD = "\033[1m"
 _RED = "\033[31m"
 _YELLOW = "\033[33m"
 
+
 def _use_color() -> bool:
     env = os.getenv("TENSORLAKE_SDK_COLOR")
     if env is not None:
         return env.lower() not in ("0", "false", "no")
     return hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
 
+
 def _c(s: str, color: str) -> str:
     if not _use_color():
         return s
     return f"{color}{s}{_RESET}"
+
 
 def _print_error_line(code: Any, message: str, trace_id: str | None = None) -> None:
     prefix = _c("Error:", _BOLD + _RED)

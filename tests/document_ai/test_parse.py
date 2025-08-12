@@ -403,5 +403,6 @@ class TestParse(unittest.TestCase):
         parse_result = self.doc_ai.wait_for_completion(parse_id=parse_id)
         self.assertEqual(parse_result.status, ParseStatus.SUCCESSFUL)
 
+
 if __name__ == "__main__":
     unittest.main()

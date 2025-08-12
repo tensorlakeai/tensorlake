@@ -15,6 +15,7 @@ from ._enums import (
     TableOutputMode,
     TableParsingFormat,
 )
+from ._errors import DocumentAIError, ErrorCode, ErrorResponse
 from ._filters import DatasetDataFilter
 
 # Options
@@ -41,12 +42,6 @@ from ._results import (
     Table,
     TableCell,
     Text,
-)
-
-from ._errors import (
-    ErrorCode,
-    ErrorResponse,
-    DocumentAIError
 )
 
 __all__ = [
@@ -89,5 +84,5 @@ __all__ = [
     # Errors
     "ErrorCode",
     "ErrorResponse",
-    "DocumentAIError"
+    "DocumentAIError",
 ]
