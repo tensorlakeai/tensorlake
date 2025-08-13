@@ -203,9 +203,7 @@ class _ParseMixin(_BaseClient):
                 if retry_count < 5:
                     wait_time = min(2**retry_count, 30)
                     _print_warn(f"Retrying in {wait_time} seconds...")
-                    await asyncio.sleep(
-                        wait_time
-                    )
+                    await asyncio.sleep(wait_time)
 
         _print_warn("Max retries reached. Checking final status...")
         return await self.get_parsed_result_async(parse_id)
