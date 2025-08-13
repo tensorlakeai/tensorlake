@@ -67,7 +67,6 @@ class TestParse(unittest.TestCase):
         print(f"Parse ID: {parse_id}")
 
         parse_result = doc_ai_eu.wait_for_completion(parse_id=parse_id)
-        print(parse_result)
         self.assertEqual(parse_result.status, ParseStatus.SUCCESSFUL)
         self.assertIsNotNone(parse_result)
         self.assertIsNotNone(parse_result.pages)
