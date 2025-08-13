@@ -82,7 +82,7 @@ class ParseStatus(str, Enum):
     PROCESSING = "processing"
     SUCCESSFUL = "successful"
     DETECTING_LAYOUT = "detecting_layout"
-    LAYOUT_DETECTED = "layout_detected"
+    LAYOUT_DETECTED = "detected_layout"
     EXTRACTING_DATA = "extracting_data"
     EXTRACTED_DATA = "extracted_data"
     FORMATTING_OUTPUT = "formatting_output"

@@ -153,8 +153,9 @@ class _ParseMixin(_BaseClient):
                     headers=self._headers(),
                 ) as sse:
                     for sse_event in sse.iter_sse():
-                        if self._handle_sse_event(sse_event):
-                            return self.get_parsed_result(parse_id)
+                        parse_result = self._handle_sse_event(sse_event)
+                        if parse_result:
+                            return parse_result
 
                     _print_warn("SSE connection ended without completion event")
 
@@ -190,8 +191,9 @@ class _ParseMixin(_BaseClient):
                     headers=self._headers(),
                 ) as sse:
                     async for sse_event in sse.aiter_sse():
-                        if self._handle_sse_event(sse_event):
-                            return await self.get_parsed_result_async(parse_id)
+                        parse_result = self._handle_sse_event(sse_event)
+                        if parse_result:
+                            return parse_result
 
                         # Always yield after processing each event
                         await asyncio.sleep(0)
@@ -208,7 +210,7 @@ class _ParseMixin(_BaseClient):
         _print_warn("Max retries reached. Checking final status...")
         return await self.get_parsed_result_async(parse_id)
 
-    def _handle_sse_event(self, sse_event: ServerSentEvent) -> bool:
+    def _handle_sse_event(self, sse_event: ServerSentEvent) -> Optional[ParseResult]:
         """
         Handle SSE event and return True if parse is complete (success or failure).
         """
@@ -220,31 +222,26 @@ class _ParseMixin(_BaseClient):
                     _print_magenta(f"  Status: {parse_result.status.value}")
                 except ValidationError:
                     _print_update(f"Parse update received: {sse_event.data}")
-                return False
 
+                return None
             case "parse_done":
-                _print_success("Parse done.")
-                return True
-
+                parse_result = ParseResult.model_validate_json(sse_event.data)
+                _print_success(f"Parse ID: {parse_result.parse_id} done")
+                return parse_result
             case "parse_failed":
-                try:
-                    parse_result = ParseResult.model_validate_json(sse_event.data)
-                    _print_error("Parse job failed.")
-                    _print_warn(f"  Parse ID: {parse_result.parse_id}")
-                    _print_magenta(f"  Status: {parse_result.status}")
-                    _print_error(f"  Error: {parse_result.error}")
-                except ValidationError:
-                    _print_error(f"Parse failed received: {sse_event.data}")
+                parse_result = ParseResult.model_validate_json(sse_event.data)
+                _print_error("Parse job failed.")
+                _print_warn(f"  Parse ID: {parse_result.parse_id}")
+                _print_magenta(f"  Status: {parse_result.status}")
+                _print_error(f"  Error: {parse_result.error}")
 
-                return True
-
+                return parse_result
             case "parse_queued":
                 _print_warn("Parse job waiting in queue.")
-                return False
-
+                return None
             case _:
                 _print_info(f"Unknown SSE event: {sse_event.event}")
-                return False
+                return None
 
     def parse_and_wait(
         self,
