@@ -1,15 +1,23 @@
 from __future__ import annotations
 
-import asyncio
 import inspect
 import json
-import time
 from typing import Any, Dict, List, Mapping, Optional, Union
 
-from pydantic import BaseModel
+from httpx_sse import aconnect_sse, connect_sse
+from pydantic import BaseModel, ValidationError
 
 from ._base import _BaseClient
 from ._utils import _drop_none
+from .common import (
+    _print_bold,
+    _print_error,
+    _print_info,
+    _print_magenta,
+    _print_success,
+    _print_update,
+    _print_warn,
+)
 from .models import (
     EnrichmentOptions,
     MimeType,
@@ -120,7 +128,7 @@ class _ParseMixin(_BaseClient):
         resp = await self._arequest("POST", "/parse", json=body)
         return resp.json()["parse_id"]
 
-    def wait_for_completion(self, parse_id: str) -> ParseResult:
+    def wait_for_completion(self, parse_id: str):
         """
         Wait for the completion of a parse operation.
 
@@ -130,13 +138,46 @@ class _ParseMixin(_BaseClient):
         Args:
             parse_id: The ID of the parse operation to wait for. This is the string returned by the parse method.
         """
-        parse = self.get_parsed_result(parse_id)
-        while parse.status in {ParseStatus.PENDING, ParseStatus.PROCESSING}:
-            print("waiting 5 s…")
-            time.sleep(5)
-            parse = self.get_parsed_result(parse_id)
-            print(f"parse status: {parse.status.name.lower()}")
-        return parse
+        _print_bold("Waiting for completion of parse job.")
+        _print_info(f"Parse ID: {parse_id}")
+
+        with connect_sse(
+            client=self._client,
+            method="GET",
+            url=f"parse/{parse_id}",
+            headers=self._headers(),
+        ) as sse:
+            for sse_event in sse.iter_sse():
+                match sse_event.event:
+                    case "parse_update":
+                        try:
+                            parse_result = ParseResult.model_validate_json(
+                                sse_event.data
+                            )
+                            _print_update("Parse job update:")
+                            _print_magenta(f"  Status: {parse_result.status.value}")
+                        except ValidationError:
+                            _print_update(f"Parse update received: {sse_event.data}")
+
+                    case "parse_done":
+                        _print_success("Parse done.")
+
+                    case "parse_failed":
+                        try:
+                            parse_result = ParseResult.model_validate_json(
+                                sse_event.data
+                            )
+                            _print_error("Parse job failed.")
+                            _print_warn(f"  Parse ID: {parse_result.parse_id}")
+                            _print_magenta(f"  Status: {parse_result.status}")
+                            _print_error(f"  Error: {parse_result.error}")
+                        except ValidationError:
+                            _print_error(f"Parse failed received: {sse_event.data}")
+
+                    case "parse_queued":
+                        _print_warn("Parse job waiting in queue.")
+
+        return self.get_parsed_result(parse_id)
 
     async def wait_for_completion_async(self, parse_id: str) -> ParseResult:
         """
@@ -148,14 +189,43 @@ class _ParseMixin(_BaseClient):
         Args:
             parse_id: The ID of the parse operation to wait for. This is the string returned by the parse method.
         """
+        async with aconnect_sse(
+            client=self._client,
+            method="GET",
+            url=f"parse/{parse_id}",
+            headers=self._headers(),
+        ) as sse:
+            async for sse_event in sse.aiter_sse():
+                match sse_event.event:
+                    case "parse_update":
+                        try:
+                            parse_result = ParseResult.model_validate_json(
+                                sse_event.data
+                            )
+                            _print_update("Parse job update:")
+                            _print_magenta(f"  Status: {parse_result.status.value}")
+                        except ValidationError:
+                            _print_update(f"Parse update received: {sse_event.data}")
 
-        parse = await self.get_parsed_result_async(parse_id)
-        while parse.status in {ParseStatus.PENDING, ParseStatus.PROCESSING}:
-            print("waiting 5 s…")
-            await asyncio.sleep(5)
-            parse = await self.get_parsed_result_async(parse_id)
-            print(f"parse status: {parse.status}")
-        return parse
+                    case "parse_done":
+                        _print_success("Parse done.")
+
+                    case "parse_failed":
+                        try:
+                            parse_result = ParseResult.model_validate_json(
+                                sse_event.data
+                            )
+                            _print_error("Parse job failed.")
+                            _print_warn(f"  Parse ID: {parse_result.parse_id}")
+                            _print_magenta(f"  Status: {parse_result.status}")
+                            _print_error(f"  Error: {parse_result.error}")
+                        except ValidationError:
+                            _print_error(f"Parse failed received: {sse_event.data}")
+
+                    case "parse_queued":
+                        _print_warn("Parse job waiting in queue.")
+
+        return await self.get_parsed_result_async(parse_id)
 
     def parse_and_wait(
         self,

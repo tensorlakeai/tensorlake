@@ -9,6 +9,43 @@ from pydantic import BaseModel, Field
 
 from .models import Region
 
+RESET = "\033[0m"
+BOLD = "\033[1m"
+CYAN = "\033[36m"
+YELLOW = "\033[33m"
+BLUE = "\033[34m"
+MAGENTA = "\033[35m"
+GREEN = "\033[32m"
+RED = "\033[31m"
+
+
+def _print_info(message: str):
+    print(f"{CYAN}{message}{RESET}")
+
+
+def _print_warn(message: str):
+    print(f"{YELLOW}{message}{RESET}")
+
+
+def _print_success(message: str):
+    print(f"{GREEN}{message}{RESET}")
+
+
+def _print_error(message: str):
+    print(f"{RED}{message}{RESET}")
+
+
+def _print_update(message: str):
+    print(f"{BLUE}{message}{RESET}")
+
+
+def _print_magenta(message: str):
+    print(f"{MAGENTA}{message}{RESET}")
+
+
+def _print_bold(message: str):
+    print(f"{BOLD}{message}{RESET}")
+
 
 def get_server_url(region: Region) -> str:
     """
