@@ -16,7 +16,6 @@
 
 import asyncio
 import os
-import signal
 import tempfile
 from dataclasses import dataclass
 from typing import Dict, Optional
@@ -195,7 +194,11 @@ class ImageBuilderV2Client:
             timeout=60,
         )
 
-        res.raise_for_status()
+        if not res.is_success:
+            error_message = res.text
+            click.secho(f"Error building image {image.image_name}: {error_message}", fg="red")
+            raise RuntimeError(f"Error building image {image.image_name}: {error_message}")
+
         build = BuildInfo.model_validate(res.json())
 
         click.secho(f"Starting build for image {image.image_name} ...", fg="green")
@@ -270,7 +273,11 @@ class ImageBuilderV2Client:
             headers=self._headers,
             timeout=60,
         )
-        res.raise_for_status()
+        if not res.is_success:
+            error_message = res.text
+            click.secho(f"Error building image: {error_message}", fg="red")
+            raise RuntimeError(f"Error building image: {error_message}")
+
         build_info = BuildInfo.model_validate(res.json())
 
         if build_info.status == "failed":
