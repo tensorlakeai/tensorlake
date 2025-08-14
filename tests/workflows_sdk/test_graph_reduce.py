@@ -1,11 +1,10 @@
 import unittest
-from typing import List
 
 import parameterized
 from pydantic import BaseModel
 from testing import remote_or_local_graph, test_graph_name
 
-from tensorlake import Graph
+from tensorlake import Graph, Map
 from tensorlake.functions_sdk.functions import tensorlake_function
 
 
@@ -14,12 +13,12 @@ class AccumulatedState(BaseModel):
 
 
 @tensorlake_function()
-def generate_seq(x: int) -> List[int]:
-    return [i for i in range(x)]
+def generate_seq(x: int) -> Map[int]:
+    return Map([i for i in range(x)])
 
 
 @tensorlake_function()
-def fail_generate_seq(x: int) -> List[int]:
+def fail_generate_seq(x: int) -> Map[int]:
     raise ValueError("test: fail_generate_seq function failed")
 
 
@@ -54,7 +53,7 @@ class TestGraphReduce(unittest.TestCase):
         graph.add_edge(accumulate_reduce, store_result)
 
         graph = remote_or_local_graph(graph, remote=is_remote)
-        invocation_id = graph.run(block_until_done=True, x=6)
+        invocation_id = graph.run(request=6, block_until_done=True)
         result = graph.output(invocation_id, store_result.name)
         self.assertEqual(result[0], 15)  # 0 + 1 + 2 + 3 + 4 + 5
 
@@ -71,7 +70,7 @@ class TestGraphReduce(unittest.TestCase):
         graph.add_edge(accumulate_reduce, store_result)
         graph = remote_or_local_graph(graph, remote=is_remote)
 
-        invocation_id = graph.run(block_until_done=True, x=3)
+        invocation_id = graph.run(request=3, block_until_done=True)
         outputs = graph.output(invocation_id, store_result.name)
         self.assertEqual(len(outputs), 0, "Expected zero results")
 
@@ -89,7 +88,7 @@ class TestGraphReduce(unittest.TestCase):
         graph.add_edge(accumulate_reduce, store_result)
         graph = remote_or_local_graph(graph, remote=is_remote)
 
-        invocation_id = graph.run(block_until_done=True, x=3)
+        invocation_id = graph.run(request=3, block_until_done=True)
         outputs = graph.output(invocation_id, store_result.name)
         self.assertEqual(len(outputs), 0, "Expected zero results")
 

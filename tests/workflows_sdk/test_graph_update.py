@@ -52,7 +52,7 @@ class TestGraphUpdate(unittest.TestCase):
 
         g = RemoteGraph.deploy(graph=g, code_dir_path=graph_code_dir_path(__file__))
 
-        invocation_id = g.run(block_until_done=False, sleep_sec=10)
+        invocation_id = g.run(block_until_done=False, request=10)
 
         g = Graph(
             name=test_graph_name(self),
@@ -83,7 +83,7 @@ class TestGraphUpdate(unittest.TestCase):
             upgrade_tasks_to_latest_version=False,
         )
 
-        invocation_id = g.run(block_until_done=False, sleep_sec=10)
+        invocation_id = g.run(block_until_done=False, request=10)
 
         g = Graph(
             name=test_graph_name(self),

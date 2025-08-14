@@ -28,7 +28,7 @@ class TestGraphBehaviorRetry(unittest.TestCase):
             name=test_graph_name(self), description="test", start_node=simple_function
         )
         graph = remote_or_local_graph(graph, remote=True)
-        invocation_id = graph.run(block_until_done=True, x=MyObject(x="a"))
+        invocation_id = graph.run(block_until_done=True, request=MyObject(x="a"))
         output = graph.output(invocation_id, "simple_function")
         self.assertTrue(len(output) == 0)
 

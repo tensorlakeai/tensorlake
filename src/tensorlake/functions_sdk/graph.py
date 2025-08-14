@@ -440,13 +440,13 @@ class Graph:
             version=self.version,
         )
 
-    def run(self, block_until_done: bool = False, **kwargs) -> str:
+    def run(self, request: Any, block_until_done: bool = False) -> str:
         self.validate_graph()
         start_node = self.nodes[self._start_node]
         serializer = get_serializer(start_node.input_encoder)
         input = TensorlakeData(
             id=nanoid(),
-            payload=serializer.serialize(kwargs),
+            payload=serializer.serialize(request),
             encoder=start_node.input_encoder,
         )
         print(f"[bold] Invoking {self._start_node}[/bold]")
@@ -577,9 +577,13 @@ class Graph:
         node = self.nodes[node_name]
         if node_name not in self._fn_cache:
             self._fn_cache[node_name] = TensorlakeFunctionWrapper(node)
-        fn = self._fn_cache[node_name]
-        acc_value = self._accumulator_values.get(node_name, None)
-        return fn.invoke_fn_ser(self._local_graph_ctx, input, acc_value)
+        function_wrapper: TensorlakeFunctionWrapper = self._fn_cache[node_name]
+        accumulator_value: Optional[TensorlakeData] = self._accumulator_values.get(
+            node_name, None
+        )
+        return function_wrapper.invoke_fn_ser(
+            self._local_graph_ctx, input, accumulator_value
+        )
 
     def _log_local_exec_tracebacks(self, result: FunctionCallResult) -> None:
         if result.exception is None:

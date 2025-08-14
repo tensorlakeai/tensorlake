@@ -32,7 +32,7 @@ class TestBrokenGraphs(unittest.TestCase):
         with redirect_stdout(func_stdout):
             g.run(
                 block_until_done=True,
-                a=10,
+                request=10,
             )
         # TODO: Uncomment this line once Function Executor creation errors are reported in
         # task stdout, stderr.

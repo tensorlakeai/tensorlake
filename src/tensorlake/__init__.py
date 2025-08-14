@@ -2,6 +2,7 @@ from . import data_loaders
 from .functions_sdk.exceptions import RequestException
 from .functions_sdk.functions import (
     GraphRequestContext,
+    Map,
     RouteTo,
     TensorlakeCompute,
     tensorlake_function,
@@ -17,6 +18,7 @@ __all__ = [
     "Graph",
     "GraphRequestContext",
     "Image",
+    "Map",
     "RemoteGraph",
     "Pipeline",
     "Retries",

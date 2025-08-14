@@ -59,7 +59,7 @@ def create_workflow() -> Graph:
 
 # Invoke the workflow for sequence [0..200].
 def run_workflow(g: Graph) -> None:
-    invocation_id: str = g.run(last_sequence_number=200, block_until_done=True)
+    invocation_id: str = g.run(request=200, block_until_done=True)
 
     # Get the output of the the workflow (of its last step).
     last_step_output: str = g.output(invocation_id, "send_to_web_service")

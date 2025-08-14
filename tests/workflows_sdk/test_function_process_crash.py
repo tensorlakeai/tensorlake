@@ -34,7 +34,7 @@ class TestFunctionProcessCrash(unittest.TestCase):
         for i in range(2):
             crash_invocation_id = graph.run(
                 block_until_done=True,
-                crash=True,
+                request=True,
             )
             crash_output = graph.output(crash_invocation_id, "function")
             self.assertEqual(crash_output, [])
@@ -44,7 +44,7 @@ class TestFunctionProcessCrash(unittest.TestCase):
         time.sleep(10)
         success_invocation_id = graph.run(
             block_until_done=True,
-            crash=False,
+            request=False,
         )
         success_output = graph.output(success_invocation_id, "function")
         self.assertEqual(success_output, ["success"])

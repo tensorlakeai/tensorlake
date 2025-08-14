@@ -20,12 +20,12 @@ def subpackage_hello_world() -> str:
 
 
 @tensorlake_function(name="foo")
-def tensorlale_function_subpackage_hello_world() -> str:
+def tensorlale_function_subpackage_hello_world(dummy: None) -> str:
     return subpackage_hello_world()
 
 
 class TensorlakeComputeSubpackageHelloWorld(TensorlakeCompute):
     name = "tensorlake_compute_subpackage_hello_world"
 
-    def run(self) -> str:
+    def run(self, dummy: None) -> str:
         return subpackage_hello_world()

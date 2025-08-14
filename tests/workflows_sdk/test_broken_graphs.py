@@ -38,7 +38,7 @@ class TensorlakeComputeWithFailingConstructor(TensorlakeCompute):
             "this exception was raised by TensorlakeComputeWithFailingConstructor constructor"
         )
 
-    def run(self) -> str:
+    def run(self, dummy: None) -> str:
         return "success"
 
 
@@ -59,7 +59,7 @@ class TestBrokenGraphs(unittest.TestCase):
         with redirect_stdout(sdk_stdout):
             invocation_id = g.run(
                 block_until_done=True,
-                url="https://www.youtube.com/watch?v=gjHv4pM8WEQ",
+                request="https://www.youtube.com/watch?v=gjHv4pM8WEQ",
             )
         sdk_stdout_str: str = sdk_stdout.getvalue()
 
@@ -84,30 +84,6 @@ class TestBrokenGraphs(unittest.TestCase):
         extractor_c_output = g.output(invocation_id, "extractor_c")
         self.assertEqual(len(extractor_c_output), 0)
 
-    def test_unexpected_function_argument(self):
-        g = Graph(
-            name=test_graph_name(self),
-            start_node=extractor_a,
-        )
-        g = RemoteGraph.deploy(graph=g, code_dir_path=graph_code_dir_path(__file__))
-
-        sdk_stdout: io.StringIO = io.StringIO()
-        with redirect_stdout(sdk_stdout):
-            invocation_id = g.run(
-                block_until_done=True,
-                unexpected_argument="https://www.youtube.com/watch?v=gjHv4pM8WEQ",
-            )
-        sdk_stdout_str: str = sdk_stdout.getvalue()
-
-        # TODO: Fix this test, when server writes to stderr, it is not captured by SDK.
-        # self.assertIn("extractor_a", sdk_stdout_str)
-        # self.assertIn("got an unexpected keyword argument", sdk_stdout_str)
-        # self.assertIn("unexpected_argument", sdk_stdout_str)
-
-        # No output from extractor_a because it failed.
-        extractor_c_output = g.output(invocation_id, "extractor_a")
-        self.assertEqual(len(extractor_c_output), 0)
-
     def test_compute_with_failing_constructor(self):
         g = Graph(
             name=test_graph_name(self),
@@ -118,6 +94,7 @@ class TestBrokenGraphs(unittest.TestCase):
         sdk_stdout: io.StringIO = io.StringIO()
         with redirect_stdout(sdk_stdout):
             invocation_id = g.run(
+                request=None,
                 block_until_done=True,
             )
         sdk_stdout_str: str = sdk_stdout.getvalue()

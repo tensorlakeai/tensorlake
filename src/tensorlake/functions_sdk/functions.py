@@ -6,6 +6,7 @@ from typing import (
     Callable,
     Dict,
     Generic,
+    Iterable,
     List,
     Optional,
     Tuple,
@@ -290,7 +291,19 @@ class RouteTo(Generic[V, N]):
     """
 
     value: V
-    edges: List[N]
+    edges: List[N] | N
+
+
+class Map(Generic[V]):
+    """A wrapper that starts a map operation for the supplied list or iterable.
+
+    Each element of the list/iterable is processed by the next function in parallel."""
+
+    def __init__(self, iterable: Iterable[V]):
+        if isinstance(iterable, List):
+            self.data: List[V] = iterable
+        else:
+            self.data: List[V] = list(iterable)
 
 
 class TensorlakeFunctionWrapper:
@@ -334,73 +347,85 @@ class TensorlakeFunctionWrapper:
     def _run_fn(
         self,
         ctx: GraphRequestContext,
-        input: Union[Dict, Type[BaseModel], List, Tuple],
-        acc: Optional[Type[Any]] = None,
+        input: Any,
+        accumulator: Optional[Any] = None,
     ) -> Tuple[List[Any], Optional[Exception], Optional[List[str]]]:
         """Invokes the wrapped function.
 
         Returns a tuple of results, containing:
-            The function output
-            The exception traceback if there's an exception, else None
-            The router edges produced by the function if any, else None
+            The function outputs
+            The exception if there's an exception, else None
+            Next function names produced by the function or otherwise derived from the graph structure.
         """
 
         args = []
-        kwargs = {}
 
-        if acc is not None:
-            args.append(acc)
-
-        # tuple and list are considered positional arguments, list is used for compatibility
-        # with json encoding which won't deserialize in tuple.
-        if isinstance(input, tuple) or isinstance(input, list):
-            args += input
-        elif isinstance(input, dict):
-            kwargs.update(input)
-        else:
-            args.append(input)
-
-        edges = self.indexify_function.next
-
+        # args order:
+        # 1. ctx, if inject_ctx is True
+        # 2. accumulator, if accumulate is not None
+        # 3. function input (required)
         if self.indexify_function.inject_ctx:
-            args.insert(0, ctx)
+            args.append(ctx)
+        if accumulator is not None:
+            args.append(accumulator)
+        args.append(input)
+
+        next_functions: List[TensorlakeCompute] | None
+        outputs: List[Any]
         try:
-            extracted_data = self.indexify_function._call_run(*args, **kwargs)
-            if isinstance(extracted_data, RouteTo):
-                edges = extracted_data.edges
-                extracted_data = extracted_data.value
+            return_value: Any = self.indexify_function._call_run(*args)
+            next_functions_from_func: (
+                TensorlakeCompute | List[TensorlakeCompute] | None
+            ) = self.indexify_function.next
+            if isinstance(return_value, RouteTo):
+                next_functions_from_func = return_value.edges
+                return_value = return_value.value
+
+            # isinstance(TensorlakeCompute) doesn't work.
+            if next_functions_from_func is None:
+                next_functions = None
+            elif isinstance(next_functions_from_func, list):
+                next_functions = next_functions_from_func
+            else:
+                next_functions = [next_functions_from_func]
+
+            if isinstance(return_value, Map):
+                outputs = return_value.data
+            elif return_value is None:
+                outputs = []
+            else:
+                outputs = [return_value]
         except Exception as e:
             return [], e, None
-        if extracted_data is None:
-            return [], None, edges
 
-        output = (
-            extracted_data if isinstance(extracted_data, list) else [extracted_data]
-        )
+        next_function_names: Optional[List[str]] = None
+        if next_functions is not None:
+            next_function_names = [fn.name for fn in next_functions]
 
-        if edges is None:
-            routes = None
-        elif isinstance(edges, list):
-            routes = [edge.name for edge in edges]
-        else:
-            routes = [edges.name]
-
-        return output, None, routes
+        return outputs, None, next_function_names
 
     def invoke_fn_ser(
         self,
         ctx: GraphRequestContext,
         input: TensorlakeData,
-        acc: Optional[Any] = None,
+        accumulator: Optional[TensorlakeData],
     ) -> FunctionCallResult:
-        input = self.deserialize_input(input)
-        input_serializer = get_serializer(self.indexify_function.input_encoder)
-        output_serializer = get_serializer(self.indexify_function.output_encoder)
-        if acc is not None:
-            acc = input_serializer.deserialize(acc.payload)
-        if acc is None and self.indexify_function.accumulate is not None:
-            acc = self.indexify_function.accumulate()
-        outputs, exception, edges = self._run_fn(ctx, input, acc=acc)
+        input_serializer: Any = get_serializer(self.indexify_function.input_encoder)
+        output_serializer: Any = get_serializer(self.indexify_function.output_encoder)
+        deserialized_input: Any = self.deserialize_input(input)
+        deserialized_accumulator: Optional[Any] = None
+        if self.indexify_function.accumulate is not None:
+            # No existing accumulator value yet then initialize it.
+            if accumulator is None:
+                deserialized_accumulator = self.indexify_function.accumulate()
+            else:
+                deserialized_accumulator = input_serializer.deserialize(
+                    accumulator.payload
+                )
+
+        outputs, exception, edges = self._run_fn(
+            ctx, deserialized_input, deserialized_accumulator
+        )
 
         metrics = Metrics(
             timers=ctx.request_state.timers,
