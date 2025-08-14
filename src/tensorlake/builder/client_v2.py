@@ -93,6 +93,7 @@ class BuildLogEvent(BaseModel):
     stream: str
     message: str
     sequence_number: int
+    build_status: str
 
 
 class ImageBuilderV2Client:
@@ -233,22 +234,27 @@ class ImageBuilderV2Client:
             ) as event_source:
                 async for sse in event_source.aiter_sse():
                     log_entry = BuildLogEvent.model_validate(sse.json())
-                    if log_entry.stream == "stdout":
-                        click.secho(
-                            log_entry.message,
-                            nl=False,
-                            err=False,
-                            fg="black",
-                            dim=True,
-                        )
-                    elif log_entry.stream == "stderr":
-                        click.secho(log_entry.message, fg="red", err=True)
-                    elif log_entry.stream == "info":
-                        click.secho(
-                            f"{log_entry.timestamp}: {log_entry.message}", fg="blue"
-                        )
+                    self._print_build_log_event(event=log_entry)
 
         return await self.build_info(build.id)
+
+    def _print_build_log_event(self, event: BuildLogEvent):
+        if event.build_status == "pending":
+            click.secho("Build waiting in queue...", fg="yellow")
+        else:
+            match event.stream:
+                case "stdout":
+                    click.secho(
+                        event.message,
+                        nl=False,
+                        err=False,
+                        fg="black",
+                        dim=True,
+                    )
+                case "stderr":
+                    click.secho(event.message, fg="red", err=True)
+                case "info":
+                    click.secho(f"{event.timestamp}: {event.message}", fg="blue")
 
     async def build_info(self, build_id: str) -> BuildInfo:
         """
