@@ -28,7 +28,7 @@ class TestRequestError(unittest.TestCase):
         g.add_edge(start_func, end_func)
         g = remote_or_local_graph(g, is_remote)
 
-        request_id = g.run(block_until_done=True, cmd="fail_request")
+        request_id = g.run(block_until_done=True, request="fail_request")
 
         try:
             output = g.output(request_id, "start_func")

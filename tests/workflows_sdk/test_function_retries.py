@@ -31,7 +31,7 @@ class TestFunctionRetries(unittest.TestCase):
             start_node=function_with_retry_policy,
         )
         start_time = time.monotonic()
-        invocation_id = graph.run(block_until_done=True, x=1)
+        invocation_id = graph.run(block_until_done=True, request=1)
         duration_sec = time.monotonic() - start_time
 
         outputs = graph.output(invocation_id, "function_with_retry_policy")

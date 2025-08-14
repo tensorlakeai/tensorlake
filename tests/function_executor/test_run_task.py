@@ -12,7 +12,7 @@ from testing import (
     run_task,
 )
 
-from tensorlake import Graph, TensorlakeCompute, tensorlake_function
+from tensorlake import Graph, Map, TensorlakeCompute, tensorlake_function
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     BLOB,
     BLOBChunk,
@@ -84,8 +84,8 @@ def extractor_returns_argument(arg: bytes) -> bytes:
 
 
 @tensorlake_function()
-def extractor_returns_3x_argument(arg: bytes) -> List[bytes]:
-    return [arg, arg, arg]
+def extractor_returns_3x_argument(arg: bytes) -> Map[bytes]:
+    return Map([arg, arg, arg])
 
 
 class FunctionFailingOnInit(TensorlakeCompute):
@@ -171,10 +171,12 @@ class TestRunTask(unittest.TestCase):
                 fn_outputs = deserialized_function_output(
                     self, task_result.function_outputs, function_outputs_blob
                 )
-                self.assertEqual(len(fn_outputs), 2)
+                self.assertEqual(len(fn_outputs), 1)
+                first_output = fn_outputs[0]
+                self.assertEqual(len(first_output), 2)
                 expected = FileChunk(data=b"hello", start=5, end=5)
 
-                self.assertEqual(expected.model_dump(), fn_outputs[1].model_dump())
+                self.assertEqual(expected.model_dump(), first_output[1].model_dump())
 
         fe_stdout = process.read_stdout()
         # Check FE events in stdout

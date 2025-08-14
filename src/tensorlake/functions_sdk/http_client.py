@@ -345,13 +345,13 @@ class TensorlakeClient:
     def call(
         self,
         graph: str,
+        request: Any,
         block_until_done: bool = False,
         input_encoding: str = "cloudpickle",
-        **kwargs,
     ) -> str:
         if not block_until_done:
-            return self._call(graph, input_encoding, **kwargs)
-        events = self.call_stream(graph, input_encoding, **kwargs)
+            return self._call(graph, request, input_encoding)
+        events = self.call_stream(graph, request, input_encoding)
         try:
             while True:
                 print(str(next(events)))
@@ -363,11 +363,11 @@ class TensorlakeClient:
     def _call(
         self,
         graph: str,
+        request: Any,
         input_encoding: str = "cloudpickle",
-        **kwargs,
     ) -> str:
         serializer = get_serializer(input_encoding)
-        ser_input = serializer.serialize(kwargs)
+        ser_input: bytes | str = serializer.serialize(request)
         kwargs = {
             "headers": {
                 "Content-Type": serializer.content_type,
@@ -384,11 +384,11 @@ class TensorlakeClient:
     def call_stream(
         self,
         graph: str,
+        request: Any,
         input_encoding: str = "cloudpickle",
-        **kwargs,
     ) -> Generator[WorkflowEvent, None, str]:
         serializer = get_serializer(input_encoding)
-        ser_input = serializer.serialize(kwargs)
+        ser_input: bytes | str = serializer.serialize(request)
         kwargs = {
             "headers": {
                 "Content-Type": serializer.content_type,

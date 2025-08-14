@@ -7,7 +7,7 @@ from tensorlake.functions_sdk.graph_serialization import graph_code_dir_path
 
 
 @tensorlake_function()
-def start_func() -> str:
+def start_func(_: None) -> str:
     return "start_func"
 
 
@@ -25,7 +25,7 @@ class TestInvocationOutput(unittest.TestCase):
         g.add_edge(start_func, end_func)
         g = RemoteGraph.deploy(graph=g, code_dir_path=graph_code_dir_path(__file__))
 
-        invocation_id = g.run(block_until_done=True)
+        invocation_id = g.run(block_until_done=True, request=None)
 
         output = g.output(invocation_id, "start_func")
         self.assertEqual(len(output), 1, output)
@@ -43,7 +43,7 @@ class TestInvocationOutput(unittest.TestCase):
         g.add_edge(start_func, end_func)
         g = RemoteGraph.deploy(graph=g, code_dir_path=graph_code_dir_path(__file__))
 
-        invocation_id = g.run(block_until_done=False)
+        invocation_id = g.run(block_until_done=False, request=None)
 
         output = wait_function_output(g, invocation_id, "start_func")
         self.assertEqual(len(output), 1, output)

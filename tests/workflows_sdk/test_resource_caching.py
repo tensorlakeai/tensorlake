@@ -45,21 +45,21 @@ class TestFileDescriptorCaching(unittest.TestCase):
             graph=graph, code_dir_path=graph_code_dir_path(__file__)
         )
 
-        create_fd_invocation_id = graph.run(block_until_done=True, action="create_fd")
+        create_fd_invocation_id = graph.run(block_until_done=True, request="create_fd")
         output = graph.output(create_fd_invocation_id, "fd_caching_function")
         self.assertEqual(output, ["success"])
 
         # Fails if the file descriptor is not cached between different invocations of
         # the same function version. File descriptor caching is required to e.g. not
         # load a model into GPU on each invocation.
-        write_fd_invocation_id = graph.run(block_until_done=True, action="write_fd")
+        write_fd_invocation_id = graph.run(block_until_done=True, request="write_fd")
         output = graph.output(write_fd_invocation_id, "fd_caching_function")
         self.assertEqual(output, ["success"])
 
         # Fail if the write to the cached file descriptor didn's happen for any reason.
         # This verifies that the file descriptor state is not altered between invocations
         # of the same function version.
-        read_file_invocation_id = graph.run(block_until_done=True, action="read_fd")
+        read_file_invocation_id = graph.run(block_until_done=True, request="read_fd")
         output = graph.output(read_file_invocation_id, "fd_caching_function")
         self.assertEqual(output, ["write_to_cacheable_fd\n"])
 
@@ -116,14 +116,14 @@ class TestTensorlakeComputeObjectCaching(unittest.TestCase):
         for i in range(5):
             # The object is created once and cached in memory.
             invocation_id = graph.run(
-                block_until_done=True, action="check_constructor_called_once"
+                block_until_done=True, request="check_constructor_called_once"
             )
             output = graph.output(invocation_id, TensorlakeComputeTestObject.name)
             self.assertEqual(output, ["success"])
 
             # Every new invocation will reuse the cached compute object.
             invocation_id = graph.run(
-                block_until_done=True, action="check_cached_object"
+                block_until_done=True, request="check_cached_object"
             )
             output = graph.output(invocation_id, TensorlakeComputeTestObject.name)
             self.assertEqual(output, ["success"])

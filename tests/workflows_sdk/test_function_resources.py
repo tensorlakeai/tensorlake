@@ -25,7 +25,7 @@ class TestFunctionResources(unittest.TestCase):
         graph = RemoteGraph.deploy(
             graph=graph, code_dir_path=graph_code_dir_path(__file__)
         )
-        invocation_id = graph.run(block_until_done=True, x=1)
+        invocation_id = graph.run(block_until_done=True, request=1)
         outputs = graph.output(invocation_id, "function_with_custom_resources")
         self.assertEqual(len(outputs), 1)
         self.assertEqual(outputs[0], "success")

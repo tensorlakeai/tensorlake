@@ -10,7 +10,6 @@ fi
 enable_fe_test_suite=false
 enable_workflows_sdk_test_suite=false
 enable_cli_test_suite=false
-enable_utils_test_suite=false
 enable_document_ai_test_suite=false
 
 if [[ "$1" == "--function-executor" ]]; then
@@ -22,7 +21,6 @@ else
   enable_fe_test_suite=true
   enable_workflows_sdk_test_suite=true
   enable_cli_test_suite=true
-  enable_utils_test_suite=true
 fi
 
 tests_exit_code=0
@@ -55,7 +53,6 @@ rm -f $summary_file
 function_executor_test_files=$(find ./function_executor -name 'test_*.py')
 workflows_sdk_test_files=$(find ./workflows_sdk -name 'test_*.py')
 cli_test_files=$(find ./cli -name 'test_*.py')
-utils_test_files=$(find ./utils -name 'test_*.py')
 document_ai_test_files=$(find ./document_ai -name 'test_*.py')
 
 if [ "$enable_fe_test_suite" = true ]; then
@@ -68,10 +65,6 @@ fi
 
 if [ "$enable_cli_test_suite" = true ]; then
   run_test_suite "$cli_test_files" "CLI"
-fi
-
-if [ "$enable_utils_test_suite" = true ]; then
-  run_test_suite "$utils_test_files" "Utils"
 fi
 
 if [ "$enable_document_ai_test_suite" = true ]; then

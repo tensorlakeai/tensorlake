@@ -41,7 +41,7 @@ class TestGraphSecrets(unittest.TestCase):
         graph = Graph(
             name=test_graph_name(self), description="test", start_node=node_with_secret
         )
-        invocation_id = graph.run(block_until_done=True, x=1)
+        invocation_id = graph.run(block_until_done=True, request=1)
         output = graph.output(invocation_id, "node_with_secret")
         self.assertTrue(len(output) == 1)
         self.assertEqual(output[0], 2)
@@ -52,7 +52,7 @@ class TestGraphSecrets(unittest.TestCase):
         graph = Graph(
             name=test_graph_name(self), description="test", start_node=route_if_even
         )
-        invocation_id = graph.run(block_until_done=True, x=2)
+        invocation_id = graph.run(block_until_done=True, request=2)
         output = graph.output(invocation_id, "add_three")
         self.assertEqual(output, [5])
 

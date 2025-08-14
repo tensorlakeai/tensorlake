@@ -23,7 +23,7 @@ class TestGraphMetrics(unittest.TestCase):
         graph = Graph(
             name=test_graph_name(self), description="test", start_node=node_with_metrics
         )
-        invocation_id = graph.run(block_until_done=True, x=1)
+        invocation_id = graph.run(block_until_done=True, request=1)
         output = graph.output(invocation_id, "node_with_metrics")
         self.assertTrue(len(output) == 1)
         self.assertEqual(output[0], 2)

@@ -28,7 +28,7 @@ from tensorlake.functions_sdk.remote_graph import RemoteGraph
 
 
 @tensorlake_function()
-def call_hello_world() -> str:
+def call_hello_world(dummy: None) -> str:
     return hello_world()
 
 
@@ -38,17 +38,17 @@ def call_repeat_hello_world(times: int) -> List[str]:
 
 
 @tensorlake_function()
-def call_hello_world_from_subpackage() -> str:
+def call_hello_world_from_subpackage(dummy: None) -> str:
     return subpackage_hello_world()
 
 
 @tensorlake_function()
-def function_from_symlink_is_available() -> bool:
+def function_from_symlink_is_available(dummy: None) -> bool:
     return True if test_graph_name else False
 
 
 @tensorlake_function()
-def import_from_subdir_fails() -> bool:
+def import_from_subdir_fails(dummy: None) -> bool:
     try:
         from hello_world.subdir.subdir import foo
 
@@ -68,7 +68,7 @@ class TestGraphCodeSerialization(unittest.TestCase):
             graph=graph, code_dir_path=graph_code_dir_path(__file__)
         )
 
-        invocation_id = graph.run(block_until_done=True)
+        invocation_id = graph.run(request=None, block_until_done=True)
         output = graph.output(invocation_id, "call_hello_world")
         self.assertEqual(len(output), 1)
         self.assertEqual(output[0], hello_world())
@@ -83,9 +83,9 @@ class TestGraphCodeSerialization(unittest.TestCase):
             graph=graph, code_dir_path=graph_code_dir_path(__file__)
         )
 
-        invocation_id = graph.run(block_until_done=True, times=3)
+        invocation_id = graph.run(block_until_done=True, request=3)
         output = graph.output(invocation_id, "call_repeat_hello_world")
-        self.assertEqual(output, repeat_hello_world(3))
+        self.assertEqual(output[0], repeat_hello_world(3))
 
     def test_call_hello_world_from_subpackage(self):
         graph = Graph(
@@ -97,7 +97,7 @@ class TestGraphCodeSerialization(unittest.TestCase):
             graph=graph, code_dir_path=graph_code_dir_path(__file__)
         )
 
-        invocation_id = graph.run(block_until_done=True)
+        invocation_id = graph.run(request=None, block_until_done=True)
         output = graph.output(invocation_id, "call_hello_world_from_subpackage")
         self.assertEqual(len(output), 1)
         self.assertEqual(output[0], subpackage_hello_world())
@@ -112,7 +112,7 @@ class TestGraphCodeSerialization(unittest.TestCase):
             graph=graph, code_dir_path=graph_code_dir_path(__file__)
         )
 
-        invocation_id = graph.run(block_until_done=True)
+        invocation_id = graph.run(request=None, block_until_done=True)
         output = graph.output(invocation_id, "function_from_symlink_is_available")
         self.assertEqual(len(output), 1)
         self.assertTrue(output[0])
@@ -136,7 +136,7 @@ class TestGraphCodeSerialization(unittest.TestCase):
             graph=graph, code_dir_path=graph_code_dir_path(__file__)
         )
 
-        invocation_id = graph.run(block_until_done=True)
+        invocation_id = graph.run(request=None, block_until_done=True)
         output = graph.output(invocation_id, "import_from_subdir_fails")
         self.assertEqual(len(output), 1)
         self.assertTrue(output[0])
@@ -152,7 +152,7 @@ class TestGraphCodeSerialization(unittest.TestCase):
             graph=graph, code_dir_path=graph_code_dir_path(__file__)
         )
 
-        invocation_id = graph.run(block_until_done=True)
+        invocation_id = graph.run(request=None, block_until_done=True)
         output = graph.output(
             invocation_id, tensorlale_function_subpackage_hello_world.name
         )
@@ -170,7 +170,7 @@ class TestGraphCodeSerialization(unittest.TestCase):
             graph=graph, code_dir_path=graph_code_dir_path(__file__)
         )
 
-        invocation_id = graph.run(block_until_done=True)
+        invocation_id = graph.run(request=None, block_until_done=True)
         output = graph.output(invocation_id, TensorlakeComputeSubpackageHelloWorld.name)
         self.assertEqual(len(output), 1)
         self.assertEqual(output[0], subpackage_hello_world())
