@@ -196,8 +196,12 @@ class ImageBuilderV2Client:
 
         if not res.is_success:
             error_message = res.text
-            click.secho(f"Error building image {image.image_name}: {error_message}", fg="red")
-            raise RuntimeError(f"Error building image {image.image_name}: {error_message}")
+            click.secho(
+                f"Error building image {image.image_name}: {error_message}", fg="red"
+            )
+            raise RuntimeError(
+                f"Error building image {image.image_name}: {error_message}"
+            )
 
         build = BuildInfo.model_validate(res.json())
 

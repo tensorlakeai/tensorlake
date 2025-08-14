@@ -60,6 +60,11 @@ class FunctionInputsLoader:
 
         data_hash: str = _sha256_hexdigest(data)
         if data_hash != self._task.request.function_input.manifest.sha256_hash:
+            self._logger.error(
+                "function input data hash mismatch",
+                data_hash=data_hash,
+                expected_hash=self._task.request.function_input.manifest.sha256_hash,
+            )
             raise ValueError(
                 f"Function input data hash {data_hash} does not match expected hash {self._task.request.function_input.manifest.sha256_hash}."
             )
@@ -83,8 +88,13 @@ class FunctionInputsLoader:
 
         data_hash: str = _sha256_hexdigest(data)
         if data_hash != self._task.request.function_init_value.manifest.sha256_hash:
+            self._logger.error(
+                "reducer init value data hash mismatch",
+                data_hash=data_hash,
+                expected_hash=self._task.request.function_init_value.manifest.sha256_hash,
+            )
             raise ValueError(
-                f"Reducer init value hash {data_hash} does not match expected hash {self._task.request.function_init_value.manifest.sha256_hash}."
+                f"Reducer init value data hash {data_hash} does not match expected hash {self._task.request.function_init_value.manifest.sha256_hash}."
             )
 
         return _to_tensorlake_data(
