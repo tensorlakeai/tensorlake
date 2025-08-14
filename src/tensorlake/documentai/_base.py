@@ -115,7 +115,7 @@ class _BaseClient:
 
         error_response = _deserialize_error_response(resp)
         _print_error_line(
-            error_response.code, error_response.message, error_response.trace_id
+            error_response.code.value, error_response.message, error_response.trace_id
         )
 
         raise DocumentAIError(
