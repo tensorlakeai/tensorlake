@@ -5,6 +5,7 @@
 [![Python Support](https://img.shields.io/pypi/pyversions/tensorlake)](https://pypi.org/project/tensorlake/)
 [![License](https://img.shields.io/github/license/tensorlakeai/tensorlake)](LICENSE)
 [![Documentation](https://img.shields.io/badge/docs-tensorlake.ai-blue)](https://docs.tensorlake.ai)
+[![Slack](https://img.shields.io/badge/slack-TensorlakeCloud-purple?logo=slack)](https://join.slack.com/t/tensorlakecloud/shared_invite/zt-32fq4nmib-gO0OM5RIar3zLOBm~ZGqKg)
 
 TensorLake transforms unstructured documents into AI-ready data through Document Ingestion APIs and enables building scalable data processing pipelines with a serverless workflow runtime. The platform handles the complexity of document parsing, data extraction, and workflow orchestration on fully managed infrastructure including GPU acceleration.
 
@@ -22,16 +23,12 @@ It consists of two core capabilities:
   - [Document Parsing](#document-parsing)
   - [Structured Extraction](#structured-extraction)
   - [Datasets](#datasets)
-- [Serverless Workflows](#serverless-workflows)
-  - [Creating Workflows](#creating-workflows)
-  - [Local Development](#local-development)
-  - [Cloud Deployment](#cloud-deployment)
-- [Additional Features](#additional-features)
-  - [Webhooks](#webhooks)
-  - [Batch Processing](#batch-processing)
-- [Configuration Reference](#configuration-reference)
-- [Examples](#examples)
-- [Resources](#resources)
+- [Custom Data Workflows](#custom-data-workflows)
+  - [Creating Workflows](#quickstart-1)
+  - [Local Development](#running-locally)
+  - [Cloud Deployment](#running-on-tensorlake-cloud)
+- [Webhooks](#webhooks)
+- [Resources](#learn-more)
 
 ---
 
@@ -118,7 +115,7 @@ enrichment_options = EnrichmentOptions(
 
 # Parse and wait for completion
 result = doc_ai.parse_and_wait(
-    file_id, 
+    file_id,
     parsing_options=parsing_options,
     enrichment_options=enrichment_options
 )
@@ -150,13 +147,13 @@ if result.status == ParseStatus.SUCCESSFUL:
     if result.chunks:
         for chunk in result.chunks:
             print(f"Page {chunk.page_number}: {chunk.content}")
-    
+
     # Access structured data if configured
     if result.structured_data:
         for data in result.structured_data:
             print(f"Schema: {data.schema_name}")
             print(f"Data: {data.data}")
-    
+
     # Access page layout information
     if result.pages:
         for page in result.pages:
@@ -165,7 +162,7 @@ if result.status == ParseStatus.SUCCESSFUL:
 
 > **Note:** Document AI APIs are async to be able to handle large volumes of documents with many pages. You can use a Parse ID to retrieve results, or configure a webhook endpoint to receive updates.
 
-### Structured Extraction 
+### Structured Extraction
 
 Extract specific data fields from documents using JSON schemas or Pydantic models:
 
@@ -227,7 +224,7 @@ Structured Extraction is guided by the provided schema. We support Pydantic Mode
 
 We recommend adding a description to each field in the schema, as it helps the model to learn the context of the field.
 
-### Datasets 
+### Datasets
 
 Tensorlake Datasets are named collections of parse settings and results that allow you to apply ingestion actions, such as document parsing and structured extraction to any file parsed through the dataset. They are ideal for batch processing at scale.
 
@@ -235,7 +232,7 @@ When you create a dataset, you specify a configuration for parsing or extraction
 
 > **Note:** You can attach webhooks to a dataset to receive status updates when documents are successfully processed.
 
-#### 1. Create a Dataset 
+#### 1. Create a Dataset
 ```python
 from tensorlake.documentai import DocumentAI
 from tensorlake.documentai.models import ParsingOptions, EnrichmentOptions
@@ -266,11 +263,11 @@ dataset = doc_ai.create_dataset(
 
 For async operation, use `create_dataset_async` instead of `create_dataset`.
 
-#### 2. Add a document to a dataset 
+#### 2. Add a document to a dataset
 ```python
 # Parse a single file using dataset configuration
 parse_id = doc_ai.parse_dataset_file(
-    dataset, 
+    dataset,
     "/path/to/document.pdf",  # Or you can use URLs
     wait_for_completion=False  # Returns parse_id immediately
 )
@@ -278,12 +275,12 @@ parse_id = doc_ai.parse_dataset_file(
 # Or wait for completion
 result = doc_ai.parse_dataset_file(
     dataset,
-    "/path/to/document.pdf", 
+    "/path/to/document.pdf",
     wait_for_completion=True  # Returns ParseResult
 )
 ```
 
-#### 3. Retrieve Dataset output and metadata 
+#### 3. Retrieve Dataset output and metadata
 ```python
 # Get dataset information
 dataset_info = doc_ai.get_dataset(dataset.dataset_id)
@@ -322,7 +319,7 @@ Workflows enables building and deploy data processing workflows in Python. Once 
 Define a workflow by implementing its data transformation steps as Python functions decorated with `@tensorlake_function()`.
 Connect the outputs of a function to the inputs of another function using edges in a `Graph` object, which represents the full workflow.
 
-### Example 
+### Example
 
 The example below creates a workflow with the following steps:
 
@@ -475,7 +472,7 @@ Get real-time notifications when document processing completes. Webhooks are con
 
 **Supported Events:**
 - `tensorlake.document_ingestion.job.created` - Job started
-- `tensorlake.document_ingestion.job.failed` - Job failed  
+- `tensorlake.document_ingestion.job.failed` - Job failed
 - `tensorlake.document_ingestion.job.completed` - Job completed successfully
 
 **Quick Setup:**

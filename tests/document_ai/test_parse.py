@@ -3,7 +3,7 @@ import unittest
 
 from json_schemas.bank_statement import BankStatement
 
-from tensorlake.documentai import DocumentAI
+from tensorlake.documentai import DocumentAI, Region
 from tensorlake.documentai.models import (
     PageClassConfig,
     ParseStatus,
@@ -44,6 +44,35 @@ class TestParse(unittest.TestCase):
         self.assertIsNotNone(parse_result.chunks)
 
         parse_list = self.doc_ai.list_parse_results()
+        self.assertIsNotNone(parse_list)
+        self.assertGreater(len(parse_list.items), 0)
+
+        found_parse = next(
+            (p for p in parse_list.items if p.parse_id == parse_id), None
+        )
+        self.assertIsNotNone(found_parse)
+        self.assertEqual(found_parse.parse_id, parse_id)
+
+        self.doc_ai.delete_parse(parse_id)
+        self.assertRaises(Exception, self.doc_ai.get_parsed_result, parse_id)
+
+    def test_simple_parse_eu(self):
+        doc_ai_eu = DocumentAI(region=Region.EU)
+
+        parse_id = doc_ai_eu.parse(
+            file="https://pub-226479de18b2493f96b64c6674705dd8.r2.dev/real-estate-purchase-all-signed.pdf",
+            page_range="1-2",
+        )
+        self.assertIsNotNone(parse_id)
+        print(f"Parse ID: {parse_id}")
+
+        parse_result = doc_ai_eu.wait_for_completion(parse_id=parse_id)
+        self.assertEqual(parse_result.status, ParseStatus.SUCCESSFUL)
+        self.assertIsNotNone(parse_result)
+        self.assertIsNotNone(parse_result.pages)
+        self.assertIsNotNone(parse_result.chunks)
+
+        parse_list = doc_ai_eu.list_parse_results()
         self.assertIsNotNone(parse_list)
         self.assertGreater(len(parse_list.items), 0)
 
@@ -108,7 +137,7 @@ class TestParse(unittest.TestCase):
         self.assertIsNotNone(parse_result.structured_data)
 
         structured_extraction_schemas = {}
-        for schema in parse_result.structured_data:
+        for schema in parse_result.structured_data or []:
             structured_extraction_schemas[schema.schema_name] = schema
 
         self.assertIsNotNone(structured_extraction_schemas.get("form125-basic"))
@@ -143,7 +172,7 @@ class TestParse(unittest.TestCase):
         self.assertIsNotNone(parse_result.structured_data)
 
         structured_extraction_schemas = {}
-        for schema in parse_result.structured_data:
+        for schema in parse_result.structured_data or []:
             structured_extraction_schemas[schema.schema_name] = schema
 
         self.assertIsNotNone(structured_extraction_schemas.get("form125-basic"))
@@ -181,7 +210,7 @@ class TestParse(unittest.TestCase):
         )
 
         page_classes = {}
-        for pc in parsed_result.page_classes:
+        for pc in parsed_result.page_classes or []:
             page_classes[pc.page_class] = pc
 
         self.assertIn("form125", page_classes)
@@ -355,6 +384,24 @@ class TestParse(unittest.TestCase):
 
         self.doc_ai.delete_parse(result.parse_id)
         self.assertRaises(Exception, self.doc_ai.get_parsed_result, result.parse_id)
+
+    def test_parse_accepts_files_from_files_v2(self):
+        file_id = os.getenv("FILES_V2_FILE_ID")
+        if not file_id:
+            self.skipTest("FILES_V2_FILE_ID environment variable is not set.")
+
+        if not file_id.startswith("file_"):
+            self.skipTest("FILES_V2_FILE_ID must start with 'file_'.")
+
+        parse_id = self.doc_ai.parse(
+            file=file_id,
+            page_range="1",
+        )
+        self.assertIsNotNone(parse_id)
+        print(f"Parse ID: {parse_id}")
+
+        parse_result = self.doc_ai.wait_for_completion(parse_id=parse_id)
+        self.assertEqual(parse_result.status, ParseStatus.SUCCESSFUL)
 
 
 if __name__ == "__main__":

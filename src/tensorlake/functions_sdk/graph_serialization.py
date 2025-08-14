@@ -4,6 +4,7 @@ import os
 import pathlib
 import stat
 import zipfile
+from pathlib import Path
 from typing import Dict, List
 
 import click
@@ -75,6 +76,46 @@ def zip_graph_code(graph: Graph, code_dir_path: str) -> bytes:
         raise
 
 
+def _detect_files_to_exclude(root_dir: str) -> List[str]:
+    root = Path(root_dir).resolve()
+    exclude_paths = set()
+
+    venv_path = os.environ.get("VIRTUAL_ENV")
+    if venv_path:
+        venv_path = Path(venv_path).resolve()
+        try:
+            venv_path.relative_to(root)
+            exclude_paths.add(str(venv_path))
+        except ValueError:
+            # venv is not inside root_dir, ignore
+            pass
+
+    # 2. Parse .gitignore if present
+    gitignore_path = root / ".gitignore"
+    if gitignore_path.exists():
+        patterns = []
+        with gitignore_path.open("r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                patterns.append(line)
+
+        # For each pattern, use glob to find matches
+        for pattern in patterns:
+            if pattern.endswith("/"):
+                pattern = pattern.rstrip("/")
+                for match in root.glob(pattern):
+                    if match.is_dir():
+                        exclude_paths.add(str(match.resolve()))
+            else:
+                for match in root.glob(pattern):
+                    if match.exists():
+                        exclude_paths.add(str(match.resolve()))
+
+    return list(exclude_paths)
+
+
 def _zip_graph_code(
     zip_buffer: io.BytesIO,
     graph_manifest: GraphManifest,
@@ -87,6 +128,11 @@ def _zip_graph_code(
     """
     graph_code_size: int = 0
     zip_infos: List[zipfile.ZipInfo] = []
+
+    # Work with absolute paths to simplify comparisons
+    code_dir_path = os.path.abspath(code_dir_path)
+    exclude = set(_detect_files_to_exclude(code_dir_path))
+
     with zipfile.ZipFile(
         zip_buffer,
         "w",
@@ -96,16 +142,22 @@ def _zip_graph_code(
     ) as zipf:
         zipf.writestr(GRAPH_MANIFEST_FILE_NAME, graph_manifest.model_dump_json())
         zipf.writestr(GRAPH_METADATA_FILE_NAME, graph_metadata.model_dump_json())
-        for dir_path, _, file_names in os.walk(
+        for dir_path, dir_names, file_names in os.walk(
             code_dir_path, followlinks=_FOLLOW_LINKS
         ):
+            # Prevent walking into excluded directories
+            dir_names[:] = [
+                d for d in dir_names if os.path.join(dir_path, d) not in exclude
+            ]
             for file_name in file_names:
                 # Only include Python files.
                 if not file_name.endswith(".py"):
                     continue
 
                 file_path = os.path.join(dir_path, file_name)
-
+                if file_path in exclude:
+                    print(f"excluding file from zip: {str(file_path)}")
+                    continue
                 # The file is added to the ZIP archive with its original rwx/rwx/rwx permissions.
                 # When unzipping the files owner and group are set to the current process uid, gid.
                 # We need to check that file owner has read access on the file so the unzipping process

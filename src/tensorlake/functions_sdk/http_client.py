@@ -420,8 +420,7 @@ class TensorlakeClient:
                 print("invocation ID is unknown, cannot block until done")
                 raise
 
-            if block_until_done:
-                self.wait_on_invocation_completion(graph, invocation_id, **kwargs)
+            self.wait_on_invocation_completion(graph, invocation_id, **kwargs)
 
         if invocation_id is None:
             raise Exception("invocation ID not returned")

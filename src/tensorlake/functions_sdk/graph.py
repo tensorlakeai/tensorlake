@@ -36,6 +36,7 @@ from .graph_definition import (
     ComputeGraphMetadata,
     FunctionMetadata,
     ParameterMetadata,
+    PlacementConstraints,
     RetryPolicyMetadata,
     RuntimeInformation,
 )
@@ -233,6 +234,7 @@ class Graph:
         tags: Dict[str, str] = {},
         version: Optional[str] = None,
         retries: Retries = Retries(),
+        default_region: Optional[str] = None,
     ):
         if version is None:
             # Update graph on every deployment unless user wants to manage the version manually.
@@ -250,6 +252,7 @@ class Graph:
         self.tags = tags
         self.version = version
         self.retries = retries
+        self.default_region = default_region
 
         self._fn_cache: Dict[str, TensorlakeFunctionWrapper] = {}
 
@@ -361,6 +364,19 @@ class Graph:
             ),
             parameters=start_node_params,
             return_type=start_node_return_type,
+            placement_constraints=(
+                PlacementConstraints(
+                    filter_expressions=[f"region=={start_node.region}"]
+                )
+                if start_node.region is not None
+                else (
+                    PlacementConstraints(
+                        filter_expressions=[f"region=={self.default_region}"]
+                    )
+                    if self.default_region is not None
+                    else None
+                )
+            ),
         )
         metadata_edges = self.edges.copy()
         metadata_nodes = {}
@@ -396,6 +412,17 @@ class Graph:
                 ),
                 parameters=node_params,
                 return_type=node_return_type,
+                placement_constraints=(
+                    PlacementConstraints(filter_expressions=[f"region=={node.region}"])
+                    if node.region is not None
+                    else (
+                        PlacementConstraints(
+                            filter_expressions=[f"region=={self.default_region}"]
+                        )
+                        if self.default_region is not None
+                        else None
+                    )
+                ),
             )
 
         return ComputeGraphMetadata(

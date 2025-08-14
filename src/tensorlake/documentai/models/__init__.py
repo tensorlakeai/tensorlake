@@ -11,9 +11,11 @@ from ._enums import (
     ModelProvider,
     ParseStatus,
     PartitionStrategy,
+    Region,
     TableOutputMode,
     TableParsingFormat,
 )
+from ._errors import DocumentAIError, ErrorCode, ErrorResponse
 from ._filters import DatasetDataFilter
 
 # Options
@@ -78,4 +80,9 @@ __all__ = [
     "PaginationDirection",
     # Filters
     "DatasetDataFilter",
+    "Region",
+    # Errors
+    "ErrorCode",
+    "ErrorResponse",
+    "DocumentAIError",
 ]

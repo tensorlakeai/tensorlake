@@ -14,7 +14,9 @@
 # and stream logs from a build.
 """
 
+import asyncio
 import os
+import signal
 import tempfile
 from dataclasses import dataclass
 from typing import Dict, Optional
@@ -196,8 +198,24 @@ class ImageBuilderV2Client:
         res.raise_for_status()
         build = BuildInfo.model_validate(res.json())
 
-        click.secho(f"Build created: {build.id}", fg="green")
-        return await self.stream_logs(build)
+        click.secho(f"Starting build for image {image.image_name} ...", fg="green")
+        click.secho(f"Build ID: {build.id}", fg="green")
+
+        try:
+            return await self.stream_logs(build)
+            # Handling these 3 exceptions allows the CLI to provide a better UX
+            # where the user can cancel the build and receive a graceful error message.
+            #
+            # For example:
+            # 2025-07-31T18:35:24.333784812Z: [4/5] RUN  sleep 301
+            # ^C
+            # Cancelling build for image generator ...
+            # Build for image generator cancelled successfully
+            # Cancelled build for image generator
+            # Aborted!
+        except (asyncio.CancelledError, KeyboardInterrupt, click.Abort):
+            await self._cancel_build(build, image)
+            raise
 
     async def stream_logs(self, build: BuildInfo) -> BuildInfo:
         """
@@ -206,6 +224,7 @@ class ImageBuilderV2Client:
         Args:
             build (NewBuild): The build for which to stream logs.
         """
+        click.echo(f"Streaming logs for build {build.id}")
         async with httpx.AsyncClient(timeout=120) as client:
             async with aconnect_sse(
                 client,
@@ -264,3 +283,28 @@ class ImageBuilderV2Client:
             )
 
         return build_info
+
+    async def _cancel_build(self, build: BuildInfo, image: Image):
+        try:
+            click.secho(
+                f"\nCancelling build for image {image.image_name} ...", fg="yellow"
+            )
+            response = await self._client.post(
+                f"{self._build_service}/builds/{build.id}/cancel",
+                headers=self._headers,
+                timeout=60,
+            )
+
+            if response.status_code == 202:
+                click.secho(
+                    f"Build for image {image.image_name} cancelled successfully",
+                    fg="green",
+                )
+            else:
+                click.secho(f"Failed to cancel build {build.id}", fg="red")
+            click.secho(f"Cancelled build for image {image.image_name}", fg="yellow")
+        except Exception as e:
+            click.secho(
+                f"Failed to cancel build for image {image.image_name}: {e}",
+                fg="red",
+            )
