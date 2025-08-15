@@ -2,8 +2,8 @@ from . import data_loaders
 from .functions_sdk.exceptions import RequestException
 from .functions_sdk.functions import (
     GraphRequestContext,
-    RouteTo,
     TensorlakeCompute,
+    TensorlakeFunctionCall,
     tensorlake_function,
 )
 from .functions_sdk.graph import Graph
@@ -21,7 +21,7 @@ __all__ = [
     "Pipeline",
     "Retries",
     "RemotePipeline",
-    "RouteTo",
+    "TensorlakeFunctionCall",
     "tensorlake_function",
     "TensorlakeCompute",
     "TensorlakeClient",
