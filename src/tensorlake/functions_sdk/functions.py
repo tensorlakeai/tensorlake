@@ -6,6 +6,7 @@ from typing import (
     Callable,
     Dict,
     Generic,
+    Iterable,
     List,
     Optional,
     Tuple,
@@ -210,6 +211,7 @@ def tensorlake_function(
     region: Optional[str] = None,
     next: Optional[Union["TensorlakeCompute", List["TensorlakeCompute"]]] = None,
     cacheable: bool = False,
+    initializer: Optional[Callable[[], None]] = None,
 ):
     def construct(fn):
         attrs = {
@@ -243,6 +245,48 @@ def tensorlake_function(
     return construct
 
 
+def graph_api(graph_name: str, graph_description: str, version: str) -> Callable:
+    return function()
+
+
+def function() -> Callable:
+    def decorator(fn: Callable):
+        return fn
+
+    return decorator
+
+
+def reducer() -> Callable:
+    return function()
+
+
+class RequestContext:
+    def __init__(self):
+        self.state: dict = {}  # key value api
+
+
+class LocalGraph:
+    def run(self, block_until_done: bool, *args, **kwargs):
+        pass
+
+
+class FunctionCall:
+    """A single function output when the function wants to call another function.
+
+    Must be serializable using all supported serializers.
+    """
+
+    def __init__(
+        self,
+        function_name: str,
+        args: List[Any],
+        kwargs: Dict[str, Any],
+    ):
+        self.function_name: str = function_name
+        self.args: List[Any] = args
+        self.kwargs: Dict[str, Any] = kwargs
+
+
 @dataclass
 class FunctionCallResult:
     ser_outputs: List[TensorlakeData]
@@ -258,28 +302,22 @@ N = TypeVar("N", bound=TensorlakeCompute)
 @dataclass
 class RouteTo(Generic[V, N]):
     """Describes a routing of data values to downstream functions.
-
     RouteTo is returned by compute functions that require non-trivial
     output value routing.  It's constructed with a value (as
     ordinarily returned by a compute function), together with a list
     of the downsteam functions that should receive that value.
-
     NB: Each downstream function supplied to a RouteTo must be listed
     in the compute function's @tensorlake_function decorator's "next"
     argument.
-
     For example:
-
         @tensorlake_function()
         def handle_even(x: int) -> int:
             # Do something with even values of x
             return x
-
         @tensorlake_function()
         def handle_odd(x: int) -> int:
             # Do something with odd values of x
             return x
-
         @tensorlake_function(next=[handle_even, handle_odd])
         def pass_value_to_some_function(x: int) -> RouteTo[
             int, Union[handle_even, handle_odd]

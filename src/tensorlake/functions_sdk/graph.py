@@ -229,7 +229,10 @@ class Graph:
     def __init__(
         self,
         name: str,
-        start_node: TensorlakeCompute,
+        api: TensorlakeCompute,
+        functions: Optional[
+            List[TensorlakeCompute]
+        ] = None,  # If None then all @tensorlake_function(s) will be available to the graph
         description: Optional[str] = None,
         tags: Dict[str, str] = {},
         version: Optional[str] = None,
@@ -440,13 +443,13 @@ class Graph:
             version=self.version,
         )
 
-    def run(self, block_until_done: bool = False, **kwargs) -> str:
+    def run(self, request: Any, block_until_done: bool = False) -> str:
         self.validate_graph()
         start_node = self.nodes[self._start_node]
         serializer = get_serializer(start_node.input_encoder)
         input = TensorlakeData(
             id=nanoid(),
-            payload=serializer.serialize(kwargs),
+            payload=serializer.serialize(request),
             encoder=start_node.input_encoder,
         )
         print(f"[bold] Invoking {self._start_node}[/bold]")
