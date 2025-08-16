@@ -1,5 +1,10 @@
-<a name="readme-top"></a>
-# Tensorlake SDK
+<h1 align="center">
+  Tensorlake
+</h1>
+
+<p align="center">Get high quality data from Documents fast, and deploy scalable serverless Data Processor APIs</p>
+<div align="center">
+
 
 [![PyPI Version](https://img.shields.io/pypi/v/tensorlake)](https://pypi.org/project/tensorlake/)
 [![Python Support](https://img.shields.io/pypi/pyversions/tensorlake)](https://pypi.org/project/tensorlake/)
@@ -9,40 +14,24 @@
 
 TensorLake transforms unstructured documents into AI-ready data through Document Ingestion APIs and enables building scalable data processing pipelines with a serverless workflow runtime. The platform handles the complexity of document parsing, data extraction, and workflow orchestration on fully managed infrastructure including GPU acceleration.
 
+![gh_animation](https://github.com/user-attachments/assets/bc57d5f5-c745-4a36-926a-d85767b9115e)
+</div>
+
 It consists of two core capabilities:
 
 - **Document Ingestion** - Parse documents (PDFs, DOCX, spreadsheets, presentations, images, and raw text) to markdown, extract structured data with schemas, and manage document collections
 - **Serverless Workflows** - Build and deploy data processing pipelines that scale automatically on cloud infrastructure
 ---
 
-## Table of Contents
-
-- [Features](#features)
-- [Getting Started](#getting-started)
-- [Document Ingestion](#document-ingestion)
-  - [Document Parsing](#document-parsing)
-  - [Structured Extraction](#structured-extraction)
-  - [Datasets](#datasets)
-- [Custom Data Workflows](#custom-data-workflows)
-  - [Creating Workflows](#quickstart-1)
-  - [Local Development](#running-locally)
-  - [Cloud Deployment](#running-on-tensorlake-cloud)
-- [Webhooks](#webhooks)
-- [Resources](#learn-more)
-
----
-
 ## Features
 
-- Parse PDFs, DOCX, spreadsheets, presentations, images, and raw text into markdown
+- Convert PDFs, DOCX, spreadsheets, presentations, images, and raw text into markdown
 - Extract structured data using JSON Schema or Pydantic models
 - Page classification, figure summarization, table extraction, signature detection
-- Organize documents into auto-parsed datasets
 - Deploy and run scalable workflows using a serverless cloud runtime
-
 ---
 
-## Getting Started
+## Quickstart
 
 ### Installation
 
@@ -124,17 +113,6 @@ if result.status == ParseStatus.SUCCESSFUL:
     for chunk in result.chunks:
         print(chunk.content)
 ```
-
-**Supported Formats:** PDF, DOCX, PPTX, images, spreadsheets, handwritten notes
-
-**Key Features:**
-- Multiple chunking strategies (entire document, page, section, fragment)
-- Table extraction and structure preservation
-- Figure and table summarization
-- Signature detection
-- Strikethrough removal
-- Reading order preservation
-- No limits on file size or page count
 
 **Getting Results:**
 ```python
@@ -224,93 +202,7 @@ Structured Extraction is guided by the provided schema. We support Pydantic Mode
 
 We recommend adding a description to each field in the schema, as it helps the model to learn the context of the field.
 
-### Datasets
-
-Tensorlake Datasets are named collections of parse settings and results that allow you to apply ingestion actions, such as document parsing and structured extraction to any file parsed through the dataset. They are ideal for batch processing at scale.
-
-When you create a dataset, you specify a configuration for parsing or extraction options. Every document added to the dataset inherits this configuration and is processed asynchronously by the Tensorlake backend.
-
-> **Note:** You can attach webhooks to a dataset to receive status updates when documents are successfully processed.
-
-#### 1. Create a Dataset
-```python
-from tensorlake.documentai import DocumentAI
-from tensorlake.documentai.models import ParsingOptions, EnrichmentOptions
-from tensorlake.documentai.models.enums import TableOutputMode, TableParsingFormat
-from pydantic import BaseModel, Field
-
-# Define schema for structured extraction
-class DocumentSchema(BaseModel):
-    title: str = Field(description="Document title")
-    summary: str = Field(description="Document summary")
-
-doc_ai = DocumentAI(api_key="your-api-key")
-
-# Create dataset with configuration
-dataset = doc_ai.create_dataset(
-    name="My Dataset",
-    description="A dataset of documents",
-    parsing_options=ParsingOptions(
-        table_output_mode=TableOutputMode.HTML,
-        table_parsing_format=TableParsingFormat.VLM,
-    ),
-    enrichment_options=EnrichmentOptions(
-        table_summarization=True,
-        figure_summarization=True
-    )
-)
-```
-
-For async operation, use `create_dataset_async` instead of `create_dataset`.
-
-#### 2. Add a document to a dataset
-```python
-# Parse a single file using dataset configuration
-parse_id = doc_ai.parse_dataset_file(
-    dataset,
-    "/path/to/document.pdf",  # Or you can use URLs
-    wait_for_completion=False  # Returns parse_id immediately
-)
-
-# Or wait for completion
-result = doc_ai.parse_dataset_file(
-    dataset,
-    "/path/to/document.pdf",
-    wait_for_completion=True  # Returns ParseResult
-)
-```
-
-#### 3. Retrieve Dataset output and metadata
-```python
-# Get dataset information
-dataset_info = doc_ai.get_dataset(dataset.dataset_id)
-print(f"Dataset status: {dataset_info.status}")  # idle or processing
-
-# List all parse results for this dataset
-results = doc_ai.list_parse_results(dataset_name=dataset.name)
-for result in results.items:
-    print(f"Parse {result.parse_id}: {result.status}")
-    if result.structured_data:
-        print(f"Extracted data: {result.structured_data}")
-
-# List all datasets in your project
-datasets = doc_ai.list_datasets()
-for ds in datasets.items:
-    print(f"Dataset: {ds.name} - Status: {ds.status}")
-
-# Update dataset configuration
-updated_dataset = doc_ai.update_dataset(
-    dataset,
-    description="Updated description",
-    parsing_options=ParsingOptions(
-        table_output_mode=TableOutputMode.MARKDOWN  # Changed table output mode
-    )
-)
-```
-
-A dataset can be in any of these states - `idle`, `processing`. You can also configure a webhook to receive updates for each file that is processed.
-
-## Custom Data Workflows
+## Data Workflows
 
 Workflows enables building and deploy data processing workflows in Python. Once deployed, the workflows are exposed as a REST API, and scale up on-demand to process data on the cloud. Functions in workflows can do anything from calling a web service to loading a data model into a GPU and running inference on it. Tensorlake will provision the required compute resources and run as many copies of a function as needed.
 
@@ -451,44 +343,6 @@ run_workflow(cloud_workflow)
 
 ```bash
 python examples/readme_example.py
-```
-
-#### Running on your own infrastructure
-
-Tensorlake Workflows are based on an Open Source [Indexify](https://github.com/tensorlakeai/indexify)
-and is fully compatible with it. You can setup your own Indexify cluster e.g. with Kubernetes
-and run workflows on it.
-
-Running workflows on Tensorlake Cloud comes with the following benefits:
-
-* Automatically scale compute resources to the required number of workflow invocations.
-* Pay only for compute resources used by the workflow. No need to pay for idle resources.
-* Automated workflow deployments using a few CLI commands.
-* High availability of Tensorlake Cloud.
-
-## Webhooks
-
-Get real-time notifications when document processing completes. Webhooks are configured at the project level in TensorLake Cloud and will notify your application about job status changes.
-
-**Supported Events:**
-- `tensorlake.document_ingestion.job.created` - Job started
-- `tensorlake.document_ingestion.job.failed` - Job failed
-- `tensorlake.document_ingestion.job.completed` - Job completed successfully
-
-**Quick Setup:**
-1. Go to your project's Webhooks tab in [TensorLake Cloud](https://cloud.tensorlake.ai)
-2. Create a webhook with your endpoint URL
-3. Select which events to receive
-4. Use the provided secret for signature verification
-
-**Webhook Payload Example:**
-```json
-{
-    "job_id": "parse_XXX",
-    "status": "successful",
-    "created_at": "2023-10-01T12:00:00Z",
-    "finished_at": "2023-10-01T12:05:00Z"
-}
 ```
 
 ## Learn more
