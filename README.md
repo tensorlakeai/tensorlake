@@ -19,21 +19,21 @@ TensorLake transforms unstructured documents into AI-ready data through Document
 
 ## Features
 
-- **Document Ingestion** - Parse documents (PDFs, DOCX, spreadsheets, presentations, images, and raw text) to markdown or extract structured data with schemas.
-- **Serverless Workflows** - Build and deploy data processing pipelines that scale automatically on cloud infrastructure
+- **Document Ingestion** - Parse documents (PDFs, DOCX, spreadsheets, presentations, images, and raw text) to markdown or extract structured data with schemas. This is powered by Tensorlake's state of the art Layout Detection and Table Recognition models.
+- **Serverless Workflows** - Build and deploy data workflow APIs in Python that scale automatically on cloud infrastructure
 ---
 
 ## Document Ingestion Quickstart
 
 ### Installation
 
+Install the SDK and get an API Key.
+
 ```bash
 pip install tensorlake
 ```
 
-### Get API Key
-
-Sign up at [cloud.tensorlake.ai](https://cloud.tensorlake.ai/) for your API key.
+Sign up at [cloud.tensorlake.ai](https://cloud.tensorlake.ai/) and get your API key.
 
 ### Parse Documents
 
@@ -58,7 +58,7 @@ if result.status == ParseStatus.SUCCESSFUL:
 
 ### Customize Parsing
 
-Various aspect of Document Parsing, such as detecting strike through lines, table output mode, figure and table summarization can be customized. The API is documented [here](https://docs.tensorlake.ai/document-ingestion/parsing/read#options-for-parsing-documents)
+Various aspect of Document Parsing, such as detecting strike through lines, table output mode, figure and table summarization can be customized. The API is [documented here](https://docs.tensorlake.ai/document-ingestion/parsing/read#options-for-parsing-documents).
 
 ```python
 from tensorlake.documentai import DocumentAI, ParsingOptions, EnrichmentOptions, ParseStatus, ChunkingStrategy, TableOutputMode
@@ -154,7 +154,11 @@ Structured Extraction is guided by the provided schema. We support Pydantic Mode
 
 We recommend adding a description to each field in the schema, as it helps the model to learn the context of the field.
 
-Find more detailed guides, and examples, about Document Parsing [here](https://docs.tensorlake.ai/document-ingestion/overview)
+### Learn More
+* [Document Parsing Guide](https://docs.tensorlake.ai/document-ingestion/parsing/read)
+* [Structured Output Guide](https://docs.tensorlake.ai/document-ingestion/parsing/structured-extraction)
+* [Page Classification](https://docs.tensorlake.ai/document-ingestion/parsing/page-classification)
+* [Signature Detection](https://docs.tensorlake.ai/document-ingestion/parsing/signature)
 
 ## Data Workflows
 
@@ -165,16 +169,12 @@ Workflows enables building and deploying workflow APIs. The workflow APIs are ex
 Define a workflow by implementing its data transformation steps as Python functions decorated with `@tensorlake_function()`.
 Connect the outputs of a function to the inputs of another function using edges in a `Graph` object, which represents the full workflow.
 
-### Example
-
 The example below creates a workflow with the following steps:
 
 1. Generate a sequence of numbers from 0 to the supplied value.
 2. Compute square of each number.
 3. Sum all the squares.
 4. Send the sum to a web service.
-
-#### Code
 
 ```python
 import os
