@@ -158,6 +158,8 @@ Structured Extraction is guided by the provided schema. We support Pydantic Mode
 * [Page Classification](https://docs.tensorlake.ai/document-ingestion/parsing/page-classification)
 * [Signature Detection](https://docs.tensorlake.ai/document-ingestion/parsing/signature)
 
+Find more detailed guides, and examples, about Document Parsing [here](https://docs.tensorlake.ai/document-ingestion/overview)
+
 ## Data Workflows
 
 Workflows enables building and deploying workflow APIs. The workflow APIs are exposed as HTTP Endpoints, and scale up on-demand to process data on the cloud. Functions in workflows can do anything from calling a web service to loading a data model into a GPU to run inference.
