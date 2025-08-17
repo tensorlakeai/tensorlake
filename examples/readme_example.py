@@ -44,17 +44,14 @@ def send_to_web_service(value: int) -> str:
         return response.read()
 
 
-# Define the full workflow using Graph object
-def create_workflow() -> Graph:
-    g = Graph(
-        name="example_workflow",
-        start_node=generate_sequence,
-        description="Example workflow",
-    )
-    g.add_edge(generate_sequence, squared)
-    g.add_edge(squared, sum_all)
-    g.add_edge(sum_all, send_to_web_service)
-    return g
+g = Graph(
+    name="example_workflow",
+    start_node=generate_sequence,
+    description="Example workflow",
+)
+g.add_edge(generate_sequence, squared)
+g.add_edge(squared, sum_all)
+g.add_edge(sum_all, send_to_web_service)
 
 
 # Invoke the workflow for sequence [0..200].
@@ -92,8 +89,7 @@ def fetch_workflow_from_cloud() -> Optional[RemoteGraph]:
 
 if __name__ == "__main__":
     # Create the workflow on your computer and run it locally.
-    local_workflow: Graph = create_workflow()
-    run_workflow(local_workflow)
+    run_workflow(g)
 
     # Fetch the workflow from the cloud and run it on cloud.
     if "TENSORLAKE_API_KEY" in os.environ:
