@@ -19,21 +19,21 @@ TensorLake transforms unstructured documents into AI-ready data through Document
 
 ## Features
 
-- **Document Ingestion** - Parse documents (PDFs, DOCX, spreadsheets, presentations, images, and raw text) to markdown or extract structured data with schemas.
-- **Serverless Workflows** - Build and deploy data processing pipelines that scale automatically on cloud infrastructure
+- **Document Ingestion** - Parse documents (PDFs, DOCX, spreadsheets, presentations, images, and raw text) to markdown or extract structured data with schemas. This is powered by Tensorlake's state of the art Layout Detection and Table Recognition models.
+- **Serverless Workflows** - Build and deploy data workflow APIs in Python that scale automatically on cloud infrastructure
 ---
 
 ## Document Ingestion Quickstart
 
 ### Installation
 
+Install the SDK and get an API Key.
+
 ```bash
 pip install tensorlake
 ```
 
-### Get API Key
-
-Sign up at [cloud.tensorlake.ai](https://cloud.tensorlake.ai/) for your API key.
+Sign up at [cloud.tensorlake.ai](https://cloud.tensorlake.ai/) and get your API key.
 
 ### Parse Documents
 
@@ -58,7 +58,7 @@ if result.status == ParseStatus.SUCCESSFUL:
 
 ### Customize Parsing
 
-Various aspect of Document Parsing, such as detecting strike through lines, table output mode, figure and table summarization can be customized. The API is documented [here](https://docs.tensorlake.ai/document-ingestion/parsing/read#options-for-parsing-documents)
+Various aspect of Document Parsing, such as detecting strike through lines, table output mode, figure and table summarization can be customized. The API is [documented here](https://docs.tensorlake.ai/document-ingestion/parsing/read#options-for-parsing-documents).
 
 ```python
 from tensorlake.documentai import DocumentAI, ParsingOptions, EnrichmentOptions, ParseStatus, ChunkingStrategy, TableOutputMode
@@ -152,7 +152,11 @@ structured_extraction_options = StructuredExtractionOptions(
 
 Structured Extraction is guided by the provided schema. We support Pydantic Models as well JSON Schema. All the levers for structured extraction are documented [here](https://docs.tensorlake.ai/document-ingestion/parsing/structured-extraction).
 
-We recommend adding a description to each field in the schema, as it helps the model to learn the context of the field.
+### Learn More
+* [Document Parsing Guide](https://docs.tensorlake.ai/document-ingestion/parsing/read)
+* [Structured Output Guide](https://docs.tensorlake.ai/document-ingestion/parsing/structured-extraction)
+* [Page Classification](https://docs.tensorlake.ai/document-ingestion/parsing/page-classification)
+* [Signature Detection](https://docs.tensorlake.ai/document-ingestion/parsing/signature)
 
 Find more detailed guides, and examples, about Document Parsing [here](https://docs.tensorlake.ai/document-ingestion/overview)
 
@@ -165,16 +169,12 @@ Workflows enables building and deploying workflow APIs. The workflow APIs are ex
 Define a workflow by implementing its data transformation steps as Python functions decorated with `@tensorlake_function()`.
 Connect the outputs of a function to the inputs of another function using edges in a `Graph` object, which represents the full workflow.
 
-### Example
-
 The example below creates a workflow with the following steps:
 
 1. Generate a sequence of numbers from 0 to the supplied value.
 2. Compute square of each number.
 3. Sum all the squares.
 4. Send the sum to a web service.
-
-#### Code
 
 ```python
 import os
@@ -224,17 +224,14 @@ def send_to_web_service(value: int) -> str:
 
 
 # Define the full workflow using Graph object
-def create_workflow() -> Graph:
-    g = Graph(
-        name="example_workflow",
-        start_node=generate_sequence,
-        description="Example workflow",
-    )
-    g.add_edge(generate_sequence, squared)
-    g.add_edge(squared, sum_all)
-    g.add_edge(sum_all, send_to_web_service)
-    return g
-
+g = Graph(
+    name="example_workflow",
+    start_node=generate_sequence,
+    description="Example workflow",
+)
+g.add_edge(generate_sequence, squared)
+g.add_edge(squared, sum_all)
+g.add_edge(sum_all, send_to_web_service)
 
 # Invoke the workflow for sequence [0..200].
 def run_workflow(g: Graph) -> None:
@@ -259,8 +256,7 @@ The workflow code is available at [examples/readme_example.py](examples/readme_e
 The following code was added there to create the workflow and run it locally on your computer:
 
 ```python
-local_workflow: Graph = create_workflow()
-run_workflow(local_workflow)
+run_workflow(g)
 ```
 
 Run the workflow locally:
@@ -270,8 +266,7 @@ python examples/readme_example.py
 ```
 
 In console output you can see that the workflow computed the sum and got a response from the web service.
-Running a workflow locally is convenient during its development. There's no need to wait until the workflow
-gets deployed to see how it works.
+Running a workflow locally is convenient during its development. There's no need to wait until the workflow sgets deployed to see how it works.
 
 #### Running on Tensorlake Cloud
 
@@ -283,14 +278,13 @@ export TENSORLAKE_API_KEY="Paste your API key here"
 ```
 2. Deploy the workflow to Tensorlake Cloud:
 ```bash
-tensorlake-cli deploy examples/readme_example.py
+tensorlake deploy examples/readme_example.py
 ```
 3. The following code was added to the workflow file to run it on Tensorlake Cloud:
 ```python
-def fetch_workflow_from_cloud() -> Optional[RemoteGraph]:
-    return RemoteGraph.by_name("example_workflow")
+from tensorlake import RemoteGraph
 
-cloud_workflow: RemoteGraph = fetch_workflow_from_cloud()
+cloud_workflow = RemoteGraph.by_name("example_workflow")
 run_workflow(cloud_workflow)
 ```
 4. Run the workflow on Tensorlake Cloud:
