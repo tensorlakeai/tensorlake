@@ -17,21 +17,13 @@ TensorLake transforms unstructured documents into AI-ready data through Document
 ![gh_animation](https://github.com/user-attachments/assets/bc57d5f5-c745-4a36-926a-d85767b9115e)
 </div>
 
-It consists of two core capabilities:
+## Features
 
-- **Document Ingestion** - Parse documents (PDFs, DOCX, spreadsheets, presentations, images, and raw text) to markdown, extract structured data with schemas, and manage document collections
+- **Document Ingestion** - Parse documents (PDFs, DOCX, spreadsheets, presentations, images, and raw text) to markdown or extract structured data with schemas.
 - **Serverless Workflows** - Build and deploy data processing pipelines that scale automatically on cloud infrastructure
 ---
 
-## Features
-
-- Convert PDFs, DOCX, spreadsheets, presentations, images, and raw text into markdown
-- Extract structured data using JSON Schema or Pydantic models
-- Page classification, figure summarization, table extraction, signature detection
-- Deploy and run scalable workflows using a serverless cloud runtime
----
-
-## Quickstart
+## Document Ingestion Quickstart
 
 ### Installation
 
@@ -43,21 +35,10 @@ pip install tensorlake
 
 Sign up at [cloud.tensorlake.ai](https://cloud.tensorlake.ai/) for your API key.
 
-## Document Ingestion
-
-The Document Ingestion API converts unstructured documents into structured, processable formats. This is the foundation for building RAG systems, knowledge bases, and document analysis applications.
-
-### Document Parsing
-
-Convert documents to clean markdown or JSON while preserving layout, tables, and structure:
-
-#### Quickstart
-
-This uses default `ParsingOptions` to parse the document.
+### Parse Documents
 
 ```python
-from tensorlake.documentai import DocumentAI
-from tensorlake.documentai.models import ParseStatus
+from tensorlake.documentai import DocumentAI, ParseStatus
 
 doc_ai = DocumentAI(api_key="your-api-key")
 
@@ -75,14 +56,12 @@ if result.status == ParseStatus.SUCCESSFUL:
         print(chunk.content)  # Clean markdown output
 ```
 
-#### Document Parsing with custom Parsing Options
+### Customize Parsing
 
-You can set custom parsing strategy for your document by configuring `ParsingOptions` and `EnrichmentOptions`. The API is documented [here](https://docs.tensorlake.ai/documentai/parsing#parse-api-reference)
+Various aspect of Document Parsing, such as detecting strike through lines, table output mode, figure and table summarization can be customized. The API is documented [here](https://docs.tensorlake.ai/document-ingestion/parsing/read#options-for-parsing-documents)
 
 ```python
-from tensorlake.documentai import DocumentAI
-from tensorlake.documentai.models import ParsingOptions, EnrichmentOptions, ParseStatus
-from tensorlake.documentai.models.enums import ChunkingStrategy, TableOutputMode
+from tensorlake.documentai import DocumentAI, ParsingOptions, EnrichmentOptions, ParseStatus, ChunkingStrategy, TableOutputMode
 
 doc_ai = DocumentAI(api_key="your-api-key")
 
@@ -114,40 +93,13 @@ if result.status == ParseStatus.SUCCESSFUL:
         print(chunk.content)
 ```
 
-**Getting Results:**
-```python
-from tensorlake.documentai.models import ParseStatus
-
-result = doc_ai.get_parsed_result(parse_id)
-
-if result.status == ParseStatus.SUCCESSFUL:
-    # Access parsed content
-    if result.chunks:
-        for chunk in result.chunks:
-            print(f"Page {chunk.page_number}: {chunk.content}")
-
-    # Access structured data if configured
-    if result.structured_data:
-        for data in result.structured_data:
-            print(f"Schema: {data.schema_name}")
-            print(f"Data: {data.data}")
-
-    # Access page layout information
-    if result.pages:
-        for page in result.pages:
-            print(f"Page {page.page_number} has {len(page.page_fragments)} fragments")
-```
-
-> **Note:** Document AI APIs are async to be able to handle large volumes of documents with many pages. You can use a Parse ID to retrieve results, or configure a webhook endpoint to receive updates.
-
 ### Structured Extraction
 
 Extract specific data fields from documents using JSON schemas or Pydantic models:
 
 #### Using Pydantic Models
 ```python
-from tensorlake.documentai import DocumentAI
-from tensorlake.documentai.models import StructuredExtractionOptions, ParseStatus
+from tensorlake.documentai import DocumentAI, StructuredExtractionOptions, ParseStatus
 from pydantic import BaseModel, Field
 
 # Define Pydantic model
@@ -202,11 +154,13 @@ Structured Extraction is guided by the provided schema. We support Pydantic Mode
 
 We recommend adding a description to each field in the schema, as it helps the model to learn the context of the field.
 
+Find more detailed guides, and examples, about Document Parsing [here](https://docs.tensorlake.ai/document-ingestion/overview)
+
 ## Data Workflows
 
-Workflows enables building and deploy data processing workflows in Python. Once deployed, the workflows are exposed as a REST API, and scale up on-demand to process data on the cloud. Functions in workflows can do anything from calling a web service to loading a data model into a GPU and running inference on it. Tensorlake will provision the required compute resources and run as many copies of a function as needed.
+Workflows enables building and deploying workflow APIs. The workflow APIs are exposed as HTTP Endpoints, and scale up on-demand to process data on the cloud. Functions in workflows can do anything from calling a web service to loading a data model into a GPU to run inference.
 
-### Quickstart
+### Workflows Quickstart
 
 Define a workflow by implementing its data transformation steps as Python functions decorated with `@tensorlake_function()`.
 Connect the outputs of a function to the inputs of another function using edges in a `Graph` object, which represents the full workflow.
@@ -345,11 +299,9 @@ run_workflow(cloud_workflow)
 python examples/readme_example.py
 ```
 
-## Learn more
+## Learn more about workflows 
 
-* [More examples](examples/)
-* [Tensorlake Documentation](https://docs.tensorlake.ai)
-* [Serverless Workflows Documentation](https://docs.tensorlake.ai/workflows/overview)
-* [Key programming concepts in Tensorlake Workflows](https://docs.tensorlake.ai/workflows/functions)
-* [Dependencies and container images in Tensorlake Workflows](https://docs.tensorlake.ai/workflows/dependencies)
-* [Open Source Indexify documentation for self-hosting](https://docs.tensorlake.ai/opensource/indexify)
+* [Serverless Workflows Documentation](https://docs.tensorlake.ai/workflows/quickstart)
+* [Key programming concepts in Tensorlake Workflows](https://docs.tensorlake.ai/workflows/compute)
+* [Dependencies and container images in Tensorlake Workflows](https://docs.tensorlake.ai/workflows/images)
+* [Open Source Workflow Compute Engine](https://docs.tensorlake.ai/opensource/indexify)
