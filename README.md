@@ -152,8 +152,6 @@ structured_extraction_options = StructuredExtractionOptions(
 
 Structured Extraction is guided by the provided schema. We support Pydantic Models as well JSON Schema. All the levers for structured extraction are documented [here](https://docs.tensorlake.ai/document-ingestion/parsing/structured-extraction).
 
-We recommend adding a description to each field in the schema, as it helps the model to learn the context of the field.
-
 ### Learn More
 * [Document Parsing Guide](https://docs.tensorlake.ai/document-ingestion/parsing/read)
 * [Structured Output Guide](https://docs.tensorlake.ai/document-ingestion/parsing/structured-extraction)
@@ -224,17 +222,14 @@ def send_to_web_service(value: int) -> str:
 
 
 # Define the full workflow using Graph object
-def create_workflow() -> Graph:
-    g = Graph(
-        name="example_workflow",
-        start_node=generate_sequence,
-        description="Example workflow",
-    )
-    g.add_edge(generate_sequence, squared)
-    g.add_edge(squared, sum_all)
-    g.add_edge(sum_all, send_to_web_service)
-    return g
-
+g = Graph(
+    name="example_workflow",
+    start_node=generate_sequence,
+    description="Example workflow",
+)
+g.add_edge(generate_sequence, squared)
+g.add_edge(squared, sum_all)
+g.add_edge(sum_all, send_to_web_service)
 
 # Invoke the workflow for sequence [0..200].
 def run_workflow(g: Graph) -> None:
@@ -259,8 +254,7 @@ The workflow code is available at [examples/readme_example.py](examples/readme_e
 The following code was added there to create the workflow and run it locally on your computer:
 
 ```python
-local_workflow: Graph = create_workflow()
-run_workflow(local_workflow)
+run_workflow(g)
 ```
 
 Run the workflow locally:
@@ -270,8 +264,7 @@ python examples/readme_example.py
 ```
 
 In console output you can see that the workflow computed the sum and got a response from the web service.
-Running a workflow locally is convenient during its development. There's no need to wait until the workflow
-gets deployed to see how it works.
+Running a workflow locally is convenient during its development. There's no need to wait until the workflow sgets deployed to see how it works.
 
 #### Running on Tensorlake Cloud
 
@@ -283,14 +276,13 @@ export TENSORLAKE_API_KEY="Paste your API key here"
 ```
 2. Deploy the workflow to Tensorlake Cloud:
 ```bash
-tensorlake-cli deploy examples/readme_example.py
+tensorlake deploy examples/readme_example.py
 ```
 3. The following code was added to the workflow file to run it on Tensorlake Cloud:
 ```python
-def fetch_workflow_from_cloud() -> Optional[RemoteGraph]:
-    return RemoteGraph.by_name("example_workflow")
+from tensorlake import RemoteGraph
 
-cloud_workflow: RemoteGraph = fetch_workflow_from_cloud()
+cloud_workflow = RemoteGraph.by_name("example_workflow")
 run_workflow(cloud_workflow)
 ```
 4. Run the workflow on Tensorlake Cloud:
