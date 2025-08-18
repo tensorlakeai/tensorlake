@@ -12,7 +12,7 @@
 [![Documentation](https://img.shields.io/badge/docs-tensorlake.ai-blue)](https://docs.tensorlake.ai)
 [![Slack](https://img.shields.io/badge/slack-TensorlakeCloud-purple?logo=slack)](https://join.slack.com/t/tensorlakecloud/shared_invite/zt-32fq4nmib-gO0OM5RIar3zLOBm~ZGqKg)
 
-TensorLake transforms unstructured documents into AI-ready data through Document Ingestion APIs and enables building scalable data processing pipelines with a serverless workflow runtime. The platform handles the complexity of document parsing, data extraction, and workflow orchestration on fully managed infrastructure including GPU acceleration.
+TensorLake transforms unstructured documents into AI-ready data through Document Ingestion APIs and enables building scalable data processing pipelines with a serverless workflow runtime. 
 
 ![gh_animation](https://github.com/user-attachments/assets/bc57d5f5-c745-4a36-926a-d85767b9115e)
 </div>
@@ -20,7 +20,7 @@ TensorLake transforms unstructured documents into AI-ready data through Document
 ## Features
 
 - **Document Ingestion** - Parse documents (PDFs, DOCX, spreadsheets, presentations, images, and raw text) to markdown or extract structured data with schemas. This is powered by Tensorlake's state of the art Layout Detection and Table Recognition models.
-- **Serverless Workflows** - Build and deploy data workflow APIs in Python that scale automatically on cloud infrastructure
+- **Serverless Workflows** - Build and deploy data ingestion and orchestration APIs using Durable Functions in Python that scales automatically on fully managed infrastructure. The requests to workflows automatically resume from failure checkpoints and scale to zero when idle.
 ---
 
 ## Document Ingestion Quickstart
@@ -158,11 +158,9 @@ Structured Extraction is guided by the provided schema. We support Pydantic Mode
 * [Page Classification](https://docs.tensorlake.ai/document-ingestion/parsing/page-classification)
 * [Signature Detection](https://docs.tensorlake.ai/document-ingestion/parsing/signature)
 
-Find more detailed guides, and examples, about Document Parsing [here](https://docs.tensorlake.ai/document-ingestion/overview)
-
 ## Data Workflows
 
-Workflows enables building and deploying workflow APIs. The workflow APIs are exposed as HTTP Endpoints, and scale up on-demand to process data on the cloud. Functions in workflows can do anything from calling a web service to loading a data model into a GPU to run inference.
+Workflows enables building and deploying workflow APIs. The workflow APIs are exposed as HTTP Endpoints.Functions in workflows can do anything from calling a web service to loading a data model into a GPU to run inference.
 
 ### Workflows Quickstart
 
