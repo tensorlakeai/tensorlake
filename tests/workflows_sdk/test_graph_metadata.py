@@ -308,5 +308,45 @@ class TestGraphMetadataParameterExtraction(unittest.TestCase):
         self.assertFalse(mapping_param.required)
 
 
+class TestGraphMetadataFunctionConcurrency(unittest.TestCase):
+    def test_function_with_default_concurrency(self):
+        @tensorlake_function()
+        def function_with_default_concurrency(x: int) -> str:
+            return "success"
+
+        graph = Graph(
+            name=test_graph_name(self),
+            description="test",
+            start_node=function_with_default_concurrency,
+        )
+
+        graph_metadata: ComputeGraphMetadata = graph.definition()
+        self.assertEqual(
+            graph_metadata.functions[
+                "function_with_default_concurrency"
+            ].max_concurrency,
+            1,
+        )
+
+    def test_function_with_custom_concurrency(self):
+        @tensorlake_function(max_concurrency=5)
+        def function_with_custom_concurrency(x: int) -> str:
+            return "success"
+
+        graph = Graph(
+            name=test_graph_name(self),
+            description="test",
+            start_node=function_with_custom_concurrency,
+        )
+
+        graph_metadata: ComputeGraphMetadata = graph.definition()
+        self.assertEqual(
+            graph_metadata.functions[
+                "function_with_custom_concurrency"
+            ].max_concurrency,
+            5,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

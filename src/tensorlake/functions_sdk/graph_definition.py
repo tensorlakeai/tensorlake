@@ -2,8 +2,6 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
-from tensorlake.functions_sdk.image import ImageInformation
-
 from .object_serializer import get_serializer
 from .resources import ResourceMetadata
 
@@ -26,12 +24,23 @@ class PlacementConstraints(BaseModel):
     filter_expressions: List[str] = []
 
 
+# Here for backward compatibility, will be removed once Server doesn't require it
+class FakeImageInformation(BaseModel):
+    image_name: str = "fake_image"
+    image_hash: str = "fake_hash"
+    image_uri: str = "http://fake_uri"
+    sdk_version: str = "fake_version"
+    run_strs: List[str] = []
+    tag: str = ""
+    base_image: str = ""
+
+
 class FunctionMetadata(BaseModel):
     name: str
     fn_name: str
     description: str
     reducer: bool = False
-    image_information: Optional[ImageInformation]
+    image_information: FakeImageInformation = FakeImageInformation()
     input_encoder: str = "cloudpickle"
     output_encoder: str = "cloudpickle"
     secret_names: Optional[List[str]] = None
@@ -42,6 +51,7 @@ class FunctionMetadata(BaseModel):
     parameters: Optional[List[ParameterMetadata]] = None
     return_type: Optional[Dict[str, Any]] = None  # JSON Schema object
     placement_constraints: Optional[PlacementConstraints] = None
+    max_concurrency: Optional[int] = None
 
 
 class RuntimeInformation(BaseModel):

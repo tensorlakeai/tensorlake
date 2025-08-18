@@ -15,6 +15,14 @@ def validate_node(indexify_fn: Type[TensorlakeCompute]):
             f"Unable to add node of type `{indexify_fn.__name__}`. "
             f"Required, `TensorlakeCompute`"
         )
+    if indexify_fn.max_concurrency > 100:
+        raise Exception(
+            f"Function {indexify_fn.name} has max_concurrency of {indexify_fn.max_concurrency}, which exceeds the maximum of 100."
+        )
+    if indexify_fn.max_concurrency < 1:
+        raise Exception(
+            f"Function {indexify_fn.name} has max_concurrency of {indexify_fn.max_concurrency}, which is less than the minimum of 1."
+        )
 
     signature = inspect.signature(indexify_fn.run)
 

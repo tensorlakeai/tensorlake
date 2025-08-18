@@ -103,6 +103,7 @@ _DEFAULT_CPU: float = 1.0
 _DEFAULT_MEMORY_GB: float = 1.0
 _DEFAULT_EPHEMERAL_DISK_GB: float = 2.0  # 2 GB
 _DEFAULT_GPU = None  # No GPU by default
+_DEFAULT_MAX_CONCURRENCY = 1  # No concurrent threads running the function by default
 
 
 class TensorlakeCompute:
@@ -121,6 +122,7 @@ class TensorlakeCompute:
         cacheable (bool): Declares that applications of this function are cacheable.
                           A function should only be marked cacheable if its outputs are a
                           pure function of its inputs.
+        max_concurrency (int): The maximum number of concurrent executions of this function. 1 by default, max value is 100.
     """
 
     name: str = ""
@@ -140,6 +142,7 @@ class TensorlakeCompute:
     region: Optional[str] = None
     next: Optional[Union["TensorlakeCompute", List["TensorlakeCompute"]]] = None
     cacheable: bool = False
+    max_concurrency: int = _DEFAULT_MAX_CONCURRENCY
 
     def run(self, *args, **kwargs) -> Union[List[Any], Any]:
         pass
@@ -210,6 +213,7 @@ def tensorlake_function(
     region: Optional[str] = None,
     next: Optional[Union["TensorlakeCompute", List["TensorlakeCompute"]]] = None,
     cacheable: bool = False,
+    max_concurrency: int = _DEFAULT_MAX_CONCURRENCY,
 ):
     def construct(fn):
         attrs = {
@@ -236,6 +240,7 @@ def tensorlake_function(
             "cacheable": cacheable,
             "run": staticmethod(fn),
             "next": next,
+            "max_concurrency": max_concurrency,
         }
 
         return type("TensorlakeCompute", (TensorlakeCompute,), attrs)
