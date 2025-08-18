@@ -1,5 +1,6 @@
 <h1 align="center">
-  Tensorlake
+    <img width="1062" height="249" alt="Logo White" src="https://github.com/user-attachments/assets/328b117c-f7d8-4e26-8c06-8a4c205d7b69" />
+
 </h1>
 
 <p align="center">Get high quality data from Documents fast, and deploy scalable serverless Data Processor APIs</p>
@@ -20,6 +21,7 @@ TensorLake transforms unstructured documents into AI-ready data through Document
 ## Features
 
 - **Document Ingestion** - Parse documents (PDFs, DOCX, spreadsheets, presentations, images, and raw text) to markdown or extract structured data with schemas. This is powered by Tensorlake's state of the art Layout Detection and Table Recognition models.
+
 - **Serverless Workflows** - Build and deploy data ingestion and orchestration APIs using Durable Functions in Python that scales automatically on fully managed infrastructure. The requests to workflows automatically resume from failure checkpoints and scale to zero when idle.
 ---
 
