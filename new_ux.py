@@ -69,20 +69,14 @@ def test_graph_function_2_map(
     # return map(lambda ix: TestGraphFunction3().run(ctx, d, ix), range(times))
 
 
-# When @tensorlake.function() is applied to a class it uses its __init__(self) as one time container initialization hook.
-# The class must have def run(self, ...) method. This is the actual function body.
-@tensorlake.function()
-# Also available:
-# @tensorlake.reducer(...)
-# @tensorlake.graph_api(...)
+# Every class that has a @tensorlake.function() decorator on its method(s) must have a constructor with no arguments (except self).
+# This is because when this class is called by other functions using `TestGraphFunction3().run(...)` we don't support
+# different constructor arguments for different requests. In the future we can support it by e.g. hashing constructor
+# args and kwargs and adding this to the function name but this is too complex to support right now.
+# @tensorlake.cls() decorator makes actual class constructor body empty when ppl call TestGraphFunction3(). When however we're running
+# a graph the original __init__ is actually called.
+@tensorlake.cls()
 class TestGraphFunction3:
-    # The class must have an empty constructor.
-    # This is because when this class is called by other functions using `TestGraphFunction3().run(...)` we don't support
-    # different constructor arguments for different requests. In the future we can support it by e.g. hashing constructor
-    # args and kwargs and adding this to the function name but this is too complex to support right now.
-
-    # The decorator makes actual class constructor body empty when ppl call TestGraphFunction3(). When however we're running
-    # a graph the original __init__ is actually called.
     def __init__(self):
         # Load a big model here
         import time
@@ -90,11 +84,13 @@ class TestGraphFunction3:
         time.sleep(100)
         self.magic_number: int = 2
 
+    # When @tensorlake.function() is applied to a class method it uses its __init__(self) as one time container initialization hook.
+    #
     # This is not a @staticmethod because a static method doesn't have self. And I assume that ppl are much less used to using static methods.
     # So we want to give them a friendly instance method here.
-    #
     # Not using __call__(self) here because I assume that people are not generally familiar with operator overloading in Python and also
     # because it'd result in an odd syntax at call sites: `TestGraphFunction3()(ctx, d, ix)`.
+    @tensorlake.function()
     def run(self, ctx: tensorlake.RequestContext, d: dict, ix: int):
         print(
             f"Processing data in TestGraphFunction3.run with key1: {d.get('key1')}, key2: {d.get('key2')}, ix: {ix}"
@@ -105,6 +101,13 @@ class TestGraphFunction3:
         else:
             # Do extra processing before sending data to fanin.
             return test_graph_function_4(ctx, value2=d["key2"], ix=ix)
+
+    # Any number of class methods can be decorated with @tensorlake.function().
+    @tensorlake.function()
+    def another_method(self, ctx: tensorlake.RequestContext, d: dict) -> str:
+        return (
+            f"Another method called with key1: {d.get('key1')}, key2: {d.get('key2')}"
+        )
 
 
 @tensorlake.function()

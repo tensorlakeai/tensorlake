@@ -256,6 +256,13 @@ def function(cpu: float = 1.0, memory: float = 1.0) -> Callable:
     return decorator
 
 
+def cls() -> Callable:
+    def decorator(cls: Type) -> Type:
+        return cls
+
+    return decorator
+
+
 def reducer() -> Callable:
     return function()
 
