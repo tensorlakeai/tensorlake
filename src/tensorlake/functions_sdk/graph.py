@@ -341,7 +341,6 @@ class Graph:
             fn_name=start_node.name,
             description=start_node.description,
             reducer=is_reducer,
-            image_information=start_node.image.to_image_information(),
             input_encoder=start_node.input_encoder,
             output_encoder=start_node.output_encoder,
             secret_names=start_node.secrets,
@@ -377,6 +376,7 @@ class Graph:
                     else None
                 )
             ),
+            max_concurrency=start_node.max_concurrency,
         )
         metadata_edges = self.edges.copy()
         metadata_nodes = {}
@@ -389,7 +389,6 @@ class Graph:
                 fn_name=node.name,
                 description=node.description,
                 reducer=node.accumulate is not None,
-                image_information=node.image.to_image_information(),
                 input_encoder=node.input_encoder,
                 output_encoder=node.output_encoder,
                 secret_names=node.secrets,
@@ -423,6 +422,7 @@ class Graph:
                         else None
                     )
                 ),
+                max_concurrency=node.max_concurrency,
             )
 
         return ComputeGraphMetadata(

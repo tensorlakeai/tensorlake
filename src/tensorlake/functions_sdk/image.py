@@ -11,20 +11,6 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel
 
-
-# Pydantic object for API
-class ImageInformation(BaseModel):
-    image_name: str
-    image_hash: str
-    image_uri: Optional[str] = ""
-    sdk_version: str
-
-    # These are deprecated and here for backwards compatibility
-    run_strs: Optional[List[str]] = []
-    tag: Optional[str] = ""
-    base_image: Optional[str] = ""
-
-
 HASH_BUFF_SIZE = 1024**2
 
 
@@ -121,14 +107,6 @@ class Image:
             BuildOp(op_type="COPY", args=[source, dest], options=kwargs)
         )
         return self
-
-    def to_image_information(self):
-        return ImageInformation(
-            image_name=self._image_name,
-            sdk_version=self._sdk_version,
-            image_hash=self.hash(),
-            image_uri=self.uri,
-        )
 
     def build_context(self, filename: str):
         with tarfile.open(filename, "w:gz") as tf:
