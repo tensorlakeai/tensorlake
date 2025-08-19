@@ -249,7 +249,7 @@ def graph_api(graph_name: str, graph_description: str, version: str) -> Callable
     return function()
 
 
-def function() -> Callable:
+def function(cpu: float = 1.0, memory: float = 1.0) -> Callable:
     def decorator(fn: Callable):
         return fn
 
@@ -257,6 +257,10 @@ def function() -> Callable:
 
 
 def reducer() -> Callable:
+    return function()
+
+
+def batched(max_size: int, max_wait: float) -> Callable:
     return function()
 
 

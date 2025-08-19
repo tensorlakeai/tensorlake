@@ -36,8 +36,11 @@ import tensorlake
 # is called `ctx` then RequestContext is injected. User has to pass it to all functions that it calls if they have ctx parameter too,
 # This is mainly to make this code look like Python and thus get all the IDE and LLM support smoothly.
 #
-# The decorator attributes are the same as @tensorlake.function + attributes for defining the graph.
+# The API function needs to have both @tensorlake.graph_api and @tensorlake.function decorators.
+# The graph_api decorator is responsible for graph level configuration.
+# And function decorator configures all typical function attributes.
 @tensorlake.graph_api(graph_name="test_graph", graph_description="test", version="2.0")
+@tensorlake.function(cpu=1.0, memory=1.0)
 def test_graph_function_1_api(
     ctx: tensorlake.RequestContext, request: dict
 ) -> tensorlake.FunctionCall:  # Actual return type, all return types are ignored by SDK
@@ -121,6 +124,7 @@ def test_graph_function_4(
 # * `is_last_value` kwarg must have a default value of False.
 # * Its return value is interpreted as reduced accumulator value for the supplied input.
 @tensorlake.reducer()
+@tensorlake.function()
 def test_graph_function_5_reduce(
     ctx: tensorlake.RequestContext,
     value1: str,
@@ -184,3 +188,76 @@ def main():
 if __name__ == "__main__":
     # main()
     pass
+
+
+# Extra examples outside of the main graph above ^:
+@tensorlake.function()
+def multy_function_call(
+    ctx: tensorlake.RequestContext, foo: str
+) -> List[tensorlake.FunctionCall]:
+    # This return statement starts two request branches from here.
+    # This is essentially the same as map but with different functions instead of one reducer function.
+    return [
+        TestGraphFunction3().run(ctx, {"key1": foo}, ix=0),
+        test_graph_function_4(ctx, {"key2": foo}, ix=1),
+    ]
+
+
+# Wait for up to `max_batch_wait` seconds for batch of size up to `max_batch_size` before calling the function.
+# To support batching the function needs to have all its arguments being lists.
+# When the function is called each list item at index X corresponds to the same request. The function should return
+# a list with each item of it at index X being the output of the request at index X.
+# If the output list length is not equal to the inputs length then SDK fails each alloc in the batch with a retriable
+# exception (not RequestError). We need to be strict about this because each input item can be for a different request
+# and each request can be for different customers of the users code. So we should exclude risk of a request
+# getting data from a different request due to a coding error in customer code.
+@tensorlake.batched(max_size=5, max_wait=3.0)
+@tensorlake.function()
+def batched_function(
+    ctxs: List[tensorlake.RequestContext], inputs: List[str], targets: List[int]
+) -> List[str | tensorlake.FunctionCall]:
+    outputs: List[str | tensorlake.FunctionCall] = []
+    for ctx, input, target in zip(ctxs, inputs, targets):
+        outputs.append(multy_function_call(ctx, input + str(target)))
+        # Once we support yield this would be:
+        # yield multy_function_call(ctx, input + str(target))
+    return outputs
+
+
+# Calling batched function looks like:
+@tensorlake.function()
+def batched_function_caller(
+    ctx: tensorlake.RequestContext,
+) -> List[str | tensorlake.FunctionCall]:
+    # The lists don't have to have len() == 1, just need to be all the same length.
+    return batched_function([ctx], ["foo"], [0])
+
+
+# Batched reducers are also supported by composing the decorators. This is a pretty advanced use case though.
+# The implementation of decorators should not assume any ordering, i.e. the decorators just set fields in the
+# internal constructed object and as all of them set different fields then we're good here.
+@tensorlake.batched(max_size=5, max_wait=3.0)
+@tensorlake.reducer()
+@tensorlake.function()
+def batched_reducer(
+    ctxs: List[tensorlake.RequestContext],
+    value1s: List[str],
+    ixs: List[int],
+    is_last_values: List[bool] = [False],
+    accumulators: List[str] = [""],
+) -> List[str | tensorlake.FunctionCall]:
+    outputs: List[str | tensorlake.FunctionCall] = []
+
+    for ctx, value1, ix, is_last_value, accumulator in zip(
+        ctxs, value1s, ixs, is_last_values, accumulators
+    ):
+        print(ctx.request_state.get("key1"))
+        new_accumulator = accumulator + value1 + str(ix) + " "
+        if is_last_value:
+            # Pass the final reduced value to the next function.
+            outputs.append(test_graph_function_6(new_accumulator))
+        else:
+            # This function returns actual data as its outputs while it's reducing.
+            outputs.append(new_accumulator)
+
+    return outputs

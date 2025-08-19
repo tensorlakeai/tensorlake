@@ -6,6 +6,7 @@ from .functions_sdk.functions import (
     LocalGraph,
     RequestContext,
     TensorlakeCompute,
+    batched,
     function,
     graph_api,
     reducer,
@@ -38,4 +39,5 @@ __all__ = [
     "LocalGraph",
     "FunctionCall",
     "graph",
+    "batched",
 ]
