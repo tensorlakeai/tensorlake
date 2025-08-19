@@ -1,5 +1,5 @@
 <h1 align="center">
-    <img width="1062" height="249" alt="Logo White" src="https://github.com/user-attachments/assets/328b117c-f7d8-4e26-8c06-8a4c205d7b69" />
+    <img width="1100" height="259" alt="Group 39884" src="https://github.com/user-attachments/assets/ac9adfc2-53cb-427e-ad6a-91394cdee961" />
 
 </h1>
 
