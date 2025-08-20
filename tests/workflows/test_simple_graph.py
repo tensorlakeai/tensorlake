@@ -1,0 +1,62 @@
+import os
+import unittest
+from typing import Any, List
+
+from pydantic import BaseModel
+
+# This import will be replaced by `import tensorlake` when we switch to the new SDK UX.
+import tensorlake.workflows.interface as tensorlake
+
+
+class TestGraphRequestPayload(BaseModel):
+    numbers: List[str]
+
+
+@tensorlake.api()
+@tensorlake.function(description="test simple graph")
+def test_simple_graph_api(
+    ctx: tensorlake.RequestContext, payload: TestGraphRequestPayload
+):
+    return print_and_return_value("simple graph: " + ", ".join(payload.numbers))
+
+
+@tensorlake.function()
+def print_and_return_value(value: str) -> str:
+    print("Printed value:", value)
+    return value
+
+
+class TestSimpleGraph(unittest.TestCase):
+    def test_local_api_call(self):
+        request = tensorlake.call_local_api(
+            test_simple_graph_api,
+            TestGraphRequestPayload(numbers=[str(i) for i in range(1, 6)]),
+        )
+
+        print_and_return_value_output: List[Any] = request.function_outputs(
+            print_and_return_value
+        )
+        self.assertEqual(
+            print_and_return_value_output,
+            ["simple graph: 1, 2, 3, 4, 5"],
+        )
+
+    def test_remote_api_call(self):
+        tensorlake.deploy(os.path.dirname(__file__))
+        # TODO: Implement.
+        # request = tensorlake.call_remote_api(
+        #     test_simple_graph_api,
+        #     TestGraphRequestPayload(numbers=[str(i) for i in range(1, 6)]),
+        # )
+
+        # print_and_return_value_output: List[Any] = request.function_output(
+        #     print_and_return_value
+        # )
+        # self.assertEqual(
+        #     print_and_return_value_output,
+        #     ["simple graph: 1, 2, 3, 4, 5"],
+        # )
+
+
+if __name__ == "__main__":
+    unittest.main()
