@@ -32,16 +32,17 @@ import tensorlake
 # a "{'foo': 'bar'}" string is not deserialized into a regular Python dict() object but it's deserialized into data type used in the
 # function parameter type annotation if it has a constructor from dict() that we deserialized from json.
 #
-# API function must have a single user supplied argument caller `request`, this is HTTP calling convention. If the first argument
+# API function must have a single user supplied argument called `request`, this is HTTP calling convention. If the first argument
 # is called `ctx` then RequestContext is injected. User has to pass it to all functions that it calls if they have ctx parameter too,
 # This is mainly to make this code look like Python and thus get all the IDE and LLM support smoothly.
 #
-# The API function needs to have both @tensorlake.graph_api and @tensorlake.function decorators.
-# The graph_api decorator is responsible for graph level configuration.
-# And function decorator configures all typical function attributes.
-@tensorlake.graph_api(graph_name="test_graph", graph_description="test", version="2.0")
+# The API function needs to have both @tensorlake.api and @tensorlake.function decorators.
+# `@tensorlake.function` decorator configures all typical function attributes.
+@tensorlake.api(
+    description="test", version="2.0"
+)  # The API name is the name of the function.
 @tensorlake.function(cpu=1.0, memory=1.0)
-def test_graph_function_1_api(
+def my_api(
     ctx: tensorlake.RequestContext, request: dict
 ) -> tensorlake.FunctionCall:  # Actual return type, all return types are ignored by SDK
     print(
@@ -155,35 +156,33 @@ def test_graph_function_6(
 
 
 def main():
-    # We don't store any edges in graph definition anymore, all routing is dynamic now.
-    # To run graph in local mode just use the function decorated with @tensorlake.graph.
-    test_graph = tensorlake.LocalGraph(test_graph_function_1_api)
-    # or test_graph = tensorlake.RemoteGraphClient(test_graph_function_1_api)
-    # or test_graph = tensorlake.RemoteGraphClient("test_graph")
-    # To deploy a remote graph:
-    # tensorlake.RemoteGraphClient(test_graph_function_1_api).deploy()
-
+    test_api_local_runner = tensorlake.LocalRunner(my_api)
     # run(block_until_done=True) by default.
-    request_id: str = test_graph.run(request={"key1": "value1", "key2": "value2"})
-    api_func_output: List[Any] = test_graph.function_output(
-        request_id,
-        test_graph_function_1_api,  # Or "test_graph_function_1_api" - there's no separate function.name attribute anymore
+    request: tensorlake.Request = test_api_local_runner.run(
+        request={"key1": "value1", "key2": "value2"}
+    )
+    # request: tensorlake.Request = my_api.run_local(request={"key1": "value1", "key2": "value2"})
+    # request: tensorlake.Request = my_api.run_remote(request={"key1": "value1", "key2": "value2"})
+    test_api_remote_runner = tensorlake.RemoteRunner(
+        my_api
+    )  # or tensorlake.RemoteRunner("my_api")
+    # test_api_remote_runner.run(request={"key1": "value1", "key2": "value2"})
+
+    # To deploy the graph:
+    my_api.deploy()
+
+    api_func_output: List[Any] = request.function_output(
+        my_api,  # Or "my_api" - there's no separate function.name attribute anymore
     )
     # api_func_output == [TensorlakeFunctionCall(test_graph_function_2_fanout, d, 10)]
-    func_2_fanout_output: List[Any] = test_graph.function_output(
-        request_id, test_graph_function_2_map
-    )
+    func_2_fanout_output: List[Any] = request.function_output(test_graph_function_2_map)
     # func_2_fanout_output is List[TensorlakeFunctionCall(...), ...]
-    func_3_output: List[Any] = test_graph.function_output(
-        request_id, TestGraphFunction3.run
-    )
+    func_3_output: List[Any] = request.function_output(TestGraphFunction3.run)
     # func_3_output == [TensorlakeFunctionCall(...)]
-    func_4_output: List[Any] = test_graph.function_output(
-        request_id, test_graph_function_4
-    )
+    func_4_output: List[Any] = request.function_output(test_graph_function_4)
     # func_4_output == [TensorlakeFunctionCall(...)]
-    func_5_fanin_output: List[str] = test_graph.function_output(
-        request_id, test_graph_function_5_reduce
+    func_5_fanin_output: List[str] = request.function_output(
+        test_graph_function_5_reduce
     )
     # func_5_fanin_output == ["value10 value11 value12 ... value19 "]
 

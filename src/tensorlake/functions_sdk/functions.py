@@ -245,15 +245,15 @@ def tensorlake_function(
     return construct
 
 
-def graph_api(graph_name: str, graph_description: str, version: str) -> Callable:
-    return function()
-
-
 def function(cpu: float = 1.0, memory: float = 1.0) -> Callable:
     def decorator(fn: Callable):
         return fn
 
     return decorator
+
+
+def api(description: str, version: str) -> Callable:
+    return function()
 
 
 def cls() -> Callable:
@@ -269,6 +269,34 @@ def reducer() -> Callable:
 
 def batched(max_size: int, max_wait: float) -> Callable:
     return function()
+
+
+class Request:
+    def __init__(self, request_id: str, request: Dict[str, Any]):
+        self.request_id: str = request_id
+        self.request: Dict[str, Any] = request
+
+    def function_output(self, function: Union[TensorlakeCompute, str]) -> List[Any]:
+        """Get the output of a function for this request."""
+        # This is a placeholder implementation.
+        # Actual implementation should retrieve the output from the execution context.
+        return []
+
+
+class LocalRunner:
+    def __init__(self, api_function):
+        pass
+
+    def run(self, request) -> Request:
+        pass
+
+
+class RemoteRunner:
+    def __init__(self, api_function):
+        pass
+
+    def run(self, request) -> Request:
+        pass
 
 
 class RequestContext:
