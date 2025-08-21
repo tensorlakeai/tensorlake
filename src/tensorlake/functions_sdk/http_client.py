@@ -92,7 +92,7 @@ class RequestMetadata(BaseModel):
     created_at: int
 
 
-class RequestCreatedEvent(BaseModel):
+class RequestStartedEvent(BaseModel):
     request_id: str
 
 
@@ -113,7 +113,7 @@ class WorkflowEvent(BaseModel):
     event_name: str
     stdout: Optional[str] = None
     stderr: Optional[str] = None
-    payload: Union[RequestCreatedEvent, RequestProgressPayload, RequestFinishedEvent]
+    payload: Union[RequestStartedEvent, RequestProgressPayload, RequestFinishedEvent]
 
     def __str__(self) -> str:
         stdout = (
@@ -434,10 +434,10 @@ class TensorlakeClient:
 
         for event_name, event_data in obj.items():
             # Handle bare ID events
-            if event_name == "id":
+            if event_name == "RequestStarted":
                 yield WorkflowEvent(
-                    event_name="RequestCreated",
-                    payload=RequestCreatedEvent(request_id=event_data),
+                    event_name="RequestStarted",
+                    payload=RequestStartedEvent(request_id=event_data["request_id"]),
                 )
                 continue
 
