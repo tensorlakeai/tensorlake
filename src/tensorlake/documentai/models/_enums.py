@@ -72,6 +72,18 @@ class ModelProvider(str, Enum):
     GPT4OMINI = "gpt_4o_mini"
 
 
+class OcrModelProvider(str, Enum):
+    """
+    The model provider to use for OCR (Optical Character Recognition).
+
+    Tensorlake01: Our current stable OCR pipeline
+    Tensorlake02: Our beta OCR pipeline
+    """
+
+    TENSORLAKE01 = "model01"
+    TENSORLAKE02 = "model03"
+
+
 class ParseStatus(str, Enum):
     """
     Status of a parse job in the v2 API.

@@ -221,7 +221,7 @@ class TestParse(unittest.TestCase):
             Exception, self.doc_ai.get_parsed_result, parsed_result.parse_id
         )
 
-    def test_parse_structured_extraction_dict_json_schema(self):
+    def test_parse_structured_extraction_dict_json_schema_and_citations(self):
         file_id = self.doc_ai.upload(
             path="./document_ai/testdata/example_bank_statement.pdf"
         )
@@ -370,6 +370,7 @@ class TestParse(unittest.TestCase):
         bank_statement_extraction_options = StructuredExtractionOptions(
             schema_name="BankStatementData",
             json_schema=bank_statement_schema,
+            provide_citations=True,
         )
 
         result = self.doc_ai.parse_and_wait(
@@ -381,6 +382,9 @@ class TestParse(unittest.TestCase):
         self.assertIsNotNone(result.structured_data)
         self.assertEqual(len(result.structured_data), 1)
         self.assertEqual(result.structured_data[0].schema_name, "BankStatementData")
+        self.assertIsNotNone(
+            result.structured_data[0].data["accountHolder"]["address_citation"],
+        )
 
         self.doc_ai.delete_parse(result.parse_id)
         self.assertRaises(Exception, self.doc_ai.get_parsed_result, result.parse_id)
