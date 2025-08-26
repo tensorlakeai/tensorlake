@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field, Json, field_serializer
 from ._enums import (
     ChunkingStrategy,
     ModelProvider,
-    OcrModelProvider,
+    OcrPipelineProvider,
     PageFragmentType,
     PartitionStrategy,
     TableOutputMode,
@@ -67,7 +67,7 @@ class ParsingOptions(BaseModel):
         False,
         description="Useful flag for documents with a lot of tables or images. If set to `true`, the API will skip the layout detection step, and directly extract text from the document.",
     )
-    ocr_pipeline_provider: Optional[OcrModelProvider] = Field(
+    ocr_pipeline_provider: Optional[OcrPipelineProvider] = Field(
         None,
         description="The model provider to use for OCR (Optical Character Recognition). This determines which OCR service is used to extract text from images and scanned documents.",
     )

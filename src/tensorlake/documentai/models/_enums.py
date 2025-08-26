@@ -72,7 +72,7 @@ class ModelProvider(str, Enum):
     GPT4OMINI = "gpt_4o_mini"
 
 
-class OcrModelProvider(str, Enum):
+class OcrPipelineProvider(str, Enum):
     """
     The model provider to use for OCR (Optical Character Recognition).
 
