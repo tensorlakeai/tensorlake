@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field, Json, field_serializer
 from ._enums import (
     ChunkingStrategy,
     ModelProvider,
+    OcrModelProvider,
     PageFragmentType,
     PartitionStrategy,
     TableOutputMode,
@@ -58,9 +59,17 @@ class ParsingOptions(BaseModel):
         None,
         description="The chunking strategy determines how the document is chunked into smaller pieces. Different strategies can be used to optimize the parsing process. Choose the one that best fits your use case. The default is `None`, which means no chunking is applied.",
     )
+    cross_page_header_detection: Optional[bool] = Field(
+        None,
+        description="Flag to enable header-hierarchy detection across pages. When set to `true`, the parser will consider headers from different pages when determining the hierarchy of headers within a single page.",
+    )
     disable_layout_detection: bool = Field(
         False,
         description="Useful flag for documents with a lot of tables or images. If set to `true`, the API will skip the layout detection step, and directly extract text from the document.",
+    )
+    ocr_pipeline_provider: Optional[OcrModelProvider] = Field(
+        None,
+        description="The model provider to use for OCR (Optical Character Recognition). This determines which OCR service is used to extract text from images and scanned documents.",
     )
     remove_strikethrough_lines: bool = Field(
         False,
@@ -124,8 +133,12 @@ class StructuredExtractionOptions(BaseModel):
         default=None,
         description="The prompt to use for structured data extraction. If not provided, the default prompt will be used.",
     )
-    skip_ocr: bool = Field(
-        default=False,
+    provide_citations: Optional[bool] = Field(
+        default=None,
+        description="Flag to enable visual citations in the structured data output. It returns the bounding boxes of the coordinates of the document where the structured data was extracted from.",
+    )
+    skip_ocr: Optional[bool] = Field(
+        default=None,
         description="Boolean flag to skip converting the document blob to OCR text before structured data extraction. If set to `true`, the API will skip the OCR step and directly extract structured data from the document. The default is `false`.",
     )
 
