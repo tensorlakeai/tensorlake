@@ -17,14 +17,17 @@ class TestGraphRequestPayload(BaseModel):
 # Pydantic model class. Without it payload parameter will be a dict { "numbers": [...] }.
 @tensorlake.api()
 @tensorlake.function(cpu=1.0, memory=1.0, description="test API function")
-def test_graph_api(ctx: tensorlake.RequestContext, payload: TestGraphRequestPayload):
+def test_graph_api(
+    ctx: tensorlake.RequestContext, payload: TestGraphRequestPayload
+) -> int:
     print(f"Received request with numbers: {payload.numbers}")
     ctx.state.set("numbers_count", len(payload.numbers))
-    return [parse_number(ctx, number) for number in payload.numbers]
+
+    return sum_numbers([parse_number(ctx, number) for number in payload.numbers])[0]
 
 
 @tensorlake.function()
-def parse_number(ctx: tensorlake.RequestContext, number: str):
+def parse_number(ctx: tensorlake.RequestContext, number: str) -> int:
     print(f"parsing number '{number}'")
     # Raises ValueError if not a number.
     parsed_number = int(number)
@@ -40,9 +43,9 @@ class MultiplierFunction:
         self.multiplier: int = 2
 
     @tensorlake.function()
-    def multiply(self, ctx: tensorlake.RequestContext, number: int):
+    def multiply(self, ctx: tensorlake.RequestContext, number: int) -> int:
         print(f"Multiplying number: {number}, multiplier: {self.multiplier}")
-        return sum_numbers(number * self.multiplier)
+        return number * self.multiplier
 
 
 class Accumulator(BaseModel):
@@ -54,20 +57,20 @@ class Accumulator(BaseModel):
 @tensorlake.reducer()
 @tensorlake.function()
 def sum_numbers(
-    number: int,
+    numbers: List[int],
     is_last_value: bool = False,
     accumulator: Accumulator = Accumulator(total=0),
-) -> tuple[Accumulator | tensorlake.FunctionCall, tensorlake.FunctionCall]:
-    print(
-        f"adding number {number} to accumulator {accumulator}, is_last_value: {is_last_value}"
-    )
-    accumulator.total = accumulator.total + number
+) -> Accumulator | tuple[Accumulator, str, str, tensorlake.File]:
+    accumulator.total = accumulator.total + sum(numbers)
     if is_last_value:
-        return format_number(accumulator.total), print_and_return_value(
-            str(accumulator.total)
+        return (
+            accumulator,
+            format_number(accumulator.total),
+            print_and_return_value(str(accumulator.total)),
+            store_as_file(str(accumulator.total).encode(), "text/plain"),
         )
     else:
-        return accumulator, print_and_return_value(str(accumulator))
+        return accumulator
 
 
 @tensorlake.function()
