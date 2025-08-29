@@ -20,7 +20,26 @@ class TestGraphRequestPayload(BaseModel):
 def test_graph_api(ctx: tensorlake.RequestContext, payload: TestGraphRequestPayload):
     print(f"Received request with numbers: {payload.numbers}")
     ctx.state.set("numbers_count", len(payload.numbers))
-    return [parse_number(ctx, number) for number in payload.numbers]
+
+    number_generators = [parse_number(ctx, number) for number in payload.numbers]
+    # All the output values produced by parse_number calls are gradually supplied into sum_numbers reducer calls.
+    # This allows users to quite explicitly control and understand what values are sent into reducer.
+    #
+    # Server will have to put all the parse_number tasks and their child tasks into a task group which
+    # sum_numbers call depends on for completion. For simplicity of our implementation we'll only allow a single function
+    # call parameter to contain other function calls (without nesting further nesting, only one level of function calls).
+    # We'll remember that parameter name at call site to not unnecessarily limit users in what they can do.
+    return sum_numbers(numbers=number_generators, accumulator=Accumulator(total=777))
+    # This approach will also be available to other non-reducer functions that want to read a values generated
+    # by other functions without reducing these inputs. This is a natural fan-in use-case.
+    # Example:
+    # return print_numbers(numbers=number_generators, fmt_string="foo bar buzz %s")
+    #
+    # For such non-reducer functions we can also allow multiple such parameters (doesn't work well for reducers).
+    # Example:
+    # return multiply_and_print_numbers(a_numbers=number_generators, b_numbers=number_generators, fmt_string="foo bar buzz %s")
+    #
+    # Important: all values returned by any of the functions calls and their sub calls are supplied into the reducer/function.
 
 
 @tensorlake.function()
@@ -42,7 +61,7 @@ class MultiplierFunction:
     @tensorlake.function()
     def multiply(self, ctx: tensorlake.RequestContext, number: int):
         print(f"Multiplying number: {number}, multiplier: {self.multiplier}")
-        return sum_numbers(number * self.multiplier)
+        return number * self.multiplier
 
 
 class Accumulator(BaseModel):
@@ -51,18 +70,16 @@ class Accumulator(BaseModel):
 
 # The type hints are only required to detect that the returned values are Pydantic models
 # when deserializing the function value outputs from their json.
-@tensorlake.reducer()
+@tensorlake.reducer(max_inputs=10)
 @tensorlake.function()
 def sum_numbers(
-    number: int,
-    is_last_value: bool = False,
+    numbers: List[int],
+    finish: bool = False,
     accumulator: Accumulator = Accumulator(total=0),
 ) -> tuple[Accumulator | tensorlake.FunctionCall, tensorlake.FunctionCall]:
-    print(
-        f"adding number {number} to accumulator {accumulator}, is_last_value: {is_last_value}"
-    )
-    accumulator.total = accumulator.total + number
-    if is_last_value:
+    print(f"adding numbers {numbers} to accumulator {accumulator}, finish: {finish}")
+    accumulator.total = accumulator.total + sum(numbers)
+    if finish:
         return format_number(accumulator.total), print_and_return_value(
             str(accumulator.total)
         )
