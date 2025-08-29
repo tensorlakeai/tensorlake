@@ -22,15 +22,24 @@ def test_graph_api(ctx: tensorlake.RequestContext, payload: TestGraphRequestPayl
     ctx.state.set("numbers_count", len(payload.numbers))
 
     number_generators = [parse_number(ctx, number) for number in payload.numbers]
+    # TODO: make it clear in runtime that these FunctionCalls() when used locally generate a warning + RequestException().
+    # TODO: Add tensorlake.reduce with the same interface as https://docs.python.org/3/library/functools.html#functools.reduce.
+    # .      The binding of the arguments to tensorlake.reduce is via positional args only.
+    # TODO: Remove tensorlake.reducer decorator.
+
     # All the output values produced by parse_number calls are gradually supplied into sum_numbers reducer calls.
     # This allows users to quite explicitly control and understand what values are sent into reducer.
     #
-    # Server will have to put all the parse_number tasks and their child tasks into a task group which
-    # sum_numbers call depends on for completion. For simplicity of our implementation we'll only allow a single function
-    # call parameter to contain other function calls (without nesting further nesting, only one level of function calls).
-    # We'll remember that parameter name at call site to not unnecessarily limit users in what they can do.
-    return sum_numbers(numbers=number_generators, accumulator=Accumulator(total=777))
-    # This approach will also be available to other non-reducer functions that want to read a values generated
+    # We're going to support graph traversal on Server side. So we're supporting unbonded depth of the call tree.
+    return foo(
+        tensorlake.reduce(
+            sum_numbers,
+            number_generators,
+            Accumulator(total=777),
+            max_inputs_per_call=10,
+        )
+    )
+    # This approach will also be available to other non-reducer functions that want to read values generated
     # by other functions without reducing these inputs. This is a natural fan-in use-case.
     # Example:
     # return print_numbers(numbers=number_generators, fmt_string="foo bar buzz %s")
@@ -70,21 +79,14 @@ class Accumulator(BaseModel):
 
 # The type hints are only required to detect that the returned values are Pydantic models
 # when deserializing the function value outputs from their json.
-@tensorlake.reducer(max_inputs=10)
 @tensorlake.function()
 def sum_numbers(
     numbers: List[int],
-    finish: bool = False,
     accumulator: Accumulator = Accumulator(total=0),
-) -> tuple[Accumulator | tensorlake.FunctionCall, tensorlake.FunctionCall]:
-    print(f"adding numbers {numbers} to accumulator {accumulator}, finish: {finish}")
+) -> tuple[Accumulator, tensorlake.FunctionCall]:
+    print(f"adding numbers {numbers} to accumulator {accumulator}")
     accumulator.total = accumulator.total + sum(numbers)
-    if finish:
-        return format_number(accumulator.total), print_and_return_value(
-            str(accumulator.total)
-        )
-    else:
-        return accumulator, print_and_return_value(str(accumulator))
+    return accumulator, print_and_return_value(str(accumulator))
 
 
 @tensorlake.function()
