@@ -952,6 +952,29 @@ class TestGraphBehaviors(unittest.TestCase):
                 self.assertEqual(output[0], 6)
                 break
 
+    @parameterized.parameterized.expand([True])
+    def test_stream_progress(self, is_remote):
+        graph = Graph(
+            name=test_graph_name(self),
+            description="test",
+            start_node=return_multiple_values_json,
+        )
+        graph.add_edge(return_multiple_values_json, sum_multiple_values_json)
+        graph = remote_or_local_graph(
+            graph,
+            is_remote,
+        )
+        request_stream = graph.stream(x=1)
+        invocation_id = None
+        for event in request_stream:
+            if event.event_name == "RequestStarted":
+                invocation_id = event.payload.request_id
+            if event.event_name == "RequestFinished":
+                output = graph.get_output(invocation_id, "sum_multiple_values_json")
+                self.assertEqual(len(output), 1)
+                self.assertEqual(output[0], 6)
+                break
+
 
 if __name__ == "__main__":
     unittest.main()
