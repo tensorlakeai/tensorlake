@@ -952,8 +952,7 @@ class TestGraphBehaviors(unittest.TestCase):
                 self.assertEqual(output[0], 6)
                 break
 
-
-    @parameterized.parameterized.expand([(True)])
+    @parameterized.parameterized.expand([True])
     def test_stream_progress(self, is_remote):
         graph = Graph(
             name=test_graph_name(self),
