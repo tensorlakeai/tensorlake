@@ -2,7 +2,7 @@ from typing import Optional
 
 import click
 
-from . import _common, auth, config, deploy, graphs, requests, secrets
+from . import _common, auth, config, deploy, graphs, parse, requests, secrets
 
 
 @click.group(
@@ -56,3 +56,4 @@ cli.add_command(deploy.deploy)
 cli.add_command(graphs.graph)
 cli.add_command(requests.request)
 cli.add_command(secrets.secrets)
+cli.add_command(parse.parse)
