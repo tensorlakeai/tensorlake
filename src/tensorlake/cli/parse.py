@@ -1,5 +1,5 @@
-from pathlib import Path
 import hashlib
+from pathlib import Path
 from typing import Optional
 
 import click
@@ -33,7 +33,7 @@ def parse(ctx: Context, path_or_url: str, pages: Optional[str], ignore_cache: bo
     client = DocumentAI(api_key=ctx.api_key, server_url=ctx.base_url)
 
     # Build cache key: file hash (for local files) or URL + page range
-    page_key = (pages.strip() if pages else "all")
+    page_key = pages.strip() if pages else "all"
     is_url = path_or_url.startswith(("http://", "https://"))
 
     source = path_or_url

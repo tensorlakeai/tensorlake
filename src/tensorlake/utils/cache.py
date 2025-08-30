@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Optional
-import hashlib
 
 
 class KVCache:
@@ -83,5 +83,3 @@ class KVCache:
                     continue
         except Exception:
             pass
-
-
