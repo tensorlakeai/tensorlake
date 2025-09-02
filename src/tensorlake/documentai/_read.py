@@ -1,21 +1,61 @@
-from typing import Optional
+from typing import Optional, overload
 
 from ._base import _BaseClient, _validate_file_input
+from ._utils import _drop_none
 from .models import (
+    EnrichmentOptions,
     MimeType,
     ParsingOptions,
-    EnrichmentOptions,
 )
-from ._utils import _drop_none
 
 
 class _ReadMixin(_BaseClient):
 
+    # Sync method overloads
+    @overload
     def read(
         self,
-        file_id: Optional[str],
-        file_url: Optional[str],
-        raw_text: Optional[str],
+        *,
+        file_id: str,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+        parsing_options: Optional[ParsingOptions] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+    ) -> str:
+        """Read document by file ID."""
+
+    @overload
+    def read(
+        self,
+        *,
+        file_url: str,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+        parsing_options: Optional[ParsingOptions] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+    ) -> str:
+        """Read document from URL."""
+
+    @overload
+    def read(
+        self,
+        *,
+        raw_text: str,
+        mime_type: MimeType,  # Required when using raw_text
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        parsing_options: Optional[ParsingOptions] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+    ) -> str:
+        """Read from raw text. MIME type is required."""
+
+    def read(
+        self,
+        file_id: Optional[str] = None,
+        file_url: Optional[str] = None,
+        raw_text: Optional[str] = None,
         page_range: Optional[str] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
@@ -54,7 +94,6 @@ class _ReadMixin(_BaseClient):
 
                 This includes summarization of tables and figures, which can help to provide a more comprehensive understanding of the document.
         """
-
         _validate_file_input(
             file_id=file_id, file_url=file_url, raw_text=raw_text, mime_type=mime_type
         )
@@ -67,8 +106,16 @@ class _ReadMixin(_BaseClient):
                 "page_range": page_range,
                 "labels": labels,
                 "mime_type": mime_type.value if mime_type else None,
-                "parsing_options": parsing_options.model_dump(exclude_none=True),
-                "enrichment_options": enrichment_options.model_dump(exclude_none=True),
+                "parsing_options": (
+                    parsing_options.model_dump(exclude_none=True)
+                    if parsing_options
+                    else None
+                ),
+                "enrichment_options": (
+                    enrichment_options.model_dump(exclude_none=True)
+                    if enrichment_options
+                    else None
+                ),
             }
         )
 
@@ -76,18 +123,57 @@ class _ReadMixin(_BaseClient):
         json_response = response.json()
         return json_response["parse_id"]
 
-    # Async API
+    # Async method overloads
+    @overload
     async def read_async(
         self,
-        file_id: Optional[str],
-        file_url: Optional[str],
-        raw_text: Optional[str],
+        *,
+        file_id: str,
         page_range: Optional[str] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
         parsing_options: Optional[ParsingOptions] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
-    ):
+    ) -> str:
+        """Read document by file ID asynchronously."""
+
+    @overload
+    async def read_async(
+        self,
+        *,
+        file_url: str,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+        parsing_options: Optional[ParsingOptions] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+    ) -> str:
+        """Read document from URL asynchronously."""
+
+    @overload
+    async def read_async(
+        self,
+        *,
+        raw_text: str,
+        mime_type: MimeType,  # Required when using raw_text
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        parsing_options: Optional[ParsingOptions] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+    ) -> str:
+        """Read from raw text asynchronously. MIME type is required."""
+
+    async def read_async(
+        self,
+        file_id: Optional[str] = None,
+        file_url: Optional[str] = None,
+        raw_text: Optional[str] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+        parsing_options: Optional[ParsingOptions] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+    ) -> str:
         """
         Create a new read operation asynchronously.
 
@@ -132,8 +218,16 @@ class _ReadMixin(_BaseClient):
                 "page_range": page_range,
                 "labels": labels,
                 "mime_type": mime_type.value if mime_type else None,
-                "parsing_options": parsing_options.model_dump(exclude_none=True),
-                "enrichment_options": enrichment_options.model_dump(exclude_none=True),
+                "parsing_options": (
+                    parsing_options.model_dump(exclude_none=True)
+                    if parsing_options
+                    else None
+                ),
+                "enrichment_options": (
+                    enrichment_options.model_dump(exclude_none=True)
+                    if enrichment_options
+                    else None
+                ),
             }
         )
 

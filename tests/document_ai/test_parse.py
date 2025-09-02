@@ -53,8 +53,11 @@ class TestParse(unittest.TestCase):
         self.assertIsNotNone(found_parse)
         self.assertEqual(found_parse.parse_id, parse_id)
 
-        self.doc_ai.delete_parse(parse_id)
-        self.assertRaises(Exception, self.doc_ai.get_parsed_result, parse_id)
+        if parse_result.status == ParseStatus.SUCCESSFUL:
+            self.doc_ai.delete_parse(parse_result.parse_id)
+            self.assertRaises(
+                Exception, self.doc_ai.get_parsed_result, parse_result.parse_id
+            )
 
     def test_simple_parse_eu(self):
         doc_ai_eu = DocumentAI(region=Region.EU)
@@ -82,8 +85,11 @@ class TestParse(unittest.TestCase):
         self.assertIsNotNone(found_parse)
         self.assertEqual(found_parse.parse_id, parse_id)
 
-        self.doc_ai.delete_parse(parse_id)
-        self.assertRaises(Exception, self.doc_ai.get_parsed_result, parse_id)
+        if parse_result.status == ParseStatus.SUCCESSFUL:
+            self.doc_ai.delete_parse(parse_result.parse_id)
+            self.assertRaises(
+                Exception, self.doc_ai.get_parsed_result, parse_result.parse_id
+            )
 
     def test_remove_file_can_still_access_parsed_results(self):
         file_id = self.doc_ai.upload(
@@ -107,10 +113,11 @@ class TestParse(unittest.TestCase):
         self.assertEqual(parsed_result.status, ParseStatus.SUCCESSFUL)
         self.assertIsNotNone(parsed_result.pages)
 
-        self.doc_ai.delete_parse(parsed_result.parse_id)
-        self.assertRaises(
-            Exception, self.doc_ai.get_parsed_result, parsed_result.parse_id
-        )
+        if parsed_result.status == ParseStatus.SUCCESSFUL:
+            self.doc_ai.delete_parse(parsed_result.parse_id)
+            self.assertRaises(
+                Exception, self.doc_ai.get_parsed_result, parsed_result.parse_id
+            )
 
     def test_parse_structured_extraction(self):
         structured_extraction_options = StructuredExtractionOptions(
@@ -142,10 +149,11 @@ class TestParse(unittest.TestCase):
 
         self.assertIsNotNone(structured_extraction_schemas.get("form125-basic"))
 
-        self.doc_ai.delete_parse(parse_result.parse_id)
-        self.assertRaises(
-            Exception, self.doc_ai.get_parsed_result, parse_result.parse_id
-        )
+        if parse_result.status == ParseStatus.SUCCESSFUL:
+            self.doc_ai.delete_parse(parse_result.parse_id)
+            self.assertRaises(
+                Exception, self.doc_ai.get_parsed_result, parse_result.parse_id
+            )
 
     def test_parse_single_object_structured_extraction(self):
         structured_extraction_options = StructuredExtractionOptions(
@@ -177,10 +185,11 @@ class TestParse(unittest.TestCase):
 
         self.assertIsNotNone(structured_extraction_schemas.get("form125-basic"))
 
-        self.doc_ai.delete_parse(parse_result.parse_id)
-        self.assertRaises(
-            Exception, self.doc_ai.get_parsed_result, parse_result.parse_id
-        )
+        if parse_result.status == ParseStatus.SUCCESSFUL:
+            self.doc_ai.delete_parse(parse_result.parse_id)
+            self.assertRaises(
+                Exception, self.doc_ai.get_parsed_result, parse_result.parse_id
+            )
 
     def test_page_classification(self):
         form125_page_class_config = PageClassConfig(
@@ -216,10 +225,11 @@ class TestParse(unittest.TestCase):
         self.assertIn("form125", page_classes)
         self.assertIn("form140", page_classes)
 
-        self.doc_ai.delete_parse(parsed_result.parse_id)
-        self.assertRaises(
-            Exception, self.doc_ai.get_parsed_result, parsed_result.parse_id
-        )
+        if parsed_result.status == ParseStatus.SUCCESSFUL:
+            self.doc_ai.delete_parse(parsed_result.parse_id)
+            self.assertRaises(
+                Exception, self.doc_ai.get_parsed_result, parsed_result.parse_id
+            )
 
     def test_parse_structured_extraction_dict_json_schema_and_citations(self):
         file_id = self.doc_ai.upload(
@@ -373,21 +383,26 @@ class TestParse(unittest.TestCase):
             provide_citations=True,
         )
 
-        result = self.doc_ai.parse_and_wait(
+        parse_result = self.doc_ai.parse_and_wait(
             file_id,
             structured_extraction_options=[bank_statement_extraction_options],
         )
 
-        self.assertIsNotNone(result)
-        self.assertIsNotNone(result.structured_data)
-        self.assertEqual(len(result.structured_data), 1)
-        self.assertEqual(result.structured_data[0].schema_name, "BankStatementData")
+        self.assertIsNotNone(parse_result)
+        self.assertIsNotNone(parse_result.structured_data)
+        self.assertEqual(len(parse_result.structured_data), 1)
+        self.assertEqual(
+            parse_result.structured_data[0].schema_name, "BankStatementData"
+        )
         self.assertIsNotNone(
-            result.structured_data[0].data["accountHolder"]["address_citation"],
+            parse_result.structured_data[0].data["accountHolder"]["address_citation"],
         )
 
-        self.doc_ai.delete_parse(result.parse_id)
-        self.assertRaises(Exception, self.doc_ai.get_parsed_result, result.parse_id)
+        if parse_result.status == ParseStatus.SUCCESSFUL:
+            self.doc_ai.delete_parse(parse_result.parse_id)
+            self.assertRaises(
+                Exception, self.doc_ai.get_parsed_result, parse_result.parse_id
+            )
 
     def test_parse_accepts_files_from_files_v2(self):
         file_id = os.getenv("FILES_V2_FILE_ID")
@@ -406,6 +421,12 @@ class TestParse(unittest.TestCase):
 
         parse_result = self.doc_ai.wait_for_completion(parse_id=parse_id)
         self.assertEqual(parse_result.status, ParseStatus.SUCCESSFUL)
+
+        if parse_result.status == ParseStatus.SUCCESSFUL:
+            self.doc_ai.delete_parse(parse_result.parse_id)
+            self.assertRaises(
+                Exception, self.doc_ai.get_parsed_result, parse_result.parse_id
+            )
 
 
 if __name__ == "__main__":

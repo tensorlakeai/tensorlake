@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 import httpx
 
 from .common import get_doc_ai_base_url_v1, get_doc_ai_base_url_v2
-from .models import DocumentAIError, ErrorCode, ErrorResponse, Region, MimeType
+from .models import DocumentAIError, ErrorCode, ErrorResponse, MimeType, Region
 
 
 class _BaseClient:
