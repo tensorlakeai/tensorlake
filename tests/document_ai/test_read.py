@@ -1,8 +1,8 @@
 import os
 import unittest
 
-from tensorlake.documentai import DocumentAI
-from tensorlake.documentai.models import (
+from tensorlake.documentai import (
+    DocumentAI,
     ParseStatus,
 )
 

@@ -1,8 +1,7 @@
 import os
 import unittest
 
-from tensorlake.documentai import DocumentAI
-from tensorlake.documentai.models import PageClassConfig, ParseStatus
+from tensorlake.documentai import DocumentAI, PageClassConfig, ParseStatus
 
 
 class TestClassify(unittest.TestCase):

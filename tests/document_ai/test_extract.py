@@ -3,8 +3,7 @@ import unittest
 
 from json_schemas.bank_statement import BankStatement
 
-from tensorlake.documentai import DocumentAI
-from tensorlake.documentai.models import ParseStatus, StructuredExtractionOptions
+from tensorlake.documentai import DocumentAI, ParseStatus, StructuredExtractionOptions
 
 
 class TestExtract(unittest.TestCase):
