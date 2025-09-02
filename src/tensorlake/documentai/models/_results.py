@@ -7,7 +7,6 @@ from typing import Any, List, Optional, Union
 from pydantic import BaseModel, Field
 
 from ._enums import PageFragmentType, ParseStatus
-from ._options import Options
 
 
 class PageClass(BaseModel):

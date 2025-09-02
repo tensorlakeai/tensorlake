@@ -471,15 +471,7 @@ class _ParseMixin(_BaseClient):
         Args:
             parse_id: The ID of the parse operation to delete. This is the string returned by the parse method.
         """
-        parse = self.get_parsed_result(parse_id)
-
-        if parse.status in {ParseStatus.PENDING, ParseStatus.PROCESSING}:
-            raise ValueError(
-                "Cannot delete a parse operation that is still pending or processing. "
-                "Please wait for the operation to complete before deleting."
-            )
-
-        self._request("DELETE", f"parse/{parse.parse_id}")
+        self._request("DELETE", f"parse/{parse_id}")
 
     async def delete_parse_async(self, parse_id: str) -> None:
         """

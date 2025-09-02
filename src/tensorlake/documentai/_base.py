@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import httpx
 
 from .common import get_doc_ai_base_url_v1, get_doc_ai_base_url_v2
-from .models import DocumentAIError, ErrorCode, ErrorResponse, Region
+from .models import DocumentAIError, ErrorCode, ErrorResponse, MimeType, Region
 
 
 class _BaseClient:
@@ -93,7 +93,7 @@ class _BaseClient:
 
         error_response = _deserialize_error_response(resp)
         _print_error_line(
-            error_response.code, error_response.message, error_response.trace_id
+            error_response.code.value, error_response.message, error_response.trace_id
         )
 
         raise DocumentAIError(
@@ -168,3 +168,31 @@ def _print_error_line(code: Any, message: str, trace_id: str | None = None) -> N
     body = _c(f" {code}", _YELLOW) + f" — {message}"
     suffix = f"  (trace_id={trace_id})" if trace_id else ""
     print(prefix + body + suffix, file=sys.stderr)
+
+
+def _validate_file_input(
+    file_id: Optional[str],
+    file_url: Optional[str],
+    raw_text: Optional[str],
+    mime_type: Optional[MimeType],
+):
+    if file_id is None and file_url is None and raw_text is None:
+        raise ValueError("One of file_id, file_url, or raw_text must be provided.")
+
+    if file_id is not None and file_url is not None and raw_text is not None:
+        raise ValueError("Only one of file_id, file_url, or raw_text can be provided.")
+
+    if raw_text is not None and mime_type is None:
+        raise ValueError("mime_type must be provided when raw_text is used.")
+
+    if (
+        file_id is not None
+        and not file_id.startswith("tensorlake-")
+        and not file_id.startswith("file_")
+    ):
+        raise ValueError("file_id must start with 'tensorlake-' or 'file_'.")
+
+    if file_url is not None and not (
+        file_url.startswith("http://") or file_url.startswith("https://")
+    ):
+        raise ValueError("file_url must start with 'http://' or 'https://'.")
