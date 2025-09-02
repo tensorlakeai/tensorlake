@@ -43,7 +43,6 @@ from ._results import (
     Table,
     TableCell,
     Text,
-    ReadResult,
 )
 
 __all__ = [
@@ -75,7 +74,6 @@ __all__ = [
     "Table",
     "TableCell",
     "Text",
-    "ReadResult",
     # Datasets
     "Dataset",
     "DatasetStatus",
