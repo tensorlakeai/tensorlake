@@ -158,3 +158,38 @@ class ParseResult(BaseModel):
         default=None,
         description="Labels associated with the parse job.",
     )
+
+
+class ReadResult(BaseModel):
+    read_id: str = Field(description="The unique identifier for the read job")
+    parsed_pages_count: int = Field(
+        description="The number of pages that were parsed successfully.", ge=0
+    )
+    status: ParseStatus = Field(description="The status of the parse job.")
+    created_at: str = Field(
+        description="The date and time when the parse job was created in RFC 3339 format."
+    )
+
+    chunks: List[Chunk] = Field(
+        default=List(),
+        description="Chunks of layout text extracted from the document. This is a vector of `Chunk` objects, each containing a piece of text extracted from the document. The chunks are typically used for further processing, such as indexing or searching. The value will vary depending on the chunking strategy used during parsing.",
+    )
+
+    pages: List[Page] = Field(
+        default=List(),
+        description="The layout of the document. This is a JSON object that contains the layout information of the document. It can be used to understand the structure of the document, such as the position of text, tables, figures, etc.",
+    )
+
+    # Optional fields
+    error: Optional[str] = Field(
+        default=None,
+        description="Error occurred during any part of the parse execution.",
+    )
+    finished_at: Optional[str] = Field(
+        default=None,
+        description="The date and time when the parse job was finished in RFC 3339 format.",
+    )
+    labels: Optional[dict] = Field(
+        default=None,
+        description="Labels associated with the parse job.",
+    )

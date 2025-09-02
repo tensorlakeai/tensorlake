@@ -13,16 +13,23 @@ from ._base import _BaseClient
 from ._utils import _drop_none
 from .common import PaginatedResult
 from .files import FileInfo, FileUploader
-from .models import PaginationDirection
+from .models import PaginationDirection, Region
 
 
 class _FilesMixin(_BaseClient):
-    def __init__(self, api_key: str | None = None, server_url: Optional[str] = None):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        server_url: Optional[str] = None,
+        region: Optional[Region] = Region.US,
+    ):
         """
         Initialize the FilesMixin with an API key and optional server URL.
         """
-        super().__init__(api_key, server_url)
-        self._uploader = FileUploader(api_key=self.api_key, server_url=server_url)
+        super().__init__(api_key=api_key, server_url=server_url, region=region)
+        self._uploader = FileUploader(
+            api_key=self.api_key, server_url=server_url, region=region
+        )
 
     def files(
         self,
