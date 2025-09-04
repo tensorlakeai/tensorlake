@@ -63,7 +63,7 @@ class S3BLOBStore:
             max_retries=_MAX_RETRIES,
             initial_delay_seconds=_INITIAL_RETRY_DELAY_SEC,
             max_delay_seconds=_MAX_RETRY_DELAY_SEC,
-            retryable_exceptions=(httpx.HTTPStatusError,),
+            retryable_exceptions=(Exception,),
             is_retryable=_is_retriable_exception,
             on_retry=on_retry,
         )
@@ -141,7 +141,7 @@ class S3BLOBStore:
             max_retries=_MAX_RETRIES,
             initial_delay_seconds=_INITIAL_RETRY_DELAY_SEC,
             max_delay_seconds=_MAX_RETRY_DELAY_SEC,
-            retryable_exceptions=(httpx.HTTPStatusError,),
+            retryable_exceptions=(Exception,),
             is_retryable=_is_retriable_exception,
             on_retry=on_retry,
         )
@@ -180,9 +180,13 @@ class S3BLOBStore:
             raise
 
 
-def _is_retriable_exception(e: httpx.HTTPStatusError) -> bool:
-    # Let's simply retry everything which is not 404 (not found) or 400 (bad request) or 403 (forbidden).
-    return e.response.status_code not in [400, 403, 404]
+def _is_retriable_exception(e: Exception) -> bool:
+    if isinstance(e, httpx.HTTPStatusError):
+        # Let's simply retry everything which is not 404 (not found) or 400 (bad request) or 403 (forbidden).
+        return e.response.status_code not in [400, 403, 404]
+    else:
+        # Retry anything else like network errors, request timeouts, etc.
+        return True
 
 
 def _to_https_uri_schema(uri: str) -> str:
