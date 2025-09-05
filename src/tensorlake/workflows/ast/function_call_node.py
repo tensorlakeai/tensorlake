@@ -149,3 +149,13 @@ class RegularFunctionCallNode(ASTNode):
         ).serialize()
 
         return node
+
+    @classmethod
+    def from_serialized(
+        cls, function_name: str, metadata: bytes, children: List[ValueNode]
+    ) -> "RegularFunctionCallNode":
+        node: RegularFunctionCallNode = RegularFunctionCallNode(function_name)
+        node.serialized_metadata = metadata
+        for child in children:
+            node.add_child(child)
+        return node

@@ -3,6 +3,7 @@ from typing import Any
 from .function_executor_pb2 import (
     BLOB,
     BLOBChunk,
+    SerializedObjectInsideBLOB,
 )
 
 
@@ -72,10 +73,24 @@ class MessageValidator:
         Raises: ValueError: If the BLOB is invalid or not present."""
         self.required_field(field_name)
         blob: BLOB = getattr(self._message, field_name)
-        if len(blob.chunks) < 1:
-            raise ValueError(f"BLOB '{field_name}' must have at least one chunk")
-        for chunk in blob.chunks:
-            self._validate_blob_chunk(chunk)
+        _validate_blob(blob)
+        return self
+
+    def required_blobs(self, field_name: str) -> "MessageValidator":
+        """Validates the repeated BLOBs.
+
+        Raises: ValueError: If the BLOBs are invalid or not present."""
+        self.required_field(field_name)
+        blobs = getattr(self._message, field_name)
+        is_present: bool = False
+        for blob in blobs:
+            _validate_blob(blob)
+            is_present = True
+
+        if not is_present:
+            raise ValueError(
+                f"BLOBs '{field_name}' must contain at least one valid BLOB"
+            )
         return self
 
     def optional_blob(self, field_name: str) -> "MessageValidator":
@@ -86,6 +101,23 @@ class MessageValidator:
             return self
 
         return self.required_blob(field_name)
+
+    def required_serialized_objects_inside_blob(
+        self, field_name: str
+    ) -> "MessageValidator":
+        """Validates that at least one SerializaedObjectInsideBLOB is present in the field.
+
+        Raises: ValueError: If the SerializedObjectsInsideBLOB is invalid or not present.
+        """
+        is_present: True = False
+        for so in getattr(self._message, field_name):
+            is_present = True
+            _validate_serialized_objects_inside_blob(so)
+
+        if not is_present:
+            raise ValueError(
+                f"Field '{field_name}' must contain at least one SerializedObjectInsideBLOB"
+            )
 
     def required_serialized_object_inside_blob(
         self, field_name: str
@@ -105,18 +137,24 @@ class MessageValidator:
         Raises: ValueError: If the SerializedObjectInsideBLOB is invalid."""
         if not self._message.HasField(field_name):
             return self
-        (
-            MessageValidator(getattr(self._message, field_name))
-            .required_serialized_object_manifest("manifest")
-            .required_field("offset")
-        )
+        _validate_serialized_objects_inside_blob(getattr(self._message, field_name))
 
         return self
 
-    def _validate_blob_chunk(self, blob_chunk: BLOBChunk) -> "MessageValidator":
-        """Validates the BLOB chunk.
 
-        Raises: ValueError: If the BLOB chunk is invalid or not present."""
-        (MessageValidator(blob_chunk).required_field("uri").required_field("size"))
+def _validate_serialized_objects_inside_blob(so: SerializedObjectInsideBLOB) -> None:
+    MessageValidator(so).required_field("manifest").required_field("offset")
 
-        return self
+
+def _validate_blob(blob: BLOB) -> None:
+    if len(blob.chunks) < 1:
+        raise ValueError("BLOB must have at least one chunk")
+    for chunk in blob.chunks:
+        _validate_blob_chunk(chunk)
+
+
+def _validate_blob_chunk(blob_chunk: BLOBChunk) -> None:
+    """Validates the BLOB chunk.
+
+    Raises: ValueError: If the BLOB chunk is invalid or not present."""
+    (MessageValidator(blob_chunk).required_field("uri").required_field("size"))

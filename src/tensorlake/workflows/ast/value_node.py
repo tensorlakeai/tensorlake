@@ -69,3 +69,12 @@ class ValueNode(ASTNode):
                 cls=type(value), extra=user_serializer.name
             ).serialize()
             return node
+
+    @classmethod
+    def from_serialized(
+        cls, node_id: str, value: bytes, metadata: bytes
+    ) -> "ValueNode":
+        node: ValueNode = ValueNode(value)
+        node.id = node_id
+        node.serialized_metadata = metadata
+        return node
