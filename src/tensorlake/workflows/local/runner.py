@@ -9,10 +9,10 @@ from ..ast import (
 )
 from ..function.function_call import (
     create_self_instance,
-    prepend_request_context_placeholder_to_function_args,
     set_request_context_args,
     set_self_arg,
 )
+from ..function.reducer_call import reducer_function_call
 from ..function.user_data_serializer import (
     function_input_serializer,
     function_output_serializer,
@@ -109,9 +109,9 @@ class LocalRunner:
         inputs: List[Any] = reducer_call.inputs.items
         accumulator: Any = inputs[0]
         for input_value in inputs[1:]:
-            args: List[Any] = [accumulator, input_value]
-            prepend_request_context_placeholder_to_function_args(reducer_function, args)
-            function_call: FunctionCall = reducer_function(*args)
+            function_call: RegularFunctionCall = reducer_function_call(
+                reducer_function, accumulator, input_value
+            )
             accumulator = self._call(function_call, reducer_function)
 
         output_ast: ASTNode = ast_from_user_object(

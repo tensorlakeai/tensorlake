@@ -15,13 +15,22 @@ enum SerializedObjectEncoding {
     SERIALIZED_OBJECT_ENCODING_UTF8_TEXT = 2;
     SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE = 3;
     SERIALIZED_OBJECT_ENCODING_BINARY_ZIP = 4;
+    SERIALIZED_OBJECT_ENCODING_RAW = 5;
 }
 
 message SerializedObjectManifest {
     optional SerializedObjectEncoding encoding = 1;
     optional uint64 encoding_version = 2;
+    // Includes data and metadata.
     optional uint64 size = 3;
-    optional string sha256_hash = 4;
+    // Metadata is stored before the actual data.
+    optional uint64 metadata_size = 4;
+    // Includes data and metadata.
+    optional string sha256_hash = 5;
+    // MIME type. Important when raw encoding is used.
+    optional string content_type = 6;
+    // ID of function call that returned this object.
+    optional string function_call_id = 7;
 }
 
 // Full serialized object with all its data.
@@ -59,14 +68,18 @@ message SerializedObjectInsideBLOB {
     optional uint64 offset = 2;
 }
 
+message FunctionRef {
+  optional string namespace = 1;
+  optional string application_name = 2;
+  optional string function_name = 3;
+  optional string application_version = 4;
+}
+
 // InitializeRequest contains information about the function
-// that Function Executor is going to run the tasks for.
+// that Function Executor is going to run the allocation for.
 message InitializeRequest {
-    optional string namespace = 1;
-    optional string graph_name = 2;
-    optional string graph_version = 3;
-    optional string function_name = 4;
-    optional SerializedObject graph = 5;
+    optional FunctionRef function = 1;
+    optional SerializedObject application_code = 2;
 }
 
 enum InitializationOutcomeCode {
@@ -92,53 +105,53 @@ message InitializeResponse {
     optional InitializeDiagnostics diagnostics = 3;
 }
 
-message SetInvocationStateRequest {
+message SetRequestStateRequest {
     optional string key = 1;
     optional SerializedObject value = 2;
 }
 
-message SetInvocationStateResponse {}
+message SetRequestStateResponse {}
 
-message GetInvocationStateRequest {
+message GetRequestStateRequest {
     optional string key = 1;
 }
 
-message GetInvocationStateResponse {
+message GetRequestStateResponse {
     optional string key = 1;
     optional SerializedObject value = 2;
 }
 
-// InvocationStateRequest is sent by RPC Server to the client
-// to perform actions on a task's graph invocation state.
-message InvocationStateRequest {
-    // The ID of the request sent by the client.
+// RequestStateRequest is sent by RPC Server to the client
+// to perform actions on a allocation's request state.
+message RequestStateRequest {
+    // The ID of the state request sent by the client.
     // Must be unique per Function Executor.
-    optional string request_id = 1;
-    // The ID of the task initiated the request.
-    optional string task_id = 2;
+    optional string state_request_id = 1;
+    // The ID of the allocation initiated the request.
+    optional string allocation_id = 2;
     oneof request {
-        SetInvocationStateRequest set = 3;
-        GetInvocationStateRequest get = 4;
+        SetRequestStateRequest set = 3;
+        GetRequestStateRequest get = 4;
     }
 }
 
-// InvocationStateResponse is sent by RPC client to the Server.
+// RequestStateResponse is sent by RPC client to the Server.
 // A response contains the result of the action performed on the
-// task's graph invocation state.
-message InvocationStateResponse {
-    // The id of the request this response is for.
-    optional string request_id = 1;
+// allocation's request state.
+message RequestStateResponse {
+    // The id of the state request this response is for.
+    optional string state_request_id = 1;
     optional bool success = 2;
     oneof response {
-        SetInvocationStateResponse set = 3;
-        GetInvocationStateResponse get = 4;
+        SetRequestStateResponse set = 3;
+        GetRequestStateResponse get = 4;
     }
 }
 
-message ListTasksRequest {}
+message ListAllocationsRequest {}
 
-message ListTasksResponse {
-  repeated Task tasks = 1;
+message ListAllocationsResponse {
+  repeated Allocation allocations = 1;
 }
 
 message Metrics {
@@ -146,17 +159,17 @@ message Metrics {
     map<string, uint64> counters = 2;
 }
 
-enum TaskOutcomeCode {
-    TASK_OUTCOME_CODE_UNKNOWN = 0;
-    TASK_OUTCOME_CODE_SUCCESS = 1;
-    TASK_OUTCOME_CODE_FAILURE = 2;
+enum AllocationOutcomeCode {
+    ALLOCATION_OUTCOME_CODE_UNKNOWN = 0;
+    ALLOCATION_OUTCOME_CODE_SUCCESS = 1;
+    ALLOCATION_OUTCOME_CODE_FAILURE = 2;
 }
 
-enum TaskFailureReason {
-    TASK_FAILURE_REASON_UNKNOWN = 0;
-    TASK_FAILURE_REASON_INTERNAL_ERROR = 1;
-    TASK_FAILURE_REASON_FUNCTION_ERROR = 2;
-    TASK_FAILURE_REASON_INVOCATION_ERROR = 3;
+enum AllocationFailureReason {
+    ALLOCATION_FAILURE_REASON_UNKNOWN = 0;
+    ALLOCATION_FAILURE_REASON_INTERNAL_ERROR = 1;
+    ALLOCATION_FAILURE_REASON_FUNCTION_ERROR = 2;
+    ALLOCATION_FAILURE_REASON_REQUEST_ERROR = 3;
 }
 
 message ProgressUpdate {
@@ -164,72 +177,104 @@ message ProgressUpdate {
     float total = 2;
 }
 
-message AwaitTaskProgress {
+message AwaitAllocationProgress {
     oneof response {
         ProgressUpdate progress = 1;
-        TaskResult task_result = 2;
+        AllocationResult allocation_result = 2;
     }
 }
 
-// FunctionInputs contains the input data for task execution
+// FunctionInputs contains the input data for allocation execution
 message FunctionInputs {
-    optional BLOB function_input_blob = 1;
-    optional SerializedObjectInsideBLOB function_input = 2;
-    optional BLOB function_init_value_blob = 3;
-    optional SerializedObjectInsideBLOB function_init_value = 4;
-    optional BLOB function_outputs_blob = 5;
-    optional BLOB invocation_error_blob = 6;
+    repeated SerializedObjectInsideBLOB args = 1;
+    // Each arg has a matching BLOB.
+    repeated BLOB arg_blobs = 2;
+    optional BLOB function_outputs_blob = 3;
+    optional BLOB request_error_blob = 4;
+    // Set for function calls originally issued by SDK.
+    // Not set for API function calls.
+    optional bytes function_call_metadata = 18;
 }
 
-// Contains diagnostics for a finished Task.
-message TaskDiagnostics {
+// Contains diagnostics for a finished allocation.
+message AllocationDiagnostics {
     optional string function_executor_log = 1;
 }
 
-// TaskResult contains the execution outcome and outputs of a task
-message TaskResult {
-    optional TaskOutcomeCode outcome_code = 1;
-    optional TaskFailureReason failure_reason = 2;
-    // Function outputs stored inside uploaded_function_outputs_blob.
-    repeated SerializedObjectInsideBLOB function_outputs = 3;
+message FunctionArg {
+  oneof source {
+    // Data dependency reference to another function call.
+    string function_call_id = 1;
+    // Stored inside uploaded_function_outputs_blob.
+    SerializedObjectInsideBLOB value = 2;
+  }
+}
+
+message FunctionCall {
+    optional string id = 1;
+    optional FunctionRef target = 2;
+    repeated FunctionArg args = 3;
+    optional bytes metadata = 4;
+}
+
+message ReduceOp {
+    // Contains at leat one item.
+    repeated FunctionArg inputs = 1; 
+    optional FunctionRef reducer = 2;
+}
+
+
+message ExecutionPlanUpdate {
+  oneof op {
+    FunctionCall function_call = 10;
+    ReduceOp     reduce        = 12;
+  }
+}
+
+message ExecutionPlanUpdates {
+  repeated ExecutionPlanUpdate updates = 1;
+}
+
+// AllocationResult contains the execution outcome and outputs of an allocation.
+message AllocationResult {
+    optional AllocationOutcomeCode outcome_code = 1;
+    optional AllocationFailureReason failure_reason = 2;
+    oneof outputs {
+        SerializedObjectInsideBLOB value = 3;
+        ExecutionPlanUpdates updates = 4;
+    }
     // The function_outputs_blob with uploaded function outputs.
-    optional BLOB uploaded_function_outputs_blob = 4;
-    // User payload for invocation error if task failed with invocation error.
-    // Stored inside uploaded_invocation_error_blob.
-    optional SerializedObjectInsideBLOB invocation_error_output = 5;
-    // The invocation_error_blob with uploaded invocation error output, if any.
-    optional BLOB uploaded_invocation_error_blob = 6;
-    // Edges that the function wants the invocation to be routed to.
-    repeated string next_functions = 7;
+    optional BLOB uploaded_function_outputs_blob = 5;
+    // User payload for request error if allocation failed with request error.
+    // Stored inside uploaded_request_error_blob.
+    optional SerializedObjectInsideBLOB request_error_output = 6;
+    // The request_error_blob with uploaded request error output, if any.
+    optional BLOB uploaded_request_error_blob = 7;
     optional Metrics metrics = 8;
-    optional TaskDiagnostics diagnostics = 9;
+    optional AllocationDiagnostics diagnostics = 9;
 }
 
-// Task represents a task with its metadata and execution result
-message Task {
-    optional string namespace = 1;
-    optional string graph_name = 2;
-    optional string graph_version = 3;
-    optional string function_name = 4;
-    optional string graph_invocation_id = 5;
-    optional string task_id = 6;
-    optional string allocation_id = 7;
-    // Input data for task execution (not returned when getting/listing tasks)
-    optional FunctionInputs request = 8;
-    // Result of task execution (not returned when getting/listing tasks)
-    optional TaskResult result = 9;
+// Allocation represents an allocation with its metadata and execution result
+message Allocation {
+    optional string request_id = 1;
+    optional string task_id = 2;
+    optional string allocation_id = 3;
+    // Input data for allocation execution (not returned when getting/listing allocations)
+    optional FunctionInputs inputs = 4;
+    // Result of allocation execution (not returned when getting/listing allocations)
+    optional AllocationResult result = 5;
 }
 
-message CreateTaskRequest {
-    optional Task task = 1;
+message CreateAllocationRequest {
+    optional Allocation allocation = 1;
 }
 
-message AwaitTaskRequest {
-    optional string task_id = 1;
+message AwaitAllocationRequest {
+    optional string allocation_id = 1;
 }
 
-message DeleteTaskRequest {
-    optional string task_id = 1;
+message DeleteAllocationRequest {
+    optional string allocation_id = 1;
 }
 
 message HealthCheckRequest {}
@@ -256,25 +301,25 @@ message InfoResponse {
 }
 
 service FunctionExecutor {
-    // Initializes the Function Executor to run tasks
+    // Initializes the Function Executor to run allocations
     // for a particular function. This method is called only
     // once per Function Executor as it can only run a single function.
-    // It should be called before calling RunTask for the function.
+    // It should be called before calling create_allocation.
     rpc initialize(InitializeRequest) returns (InitializeResponse);
-    // Initializes a server that sends requests to the client to perform actions on
-    // a task's graph invocation state. This method is called only once per Function Executor
-    // It should be called before calling RunTask for the function.
-    rpc initialize_invocation_state_server(stream InvocationStateResponse) returns (stream InvocationStateRequest);
-    // Lists the currently-running tasks.
-    rpc list_tasks(ListTasksRequest) returns (ListTasksResponse);
-    // Creates and starts the task specified in the request.
-    rpc create_task(CreateTaskRequest) returns (Task);
-    // Sends progress updates for the task.
+    // Initializes a server that sends requests to the client to perform actions on an allocation's
+    // request state. This method is called only once per Function Executor
+    // It should be called before calling create_allocation.
+    rpc initialize_request_state_server(stream RequestStateResponse) returns (stream RequestStateRequest);
+    // Lists the currently-running allocations.
+    rpc list_allocations(ListAllocationsRequest) returns (ListAllocationsResponse);
+    // Creates and starts the allocation specified in the request.
+    rpc create_allocation(CreateAllocationRequest) returns (Allocation);
+    // Sends progress updates for the allocation.
     // Sends its result once it's complete.
-    rpc await_task(AwaitTaskRequest) returns (stream AwaitTaskProgress);
-    // Deletes the task.
-    rpc delete_task(DeleteTaskRequest) returns (Empty);
-    // Health check method to check if the FE is able to run tasks.
+    rpc await_allocation(AwaitAllocationRequest) returns (stream AwaitAllocationProgress);
+    // Deletes the allocation.
+    rpc delete_allocation(DeleteAllocationRequest) returns (Empty);
+    // Health check method to check if the FE is able to run allocations.
     // The FE should be initialized before calling this method.
     rpc check_health(HealthCheckRequest) returns (HealthCheckResponse);
     // Information about this Function Executor.
