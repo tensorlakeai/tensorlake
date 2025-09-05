@@ -23,6 +23,8 @@ def deploy(
     application: Application = get_user_defined_or_default_application()
     functions: List[Function] = get_functions()
 
+    # TODO: We can only generate the manifest once we loaded all of the files from the
+    # application code dir into memory because all of them need to get registered first.
     app_manifest: ApplicationManifest = create_application_manifest(
         application, functions
     )
