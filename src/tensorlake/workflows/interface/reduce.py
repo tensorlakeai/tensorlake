@@ -1,5 +1,5 @@
 from collections.abc import Iterable
-from typing import Any, List
+from typing import Any
 
 from .function import Function
 from .function_call import FunctionCall
@@ -11,33 +11,20 @@ class ReducerFunctionCall(FunctionCall):
         self,
         reducer_function_name: str,
         inputs: FutureList,
-        is_initial_missing: bool,
-        initial: Any,
     ):
         super().__init__(reducer_function_name)
         self._inputs: FutureList = inputs
-        self._is_initial_missing: bool = is_initial_missing
-        self._initial: Any = initial
 
     @property
     def inputs(self) -> FutureList:
+        # Guaranteed to contain at least a single element.
         return self._inputs
-
-    @property
-    def is_initial_missing(self) -> bool:
-        return self._is_initial_missing
-
-    @property
-    def initial(self) -> Any:
-        return self._initial
 
     def __repr__(self) -> str:
         return (
             f"<Tensorlake ReducerFunctionCall(\n"
             f"  reducer_function_name={self.function_name!r},\n"
             f"  inputs={self.inputs!r},\n"
-            f"  is_initial_missing={self.is_initial_missing!r},\n"
-            f"  initial={self.initial!r}\n"
             f")>"
         )
 
@@ -65,9 +52,10 @@ def reduce(
     if len(inputs.items) == 0 and initial is _InitialMissing:
         raise TypeError("reduce() of empty iterable with no initial value")
 
+    if initial is not _InitialMissing:
+        inputs.items.insert(0, initial)
+
     return ReducerFunctionCall(
         reducer_function_name=function.function_config.function_name,
         inputs=inputs,
-        is_initial_missing=initial is _InitialMissing,
-        initial=initial if initial is not _InitialMissing else None,
     )

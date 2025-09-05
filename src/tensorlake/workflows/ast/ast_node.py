@@ -64,3 +64,7 @@ class ASTNode:
             raise ValueError(
                 f"Old child with id {old_child.id} is not a child of parent node with id {self.id}"
             )
+
+    def add_child(self, child: "ASTNode") -> None:
+        self.children[child.id] = child
+        child.parent = self

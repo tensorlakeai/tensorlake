@@ -30,7 +30,6 @@ class RegularFunctionCallMetadata(BaseModel):
     kwargs: Dict[str, ArgumentMetadata]
 
     def serialize(self) -> bytes:
-        # Using pickle here because it's faster than JSON serialization according to Internet.
         return pickle.dumps(self)
 
     @classmethod
@@ -132,8 +131,7 @@ class RegularFunctionCallNode(ASTNode):
                     )
                 else:
                     arg_node: ASTNode = ast_from_user_object(value, inputs_serializer)
-                    node.children[arg_node.id] = arg_node
-                    arg_node.parent = node
+                    node.add_child(arg_node)
                     arg_metadata = ArgumentMetadata(
                         nid=arg_node.id, ctx=False, flist=None
                     )

@@ -105,17 +105,8 @@ class LocalRunner:
         reducer_call: ReducerFunctionCall = node.to_reducer_function_call()
         reducer_function: Function = get_function(reducer_call.function_name)
 
-        inputs: List[Any]
-        if len(reducer_call.inputs.items) == 0:
-            # Initial is never missing if len(inputs) == 0,
-            # this is validated in tensorlake.reduce().
-            inputs = [reducer_call.initial]
-        else:
-            inputs = reducer_call.inputs.items
-            if not reducer_call.is_initial_missing:
-                inputs.insert(0, reducer_call.initial)
-
-        # inputs contains at least 1 item at this point.
+        # inputs contains at least 1 item, this is guranteed by ReducerFunctionCall.
+        inputs: List[Any] = reducer_call.inputs.items
         accumulator: Any = inputs[0]
         for input_value in inputs[1:]:
             args: List[Any] = [accumulator, input_value]

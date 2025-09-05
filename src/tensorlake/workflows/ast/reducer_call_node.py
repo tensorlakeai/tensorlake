@@ -1,4 +1,7 @@
+import pickle
 from typing import Any, List
+
+from pydantic import BaseModel
 
 from ..function.user_data_serializer import function_input_serializer
 from ..interface.function import Function
@@ -8,63 +11,48 @@ from ..registry import get_function
 from ..user_data_serializer import UserDataSerializer
 from .ast import ast_from_user_object
 from .ast_node import ASTNode
+from .future_list_metadata import FutureListMetadata
 from .value_node import ValueNode
 
 
-# A reducer call can't have any metadata because Indexify Server protocol
-# currently doesn't allow that.
+class ReducerFunctionCallMetadata(BaseModel):
+    # Contains at least one item due to initial + SDK validation.
+    flist: FutureListMetadata
+
+    def serialize(self) -> bytes:
+        return pickle.dumps(self)
+
+    @classmethod
+    def deserialize(cls, data: bytes) -> "ReducerFunctionCallMetadata":
+        return pickle.loads(data)
+
+
 class ReducerFunctionCallNode(ASTNode):
     def __init__(self, reducer_function_name: str):
         super().__init__()
         self._reducer_function_name: str = reducer_function_name
-        self._inputs: List[ASTNode] = []
-        self._initial: ASTNode | None = None
 
     @property
     def reducer_function_name(self) -> str:
         return self._reducer_function_name
 
-    @property
-    def inputs(self) -> List[ASTNode]:
-        return self._inputs
-
-    @property
-    def initial(self) -> ASTNode | None:
-        return self._initial
-
-    def replace_child(self, old_child: "ASTNode", new_child: "ASTNode") -> None:
-        """Replaces an old child node with a new child node.
-
-        The old child node is not valid after the replacement."""
-        super().replace_child(old_child, new_child)
-        if self._initial is not None and old_child.id == self._initial.id:
-            self._initial = new_child
-            return
-
-        # Linear lookup using ASTNode equality operator.
-        old_child_inputs_ix: int = self._inputs.index(old_child)
-        self._inputs[old_child_inputs_ix] = new_child
-
-    def to_reducer_function_call(
-        node: "ReducerFunctionCallNode",
-    ) -> ReducerFunctionCall:
+    def to_reducer_function_call(self) -> ReducerFunctionCall:
         """Converts the node back to its original ReducerFunctionCall.
 
         All children must be value nodes (they must already be resolved/finished).
         """
-        node._initial: ValueNode | None
-        initial: Any = node._initial.to_value() if node._initial is not None else None
+        metadata: ReducerFunctionCallMetadata = ReducerFunctionCallMetadata.deserialize(
+            self.serialized_metadata
+        )
 
         inputs: List[Any] = []
-        for input_node in node._inputs:
-            input_node: ValueNode
+        for input_node_id in metadata.flist.nids:
+            input_node: ValueNode = self.children[input_node_id]
             inputs.append(input_node.to_value())
 
         return ReducerFunctionCall(
-            reducer_function_name=node._reducer_function_name,
+            reducer_function_name=self.reducer_function_name,
             inputs=FutureList(inputs),
-            is_initial_missing=node._initial is None,
-            initial=initial,
         )
 
     @classmethod
@@ -76,15 +64,13 @@ class ReducerFunctionCallNode(ASTNode):
         node: ReducerFunctionCallNode = ReducerFunctionCallNode(
             reducer_call.function_name
         )
-        node._initial = (
-            None
-            if reducer_call.is_initial_missing
-            else ast_from_user_object(reducer_call.initial, input_serializer)
-        )
+        input_node_ids: List[str] = []
         for input in reducer_call.inputs.items:
             input_node: ASTNode = ast_from_user_object(input, input_serializer)
-            input_node.parent = node
-            node.children[input_node.id] = input_node
-            node._inputs.append(input_node)
+            node.add_child(input_node)
+            input_node_ids.append(input_node.id)
 
+        node.serialized_metadata = ReducerFunctionCallMetadata(
+            flist=FutureListMetadata(nids=input_node_ids)
+        ).serialize()
         return node
