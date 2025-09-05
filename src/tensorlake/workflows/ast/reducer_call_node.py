@@ -17,6 +17,8 @@ from .value_node import ValueNode
 
 class ReducerFunctionCallMetadata(BaseModel):
     # Contains at least one item due to initial + SDK validation.
+    # TODO: remove this from metadata because it's not used to run the function calls.
+    # We only need to know metadata type to run a reducer function.
     flist: FutureListMetadata
 
     def serialize(self) -> bytes:

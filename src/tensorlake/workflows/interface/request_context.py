@@ -1,7 +1,4 @@
-from typing import (
-    Any,
-    Optional,
-)
+from typing import Any
 
 
 class RequestState:
@@ -19,7 +16,7 @@ class RequestState:
         Raises Exception if an error occurred."""
         raise NotImplementedError()
 
-    def get(self, key: str, default: Optional[Any] = None) -> Optional[Any]:
+    def get(self, key: str, default: Any | None = None) -> Any | None:
         """Get a value by key. If the key does not exist, return the default value.
 
         Raises Exception if an error occurred."""

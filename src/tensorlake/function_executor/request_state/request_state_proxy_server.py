@@ -1,38 +1,38 @@
 import hashlib
 import queue
 import threading
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator
 
 import grpc
 
-from tensorlake.functions_sdk.object_serializer import (
-    CloudPickleSerializer,
-)
-
 from ..proto.function_executor_pb2 import (
-    GetInvocationStateRequest,
-    InvocationStateRequest,
-    InvocationStateResponse,
+    GetRequestStateRequest,
+    RequestStateRequest,
+    RequestStateResponse,
     SerializedObject,
     SerializedObjectEncoding,
     SerializedObjectManifest,
-    SetInvocationStateRequest,
+    SetRequestStateRequest,
 )
 from .response_validator import ResponseValidator
 
 
-class InvocationStateProxyServer:
-    """A gRPC server that proxies InvocationState calls to the gRPC client.
+class RequestStateProxyServer:
+    """A gRPC server that proxies RequestState calls to the gRPC client.
 
-    The gRPC client is responsible for the actual implementation of the InvocationState.
+    The gRPC client is responsible for the actual implementation of the RequestState.
     We do the proxying to remove authorization logic and credentials from Function Executor.
     This improves security posture of Function Executor because it may run untrusted code.
     """
 
     def __init__(
-        self, client_responses: Iterator[InvocationStateResponse], logger: Any
+        self,
+        encoding: SerializedObjectEncoding,
+        client_responses: Iterator[RequestStateResponse],
+        logger: Any,
     ):
-        self._client_responses: Iterator[InvocationStateResponse] = client_responses
+        self._client_responses: Iterator[RequestStateResponse] = client_responses
+        self._encoding: SerializedObjectEncoding = encoding
         self._logger: Any = logger.bind(module=__name__)
         self._reciever_thread: threading.Thread = threading.Thread(
             target=self._reciever
@@ -44,10 +44,10 @@ class InvocationStateProxyServer:
         # to be worried about interger overflows.
         self._request_seq_num: int = 0
         # Request ID -> Client Response.
-        self._response_map: dict[str, InvocationStateResponse] = {}
+        self._response_map: dict[str, RequestStateResponse] = {}
         self._new_response: threading.Condition = threading.Condition(self._lock)
 
-    def run(self) -> Iterator[InvocationStateRequest]:
+    def run(self) -> Iterator[RequestStateRequest]:
         # There's no need to implement shutdown of the server and its threads because
         # the server lives while the Function Executor process lives.
         self._reciever_thread.start()
@@ -65,7 +65,7 @@ class InvocationStateProxyServer:
                     continue
 
                 with self._lock:
-                    self._response_map[response.request_id] = response
+                    self._response_map[response.state_request_id] = response
                     self._new_response.notify_all()
         except grpc.RpcError:
             self._logger.info("shutting down, client disconnected")
@@ -74,14 +74,14 @@ class InvocationStateProxyServer:
         except Exception as e:
             self._logger.error("error in reciever thread, exiting", exc_info=e)
 
-    def _sender(self) -> Iterator[InvocationStateRequest]:
+    def _sender(self) -> Iterator[RequestStateRequest]:
         while True:
             request: Any = self._request_queue.get()
             if request == "shutdown":
                 self._logger.info("sender thread shutting down")
                 return
 
-            request: InvocationStateRequest
+            request: RequestStateRequest
             yield request
             with self._lock:
                 # Wait until we get a response for the request.
@@ -89,22 +89,19 @@ class InvocationStateProxyServer:
                 # we can avoid a read returning not previously written value.
                 self._new_response.wait()
 
-    def set(self, task_id: str, key: str, value: Any) -> None:
+    def set(self, allocation_id: str, key: str, data: bytes) -> None:
         with self._lock:
-            request_id: str = str(self._request_seq_num)
+            state_request_id: str = str(self._request_seq_num)
             self._request_seq_num += 1
 
-            # We currently use CloudPickleSerializer for function inputs,
-            # outputs and invocation state values. This provides consistent UX.
-            data: bytes = CloudPickleSerializer.serialize(value)
-            request = InvocationStateRequest(
-                request_id=request_id,
-                task_id=task_id,
-                set=SetInvocationStateRequest(
+            request = RequestStateRequest(
+                state_request_id=state_request_id,
+                allocation_id=allocation_id,
+                set=SetRequestStateRequest(
                     key=key,
                     value=SerializedObject(
                         manifest=SerializedObjectManifest(
-                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
+                            encoding=self._encoding,
                             encoding_version=0,
                             size=len(data),
                             sha256_hash=hashlib.sha256(data).hexdigest(),
@@ -114,85 +111,83 @@ class InvocationStateProxyServer:
                 ),
             )
             self._request_queue.put(request)
-            while request_id not in self._response_map:
+            while state_request_id not in self._response_map:
                 self._new_response.wait()
 
-            response: InvocationStateResponse = self._response_map.pop(request_id)
-            if response.request_id != request_id:
+            response: RequestStateResponse = self._response_map.pop(state_request_id)
+            if response.state_request_id != state_request_id:
                 self._logger.error(
-                    "response request_id doesn't match actual request_id",
-                    request_id=request_id,
+                    "response state_request_id doesn't match actual request_id",
+                    state_request_id=state_request_id,
                     response=response,
                 )
                 raise RuntimeError(
-                    "response request_id doesn't match actual request_id"
+                    "response state_request_id doesn't match actual request_id"
                 )
             if not response.HasField("set"):
                 self._logger.error(
                     "set response is missing in the client response",
-                    request_id=request_id,
+                    state_request_id=state_request_id,
                     response=response,
                 )
                 raise RuntimeError("set response is missing in the client response")
             if not response.success:
                 self._logger.error(
-                    "failed to set the invocation state for key",
+                    "failed to set the request state for key",
                     key=key,
                 )
-                raise RuntimeError("failed to set the invocation state for key")
+                raise RuntimeError("failed to set the request state for key")
 
-    def get(self, task_id: str, key: str) -> Optional[Any]:
+    def get(self, allocation_id: str, key: str) -> bytes | None:
         with self._lock:
-            request_id: str = str(self._request_seq_num)
+            state_request_id: str = str(self._request_seq_num)
             self._request_seq_num += 1
 
-            request = InvocationStateRequest(
-                request_id=request_id,
-                task_id=task_id,
-                get=GetInvocationStateRequest(
+            request = RequestStateRequest(
+                state_request_id=state_request_id,
+                allocation_id=allocation_id,
+                get=GetRequestStateRequest(
                     key=key,
                 ),
             )
             self._request_queue.put(request)
-            while request_id not in self._response_map:
+            while state_request_id not in self._response_map:
                 self._new_response.wait()
 
-            response: InvocationStateResponse = self._response_map.pop(request_id)
-            if response.request_id != request_id:
+            response: RequestStateResponse = self._response_map.pop(state_request_id)
+            if response.state_request_id != state_request_id:
                 self._logger.error(
-                    "response request_id doesn't match actual request_id",
-                    request_id=request_id,
+                    "response state_request_id doesn't match actual state_request_id",
+                    state_request_id=state_request_id,
                     response=response,
                 )
                 raise RuntimeError(
-                    "response request_id doesn't match actual request_id"
+                    "response state_request_id doesn't match actual state_request_id"
                 )
             if not response.HasField("get"):
                 self._logger.error(
                     "get response is missing in the client response",
-                    request_id=request_id,
+                    state_request_id=state_request_id,
                     response=response,
                 )
                 raise RuntimeError("get response is missing in the client response")
             if not response.success:
                 self._logger.error(
-                    "failed to get the invocation state for key",
+                    "failed to get the request state for key",
                     key=key,
                 )
-                raise RuntimeError("failed to get the invocation state for key")
+                raise RuntimeError("failed to get the request state for key")
             if not response.get.HasField("value"):
                 return None
 
             so_value: SerializedObject = response.get.value
-            if (
-                so_value.manifest.encoding
-                != SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE
-            ):
+            if so_value.manifest.encoding != self._encoding:
                 self._logger.error(
-                    "unexpected encoding of the invocation state value",
+                    "unexpected encoding of the request state value",
                     key=key,
                     encoding=SerializedObjectEncoding.Name(so_value.manifest.encoding),
+                    expected_encoding=SerializedObjectEncoding.Name(self._encoding),
                 )
-                raise RuntimeError("unexpected encoding of the invocation state value")
+                raise RuntimeError("unexpected encoding of the request state value")
 
-            return CloudPickleSerializer.deserialize(so_value.data)
+            return so_value.data

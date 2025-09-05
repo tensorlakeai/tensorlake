@@ -15,8 +15,8 @@ from typing import Any, Dict, List
 @dataclass
 class InitializationEventDetails:
     namespace: str
-    graph_name: str
-    graph_version: str
+    application_name: str
+    application_version: str
     function_name: str
 
 
@@ -26,8 +26,8 @@ def log_user_event_initialization_started(details: InitializationEventDetails) -
         {
             "event": "function_executor_initialization_started",
             "namespace": details.namespace,
-            "graph": details.graph_name,
-            "graph_version": details.graph_version,
+            "application": details.application_name,
+            "application_version": details.application_version,
             "fn": details.function_name,
         }
     )
@@ -42,38 +42,38 @@ def log_user_event_initialization_finished(
             "event": "function_executor_initialization_finished",
             "success": success,
             "namespace": details.namespace,
-            "graph": details.graph_name,
-            "graph_version": details.graph_version,
+            "application": details.application_name,
+            "application_version": details.application_version,
             "fn": details.function_name,
         }
     )
 
 
 @dataclass
-class TaskAllocationEventDetails:
+class AllocationEventDetails:
     namespace: str
-    graph_name: str
-    graph_version: str
+    application_name: str
+    application_version: str
     function_name: str
-    graph_invocation_id: str
+    request_id: str
     task_id: str
     allocation_id: str
 
 
-def log_user_event_task_allocations_started(
-    details: List[TaskAllocationEventDetails],
+def log_user_event_allocations_started(
+    details: List[AllocationEventDetails],
 ) -> None:
     # Using standardized tags, see https://github.com/tensorlakeai/indexify/blob/main/docs/tags.md.
     _log_event(
         {
-            "event": "task_allocations_started",
+            "event": "allocations_started",
             "allocations": [
                 {
                     "namespace": alloc_info.namespace,
-                    "graph": alloc_info.graph_name,
-                    "graph_version": alloc_info.graph_version,
+                    "application": alloc_info.application_name,
+                    "application_version": alloc_info.application_version,
                     "fn": alloc_info.function_name,
-                    "graph_invocation_id": alloc_info.graph_invocation_id,
+                    "request_id": alloc_info.request_id,
                     "task_id": alloc_info.task_id,
                     "allocation_id": alloc_info.allocation_id,
                 }
@@ -83,20 +83,20 @@ def log_user_event_task_allocations_started(
     )
 
 
-def log_user_event_task_allocations_finished(
-    details: List[TaskAllocationEventDetails],
+def log_user_event_allocations_finished(
+    details: List[AllocationEventDetails],
 ) -> None:
     # Using standardized tags, see https://github.com/tensorlakeai/indexify/blob/main/docs/tags.md.
     _log_event(
         {
-            "event": "task_allocations_finished",
+            "event": "allocations_finished",
             "allocations": [
                 {
                     "namespace": alloc_info.namespace,
-                    "graph": alloc_info.graph_name,
-                    "graph_version": alloc_info.graph_version,
+                    "application": alloc_info.application_name,
+                    "application_version": alloc_info.application_version,
                     "fn": alloc_info.function_name,
-                    "graph_invocation_id": alloc_info.graph_invocation_id,
+                    "request_id": alloc_info.request_id,
                     "task_id": alloc_info.task_id,
                     "allocation_id": alloc_info.allocation_id,
                 }

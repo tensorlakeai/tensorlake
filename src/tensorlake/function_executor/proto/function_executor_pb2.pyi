@@ -18,6 +18,7 @@ class SerializedObjectEncoding(int, metaclass=_enum_type_wrapper.EnumTypeWrapper
     SERIALIZED_OBJECT_ENCODING_UTF8_TEXT: _ClassVar[SerializedObjectEncoding]
     SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE: _ClassVar[SerializedObjectEncoding]
     SERIALIZED_OBJECT_ENCODING_BINARY_ZIP: _ClassVar[SerializedObjectEncoding]
+    SERIALIZED_OBJECT_ENCODING_RAW: _ClassVar[SerializedObjectEncoding]
 
 class InitializationOutcomeCode(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -31,58 +32,76 @@ class InitializationFailureReason(int, metaclass=_enum_type_wrapper.EnumTypeWrap
     INITIALIZATION_FAILURE_REASON_INTERNAL_ERROR: _ClassVar[InitializationFailureReason]
     INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR: _ClassVar[InitializationFailureReason]
 
-class TaskOutcomeCode(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+class AllocationOutcomeCode(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
-    TASK_OUTCOME_CODE_UNKNOWN: _ClassVar[TaskOutcomeCode]
-    TASK_OUTCOME_CODE_SUCCESS: _ClassVar[TaskOutcomeCode]
-    TASK_OUTCOME_CODE_FAILURE: _ClassVar[TaskOutcomeCode]
+    ALLOCATION_OUTCOME_CODE_UNKNOWN: _ClassVar[AllocationOutcomeCode]
+    ALLOCATION_OUTCOME_CODE_SUCCESS: _ClassVar[AllocationOutcomeCode]
+    ALLOCATION_OUTCOME_CODE_FAILURE: _ClassVar[AllocationOutcomeCode]
 
-class TaskFailureReason(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+class AllocationFailureReason(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
-    TASK_FAILURE_REASON_UNKNOWN: _ClassVar[TaskFailureReason]
-    TASK_FAILURE_REASON_INTERNAL_ERROR: _ClassVar[TaskFailureReason]
-    TASK_FAILURE_REASON_FUNCTION_ERROR: _ClassVar[TaskFailureReason]
-    TASK_FAILURE_REASON_INVOCATION_ERROR: _ClassVar[TaskFailureReason]
+    ALLOCATION_FAILURE_REASON_UNKNOWN: _ClassVar[AllocationFailureReason]
+    ALLOCATION_FAILURE_REASON_INTERNAL_ERROR: _ClassVar[AllocationFailureReason]
+    ALLOCATION_FAILURE_REASON_FUNCTION_ERROR: _ClassVar[AllocationFailureReason]
+    ALLOCATION_FAILURE_REASON_REQUEST_ERROR: _ClassVar[AllocationFailureReason]
 
 SERIALIZED_OBJECT_ENCODING_UNKNOWN: SerializedObjectEncoding
 SERIALIZED_OBJECT_ENCODING_UTF8_JSON: SerializedObjectEncoding
 SERIALIZED_OBJECT_ENCODING_UTF8_TEXT: SerializedObjectEncoding
 SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE: SerializedObjectEncoding
 SERIALIZED_OBJECT_ENCODING_BINARY_ZIP: SerializedObjectEncoding
+SERIALIZED_OBJECT_ENCODING_RAW: SerializedObjectEncoding
 INITIALIZATION_OUTCOME_CODE_UNKNOWN: InitializationOutcomeCode
 INITIALIZATION_OUTCOME_CODE_SUCCESS: InitializationOutcomeCode
 INITIALIZATION_OUTCOME_CODE_FAILURE: InitializationOutcomeCode
 INITIALIZATION_FAILURE_REASON_UNKNOWN: InitializationFailureReason
 INITIALIZATION_FAILURE_REASON_INTERNAL_ERROR: InitializationFailureReason
 INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR: InitializationFailureReason
-TASK_OUTCOME_CODE_UNKNOWN: TaskOutcomeCode
-TASK_OUTCOME_CODE_SUCCESS: TaskOutcomeCode
-TASK_OUTCOME_CODE_FAILURE: TaskOutcomeCode
-TASK_FAILURE_REASON_UNKNOWN: TaskFailureReason
-TASK_FAILURE_REASON_INTERNAL_ERROR: TaskFailureReason
-TASK_FAILURE_REASON_FUNCTION_ERROR: TaskFailureReason
-TASK_FAILURE_REASON_INVOCATION_ERROR: TaskFailureReason
+ALLOCATION_OUTCOME_CODE_UNKNOWN: AllocationOutcomeCode
+ALLOCATION_OUTCOME_CODE_SUCCESS: AllocationOutcomeCode
+ALLOCATION_OUTCOME_CODE_FAILURE: AllocationOutcomeCode
+ALLOCATION_FAILURE_REASON_UNKNOWN: AllocationFailureReason
+ALLOCATION_FAILURE_REASON_INTERNAL_ERROR: AllocationFailureReason
+ALLOCATION_FAILURE_REASON_FUNCTION_ERROR: AllocationFailureReason
+ALLOCATION_FAILURE_REASON_REQUEST_ERROR: AllocationFailureReason
 
 class Empty(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
 
 class SerializedObjectManifest(_message.Message):
-    __slots__ = ("encoding", "encoding_version", "size", "sha256_hash")
+    __slots__ = (
+        "encoding",
+        "encoding_version",
+        "size",
+        "metadata_size",
+        "sha256_hash",
+        "content_type",
+        "function_call_id",
+    )
     ENCODING_FIELD_NUMBER: _ClassVar[int]
     ENCODING_VERSION_FIELD_NUMBER: _ClassVar[int]
     SIZE_FIELD_NUMBER: _ClassVar[int]
+    METADATA_SIZE_FIELD_NUMBER: _ClassVar[int]
     SHA256_HASH_FIELD_NUMBER: _ClassVar[int]
+    CONTENT_TYPE_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_CALL_ID_FIELD_NUMBER: _ClassVar[int]
     encoding: SerializedObjectEncoding
     encoding_version: int
     size: int
+    metadata_size: int
     sha256_hash: str
+    content_type: str
+    function_call_id: str
     def __init__(
         self,
         encoding: _Optional[_Union[SerializedObjectEncoding, str]] = ...,
         encoding_version: _Optional[int] = ...,
         size: _Optional[int] = ...,
+        metadata_size: _Optional[int] = ...,
         sha256_hash: _Optional[str] = ...,
+        content_type: _Optional[str] = ...,
+        function_call_id: _Optional[str] = ...,
     ) -> None: ...
 
 class SerializedObject(_message.Message):
@@ -132,25 +151,39 @@ class SerializedObjectInsideBLOB(_message.Message):
         offset: _Optional[int] = ...,
     ) -> None: ...
 
-class InitializeRequest(_message.Message):
-    __slots__ = ("namespace", "graph_name", "graph_version", "function_name", "graph")
+class FunctionRef(_message.Message):
+    __slots__ = (
+        "namespace",
+        "application_name",
+        "function_name",
+        "application_version",
+    )
     NAMESPACE_FIELD_NUMBER: _ClassVar[int]
-    GRAPH_NAME_FIELD_NUMBER: _ClassVar[int]
-    GRAPH_VERSION_FIELD_NUMBER: _ClassVar[int]
+    APPLICATION_NAME_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_NAME_FIELD_NUMBER: _ClassVar[int]
-    GRAPH_FIELD_NUMBER: _ClassVar[int]
+    APPLICATION_VERSION_FIELD_NUMBER: _ClassVar[int]
     namespace: str
-    graph_name: str
-    graph_version: str
+    application_name: str
     function_name: str
-    graph: SerializedObject
+    application_version: str
     def __init__(
         self,
         namespace: _Optional[str] = ...,
-        graph_name: _Optional[str] = ...,
-        graph_version: _Optional[str] = ...,
+        application_name: _Optional[str] = ...,
         function_name: _Optional[str] = ...,
-        graph: _Optional[_Union[SerializedObject, _Mapping]] = ...,
+        application_version: _Optional[str] = ...,
+    ) -> None: ...
+
+class InitializeRequest(_message.Message):
+    __slots__ = ("function", "application_code")
+    FUNCTION_FIELD_NUMBER: _ClassVar[int]
+    APPLICATION_CODE_FIELD_NUMBER: _ClassVar[int]
+    function: FunctionRef
+    application_code: SerializedObject
+    def __init__(
+        self,
+        function: _Optional[_Union[FunctionRef, _Mapping]] = ...,
+        application_code: _Optional[_Union[SerializedObject, _Mapping]] = ...,
     ) -> None: ...
 
 class InitializeDiagnostics(_message.Message):
@@ -174,7 +207,7 @@ class InitializeResponse(_message.Message):
         diagnostics: _Optional[_Union[InitializeDiagnostics, _Mapping]] = ...,
     ) -> None: ...
 
-class SetInvocationStateRequest(_message.Message):
+class SetRequestStateRequest(_message.Message):
     __slots__ = ("key", "value")
     KEY_FIELD_NUMBER: _ClassVar[int]
     VALUE_FIELD_NUMBER: _ClassVar[int]
@@ -186,17 +219,17 @@ class SetInvocationStateRequest(_message.Message):
         value: _Optional[_Union[SerializedObject, _Mapping]] = ...,
     ) -> None: ...
 
-class SetInvocationStateResponse(_message.Message):
+class SetRequestStateResponse(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
 
-class GetInvocationStateRequest(_message.Message):
+class GetRequestStateRequest(_message.Message):
     __slots__ = ("key",)
     KEY_FIELD_NUMBER: _ClassVar[int]
     key: str
     def __init__(self, key: _Optional[str] = ...) -> None: ...
 
-class GetInvocationStateResponse(_message.Message):
+class GetRequestStateResponse(_message.Message):
     __slots__ = ("key", "value")
     KEY_FIELD_NUMBER: _ClassVar[int]
     VALUE_FIELD_NUMBER: _ClassVar[int]
@@ -208,52 +241,52 @@ class GetInvocationStateResponse(_message.Message):
         value: _Optional[_Union[SerializedObject, _Mapping]] = ...,
     ) -> None: ...
 
-class InvocationStateRequest(_message.Message):
-    __slots__ = ("request_id", "task_id", "set", "get")
-    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
-    TASK_ID_FIELD_NUMBER: _ClassVar[int]
+class RequestStateRequest(_message.Message):
+    __slots__ = ("state_request_id", "allocation_id", "set", "get")
+    STATE_REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
     SET_FIELD_NUMBER: _ClassVar[int]
     GET_FIELD_NUMBER: _ClassVar[int]
-    request_id: str
-    task_id: str
-    set: SetInvocationStateRequest
-    get: GetInvocationStateRequest
+    state_request_id: str
+    allocation_id: str
+    set: SetRequestStateRequest
+    get: GetRequestStateRequest
     def __init__(
         self,
-        request_id: _Optional[str] = ...,
-        task_id: _Optional[str] = ...,
-        set: _Optional[_Union[SetInvocationStateRequest, _Mapping]] = ...,
-        get: _Optional[_Union[GetInvocationStateRequest, _Mapping]] = ...,
+        state_request_id: _Optional[str] = ...,
+        allocation_id: _Optional[str] = ...,
+        set: _Optional[_Union[SetRequestStateRequest, _Mapping]] = ...,
+        get: _Optional[_Union[GetRequestStateRequest, _Mapping]] = ...,
     ) -> None: ...
 
-class InvocationStateResponse(_message.Message):
-    __slots__ = ("request_id", "success", "set", "get")
-    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+class RequestStateResponse(_message.Message):
+    __slots__ = ("state_request_id", "success", "set", "get")
+    STATE_REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     SUCCESS_FIELD_NUMBER: _ClassVar[int]
     SET_FIELD_NUMBER: _ClassVar[int]
     GET_FIELD_NUMBER: _ClassVar[int]
-    request_id: str
+    state_request_id: str
     success: bool
-    set: SetInvocationStateResponse
-    get: GetInvocationStateResponse
+    set: SetRequestStateResponse
+    get: GetRequestStateResponse
     def __init__(
         self,
-        request_id: _Optional[str] = ...,
+        state_request_id: _Optional[str] = ...,
         success: bool = ...,
-        set: _Optional[_Union[SetInvocationStateResponse, _Mapping]] = ...,
-        get: _Optional[_Union[GetInvocationStateResponse, _Mapping]] = ...,
+        set: _Optional[_Union[SetRequestStateResponse, _Mapping]] = ...,
+        get: _Optional[_Union[GetRequestStateResponse, _Mapping]] = ...,
     ) -> None: ...
 
-class ListTasksRequest(_message.Message):
+class ListAllocationsRequest(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
 
-class ListTasksResponse(_message.Message):
-    __slots__ = ("tasks",)
-    TASKS_FIELD_NUMBER: _ClassVar[int]
-    tasks: _containers.RepeatedCompositeFieldContainer[Task]
+class ListAllocationsResponse(_message.Message):
+    __slots__ = ("allocations",)
+    ALLOCATIONS_FIELD_NUMBER: _ClassVar[int]
+    allocations: _containers.RepeatedCompositeFieldContainer[Allocation]
     def __init__(
-        self, tasks: _Optional[_Iterable[_Union[Task, _Mapping]]] = ...
+        self, allocations: _Optional[_Iterable[_Union[Allocation, _Mapping]]] = ...
     ) -> None: ...
 
 class Metrics(_message.Message):
@@ -299,166 +332,198 @@ class ProgressUpdate(_message.Message):
         self, current: _Optional[float] = ..., total: _Optional[float] = ...
     ) -> None: ...
 
-class AwaitTaskProgress(_message.Message):
-    __slots__ = ("progress", "task_result")
+class AwaitAllocationProgress(_message.Message):
+    __slots__ = ("progress", "allocation_result")
     PROGRESS_FIELD_NUMBER: _ClassVar[int]
-    TASK_RESULT_FIELD_NUMBER: _ClassVar[int]
+    ALLOCATION_RESULT_FIELD_NUMBER: _ClassVar[int]
     progress: ProgressUpdate
-    task_result: TaskResult
+    allocation_result: AllocationResult
     def __init__(
         self,
         progress: _Optional[_Union[ProgressUpdate, _Mapping]] = ...,
-        task_result: _Optional[_Union[TaskResult, _Mapping]] = ...,
+        allocation_result: _Optional[_Union[AllocationResult, _Mapping]] = ...,
     ) -> None: ...
 
 class FunctionInputs(_message.Message):
     __slots__ = (
-        "function_input_blob",
-        "function_input",
-        "function_init_value_blob",
-        "function_init_value",
+        "args",
+        "arg_blobs",
         "function_outputs_blob",
-        "invocation_error_blob",
+        "request_error_blob",
+        "function_call_metadata",
     )
-    FUNCTION_INPUT_BLOB_FIELD_NUMBER: _ClassVar[int]
-    FUNCTION_INPUT_FIELD_NUMBER: _ClassVar[int]
-    FUNCTION_INIT_VALUE_BLOB_FIELD_NUMBER: _ClassVar[int]
-    FUNCTION_INIT_VALUE_FIELD_NUMBER: _ClassVar[int]
+    ARGS_FIELD_NUMBER: _ClassVar[int]
+    ARG_BLOBS_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_OUTPUTS_BLOB_FIELD_NUMBER: _ClassVar[int]
-    INVOCATION_ERROR_BLOB_FIELD_NUMBER: _ClassVar[int]
-    function_input_blob: BLOB
-    function_input: SerializedObjectInsideBLOB
-    function_init_value_blob: BLOB
-    function_init_value: SerializedObjectInsideBLOB
+    REQUEST_ERROR_BLOB_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_CALL_METADATA_FIELD_NUMBER: _ClassVar[int]
+    args: _containers.RepeatedCompositeFieldContainer[SerializedObjectInsideBLOB]
+    arg_blobs: _containers.RepeatedCompositeFieldContainer[BLOB]
     function_outputs_blob: BLOB
-    invocation_error_blob: BLOB
+    request_error_blob: BLOB
+    function_call_metadata: bytes
     def __init__(
         self,
-        function_input_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
-        function_input: _Optional[_Union[SerializedObjectInsideBLOB, _Mapping]] = ...,
-        function_init_value_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
-        function_init_value: _Optional[
-            _Union[SerializedObjectInsideBLOB, _Mapping]
-        ] = ...,
+        args: _Optional[_Iterable[_Union[SerializedObjectInsideBLOB, _Mapping]]] = ...,
+        arg_blobs: _Optional[_Iterable[_Union[BLOB, _Mapping]]] = ...,
         function_outputs_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
-        invocation_error_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
+        request_error_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
+        function_call_metadata: _Optional[bytes] = ...,
     ) -> None: ...
 
-class TaskDiagnostics(_message.Message):
+class AllocationDiagnostics(_message.Message):
     __slots__ = ("function_executor_log",)
     FUNCTION_EXECUTOR_LOG_FIELD_NUMBER: _ClassVar[int]
     function_executor_log: str
     def __init__(self, function_executor_log: _Optional[str] = ...) -> None: ...
 
-class TaskResult(_message.Message):
+class FunctionArg(_message.Message):
+    __slots__ = ("function_call_id", "value")
+    FUNCTION_CALL_ID_FIELD_NUMBER: _ClassVar[int]
+    VALUE_FIELD_NUMBER: _ClassVar[int]
+    function_call_id: str
+    value: SerializedObjectInsideBLOB
+    def __init__(
+        self,
+        function_call_id: _Optional[str] = ...,
+        value: _Optional[_Union[SerializedObjectInsideBLOB, _Mapping]] = ...,
+    ) -> None: ...
+
+class FunctionCall(_message.Message):
+    __slots__ = ("id", "target", "args", "metadata")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    TARGET_FIELD_NUMBER: _ClassVar[int]
+    ARGS_FIELD_NUMBER: _ClassVar[int]
+    METADATA_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    target: FunctionRef
+    args: _containers.RepeatedCompositeFieldContainer[FunctionArg]
+    metadata: bytes
+    def __init__(
+        self,
+        id: _Optional[str] = ...,
+        target: _Optional[_Union[FunctionRef, _Mapping]] = ...,
+        args: _Optional[_Iterable[_Union[FunctionArg, _Mapping]]] = ...,
+        metadata: _Optional[bytes] = ...,
+    ) -> None: ...
+
+class ReduceOp(_message.Message):
+    __slots__ = ("inputs", "reducer")
+    INPUTS_FIELD_NUMBER: _ClassVar[int]
+    REDUCER_FIELD_NUMBER: _ClassVar[int]
+    inputs: _containers.RepeatedCompositeFieldContainer[FunctionArg]
+    reducer: FunctionRef
+    def __init__(
+        self,
+        inputs: _Optional[_Iterable[_Union[FunctionArg, _Mapping]]] = ...,
+        reducer: _Optional[_Union[FunctionRef, _Mapping]] = ...,
+    ) -> None: ...
+
+class ExecutionPlanUpdate(_message.Message):
+    __slots__ = ("function_call", "reduce")
+    FUNCTION_CALL_FIELD_NUMBER: _ClassVar[int]
+    REDUCE_FIELD_NUMBER: _ClassVar[int]
+    function_call: FunctionCall
+    reduce: ReduceOp
+    def __init__(
+        self,
+        function_call: _Optional[_Union[FunctionCall, _Mapping]] = ...,
+        reduce: _Optional[_Union[ReduceOp, _Mapping]] = ...,
+    ) -> None: ...
+
+class ExecutionPlanUpdates(_message.Message):
+    __slots__ = ("updates",)
+    UPDATES_FIELD_NUMBER: _ClassVar[int]
+    updates: _containers.RepeatedCompositeFieldContainer[ExecutionPlanUpdate]
+    def __init__(
+        self, updates: _Optional[_Iterable[_Union[ExecutionPlanUpdate, _Mapping]]] = ...
+    ) -> None: ...
+
+class AllocationResult(_message.Message):
     __slots__ = (
         "outcome_code",
         "failure_reason",
-        "function_outputs",
+        "value",
+        "updates",
         "uploaded_function_outputs_blob",
-        "invocation_error_output",
-        "uploaded_invocation_error_blob",
-        "next_functions",
+        "request_error_output",
+        "uploaded_request_error_blob",
         "metrics",
         "diagnostics",
     )
     OUTCOME_CODE_FIELD_NUMBER: _ClassVar[int]
     FAILURE_REASON_FIELD_NUMBER: _ClassVar[int]
-    FUNCTION_OUTPUTS_FIELD_NUMBER: _ClassVar[int]
+    VALUE_FIELD_NUMBER: _ClassVar[int]
+    UPDATES_FIELD_NUMBER: _ClassVar[int]
     UPLOADED_FUNCTION_OUTPUTS_BLOB_FIELD_NUMBER: _ClassVar[int]
-    INVOCATION_ERROR_OUTPUT_FIELD_NUMBER: _ClassVar[int]
-    UPLOADED_INVOCATION_ERROR_BLOB_FIELD_NUMBER: _ClassVar[int]
-    NEXT_FUNCTIONS_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_ERROR_OUTPUT_FIELD_NUMBER: _ClassVar[int]
+    UPLOADED_REQUEST_ERROR_BLOB_FIELD_NUMBER: _ClassVar[int]
     METRICS_FIELD_NUMBER: _ClassVar[int]
     DIAGNOSTICS_FIELD_NUMBER: _ClassVar[int]
-    outcome_code: TaskOutcomeCode
-    failure_reason: TaskFailureReason
-    function_outputs: _containers.RepeatedCompositeFieldContainer[
-        SerializedObjectInsideBLOB
-    ]
+    outcome_code: AllocationOutcomeCode
+    failure_reason: AllocationFailureReason
+    value: SerializedObjectInsideBLOB
+    updates: ExecutionPlanUpdates
     uploaded_function_outputs_blob: BLOB
-    invocation_error_output: SerializedObjectInsideBLOB
-    uploaded_invocation_error_blob: BLOB
-    next_functions: _containers.RepeatedScalarFieldContainer[str]
+    request_error_output: SerializedObjectInsideBLOB
+    uploaded_request_error_blob: BLOB
     metrics: Metrics
-    diagnostics: TaskDiagnostics
+    diagnostics: AllocationDiagnostics
     def __init__(
         self,
-        outcome_code: _Optional[_Union[TaskOutcomeCode, str]] = ...,
-        failure_reason: _Optional[_Union[TaskFailureReason, str]] = ...,
-        function_outputs: _Optional[
-            _Iterable[_Union[SerializedObjectInsideBLOB, _Mapping]]
-        ] = ...,
+        outcome_code: _Optional[_Union[AllocationOutcomeCode, str]] = ...,
+        failure_reason: _Optional[_Union[AllocationFailureReason, str]] = ...,
+        value: _Optional[_Union[SerializedObjectInsideBLOB, _Mapping]] = ...,
+        updates: _Optional[_Union[ExecutionPlanUpdates, _Mapping]] = ...,
         uploaded_function_outputs_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
-        invocation_error_output: _Optional[
+        request_error_output: _Optional[
             _Union[SerializedObjectInsideBLOB, _Mapping]
         ] = ...,
-        uploaded_invocation_error_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
-        next_functions: _Optional[_Iterable[str]] = ...,
+        uploaded_request_error_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
         metrics: _Optional[_Union[Metrics, _Mapping]] = ...,
-        diagnostics: _Optional[_Union[TaskDiagnostics, _Mapping]] = ...,
+        diagnostics: _Optional[_Union[AllocationDiagnostics, _Mapping]] = ...,
     ) -> None: ...
 
-class Task(_message.Message):
-    __slots__ = (
-        "namespace",
-        "graph_name",
-        "graph_version",
-        "function_name",
-        "graph_invocation_id",
-        "task_id",
-        "allocation_id",
-        "request",
-        "result",
-    )
-    NAMESPACE_FIELD_NUMBER: _ClassVar[int]
-    GRAPH_NAME_FIELD_NUMBER: _ClassVar[int]
-    GRAPH_VERSION_FIELD_NUMBER: _ClassVar[int]
-    FUNCTION_NAME_FIELD_NUMBER: _ClassVar[int]
-    GRAPH_INVOCATION_ID_FIELD_NUMBER: _ClassVar[int]
+class Allocation(_message.Message):
+    __slots__ = ("request_id", "task_id", "allocation_id", "request", "result")
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     TASK_ID_FIELD_NUMBER: _ClassVar[int]
     ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
     REQUEST_FIELD_NUMBER: _ClassVar[int]
     RESULT_FIELD_NUMBER: _ClassVar[int]
-    namespace: str
-    graph_name: str
-    graph_version: str
-    function_name: str
-    graph_invocation_id: str
+    request_id: str
     task_id: str
     allocation_id: str
-    request: FunctionInputs
-    result: TaskResult
+    inputs: FunctionInputs
+    result: AllocationResult
     def __init__(
         self,
-        namespace: _Optional[str] = ...,
-        graph_name: _Optional[str] = ...,
-        graph_version: _Optional[str] = ...,
-        function_name: _Optional[str] = ...,
-        graph_invocation_id: _Optional[str] = ...,
+        request_id: _Optional[str] = ...,
         task_id: _Optional[str] = ...,
         allocation_id: _Optional[str] = ...,
         request: _Optional[_Union[FunctionInputs, _Mapping]] = ...,
-        result: _Optional[_Union[TaskResult, _Mapping]] = ...,
+        result: _Optional[_Union[AllocationResult, _Mapping]] = ...,
     ) -> None: ...
 
-class CreateTaskRequest(_message.Message):
-    __slots__ = ("task",)
-    TASK_FIELD_NUMBER: _ClassVar[int]
-    task: Task
-    def __init__(self, task: _Optional[_Union[Task, _Mapping]] = ...) -> None: ...
+class CreateAllocationRequest(_message.Message):
+    __slots__ = ("allocation",)
+    ALLOCATION_FIELD_NUMBER: _ClassVar[int]
+    allocation: Allocation
+    def __init__(
+        self, allocation: _Optional[_Union[Allocation, _Mapping]] = ...
+    ) -> None: ...
 
-class AwaitTaskRequest(_message.Message):
-    __slots__ = ("task_id",)
-    TASK_ID_FIELD_NUMBER: _ClassVar[int]
-    task_id: str
-    def __init__(self, task_id: _Optional[str] = ...) -> None: ...
+class AwaitAllocationRequest(_message.Message):
+    __slots__ = ("allocation_id",)
+    ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
+    allocation_id: str
+    def __init__(self, allocation_id: _Optional[str] = ...) -> None: ...
 
-class DeleteTaskRequest(_message.Message):
-    __slots__ = ("task_id",)
-    TASK_ID_FIELD_NUMBER: _ClassVar[int]
-    task_id: str
-    def __init__(self, task_id: _Optional[str] = ...) -> None: ...
+class DeleteAllocationRequest(_message.Message):
+    __slots__ = ("allocation_id",)
+    ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
+    allocation_id: str
+    def __init__(self, allocation_id: _Optional[str] = ...) -> None: ...
 
 class HealthCheckRequest(_message.Message):
     __slots__ = ()
