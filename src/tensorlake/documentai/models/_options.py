@@ -7,7 +7,7 @@ from ._enums import (
     ModelProvider,
     OcrPipelineProvider,
     PageFragmentType,
-    PartitionStrategy,
+    PartitionConfig,
     TableOutputMode,
     TableParsingFormat,
 )
@@ -117,7 +117,7 @@ class StructuredExtractionOptions(BaseModel):
     )
 
     # Optional fields
-    partition_strategy: Optional[PartitionStrategy] = Field(
+    partition_strategy: Optional[PartitionConfig] = Field(
         default=None,
         description="Strategy to partition the document before structured data extraction. The API will return one structured data object per partition. This is useful when you want to extract certain fields from every page.",
     )

@@ -3,6 +3,9 @@ Enums for document parsing.
 """
 
 from enum import Enum
+from typing import Annotated, List, Literal, Optional, Union
+
+from pydantic import BaseModel, Field
 
 
 class Region(str, Enum):
@@ -103,14 +106,41 @@ class ParseStatus(str, Enum):
 
 class PartitionStrategy(str, Enum):
     """
-    Partition strategy for parsing a document.
+    Strategy for partitioning a document before structured data extraction.
 
-    NONE: No partitioning is applied.
-    PAGE: Partition the document into pages.
+    NONE: No partitioning is applied. The entire document is treated as a single unit for extraction.
+    PAGE: The document is partitioned by individual pages. Each page is treated as a separate unit for extraction.
+    SECTION: The document is partitioned into sections based on detected section headers. Each section is treated as a separate unit for extraction.
+    FRAGMENT: The document is partitioned by individual page elements (fragments). Each fragment is treated as a separate unit for extraction.
+    PATTERNS: The document is partitioned based on user-defined start and end patterns.
     """
 
     NONE = "none"
     PAGE = "page"
+    SECTION = "section"
+    FRAGMENT = "fragment"
+    PATTERNS = "patterns"
+
+
+class PatternChunking(BaseModel):
+    """
+    Partition strategy based on start and end patterns.
+
+    Args:
+        strategy (Literal["patterns"]): The partitioning strategy to use. Must be "patterns".
+        start_patterns (Optional[List[str]]): List of document-specific keywords or phrases that indicate the start of a new chunk.
+        end_patterns (Optional[List[str]]): List of document-specific keywords or phrases that indicate the end of a chunk.
+    """
+
+    strategy: Literal["patterns"]
+    start_patterns: Optional[List[str]] = None
+    end_patterns: Optional[List[str]] = None
+
+
+PartitionConfig = Annotated[
+    Union[PartitionStrategy, PatternChunking],
+    Field(discriminator="strategy", description="Partitioning strategy"),
+]
 
 
 class TableOutputMode(str, Enum):

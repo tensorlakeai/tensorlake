@@ -21,7 +21,9 @@ from tensorlake.documentai.models import (
     ParseResult,
     ParseStatus,
     ParsingOptions,
+    PartitionConfig,
     PartitionStrategy,
+    PatternChunking,
     Region,
     Signature,
     StructuredData,
@@ -45,6 +47,8 @@ __all__ = [
     "PartitionStrategy",
     "TableOutputMode",
     "TableParsingFormat",
+    "PatternChunking",
+    "PartitionConfig",
     # Options
     "EnrichmentOptions",
     "Options",
