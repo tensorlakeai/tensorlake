@@ -13,9 +13,9 @@ from ._enums import (
     ParseStatus,
     PartitionConfig,
     PartitionStrategy,
-    SimpleChunking,
     PatternChunking,
     Region,
+    SimpleChunking,
     TableOutputMode,
     TableParsingFormat,
 )

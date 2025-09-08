@@ -121,11 +121,14 @@ class PartitionStrategy(str, Enum):
     FRAGMENT = "fragment"
     PATTERNS = "patterns"
 
+
 class SimpleChunking(BaseModel):
     """
     Variant of PartitionStrategy for simple strategies.
     """
+
     strategy: Literal["none", "page", "section", "fragment"]
+
 
 class PatternChunking(BaseModel):
     """

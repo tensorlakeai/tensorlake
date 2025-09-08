@@ -8,9 +8,10 @@ from ._enums import (
     OcrPipelineProvider,
     PageFragmentType,
     PartitionConfig,
+    PartitionStrategy,
+    SimpleChunking,
     TableOutputMode,
     TableParsingFormat,
-    PartitionStrategy,
 )
 
 
@@ -145,7 +146,7 @@ class StructuredExtractionOptions(BaseModel):
 
     @field_validator("partition_strategy", mode="before")
     @classmethod
-    def normalize_partition_strategy(cls, v):
+    def _normalize_partition_strategy(cls, v):
         if v is None:
             return v
         if isinstance(v, PartitionStrategy):
@@ -154,6 +155,14 @@ class StructuredExtractionOptions(BaseModel):
             if v == PartitionStrategy.PATTERNS.value:
                 return {"strategy": "patterns"}
             return {"strategy": v}
+        return v
+
+    @field_serializer("partition_strategy")
+    def _serialize_partition_strategy(self, v):
+        if v is None:
+            return None
+        if isinstance(v, SimpleChunking):
+            return v.strategy
         return v
 
 
