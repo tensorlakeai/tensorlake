@@ -47,7 +47,7 @@ class TestExtract(unittest.TestCase):
         )
 
         self.assertIsNotNone(parse_id)
-        print(f"Classify Extract ID: {parse_id}")
+        print(f"Extract ID: {parse_id}")
 
         parse_result = self.doc_ai.wait_for_completion(parse_id=parse_id)
 
@@ -89,7 +89,7 @@ class TestExtract(unittest.TestCase):
         )
 
         self.assertIsNotNone(parse_id)
-        print(f"Classify Extract ID: {parse_id}")
+        print(f"Extract ID: {parse_id}")
 
         parse_result = self.doc_ai.wait_for_completion(parse_id=parse_id)
 
