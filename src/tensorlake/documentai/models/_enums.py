@@ -121,6 +121,11 @@ class PartitionStrategy(str, Enum):
     FRAGMENT = "fragment"
     PATTERNS = "patterns"
 
+class SimpleChunking(BaseModel):
+    """
+    Variant of PartitionStrategy for simple strategies.
+    """
+    strategy: Literal["none", "page", "section", "fragment"]
 
 class PatternChunking(BaseModel):
     """
@@ -138,8 +143,8 @@ class PatternChunking(BaseModel):
 
 
 PartitionConfig = Annotated[
-    Union[PartitionStrategy, PatternChunking],
-    Field(discriminator="strategy", description="Partitioning strategy"),
+    Union[SimpleChunking, PatternChunking],
+    Field(discriminator="strategy"),
 ]
 
 

@@ -13,6 +13,7 @@ from ._enums import (
     ParseStatus,
     PartitionConfig,
     PartitionStrategy,
+    SimpleChunking,
     PatternChunking,
     Region,
     TableOutputMode,
@@ -59,6 +60,7 @@ __all__ = [
     "TableParsingFormat",
     "PatternChunking",
     "PartitionConfig",
+    "SimpleChunking",
     # Options
     "EnrichmentOptions",
     "Options",

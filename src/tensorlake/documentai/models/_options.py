@@ -1,6 +1,6 @@
 from typing import List, Optional, Set, Type, Union
 
-from pydantic import BaseModel, Field, Json, field_serializer
+from pydantic import BaseModel, Field, Json, field_serializer, field_validator
 
 from ._enums import (
     ChunkingStrategy,
@@ -10,6 +10,7 @@ from ._enums import (
     PartitionConfig,
     TableOutputMode,
     TableParsingFormat,
+    PartitionStrategy,
 )
 
 
@@ -141,6 +142,19 @@ class StructuredExtractionOptions(BaseModel):
         default=None,
         description="Boolean flag to skip converting the document blob to OCR text before structured data extraction. If set to `true`, the API will skip the OCR step and directly extract structured data from the document. The default is `false`.",
     )
+
+    @field_validator("partition_strategy", mode="before")
+    @classmethod
+    def normalize_partition_strategy(cls, v):
+        if v is None:
+            return v
+        if isinstance(v, PartitionStrategy):
+            v = v.value
+        if isinstance(v, str):
+            if v == PartitionStrategy.PATTERNS.value:
+                return {"strategy": "patterns"}
+            return {"strategy": v}
+        return v
 
 
 class Options(BaseModel):
