@@ -9,7 +9,9 @@ from ._enums import (
     PageFragmentType,
     PartitionConfig,
     PartitionStrategy,
-    SimpleChunking,
+    PatternConfig,
+    SimplePartitionStrategy,
+    PatternPartitionStrategy,
     TableOutputMode,
     TableParsingFormat,
 )
@@ -149,20 +151,75 @@ class StructuredExtractionOptions(BaseModel):
     def _normalize_partition_strategy(cls, v):
         if v is None:
             return v
-        if isinstance(v, PartitionStrategy):
-            v = v.value
+
+        # Handle string input
         if isinstance(v, str):
             if v == PartitionStrategy.PATTERNS.value:
-                return {"strategy": "patterns"}
-            return {"strategy": v}
+                return {"strategy": "patterns", "patterns": {"start_patterns": None, "end_patterns": None}}
+            else:
+                return {"strategy": v}
+
+        # Handle dictionary input
+        if isinstance(v, dict):
+            # If it has 'patterns' key, it's a PatternPartitionStrategy
+            if "patterns" in v:
+                return v  # Already in correct format
+            # If it has 'strategy' key, it might need conversion
+            elif "strategy" in v and v["strategy"] == "patterns":
+                return {
+                    "strategy": "patterns",  # Keep the strategy field
+                    "patterns": {
+                        "start_patterns": v.get("start_patterns"),
+                        "end_patterns": v.get("end_patterns"),
+                    }
+                }
+            # Otherwise it's a simple strategy
+            else:
+                return v
+
+        # Handle model objects
+        if isinstance(v, PatternPartitionStrategy):
+            return {
+                "strategy": "patterns",  # Add the missing strategy field
+                "patterns": {
+                    "start_patterns": v.patterns.start_patterns,
+                    "end_patterns": v.patterns.end_patterns,
+                }
+            }
+
+        if isinstance(v, SimplePartitionStrategy):
+            return {"strategy": v.strategy}
+
         return v
 
     @field_serializer("partition_strategy")
     def _serialize_partition_strategy(self, v):
         if v is None:
             return None
-        if isinstance(v, SimpleChunking):
+        if isinstance(v, SimplePartitionStrategy):
             return v.strategy
+        if isinstance(v, PatternPartitionStrategy):
+            return {
+                "patterns": {
+                    "start_patterns": v.patterns.start_patterns,
+                    "end_patterns": v.patterns.end_patterns,
+                }
+            }
+        return v
+
+    @field_validator("partition_strategy", mode="after")
+    @classmethod
+    def _validate_partition_strategy_type(cls, v):
+        if v is None:
+            return v
+
+        # Custom validation since we can't use automatic discriminator
+        if isinstance(v, dict):
+            if "patterns" in v:
+                return PatternPartitionStrategy(patterns=PatternConfig(**v["patterns"]))
+
+            return SimplePartitionStrategy(strategy=v["strategy"])
+
         return v
 
 

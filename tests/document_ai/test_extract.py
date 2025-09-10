@@ -1,13 +1,14 @@
 import os
 import unittest
-
-from json_schemas.bank_statement import BankStatement
+from pathlib import Path
 
 from tensorlake.documentai import (
     DocumentAI,
     ParseStatus,
     PartitionStrategy,
     StructuredExtractionOptions,
+    PatternPartitionStrategy,
+    PatternConfig,
 )
 
 
@@ -29,16 +30,36 @@ class TestExtract(unittest.TestCase):
         )
         self.addCleanup(self.doc_ai.close)
 
+        self.test_dir = Path(__file__).parent
+        self.test_data_dir = self.test_dir / "testdata"
+
     def test_extract(self):
         structured_extraction_options = StructuredExtractionOptions(
-            schema_name="form125-basic",
-            json_schema=BankStatement,
-            partition_strategy=PartitionStrategy.PAGE,
+            schema_name="w2FormSimple",
+            json_schema={
+                "title": "w2FormSimple",
+                "type": "object",
+                "properties": {
+                    "ssn": {
+                        "type": "string",
+                        "description": "Employee's Social Security Number (Box a)",
+                    },
+                    "employerName": {
+                        "type": "string",
+                        "description": "Full name of the employer (Box c)",
+                    },
+                    "wagesTipsOtherCompensation": {
+                        "type": "number",
+                        "description": "Wages, tips, and other compensation (Box 1)",
+                    },
+                },
+                "required": ["ssn", "employerName", "wagesTipsOtherCompensation"],
+            },
+            partition_strategy=PartitionStrategy.SECTION,
         )
 
-        file_id = self.doc_ai.upload(
-            path="./document_ai/testdata/example_bank_statement.pdf"
-        )
+        test_file_path = self.test_data_dir / "w2.pdf"
+        file_id = self.doc_ai.upload(path=str(test_file_path.absolute()))
         self.assertIsNotNone(file_id)
 
         parse_id = self.doc_ai.extract(
@@ -59,7 +80,7 @@ class TestExtract(unittest.TestCase):
         for schema in parse_result.structured_data or []:
             structured_extraction_schemas[schema.schema_name] = schema
 
-        self.assertIsNotNone(structured_extraction_schemas.get("form125-basic"))
+        self.assertIsNotNone(structured_extraction_schemas.get("w2FormSimple"))
 
         if parse_result.status == ParseStatus.SUCCESSFUL:
             self.doc_ai.delete_parse(parse_result.parse_id)
@@ -69,18 +90,37 @@ class TestExtract(unittest.TestCase):
 
     def test_extract_partition_with_patterns(self):
         structured_extraction_options = StructuredExtractionOptions(
-            schema_name="form125-basic",
-            json_schema=BankStatement,
-            partition_strategy={
-                "strategy": "patterns",
-                "start_patterns": ["Account Summary"],
-                "end_patterns": ["End of Statement"],
+            schema_name="w2FormSimple",
+            json_schema={
+                "title": "w2FormSimple",
+                "type": "object",
+                "properties": {
+                    "ssn": {
+                        "type": "string",
+                        "description": "Employee's Social Security Number (Box a)",
+                    },
+                    "employerName": {
+                        "type": "string",
+                        "description": "Full name of the employer (Box c)",
+                    },
+                    "wagesTipsOtherCompensation": {
+                        "type": "number",
+                        "description": "Wages, tips, and other compensation (Box 1)",
+                    },
+                },
+                "required": ["ssn", "employerName", "wagesTipsOtherCompensation"],
             },
+            partition_strategy=PatternPartitionStrategy(
+                strategy="patterns",
+                patterns=PatternConfig(
+                    start_patterns=[r"Form W-2", r"Employee's social security number"],
+                    end_patterns=[r"Department of the Treasury", r"Employer identification number"],
+                )
+            )
         )
 
-        file_id = self.doc_ai.upload(
-            path="./document_ai/testdata/example_bank_statement.pdf"
-        )
+        test_file_path = self.test_data_dir / "w2.pdf"
+        file_id = self.doc_ai.upload(path=str(test_file_path.absolute()))
         self.assertIsNotNone(file_id)
 
         parse_id = self.doc_ai.extract(
@@ -101,7 +141,7 @@ class TestExtract(unittest.TestCase):
         for schema in parse_result.structured_data or []:
             structured_extraction_schemas[schema.schema_name] = schema
 
-        self.assertIsNotNone(structured_extraction_schemas.get("form125-basic"))
+        self.assertIsNotNone(structured_extraction_schemas.get("w2FormSimple"))
 
         if parse_result.status == ParseStatus.SUCCESSFUL:
             self.doc_ai.delete_parse(parse_result.parse_id)

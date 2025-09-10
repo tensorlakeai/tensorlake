@@ -122,7 +122,7 @@ class PartitionStrategy(str, Enum):
     PATTERNS = "patterns"
 
 
-class SimpleChunking(BaseModel):
+class SimplePartitionStrategy(BaseModel):
     """
     Variant of PartitionStrategy for simple strategies.
     """
@@ -130,23 +130,23 @@ class SimpleChunking(BaseModel):
     strategy: Literal["none", "page", "section", "fragment"]
 
 
-class PatternChunking(BaseModel):
+class PatternConfig(BaseModel):
     """
-    Partition strategy based on start and end patterns.
-
-    Args:
-        strategy (Literal["patterns"]): The partitioning strategy to use. Must be "patterns".
-        start_patterns (Optional[List[str]]): List of document-specific keywords or phrases that indicate the start of a new chunk.
-        end_patterns (Optional[List[str]]): List of document-specific keywords or phrases that indicate the end of a chunk.
+    Configuration for pattern-based partitioning.
     """
-
-    strategy: Literal["patterns"]
     start_patterns: Optional[List[str]] = None
     end_patterns: Optional[List[str]] = None
 
+class PatternPartitionStrategy(BaseModel):
+    """
+    Partition strategy based on start and end patterns.
+    """
+    strategy: Literal["patterns"]
+    patterns: PatternConfig
+
 
 PartitionConfig = Annotated[
-    Union[SimpleChunking, PatternChunking],
+    Union[SimplePartitionStrategy, PatternPartitionStrategy],
     Field(discriminator="strategy"),
 ]
 
