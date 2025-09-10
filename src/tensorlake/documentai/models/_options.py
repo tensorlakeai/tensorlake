@@ -153,10 +153,6 @@ class StructuredExtractionOptions(BaseModel):
             return v
 
         if isinstance(v, PartitionStrategy):
-            if v == PartitionStrategy.PATTERNS:
-                raise ValueError(
-                    "Cannot use PATTERNS strategy without pattern configuration"
-                )
             return SimplePartitionStrategy(strategy=v.value)
 
         # Handle string values
