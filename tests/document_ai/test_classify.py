@@ -1,5 +1,6 @@
 import os
 import unittest
+from pathlib import Path
 
 from tensorlake.documentai import DocumentAI, PageClassConfig, ParseStatus
 
@@ -22,6 +23,9 @@ class TestClassify(unittest.TestCase):
         )
         self.addCleanup(self.doc_ai.close)
 
+        self.test_dir = Path(__file__).parent
+        self.test_data_dir = self.test_dir / "testdata"
+
     def test_classify(self):
         form125_page_class_config = PageClassConfig(
             name="form125",
@@ -33,7 +37,8 @@ class TestClassify(unittest.TestCase):
             description="ACORD 140: Property Section — includes details about property coverage, location, valuation, and limit",
         )
 
-        accord_file_id = self.doc_ai.upload(path="./document_ai/testdata/acord.pdf")
+        test_file_path = self.test_data_dir / "acord.pdf"
+        accord_file_id = self.doc_ai.upload(path=str(test_file_path.absolute()))
         self.assertIsNotNone(accord_file_id)
 
         parse_id = self.doc_ai.classify(
@@ -41,7 +46,6 @@ class TestClassify(unittest.TestCase):
             file_id=accord_file_id,
         )
         self.assertIsNotNone(parse_id)
-        print(f"Classify Parse ID: {parse_id}")
 
         parsed_result = self.doc_ai.wait_for_completion(parse_id=parse_id)
         self.assertIsNotNone(parsed_result)
@@ -58,6 +62,9 @@ class TestClassify(unittest.TestCase):
 
         self.assertIn("form125", page_classes)
         self.assertIn("form140", page_classes)
+
+        self.assertIsNotNone(page_classes["form125"].classification_reasons)
+        self.assertIsNotNone(page_classes["form140"].classification_reasons)
 
         if parsed_result.status == ParseStatus.SUCCESSFUL:
             self.doc_ai.delete_parse(parsed_result.parse_id)

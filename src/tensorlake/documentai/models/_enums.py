@@ -3,6 +3,9 @@ Enums for document parsing.
 """
 
 from enum import Enum
+from typing import Annotated, List, Literal, Optional, Union
+
+from pydantic import BaseModel, Field
 
 
 class Region(str, Enum):
@@ -103,14 +106,56 @@ class ParseStatus(str, Enum):
 
 class PartitionStrategy(str, Enum):
     """
-    Partition strategy for parsing a document.
+    Strategy for partitioning a document before structured data extraction.
 
-    NONE: No partitioning is applied.
-    PAGE: Partition the document into pages.
+    NONE: No partitioning is applied. The entire document is treated as a single unit for extraction.
+    PAGE: The document is partitioned by individual pages. Each page is treated as a separate unit for extraction.
+    SECTION: The document is partitioned into sections based on detected section headers. Each section is treated as a separate unit for extraction.
+    FRAGMENT: The document is partitioned by individual page elements (fragments). Each fragment is treated as a separate unit for extraction.
+    PATTERNS: The document is partitioned based on user-defined start and end patterns.
     """
 
     NONE = "none"
     PAGE = "page"
+    SECTION = "section"
+    FRAGMENT = "fragment"
+
+
+class SimplePartitionStrategy(BaseModel):
+    """
+    Variant of PartitionStrategy for simple strategies.
+    """
+
+    strategy: Literal["none", "page", "section", "fragment"]
+
+
+class PatternConfig(BaseModel):
+    """
+    Configuration for pattern-based partitioning.
+    """
+
+    start_patterns: Optional[List[str]] = None
+    end_patterns: Optional[List[str]] = None
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        if not self.start_patterns and not self.end_patterns:
+            raise ValueError("At least one start or end pattern must be provided.")
+
+
+class PatternPartitionStrategy(BaseModel):
+    """
+    Partition strategy based on start and end patterns.
+    """
+
+    strategy: Literal["patterns"] = Field(default="patterns")
+    patterns: PatternConfig
+
+
+PartitionConfig = Annotated[
+    Union[SimplePartitionStrategy, PatternPartitionStrategy],
+    Field(discriminator="strategy"),
+]
 
 
 class TableOutputMode(str, Enum):

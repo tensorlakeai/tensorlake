@@ -11,8 +11,12 @@ from ._enums import (
     ModelProvider,
     OcrPipelineProvider,
     ParseStatus,
+    PartitionConfig,
     PartitionStrategy,
+    PatternConfig,
+    PatternPartitionStrategy,
     Region,
+    SimplePartitionStrategy,
     TableOutputMode,
     TableParsingFormat,
 )
@@ -55,6 +59,10 @@ __all__ = [
     "PartitionStrategy",
     "TableOutputMode",
     "TableParsingFormat",
+    "PatternPartitionStrategy",
+    "PartitionConfig",
+    "SimplePartitionStrategy",
+    "PatternConfig",
     # Options
     "EnrichmentOptions",
     "Options",

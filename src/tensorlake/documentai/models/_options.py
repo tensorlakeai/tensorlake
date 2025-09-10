@@ -1,13 +1,17 @@
 from typing import List, Optional, Set, Type, Union
 
-from pydantic import BaseModel, Field, Json, field_serializer
+from pydantic import BaseModel, Field, Json, field_serializer, field_validator
 
 from ._enums import (
     ChunkingStrategy,
     ModelProvider,
     OcrPipelineProvider,
     PageFragmentType,
+    PartitionConfig,
     PartitionStrategy,
+    PatternConfig,
+    PatternPartitionStrategy,
+    SimplePartitionStrategy,
     TableOutputMode,
     TableParsingFormat,
 )
@@ -117,7 +121,7 @@ class StructuredExtractionOptions(BaseModel):
     )
 
     # Optional fields
-    partition_strategy: Optional[PartitionStrategy] = Field(
+    partition_strategy: Optional[PartitionConfig] = Field(
         default=None,
         description="Strategy to partition the document before structured data extraction. The API will return one structured data object per partition. This is useful when you want to extract certain fields from every page.",
     )
@@ -141,6 +145,72 @@ class StructuredExtractionOptions(BaseModel):
         default=None,
         description="Boolean flag to skip converting the document blob to OCR text before structured data extraction. If set to `true`, the API will skip the OCR step and directly extract structured data from the document. The default is `false`.",
     )
+
+    @field_validator("partition_strategy", mode="before")
+    @classmethod
+    def _normalize_partition_strategy(cls, v):
+        if v is None:
+            return v
+
+        if isinstance(v, PartitionStrategy):
+            return SimplePartitionStrategy(strategy=v.value)
+
+        # Handle string values
+        if isinstance(v, str):
+            if v == "patterns":
+                raise ValueError(
+                    "Cannot use 'patterns' strategy without pattern configuration"
+                )
+            return SimplePartitionStrategy(strategy=v)
+
+        if isinstance(v, dict):
+            if "patterns" in v:
+                return PatternPartitionStrategy(patterns=PatternConfig(**v["patterns"]))
+
+            elif "strategy" in v and v["strategy"] == "patterns":
+                return PatternPartitionStrategy(
+                    patterns=PatternConfig(
+                        start_patterns=v.get("start_patterns"),
+                        end_patterns=v.get("end_patterns"),
+                    )
+                )
+            else:
+                return SimplePartitionStrategy(strategy=v["strategy"])
+
+        if isinstance(v, (SimplePartitionStrategy, PatternPartitionStrategy)):
+            return v
+
+        return v
+
+    @field_serializer("partition_strategy")
+    def _serialize_partition_strategy(self, v):
+        if v is None:
+            return None
+        if isinstance(v, SimplePartitionStrategy):
+            return v.strategy
+        if isinstance(v, PatternPartitionStrategy):
+            return {
+                "patterns": {
+                    "start_patterns": v.patterns.start_patterns,
+                    "end_patterns": v.patterns.end_patterns,
+                }
+            }
+        return v
+
+    @field_validator("partition_strategy", mode="after")
+    @classmethod
+    def _validate_partition_strategy_type(cls, v):
+        if v is None:
+            return v
+
+        # Custom validation since we can't use automatic discriminator
+        if isinstance(v, dict):
+            if "patterns" in v:
+                return PatternPartitionStrategy(patterns=PatternConfig(**v["patterns"]))
+
+            return SimplePartitionStrategy(strategy=v["strategy"])
+
+        return v
 
 
 class Options(BaseModel):

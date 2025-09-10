@@ -2,7 +2,7 @@
 This module contains the data models for the parsing results of a document.
 """
 
-from typing import Any, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -17,6 +17,10 @@ class PageClass(BaseModel):
     page_class: str = Field(description="The name of the page class")
     page_numbers: List[int] = Field(
         description="List of page numbers (1-indexed) where this page class appears"
+    )
+    classification_reasons: Optional[Dict[int, str]] = Field(
+        default=None,
+        description="Optional mapping of page numbers to classification reasons",
     )
 
 
@@ -88,6 +92,7 @@ class Page(BaseModel):
     dimensions: Optional[List[int]] = None
     page_fragments: Optional[List[PageFragment]] = None
     page_number: int
+    classification_reason: Optional[str] = None
 
 
 class StructuredData(BaseModel):
