@@ -6,9 +6,9 @@ from tensorlake.documentai import (
     DocumentAI,
     ParseStatus,
     PartitionStrategy,
-    StructuredExtractionOptions,
-    PatternPartitionStrategy,
     PatternConfig,
+    PatternPartitionStrategy,
+    StructuredExtractionOptions,
 )
 
 
@@ -111,12 +111,14 @@ class TestExtract(unittest.TestCase):
                 "required": ["ssn", "employerName", "wagesTipsOtherCompensation"],
             },
             partition_strategy=PatternPartitionStrategy(
-                strategy="patterns",
                 patterns=PatternConfig(
                     start_patterns=[r"Form W-2", r"Employee's social security number"],
-                    end_patterns=[r"Department of the Treasury", r"Employer identification number"],
+                    end_patterns=[
+                        r"Department of the Treasury",
+                        r"Employer identification number",
+                    ],
                 )
-            )
+            ),
         )
 
         test_file_path = self.test_data_dir / "w2.pdf"
@@ -148,6 +150,42 @@ class TestExtract(unittest.TestCase):
             self.assertRaises(
                 Exception, self.doc_ai.get_parsed_result, parse_result.parse_id
             )
+
+    def test_extract_invalid_patterns_partition_strategy(self):
+        with self.assertRaises(ValueError) as context:
+            StructuredExtractionOptions(
+                schema_name="w2FormSimple",
+                json_schema={
+                    "title": "w2FormSimple",
+                    "type": "object",
+                    "properties": {
+                        "ssn": {
+                            "type": "string",
+                            "description": "Employee's Social Security Number (Box a)",
+                        },
+                        "employerName": {
+                            "type": "string",
+                            "description": "Full name of the employer (Box c)",
+                        },
+                        "wagesTipsOtherCompensation": {
+                            "type": "number",
+                            "description": "Wages, tips, and other compensation (Box 1)",
+                        },
+                    },
+                    "required": ["ssn", "employerName", "wagesTipsOtherCompensation"],
+                },
+                partition_strategy=PatternPartitionStrategy(
+                    patterns=PatternConfig(
+                        start_patterns=None,
+                        end_patterns=None,
+                    )
+                ),
+            )
+
+        self.assertIn(
+            "At least one start or end pattern must be provided.",
+            str(context.exception),
+        )
 
 
 if __name__ == "__main__":

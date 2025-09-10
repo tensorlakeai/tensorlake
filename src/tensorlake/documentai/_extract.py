@@ -116,7 +116,6 @@ class _ExtractMixin(_BaseClient):
                 _convert_seo(opt) for opt in structured_extraction_options
             ]
 
-
         response = self._request("POST", "extract", json=payload)
         json_response = response.json()
         return json_response["parse_id"]

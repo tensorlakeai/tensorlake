@@ -10,8 +10,8 @@ from ._enums import (
     PartitionConfig,
     PartitionStrategy,
     PatternConfig,
-    SimplePartitionStrategy,
     PatternPartitionStrategy,
+    SimplePartitionStrategy,
     TableOutputMode,
     TableParsingFormat,
 )
@@ -152,43 +152,37 @@ class StructuredExtractionOptions(BaseModel):
         if v is None:
             return v
 
-        # Handle string input
+        if isinstance(v, PartitionStrategy):
+            if v == PartitionStrategy.PATTERNS:
+                raise ValueError(
+                    "Cannot use PATTERNS strategy without pattern configuration"
+                )
+            return SimplePartitionStrategy(strategy=v.value)
+
+        # Handle string values
         if isinstance(v, str):
-            if v == PartitionStrategy.PATTERNS.value:
-                return {"strategy": "patterns", "patterns": {"start_patterns": None, "end_patterns": None}}
-            else:
-                return {"strategy": v}
+            if v == "patterns":
+                raise ValueError(
+                    "Cannot use 'patterns' strategy without pattern configuration"
+                )
+            return SimplePartitionStrategy(strategy=v)
 
-        # Handle dictionary input
         if isinstance(v, dict):
-            # If it has 'patterns' key, it's a PatternPartitionStrategy
             if "patterns" in v:
-                return v  # Already in correct format
-            # If it has 'strategy' key, it might need conversion
+                return PatternPartitionStrategy(patterns=PatternConfig(**v["patterns"]))
+
             elif "strategy" in v and v["strategy"] == "patterns":
-                return {
-                    "strategy": "patterns",  # Keep the strategy field
-                    "patterns": {
-                        "start_patterns": v.get("start_patterns"),
-                        "end_patterns": v.get("end_patterns"),
-                    }
-                }
-            # Otherwise it's a simple strategy
+                return PatternPartitionStrategy(
+                    patterns=PatternConfig(
+                        start_patterns=v.get("start_patterns"),
+                        end_patterns=v.get("end_patterns"),
+                    )
+                )
             else:
-                return v
+                return SimplePartitionStrategy(strategy=v["strategy"])
 
-        # Handle model objects
-        if isinstance(v, PatternPartitionStrategy):
-            return {
-                "strategy": "patterns",  # Add the missing strategy field
-                "patterns": {
-                    "start_patterns": v.patterns.start_patterns,
-                    "end_patterns": v.patterns.end_patterns,
-                }
-            }
-
-        if isinstance(v, SimplePartitionStrategy):
-            return {"strategy": v.strategy}
+        if isinstance(v, (SimplePartitionStrategy, PatternPartitionStrategy)):
+            return v
 
         return v
 

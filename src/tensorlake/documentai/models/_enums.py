@@ -119,7 +119,6 @@ class PartitionStrategy(str, Enum):
     PAGE = "page"
     SECTION = "section"
     FRAGMENT = "fragment"
-    PATTERNS = "patterns"
 
 
 class SimplePartitionStrategy(BaseModel):
@@ -134,14 +133,22 @@ class PatternConfig(BaseModel):
     """
     Configuration for pattern-based partitioning.
     """
+
     start_patterns: Optional[List[str]] = None
     end_patterns: Optional[List[str]] = None
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        if not self.start_patterns and not self.end_patterns:
+            raise ValueError("At least one start or end pattern must be provided.")
+
 
 class PatternPartitionStrategy(BaseModel):
     """
     Partition strategy based on start and end patterns.
     """
-    strategy: Literal["patterns"]
+
+    strategy: Literal["patterns"] = Field(default="patterns")
     patterns: PatternConfig
 
 
