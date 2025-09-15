@@ -1,12 +1,9 @@
-import pickle
 import time
 from typing import Any, List
 
 from tensorlake.workflows.ast.function_call_node import (
-    RegularFunctionCallMetadata,
     RegularFunctionCallNode,
 )
-from tensorlake.workflows.ast.reducer_call_node import ReducerFunctionCallMetadata
 from tensorlake.workflows.ast.value_node import ValueNode
 from tensorlake.workflows.function.api_call import (
     api_function_call_with_serialized_payload,
@@ -29,6 +26,7 @@ from ...user_events import (
     log_user_event_allocations_started,
 )
 from .download import download_api_function_payload_bytes, download_function_arguments
+from .function_call_node_metadata import FunctionCallNodeMetadata, FunctionCallType
 from .response_helper import ResponseHelper
 
 
@@ -98,22 +96,25 @@ class Handler:
         )
 
     def _reconstruct_function_call(self) -> RegularFunctionCall:
+        # TODO: set self._function_instance_arg to the self argument of the function call
+        # TODO: set request context argument of the function call.
         if self._allocation.inputs.HasField("function_call_metadata"):
             downloaded_args: List[ValueNode] = download_function_arguments(
                 self._allocation, self._blob_store, self._logger
             )
-            metadata: RegularFunctionCallMetadata | ReducerFunctionCallMetadata = (
-                pickle.loads(self._allocation.inputs.function_call_metadata)
+            node_metadata: FunctionCallNodeMetadata = (
+                FunctionCallNodeMetadata.deserialize(
+                    self._allocation.inputs.function_call_metadata
+                )
             )
-            if isinstance(metadata, RegularFunctionCallMetadata):
-                # FIXME: We're deserializing metadata twice here because RegularFunctionCallNode
-                # doesn't have an option to get created from serialized metadata.
+            if node_metadata.type == FunctionCallType.REGULAR:
                 return RegularFunctionCallNode.from_serialized(
+                    node_metadata.nid,
                     self._function_ref.function_name,
-                    self._allocation.inputs.function_call_metadata,
+                    node_metadata.metadata,
                     downloaded_args,
                 ).to_regular_function_call()
-            elif isinstance(metadata, ReducerFunctionCallMetadata):
+            elif node_metadata.type == FunctionCallType.REDUCER:
                 if len(downloaded_args) != 2:
                     raise ValueError(
                         f"Expected 2 arguments for reducer function call, got {len(downloaded_args)}"
@@ -123,7 +124,7 @@ class Handler:
                 return reducer_function_call(self._function, accumulator, item)
             else:
                 raise ValueError(
-                    f"Received function call with unexpected metadata type: {metadata}"
+                    f"Received function call with unexpected function call node metadata type: {node_metadata.type}"
                 )
         else:
             if self._function.api_config is None:
