@@ -15,8 +15,9 @@ def set_application(application: Any) -> None:
     Overwrites previously set Application (it's a singleton)."""
     global _application
     if _application is not None:
-        # TODO: Figure out how to return error here.
-        print("Warning: Overwriting existing Tensorlake Application.")
+        print(
+            "Warning: Overwriting existing Tensorlake Application.", repr(_application)
+        )
     _application = application
 
 
@@ -31,8 +32,10 @@ def register_function(fn_name: str, fn: Any) -> None:
     global _function_registry
 
     if fn_name in _function_registry:
-        # TODO: Figure out how to return error here.
-        print(f"Warning: Tensorlake Function '{fn_name}' already exists.")
+        print(
+            "Warning: Overwriting existing Tensorlake Function.",
+            repr(_function_registry[fn_name]),
+        )
     _function_registry[fn_name] = fn
 
 

@@ -1,4 +1,5 @@
 import importlib
+import json
 import sys
 import tempfile
 import threading
@@ -13,6 +14,11 @@ from tensorlake.workflows.function.function_call import create_self_instance
 from tensorlake.workflows.interface import Function
 from tensorlake.workflows.interface.request_context import RequestProgress
 from tensorlake.workflows.registry import get_function, get_functions, has_function
+from tensorlake.workflows.remote.application.zip import (
+    APPLICATION_ZIP_MANIFEST_FILE_NAME,
+    ApplicationZIPManifest,
+    FunctionZIPManifest,
+)
 from tensorlake.workflows.request_context_base import RequestContextBase
 from tensorlake.workflows.user_data_serializer import PickleUserDataSerializer
 
@@ -148,16 +154,30 @@ class Service(FunctionExecutorServicer):
             # Process user controlled input in a try-except block to not treat errors here as our
             # internal platform errors.
             with zipfile.ZipFile(graph_modules_zip_path, "r") as zf:
-                # TODO: Record import path of every function in application manifest and only import it.
-                # This allows each function to defined it own imports and each function file should import
-                # all functions it routes too. So should work.
-                for file_name in zf.namelist():
-                    # Import all .py files at the root of the application code to register
-                    # functions and other SDK objects.
-                    if file_name.endswith(".py") and "/" not in file_name:
-                        module_name = file_name[:-3]
-                        importlib.import_module(module_name)
+                with zf.open(
+                    APPLICATION_ZIP_MANIFEST_FILE_NAME
+                ) as app_zip_manifest_file:
+                    app_zip_manifest: ApplicationZIPManifest = (
+                        ApplicationZIPManifest.model_validate(
+                            json.load(app_zip_manifest_file)
+                        )
+                    )
 
+            if request.function.function_name not in app_zip_manifest.functions:
+                raise ValueError(
+                    (
+                        f"Function '{request.function.function_name}' not found in the application '{request.function.application_name} ZIP manifest'. "
+                        f"Available functions: {list(app_zip_manifest.functions.keys())}"
+                    )
+                )
+
+            # Load the function module so that the function is available in the registry.
+            function_zip_manifest: FunctionZIPManifest = app_zip_manifest.functions[
+                request.function.function_name
+            ]
+            importlib.import_module(function_zip_manifest.module_import_name)
+
+            # Verify that the function exists in the registry now.
             if not has_function(request.function.function_name):
                 raise ValueError(
                     (
