@@ -8,6 +8,10 @@ from tensorlake.workflows.ast.value_node import ValueNode
 from tensorlake.workflows.function.api_call import (
     api_function_call_with_serialized_payload,
 )
+from tensorlake.workflows.function.function_call import (
+    set_request_context_args,
+    set_self_arg,
+)
 from tensorlake.workflows.function.reducer_call import reducer_function_call
 from tensorlake.workflows.interface.function import Function
 from tensorlake.workflows.interface.function_call import RegularFunctionCall
@@ -81,6 +85,9 @@ class Handler:
     def _run(self) -> AllocationResult:
         fe_log_start: int = self._logger.end()
         function_call: RegularFunctionCall = self._reconstruct_function_call()
+        set_request_context_args(function_call, self._request_context)
+        if self._function_instance_arg is not None:
+            set_self_arg(function_call, self._function_instance_arg)
 
         try:
             output: Any = self._call(function_call)
@@ -96,8 +103,6 @@ class Handler:
         )
 
     def _reconstruct_function_call(self) -> RegularFunctionCall:
-        # TODO: set self._function_instance_arg to the self argument of the function call
-        # TODO: set request context argument of the function call.
         if self._allocation.inputs.HasField("function_call_metadata"):
             downloaded_args: List[ValueNode] = download_function_arguments(
                 self._allocation, self._blob_store, self._logger
