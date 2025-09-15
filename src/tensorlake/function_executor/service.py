@@ -10,6 +10,8 @@ from typing import Any, Dict, Generator, Iterator, List
 
 import grpc
 
+# Code that uses SDK has to import first the SDK interfaces to avoid circular imports when importing internal SDK modules.
+import tensorlake.workflows.interface as workflow_interface
 from tensorlake.workflows.function.function_call import create_self_instance
 from tensorlake.workflows.interface import Function
 from tensorlake.workflows.interface.request_context import RequestProgress
@@ -145,7 +147,7 @@ class Service(FunctionExecutorServicer):
 
         graph_modules_zip_fd, graph_modules_zip_path = tempfile.mkstemp(suffix=".zip")
         with open(graph_modules_zip_fd, "wb") as graph_modules_zip_file:
-            graph_modules_zip_file.write(request.graph.data)
+            graph_modules_zip_file.write(request.application_code.data)
         sys.path.insert(
             0, graph_modules_zip_path
         )  # Add as the first entry so user modules have highest priority

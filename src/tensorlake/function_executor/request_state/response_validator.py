@@ -1,9 +1,9 @@
-from ..proto.function_executor_pb2 import InvocationStateResponse
+from ..proto.function_executor_pb2 import RequestStateResponse
 from ..proto.message_validator import MessageValidator
 
 
 class ResponseValidator(MessageValidator):
-    def __init__(self, response: InvocationStateResponse):
+    def __init__(self, response: RequestStateResponse):
         self._response = response
 
     def check(self):
