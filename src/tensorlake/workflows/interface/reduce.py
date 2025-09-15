@@ -13,6 +13,7 @@ class ReducerFunctionCall(FunctionCall):
         inputs: FutureList,
     ):
         super().__init__(reducer_function_name)
+        # Contains at least one item due to initial + SDK validation.
         self._inputs: FutureList = inputs
 
     @property

@@ -1,6 +1,6 @@
 import hashlib
 import time
-from typing import Any, List
+from typing import List
 
 from tensorlake.workflows.ast.value_node import ValueNode
 
@@ -12,6 +12,7 @@ from ...proto.function_executor_pb2 import (
     SerializedObjectInsideBLOB,
     SerializedObjectManifest,
 )
+from .value_node_metadata import ValueNodeMetadata
 
 
 def download_function_arguments(
@@ -57,7 +58,7 @@ def download_api_function_payload_bytes(
     api_payload_blob: BLOB = allocation.inputs.args[0]
     api_payload_so: SerializedObjectInsideBLOB = allocation.inputs.arg_blobs[0]
 
-    payload: Any = _download_function_argument(
+    payload: bytes = _download_function_argument(
         api_payload_blob, api_payload_so, blob_store, logger
     )
 
@@ -104,10 +105,14 @@ def _deserialize_to_value_node(
     if not manifest.HasField("function_call_id"):
         raise ValueError("SerializedObjectManifest is missing function_call_id.")
 
-    serialized_metadata = memoryview(data)[: manifest.metadata_size]
+    value_node_metadata: ValueNodeMetadata = ValueNodeMetadata.deserialize(
+        memoryview(data)[: manifest.metadata_size]
+    )
     serialized_value = memoryview(data)[manifest.metadata_size :]
     return ValueNode.from_serialized(
-        manifest.function_call_id, serialized_value, serialized_metadata
+        node_id=value_node_metadata.nid,
+        value=serialized_value,
+        metadata=value_node_metadata.metadata,
     )
 
 
