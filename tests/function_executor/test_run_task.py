@@ -1,7 +1,7 @@
 import hashlib
 import os
 import unittest
-from typing import List, Mapping
+from typing import List
 
 from pydantic import BaseModel
 from testing import (
@@ -12,14 +12,13 @@ from testing import (
     run_task,
 )
 
-# This import will be replaced by `import tensorlake` when we switch to the new SDK UX.
-import tensorlake.workflows.interface as tensorlake
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     BLOB,
     AllocationFailureReason,
     AllocationOutcomeCode,
     AllocationResult,
     BLOBChunk,
+    FunctionRef,
     InitializationFailureReason,
     InitializationOutcomeCode,
     InitializeRequest,
@@ -32,16 +31,14 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
+from tensorlake.workflows.remote.application.zip import zip_application_code
 
-APPLICATION_CODE_DIR_PATH = os.path.dirname(__file__)
+APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
 
+# This import will be replaced by `import tensorlake` when we switch to the new SDK UX.
+import tensorlake.workflows.interface as tensorlake
 
-@tensorlake_function()
-def extractor_a(url: str) -> File:
-    print(f"extractor_a called with url: {url}")
-    assert url == "https://example.com"
-    assert isinstance(url, str)
-    return File(data=bytes(b"hello"), mime_type="text/plain")
+app: tensorlake.Application = tensorlake.define_application(name=__file__)
 
 
 class FileChunk(BaseModel):
@@ -50,78 +47,78 @@ class FileChunk(BaseModel):
     end: int
 
 
-@tensorlake_function()
-def extractor_b(file: File) -> List[FileChunk]:
-    print(f"extractor_b called with file data: {file.data.decode()}")
+@tensorlake.api()
+@tensorlake.function()
+def api_function(url: str) -> List[FileChunk]:
+    print(f"api_function called with url: {url}")
+    assert url == "https://example.com"
+    assert isinstance(url, str)
+    return file_chunker(
+        tensorlake.File(content=bytes(b"hello"), content_type="text/plain")
+    )
+
+
+@tensorlake.function()
+def file_chunker(file: tensorlake.File) -> List[FileChunk]:
+    print(f"file_chunker called with file data: {file.content.decode()}")
     return [
-        FileChunk(data=file.data, start=0, end=5),
-        FileChunk(data=file.data, start=5, end=len(file.data)),
+        FileChunk(data=file.content, start=0, end=5),
+        FileChunk(data=file.content, start=5, end=len(file.content)),
     ]
 
 
-class SomeMetadata(BaseModel):
-    metadata: Mapping[str, str]
-
-
-@tensorlake_function()
-def extractor_c(file_chunk: FileChunk) -> SomeMetadata:
-    return SomeMetadata(metadata={"a": "b", "c": "d"})
-
-
-@tensorlake_function()
-def extractor_exception(a: int) -> int:
+@tensorlake.function()
+def raises_exception(input: int):
     raise Exception("this extractor throws an exception.")
 
 
-@tensorlake_function()
-def extractor_returns_argument(arg: bytes) -> bytes:
+@tensorlake.function()
+def returns_argument(arg: bytes) -> bytes:
     return arg
 
 
-@tensorlake_function()
-def extractor_returns_3x_argument(arg: bytes) -> List[bytes]:
+@tensorlake.function()
+def returns_3x_argument(arg: bytes) -> List[bytes]:
     return [arg, arg, arg]
 
 
-class FunctionFailingOnInit(TensorlakeCompute):
-    name = "FunctionFailingOnInit"
-
+@tensorlake.cls()
+class FunctionFailingOnInit:
     def __init__(self):
-        super().__init__()
         raise Exception("This function fails on initialization")
 
+    @tensorlake.function()
     def run(self, x: int) -> int:
         return x
 
 
 class TestRunTask(unittest.TestCase):
-    def test_function_success(self):
-        graph = Graph(name="test", description="test", start_node=extractor_a)
-        graph = graph.add_edge(extractor_a, extractor_b)
-        graph = graph.add_edge(extractor_b, extractor_c)
-
-        graph_data: bytes = zip_graph_code(
-            graph=graph, code_dir_path=GRAPH_CODE_DIR_PATH
+    def test_api_function_success(self):
+        application_zip: bytes = zip_application_code(
+            code_dir_path=APPLICATION_CODE_DIR_PATH,
+            ignored_absolute_paths=set(),
         )
         with FunctionExecutorProcessContextManager(
-            capture_std_outputs=True,
+            capture_std_outputs=False,
         ) as process:
             with rpc_channel(process) as channel:
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 initialize_response: InitializeResponse = stub.initialize(
                     InitializeRequest(
-                        namespace="test",
-                        graph_name="test",
-                        graph_version="1",
-                        function_name="extractor_b",
-                        graph=SerializedObject(
+                        function=FunctionRef(
+                            namespace="test",
+                            application_name=app.name,
+                            application_version=app.version,
+                            function_name="api_function",
+                        ),
+                        application_code=SerializedObject(
                             manifest=SerializedObjectManifest(
                                 encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
                                 encoding_version=0,
-                                size=len(graph_data),
-                                sha256_hash=hashlib.sha256(graph_data).hexdigest(),
+                                size=len(application_zip),
+                                sha256_hash=hashlib.sha256(application_zip).hexdigest(),
                             ),
-                            data=graph_data,
+                            data=application_zip,
                         ),
                     )
                 )
@@ -129,6 +126,7 @@ class TestRunTask(unittest.TestCase):
                     initialize_response.outcome_code,
                     InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
                 )
+
                 # Check FE logs (separated from function logs)
                 # Skipping this right now because currently we print FE logs to FE stdout.
                 # self.assertIn(

@@ -9,17 +9,17 @@ import grpc
 
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     BLOB,
-    AwaitTaskProgress,
-    AwaitTaskRequest,
+    Allocation,
+    AllocationResult,
+    AwaitAllocationProgress,
+    AwaitAllocationRequest,
     BLOBChunk,
-    CreateTaskRequest,
-    DeleteTaskRequest,
+    CreateAllocationRequest,
+    DeleteAllocationRequest,
     FunctionInputs,
     SerializedObjectEncoding,
     SerializedObjectInsideBLOB,
     SerializedObjectManifest,
-    Task,
-    TaskResult,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
@@ -106,7 +106,7 @@ def run_task(
     function_outputs_blob: BLOB,
     invocation_error_blob: BLOB,
     timeout_sec: Optional[int] = None,
-) -> TaskResult:
+) -> AllocationResult:
     function_input_blob: BLOB = create_tmp_blob()
     function_input_data: bytes = CloudPickleSerializer.serialize(input)
     write_tmp_blob_bytes(
@@ -115,9 +115,9 @@ def run_task(
     )
 
     task_id: str = "test-task"
-    stub.create_task(
-        CreateTaskRequest(
-            task=Task(
+    stub.create_allocation(
+        CreateAllocationRequest(
+            task=Allocation(
                 namespace="test",
                 graph_name="test",
                 graph_version="1",
@@ -143,22 +143,22 @@ def run_task(
         )
     )
 
-    await_task_stream_rpc = stub.await_task(
-        AwaitTaskRequest(task_id=task_id), timeout=timeout_sec
+    await_task_stream_rpc = stub.await_allocation(
+        AwaitAllocationRequest(task_id=task_id), timeout=timeout_sec
     )
-    result: Optional[TaskResult] = None
+    result: Optional[AllocationResult] = None
     for progress in await_task_stream_rpc:
-        progress: AwaitTaskProgress
+        progress: AwaitAllocationProgress
         if progress.WhichOneof("response") == "task_result":
-            result: TaskResult = progress.task_result
+            result: AllocationResult = progress.allocation_result
             break
 
     await_task_stream_rpc.cancel()
-    stub.delete_task(DeleteTaskRequest(task_id=task_id))
+    stub.delete_allocation(DeleteAllocationRequest(task_id=task_id))
 
     if result is None:
         # Check in case if stream finished by FE without task_result.
-        raise Exception("Task result was not received from the server.")
+        raise Exception("Allocation result was not received from the server.")
 
     return result
 
