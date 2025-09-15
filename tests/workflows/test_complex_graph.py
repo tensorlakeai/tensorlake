@@ -5,6 +5,9 @@ from pydantic import BaseModel
 
 # This import will be replaced by `import tensorlake` when we switch to the new SDK UX.
 import tensorlake.workflows.interface as tensorlake
+from tensorlake.workflows.remote.deploy import deploy
+
+tensorlake.define_application(name="Test Complex Graph Application")
 
 
 class TestGraphRequestPayload(BaseModel):
@@ -120,8 +123,8 @@ class TestComplexGraph(unittest.TestCase):
             self.assertEqual(file.content, b"Total sum: 280")
 
     def test_remote_api_call_of_complex_graph_produces_expected_outputs(self):
-        pass
-        # tensorlake.deploy(os.path.dirname(__file__))
+        # pass
+        deploy(__file__)
         # TODO: Implement.
         # for function in ["test_graph_api_reduce", "test_graph_api_fan_in"]:
         #     request = tensorlake.call_remote_api(
