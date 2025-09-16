@@ -42,10 +42,16 @@ class ValueNode(ASTNode):
     ):
         super().__init__()
         self._value: bytes = value
+        # A workaround to not deserialize metadata to get file content type when generating function output in FE.
+        self._content_type: str | None = None
 
     @property
     def value(self) -> bytes:
         return self._value
+
+    @property
+    def content_type(self) -> str | None:
+        return self._content_type
 
     def replace_child(self, old_child: "ASTNode", new_child: "ASTNode") -> None:
         raise ValueError("Value node has no children to replace")
@@ -62,6 +68,7 @@ class ValueNode(ASTNode):
             node.serialized_metadata = ValueMetadata(
                 cls=File, extra=value.content_type
             ).serialize()
+            node._content_type = value.content_type
             return node
         else:
             node: ValueNode = ValueNode(user_serializer.serialize(value))

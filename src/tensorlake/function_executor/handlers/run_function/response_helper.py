@@ -11,6 +11,7 @@ from tensorlake.workflows.function.user_data_serializer import (
 from tensorlake.workflows.interface.exceptions import RequestException
 from tensorlake.workflows.interface.function import Function
 from tensorlake.workflows.request_state_base import RequestStateBase
+from tensorlake.workflows.user_data_serializer import UserDataSerializer
 
 from ...blob_store.blob_store import BLOBStore
 from ...logger import FunctionExecutorLogger
@@ -27,6 +28,7 @@ from ...proto.function_executor_pb2 import (
     SerializedObjectInsideBLOB,
     SerializedObjectManifest,
 )
+from .value_node_metadata import ValueNodeMetadata
 
 
 class ResponseHelper:
@@ -50,26 +52,44 @@ class ResponseHelper:
         self,
         output: Any,
     ) -> AllocationResult:
-        output_ast: ASTNode = ast_from_user_object(
-            output, function_output_serializer(self._function)
+        output_serializer: UserDataSerializer = function_output_serializer(
+            self._function
         )
+        output_ast: ASTNode = ast_from_user_object(output, output_serializer)
 
+        serialized_object: SerializedObjectInsideBLOB
+        uploaded_function_outputs_blob: BLOB
         if isinstance(output_ast, ValueNode):
-            self._upload_function_output_value(output_ast)
+            serialized_object, uploaded_function_outputs_blob = (
+                self._upload_function_output_value(output_ast, output_serializer)
+            )
         else:
-            pass
+            serialized_object = SerializedObjectInsideBLOB(
+                manifest=SerializedObjectManifest(
+                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_TEXT,
+                    encoding_version=0,
+                    size=11,
+                    sha256_hash="",
+                    content_type="",
+                ),
+                offset=0,
+            )
+            uploaded_function_outputs_blob: BLOB = _upload_outputs(
+                [b"Fake output"],
+                self._inputs.function_outputs_blob,
+                self._blob_store,
+                self._logger,
+            )
             # TODO: Walk the output_ast tree and for each ValueNode
             # upload it to BLOB store and then remember its serialized objects.
             #
             # Then flatten the tree and convert it into proto tree.
 
-        # function_outputs, uploaded_function_outputs_blob = (
-        #     self._upload_function_outputs(result.ser_outputs)
-        # )
-
         return AllocationResult(
             outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
-            # TODO: set either value or updates field.
+            # TODO: set updates field for AST tree output.
+            value=serialized_object,
+            uploaded_function_outputs_blob=uploaded_function_outputs_blob,
             metrics=self._get_metrics(),
         )
 
@@ -106,54 +126,55 @@ class ResponseHelper:
         )
 
     def _upload_function_output_value(
-        self, value_node: ValueNode
-    ) -> Tuple[List[SerializedObjectInsideBLOB], BLOB]:
+        self, value_node: ValueNode, serializer: UserDataSerializer
+    ) -> Tuple[SerializedObjectInsideBLOB, BLOB]:
         serialized_objects: List[SerializedObjectInsideBLOB] = []
-        serialized_datas: List[bytes] = []
+        blob_datas: List[bytes] = []
 
-        # TODO: Use deserialized value node metadata to figure out encoding.
-        # TODO: Store serialized metadata in front of the serialized object.
         blob_offset: int = 0
         encoding_version: int = 0
-        serialized_data: bytes = value_node.val
 
-        serialized_objects.append(
-            SerializedObjectInsideBLOB(
-                manifest=SerializedObjectManifest(
-                    encoding=value_node.metadata.serializer,  # Convert to encoding.
-                    encoding_version=encoding_version,
-                    size=len(serialized_data),
-                    sha256_hash=_sha256_hexdigest(serialized_data),
+        value_node_serialized_metadata: bytes = ValueNodeMetadata(
+            nid=value_node.id, metadata=value_node.serialized_metadata
+        ).serialize()
+        value_node_so: SerializedObjectInsideBLOB = SerializedObjectInsideBLOB(
+            manifest=SerializedObjectManifest(
+                encoding=serializer.serialized_object_encoding,
+                encoding_version=encoding_version,
+                size=len(value_node_serialized_metadata) + len(value_node.value),
+                metadata_size=len(value_node_serialized_metadata),
+                sha256_hash=_sha256_hexdigest(
+                    value_node_serialized_metadata, value_node.value
                 ),
-                offset=blob_offset,
-            )
+                content_type=value_node.content_type,
+            ),
+            offset=blob_offset,
         )
-        serialized_datas.append(serialized_data)
-        blob_offset += len(serialized_data)
+        serialized_objects.append(value_node_so)
+        blob_datas.append(value_node_serialized_metadata)
+        blob_datas.append(value_node.value)
+        blob_offset += value_node_so.manifest.size
 
-        serialized_datas_size: int = sum(
-            len(serialized_data) for serialized_data in serialized_datas
-        )
         start_time = time.monotonic()
         self._logger.info(
             "uploading function output",
-            outputs_count=len(serialized_datas),
-            total_size=serialized_datas_size,
+            outputs_count=len(serialized_objects),
+            total_size=blob_offset,
         )
         uploaded_blob: BLOB = _upload_outputs(
-            serialized_datas,
+            blob_datas,
             self._inputs.function_outputs_blob,
             self._blob_store,
             self._logger,
         )
         self._logger.info(
             "function output uploaded",
-            outputs_count=len(serialized_datas),
-            total_size=serialized_datas_size,
+            outputs_count=len(serialized_objects),
+            total_size=blob_offset,
             duration_sec=f"{time.monotonic() - start_time:.3f}",
         )
 
-        return (serialized_objects, uploaded_blob)
+        return value_node_so, uploaded_blob
 
     def _upload_request_error_output(
         self, message: str
@@ -182,7 +203,7 @@ class ResponseHelper:
                     encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_TEXT,
                     encoding_version=0,
                     size=len(data),
-                    sha256_hash=_sha256_hexdigest(data),
+                    sha256_hash=_sha256_hexdigest(b"", data),
                 ),
                 offset=0,
             ),
@@ -218,5 +239,8 @@ def _upload_outputs(
     )
 
 
-def _sha256_hexdigest(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+def _sha256_hexdigest(metadata: bytes, data: bytes) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(metadata)
+    hasher.update(data)
+    return hasher.hexdigest()
