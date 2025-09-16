@@ -206,8 +206,8 @@ message FunctionCall {
 
 message ReduceOp {
     optional string id = 1;
-    // Contains at leat one item.
-    repeated FunctionArg inputs = 2; 
+    // Contains at least one item.
+    repeated FunctionArg collection = 2;
     optional FunctionRef reducer = 3;
     optional bytes call_metadata = 4;
 }
