@@ -8,6 +8,7 @@ from testing import (
     FunctionExecutorProcessContextManager,
     create_tmp_blob,
     download_and_deserialize_so,
+    read_so_metadata,
     rpc_channel,
     run_allocation,
     write_tmp_blob_bytes,
@@ -24,13 +25,12 @@ from tensorlake.function_executor.handlers.run_function.value_node_metadata impo
 )
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     BLOB,
-    AllocationFailureReason,
     AllocationOutcomeCode,
     AllocationResult,
-    BLOBChunk,
+    ExecutionPlanUpdate,
+    FunctionCall,
     FunctionInputs,
     FunctionRef,
-    InitializationFailureReason,
     InitializationOutcomeCode,
     InitializeRequest,
     InitializeResponse,
@@ -119,7 +119,7 @@ class TestRunAllocation(unittest.TestCase):
             ignored_absolute_paths=set(),
         )
         with FunctionExecutorProcessContextManager(
-            capture_std_outputs=False,
+            capture_std_outputs=True,
         ) as process:
             with rpc_channel(process) as channel:
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
@@ -187,22 +187,74 @@ class TestRunAllocation(unittest.TestCase):
                 )
                 self.assertFalse(alloc_result.HasField("request_error_output"))
 
-    #             fn_outputs = deserialized_function_output(
-    #                 self, task_result.function_outputs, function_outputs_blob
-    #             )
-    #             self.assertEqual(len(fn_outputs), 2)
-    #             expected = FileChunk(data=b"hello", start=5, end=5)
+                updates: List[ExecutionPlanUpdate] = list(alloc_result.updates.updates)
+                self.assertEqual(len(updates), 1)
+                function_call: FunctionCall = updates[0].function_call
+                self.assertIsNotNone(function_call)
+                self.assertIsNotNone(function_call.id)
+                self.assertEqual(
+                    function_call.target,
+                    FunctionRef(
+                        namespace="test",
+                        application_name=app.name,
+                        application_version=app.version,
+                        function_name="file_chunker",
+                    ),
+                )
 
-    #             self.assertEqual(expected.model_dump(), fn_outputs[1].model_dump())
+                self.assertEqual(len(function_call.args), 2)
+                self.assertTrue(function_call.args[0].HasField("value"))
+                self.assertTrue(function_call.args[1].HasField("value"))
+                arg_0: tensorlake.File = download_and_deserialize_so(
+                    self,
+                    function_call.args[0].value,
+                    function_outputs_blob,
+                )
+                self.assertEqual(arg_0.content, b"hello")
+                self.assertEqual(arg_0.content_type, "text/plain")
+                arg_0_metadata = read_so_metadata(
+                    self, function_call.args[0].value, function_outputs_blob
+                )
+                arg_1: int = download_and_deserialize_so(
+                    self,
+                    function_call.args[1].value,
+                    function_outputs_blob,
+                )
+                self.assertEqual(arg_1, 3)
+                arg_1_metadata = read_so_metadata(
+                    self, function_call.args[1].value, function_outputs_blob
+                )
 
-    #     fe_stdout = process.read_stdout()
-    #     # Check FE events in stdout
-    #     self.assertIn("function_executor_initialization_started", fe_stdout)
-    #     self.assertIn("function_executor_initialization_finished", fe_stdout)
-    #     self.assertIn("task_allocations_started", fe_stdout)
-    #     self.assertIn("task_allocations_finished", fe_stdout)
-    #     # Check function output to stdout
-    #     self.assertIn("extractor_b called with file data: hello", fe_stdout)
+                function_call_node_metadata = FunctionCallNodeMetadata.deserialize(
+                    function_call.metadata
+                )
+                self.assertEqual(
+                    function_call_node_metadata.type, FunctionCallType.REGULAR
+                )
+                function_call_metadata = RegularFunctionCallMetadata.deserialize(
+                    function_call_node_metadata.metadata
+                )
+                self.assertEqual(len(function_call_metadata.args), 1)
+                self.assertEqual(function_call_metadata.args[0].nid, arg_0_metadata.nid)
+                self.assertEqual(function_call_metadata.args[0].ctx, False)
+                self.assertEqual(function_call_metadata.args[0].flist, None)
+                self.assertEqual(len(function_call_metadata.kwargs), 1)
+                self.assertEqual(
+                    function_call_metadata.kwargs["num_chunks"].nid, arg_1_metadata.nid
+                )
+                self.assertEqual(function_call_metadata.kwargs["num_chunks"].ctx, False)
+                self.assertEqual(
+                    function_call_metadata.kwargs["num_chunks"].flist, None
+                )
+
+        fe_stdout = process.read_stdout()
+        # Check FE events in stdout
+        self.assertIn("function_executor_initialization_started", fe_stdout)
+        self.assertIn("function_executor_initialization_finished", fe_stdout)
+        self.assertIn("allocations_started", fe_stdout)
+        self.assertIn("allocations_finished", fe_stdout)
+        # Check function output to stdout
+        self.assertIn("api_function called with url: https://example.com", fe_stdout)
 
     def test_regular_function_success(self):
         application_zip: bytes = zip_application_code(
@@ -210,7 +262,7 @@ class TestRunAllocation(unittest.TestCase):
             ignored_absolute_paths=set(),
         )
         with FunctionExecutorProcessContextManager(
-            capture_std_outputs=False,
+            capture_std_outputs=True,
         ) as process:
             with rpc_channel(process) as channel:
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
@@ -360,14 +412,14 @@ class TestRunAllocation(unittest.TestCase):
                     FileChunk(data=b"o", start=4, end=5).model_dump(),
                 )
 
-    #     fe_stdout = process.read_stdout()
-    #     # Check FE events in stdout
-    #     self.assertIn("function_executor_initialization_started", fe_stdout)
-    #     self.assertIn("function_executor_initialization_finished", fe_stdout)
-    #     self.assertIn("task_allocations_started", fe_stdout)
-    #     self.assertIn("task_allocations_finished", fe_stdout)
-    #     # Check function output to stdout
-    #     self.assertIn("extractor_b called with file data: hello", fe_stdout)
+        fe_stdout = process.read_stdout()
+        # Check FE events in stdout
+        self.assertIn("function_executor_initialization_started", fe_stdout)
+        self.assertIn("function_executor_initialization_finished", fe_stdout)
+        self.assertIn("allocations_started", fe_stdout)
+        self.assertIn("allocations_finished", fe_stdout)
+        # Check function output to stdout
+        self.assertIn("file_chunker called with file data: hello", fe_stdout)
 
     # def test_function_output_blob_with_multiple_chunks(self):
     #     graph = Graph(

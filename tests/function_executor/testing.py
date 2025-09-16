@@ -169,6 +169,15 @@ def download_and_deserialize_so(
     )
 
 
+def read_so_metadata(
+    test_case: unittest.TestCase, so: SerializedObjectInsideBLOB, so_blob: BLOB
+) -> ValueNodeMetadata:
+    serialized_node_metadata: bytes = read_tmp_blob_bytes(
+        so_blob, so.offset, so.manifest.metadata_size
+    )
+    return ValueNodeMetadata.deserialize(serialized_node_metadata)
+
+
 def create_tmp_blob(chunks_count: int = 5, chunk_size: int = 1 * 1024 * 1024) -> BLOB:
     """Returns a temporary local file backed blob for writing."""
     with tempfile.NamedTemporaryFile(delete=False) as blob_file:
