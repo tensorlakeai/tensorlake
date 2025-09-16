@@ -91,10 +91,7 @@ class Handler:
         try:
             output: Any = self._call(function_call)
         except BaseException as e:
-            return self._response_helper.from_function_exception(
-                exception=e,
-                metrics=None,
-            )
+            return self._response_helper.from_function_exception(e)
 
         return self._response_helper.from_function_output(
             output=output,

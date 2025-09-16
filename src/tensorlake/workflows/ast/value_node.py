@@ -75,6 +75,6 @@ class ValueNode(ASTNode):
         cls, node_id: str, value: bytes, metadata: bytes
     ) -> "ValueNode":
         node: ValueNode = ValueNode(value)
-        node.id = node_id
+        node._id = node_id
         node.serialized_metadata = metadata
         return node

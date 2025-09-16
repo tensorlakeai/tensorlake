@@ -55,8 +55,7 @@ class ResponseHelper:
         )
 
         if isinstance(output_ast, ValueNode):
-            # TODO: a single output value was returned from the function.
-            self._upload_function_output_values([output_ast])
+            self._upload_function_output_value(output_ast)
         else:
             pass
             # TODO: Walk the output_ast tree and for each ValueNode
@@ -78,14 +77,14 @@ class ResponseHelper:
         # Print the exception to stderr so customer can see it there.
         traceback.print_exception(exception)
 
-        invocation_error_output: SerializedObjectInsideBLOB | None = None
-        uploaded_invocation_error_blob: BLOB | None = None
+        request_error_output: SerializedObjectInsideBLOB | None = None
+        uploaded_request_error_blob: BLOB | None = None
         if isinstance(exception, RequestException):
             failure_reason: AllocationFailureReason = (
                 AllocationFailureReason.ALLOCATION_FAILURE_REASON_REQUEST_ERROR
             )
-            invocation_error_output, uploaded_invocation_error_blob = (
-                self._upload_invocation_error_output(exception.message)
+            request_error_output, uploaded_request_error_blob = (
+                self._upload_request_error_output(exception.message)
             )
         else:
             failure_reason: AllocationFailureReason = (
@@ -95,9 +94,8 @@ class ResponseHelper:
         return AllocationResult(
             outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,
             failure_reason=failure_reason,
-            invocation_error_output=invocation_error_output,
-            uploaded_invocation_error_blob=uploaded_invocation_error_blob,
-            next_functions=[],
+            request_error_output=request_error_output,
+            uploaded_request_error_blob=uploaded_request_error_blob,
             metrics=self._get_metrics(),
         )
 
@@ -107,8 +105,8 @@ class ResponseHelper:
             counters=self._request_state.counters,
         )
 
-    def _upload_function_output_values(
-        self, value_nodes: List[ValueNode]
+    def _upload_function_output_value(
+        self, value_node: ValueNode
     ) -> Tuple[List[SerializedObjectInsideBLOB], BLOB]:
         serialized_objects: List[SerializedObjectInsideBLOB] = []
         serialized_datas: List[bytes] = []
@@ -116,23 +114,22 @@ class ResponseHelper:
         # TODO: Use deserialized value node metadata to figure out encoding.
         # TODO: Store serialized metadata in front of the serialized object.
         blob_offset: int = 0
-        for value_node in value_nodes:
-            encoding_version: int = 0
-            serialized_data: bytes = value_node.val
+        encoding_version: int = 0
+        serialized_data: bytes = value_node.val
 
-            serialized_objects.append(
-                SerializedObjectInsideBLOB(
-                    manifest=SerializedObjectManifest(
-                        encoding=value_node.metadata.serializer,  # Convert to encoding.
-                        encoding_version=encoding_version,
-                        size=len(serialized_data),
-                        sha256_hash=_sha256_hexdigest(serialized_data),
-                    ),
-                    offset=blob_offset,
-                )
+        serialized_objects.append(
+            SerializedObjectInsideBLOB(
+                manifest=SerializedObjectManifest(
+                    encoding=value_node.metadata.serializer,  # Convert to encoding.
+                    encoding_version=encoding_version,
+                    size=len(serialized_data),
+                    sha256_hash=_sha256_hexdigest(serialized_data),
+                ),
+                offset=blob_offset,
             )
-            serialized_datas.append(serialized_data)
-            blob_offset += len(serialized_data)
+        )
+        serialized_datas.append(serialized_data)
+        blob_offset += len(serialized_data)
 
         serialized_datas_size: int = sum(
             len(serialized_data) for serialized_data in serialized_datas
@@ -158,7 +155,7 @@ class ResponseHelper:
 
         return (serialized_objects, uploaded_blob)
 
-    def _upload_invocation_error_output(
+    def _upload_request_error_output(
         self, message: str
     ) -> Tuple[SerializedObjectInsideBLOB, BLOB]:
         data: bytes = message.encode("utf-8")

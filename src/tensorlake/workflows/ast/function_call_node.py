@@ -159,7 +159,7 @@ class RegularFunctionCallNode(ASTNode):
         children: List[ValueNode],
     ) -> "RegularFunctionCallNode":
         node: RegularFunctionCallNode = RegularFunctionCallNode(function_name)
-        node.id = node_id
+        node._id = node_id
         node.serialized_metadata = metadata
         for child in children:
             node.add_child(child)

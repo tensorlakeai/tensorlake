@@ -13,6 +13,15 @@ from testing import (
     write_tmp_blob_bytes,
 )
 
+# This import will be replaced by `import tensorlake` when we switch to the new SDK UX.
+import tensorlake.workflows.interface as tensorlake
+from tensorlake.function_executor.handlers.run_function.function_call_node_metadata import (
+    FunctionCallNodeMetadata,
+    FunctionCallType,
+)
+from tensorlake.function_executor.handlers.run_function.value_node_metadata import (
+    ValueNodeMetadata,
+)
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     BLOB,
     AllocationFailureReason,
@@ -33,13 +42,18 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
+from tensorlake.workflows.ast.function_call_node import (
+    ArgumentMetadata,
+    RegularFunctionCallMetadata,
+)
+from tensorlake.workflows.ast.value_node import ValueMetadata
 from tensorlake.workflows.remote.application.zip import zip_application_code
-from tensorlake.workflows.user_data_serializer import JSONUserDataSerializer
+from tensorlake.workflows.user_data_serializer import (
+    JSONUserDataSerializer,
+    PickleUserDataSerializer,
+)
 
 APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
-
-# This import will be replaced by `import tensorlake` when we switch to the new SDK UX.
-import tensorlake.workflows.interface as tensorlake
 
 app: tensorlake.Application = tensorlake.define_application(name=__file__)
 
@@ -57,16 +71,19 @@ def api_function(url: str) -> List[FileChunk]:
     assert url == "https://example.com"
     assert isinstance(url, str)
     return file_chunker(
-        tensorlake.File(content=bytes(b"hello"), content_type="text/plain")
+        tensorlake.File(content=bytes(b"hello"), content_type="text/plain"),
+        num_chunks=3,
     )
 
 
 @tensorlake.function()
-def file_chunker(file: tensorlake.File) -> List[FileChunk]:
+def file_chunker(file: tensorlake.File, num_chunks: int) -> List[FileChunk]:
     print(f"file_chunker called with file data: {file.content.decode()}")
     return [
-        FileChunk(data=file.content, start=0, end=5),
-        FileChunk(data=file.content, start=5, end=len(file.content)),
+        FileChunk(
+            data=file.content[chunk_ix : chunk_ix + 1], start=chunk_ix, end=chunk_ix + 1
+        )
+        for chunk_ix in range(num_chunks)
     ]
 
 
@@ -95,7 +112,7 @@ class FunctionFailingOnInit:
         return x
 
 
-class TestRunTask(unittest.TestCase):
+class TestRunAllocation(unittest.TestCase):
     def test_api_function_success(self):
         application_zip: bytes = zip_application_code(
             code_dir_path=APPLICATION_CODE_DIR_PATH,
@@ -130,8 +147,8 @@ class TestRunTask(unittest.TestCase):
                     InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
                 )
 
-                inputs_serializer: JSONUserDataSerializer = JSONUserDataSerializer()
-                serialized_api_payload: bytes = inputs_serializer.serialize(
+                user_serializer: JSONUserDataSerializer = JSONUserDataSerializer()
+                serialized_api_payload: bytes = user_serializer.serialize(
                     "https://example.com"
                 )
                 api_payload_blob: BLOB = create_tmp_blob()
@@ -161,6 +178,153 @@ class TestRunTask(unittest.TestCase):
                         function_outputs_blob=function_outputs_blob,
                         request_error_blob=create_tmp_blob(),
                         # No function_call_metadata for API function calls.
+                    ),
+                )
+
+                self.assertEqual(
+                    alloc_result.outcome_code,
+                    AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
+                )
+                self.assertFalse(alloc_result.HasField("request_error_output"))
+
+    #             fn_outputs = deserialized_function_output(
+    #                 self, task_result.function_outputs, function_outputs_blob
+    #             )
+    #             self.assertEqual(len(fn_outputs), 2)
+    #             expected = FileChunk(data=b"hello", start=5, end=5)
+
+    #             self.assertEqual(expected.model_dump(), fn_outputs[1].model_dump())
+
+    #     fe_stdout = process.read_stdout()
+    #     # Check FE events in stdout
+    #     self.assertIn("function_executor_initialization_started", fe_stdout)
+    #     self.assertIn("function_executor_initialization_finished", fe_stdout)
+    #     self.assertIn("task_allocations_started", fe_stdout)
+    #     self.assertIn("task_allocations_finished", fe_stdout)
+    #     # Check function output to stdout
+    #     self.assertIn("extractor_b called with file data: hello", fe_stdout)
+
+    def test_regular_function_success(self):
+        application_zip: bytes = zip_application_code(
+            code_dir_path=APPLICATION_CODE_DIR_PATH,
+            ignored_absolute_paths=set(),
+        )
+        with FunctionExecutorProcessContextManager(
+            capture_std_outputs=False,
+        ) as process:
+            with rpc_channel(process) as channel:
+                stub: FunctionExecutorStub = FunctionExecutorStub(channel)
+                initialize_response: InitializeResponse = stub.initialize(
+                    InitializeRequest(
+                        function=FunctionRef(
+                            namespace="test",
+                            application_name=app.name,
+                            application_version=app.version,
+                            function_name="file_chunker",
+                        ),
+                        application_code=SerializedObject(
+                            manifest=SerializedObjectManifest(
+                                encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                                encoding_version=0,
+                                size=len(application_zip),
+                                sha256_hash=hashlib.sha256(application_zip).hexdigest(),
+                            ),
+                            data=application_zip,
+                        ),
+                    )
+                )
+                self.assertEqual(
+                    initialize_response.outcome_code,
+                    InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
+                )
+
+                user_serializer: PickleUserDataSerializer = PickleUserDataSerializer()
+                serialized_file_arg_metadata: bytes = ValueNodeMetadata(
+                    nid="file_arg_id",
+                    metadata=ValueMetadata(
+                        cls=tensorlake.File, extra="text/plain"
+                    ).serialize(),
+                ).serialize()
+                serialized_file_arg: bytes = (
+                    "hello".encode()
+                )  # File content is stored directly in the BLOB so users can read it over HTTP.
+                serialized_num_chunks_arg_metadata: bytes = ValueNodeMetadata(
+                    nid="num_chunks_arg_id",
+                    metadata=ValueMetadata(
+                        cls=int, extra=user_serializer.name
+                    ).serialize(),
+                ).serialize()
+                serialized_num_chunks_arg: bytes = user_serializer.serialize(5)
+
+                serialized_args: bytes = b"".join(
+                    [
+                        serialized_file_arg_metadata,
+                        serialized_file_arg,
+                        serialized_num_chunks_arg_metadata,
+                        serialized_num_chunks_arg,
+                    ]
+                )
+                args_blob: BLOB = create_tmp_blob()
+                write_tmp_blob_bytes(
+                    args_blob,
+                    serialized_args,
+                )
+                function_outputs_blob: BLOB = create_tmp_blob()
+                alloc_result: AllocationResult = run_allocation(
+                    stub,
+                    inputs=FunctionInputs(
+                        args=[
+                            SerializedObjectInsideBLOB(
+                                manifest=SerializedObjectManifest(
+                                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
+                                    encoding_version=0,
+                                    size=len(serialized_file_arg_metadata)
+                                    + len(serialized_file_arg),
+                                    metadata_size=len(serialized_file_arg_metadata),
+                                    sha256_hash=hashlib.sha256(
+                                        serialized_file_arg_metadata
+                                        + serialized_file_arg
+                                    ).hexdigest(),
+                                ),
+                                offset=0,
+                            ),
+                            SerializedObjectInsideBLOB(
+                                manifest=SerializedObjectManifest(
+                                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
+                                    encoding_version=0,
+                                    size=len(serialized_num_chunks_arg_metadata)
+                                    + len(serialized_num_chunks_arg),
+                                    metadata_size=len(
+                                        serialized_num_chunks_arg_metadata
+                                    ),
+                                    sha256_hash=hashlib.sha256(
+                                        serialized_num_chunks_arg_metadata
+                                        + serialized_num_chunks_arg
+                                    ).hexdigest(),
+                                ),
+                                offset=len(serialized_file_arg_metadata)
+                                + len(serialized_file_arg),
+                            ),
+                        ],
+                        arg_blobs=[args_blob, args_blob],
+                        function_outputs_blob=function_outputs_blob,
+                        request_error_blob=create_tmp_blob(),
+                        function_call_metadata=FunctionCallNodeMetadata(
+                            nid="file_chunker_call",
+                            type=FunctionCallType.REGULAR,
+                            metadata=RegularFunctionCallMetadata(
+                                args=[
+                                    ArgumentMetadata(
+                                        nid="file_arg_id", ctx=False, flist=None
+                                    )
+                                ],
+                                kwargs={
+                                    "num_chunks": ArgumentMetadata(
+                                        nid="num_chunks_arg_id", ctx=False, flist=None
+                                    ),
+                                },
+                            ).serialize(),
+                        ).serialize(),
                     ),
                 )
 

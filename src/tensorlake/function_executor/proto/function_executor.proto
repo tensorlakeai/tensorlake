@@ -29,8 +29,6 @@ message SerializedObjectManifest {
     optional string sha256_hash = 5;
     // MIME type. Important when raw encoding is used.
     optional string content_type = 6;
-    // ID of function call that returned this object.
-    optional string function_call_id = 7;
 }
 
 // Full serialized object with all its data.
