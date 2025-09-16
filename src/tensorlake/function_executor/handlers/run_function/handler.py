@@ -53,6 +53,7 @@ class Handler:
         self._blob_store: BLOBStore = blob_store
         self._logger = logger.bind(module=__name__)
         self._response_helper = ResponseHelper(
+            function_ref=function_ref,
             function=function,
             inputs=allocation.inputs,
             request_state=request_context.state,
