@@ -15,6 +15,9 @@ def set_application(application: Any) -> None:
     Overwrites previously set Application (it's a singleton)."""
     global _application
     if _application is not None:
+        # This happens if the module that defined the application gets imported multiple times.
+        # This happens e.g. in tests where the same module is imported as __main__ and as a regular
+        # module under its real name when pickle loads classes from it.
         print(
             "Warning: Overwriting existing Tensorlake Application.", repr(_application)
         )
@@ -32,6 +35,9 @@ def register_function(fn_name: str, fn: Any) -> None:
     global _function_registry
 
     if fn_name in _function_registry:
+        # This happens if the module that defined the application gets imported multiple times.
+        # This happens e.g. in tests where the same module is imported as __main__ and as a regular
+        # module under its real name when pickle loads classes from it.
         print(
             "Warning: Overwriting existing Tensorlake Function.",
             repr(_function_registry[fn_name]),

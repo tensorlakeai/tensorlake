@@ -7,6 +7,10 @@ from typing import Any, Dict, List
 
 import grpc
 
+import tensorlake.workflows.interface as tensorlake
+from tensorlake.function_executor.handlers.run_function.value_node_metadata import (
+    ValueNodeMetadata,
+)
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     BLOB,
     Allocation,
@@ -24,6 +28,11 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
 from tensorlake.function_executor.proto.server_configuration import GRPC_SERVER_OPTIONS
+from tensorlake.workflows.ast.value_node import ValueMetadata
+from tensorlake.workflows.user_data_serializer import (
+    UserDataSerializer,
+    serializer_by_name,
+)
 
 
 class FunctionExecutorProcessContextManager:
@@ -121,7 +130,7 @@ def run_allocation(
     for progress in await_allocation_stream_rpc:
         progress: AwaitAllocationProgress
         if progress.WhichOneof("response") == "allocation_result":
-            result: AllocationResult = progress.allocation_result
+            result = progress.allocation_result
             break
 
     await_allocation_stream_rpc.cancel()
@@ -134,26 +143,30 @@ def run_allocation(
     return result
 
 
-def deserialized_function_output(
+def download_and_deserialize_so(
     test_case: unittest.TestCase,
-    function_outputs: List[SerializedObjectInsideBLOB],
-    function_outputs_blob: BLOB,
-) -> List[Any]:
-    outputs: List[Any] = []
-    for output in function_outputs:
-        test_case.assertEqual(
-            output.manifest.encoding,
-            SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-        )
-        data: bytes = read_tmp_blob_bytes(
-            function_outputs_blob, output.offset, output.manifest.size
-        )
-        test_case.assertEqual(len(data), output.manifest.size)
-        test_case.assertEqual(
-            hashlib.sha256(data).hexdigest(), output.manifest.sha256_hash
-        )
-        outputs.append(CloudPickleSerializer.deserialize(data))
-    return outputs
+    so: SerializedObjectInsideBLOB,
+    so_blob: BLOB,
+) -> Any:
+    serialized_node_metadata: bytes = read_tmp_blob_bytes(
+        so_blob, so.offset, so.manifest.metadata_size
+    )
+    serialized_data: bytes = read_tmp_blob_bytes(
+        so_blob,
+        so.offset + so.manifest.metadata_size,
+        so.manifest.size - so.manifest.metadata_size,
+    )
+    test_case.assertEqual(
+        hashlib.sha256(serialized_node_metadata + serialized_data).hexdigest(),
+        so.manifest.sha256_hash,
+    )
+
+    node_metadata: ValueNodeMetadata = ValueNodeMetadata.deserialize(
+        serialized_node_metadata
+    )
+    return ValueMetadata.deserialize(node_metadata.metadata).deserialize_value(
+        serialized_data
+    )
 
 
 def create_tmp_blob(chunks_count: int = 5, chunk_size: int = 1 * 1024 * 1024) -> BLOB:

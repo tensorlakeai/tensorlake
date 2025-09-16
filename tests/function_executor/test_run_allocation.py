@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from testing import (
     FunctionExecutorProcessContextManager,
     create_tmp_blob,
-    deserialized_function_output,
+    download_and_deserialize_so,
     rpc_channel,
     run_allocation,
     write_tmp_blob_bytes,
@@ -333,14 +333,32 @@ class TestRunAllocation(unittest.TestCase):
                     AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
                 )
                 self.assertFalse(alloc_result.HasField("request_error_output"))
+                self.assertTrue(alloc_result.HasField("value"))
 
-    #             fn_outputs = deserialized_function_output(
-    #                 self, task_result.function_outputs, function_outputs_blob
-    #             )
-    #             self.assertEqual(len(fn_outputs), 2)
-    #             expected = FileChunk(data=b"hello", start=5, end=5)
-
-    #             self.assertEqual(expected.model_dump(), fn_outputs[1].model_dump())
+                output = download_and_deserialize_so(
+                    self, alloc_result.value, function_outputs_blob
+                )
+                self.assertEqual(len(output), 5)
+                self.assertEqual(
+                    output[0].model_dump(),
+                    FileChunk(data=b"h", start=0, end=1).model_dump(),
+                )
+                self.assertEqual(
+                    output[1].model_dump(),
+                    FileChunk(data=b"e", start=1, end=2).model_dump(),
+                )
+                self.assertEqual(
+                    output[2].model_dump(),
+                    FileChunk(data=b"l", start=2, end=3).model_dump(),
+                )
+                self.assertEqual(
+                    output[3].model_dump(),
+                    FileChunk(data=b"l", start=3, end=4).model_dump(),
+                )
+                self.assertEqual(
+                    output[4].model_dump(),
+                    FileChunk(data=b"o", start=4, end=5).model_dump(),
+                )
 
     #     fe_stdout = process.read_stdout()
     #     # Check FE events in stdout
