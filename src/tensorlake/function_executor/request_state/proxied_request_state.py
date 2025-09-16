@@ -28,4 +28,10 @@ class ProxiedRequestState(RequestStateBase):
     def get(self, key: str, default: Any | None = None) -> Any | None:
         """Get a value by key. If the key does not exist, return the default value."""
         value: bytes | None = self._proxy_server.get(self._allocation_id, key)
-        return default if value is None else self._user_serializer.deserialize(value)
+        return (
+            default
+            if value is None
+            else self._user_serializer.deserialize(
+                value, possible_types=[type(default)]
+            )
+        )
