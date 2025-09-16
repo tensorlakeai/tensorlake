@@ -55,11 +55,14 @@ def download_api_function_payload_bytes(
     logger = logger.bind(module=__name__)
     logger.info("downloading function arguments")
 
-    api_payload_blob: BLOB = allocation.inputs.args[0]
-    api_payload_so: SerializedObjectInsideBLOB = allocation.inputs.arg_blobs[0]
+    api_payload_blob: BLOB = allocation.inputs.arg_blobs[0]
+    api_payload_so: SerializedObjectInsideBLOB = allocation.inputs.args[0]
 
     payload: bytes = _download_function_argument(
-        api_payload_blob, api_payload_so, blob_store, logger
+        arg_blob=api_payload_blob,
+        arg=api_payload_so,
+        blob_store=blob_store,
+        logger=logger,
     )
 
     logger.info(
@@ -78,8 +81,8 @@ def _download_function_argument(
 ) -> bytes:
     data: bytes = blob_store.get(
         blob=arg_blob,
-        offset=arg.offset,
-        size=arg.manifest.size,
+        offset=arg.offset + arg.manifest.metadata_size,
+        size=arg.manifest.size - arg.manifest.metadata_size,
         logger=logger,
     )
 
@@ -93,6 +96,8 @@ def _download_function_argument(
         raise ValueError(
             f"Function argument data hash {data_hash} does not match expected hash {arg.manifest.sha256_hash}."
         )
+
+    return data
 
 
 def _deserialize_to_value_node(

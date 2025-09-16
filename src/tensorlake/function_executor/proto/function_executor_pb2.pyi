@@ -186,25 +186,16 @@ class InitializeRequest(_message.Message):
         application_code: _Optional[_Union[SerializedObject, _Mapping]] = ...,
     ) -> None: ...
 
-class InitializeDiagnostics(_message.Message):
-    __slots__ = ("function_executor_log",)
-    FUNCTION_EXECUTOR_LOG_FIELD_NUMBER: _ClassVar[int]
-    function_executor_log: str
-    def __init__(self, function_executor_log: _Optional[str] = ...) -> None: ...
-
 class InitializeResponse(_message.Message):
-    __slots__ = ("outcome_code", "failure_reason", "diagnostics")
+    __slots__ = ("outcome_code", "failure_reason")
     OUTCOME_CODE_FIELD_NUMBER: _ClassVar[int]
     FAILURE_REASON_FIELD_NUMBER: _ClassVar[int]
-    DIAGNOSTICS_FIELD_NUMBER: _ClassVar[int]
     outcome_code: InitializationOutcomeCode
     failure_reason: InitializationFailureReason
-    diagnostics: InitializeDiagnostics
     def __init__(
         self,
         outcome_code: _Optional[_Union[InitializationOutcomeCode, str]] = ...,
         failure_reason: _Optional[_Union[InitializationFailureReason, str]] = ...,
-        diagnostics: _Optional[_Union[InitializeDiagnostics, _Mapping]] = ...,
     ) -> None: ...
 
 class SetRequestStateRequest(_message.Message):
@@ -371,12 +362,6 @@ class FunctionInputs(_message.Message):
         function_call_metadata: _Optional[bytes] = ...,
     ) -> None: ...
 
-class AllocationDiagnostics(_message.Message):
-    __slots__ = ("function_executor_log",)
-    FUNCTION_EXECUTOR_LOG_FIELD_NUMBER: _ClassVar[int]
-    function_executor_log: str
-    def __init__(self, function_executor_log: _Optional[str] = ...) -> None: ...
-
 class FunctionArg(_message.Message):
     __slots__ = ("function_call_id", "value")
     FUNCTION_CALL_ID_FIELD_NUMBER: _ClassVar[int]
@@ -449,7 +434,6 @@ class AllocationResult(_message.Message):
         "request_error_output",
         "uploaded_request_error_blob",
         "metrics",
-        "diagnostics",
     )
     OUTCOME_CODE_FIELD_NUMBER: _ClassVar[int]
     FAILURE_REASON_FIELD_NUMBER: _ClassVar[int]
@@ -459,7 +443,6 @@ class AllocationResult(_message.Message):
     REQUEST_ERROR_OUTPUT_FIELD_NUMBER: _ClassVar[int]
     UPLOADED_REQUEST_ERROR_BLOB_FIELD_NUMBER: _ClassVar[int]
     METRICS_FIELD_NUMBER: _ClassVar[int]
-    DIAGNOSTICS_FIELD_NUMBER: _ClassVar[int]
     outcome_code: AllocationOutcomeCode
     failure_reason: AllocationFailureReason
     value: SerializedObjectInsideBLOB
@@ -468,7 +451,6 @@ class AllocationResult(_message.Message):
     request_error_output: SerializedObjectInsideBLOB
     uploaded_request_error_blob: BLOB
     metrics: Metrics
-    diagnostics: AllocationDiagnostics
     def __init__(
         self,
         outcome_code: _Optional[_Union[AllocationOutcomeCode, str]] = ...,
@@ -481,15 +463,14 @@ class AllocationResult(_message.Message):
         ] = ...,
         uploaded_request_error_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
         metrics: _Optional[_Union[Metrics, _Mapping]] = ...,
-        diagnostics: _Optional[_Union[AllocationDiagnostics, _Mapping]] = ...,
     ) -> None: ...
 
 class Allocation(_message.Message):
-    __slots__ = ("request_id", "task_id", "allocation_id", "request", "result")
+    __slots__ = ("request_id", "task_id", "allocation_id", "inputs", "result")
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     TASK_ID_FIELD_NUMBER: _ClassVar[int]
     ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
-    REQUEST_FIELD_NUMBER: _ClassVar[int]
+    INPUTS_FIELD_NUMBER: _ClassVar[int]
     RESULT_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     task_id: str
@@ -501,7 +482,7 @@ class Allocation(_message.Message):
         request_id: _Optional[str] = ...,
         task_id: _Optional[str] = ...,
         allocation_id: _Optional[str] = ...,
-        request: _Optional[_Union[FunctionInputs, _Mapping]] = ...,
+        inputs: _Optional[_Union[FunctionInputs, _Mapping]] = ...,
         result: _Optional[_Union[AllocationResult, _Mapping]] = ...,
     ) -> None: ...
 

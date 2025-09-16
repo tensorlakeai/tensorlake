@@ -11,7 +11,7 @@ from testing import (
     create_tmp_blob,
     deserialized_function_output,
     rpc_channel,
-    run_task,
+    run_allocation,
 )
 
 from tensorlake import Graph
@@ -180,7 +180,7 @@ class TestSetInvocationState(unittest.TestCase):
                     self, stub, expected_requests, responses
                 )
                 function_outputs_blob: BLOB = create_tmp_blob()
-                task_result: TaskResult = run_task(
+                task_result: TaskResult = run_allocation(
                     stub,
                     function_name="set_invocation_state",
                     input=42,
@@ -243,7 +243,7 @@ class TestSetInvocationState(unittest.TestCase):
                     self, stub, expected_requests, responses
                 )
                 function_outputs_blob: BLOB = create_tmp_blob()
-                task_result: TaskResult = run_task(
+                task_result: TaskResult = run_allocation(
                     stub,
                     function_name="set_invocation_state",
                     input=42,
@@ -373,7 +373,7 @@ class TestGetInvocationState(unittest.TestCase):
                     self, stub, expected_requests, responses
                 )
                 function_outputs_blob: BLOB = create_tmp_blob()
-                rtask_result: TaskResult = run_task(
+                rtask_result: TaskResult = run_allocation(
                     stub,
                     function_name="check_invocation_state_is_expected",
                     input=33,
@@ -431,7 +431,7 @@ class TestGetInvocationState(unittest.TestCase):
                     self, stub, expected_requests, responses
                 )
                 function_outputs_blob: BLOB = create_tmp_blob()
-                task_result: TaskResult = run_task(
+                task_result: TaskResult = run_allocation(
                     stub,
                     function_name="check_invocation_state_is_none",
                     input=33,
@@ -482,7 +482,7 @@ class TestGetInvocationState(unittest.TestCase):
                     self, stub, expected_requests, responses
                 )
                 function_outputs_blob: BLOB = create_tmp_blob()
-                task_result: TaskResult = run_task(
+                task_result: TaskResult = run_allocation(
                     stub,
                     function_name="check_invocation_state_is_expected",
                     input=14,

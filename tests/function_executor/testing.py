@@ -3,7 +3,7 @@ import os
 import subprocess
 import tempfile
 import unittest
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import grpc
 
@@ -19,13 +19,11 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     FunctionInputs,
     SerializedObjectEncoding,
     SerializedObjectInsideBLOB,
-    SerializedObjectManifest,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
 from tensorlake.function_executor.proto.server_configuration import GRPC_SERVER_OPTIONS
-from tensorlake.functions_sdk.object_serializer import CloudPickleSerializer
 
 
 class FunctionExecutorProcessContextManager:
@@ -49,9 +47,9 @@ class FunctionExecutorProcessContextManager:
         self._args.extend(extra_args)
         self._extra_env = extra_env
         self._capture_std_outputs = capture_std_outputs
-        self._process: Optional[subprocess.Popen] = None
-        self._stdout: Optional[str] = None
-        self._stderr: Optional[str] = None
+        self._process: subprocess.Popen | None = None
+        self._stdout: str | None = None
+        self._stderr: str | None = None
 
     def __enter__(self) -> "FunctionExecutorProcessContextManager":
         kwargs = {}
@@ -72,11 +70,11 @@ class FunctionExecutorProcessContextManager:
                 self._stderr = self._process.stderr.read().decode("utf-8")
             self._process.__exit__(exc_type, exc_value, traceback)
 
-    def read_stdout(self) -> Optional[str]:
+    def read_stdout(self) -> str | None:
         # Only call this after FE exits.
         return self._stdout
 
-    def read_stderr(self) -> Optional[str]:
+    def read_stderr(self) -> str | None:
         # Only call this after FE exits.
         return self._stderr
 
@@ -99,65 +97,38 @@ def rpc_channel(context_manager: FunctionExecutorProcessContextManager) -> grpc.
         ) from e
 
 
-def run_task(
+def run_allocation(
     stub: FunctionExecutorStub,
-    function_name: str,
-    input: Any,
-    function_outputs_blob: BLOB,
-    invocation_error_blob: BLOB,
-    timeout_sec: Optional[int] = None,
+    inputs: FunctionInputs,
+    timeout_sec: int | None = None,
 ) -> AllocationResult:
-    function_input_blob: BLOB = create_tmp_blob()
-    function_input_data: bytes = CloudPickleSerializer.serialize(input)
-    write_tmp_blob_bytes(
-        blob=function_input_blob,
-        data=function_input_data,
-    )
-
-    task_id: str = "test-task"
+    allocation_id: str = "test-allocation"
     stub.create_allocation(
         CreateAllocationRequest(
-            task=Allocation(
-                namespace="test",
-                graph_name="test",
-                graph_version="1",
-                function_name=function_name,
-                graph_invocation_id="123",
-                task_id=task_id,
-                allocation_id="test-allocation",
-                request=FunctionInputs(
-                    function_input_blob=function_input_blob,
-                    function_input=SerializedObjectInsideBLOB(
-                        manifest=SerializedObjectManifest(
-                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-                            encoding_version=0,
-                            size=len(function_input_data),
-                            sha256_hash=hashlib.sha256(function_input_data).hexdigest(),
-                        ),
-                        offset=0,
-                    ),
-                    function_outputs_blob=function_outputs_blob,
-                    invocation_error_blob=invocation_error_blob,
-                ),
+            allocation=Allocation(
+                request_id="123",
+                task_id="test-task",
+                allocation_id=allocation_id,
+                inputs=inputs,
             ),
         )
     )
 
-    await_task_stream_rpc = stub.await_allocation(
-        AwaitAllocationRequest(task_id=task_id), timeout=timeout_sec
+    await_allocation_stream_rpc = stub.await_allocation(
+        AwaitAllocationRequest(allocation_id=allocation_id), timeout=timeout_sec
     )
-    result: Optional[AllocationResult] = None
-    for progress in await_task_stream_rpc:
+    result: AllocationResult | None = None
+    for progress in await_allocation_stream_rpc:
         progress: AwaitAllocationProgress
-        if progress.WhichOneof("response") == "task_result":
+        if progress.WhichOneof("response") == "allocation_result":
             result: AllocationResult = progress.allocation_result
             break
 
-    await_task_stream_rpc.cancel()
-    stub.delete_allocation(DeleteAllocationRequest(task_id=task_id))
+    await_allocation_stream_rpc.cancel()
+    stub.delete_allocation(DeleteAllocationRequest(allocation_id=allocation_id))
 
     if result is None:
-        # Check in case if stream finished by FE without task_result.
+        # Check in case if stream finished by FE without allocation_result.
         raise Exception("Allocation result was not received from the server.")
 
     return result
