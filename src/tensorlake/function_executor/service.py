@@ -11,10 +11,8 @@ from typing import Any, Dict, Generator, Iterator, List
 import grpc
 
 # Code that uses SDK has to import first the SDK interfaces to avoid circular imports when importing internal SDK modules.
-import tensorlake.workflows.interface as workflow_interface
+import tensorlake.workflows.interface as workflows_interface
 from tensorlake.workflows.function.function_call import create_self_instance
-from tensorlake.workflows.interface import Function
-from tensorlake.workflows.interface.request_context import RequestProgress
 from tensorlake.workflows.registry import get_function, get_functions, has_function
 from tensorlake.workflows.remote.application.zip import (
     APPLICATION_ZIP_MANIFEST_FILE_NAME,
@@ -45,7 +43,6 @@ from .proto.function_executor_pb2 import (
     InfoResponse,
     InitializationFailureReason,
     InitializationOutcomeCode,
-    InitializeDiagnostics,
     InitializeRequest,
     InitializeResponse,
     ListAllocationsRequest,
@@ -86,7 +83,7 @@ class _AllocationInfo:
         )
 
 
-class TaskAllocationRequestProgress(RequestProgress):
+class TaskAllocationRequestProgress(workflows_interface.RequestProgress):
     def __init__(self, alloc_info: _AllocationInfo):
         self._alloc_info: _AllocationInfo = alloc_info
 
@@ -110,7 +107,7 @@ class Service(FunctionExecutorServicer):
             module=__name__, **info_response_kv_args()
         )
         self._function_ref: FunctionRef | None = None
-        self._function: Function | None = None
+        self._function: workflows_interface.Function | None = None
         self._function_instance_arg: Any | None = None
         self._blob_store: BLOBStore | None = None
         self._request_state_proxy_server: RequestStateProxyServer | None = None
@@ -211,9 +208,6 @@ class Service(FunctionExecutorServicer):
             return InitializeResponse(
                 outcome_code=InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_FAILURE,
                 failure_reason=InitializationFailureReason.INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR,
-                diagnostics=InitializeDiagnostics(
-                    function_executor_log=self._logger.read_till_the_end(start=0),
-                ),
             )
 
         available_cpu_count: int = int(self._function.function_config.cpu)
@@ -229,9 +223,6 @@ class Service(FunctionExecutorServicer):
         log_user_event_initialization_finished(event_details, success=True)
         return InitializeResponse(
             outcome_code=InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
-            diagnostics=InitializeDiagnostics(
-                function_executor_log=self._logger.read_till_the_end(start=0),
-            ),
         )
 
     def initialize_request_state_server(

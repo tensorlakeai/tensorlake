@@ -16,7 +16,6 @@ from ...blob_store.blob_store import BLOBStore
 from ...logger import FunctionExecutorLogger
 from ...proto.function_executor_pb2 import (
     BLOB,
-    AllocationDiagnostics,
     AllocationFailureReason,
     AllocationOutcomeCode,
     AllocationResult,
@@ -50,7 +49,6 @@ class ResponseHelper:
     def from_function_output(
         self,
         output: Any,
-        fe_log_start: int,
     ) -> AllocationResult:
         output_ast: ASTNode = ast_from_user_object(
             output, function_output_serializer(self._function)
@@ -70,21 +68,13 @@ class ResponseHelper:
         #     self._upload_function_outputs(result.ser_outputs)
         # )
 
-        # Gather the diagnostics in the very end to not miss anything.
-        diagnostics = AllocationDiagnostics(
-            function_executor_log=self._logger.read_till_the_end(start=fe_log_start),
-        )
-
         return AllocationResult(
             outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
             # TODO: set either value or updates field.
             metrics=self._get_metrics(),
-            diagnostics=diagnostics,
         )
 
-    def from_function_exception(
-        self, exception: Exception, fe_log_start: int
-    ) -> AllocationResult:
+    def from_function_exception(self, exception: Exception) -> AllocationResult:
         # Print the exception to stderr so customer can see it there.
         traceback.print_exception(exception)
 
@@ -102,11 +92,6 @@ class ResponseHelper:
                 AllocationFailureReason.ALLOCATION_FAILURE_REASON_FUNCTION_ERROR
             )
 
-        # Gather the diagnostics in the very end to not miss anything.
-        diagnostics = AllocationDiagnostics(
-            function_executor_log=self._logger.read_till_the_end(start=fe_log_start),
-        )
-
         return AllocationResult(
             outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,
             failure_reason=failure_reason,
@@ -114,7 +99,6 @@ class ResponseHelper:
             uploaded_invocation_error_blob=uploaded_invocation_error_blob,
             next_functions=[],
             metrics=self._get_metrics(),
-            diagnostics=diagnostics,
         )
 
     def _get_metrics(self) -> MetricsProto:
