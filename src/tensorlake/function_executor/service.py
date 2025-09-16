@@ -302,6 +302,8 @@ class Service(FunctionExecutorServicer):
             state=ProxiedRequestState(
                 allocation_id=alloc_info.allocation.allocation_id,
                 proxy_server=self._request_state_proxy_server,
+                # User data stored in request context is not available via HTTP.
+                # So we can use Pickle which gives smooth UX.
                 user_serializer=PickleUserDataSerializer(),
             ),
             progress=TaskAllocationRequestProgress(alloc_info),
