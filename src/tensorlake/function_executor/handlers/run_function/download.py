@@ -35,10 +35,16 @@ def download_function_arguments(
     for i, arg in enumerate(allocation.inputs.args):
         arg: SerializedObjectInsideBLOB
         arg_blob: BLOB = allocation.inputs.arg_blobs[i]
-        serialized_arg: bytes = _download_function_argument(
+        serialized_arg_metadata, serialized_arg_data = _download_serialized_object(
             arg_blob, arg, blob_store, logger
         )
-        args.append(_deserialize_to_value_node(arg.manifest, serialized_arg))
+        serialized_arg_metadata: bytes
+        serialized_arg_data: bytes
+        args.append(
+            _deserialize_to_value_node(
+                arg.manifest, serialized_arg_metadata, serialized_arg_data
+            )
+        )
 
     logger.info(
         "function arguments downloaded",
@@ -58,9 +64,9 @@ def download_api_function_payload_bytes(
     api_payload_blob: BLOB = allocation.inputs.arg_blobs[0]
     api_payload_so: SerializedObjectInsideBLOB = allocation.inputs.args[0]
 
-    payload: bytes = _download_function_argument(
-        arg_blob=api_payload_blob,
-        arg=api_payload_so,
+    _, payload = _download_serialized_object(
+        blob=api_payload_blob,
+        so=api_payload_so,
         blob_store=blob_store,
         logger=logger,
     )
@@ -73,53 +79,57 @@ def download_api_function_payload_bytes(
     return payload
 
 
-def _download_function_argument(
-    arg_blob: BLOB,
-    arg: SerializedObjectInsideBLOB,
+def _download_serialized_object(
+    blob: BLOB,
+    so: SerializedObjectInsideBLOB,
     blob_store: BLOBStore,
     logger: FunctionExecutorLogger,
-) -> bytes:
-    data: bytes = blob_store.get(
-        blob=arg_blob,
-        offset=arg.offset + arg.manifest.metadata_size,
-        size=arg.manifest.size - arg.manifest.metadata_size,
+) -> tuple[bytes, bytes]:
+    """Returns the raw bytes of the serialized object metadata and data from blob store."""
+    if not so.manifest.HasField("metadata_size"):
+        raise ValueError("SerializedObjectManifest is missing metadata_size.")
+
+    # Download each part separately to avoid splitting the downloaded data and consuming extra memory.
+    so_metadata: bytes = blob_store.get(
+        blob=blob,
+        offset=so.offset,
+        size=so.manifest.metadata_size,
         logger=logger,
     )
-
-    data_hash: str = _sha256_hexdigest(data)
-    if data_hash != arg.manifest.sha256_hash:
+    so_data: bytes = blob_store.get(
+        blob=blob,
+        offset=so.offset + so.manifest.metadata_size,
+        size=so.manifest.size - so.manifest.metadata_size,
+        logger=logger,
+    )
+    so_hash: str = _sha256_hexdigest(so_metadata, so_data)
+    if so_hash != so.manifest.sha256_hash:
         logger.error(
-            "function argument data hash mismatch",
-            got_hash=data_hash,
-            expected_hash=arg.manifest.sha256_hash,
+            "serialized object data hash mismatch",
+            got_hash=so_hash,
+            expected_hash=so.manifest.sha256_hash,
         )
         raise ValueError(
-            f"Function argument data hash {data_hash} does not match expected hash {arg.manifest.sha256_hash}."
+            f"Serialized object hash {so_hash} does not match expected hash {so.manifest.sha256_hash}."
         )
 
-    return data
+    return so_metadata, so_data
 
 
 def _deserialize_to_value_node(
-    manifest: SerializedObjectManifest, data: bytes
+    manifest: SerializedObjectManifest, metadata: bytes, data: bytes
 ) -> ValueNode:
     """Deserialized Serialized Object created by Python SDK into its original ValueNode."""
-    if not manifest.HasField("metadata_size"):
-        raise ValueError("SerializedObjectManifest is missing metadata_size.")
-
-    if not manifest.HasField("function_call_id"):
-        raise ValueError("SerializedObjectManifest is missing function_call_id.")
-
-    value_node_metadata: ValueNodeMetadata = ValueNodeMetadata.deserialize(
-        memoryview(data)[: manifest.metadata_size]
-    )
-    serialized_value = memoryview(data)[manifest.metadata_size :]
+    value_node_metadata: ValueNodeMetadata = ValueNodeMetadata.deserialize(metadata)
     return ValueNode.from_serialized(
         node_id=value_node_metadata.nid,
-        value=serialized_value,
+        value=data,
         metadata=value_node_metadata.metadata,
     )
 
 
-def _sha256_hexdigest(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+def _sha256_hexdigest(metadata: bytes, data: bytes) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(metadata)
+    hasher.update(data)
+    return hasher.hexdigest()
