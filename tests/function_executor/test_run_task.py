@@ -9,7 +9,8 @@ from testing import (
     create_tmp_blob,
     deserialized_function_output,
     rpc_channel,
-    run_task,
+    run_allocation,
+    write_tmp_blob_bytes,
 )
 
 from tensorlake.function_executor.proto.function_executor_pb2 import (
@@ -18,6 +19,7 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     AllocationOutcomeCode,
     AllocationResult,
     BLOBChunk,
+    FunctionInputs,
     FunctionRef,
     InitializationFailureReason,
     InitializationOutcomeCode,
@@ -32,6 +34,7 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
 from tensorlake.workflows.remote.application.zip import zip_application_code
+from tensorlake.workflows.user_data_serializer import JSONUserDataSerializer
 
 APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
 
@@ -127,39 +130,45 @@ class TestRunTask(unittest.TestCase):
                     InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
                 )
 
-                # Check FE logs (separated from function logs)
-                # Skipping this right now because currently we print FE logs to FE stdout.
-                # self.assertIn(
-                #     "initializing function executor service",
-                #     initialize_response.diagnostics.function_executor_log,
-                # )
-                # self.assertIn(
-                #     "initialized function executor service",
-                #     initialize_response.diagnostics.function_executor_log,
-                # )
+                inputs_serializer: JSONUserDataSerializer = JSONUserDataSerializer()
+                serialized_api_payload: bytes = inputs_serializer.serialize(
+                    "https://example.com"
+                )
+                api_payload_blob: BLOB = create_tmp_blob()
+                write_tmp_blob_bytes(
+                    api_payload_blob,
+                    serialized_api_payload,
+                )
+                function_outputs_blob: BLOB = create_tmp_blob()
+                alloc_result: AllocationResult = run_allocation(
+                    stub,
+                    inputs=FunctionInputs(
+                        args=[
+                            SerializedObjectInsideBLOB(
+                                manifest=SerializedObjectManifest(
+                                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON,
+                                    encoding_version=0,
+                                    size=len(serialized_api_payload),
+                                    metadata_size=0,  # No metadata for API function calls.
+                                    sha256_hash=hashlib.sha256(
+                                        serialized_api_payload
+                                    ).hexdigest(),
+                                ),
+                                offset=0,
+                            )
+                        ],
+                        arg_blobs=[api_payload_blob],
+                        function_outputs_blob=function_outputs_blob,
+                        request_error_blob=create_tmp_blob(),
+                        # No function_call_metadata for API function calls.
+                    ),
+                )
 
-    #             function_outputs_blob: BLOB = create_tmp_blob()
-    #             task_result: TaskResult = run_task(
-    #                 stub,
-    #                 function_name="extractor_b",
-    #                 input=File(data=bytes(b"hello"), mime_type="text/plain"),
-    #                 function_outputs_blob=function_outputs_blob,
-    #                 invocation_error_blob=create_tmp_blob(),
-    #             )
-
-    #             self.assertEqual(
-    #                 task_result.outcome_code,
-    #                 TaskOutcomeCode.TASK_OUTCOME_CODE_SUCCESS,
-    #             )
-    #             self.assertFalse(task_result.HasField("invocation_error_output"))
-    #             # Check FE logs (separated from function logs)
-    #             # Skipping this right now because currently we print FE logs to FE stdout.
-    #             # self.assertIn(
-    #             #     "running function", task_result.diagnostics.function_executor_log
-    #             # )
-    #             # self.assertIn(
-    #             #     "function finished", task_result.diagnostics.function_executor_log
-    #             # )
+                self.assertEqual(
+                    alloc_result.outcome_code,
+                    AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
+                )
+                self.assertFalse(alloc_result.HasField("request_error_output"))
 
     #             fn_outputs = deserialized_function_output(
     #                 self, task_result.function_outputs, function_outputs_blob

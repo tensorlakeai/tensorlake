@@ -7,7 +7,7 @@ from testing import (
     deserialized_function_output,
     read_tmp_blob_bytes,
     rpc_channel,
-    run_task,
+    run_allocation,
 )
 
 from tensorlake import Graph, RequestException
@@ -77,7 +77,7 @@ class TestInvocationError(unittest.TestCase):
 
                 function_outputs_blob = create_tmp_blob()
                 invocation_error_blob = create_tmp_blob()
-                task_result: TaskResult = run_task(
+                task_result: TaskResult = run_allocation(
                     stub,
                     function_name="raise_invocation_error",
                     input=10,

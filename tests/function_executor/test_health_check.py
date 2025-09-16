@@ -10,7 +10,7 @@ from testing import (
     FunctionExecutorProcessContextManager,
     create_tmp_blob,
     rpc_channel,
-    run_task,
+    run_allocation,
 )
 
 from tensorlake import Graph
@@ -133,7 +133,7 @@ class TestHealthCheck(unittest.TestCase):
 
                 def run_task_in_thread():
                     try:
-                        run_task(
+                        run_allocation(
                             stub,
                             function_name="action_function",
                             input="deadlock",
@@ -164,7 +164,7 @@ class TestHealthCheck(unittest.TestCase):
                 function_outputs_blob: BLOB = create_tmp_blob()
 
                 def run_task_in_thread():
-                    task_result: TaskResult = run_task(
+                    task_result: TaskResult = run_allocation(
                         stub,
                         function_name="action_function",
                         input="raise_exception",
@@ -197,7 +197,7 @@ class TestHealthCheck(unittest.TestCase):
                 def run_task_in_thread():
                     try:
                         # Due to "tcp keep-alive" property of the health checks the task should unblock with RpcError.
-                        run_task(
+                        run_allocation(
                             stub,
                             function_name="action_function",
                             input="crash_process",
@@ -224,7 +224,7 @@ class TestHealthCheck(unittest.TestCase):
                 def run_task_in_thread():
                     try:
                         # Due to "tcp keep-alive" property of the health checks the task should unblock with RpcError.
-                        run_task(
+                        run_allocation(
                             stub,
                             function_name="action_function",
                             input="close_connections",

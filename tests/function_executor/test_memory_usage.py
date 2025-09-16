@@ -8,7 +8,7 @@ from testing import (
     create_tmp_blob,
     deserialized_function_output,
     rpc_channel,
-    run_task,
+    run_allocation,
 )
 
 from tensorlake import Graph
@@ -83,7 +83,7 @@ class TestMemoryUsage(unittest.TestCase):
                 )
 
                 function_outputs_blob: BLOB = create_tmp_blob()
-                task_result: TaskResult = run_task(
+                task_result: TaskResult = run_allocation(
                     stub,
                     function_name="process_rss_mb",
                     input=0,
