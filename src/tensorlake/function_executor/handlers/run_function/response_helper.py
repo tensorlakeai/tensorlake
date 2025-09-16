@@ -10,7 +10,6 @@ from tensorlake.workflows.ast.ast import (
     traverse_ast,
 )
 from tensorlake.workflows.ast.function_call_node import (
-    RegularFunctionCallMetadata,
     RegularFunctionCallNode,
 )
 from tensorlake.workflows.ast.reducer_call_node import ReducerFunctionCallNode
@@ -156,7 +155,7 @@ class ResponseHelper:
             node: RegularFunctionCallNode | ReducerFunctionCallNode
             update: ExecutionPlanUpdate
             data_dependencies: List[FunctionArg] = []
-            for child in node.children:
+            for child in node.children.values():
                 if isinstance(child, ValueNode):
                     data_dependencies.append(
                         FunctionArg(value=uploaded_value_node_sos[child.id])
