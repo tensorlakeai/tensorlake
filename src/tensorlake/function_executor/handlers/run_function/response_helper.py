@@ -1,9 +1,19 @@
 import hashlib
 import time
 import traceback
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Tuple
 
-from tensorlake.workflows.ast.ast import ASTNode, ast_from_user_object
+from tensorlake.workflows.ast.ast import (
+    ASTNode,
+    ast_from_user_object,
+    flatten_ast,
+    traverse_ast,
+)
+from tensorlake.workflows.ast.function_call_node import (
+    RegularFunctionCallMetadata,
+    RegularFunctionCallNode,
+)
+from tensorlake.workflows.ast.reducer_call_node import ReducerFunctionCallNode
 from tensorlake.workflows.ast.value_node import ValueNode
 from tensorlake.workflows.function.user_data_serializer import (
     function_output_serializer,
@@ -20,14 +30,21 @@ from ...proto.function_executor_pb2 import (
     AllocationFailureReason,
     AllocationOutcomeCode,
     AllocationResult,
+    ExecutionPlanUpdate,
+    ExecutionPlanUpdates,
+    FunctionArg,
+    FunctionCall,
     FunctionInputs,
+    FunctionRef,
 )
 from ...proto.function_executor_pb2 import Metrics as MetricsProto
 from ...proto.function_executor_pb2 import (
+    ReduceOp,
     SerializedObjectEncoding,
     SerializedObjectInsideBLOB,
     SerializedObjectManifest,
 )
+from .function_call_node_metadata import FunctionCallNodeMetadata, FunctionCallType
 from .value_node_metadata import ValueNodeMetadata
 
 
@@ -36,12 +53,14 @@ class ResponseHelper:
 
     def __init__(
         self,
+        function_ref: FunctionRef,
         function: Function,
         inputs: FunctionInputs,
         request_state: RequestStateBase,
         blob_store: BLOBStore,
         logger: FunctionExecutorLogger,
     ):
+        self._function_ref: FunctionRef = function_ref
         self._function: Function = function
         self._inputs: FunctionInputs = inputs
         self._request_state: RequestStateBase = request_state
@@ -57,41 +76,32 @@ class ResponseHelper:
         )
         output_ast: ASTNode = ast_from_user_object(output, output_serializer)
 
-        serialized_object: SerializedObjectInsideBLOB
+        value: SerializedObjectInsideBLOB | None = None
+        updates: ExecutionPlanUpdates | None = None
         uploaded_function_outputs_blob: BLOB
-        if isinstance(output_ast, ValueNode):
-            serialized_object, uploaded_function_outputs_blob = (
-                self._upload_function_output_value(output_ast, output_serializer)
-            )
-        else:
-            serialized_object = SerializedObjectInsideBLOB(
-                manifest=SerializedObjectManifest(
-                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_TEXT,
-                    encoding_version=0,
-                    size=11,
-                    sha256_hash="",
-                    content_type="",
-                ),
-                offset=0,
-            )
-            uploaded_function_outputs_blob: BLOB = _upload_outputs(
-                [b"Fake output"],
-                self._inputs.function_outputs_blob,
-                self._blob_store,
-                self._logger,
-            )
-            # TODO: Walk the output_ast tree and for each ValueNode
-            # upload it to BLOB store and then remember its serialized objects.
-            #
-            # Then flatten the tree and convert it into proto tree.
 
-        return AllocationResult(
+        if isinstance(output_ast, ValueNode):
+            uploaded_sos, uploaded_function_outputs_blob = (
+                self._upload_function_output_values([output_ast], output_serializer)
+            )
+            value = uploaded_sos[output_ast.id]
+        else:
+            updates, uploaded_function_outputs_blob = self._upload_function_output_ast(
+                output_ast, output_serializer
+            )
+
+        result = AllocationResult(
             outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
-            # TODO: set updates field for AST tree output.
-            value=serialized_object,
             uploaded_function_outputs_blob=uploaded_function_outputs_blob,
             metrics=self._get_metrics(),
         )
+
+        if updates is None:
+            result.value.CopyFrom(value)
+        else:
+            result.updates.CopyFrom(updates)
+
+        return result
 
     def from_function_exception(self, exception: Exception) -> AllocationResult:
         # Print the exception to stderr so customer can see it there.
@@ -125,39 +135,125 @@ class ResponseHelper:
             counters=self._request_state.counters,
         )
 
-    def _upload_function_output_value(
-        self, value_node: ValueNode, serializer: UserDataSerializer
-    ) -> Tuple[SerializedObjectInsideBLOB, BLOB]:
-        serialized_objects: List[SerializedObjectInsideBLOB] = []
-        blob_datas: List[bytes] = []
+    def _upload_function_output_ast(
+        self, root: ASTNode, serializer: UserDataSerializer
+    ) -> Tuple[ExecutionPlanUpdates, BLOB]:
+        flattened_ast: Dict[str, ASTNode] = flatten_ast(root)
+        value_nodes: List[ValueNode] = [
+            node for node in flattened_ast.values() if isinstance(node, ValueNode)
+        ]
+        uploaded_value_node_sos, uploaded_function_outputs_blob = (
+            self._upload_function_output_values(value_nodes, serializer)
+        )
+        uploaded_value_node_sos: Dict[str, SerializedObjectInsideBLOB]
+        uploaded_function_outputs_blob: BLOB
+        updates: List[ExecutionPlanUpdate] = []
 
+        for node in traverse_ast(root):
+            if isinstance(node, ValueNode):
+                continue
+
+            node: RegularFunctionCallNode | ReducerFunctionCallNode
+            update: ExecutionPlanUpdate
+            data_dependencies: List[FunctionArg] = []
+            for child in node.children:
+                if isinstance(child, ValueNode):
+                    data_dependencies.append(
+                        FunctionArg(value=uploaded_value_node_sos[child.id])
+                    )
+                elif isinstance(child, RegularFunctionCallNode):
+                    data_dependencies.append(
+                        FunctionArg(
+                            function_call_id=child.id,
+                        )
+                    )
+                elif isinstance(child, ReducerFunctionCallNode):
+                    data_dependencies.append(
+                        FunctionArg(
+                            function_call_id=child.id,
+                        )
+                    )
+
+            if isinstance(node, RegularFunctionCallNode):
+                update = ExecutionPlanUpdate(
+                    function_call=FunctionCall(
+                        id=node.id,
+                        target=FunctionRef(
+                            namespace=self._function_ref.namespace,
+                            application_name=self._function_ref.application_name,
+                            function_name=node.function_name,
+                            application_version=self._function_ref.application_version,
+                        ),
+                        args=data_dependencies,
+                        metadata=FunctionCallNodeMetadata(
+                            nid=node.id,
+                            type=FunctionCallType.REGULAR,
+                            metadata=node.serialized_metadata,
+                        ).serialize(),
+                    )
+                )
+            elif isinstance(node, ReducerFunctionCallNode):
+                update = ExecutionPlanUpdate(
+                    reduce=ReduceOp(
+                        id=node.id,
+                        reducer=FunctionRef(
+                            namespace=self._function_ref.namespace,
+                            application_name=self._function_ref.application_name,
+                            function_name=node.reducer_function_name,
+                            application_version=self._function_ref.application_version,
+                        ),
+                        collection=data_dependencies,
+                        call_metadata=FunctionCallNodeMetadata(
+                            nid=node.id,
+                            type=FunctionCallType.REDUCER,
+                        ).serialize(),
+                    )
+                )
+            else:
+                raise ValueError(f"Unknown AST node type: {type(node)}")
+
+            updates.append(update)
+
+        return (
+            ExecutionPlanUpdates(
+                updates=updates,
+            ),
+            uploaded_function_outputs_blob,
+        )
+
+    def _upload_function_output_values(
+        self, value_nodes: List[ValueNode], serializer: UserDataSerializer
+    ) -> Tuple[Dict[str, SerializedObjectInsideBLOB], BLOB]:
+        serialized_objects: Dict[str, SerializedObjectInsideBLOB] = {}
+        blob_datas: List[bytes] = []
         blob_offset: int = 0
         encoding_version: int = 0
 
-        value_node_serialized_metadata: bytes = ValueNodeMetadata(
-            nid=value_node.id, metadata=value_node.serialized_metadata
-        ).serialize()
-        value_node_so: SerializedObjectInsideBLOB = SerializedObjectInsideBLOB(
-            manifest=SerializedObjectManifest(
-                encoding=serializer.serialized_object_encoding,
-                encoding_version=encoding_version,
-                size=len(value_node_serialized_metadata) + len(value_node.value),
-                metadata_size=len(value_node_serialized_metadata),
-                sha256_hash=_sha256_hexdigest(
-                    value_node_serialized_metadata, value_node.value
+        for value_node in value_nodes:
+            value_node_serialized_metadata: bytes = ValueNodeMetadata(
+                nid=value_node.id, metadata=value_node.serialized_metadata
+            ).serialize()
+            value_node_so: SerializedObjectInsideBLOB = SerializedObjectInsideBLOB(
+                manifest=SerializedObjectManifest(
+                    encoding=serializer.serialized_object_encoding,
+                    encoding_version=encoding_version,
+                    size=len(value_node_serialized_metadata) + len(value_node.value),
+                    metadata_size=len(value_node_serialized_metadata),
+                    sha256_hash=_sha256_hexdigest(
+                        value_node_serialized_metadata, value_node.value
+                    ),
+                    content_type=value_node.content_type,
                 ),
-                content_type=value_node.content_type,
-            ),
-            offset=blob_offset,
-        )
-        serialized_objects.append(value_node_so)
-        blob_datas.append(value_node_serialized_metadata)
-        blob_datas.append(value_node.value)
-        blob_offset += value_node_so.manifest.size
+                offset=blob_offset,
+            )
+            serialized_objects[value_node.id] = value_node_so
+            blob_datas.append(value_node_serialized_metadata)
+            blob_datas.append(value_node.value)
+            blob_offset += value_node_so.manifest.size
 
         start_time = time.monotonic()
         self._logger.info(
-            "uploading function output",
+            "uploading function output values",
             outputs_count=len(serialized_objects),
             total_size=blob_offset,
         )
@@ -168,13 +264,13 @@ class ResponseHelper:
             self._logger,
         )
         self._logger.info(
-            "function output uploaded",
+            "function output values uploaded",
             outputs_count=len(serialized_objects),
             total_size=blob_offset,
             duration_sec=f"{time.monotonic() - start_time:.3f}",
         )
 
-        return value_node_so, uploaded_blob
+        return serialized_objects, uploaded_blob
 
     def _upload_request_error_output(
         self, message: str

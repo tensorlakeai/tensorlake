@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Dict
 
 from ..interface.function_call import RegularFunctionCall
 from ..interface.reduce import ReducerFunctionCall
@@ -28,3 +28,25 @@ def ast_from_user_object(
         return ReducerFunctionCallNode.from_reducer_function_call(user_object)
     else:
         return ValueNode.from_value(user_object, value_serializer)
+
+
+def flatten_ast(root: ASTNode) -> Dict[str, ASTNode]:
+    """Flattens the AST into a dictionary mapping node IDs to nodes."""
+    flattened = {}
+
+    def _flatten(node: ASTNode):
+        flattened[node.id] = node
+        for child in node.children.values():
+            _flatten(child)
+
+    _flatten(root)
+    return flattened
+
+
+def traverse_ast(
+    root: ASTNode,
+):
+    """Traverses the AST and yields each node."""
+    yield root
+    for child in root.children.values():
+        yield from traverse_ast(child)
