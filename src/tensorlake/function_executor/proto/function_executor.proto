@@ -94,15 +94,9 @@ enum InitializationFailureReason {
     INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR = 2;
 }
 
-// Contains diagnostics for a finished initialize call.
-message InitializeDiagnostics {
-    optional string function_executor_log = 1;
-}
-
 message InitializeResponse {
     optional InitializationOutcomeCode outcome_code = 1;
     optional InitializationFailureReason failure_reason = 2;
-    optional InitializeDiagnostics diagnostics = 3;
 }
 
 message SetRequestStateRequest {
@@ -196,11 +190,6 @@ message FunctionInputs {
     optional bytes function_call_metadata = 18;
 }
 
-// Contains diagnostics for a finished allocation.
-message AllocationDiagnostics {
-    optional string function_executor_log = 1;
-}
-
 message FunctionArg {
   oneof source {
     // Data dependency reference to another function call.
@@ -251,7 +240,6 @@ message AllocationResult {
     // The request_error_blob with uploaded request error output, if any.
     optional BLOB uploaded_request_error_blob = 7;
     optional Metrics metrics = 8;
-    optional AllocationDiagnostics diagnostics = 9;
 }
 
 // Allocation represents an allocation with its metadata and execution result

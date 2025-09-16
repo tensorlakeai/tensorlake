@@ -83,7 +83,6 @@ class Handler:
             log_user_event_allocations_finished(event_details)
 
     def _run(self) -> AllocationResult:
-        fe_log_start: int = self._logger.end()
         function_call: RegularFunctionCall = self._reconstruct_function_call()
         set_request_context_args(function_call, self._request_context)
         if self._function_instance_arg is not None:
@@ -94,12 +93,11 @@ class Handler:
         except BaseException as e:
             return self._response_helper.from_function_exception(
                 exception=e,
-                fe_log_start=fe_log_start,
                 metrics=None,
             )
 
         return self._response_helper.from_function_output(
-            output=output, fe_log_start=fe_log_start
+            output=output,
         )
 
     def _reconstruct_function_call(self) -> RegularFunctionCall:

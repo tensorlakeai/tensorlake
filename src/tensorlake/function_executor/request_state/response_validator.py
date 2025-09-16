@@ -4,7 +4,7 @@ from ..proto.message_validator import MessageValidator
 
 class ResponseValidator(MessageValidator):
     def __init__(self, response: RequestStateResponse):
-        self._response = response
+        self._response: RequestStateResponse = response
 
     def check(self):
         """Validates the request.
@@ -13,7 +13,7 @@ class ResponseValidator(MessageValidator):
         """
         (
             MessageValidator(self._response)
-            .required_field("request_id")
+            .required_field("state_request_id")
             .required_field("success")
         )
 
