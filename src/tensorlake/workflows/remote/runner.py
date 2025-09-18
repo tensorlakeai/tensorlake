@@ -23,7 +23,7 @@ class RemoteRunner:
             application_name=self._application.name,
             api_function_name=self._api.function_config.function_name,
             payload=serialized_payload,
-            payload_content_type=payload_serializer.content_type(),
+            payload_content_type=payload_serializer.content_type,
             block_until_done=False,
         )
         return RemoteRequest(

@@ -321,7 +321,7 @@ class APIClient:
             "data": payload,
         }
         response = self._post(
-            f"v1/namespaces/{self._namespace}/applications/{application_name}/api/{api_function_name}/call",
+            f"v1/namespaces/{self._namespace}/applications/{application_name}/{api_function_name}",
             **kwargs,
         )
         return response.json()["request_id"]
@@ -345,7 +345,7 @@ class APIClient:
             with connect_sse(
                 self._client,
                 "POST",
-                f"v1/namespaces/{self._namespace}/applications/{application_name}/api/{api_function_name}/call",
+                f"v1/namespaces/{self._namespace}/applications/{application_name}/{api_function_name}",
                 **kwargs,
             ) as event_source:
                 if not event_source.response.is_success:
