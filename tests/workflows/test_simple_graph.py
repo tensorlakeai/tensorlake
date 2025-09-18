@@ -7,7 +7,6 @@ from pydantic import BaseModel
 import tensorlake.workflows.interface as tensorlake
 from tensorlake.workflows.remote.deploy import deploy
 
-
 tensorlake.define_application(name="Test Simple Graph Application")
 
 
@@ -44,7 +43,7 @@ class TestSimpleGraph(unittest.TestCase):
             TestGraphRequestPayload(numbers=[str(i) for i in range(1, 6)]),
         )
 
-        self.assertEqual(request.output(),"simple graph: 1, 2, 3, 4, 5")
+        self.assertEqual(request.output(), "simple graph: 1, 2, 3, 4, 5")
 
 
 if __name__ == "__main__":

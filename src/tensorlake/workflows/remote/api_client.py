@@ -286,13 +286,18 @@ class APIClient:
     def call(
         self,
         application_name: str,
+        api_function_name: str,
         payload: bytes,
         payload_content_type: str,
         block_until_done: bool = False,
     ) -> str:
         if not block_until_done:
-            return self._call(application_name, payload, payload_content_type)
-        events = self.call_stream(application_name, payload, payload_content_type)
+            return self._call(
+                application_name, api_function_name, payload, payload_content_type
+            )
+        events = self.call_stream(
+            application_name, api_function_name, payload, payload_content_type
+        )
         try:
             while True:
                 print(str(next(events)))
@@ -304,6 +309,7 @@ class APIClient:
     def _call(
         self,
         application_name: str,
+        api_function_name: str,
         payload: bytes,
         payload_content_type: str,
     ) -> str:
@@ -315,7 +321,7 @@ class APIClient:
             "data": payload,
         }
         response = self._post(
-            f"v1/namespaces/{self._namespace}/applications/{application_name}",
+            f"v1/namespaces/{self._namespace}/applications/{application_name}/api/{api_function_name}/call",
             **kwargs,
         )
         return response.json()["request_id"]
@@ -323,6 +329,7 @@ class APIClient:
     def call_stream(
         self,
         application_name: str,
+        api_function_name: str,
         payload: bytes,
         payload_content_type: str,
     ) -> Generator[WorkflowEvent, None, str]:
@@ -338,7 +345,7 @@ class APIClient:
             with connect_sse(
                 self._client,
                 "POST",
-                f"{self._api_url}/v1/namespaces/{self._namespace}/applications/{application_name}",
+                f"v1/namespaces/{self._namespace}/applications/{application_name}/api/{api_function_name}/call",
                 **kwargs,
             ) as event_source:
                 if not event_source.response.is_success:
