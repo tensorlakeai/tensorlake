@@ -371,21 +371,21 @@ class FunctionArg(_message.Message):
     ) -> None: ...
 
 class FunctionCall(_message.Message):
-    __slots__ = ("id", "target", "args", "metadata")
+    __slots__ = ("id", "target", "args", "call_metadata")
     ID_FIELD_NUMBER: _ClassVar[int]
     TARGET_FIELD_NUMBER: _ClassVar[int]
     ARGS_FIELD_NUMBER: _ClassVar[int]
-    METADATA_FIELD_NUMBER: _ClassVar[int]
+    CALL_METADATA_FIELD_NUMBER: _ClassVar[int]
     id: str
     target: FunctionRef
     args: _containers.RepeatedCompositeFieldContainer[FunctionArg]
-    metadata: bytes
+    call_metadata: bytes
     def __init__(
         self,
         id: _Optional[str] = ...,
         target: _Optional[_Union[FunctionRef, _Mapping]] = ...,
         args: _Optional[_Iterable[_Union[FunctionArg, _Mapping]]] = ...,
-        metadata: _Optional[bytes] = ...,
+        call_metadata: _Optional[bytes] = ...,
     ) -> None: ...
 
 class ReduceOp(_message.Message):

@@ -226,7 +226,7 @@ class TestRunAllocation(unittest.TestCase):
                 )
 
                 function_call_node_metadata = FunctionCallNodeMetadata.deserialize(
-                    function_call.metadata
+                    function_call.call_metadata
                 )
                 self.assertEqual(
                     function_call_node_metadata.type, FunctionCallType.REGULAR

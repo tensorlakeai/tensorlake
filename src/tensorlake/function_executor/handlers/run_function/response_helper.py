@@ -184,7 +184,7 @@ class ResponseHelper:
                             application_version=self._function_ref.application_version,
                         ),
                         args=data_dependencies,
-                        metadata=FunctionCallNodeMetadata(
+                        call_metadata=FunctionCallNodeMetadata(
                             nid=node.id,
                             type=FunctionCallType.REGULAR,
                             metadata=node.serialized_metadata,

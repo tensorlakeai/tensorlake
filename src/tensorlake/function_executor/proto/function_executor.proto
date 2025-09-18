@@ -201,7 +201,7 @@ message FunctionCall {
     optional string id = 1;
     optional FunctionRef target = 2;
     repeated FunctionArg args = 3;
-    optional bytes metadata = 4;
+    optional bytes call_metadata = 4;
 }
 
 message ReduceOp {
