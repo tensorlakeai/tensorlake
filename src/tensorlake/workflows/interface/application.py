@@ -3,6 +3,7 @@ from typing import Dict
 from tensorlake.vendor.nanoid import generate as nanoid
 
 from ..registry import set_application
+from .function import Function
 from .retries import Retries
 
 
@@ -11,6 +12,7 @@ class Application:
         self,
         name: str,
         description: str,
+        default_api: Function | None,
         tags: Dict[str, str],
         version: str,
         retries: Retries,
@@ -18,6 +20,7 @@ class Application:
     ):
         self._name: str = name
         self._description: str = description
+        self._default_api: Function | None = default_api
         self._tags: Dict[str, str] = tags
         self._version: str = version
         self._retries: Retries = retries
@@ -30,6 +33,10 @@ class Application:
     @property
     def description(self) -> str:
         return self._description
+
+    @property
+    def default_api_function(self) -> Function | None:
+        return self._default_api
 
     @property
     def tags(self) -> Dict[str, str]:
@@ -55,6 +62,7 @@ class Application:
 def define_application(
     name: str,
     description: str = "",
+    default_api: Function | None = None,
     tags: Dict[str, str] = {},
     retries: Retries = Retries(),
     region: str | None = None,
@@ -64,6 +72,7 @@ def define_application(
     application = Application(
         name=name,
         description=description,
+        default_api=default_api,
         tags=tags.copy(),
         version=version,
         retries=retries,
