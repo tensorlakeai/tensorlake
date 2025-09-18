@@ -5,6 +5,10 @@ from pydantic import BaseModel
 
 # This import will be replaced by `import tensorlake` when we switch to the new SDK UX.
 import tensorlake.workflows.interface as tensorlake
+from tensorlake.workflows.remote.deploy import deploy
+
+
+tensorlake.define_application(name="Test Simple Graph Application")
 
 
 class TestGraphRequestPayload(BaseModel):
@@ -34,15 +38,13 @@ class TestSimpleGraph(unittest.TestCase):
         self.assertEqual(request.output(), "simple graph: 1, 2, 3, 4, 5")
 
     def test_remote_api_call(self):
-        pass
-        # tensorlake.deploy(os.path.dirname(__file__))
-        # TODO: Implement.
-        # request = tensorlake.call_remote_api(
-        #     test_simple_graph_api,
-        #     TestGraphRequestPayload(numbers=[str(i) for i in range(1, 6)]),
-        # )
+        deploy(__file__)
+        request: tensorlake.Request = tensorlake.call_remote_api(
+            test_simple_graph_api,
+            TestGraphRequestPayload(numbers=[str(i) for i in range(1, 6)]),
+        )
 
-        # self.assertEqual(request.output(),"simple graph: 1, 2, 3, 4, 5")
+        self.assertEqual(request.output(),"simple graph: 1, 2, 3, 4, 5")
 
 
 if __name__ == "__main__":
