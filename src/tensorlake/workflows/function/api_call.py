@@ -1,8 +1,9 @@
 from typing import Any, List
 
+from ..interface.file import File
 from ..interface.function import Function
 from ..interface.function_call import RegularFunctionCall
-from ..registry import get_class, get_function
+from ..registry import get_class
 from .function_call import prepend_request_context_placeholder_to_function_args
 from .type_hints import function_arg_type_hint
 from .user_data_serializer import function_input_serializer
@@ -30,7 +31,7 @@ def _api_function_call_with_object_payload(
 
 
 def api_function_call_with_serialized_payload(
-    api: Function, payload: bytes
+    api: Function, payload: bytes, payload_content_type: str
 ) -> RegularFunctionCall:
     """Creates a function call for the API function with the provided serialized payload.
 
@@ -38,7 +39,20 @@ def api_function_call_with_serialized_payload(
     The function call is compliant with API function calling convention.
     The supplied binary payload is deserialized using the input serializer and type hints of the API function.
     """
-    deserialized_payload: Any = function_input_serializer(api).deserialize(
-        payload, function_arg_type_hint(api, -1)
-    )
+    # We're using API function payload argument type hint to determine how to deserialize it properly.
+    payload_type_hints: List[Any] = function_arg_type_hint(api, -1)
+    payload_is_file: bool = False
+    for hint in payload_type_hints:
+        if hint is File:
+            payload_is_file = True
+
+    if payload_is_file:
+        deserialized_payload: File = File(
+            content_type=payload_content_type, content=payload
+        )
+    else:
+        deserialized_payload: Any = function_input_serializer(api).deserialize(
+            payload, payload_type_hints
+        )
+
     return _api_function_call_with_object_payload(api, deserialized_payload)

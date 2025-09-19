@@ -7,16 +7,14 @@ from pydantic import BaseModel
 import tensorlake.workflows.interface as tensorlake
 from tensorlake.workflows.remote.deploy import deploy
 
-tensorlake.define_application(name="Test Complex Graph Application")
-
 
 class TestGraphRequestPayload(BaseModel):
     numbers: List[str]
 
 
-# The payload type hint is required for SDK to deserialize the request payload into the
-# Pydantic model class. Without it payload parameter will be a dict { "numbers": [...] }.
-@tensorlake.api()
+# FIXME: Temporary use "pickle" serializer until root function call of the returned
+# call tree inherits its output serializer from the API function.
+@tensorlake.api(output_serializer="pickle")
 @tensorlake.function(cpu=1.0, memory=1.0, description="test API function")
 def test_graph_api_fan_in(
     ctx: tensorlake.RequestContext, payload: TestGraphRequestPayload
@@ -123,18 +121,16 @@ class TestComplexGraph(unittest.TestCase):
             self.assertEqual(file.content, b"Total sum: 280")
 
     def test_remote_api_call_of_complex_graph_produces_expected_outputs(self):
-        # pass
         deploy(__file__)
-        # TODO: Implement.
-        # for function in ["test_graph_api_reduce", "test_graph_api_fan_in"]:
-        #     request = tensorlake.call_remote_api(
-        #         function,
-        #         TestGraphRequestPayload(numbers=[str(i) for i in range(10, 20)]),
-        #     )
+        for function in ["test_graph_api_reduce", "test_graph_api_fan_in"]:
+            request: tensorlake.Request = tensorlake.call_remote_api(
+                function,
+                TestGraphRequestPayload(numbers=[str(i) for i in range(10, 20)]),
+            )
 
-        # file: tensorlake.File = request.output()
-        # self.assertEqual(file.content_type, "text/plain; charset=UTF-8")
-        # self.assertEqual(file.content, b"Total sum: 280")
+        file: tensorlake.File = request.output()
+        self.assertEqual(file.content_type, "text/plain; charset=UTF-8")
+        self.assertEqual(file.content, b"Total sum: 280")
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ from ...proto.function_executor_pb2 import (
     Allocation,
     AllocationResult,
     FunctionRef,
+    SerializedObjectInsideBLOB,
 )
 from ...user_events import (
     AllocationEventDetails,
@@ -134,7 +135,12 @@ class Handler:
             payload: bytes = download_api_function_payload_bytes(
                 self._allocation, self._blob_store, self._logger
             )
-            return api_function_call_with_serialized_payload(self._function, payload)
+            payload_arg_so: SerializedObjectInsideBLOB = self._allocation.inputs.args[0]
+            return api_function_call_with_serialized_payload(
+                api=self._function,
+                payload=payload,
+                payload_content_type=payload_arg_so.manifest.content_type or "",
+            )
 
     def _call(self, function_call: RegularFunctionCall) -> Any:
         self._logger.info("running function")

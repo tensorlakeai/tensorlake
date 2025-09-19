@@ -1,7 +1,9 @@
 import os
 from typing import Set
 
-from ..registry import get_application, get_functions
+from ..application import get_user_defined_or_default_application
+from ..interface.application import Application
+from ..registry import get_functions
 from ..remote.api_client import APIClient
 from ..remote.application.application import (
     ApplicationManifest,
@@ -25,6 +27,9 @@ def deploy(
     """
     # TODO: Validate the graph.
 
+    # Define default application if the caller didn't define a custom one.
+    application: Application = get_user_defined_or_default_application()
+
     # Work with absolute paths to simplify comparisons
     application_source_dir_or_file_path: str = os.path.abspath(
         application_source_dir_or_file_path
@@ -39,7 +44,7 @@ def deploy(
 
     # Now the application is fully loaded into memory so we can use the registry.
     app_manifest: ApplicationManifest = create_application_manifest(
-        app=get_application(), functions=get_functions()
+        app=application, functions=get_functions()
     )
     app_code: bytes = zip_application_code(
         os.path.dirname(application_source_dir_or_file_path), ignored_absolute_paths

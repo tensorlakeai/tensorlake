@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from typing import Any, Dict, Generator, Iterator, List, Optional, Union
+from typing import Any, Dict, Generator, Iterator, List
 
 import httpx
 from httpx_sse import ServerSentEvent, connect_sse
@@ -27,10 +27,11 @@ _API_URL_FROM_ENV: str = os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")
 _API_KEY_FROM_ENV: str = os.getenv("TENSORLAKE_API_KEY")
 
 
-class GraphOutputMetadata(BaseModel):
+class DataPayload(BaseModel):
     id: str
-    num_outputs: int
-    compute_fn: str
+    path: str
+    size: int
+    sha256_hash: str
 
 
 class RequestProgress(BaseModel):
@@ -46,8 +47,7 @@ class RequestError(BaseModel):
 
 class ShallowRequestMetadata(BaseModel):
     id: str
-    status: str
-    outcome: str
+    outcome: str | None = None
     created_at: int
 
 
@@ -56,7 +56,7 @@ class Allocation(BaseModel):
     server_id: str = Field(alias="executor_id")
     container_id: str = Field(alias="function_executor_id")
     created_at: int
-    outcome: Optional[str] = None
+    outcome: str | None = None
     attempt_number: int
 
 
@@ -65,22 +65,16 @@ class Task(BaseModel):
     status: str
     outcome: str
     created_at: int = Field(alias="creation_time_ns")
-    allocations: Optional[List[Allocation]] = None
+    allocations: List[Allocation] | None = None
 
 
 class RequestMetadata(BaseModel):
     id: str
-    completed: bool
-    status: str
-    outcome: str
-    failure_reason: str
-    outstanding_tasks: int
-    request_progress: dict[str, RequestProgress]
-    graph_version: str
-    created_at: str
-    request_error: Optional[RequestError] = None
-    outputs: List[GraphOutputMetadata] = []
+    outcome: str | None = None
+    application_version: str
     created_at: int
+    request_error: RequestError | None = None
+    output: DataPayload | None = None
 
 
 class RequestCreatedEvent(BaseModel):
@@ -95,16 +89,16 @@ class RequestProgressPayload(BaseModel):
     request_id: str
     fn_name: str
     task_id: str
-    allocation_id: Optional[str] = None
-    executor_id: Optional[str] = None
-    outcome: Optional[str] = None
+    allocation_id: str | None = None
+    executor_id: str | None = None
+    outcome: str | None = None
 
 
 class WorkflowEvent(BaseModel):
     event_name: str
-    stdout: Optional[str] = None
-    stderr: Optional[str] = None
-    payload: Union[RequestCreatedEvent, RequestProgressPayload, RequestFinishedEvent]
+    stdout: str | None = None
+    stderr: str | None = None
+    payload: RequestCreatedEvent | RequestProgressPayload | RequestFinishedEvent
 
     def __str__(self) -> str:
         stdout = (
@@ -256,7 +250,7 @@ class APIClient:
 
     def logs(
         self, application_name: str, invocation_id: str, allocation_id: str, file: str
-    ) -> Optional[str]:
+    ) -> str | None:
         try:
             response = self._get(
                 f"namespaces/{self._namespace}/applications/{application_name}/invocations/{invocation_id}/allocations/{allocation_id}/logs/{file}"
@@ -340,7 +334,7 @@ class APIClient:
             "data": payload,
         }
         self._add_api_key(kwargs)
-        request_id: Optional[str] = None
+        request_id: str | None = None
         try:
             with connect_sse(
                 self._client,
@@ -434,7 +428,7 @@ class APIClient:
         with connect_sse(
             self._client,
             "GET",
-            f"{self._api_url}/namespaces/{self._namespace}/applications/{application_name}/invocations/{request_id}/wait",
+            f"{self._api_url}/v1/namespaces/{self._namespace}/applications/{application_name}/requests/{request_id}/progress",
             **kwargs,
         ) as event_source:
             if not event_source.response.is_success:
@@ -448,45 +442,39 @@ class APIClient:
                     if event.event_name == "RequestFinished":
                         break
 
-    def _download_outputs(
+    def _download_request_output(
         self,
         application_name: str,
         request_id: str,
-        function_name: str,
-        output_metadata: GraphOutputMetadata,
-    ) -> List[bytes]:
-        outputs: List[bytes] = []
-        for i in range(output_metadata.num_outputs):
-            response = self._get(
-                f"v1/namespaces/{self._namespace}/applications/{application_name}/requests/{request_id}/output/{function_name}/id/{output_metadata.id}/index/{i}",
-            )
-            response.raise_for_status()
-            outputs.append(response.content)
-        return outputs
+    ) -> tuple[bytes, str]:
+        response = self._get(
+            f"v1/namespaces/{self._namespace}/applications/{application_name}/requests/{request_id}/output",
+        )
+        response.raise_for_status()
+        return response.content, response.headers.get("Content-Type", "")
 
-    def function_outputs(
+    def request_output(
         self,
         application_name: str,
         request_id: str,
-        function_name: str,
-    ) -> List[Any]:
+    ) -> tuple[bytes, str]:
         response = self._get(
             f"v1/namespaces/{self._namespace}/applications/{application_name}/requests/{request_id}",
         )
         response.raise_for_status()
         request = RequestMetadata(**response.json())
-        if request.status in ["pending", "running"]:
+        if request.outcome is None:
             raise RequestNotFinished()
 
         if request.request_error is not None:
             raise RequestException(request.request_error.message)
 
-        all_outputs = []
-        for output_metadata in request.outputs:
-            if output_metadata.compute_fn == function_name:
-                all_outputs.extend(
-                    self._download_outputs(
-                        application_name, request_id, function_name, output_metadata
-                    )
-                )
-        return all_outputs
+        if request.output is None:
+            raise ValueError(
+                "Request is finished but has no output, something went wrong."
+            )
+
+        return self._download_request_output(
+            application_name=application_name,
+            request_id=request_id,
+        )
