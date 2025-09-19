@@ -1,7 +1,8 @@
 from typing import Any
 
 from ..application import get_user_defined_or_default_application
-from ..function.api_call import api_function_call_with_object_payload
+from ..function.api_call import api_function_call_with_serialized_payload
+from ..function.user_data_serializer import function_input_serializer
 from ..local.runner import LocalRunner
 from ..registry import get_function
 from ..remote.runner import RemoteRunner
@@ -15,7 +16,14 @@ def call_local_api(api: Function | str, payload: Any) -> Request:
     """Calls the API locally and returns the request."""
     # TODO: validate the graph.
     # TODO: validate that the supplied function is an API function.
-    return LocalRunner().run(api_function_call_with_object_payload(api, payload))
+
+    if isinstance(api, str):
+        api: Function = get_function(api)
+    # Serialize payload first to make local UX and remote UX as similar as possible.
+    serialized_payload: bytes = function_input_serializer(api).serialize(payload)
+    return LocalRunner().run(
+        api_function_call_with_serialized_payload(api, serialized_payload)
+    )
 
 
 def call_remote_api(api: Function | str, payload: Any) -> Request:

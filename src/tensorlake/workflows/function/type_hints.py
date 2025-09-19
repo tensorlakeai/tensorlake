@@ -6,10 +6,13 @@ from ..interface.function import Function
 
 
 def function_arg_type_hint(function: Function, arg_ix: int) -> List[Any]:
-    """Returns the type hint for positional function call argument at the specified index, or None if not found."""
+    """Returns the type hint for positional function call argument at the specified index, or None if not found.
+
+    arg_ix can be negative to indicate position from the end of the argument list.
+    """
     function_signature: inspect.Signature = _function_signature(function)
     parameters: list[inspect.Parameter] = list(function_signature.parameters.values())
-    if arg_ix < 0 or arg_ix >= len(parameters):
+    if arg_ix >= len(parameters):
         return []
     parameter: inspect.Parameter = parameters[arg_ix]
     if parameter.annotation is inspect.Parameter.empty:
