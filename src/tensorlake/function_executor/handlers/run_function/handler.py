@@ -99,7 +99,7 @@ class Handler:
         )
 
     def _reconstruct_function_call(self) -> RegularFunctionCall:
-        if self._allocation.inputs.HasField("function_call_metadata"):
+        if len(self._allocation.inputs.function_call_metadata) > 0:
             downloaded_args: List[ValueNode] = download_function_arguments(
                 self._allocation, self._blob_store, self._logger
             )

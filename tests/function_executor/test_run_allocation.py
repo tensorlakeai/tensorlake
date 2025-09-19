@@ -177,7 +177,7 @@ class TestRunAllocation(unittest.TestCase):
                         arg_blobs=[api_payload_blob],
                         function_outputs_blob=function_outputs_blob,
                         request_error_blob=create_tmp_blob(),
-                        # No function_call_metadata for API function calls.
+                        function_call_metadata=b"",
                     ),
                 )
 

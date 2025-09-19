@@ -8,17 +8,14 @@ from .type_hints import function_arg_type_hint
 from .user_data_serializer import function_input_serializer
 
 
-def api_function_call_with_object_payload(
-    api: Function | str, object: Any
+def _api_function_call_with_object_payload(
+    api: Function, object: Any
 ) -> RegularFunctionCall:
     """Creates a function call for the API function with the provided payload.
 
     This is used for API function calls done using SDK.
     The function call is compliant with API function calling convention.
     """
-    if isinstance(api, str):
-        api: Function = get_function(api)
-
     # API function call conventions:
     # [optional ctx: tensorlake.RequestContext, payload: Optional type hint]
     args: List[Any] = [object]
@@ -33,7 +30,7 @@ def api_function_call_with_object_payload(
 
 
 def api_function_call_with_serialized_payload(
-    api: Function | str, payload: bytes
+    api: Function, payload: bytes
 ) -> RegularFunctionCall:
     """Creates a function call for the API function with the provided serialized payload.
 
@@ -41,10 +38,7 @@ def api_function_call_with_serialized_payload(
     The function call is compliant with API function calling convention.
     The supplied binary payload is deserialized using the input serializer and type hints of the API function.
     """
-    if isinstance(api, str):
-        api: Function = get_function(api)
-
     deserialized_payload: Any = function_input_serializer(api).deserialize(
         payload, function_arg_type_hint(api, -1)
     )
-    return api_function_call_with_object_payload(api, deserialized_payload)
+    return _api_function_call_with_object_payload(api, deserialized_payload)

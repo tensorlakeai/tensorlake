@@ -183,8 +183,7 @@ message FunctionInputs {
     repeated BLOB arg_blobs = 2;
     optional BLOB function_outputs_blob = 3;
     optional BLOB request_error_blob = 4;
-    // Set for function calls originally issued by SDK.
-    // Not set for API function calls.
+    // Always set. An empty bytes array if no metadata, e.g. for API function call.
     optional bytes function_call_metadata = 18;
 }
 
