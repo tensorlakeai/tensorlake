@@ -7,14 +7,14 @@ from pydantic import BaseModel
 import tensorlake.workflows.interface as tensorlake
 from tensorlake.workflows.remote.deploy import deploy
 
-tensorlake.define_application(name="Test Simple Graph Application")
-
 
 class TestGraphRequestPayload(BaseModel):
     numbers: List[str]
 
 
-@tensorlake.api()
+# FIXME: Temporary use "pickle" serializer until root function call of the returned
+# call tree inherits its output serializer from the API function.
+@tensorlake.api(output_serializer="pickle")
 @tensorlake.function(description="test simple graph")
 def test_simple_graph_api(
     ctx: tensorlake.RequestContext, payload: TestGraphRequestPayload
