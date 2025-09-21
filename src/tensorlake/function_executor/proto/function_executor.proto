@@ -221,6 +221,7 @@ message ExecutionPlanUpdate {
 
 message ExecutionPlanUpdates {
   repeated ExecutionPlanUpdate updates = 1;
+  optional string root_function_call_id = 2;
 }
 
 // AllocationResult contains the execution outcome and outputs of an allocation.

@@ -216,6 +216,7 @@ class ResponseHelper:
         return (
             ExecutionPlanUpdates(
                 updates=updates,
+                root_function_call_id=root.id,
             ),
             uploaded_function_outputs_blob,
         )
