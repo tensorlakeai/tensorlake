@@ -71,9 +71,9 @@ class ParsingOptions(BaseModel):
         False,
         description="Useful flag for documents with a lot of tables or images. If set to `true`, the API will skip the layout detection step, and directly extract text from the document.",
     )
-    ocr_pipeline_provider: Optional[OcrPipelineProvider] = Field(
+    ocr_model: Optional[OcrPipelineProvider] = Field(
         None,
-        description="The model provider to use for OCR (Optical Character Recognition). This determines which OCR service is used to extract text from images and scanned documents.",
+        description="The model to use for OCR (Optical Character Recognition).",
     )
     remove_strikethrough_lines: bool = Field(
         False,
