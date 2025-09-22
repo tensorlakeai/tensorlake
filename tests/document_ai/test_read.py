@@ -3,7 +3,9 @@ import unittest
 
 from tensorlake.documentai import (
     DocumentAI,
+    OcrPipelineProvider,
     ParseStatus,
+    ParsingOptions,
 )
 
 
@@ -29,6 +31,7 @@ class TestRead(unittest.TestCase):
         parse_id = self.doc_ai.read(
             file_url="https://raw.githubusercontent.com/tensorlakeai/tensorlake/main/tests/document_ai/testdata/example_bank_statement.pdf",
             page_range="1-2",
+            parsing_options=ParsingOptions(ocr_model=OcrPipelineProvider.TENSORLAKE01),
         )
         self.assertIsNotNone(parse_id)
         print(f"Parse read ID: {parse_id}")
