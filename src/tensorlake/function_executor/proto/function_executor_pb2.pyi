@@ -77,6 +77,7 @@ class SerializedObjectManifest(_message.Message):
         "metadata_size",
         "sha256_hash",
         "content_type",
+        "source_function_call_id",
     )
     ENCODING_FIELD_NUMBER: _ClassVar[int]
     ENCODING_VERSION_FIELD_NUMBER: _ClassVar[int]
@@ -84,12 +85,14 @@ class SerializedObjectManifest(_message.Message):
     METADATA_SIZE_FIELD_NUMBER: _ClassVar[int]
     SHA256_HASH_FIELD_NUMBER: _ClassVar[int]
     CONTENT_TYPE_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_FUNCTION_CALL_ID_FIELD_NUMBER: _ClassVar[int]
     encoding: SerializedObjectEncoding
     encoding_version: int
     size: int
     metadata_size: int
     sha256_hash: str
     content_type: str
+    source_function_call_id: str
     def __init__(
         self,
         encoding: _Optional[_Union[SerializedObjectEncoding, str]] = ...,
@@ -98,6 +101,7 @@ class SerializedObjectManifest(_message.Message):
         metadata_size: _Optional[int] = ...,
         sha256_hash: _Optional[str] = ...,
         content_type: _Optional[str] = ...,
+        source_function_call_id: _Optional[str] = ...,
     ) -> None: ...
 
 class SerializedObject(_message.Message):

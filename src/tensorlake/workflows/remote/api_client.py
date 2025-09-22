@@ -47,7 +47,10 @@ class RequestError(BaseModel):
 
 class ShallowRequestMetadata(BaseModel):
     id: str
-    outcome: str | None = None
+    # dict when failure outcome
+    # str when success outcome
+    # None when not finished
+    outcome: dict | str | None = None
     created_at: int
 
 
@@ -70,7 +73,10 @@ class Task(BaseModel):
 
 class RequestMetadata(BaseModel):
     id: str
-    outcome: str | None = None
+    # dict when failure outcome
+    # str when success outcome
+    # None when not finished
+    outcome: dict | str | None = None
     application_version: str
     created_at: int
     request_error: RequestError | None = None
