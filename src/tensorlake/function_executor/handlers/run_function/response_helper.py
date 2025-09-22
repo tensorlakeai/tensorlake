@@ -84,6 +84,7 @@ class ResponseHelper:
                 self._upload_function_output_values([output_ast], output_serializer)
             )
             value = uploaded_sos[output_ast.id]
+            value.manifest.source_function_call_id = output_ast.id
         else:
             updates, uploaded_function_outputs_blob = self._upload_function_output_ast(
                 output_ast, output_serializer

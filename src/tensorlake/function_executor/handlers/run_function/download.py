@@ -121,8 +121,20 @@ def _deserialize_to_value_node(
 ) -> ValueNode:
     """Deserialized Serialized Object created by Python SDK into its original ValueNode."""
     value_node_metadata: ValueNodeMetadata = ValueNodeMetadata.deserialize(metadata)
+    # The Data Payload is produced by one of the nodes in a call tree. The this data payload gets assigned as
+    # a value output of the root of the call tree. The parent of the root node expect to find a ValueNode with
+    # id of the root node but the Data Payload metadata contains the id of the node that produced it.
+    #
+    # To get the id of the root node we need to use source_function_call_id from the manifest. If it's not set
+    # then it means that the Data Payload was produced in the same function call where it's consumed so the node
+    # id in the metadata is correct.
+    node_id: str = (
+        manifest.source_function_call_id
+        if manifest.HasField("source_function_call_id")
+        else value_node_metadata.nid
+    )
     return ValueNode.from_serialized(
-        node_id=value_node_metadata.nid,
+        node_id=node_id,
         value=data,
         metadata=value_node_metadata.metadata,
     )

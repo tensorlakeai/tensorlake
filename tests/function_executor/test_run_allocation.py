@@ -190,6 +190,9 @@ class TestRunAllocation(unittest.TestCase):
                 updates: List[ExecutionPlanUpdate] = list(alloc_result.updates.updates)
                 self.assertEqual(len(updates), 1)
                 function_call: FunctionCall = updates[0].function_call
+                self.assertEqual(
+                    alloc_result.updates.root_function_call_id, function_call.id
+                )
                 self.assertIsNotNone(function_call)
                 self.assertIsNotNone(function_call.id)
                 self.assertEqual(
