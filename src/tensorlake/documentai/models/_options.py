@@ -41,6 +41,10 @@ class EnrichmentOptions(BaseModel):
         None,
         description="The prompt to guide the table summarization. If not provided, a default prompt will be used. It is not required to provide a prompt. The prompt only has effect if `table_summarization` is set to `true`.",
     )
+    include_full_page_image: Optional[bool] = Field(
+        None,
+        description="Use full page image in addition to the cropped table and figure images. This provides Language Models context about the table and figure they are summarizing in addition to the cropped images, and could improve the summarization quality. The default is `false`.",
+    )
 
 
 class PageClassConfig(BaseModel):
