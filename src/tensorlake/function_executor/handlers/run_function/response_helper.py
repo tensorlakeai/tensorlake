@@ -17,7 +17,7 @@ from tensorlake.workflows.ast.value_node import ValueNode
 from tensorlake.workflows.function.user_data_serializer import (
     function_output_serializer,
 )
-from tensorlake.workflows.interface.exceptions import RequestException
+from tensorlake.workflows.interface.exceptions import RequestError
 from tensorlake.workflows.interface.function import Function
 from tensorlake.workflows.request_state_base import RequestStateBase
 from tensorlake.workflows.user_data_serializer import UserDataSerializer
@@ -109,7 +109,7 @@ class ResponseHelper:
 
         request_error_output: SerializedObjectInsideBLOB | None = None
         uploaded_request_error_blob: BLOB | None = None
-        if isinstance(exception, RequestException):
+        if isinstance(exception, RequestError):
             failure_reason: AllocationFailureReason = (
                 AllocationFailureReason.ALLOCATION_FAILURE_REASON_REQUEST_ERROR
             )

@@ -6,6 +6,10 @@ from pydantic import BaseModel
 
 # This import will be replaced by `import tensorlake` when we switch to the new SDK UX.
 import tensorlake.workflows.interface as tensorlake
+from tensorlake.workflows.remote.deploy import deploy
+
+# This test doesn't verify much but it's used to simulate primary use case of the SDK
+# and see how easy it is to express it using the current SDK UX.
 
 
 class FakePDFChunk(BaseModel):
@@ -17,7 +21,7 @@ class FakePDFParseResult(BaseModel):
 
 
 def fake_parse_pdf_service_call(file: str, page_range: str) -> FakePDFParseResult:
-    time.sleep(0.1)  # Simulate network call
+    time.sleep(0.001)  # Simulate network call
     start, end = map(int, page_range.split("-"))
     return FakePDFParseResult(
         chunks=[
@@ -45,7 +49,9 @@ class ResponsePayload(BaseModel):
     chunks: List[ChunkEmbeddings]
 
 
-@tensorlake.api()
+# FIXME: Temporary use "pickle" serializer until root function call of the returned
+# call tree inherits its output serializer from the API function.
+@tensorlake.api(output_serializer="pickle")
 @tensorlake.function(description="Fake PDF parse workflow")
 def parse_pdf_api(
     ctx: tensorlake.RequestContext, payload: RequestPayload
@@ -121,11 +127,21 @@ class IndexEmbedding:
 
 class TestPDFParseDataWorkflow(unittest.TestCase):
     def test_local_api_call(self):
-        request = tensorlake.call_local_api(
+        request: tensorlake.Request = tensorlake.call_local_api(
             parse_pdf_api,
             RequestPayload(url="http://example.com/sample.pdf", page_range="1-5"),
         )
-        print(request.output())
+        payload: ResponsePayload = request.output()
+        self.assertEqual(len(payload.chunks), 5)
+
+    def test_remote_api_call(self):
+        deploy(__file__)
+        request: tensorlake.Request = tensorlake.call_remote_api(
+            parse_pdf_api,
+            RequestPayload(url="http://example.com/sample.pdf", page_range="1-5"),
+        )
+        payload: ResponsePayload = request.output()
+        self.assertEqual(len(payload.chunks), 5)
 
 
 if __name__ == "__main__":

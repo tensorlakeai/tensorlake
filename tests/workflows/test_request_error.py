@@ -1,14 +1,14 @@
 import unittest
 
-from tensorlake import RequestException
 import tensorlake.workflows.interface as tensorlake
 from tensorlake.workflows.remote.deploy import deploy
+
 
 @tensorlake.api()
 @tensorlake.function()
 def start_func(cmd: str) -> str:
     if cmd == "fail_request":
-        raise RequestException("Got command to fail the request")
+        raise tensorlake.RequestError("Got command to fail the request")
     return end_func(f"start_func: {cmd}")
 
 
@@ -32,8 +32,9 @@ class TestRequestError(unittest.TestCase):
             self.fail(
                 f"Expected RequestError from start_func, but got output: {output}"
             )
-        except RequestException as e:
+        except tensorlake.RequestError as e:
             self.assertEqual(e.message, "Got command to fail the request")
+
 
 if __name__ == "__main__":
     unittest.main()

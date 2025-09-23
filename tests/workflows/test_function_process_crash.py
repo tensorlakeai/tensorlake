@@ -4,7 +4,6 @@ import unittest
 
 import tensorlake.workflows.interface as tensorlake
 from tensorlake.workflows.remote.deploy import deploy
-from tensorlake.workflows.interface.exceptions import RequestException
 
 
 @tensorlake.api()
@@ -30,8 +29,8 @@ class TestFunctionProcessCrash(unittest.TestCase):
                 True,
             )
             try:
-                crash_output = request.output()
-            except RequestException as e:
+                request.output()
+            except tensorlake.RequestFailureException as e:
                 self.assertEqual(e.message, "functionerror")
 
         # FIXME: we're only doing periodic Function Executor health checks right now,
