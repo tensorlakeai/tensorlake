@@ -15,8 +15,11 @@ from tensorlake.utils.http_client import (
 from tensorlake.utils.retries import exponential_backoff
 
 from ..interface.exceptions import (
-    RemoteAPIException,
-    RequestException,
+    RemoteAPIError,
+)
+from ..interface.exceptions import RequestError as RequestErrorException
+from ..interface.exceptions import (
+    RequestFailureException,
     RequestNotFinished,
 )
 
@@ -161,10 +164,10 @@ class APIClient:
             )
             status_code = response.status_code
             if status_code >= 400:
-                raise RemoteAPIException(status_code=status_code, message=response.text)
+                raise RemoteAPIError(status_code=status_code, message=response.text)
         except httpx.RequestError as e:
             message = f"Make sure the server is running and accessible at {self._api_url}, {e}"
-            raise RemoteAPIException(status_code=503, message=message)
+            raise RemoteAPIError(status_code=503, message=message)
         return response
 
     def _add_api_key(self, kwargs):
@@ -175,9 +178,8 @@ class APIClient:
 
     @exponential_backoff(
         max_retries=5,
-        retryable_exceptions=(RemoteAPIException,),
-        is_retryable=lambda e: isinstance(e, RemoteAPIException)
-        and e.status_code == 503,
+        retryable_exceptions=(RemoteAPIError,),
+        is_retryable=lambda e: isinstance(e, RemoteAPIError) and e.status_code == 503,
         on_retry=log_retries,
     )
     def _get(self, endpoint: str, **kwargs) -> httpx.Response:
@@ -263,7 +265,7 @@ class APIClient:
             )
             response.raise_for_status()
             return response.content.decode("utf-8")
-        except RemoteAPIException as e:
+        except RemoteAPIError as e:
             print(f"failed to fetch logs: {e}")
             return None
 
@@ -473,11 +475,12 @@ class APIClient:
             raise RequestNotFinished()
 
         if isinstance(request.outcome, dict):
-            raise RequestException(request.outcome["failure"])
+            if request.request_error is None:
+                raise RequestFailureException(request.outcome["failure"])
+            else:
+                raise RequestErrorException(request.request_error.message)
 
-        if request.request_error is not None:
-            raise RequestException(request.request_error.message)
-
+        # request.outcome is str at this point so the request is finished successfully.
         if request.output is None:
             raise ValueError(
                 "Request is finished but has no output, something went wrong."

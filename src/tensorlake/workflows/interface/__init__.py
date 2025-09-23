@@ -1,7 +1,12 @@
 from .application import Application, define_application
 from .call import call_api, call_local_api, call_local_function, call_remote_api
 from .decorators import api, cls, function
-from .exceptions import RemoteAPIException, RequestException, RequestNotFinished
+from .exceptions import (
+    RemoteAPIError,
+    RequestError,
+    RequestFailureException,
+    RequestNotFinished,
+)
 from .file import File
 from .function import Function
 from .function_call import FunctionCall
@@ -34,13 +39,14 @@ __all__ = [
     "Function",
     "FunctionCall",
     "Image",
-    "RemoteAPIException",
+    "RemoteAPIError",
     "Request",
     "RequestContext",
     "RequestContextPlaceholder",
+    "RequestFailureException",
     "RequestProgress",
     "RequestState",
-    "RequestException",
+    "RequestError",
     "RequestNotFinished",
     "Retries",
 ]

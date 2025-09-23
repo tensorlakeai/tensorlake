@@ -3,11 +3,6 @@ import unittest
 import tensorlake.workflows.interface as tensorlake
 
 
-@tensorlake.api()
-@tensorlake.function(secrets=["SECRET_NAME"])
-def node_with_secret(x: int) -> int:
-    return x + 1
-
 @tensorlake.function()
 def add_two(x: int) -> int:
     return x + 2
@@ -19,8 +14,8 @@ def add_three(x: int) -> int:
 
 
 @tensorlake.api()
-@tensorlake.function(secrets=["SECRET_NAME_ROUTER"])
-def route_if_even(x: int) -> int:
+@tensorlake.function(secrets=["SECRET_NAME"])
+def api_router_func(x: int) -> int:
     if x % 2 == 0:
         return add_three(x)
     else:
@@ -28,20 +23,11 @@ def route_if_even(x: int) -> int:
 
 
 class TestGraphSecrets(unittest.TestCase):
-    def test_secrets_settable(self):
-        # Only test local graph mode here because behavior of secrets in remote graph depends
-        # on Executor flavor.
-        request: tensorlake.Request = tensorlake.call_local_api(
-            node_with_secret,
-            1,
-        )
-        self.assertEqual(request.output(), 2)
-
     def test_graph_router_secrets_settable(self):
         # Only test local graph mode here because behavior of secrets in remote graph depends
         # on Executor flavor.
         request: tensorlake.Request = tensorlake.call_local_api(
-            route_if_even,
+            api_router_func,
             2,
         )
         self.assertEqual(request.output(), 5)
