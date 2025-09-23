@@ -472,6 +472,9 @@ class APIClient:
         if request.outcome is None:
             raise RequestNotFinished()
 
+        if isinstance(request.outcome, dict):
+            raise RequestException(request.outcome["failure"])
+
         if request.request_error is not None:
             raise RequestException(request.request_error.message)
 
