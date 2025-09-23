@@ -1,5 +1,5 @@
 import unittest
-from typing import List
+from typing import Any, List
 
 import parameterized
 from pydantic import BaseModel
@@ -36,30 +36,59 @@ def accumulate_reduce(acc: AccumulatedState, y: AccumulatedState) -> Accumulated
 
 
 @tensorlake.function()
-def fail_generate_seq(x: int) -> List[int]:
-    raise ValueError("test: fail_generate_seq function failed")
-
-
-@tensorlake.function()
 def store_result(acc: AccumulatedState) -> int:
     return acc.sum
 
 
+@tensorlake.api()
 @tensorlake.function()
-def add_one(x: int) -> int:
-    return x + 1
+def fail_api_function(x: int) -> AccumulatedState:
+    seq = tensorlake.map(accumulate_reduce_fail_at_3, generate_seq(x))
+    return tensorlake.reduce(accumulate_reduce, seq, AccumulatedState(sum=0))
 
 
 @tensorlake.function()
-def add_one_or_fail_at_0(x: int) -> int:
-    if x == 0:
-        raise ValueError("test: add_one_or_fail_at_0 function failed")
-    return x + 1
+def accumulate_reduce_fail_at_3(
+    acc: AccumulatedState, y: AccumulatedState
+) -> AccumulatedState:
+    if y.sum == 3:
+        raise ValueError("Intentional failure at 3")
+    acc.sum += y.sum
+    return acc
 
 
-class TestGraphReduce(unittest.TestCase):
+@tensorlake.api()
+@tensorlake.function()
+def api_reduce_no_items_no_initial(_: Any) -> AccumulatedState:
+    return tensorlake.reduce(accumulate_reduce, [])
+
+
+@tensorlake.api()
+@tensorlake.function()
+def api_reduce_no_items_with_initial(_: Any) -> AccumulatedState:
+    return tensorlake.reduce(accumulate_reduce, [], AccumulatedState(sum=10))
+
+
+@tensorlake.api()
+@tensorlake.function()
+def api_reduce_one_value_item(_: Any) -> AccumulatedState:
+    return tensorlake.reduce(accumulate_reduce, [AccumulatedState(sum=10)])
+
+
+@tensorlake.api()
+@tensorlake.function()
+def api_reduce_one_function_call_item(_: Any) -> AccumulatedState:
+    return tensorlake.reduce(accumulate_reduce, [generate_single_value()])
+
+
+@tensorlake.function()
+def generate_single_value() -> AccumulatedState:
+    return AccumulatedState(sum=7)
+
+
+class TestReduce(unittest.TestCase):
     @parameterized.parameterized.expand([(True), (False)])
-    def test_simple(self, is_remote: bool):
+    def test_success(self, is_remote: bool):
         if is_remote:
             deploy(__file__)
 
@@ -69,45 +98,65 @@ class TestGraphReduce(unittest.TestCase):
         result: AccumulatedState = request.output()
         self.assertEqual(result.sum, 15)  # 0 + 1 + 2 + 3 + 4 + 5
 
-    def test_single_item_reduce(self):
-        deploy(__file__)
+    @parameterized.parameterized.expand([(True), (False)])
+    def test_failure(self, is_remote: bool):
+        if is_remote:
+            deploy(__file__)
 
-        # TODO:
+        request: tensorlake.Request = tensorlake.call_api(
+            fail_api_function, 6, remote=is_remote
+        )
+        result: AccumulatedState = request.output()
+        self.assertEqual(result, AccumulatedState(sum=15))  # 0 + 1 + 2 + 3 + 4 + 5
 
-    # @parameterized.parameterized.expand([True])
-    # def test_failure_in_parent(self, is_remote: bool):
-    #     # Not running this with local graph because local execution currently
-    #     # raises an exception on function error and fails the test case.
-    #     graph = Graph(
-    #         name=test_graph_name(self),
-    #         start_node=generate_seq,
-    #     )
-    #     graph.add_edge(generate_seq, add_one_or_fail_at_0)
-    #     graph.add_edge(add_one_or_fail_at_0, accumulate_reduce)
-    #     graph.add_edge(accumulate_reduce, store_result)
-    #     graph = remote_or_local_graph(graph, remote=is_remote)
+    @parameterized.parameterized.expand([(True), (False)])
+    def test_reduce_nothing(self, is_remote: bool):
+        if is_remote:
+            deploy(__file__)
 
-    #     invocation_id = graph.run(block_until_done=True, x=3)
-    #     outputs = graph.output(invocation_id, store_result.name)
-    #     self.assertEqual(len(outputs), 0, "Expected zero results")
+        request: tensorlake.Request = tensorlake.call_api(
+            api_reduce_no_items_no_initial, None, remote=is_remote
+        )
+        self.assertRaises(tensorlake.RequestFailureException, request.output)
 
-    # @parameterized.parameterized.expand([True])
-    # def test_failure_start_node(self, is_remote: bool):
-    #     # Not running this with local graph because local execution currently
-    #     # raises an exception on function error and fails the test case.
+    @parameterized.parameterized.expand([(True), (False)])
+    def test_reduce_initial(self, is_remote: bool):
+        if is_remote:
+            deploy(__file__)
 
-    #     graph = Graph(
-    #         name=test_graph_name(self),
-    #         start_node=fail_generate_seq,
-    #     )
-    #     graph.add_edge(fail_generate_seq, add_one)
-    #     graph.add_edge(add_one, accumulate_reduce)
-    #     graph.add_edge(accumulate_reduce, store_result)
-    #     graph = remote_or_local_graph(graph, remote=is_remote)
+        request: tensorlake.Request = tensorlake.call_api(
+            api_reduce_no_items_with_initial,
+            None,
+            remote=is_remote,
+        )
+        result: AccumulatedState = request.output()
+        self.assertEqual(result, AccumulatedState(sum=10))
 
-    #     invocation_id = graph.run(block_until_done=True, x=3)
-    #     outputs = graph.output(invocation_id, store_result.name)
-    #     self.assertEqual(len(outputs), 0, "Expected zero results")
+    @parameterized.parameterized.expand([(True), (False)])
+    def test_reduce_one_value_item(self, is_remote: bool):
+        if is_remote:
+            deploy(__file__)
+
+        request: tensorlake.Request = tensorlake.call_api(
+            api_reduce_one_value_item,
+            None,
+            remote=is_remote,
+        )
+        result: AccumulatedState = request.output()
+        self.assertEqual(result, AccumulatedState(sum=10))
+
+    @parameterized.parameterized.expand([(True), (False)])
+    def test_reduce_one_function_call_item(self, is_remote: bool):
+        if is_remote:
+            deploy(__file__)
+
+        request: tensorlake.Request = tensorlake.call_api(
+            api_reduce_one_function_call_item,
+            None,
+            remote=is_remote,
+        )
+        result: AccumulatedState = request.output()
+        self.assertEqual(result, AccumulatedState(sum=7))
 
 
 if __name__ == "__main__":
