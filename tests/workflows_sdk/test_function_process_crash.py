@@ -2,13 +2,13 @@ import os
 import time
 import unittest
 
-from testing import test_graph_name
+import tensorlake.workflows.interface as tensorlake
+from tensorlake.workflows.remote.deploy import deploy
+from tensorlake.workflows.interface.exceptions import RequestException
 
-from tensorlake import Graph, RemoteGraph, tensorlake_function
-from tensorlake.functions_sdk.graph_serialization import graph_code_dir_path
 
-
-@tensorlake_function()
+@tensorlake.api()
+@tensorlake.function()
 def function(crash: bool) -> str:
     if crash:
         # os.kill(getpid(), signal.SIGKILL) won't work for container init process,
@@ -21,33 +21,28 @@ def function(crash: bool) -> str:
 
 class TestFunctionProcessCrash(unittest.TestCase):
     def test_function_invoke_successful_after_process_crashes(self):
-        graph = Graph(
-            name=test_graph_name(self),
-            description="test",
-            start_node=function,
-        )
-        graph = RemoteGraph.deploy(
-            graph=graph, code_dir_path=graph_code_dir_path(__file__)
-        )
+        deploy(__file__)
 
         print("Running a function that will crash FunctionExecutor process...")
         for i in range(2):
-            crash_invocation_id = graph.run(
-                block_until_done=True,
-                crash=True,
+            request: tensorlake.Request = tensorlake.call_remote_api(
+                function,
+                True,
             )
-            crash_output = graph.output(crash_invocation_id, "function")
-            self.assertEqual(crash_output, [])
+            try:
+                crash_output = request.output()
+            except RequestException as e:
+                self.assertEqual(e.message, "functionerror")
 
         # FIXME: we're only doing periodic Function Executor health checks right now,
         # so we need to wait for the crash to be detected.
         time.sleep(10)
-        success_invocation_id = graph.run(
-            block_until_done=True,
-            crash=False,
+        success_request: tensorlake.Request = tensorlake.call_remote_api(
+            function,
+            False,
         )
-        success_output = graph.output(success_invocation_id, "function")
-        self.assertEqual(success_output, ["success"])
+        success_output = success_request.output()
+        self.assertEqual(success_output, "success")
 
 
 if __name__ == "__main__":
