@@ -15,9 +15,8 @@ class AccumulatedState(BaseModel):
 @tensorlake.api()
 @tensorlake.function()
 def success_api_function(x: int) -> AccumulatedState:
-    return tensorlake.reduce(
-        accumulate_reduce, generate_seq(x), AccumulatedState(sum=0)
-    )
+    seq = tensorlake.map(transform_int_to_accumulated_state, generate_seq(x))
+    return tensorlake.reduce(accumulate_reduce, seq, AccumulatedState(sum=0))
 
 
 # TODO: We need to allow a future as reducer input so tensorlake functions can generate sequences.
@@ -69,6 +68,11 @@ class TestGraphReduce(unittest.TestCase):
         )
         result: AccumulatedState = request.output()
         self.assertEqual(result, AccumulatedState(sum=15))  # 0 + 1 + 2 + 3 + 4 + 5
+
+    def test_single_item_reduce(self):
+        deploy(__file__)
+
+        # TODO:
 
     # @parameterized.parameterized.expand([True])
     # def test_failure_in_parent(self, is_remote: bool):
