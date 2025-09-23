@@ -61,6 +61,12 @@ def download_api_function_payload_bytes(
     logger = logger.bind(module=__name__)
     logger.info("downloading function arguments")
 
+    if len(allocation.inputs.args) != 1 or len(allocation.inputs.arg_blobs) != 1:
+        raise ValueError(
+            "API function calls must have exactly one argument and one argument blob, "
+            f"got {len(allocation.inputs.args)} args and {len(allocation.inputs.arg_blobs)} arg blobs"
+        )
+
     api_payload_blob: BLOB = allocation.inputs.arg_blobs[0]
     api_payload_so: SerializedObjectInsideBLOB = allocation.inputs.args[0]
 

@@ -45,7 +45,6 @@ _DEFAULT_MAX_CONCURRENCY = 1  # No concurrent threads running the function by de
 
 
 def function(
-    name: str | None = None,
     description: str = "",
     cpu: float = _DEFAULT_CPU,
     memory: float = _DEFAULT_MEMORY_GB,
@@ -71,15 +70,13 @@ def function(
             fn = Function(fn)
 
         fn: Function
-        # "{class}.{method}" for methods, otherwise just function name. Doesn't include module name.
-        # All functions and classes in the application share a single namespace.
-        default_name: str = fn._original_function.__name__
-
         fn._function_config = _FunctionConfiguration(
             # set by cls() decorator if this is a class method
             class_name=None,
             class_method_name=None,
-            function_name=default_name if name is None else name,
+            # "{class}.{method}" for methods, otherwise just function name. Doesn't include module name.
+            # All functions and classes in the application share a single namespace.
+            function_name=fn._original_function.__name__,
             description=description,
             image=image,
             secrets=secrets,

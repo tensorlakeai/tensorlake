@@ -275,11 +275,16 @@ class Service(FunctionExecutorServicer):
         # Validate allocation inputs
         (
             MessageValidator(allocation.inputs)
-            .required_serialized_objects_inside_blob("args")
-            .required_blobs("arg_blobs")
+            .optional_serialized_objects_inside_blob("args")
+            .optional_blobs("arg_blobs")
             .required_blob("function_outputs_blob")
             .required_blob("request_error_blob")
         )
+        if len(allocation.inputs.args) != len(allocation.inputs.arg_blobs):
+            raise ValueError(
+                "Mismatched function arguments and functions argument blobs lengths, "
+                f"{len(allocation.inputs.args)} != {len(allocation.inputs.arg_blobs)}"
+            )
 
     def check_health(
         self, request: HealthCheckRequest, context: grpc.ServicerContext

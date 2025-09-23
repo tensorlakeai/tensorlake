@@ -58,20 +58,11 @@ class MessageValidator:
         _validate_blob(blob)
         return self
 
-    def required_blobs(self, field_name: str) -> "MessageValidator":
-        """Validates the repeated BLOBs.
-
-        Raises: ValueError: If the BLOBs are invalid or not present."""
+    def optional_blobs(self, field_name: str) -> "MessageValidator":
+        """Validates that every BLOB in the field are valid."""
         blobs = getattr(self._message, field_name)
-        is_present: bool = False
         for blob in blobs:
             _validate_blob(blob)
-            is_present = True
-
-        if not is_present:
-            raise ValueError(
-                f"BLOBs '{field_name}' must contain at least one valid BLOB"
-            )
         return self
 
     def optional_blob(self, field_name: str) -> "MessageValidator":
@@ -83,22 +74,12 @@ class MessageValidator:
 
         return self.required_blob(field_name)
 
-    def required_serialized_objects_inside_blob(
+    def optional_serialized_objects_inside_blob(
         self, field_name: str
     ) -> "MessageValidator":
-        """Validates that at least one SerializaedObjectInsideBLOB is present in the field.
-
-        Raises: ValueError: If the SerializedObjectsInsideBLOB is invalid or not present.
-        """
-        is_present: True = False
+        """Validates that all SerializedObjectInsideBLOB items in the field are valid."""
         for so in getattr(self._message, field_name):
-            is_present = True
             _validate_serialized_object_inside_blob(so)
-
-        if not is_present:
-            raise ValueError(
-                f"Field '{field_name}' must contain at least one SerializedObjectInsideBLOB"
-            )
 
         return self
 
