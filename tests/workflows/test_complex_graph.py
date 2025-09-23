@@ -128,9 +128,9 @@ class TestComplexGraph(unittest.TestCase):
                 TestGraphRequestPayload(numbers=[str(i) for i in range(10, 20)]),
             )
 
-        file: tensorlake.File = request.output()
-        self.assertEqual(file.content_type, "text/plain; charset=UTF-8")
-        self.assertEqual(file.content, b"Total sum: 280")
+            file: tensorlake.File = request.output()
+            self.assertEqual(file.content_type, "text/plain; charset=UTF-8")
+            self.assertEqual(file.content, b"Total sum: 280")
 
 
 if __name__ == "__main__":

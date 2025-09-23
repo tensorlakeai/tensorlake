@@ -22,8 +22,8 @@ def api_router_func(x: int) -> int:
         return add_two(x)
 
 
-class TestGraphSecrets(unittest.TestCase):
-    def test_graph_router_secrets_settable(self):
+class TestSecrets(unittest.TestCase):
+    def test_api_func_secrets_settable(self):
         # Only test local graph mode here because behavior of secrets in remote graph depends
         # on Executor flavor.
         request: tensorlake.Request = tensorlake.call_local_api(
