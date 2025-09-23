@@ -25,16 +25,16 @@ class EnrichmentOptions(BaseModel):
     This includes summarization of tables and figures, which can help to provide a more comprehensive understanding of the document.
     """
 
-    figure_summarization: bool = Field(
-        False,
+    figure_summarization: Optional[bool] = Field(
+        None,
         description="Boolean flag to enable figure summarization. The default is `false`.",
     )
     figure_summarization_prompt: Optional[str] = Field(
         None,
         description="The prompt to guide the figure summarization. If not provided, a default prompt will be used. It is not required to provide a prompt. The prompt only has effect if `figure_summarization` is set to `true`.",
     )
-    table_summarization: bool = Field(
-        False,
+    table_summarization: Optional[bool] = Field(
+        None,
         description="Boolean flag to enable summary generation for parsed tables. The default is `false`.",
     )
     table_summarization_prompt: Optional[str] = Field(
@@ -71,32 +71,32 @@ class ParsingOptions(BaseModel):
         None,
         description="Flag to enable header-hierarchy detection across pages. When set to `true`, the parser will consider headers from different pages when determining the hierarchy of headers within a single page.",
     )
-    disable_layout_detection: bool = Field(
-        False,
+    disable_layout_detection: Optional[bool] = Field(
+        None,
         description="Useful flag for documents with a lot of tables or images. If set to `true`, the API will skip the layout detection step, and directly extract text from the document.",
     )
     ocr_model: Optional[OcrPipelineProvider] = Field(
         None,
         description="The model to use for OCR (Optical Character Recognition).",
     )
-    remove_strikethrough_lines: bool = Field(
-        False,
+    remove_strikethrough_lines: Optional[bool] = Field(
+        None,
         description="Flag to enable the detection, and removal, of strikethrough text in the document. This flag incurs additional billing costs. The default is `false`.",
     )
-    signature_detection: bool = Field(
-        False,
+    signature_detection: Optional[bool] = Field(
+        None,
         description="Flag to enable the detection of signatures in the document. This flag incurs additional billing costs. The default is `false`.",
     )
-    skew_detection: bool = Field(
-        False,
+    skew_detection: Optional[bool] = Field(
+        None,
         description="Boolean flag to detect and correct skewed or rotated pages in the document. The default is `false`. Setting this to `true` will increase the processing time of the document.",
     )
-    table_output_mode: TableOutputMode = Field(
-        TableOutputMode.HTML,
+    table_output_mode: Optional[TableOutputMode] = Field(
+        None,
         description="The format for the tables extracted from the document. This options determines how the tables are represented in the json response. The default is `HTML`, which means the tables are represented as HTML strings.",
     )
-    table_parsing_format: TableParsingFormat = Field(
-        TableParsingFormat.TSR,
+    table_parsing_format: Optional[TableParsingFormat] = Field(
+        None,
         description="Determines how the system identifies and extracts tables from the document. Default is `table_structure_recognition`, which is better suited for clean, grid-like tables.",
     )
     ignore_sections: Optional[Set[PageFragmentType]] = Field(
@@ -129,8 +129,8 @@ class StructuredExtractionOptions(BaseModel):
         default=None,
         description="Strategy to partition the document before structured data extraction. The API will return one structured data object per partition. This is useful when you want to extract certain fields from every page.",
     )
-    model_provider: ModelProvider = Field(
-        default=ModelProvider.TENSORLAKE,
+    model_provider: Optional[ModelProvider] = Field(
+        default=None,
         description="The model provider to use for structured data extraction. The default is `tensorlake`, which uses our private model, and runs on our servers.",
     )
     page_classes: Optional[List[str]] = Field(
