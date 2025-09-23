@@ -206,6 +206,7 @@ class ResponseHelper:
                         call_metadata=FunctionCallNodeMetadata(
                             nid=node.id,
                             type=FunctionCallType.REDUCER,
+                            metadata=None,
                         ).serialize(),
                     )
                 )
