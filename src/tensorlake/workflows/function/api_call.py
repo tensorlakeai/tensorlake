@@ -26,8 +26,9 @@ def _api_function_call_with_object_payload(
     if api.function_config.class_name is None:
         return api(*args)
     else:
+        # Warning: don't create class instance here as it must be reused by SDK if created once.
         cls: Any = get_class(api.function_config.class_name)
-        return cls().getattr(api.function_config.class_method_name)(*args)
+        return getattr(cls, api.function_config.class_method_name)(*args)
 
 
 def api_function_call_with_serialized_payload(
