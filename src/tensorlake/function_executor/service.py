@@ -20,7 +20,7 @@ from tensorlake.workflows.remote.application.zip import (
     FunctionZIPManifest,
 )
 from tensorlake.workflows.request_context_base import RequestContextBase
-from tensorlake.workflows.user_data_serializer import PickleUserDataSerializer
+from tensorlake.workflows.request_metrics_recorder import RequestMetricsRecorder
 
 from .blob_store.blob_store import BLOBStore
 from .handlers.check_health.handler import Handler as CheckHealthHandler
@@ -165,7 +165,7 @@ class Service(FunctionExecutorServicer):
             if request.function.function_name not in app_zip_manifest.functions:
                 raise ValueError(
                     (
-                        f"Function '{request.function.function_name}' not found in the application '{request.function.application_name} ZIP manifest'. "
+                        f"Function '{request.function.function_name}' not found in ZIP manifest of application '{request.function.application_name}'. "
                         f"Available functions: {list(app_zip_manifest.functions.keys())}"
                     )
                 )
@@ -307,11 +307,9 @@ class Service(FunctionExecutorServicer):
             state=ProxiedRequestState(
                 allocation_id=alloc_info.allocation.allocation_id,
                 proxy_server=self._request_state_proxy_server,
-                # User data stored in request context is not available via HTTP.
-                # So we can use Pickle which gives smooth UX.
-                user_serializer=PickleUserDataSerializer(),
             ),
             progress=TaskAllocationRequestProgress(alloc_info),
+            metrics=RequestMetricsRecorder(),
         )
 
         try:

@@ -1,17 +1,12 @@
 from typing import Dict
 
-from .interface.request_context import RequestState
-from .user_data_serializer import UserDataSerializer
+from .interface.request_context import RequestMetrics
 
 
-class RequestStateBase(RequestState):
-    """Base class with common functionality for request state implementations"""
+class RequestMetricsRecorder(RequestMetrics):
+    """Concrete implementation of RequestMetrics that records its metrics."""
 
-    def __init__(
-        self,
-        user_serializer: UserDataSerializer,
-    ):
-        self._user_serializer: UserDataSerializer = user_serializer
+    def __init__(self):
         self._timers: Dict[str, float] = {}
         self._counters: Dict[str, int] = {}
 

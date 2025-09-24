@@ -22,10 +22,18 @@ class RequestState:
         Raises Exception if an error occurred."""
         raise NotImplementedError()
 
+
+class RequestMetrics:
+    """Abstract interface for reporting graph request metrics."""
+
     def timer(self, name: str, value: float):
+        """Records a duration metric with the supplied name and value."""
         raise NotImplementedError()
 
     def counter(self, name: str, value: int = 1):
+        """Adds the supplied value to the counter with the supplied name.
+
+        If the counter does not exist, it is created with the supplied value."""
         raise NotImplementedError()
 
 
@@ -55,6 +63,10 @@ class RequestContext:
 
     @property
     def progress(self) -> RequestProgress:
+        raise NotImplementedError()
+
+    @property
+    def metrics(self) -> RequestMetrics:
         raise NotImplementedError()
 
 

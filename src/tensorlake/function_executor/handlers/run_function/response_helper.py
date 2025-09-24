@@ -19,7 +19,7 @@ from tensorlake.workflows.function.user_data_serializer import (
 )
 from tensorlake.workflows.interface.exceptions import RequestError
 from tensorlake.workflows.interface.function import Function
-from tensorlake.workflows.request_state_base import RequestStateBase
+from tensorlake.workflows.request_metrics_recorder import RequestMetricsRecorder
 from tensorlake.workflows.user_data_serializer import UserDataSerializer
 
 from ...blob_store.blob_store import BLOBStore
@@ -55,14 +55,14 @@ class ResponseHelper:
         function_ref: FunctionRef,
         function: Function,
         inputs: FunctionInputs,
-        request_state: RequestStateBase,
+        request_metrics: RequestMetricsRecorder,
         blob_store: BLOBStore,
         logger: FunctionExecutorLogger,
     ):
         self._function_ref: FunctionRef = function_ref
         self._function: Function = function
         self._inputs: FunctionInputs = inputs
-        self._request_state: RequestStateBase = request_state
+        self._request_metrics: RequestMetricsRecorder = request_metrics
         self._blob_store: BLOBStore = blob_store
         self._logger: FunctionExecutorLogger = logger.bind(module=__name__)
 
@@ -131,8 +131,8 @@ class ResponseHelper:
 
     def _get_metrics(self) -> MetricsProto:
         return MetricsProto(
-            timers=self._request_state.timers,
-            counters=self._request_state.counters,
+            timers=self._request_metrics.timers,
+            counters=self._request_metrics.counters,
         )
 
     def _upload_function_output_ast(
