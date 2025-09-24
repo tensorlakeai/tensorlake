@@ -15,7 +15,7 @@ from tensorlake.workflows.function.function_call import (
 from tensorlake.workflows.function.reducer_call import reducer_function_call
 from tensorlake.workflows.interface.function import Function
 from tensorlake.workflows.interface.function_call import RegularFunctionCall
-from tensorlake.workflows.interface.request_context import RequestContext
+from tensorlake.workflows.request_context_base import RequestContextBase
 
 from ...blob_store.blob_store import BLOBStore
 from ...logger import FunctionExecutorLogger
@@ -39,7 +39,7 @@ class Handler:
     def __init__(
         self,
         allocation: Allocation,
-        request_context: RequestContext,
+        request_context: RequestContextBase,
         function_ref: FunctionRef,
         function: Function,
         function_instance_arg: Any | None,
@@ -47,7 +47,7 @@ class Handler:
         logger: FunctionExecutorLogger,
     ):
         self._allocation: Allocation = allocation
-        self._request_context: RequestContext = request_context
+        self._request_context: RequestContextBase = request_context
         self._function_ref: FunctionRef = function_ref
         self._function: Function = function
         self._function_instance_arg: Any | None = function_instance_arg
@@ -57,7 +57,7 @@ class Handler:
             function_ref=function_ref,
             function=function,
             inputs=allocation.inputs,
-            request_state=request_context.state,
+            request_metrics=request_context.metrics,
             blob_store=blob_store,
             logger=self._logger,
         )

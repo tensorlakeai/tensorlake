@@ -1,25 +1,23 @@
 from typing import Any, Dict
 
-from ..ast.value_node import ValueNode
-from ..request_state_base import RequestStateBase
-from ..user_data_serializer import UserDataSerializer
+from ..interface.request_context import RequestState
+from ..request_state import REQUEST_STATE_USER_DATA_SERIALIZER
 
 
-class LocalRequestState(RequestStateBase):
-    def __init__(
-        self,
-        user_serializer: UserDataSerializer,
-        state: Dict[str, ValueNode],
-    ):
-        super().__init__(user_serializer)
-        # Use ValueNode to store serialized value and its metadata.
-        # This makes local UX close to remote where serialized values
-        # are stored outside of FE.
-        self._state: Dict[str, ValueNode] = state
+class LocalRequestState(RequestState):
+    def __init__(self):
+        # Store all data in serialized form to be consistent with remote mode.
+        self._state: Dict[str, bytes] = {}
 
     def set(self, key: str, value: Any) -> None:
-        self._state[key] = ValueNode.from_value(value, self._user_serializer)
+        self._state[key] = REQUEST_STATE_USER_DATA_SERIALIZER.serialize(value)
 
     def get(self, key: str, default: Any | None = None) -> Any | None:
-        value_node: ValueNode | None = self._state.get(key, None)
-        return default if value_node is None else value_node.to_value()
+        serialized_value: bytes | None = self._state.get(key, None)
+        return (
+            default
+            if serialized_value is None
+            else REQUEST_STATE_USER_DATA_SERIALIZER.deserialize(
+                serialized_value, possible_types=[type(default)]
+            )
+        )

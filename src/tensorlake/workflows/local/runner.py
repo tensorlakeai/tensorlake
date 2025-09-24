@@ -27,6 +27,7 @@ from ..interface.request import Request
 from ..interface.request_context import RequestContext
 from ..registry import get_function
 from ..request_context_base import RequestContextBase
+from ..request_metrics_recorder import RequestMetricsRecorder
 from .request import LocalRequest
 from .request_progress import LocalRequestProgress
 from .request_state import LocalRequestState
@@ -44,8 +45,12 @@ class LocalRunner:
         self._class_instances: Dict[str, Any] = {}
         # Function name -> serialized current accumulator value.
         self._reducer_accumulators: Dict[str, bytes] = {}
-        # Key -> ValueNode.
-        self._request_state: Dict[str, ValueNode] = {}
+        self._request_context: RequestContext = RequestContextBase(
+            request_id=_LOCAL_REQUEST_ID,
+            state=LocalRequestState(),
+            progress=LocalRequestProgress(),
+            metrics=RequestMetricsRecorder(),
+        )
 
     def run(self, function_call: FunctionCall) -> Request:
         try:
@@ -121,7 +126,7 @@ class LocalRunner:
         self._replace_node(node, output_ast)
 
     def _call(self, function_call: RegularFunctionCall, function: Function) -> Any:
-        self._set_function_call_request_context(function_call, function)
+        set_request_context_args(function_call, self._request_context)
         self._set_function_call_instance_args(function_call, function)
 
         return function.original_function(*function_call.args, **function_call.kwargs)
@@ -140,19 +145,6 @@ class LocalRunner:
         set_self_arg(
             function_call, self._class_instances[function.function_config.class_name]
         )
-
-    def _set_function_call_request_context(
-        self, function_call: FunctionCall, function: Function
-    ) -> None:
-        request_context: RequestContext = RequestContextBase(
-            request_id=_LOCAL_REQUEST_ID,
-            state=LocalRequestState(
-                user_serializer=function_output_serializer(function),
-                state=self._request_state,
-            ),
-            progress=LocalRequestProgress(),
-        )
-        set_request_context_args(function_call, request_context)
 
 
 def _find_non_value_node_with_value_only_children(ast: ASTNode) -> ASTNode | None:

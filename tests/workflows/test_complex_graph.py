@@ -12,9 +12,7 @@ class TestGraphRequestPayload(BaseModel):
     numbers: List[str]
 
 
-# FIXME: Temporary use "pickle" serializer until root function call of the returned
-# call tree inherits its output serializer from the API function.
-@tensorlake.api(output_serializer="pickle")
+@tensorlake.api()
 @tensorlake.function(cpu=1.0, memory=1.0, description="test API function")
 def test_graph_api_fan_in(
     ctx: tensorlake.RequestContext, payload: TestGraphRequestPayload
