@@ -301,6 +301,7 @@ class ResponseHelper:
                     encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_TEXT,
                     encoding_version=0,
                     size=len(data),
+                    metadata_size=0,
                     sha256_hash=_sha256_hexdigest(b"", data),
                 ),
                 offset=0,
