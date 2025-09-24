@@ -4,7 +4,7 @@ import tensorlake.workflows.interface as tensorlake
 from tensorlake.workflows.remote.deploy import deploy
 
 
-@tensorlake.api()
+@tensorlake.api(output_serializer="pickle")
 @tensorlake.function()
 def api_func(payload: str) -> str:
     return foo()

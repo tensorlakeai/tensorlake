@@ -12,7 +12,7 @@ class AccumulatedState(BaseModel):
     sum: int = 0
 
 
-@tensorlake.api()
+@tensorlake.api(output_serializer="pickle")
 @tensorlake.function()
 def success_api_function(x: int) -> AccumulatedState:
     seq = tensorlake.map(transform_int_to_accumulated_state, generate_seq(x))
@@ -67,7 +67,7 @@ class TestGraphReduce(unittest.TestCase):
             success_api_function, 6, remote=is_remote
         )
         result: AccumulatedState = request.output()
-        self.assertEqual(result, AccumulatedState(sum=15))  # 0 + 1 + 2 + 3 + 4 + 5
+        self.assertEqual(result.sum, 15)  # 0 + 1 + 2 + 3 + 4 + 5
 
     def test_single_item_reduce(self):
         deploy(__file__)
