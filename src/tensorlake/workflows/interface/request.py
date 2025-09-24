@@ -13,6 +13,8 @@ class Request:
         """Returns output of the request API function.
 
         API function output is what was returned from it.
-        Raises Exception on error.
+        Raises RequestFailureException on error during the request execution.
+        Raises RequestNotFinished if the request is not yet completed.
+        Raises RemoteAPIError on error communicating with the remote API.
         """
         raise NotImplementedError("output is implemented in subclasses.")

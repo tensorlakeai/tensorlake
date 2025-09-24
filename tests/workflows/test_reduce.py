@@ -12,10 +12,21 @@ class AccumulatedState(BaseModel):
     sum: int = 0
 
 
+# FIXME: Temporary use "pickle" serializer until root function call of the returned
+# call tree inherits its output serializer from the API function.
 @tensorlake.api(output_serializer="pickle")
 @tensorlake.function()
-def success_api_function(x: int) -> AccumulatedState:
+def success_api_function_function_call_collection(x: int) -> AccumulatedState:
     seq = tensorlake.map(transform_int_to_accumulated_state, generate_seq(x))
+    return tensorlake.reduce(accumulate_reduce, seq, AccumulatedState(sum=0))
+
+
+# FIXME: Temporary use "pickle" serializer until root function call of the returned
+# call tree inherits its output serializer from the API function.
+@tensorlake.api(output_serializer="pickle")
+@tensorlake.function()
+def success_api_function_value_collection(x: int) -> AccumulatedState:
+    seq = [transform_int_to_accumulated_state(i) for i in generate_seq(x)]
     return tensorlake.reduce(accumulate_reduce, seq, AccumulatedState(sum=0))
 
 
@@ -43,8 +54,8 @@ def store_result(acc: AccumulatedState) -> int:
 @tensorlake.api()
 @tensorlake.function()
 def fail_api_function(x: int) -> AccumulatedState:
-    seq = tensorlake.map(accumulate_reduce_fail_at_3, generate_seq(x))
-    return tensorlake.reduce(accumulate_reduce, seq, AccumulatedState(sum=0))
+    seq = [transform_int_to_accumulated_state(i) for i in generate_seq(x)]
+    return tensorlake.reduce(accumulate_reduce_fail_at_3, seq, AccumulatedState(sum=0))
 
 
 @tensorlake.function()
@@ -63,19 +74,25 @@ def api_reduce_no_items_no_initial(_: Any) -> AccumulatedState:
     return tensorlake.reduce(accumulate_reduce, [])
 
 
-@tensorlake.api()
+# FIXME: Temporary use "pickle" serializer until root function call of the returned
+# call tree inherits its output serializer from the API function.
+@tensorlake.api(output_serializer="pickle")
 @tensorlake.function()
 def api_reduce_no_items_with_initial(_: Any) -> AccumulatedState:
     return tensorlake.reduce(accumulate_reduce, [], AccumulatedState(sum=10))
 
 
-@tensorlake.api()
+# FIXME: Temporary use "pickle" serializer until root function call of the returned
+# call tree inherits its output serializer from the API function.
+@tensorlake.api(output_serializer="pickle")
 @tensorlake.function()
 def api_reduce_one_value_item(_: Any) -> AccumulatedState:
     return tensorlake.reduce(accumulate_reduce, [AccumulatedState(sum=10)])
 
 
-@tensorlake.api()
+# FIXME: Temporary use "pickle" serializer until root function call of the returned
+# call tree inherits its output serializer from the API function.
+@tensorlake.api(output_serializer="pickle")
 @tensorlake.function()
 def api_reduce_one_function_call_item(_: Any) -> AccumulatedState:
     return tensorlake.reduce(accumulate_reduce, [generate_single_value()])
@@ -88,12 +105,23 @@ def generate_single_value() -> AccumulatedState:
 
 class TestReduce(unittest.TestCase):
     @parameterized.parameterized.expand([(True), (False)])
-    def test_success(self, is_remote: bool):
+    def test_success_function_call_collection(self, is_remote: bool):
         if is_remote:
             deploy(__file__)
 
         request: tensorlake.Request = tensorlake.call_api(
-            success_api_function, 6, remote=is_remote
+            success_api_function_function_call_collection, 6, remote=is_remote
+        )
+        result: AccumulatedState = request.output()
+        self.assertEqual(result.sum, 15)  # 0 + 1 + 2 + 3 + 4 + 5
+
+    @parameterized.parameterized.expand([(True), (False)])
+    def test_success_value_collection(self, is_remote: bool):
+        if is_remote:
+            deploy(__file__)
+
+        request: tensorlake.Request = tensorlake.call_api(
+            success_api_function_value_collection, 6, remote=is_remote
         )
         result: AccumulatedState = request.output()
         self.assertEqual(result.sum, 15)  # 0 + 1 + 2 + 3 + 4 + 5
@@ -106,8 +134,7 @@ class TestReduce(unittest.TestCase):
         request: tensorlake.Request = tensorlake.call_api(
             fail_api_function, 6, remote=is_remote
         )
-        result: AccumulatedState = request.output()
-        self.assertEqual(result, AccumulatedState(sum=15))  # 0 + 1 + 2 + 3 + 4 + 5
+        self.assertRaises(tensorlake.RequestFailureException, request.output)
 
     @parameterized.parameterized.expand([(True), (False)])
     def test_reduce_nothing(self, is_remote: bool):
@@ -130,7 +157,7 @@ class TestReduce(unittest.TestCase):
             remote=is_remote,
         )
         result: AccumulatedState = request.output()
-        self.assertEqual(result, AccumulatedState(sum=10))
+        self.assertEqual(result.sum, 10)
 
     @parameterized.parameterized.expand([(True), (False)])
     def test_reduce_one_value_item(self, is_remote: bool):
@@ -143,7 +170,7 @@ class TestReduce(unittest.TestCase):
             remote=is_remote,
         )
         result: AccumulatedState = request.output()
-        self.assertEqual(result, AccumulatedState(sum=10))
+        self.assertEqual(result.sum, 10)
 
     @parameterized.parameterized.expand([(True), (False)])
     def test_reduce_one_function_call_item(self, is_remote: bool):
@@ -156,7 +183,7 @@ class TestReduce(unittest.TestCase):
             remote=is_remote,
         )
         result: AccumulatedState = request.output()
-        self.assertEqual(result, AccumulatedState(sum=7))
+        self.assertEqual(result.sum, 7)
 
 
 if __name__ == "__main__":
