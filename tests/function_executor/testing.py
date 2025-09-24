@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 
 import grpc
 
+# Interface should be imported first before internal modules.
 import tensorlake.workflows.interface as tensorlake
 from tensorlake.function_executor.handlers.run_function.value_node_metadata import (
     ValueNodeMetadata,
@@ -21,17 +22,22 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     CreateAllocationRequest,
     DeleteAllocationRequest,
     FunctionInputs,
+    FunctionRef,
+    InitializeRequest,
+    InitializeResponse,
+    SerializedObject,
     SerializedObjectEncoding,
     SerializedObjectInsideBLOB,
+    SerializedObjectManifest,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
 from tensorlake.function_executor.proto.server_configuration import GRPC_SERVER_OPTIONS
 from tensorlake.workflows.ast.value_node import ValueMetadata
+from tensorlake.workflows.remote.application.zip import zip_application_code
 from tensorlake.workflows.user_data_serializer import (
-    UserDataSerializer,
-    serializer_by_name,
+    JSONUserDataSerializer,
 )
 
 
@@ -106,6 +112,37 @@ def rpc_channel(context_manager: FunctionExecutorProcessContextManager) -> grpc.
         ) from e
 
 
+def initialize(
+    stub: FunctionExecutorStub,
+    app: tensorlake.Application,
+    app_code_dir_path: str,
+    function_name: str,
+) -> InitializeResponse:
+    application_zip: bytes = zip_application_code(
+        code_dir_path=app_code_dir_path,
+        ignored_absolute_paths=set(),
+    )
+    return stub.initialize(
+        InitializeRequest(
+            function=FunctionRef(
+                namespace="test",
+                application_name=app.name,
+                application_version=app.version,
+                function_name=function_name,
+            ),
+            application_code=SerializedObject(
+                manifest=SerializedObjectManifest(
+                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                    encoding_version=0,
+                    size=len(application_zip),
+                    sha256_hash=hashlib.sha256(application_zip).hexdigest(),
+                ),
+                data=application_zip,
+            ),
+        )
+    )
+
+
 def run_allocation(
     stub: FunctionExecutorStub,
     inputs: FunctionInputs,
@@ -141,6 +178,34 @@ def run_allocation(
         raise Exception("Allocation result was not received from the server.")
 
     return result
+
+
+def api_function_inputs(api_payload: Any) -> FunctionInputs:
+    user_serializer: JSONUserDataSerializer = JSONUserDataSerializer()
+    serialized_api_payload: bytes = user_serializer.serialize(api_payload)
+    api_payload_blob: BLOB = create_tmp_blob(
+        chunks_count=1, chunk_size=len(serialized_api_payload)
+    )
+    write_tmp_blob_bytes(api_payload_blob, serialized_api_payload)
+
+    return FunctionInputs(
+        args=[
+            SerializedObjectInsideBLOB(
+                manifest=SerializedObjectManifest(
+                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON,
+                    encoding_version=0,
+                    size=len(serialized_api_payload),
+                    metadata_size=0,  # No metadata for API function calls.
+                    sha256_hash=hashlib.sha256(serialized_api_payload).hexdigest(),
+                ),
+                offset=0,
+            )
+        ],
+        arg_blobs=[api_payload_blob],
+        function_outputs_blob=create_tmp_blob(),
+        request_error_blob=create_tmp_blob(),
+        function_call_metadata=b"",
+    )
 
 
 def download_and_deserialize_so(

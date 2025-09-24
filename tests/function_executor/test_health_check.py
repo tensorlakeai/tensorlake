@@ -8,42 +8,38 @@ import unittest
 from grpc import RpcError
 from testing import (
     FunctionExecutorProcessContextManager,
-    create_tmp_blob,
+    api_function_inputs,
+    initialize,
     rpc_channel,
     run_allocation,
 )
 
-from tensorlake import Graph
+import tensorlake.workflows.interface as tensorlake
 from tensorlake.function_executor.proto.function_executor_pb2 import (
-    BLOB,
+    AllocationOutcomeCode,
+    AllocationResult,
+    FunctionInputs,
     HealthCheckRequest,
     HealthCheckResponse,
     InitializationOutcomeCode,
-    InitializeRequest,
     InitializeResponse,
-    SerializedObject,
-    SerializedObjectEncoding,
-    SerializedObjectManifest,
-    TaskOutcomeCode,
-    TaskResult,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
-from tensorlake.functions_sdk.functions import tensorlake_function
-from tensorlake.functions_sdk.graph_serialization import (
-    graph_code_dir_path,
-    zip_graph_code,
-)
+from tensorlake.workflows.remote.application.zip import zip_application_code
 
-GRAPH_CODE_DIR_PATH = graph_code_dir_path(__file__)
+APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
+
+app: tensorlake.Application = tensorlake.define_application(name=__file__)
 
 # Lower - faster tests but more CPU usage.
 HEALTH_CHECK_POLL_PERIOD_SEC = 0.1
 HEALTH_CHECK_TIMEOUT_SEC = 5
 
 
-@tensorlake_function()
+@tensorlake.api()
+@tensorlake.function()
 def action_function(action: str) -> str:
     if action == "crash_process":
         print("Crashing process...")
@@ -61,34 +57,6 @@ def action_function(action: str) -> str:
         os.closerange(0, 1000)
     else:
         return "success"
-
-
-def initialize(test_case: unittest.TestCase, stub: FunctionExecutorStub):
-    graph_data: bytes = zip_graph_code(
-        graph=Graph(name="test", description="test", start_node=action_function),
-        code_dir_path=GRAPH_CODE_DIR_PATH,
-    )
-    initialize_response: InitializeResponse = stub.initialize(
-        InitializeRequest(
-            namespace="test",
-            graph_name="test",
-            graph_version="1",
-            function_name="action_function",
-            graph=SerializedObject(
-                manifest=SerializedObjectManifest(
-                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
-                    encoding_version=0,
-                    size=len(graph_data),
-                    sha256_hash=hashlib.sha256(graph_data).hexdigest(),
-                ),
-                data=graph_data,
-            ),
-        )
-    )
-    test_case.assertEqual(
-        initialize_response.outcome_code,
-        InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
-    )
 
 
 def wait_health_check_failure(test_case: unittest.TestCase, stub: FunctionExecutorStub):
@@ -128,17 +96,24 @@ class TestHealthCheck(unittest.TestCase):
         with FunctionExecutorProcessContextManager() as process:
             with rpc_channel(process) as channel:
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
-                initialize(self, stub)
-                function_outputs_blob: BLOB = create_tmp_blob()
+                response: InitializeResponse = initialize(
+                    stub,
+                    app=app,
+                    app_code_dir_path=APPLICATION_CODE_DIR_PATH,
+                    function_name="action_function",
+                )
+                self.assertEqual(
+                    response.outcome_code,
+                    InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
+                )
+
+                inputs: FunctionInputs = api_function_inputs("deadlock")
 
                 def run_task_in_thread():
                     try:
                         run_allocation(
                             stub,
-                            function_name="action_function",
-                            input="deadlock",
-                            function_outputs_blob=function_outputs_blob,
-                            invocation_error_blob=create_tmp_blob(),
+                            inputs=inputs,
                             timeout_sec=HEALTH_CHECK_TIMEOUT_SEC,
                         )
                         self.fail("Run task should have timed out.")
@@ -160,20 +135,25 @@ class TestHealthCheck(unittest.TestCase):
         with FunctionExecutorProcessContextManager() as process:
             with rpc_channel(process) as channel:
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
-                initialize(self, stub)
-                function_outputs_blob: BLOB = create_tmp_blob()
+                response: InitializeResponse = initialize(
+                    stub,
+                    app=app,
+                    app_code_dir_path=APPLICATION_CODE_DIR_PATH,
+                    function_name="action_function",
+                )
+                self.assertEqual(
+                    response.outcome_code,
+                    InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
+                )
 
                 def run_task_in_thread():
-                    task_result: TaskResult = run_allocation(
+                    alloc_result: AllocationResult = run_allocation(
                         stub,
-                        function_name="action_function",
-                        input="raise_exception",
-                        function_outputs_blob=function_outputs_blob,
-                        invocation_error_blob=create_tmp_blob(),
+                        inputs=api_function_inputs("raise_exception"),
                     )
                     self.assertEqual(
-                        task_result.outcome_code,
-                        TaskOutcomeCode.TASK_OUTCOME_CODE_FAILURE,
+                        alloc_result.outcome_code,
+                        AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,
                     )
 
                 task_thread = threading.Thread(target=run_task_in_thread)
@@ -191,18 +171,23 @@ class TestHealthCheck(unittest.TestCase):
         with FunctionExecutorProcessContextManager() as process:
             with rpc_channel(process) as channel:
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
-                initialize(self, stub)
-                function_outputs_blob: BLOB = create_tmp_blob()
+                response: InitializeResponse = initialize(
+                    stub,
+                    app=app,
+                    app_code_dir_path=APPLICATION_CODE_DIR_PATH,
+                    function_name="action_function",
+                )
+                self.assertEqual(
+                    response.outcome_code,
+                    InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
+                )
 
                 def run_task_in_thread():
                     try:
                         # Due to "tcp keep-alive" property of the health checks the task should unblock with RpcError.
                         run_allocation(
                             stub,
-                            function_name="action_function",
-                            input="crash_process",
-                            function_outputs_blob=function_outputs_blob,
-                            invocation_error_blob=create_tmp_blob(),
+                            inputs=api_function_inputs("crash_process"),
                         )
                         self.fail("Run task should have failed.")
                     except RpcError:
@@ -218,18 +203,23 @@ class TestHealthCheck(unittest.TestCase):
         with FunctionExecutorProcessContextManager() as process:
             with rpc_channel(process) as channel:
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
-                initialize(self, stub)
-                function_outputs_blob: BLOB = create_tmp_blob()
+                response: InitializeResponse = initialize(
+                    stub,
+                    app=app,
+                    app_code_dir_path=APPLICATION_CODE_DIR_PATH,
+                    function_name="action_function",
+                )
+                self.assertEqual(
+                    response.outcome_code,
+                    InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
+                )
 
                 def run_task_in_thread():
                     try:
                         # Due to "tcp keep-alive" property of the health checks the task should unblock with RpcError.
                         run_allocation(
                             stub,
-                            function_name="action_function",
-                            input="close_connections",
-                            function_outputs_blob=function_outputs_blob,
-                            invocation_error_blob=create_tmp_blob(),
+                            inputs=api_function_inputs("close_connections"),
                         )
                         self.fail("Run task should have failed.")
                     except RpcError:

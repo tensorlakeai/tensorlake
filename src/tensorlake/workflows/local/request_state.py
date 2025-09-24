@@ -14,10 +14,11 @@ class LocalRequestState(RequestState):
 
     def get(self, key: str, default: Any | None = None) -> Any | None:
         serialized_value: bytes | None = self._state.get(key, None)
+        # possible_types=[] because pickle deserializer knows the target type already.
         return (
             default
             if serialized_value is None
             else REQUEST_STATE_USER_DATA_SERIALIZER.deserialize(
-                serialized_value, possible_types=[type(default)]
+                serialized_value, possible_types=[]
             )
         )

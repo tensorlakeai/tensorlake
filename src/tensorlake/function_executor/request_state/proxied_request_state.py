@@ -28,10 +28,11 @@ class ProxiedRequestState(RequestState):
     def get(self, key: str, default: Any | None = None) -> Any | None:
         """Get a value by key. If the key does not exist, return the default value."""
         value: bytes | None = self._proxy_server.get(self._allocation_id, key)
+        # possible_types=[] because pickle deserializer knows the target type already.
         return (
             default
             if value is None
             else REQUEST_STATE_USER_DATA_SERIALIZER.deserialize(
-                value, possible_types=[type(default)]
+                value, possible_types=[]
             )
         )

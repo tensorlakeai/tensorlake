@@ -2,7 +2,7 @@ import os
 import sys
 import time
 from datetime import datetime
-from typing import List, Optional
+from typing import List
 
 from tensorlake.function_executor.blob_store.blob_store import BLOBStore
 from tensorlake.function_executor.logger import FunctionExecutorLogger
@@ -44,8 +44,8 @@ class Benchmark:
         self,
         key: str,
         operation: str,
-        part_number: Optional[int] = None,
-        upload_id: Optional[str] = None,
+        part_number: int | None = None,
+        upload_id: str | None = None,
     ) -> str:
         """Generates a presigned URL for the S3 object."""
         params = {

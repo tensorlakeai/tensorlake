@@ -76,7 +76,7 @@ def function(
             class_method_name=None,
             # "{class}.{method}" for methods, otherwise just function name. Doesn't include module name.
             # All functions and classes in the application share a single namespace.
-            function_name=fn._original_function.__name__,
+            function_name=fn._original_function.__qualname__,
             description=description,
             image=image,
             secrets=secrets,
