@@ -9,7 +9,6 @@ from tensorlake.workflows.remote.application.application import (
     create_application_manifest,
 )
 from tensorlake.workflows.remote.application.function import (
-    FunctionManifest,
     ParameterManifest,
     RetryPolicyManifest,
 )
@@ -83,9 +82,6 @@ def function_without_retries(x: int) -> str:
 @tensorlake.function(
     retries=tensorlake.Retries(
         max_retries=2,
-        initial_delay=2.0,
-        max_delay=10.0,
-        delay_multiplier=5.0,
     )
 )
 def function_with_custom_retries(x: int) -> str:
@@ -114,9 +110,6 @@ class TestFunctionManifestRetries(unittest.TestCase):
                 name="TestFunctionManifestRetries.test_custom_application_retries",
                 retries=tensorlake.Retries(
                     max_retries=3,
-                    initial_delay=10.0,
-                    max_delay=120.0,
-                    delay_multiplier=10.0,
                 ),
             ),
             functions=get_functions(),
@@ -127,9 +120,9 @@ class TestFunctionManifestRetries(unittest.TestCase):
         ].retry_policy
         self.assertIsNotNone(retry_policy_metadata)
         self.assertEqual(retry_policy_metadata.max_retries, 3)
-        self.assertEqual(retry_policy_metadata.initial_delay_sec, 10.0)
-        self.assertEqual(retry_policy_metadata.max_delay_sec, 120.0)
-        self.assertEqual(retry_policy_metadata.delay_multiplier, 10.0)
+        self.assertEqual(retry_policy_metadata.initial_delay_sec, 1.0)
+        self.assertEqual(retry_policy_metadata.max_delay_sec, 60.0)
+        self.assertEqual(retry_policy_metadata.delay_multiplier, 2.0)
 
     def test_custom_function_retries(self):
         # Tests that custom app level retries don't get applied to functions that have their own retry policy.
@@ -138,9 +131,6 @@ class TestFunctionManifestRetries(unittest.TestCase):
                 name="TestFunctionManifestRetries.test_custom_function_retries",
                 retries=tensorlake.Retries(
                     max_retries=3,
-                    initial_delay=10.0,
-                    max_delay=120.0,
-                    delay_multiplier=10.0,
                 ),
             ),
             functions=get_functions(),
@@ -151,9 +141,9 @@ class TestFunctionManifestRetries(unittest.TestCase):
         ].retry_policy
         self.assertIsNotNone(retry_policy_metadata)
         self.assertEqual(retry_policy_metadata.max_retries, 2)
-        self.assertEqual(retry_policy_metadata.initial_delay_sec, 2.0)
-        self.assertEqual(retry_policy_metadata.max_delay_sec, 10.0)
-        self.assertEqual(retry_policy_metadata.delay_multiplier, 5.0)
+        self.assertEqual(retry_policy_metadata.initial_delay_sec, 1.0)
+        self.assertEqual(retry_policy_metadata.max_delay_sec, 60.0)
+        self.assertEqual(retry_policy_metadata.delay_multiplier, 2.0)
 
 
 @tensorlake.function()
