@@ -17,6 +17,7 @@ from ..function.user_data_serializer import (
     function_input_serializer,
     function_output_serializer,
 )
+from ..interface.application import Application
 from ..interface.function import Function
 from ..interface.function_call import (
     FunctionCall,
@@ -25,6 +26,7 @@ from ..interface.function_call import (
 from ..interface.reduce import ReducerFunctionCall
 from ..interface.request import Request
 from ..interface.request_context import RequestContext
+from ..interface.retries import Retries
 from ..registry import get_function
 from ..request_context_base import RequestContextBase
 from ..request_metrics_recorder import RequestMetricsRecorder
@@ -38,7 +40,8 @@ _LOCAL_REQUEST_ID = "local-request"
 # We're using AST in local mode even though it's not the most convenient way for local mode.
 # Is is to get as similar experience as possible with remote mode where AST is used.
 class LocalRunner:
-    def __init__(self):
+    def __init__(self, application: Application):
+        self._application: Application = application
         # AST we're running.
         self._root_node: ASTNode = None
         # Class name => instance.
@@ -129,7 +132,13 @@ class LocalRunner:
         set_request_context_args(function_call, self._request_context)
         self._set_function_call_instance_args(function_call, function)
 
-        runs_left: int = 1 + function.function_config.retries.max_retries
+        # Application retries are used if function retries are not set.
+        function_retries: Retries = (
+            self._application.retries
+            if function.function_config.retries is None
+            else function.function_config.retries
+        )
+        runs_left: int = 1 + function_retries.max_retries
         while True:
             try:
                 return function.original_function(

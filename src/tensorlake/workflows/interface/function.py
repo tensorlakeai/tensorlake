@@ -18,7 +18,7 @@ class _FunctionConfiguration:
     description: str
     image: Image
     secrets: List[str]
-    retries: Retries | None  # Uses API retry policy if None
+    retries: Retries | None  # Uses application retry policy if None
     timeout: int
     cpu: float
     memory: float
