@@ -10,7 +10,7 @@ function_with_retry_policy_call_number = 0
 
 
 @tensorlake.api()
-@tensorlake.function(retries=tensorlake.Retries(max_retries=3, max_delay=1.0))
+@tensorlake.function(retries=tensorlake.Retries(max_retries=3))
 def function_that_succeeds_on_3rd_retry(x: int) -> str:
     global function_with_retry_policy_call_number
     function_with_retry_policy_call_number += 1
@@ -22,7 +22,7 @@ def function_that_succeeds_on_3rd_retry(x: int) -> str:
 
 
 @tensorlake.api()
-@tensorlake.function(retries=tensorlake.Retries(max_retries=3, max_delay=1.0))
+@tensorlake.function(retries=tensorlake.Retries(max_retries=3))
 def function_that_always_fails(x: int) -> str:
     raise Exception("Function always fails")
 
