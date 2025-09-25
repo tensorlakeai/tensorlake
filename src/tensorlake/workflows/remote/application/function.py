@@ -196,6 +196,7 @@ class FunctionManifest(BaseModel):
     description: str
     is_api: bool
     secret_names: List[str]
+    initialization_timeout_sec: int
     timeout_sec: int
     resources: FunctionResources
     retry_policy: RetryPolicy
@@ -251,6 +252,13 @@ def create_function_manifest(app: Application, function: Function) -> FunctionMa
         description=function.function_config.description,
         is_api=function.api_config is not None,
         secret_names=function.function_config.secrets,
+        # When a function doesn't have a class_init_timeout set it means it's not a class method.
+        # In this case FE initialization timeout should be the same as function timeout.
+        initialization_timeout_sec=(
+            function.function_config.timeout
+            if function.function_config.class_init_timeout is None
+            else function.function_config.class_init_timeout
+        ),
         timeout_sec=function.function_config.timeout,
         resources=resources_for_function(function),
         retry_policy=retry_policy,

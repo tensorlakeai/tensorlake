@@ -13,6 +13,7 @@ class _FunctionConfiguration:
     # because class objects are created after their methods.
     class_name: str | None
     class_method_name: str | None
+    class_init_timeout: int | None
     function_name: str
     description: str
     image: Image

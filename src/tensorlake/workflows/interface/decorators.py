@@ -74,6 +74,7 @@ def function(
             # set by cls() decorator if this is a class method
             class_name=None,
             class_method_name=None,
+            class_init_timeout=None,
             # "{class}.{method}" for methods, otherwise just function name. Doesn't include module name.
             # All functions and classes in the application share a single namespace.
             function_name=fn._original_function.__qualname__,
@@ -98,7 +99,9 @@ def function(
     return decorator
 
 
-def cls() -> Callable:
+def cls(
+    init_timeout: int = _DEFAULT_TIMEOUT_SEC,
+) -> Callable:
     CLASS = TypeVar("CLASS")
 
     def decorator(original_class: CLASS) -> CLASS:
@@ -120,6 +123,7 @@ def cls() -> Callable:
             if isinstance(attr, Function):
                 attr.function_config.class_name = class_name
                 attr.function_config.class_method_name = attr_name
+                attr.function_config.class_init_timeout = init_timeout
 
         return original_class
 
