@@ -15,7 +15,10 @@ from .request import Request
 
 
 def _serialize_api_payload(api: Function, payload: Any) -> tuple[bytes, str]:
-    """Serializes the API payload using the API function input serializer."""
+    """Serializes the API payload using the API function input serializer.
+
+    Returns a tuple of (serialized_payload, content_type).
+    """
     if isinstance(payload, File):
         return payload.content, payload.content_type
     else:
@@ -38,7 +41,7 @@ def call_local_api(api: Function | str, payload: Any) -> Request:
     serialized_payload: bytes
     content_type: str
     serialized_payload, content_type = _serialize_api_payload(api, payload)
-    return LocalRunner().run(
+    return LocalRunner(application=get_user_defined_or_default_application()).run(
         api_function_call_with_serialized_payload(
             api=api, payload=serialized_payload, payload_content_type=content_type
         )
@@ -79,4 +82,6 @@ def call_local_function(function_call: FunctionCall) -> Request:
 
     Primarily used for local debugging of individual functions.
     """
-    return LocalRunner().run(function_call)
+    return LocalRunner(application=get_user_defined_or_default_application()).run(
+        function_call
+    )
