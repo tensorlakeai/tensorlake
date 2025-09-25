@@ -11,10 +11,10 @@ from typing_extensions import get_args, get_origin, get_type_hints
 
 from ...interface.application import Application
 from ...interface.function import Function
-from .function_resources import FunctionResources, resources_for_function
+from .function_resources import FunctionResourcesManifest, resources_for_function
 
 
-class Parameter(BaseModel):
+class ParameterManifest(BaseModel):
     name: str
     data_type: Dict[str, Any]  # JSON Schema object with optional "default" property
     description: str | None
@@ -139,7 +139,7 @@ def _type_hint_json_schema(type_hint) -> Dict[str, str]:
 
 def _function_signature_info(
     function: Function,
-) -> tuple[List[Parameter], Dict[str, str]]:
+) -> tuple[List[ParameterManifest], Dict[str, str]]:
     """Extract parameter names, types, and return type from TensorlakeCompute function."""
     signature = inspect.signature(function.original_function)
     type_hints = get_type_hints(function.original_function)
@@ -148,7 +148,7 @@ def _function_signature_info(
     docstring = inspect.getdoc(function.original_function) or ""
     param_descriptions = _parse_docstring_parameters(docstring)
 
-    parameters: List[Parameter] = []
+    parameters: List[ParameterManifest] = []
     for param_name, param in signature.parameters.items():
         if param_name == "self":
             continue
@@ -165,7 +165,7 @@ def _function_signature_info(
         description = param_descriptions.get(param_name, None)
 
         parameters.append(
-            Parameter(
+            ParameterManifest(
                 name=param_name,
                 data_type=schema,
                 description=description,
@@ -180,14 +180,14 @@ def _function_signature_info(
     return parameters, return_type_schema
 
 
-class RetryPolicy(BaseModel):
+class RetryPolicyManifest(BaseModel):
     max_retries: int
     initial_delay_sec: float
     max_delay_sec: float
     delay_multiplier: float
 
 
-class PlacementConstraints(BaseModel):
+class PlacementConstraintsManifest(BaseModel):
     filter_expressions: List[str]
 
 
@@ -198,25 +198,25 @@ class FunctionManifest(BaseModel):
     secret_names: List[str]
     initialization_timeout_sec: int
     timeout_sec: int
-    resources: FunctionResources
-    retry_policy: RetryPolicy
+    resources: FunctionResourcesManifest
+    retry_policy: RetryPolicyManifest
     cache_key: str | None
-    parameters: List[Parameter] | None
+    parameters: List[ParameterManifest] | None
     return_type: Dict[str, Any] | None  # JSON Schema object
-    placement_constraints: PlacementConstraints
+    placement_constraints: PlacementConstraintsManifest
     max_concurrency: int
 
 
 def create_function_manifest(app: Application, function: Function) -> FunctionManifest:
-    retry_policy: RetryPolicy = (
-        RetryPolicy(
+    retry_policy: RetryPolicyManifest = (
+        RetryPolicyManifest(
             max_retries=app.retries.max_retries,
             initial_delay_sec=app.retries.initial_delay,
             max_delay_sec=app.retries.max_delay,
             delay_multiplier=app.retries.delay_multiplier,
         )
         if function.function_config.retries is None
-        else RetryPolicy(
+        else RetryPolicyManifest(
             max_retries=function.function_config.retries.max_retries,
             initial_delay_sec=function.function_config.retries.initial_delay,
             max_delay_sec=function.function_config.retries.max_delay,
@@ -224,7 +224,7 @@ def create_function_manifest(app: Application, function: Function) -> FunctionMa
         )
     )
 
-    parameters: List[Parameter]
+    parameters: List[ParameterManifest]
     return_type_json_schema: Dict[str, str]
     parameters, return_type_json_schema = _function_signature_info(function)
 
@@ -234,15 +234,15 @@ def create_function_manifest(app: Application, function: Function) -> FunctionMa
         else None
     )
 
-    app_placement_constraints: PlacementConstraints = (
-        PlacementConstraints(filter_expressions=[])
+    app_placement_constraints: PlacementConstraintsManifest = (
+        PlacementConstraintsManifest(filter_expressions=[])
         if app.region is None
-        else PlacementConstraints(filter_expressions=[f"region=={app.region}"])
+        else PlacementConstraintsManifest(filter_expressions=[f"region=={app.region}"])
     )
     placement_constraints = (
         app_placement_constraints
         if function.function_config.region is None
-        else PlacementConstraints(
+        else PlacementConstraintsManifest(
             filter_expressions=[f"region=={function.function_config.region}"]
         )
     )

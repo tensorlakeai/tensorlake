@@ -129,7 +129,16 @@ class LocalRunner:
         set_request_context_args(function_call, self._request_context)
         self._set_function_call_instance_args(function_call, function)
 
-        return function.original_function(*function_call.args, **function_call.kwargs)
+        runs_left: int = 1 + function.function_config.retries.max_retries
+        while True:
+            try:
+                return function.original_function(
+                    *function_call.args, **function_call.kwargs
+                )
+            except Exception:
+                runs_left -= 1
+                if runs_left == 0:
+                    raise
 
     def _set_function_call_instance_args(
         self, function_call: FunctionCall, function: Function
