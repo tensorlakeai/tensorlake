@@ -1,3 +1,4 @@
+import datetime
 import json
 from typing import List
 
@@ -6,8 +7,12 @@ from pydantic.json import pydantic_encoder
 from rich import print, print_json
 from rich.table import Table
 
-from tensorlake.cli._common import Context, pass_auth
-from tensorlake.functions_sdk.http_client import RequestMetadata, Task
+from tensorlake.cli._common import Context, pass_auth, print_signals
+from tensorlake.functions_sdk.http_client import (
+    RequestMetadata,
+    Signal,
+    Task,
+)
 
 
 @click.group()
@@ -212,3 +217,150 @@ def info(
                 )
 
             print(allocations_table)
+
+
+@request.command(
+    epilog="""
+\b
+Arguments:
+  tensorlake request events <request-id>              # Uses default graph
+  tensorlake request events <graph-name> <request-id> # Explicit graph name
+\b
+Use 'tensorlake config set default.graph <name>' to set a default graph name.
+Use 'tensorlake config set default.request <id>' to set a default request ID.
+"""
+)
+@click.option(
+    "--json",
+    "use_json",
+    "-j",
+    is_flag=True,
+    help="Export event information as JSON-encoded data",
+)
+@click.option("--verbose", "-v", is_flag=True, help="Include all event information")
+@click.argument("args", nargs=-1, required=False)
+@pass_auth
+def events(
+    ctx: Context,
+    use_json: bool,
+    verbose: bool,
+    args: tuple,
+):
+    """
+    Show events for a remote request
+    """
+    # Parse arguments: if one arg provided, treat it as request_id
+    # If two args provided, treat them as graph_name and request_id
+    if len(args) == 1:
+        graph_name = None
+        request_id = args[0]
+    elif len(args) == 2:
+        graph_name = args[0]
+        request_id = args[1]
+    else:
+        graph_name = None
+        request_id = None
+
+    if not graph_name:
+        if ctx.default_graph:
+            graph_name = ctx.default_graph
+            click.echo(f"Using default graph from config: {graph_name}")
+        else:
+            raise click.UsageError(
+                "No graph name provided and no default.graph configured"
+            )
+
+    if not request_id:
+        if ctx.default_request:
+            request_id = ctx.default_request
+            click.echo(f"Using default request from config: {request_id}")
+        else:
+            raise click.UsageError(
+                "No request ID provided and no default.request configured"
+            )
+
+    signals: List[Signal] = ctx.tensorlake_client.request_events(graph_name, request_id)
+
+    if use_json:
+        all_signals = json.dumps(signals, default=pydantic_encoder)
+        print_json(all_signals)
+        return
+
+    if not signals:
+        print("No events found for this request.")
+        return
+
+    print_signals(
+        f"Events for Request {request_id}",
+        ctx.tensorlake_client.request_logs(graph_name, request_id),
+        use_json=use_json,
+        verbose=verbose,
+    )
+
+
+@request.command(
+    epilog="""
+\b
+Arguments:
+  tensorlake request logs <request-id>              # Uses default graph
+  tensorlake request logs <graph-name> <request-id> # Explicit graph name
+\b
+Use 'tensorlake config set default.graph <name>' to set a default graph name.
+Use 'tensorlake config set default.request <id>' to set a default request ID.
+"""
+)
+@click.option(
+    "--json",
+    "use_json",
+    "-j",
+    is_flag=True,
+    help="Export log information as JSON-encoded data",
+)
+@click.option("--verbose", "-v", is_flag=True, help="Include all log information")
+@click.argument("args", nargs=-1, required=False)
+@pass_auth
+def logs(
+    ctx: Context,
+    use_json: bool,
+    verbose: bool,
+    args: tuple,
+):
+    """
+    Show logs for a remote request
+    """
+    # Parse arguments: if one arg provided, treat it as request_id
+    # If two args provided, treat them as graph_name and request_id
+    if len(args) == 1:
+        graph_name = None
+        request_id = args[0]
+    elif len(args) == 2:
+        graph_name = args[0]
+        request_id = args[1]
+    else:
+        graph_name = None
+        request_id = None
+
+    if not graph_name:
+        if ctx.default_graph:
+            graph_name = ctx.default_graph
+            click.echo(f"Using default graph from config: {graph_name}")
+        else:
+            raise click.UsageError(
+                "No graph name provided and no default.graph configured"
+            )
+
+    if not request_id:
+        if ctx.default_request:
+            request_id = ctx.default_request
+            click.echo(f"Using default request from config: {request_id}")
+        else:
+            raise click.UsageError(
+                "No request ID provided and no default.request configured"
+            )
+
+    print_signals(
+        f"Logs for Request {request_id}",
+        ctx.tensorlake_client.request_logs(graph_name, request_id),
+        use_json=use_json,
+        verbose=verbose,
+    )

@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from enum import IntEnum
 from typing import Any, Dict, Generator, Iterator, List, Optional, Union
 
 import httpx
@@ -107,6 +108,94 @@ class RequestProgressPayload(BaseModel):
     allocation_id: Optional[str] = None
     executor_id: Optional[str] = None
     outcome: Optional[str] = None
+
+
+# OpenTelemetry Common Models
+class AnyValue(BaseModel):
+    string_value: Optional[str] = Field(None, alias="stringValue")
+    bool_value: Optional[bool] = Field(None, alias="boolValue")
+    int_value: Optional[int] = Field(None, alias="intValue")
+    double_value: Optional[float] = Field(None, alias="doubleValue")
+    bytes_value: Optional[bytes] = Field(None, alias="bytesValue")
+    # array_value and kvlist_value not implemented for simplicity
+
+
+class KeyValue(BaseModel):
+    key: str
+    value: AnyValue
+
+
+class InstrumentationScope(BaseModel):
+    name: Optional[str] = ""
+    version: Optional[str] = ""
+    attributes: Optional[List[KeyValue]] = []
+    dropped_attributes_count: Optional[int] = 0
+
+
+# OpenTelemetry Resource Models
+class Resource(BaseModel):
+    attributes: List[KeyValue] = []
+    dropped_attributes_count: Optional[int] = Field(0, alias="droppedAttributesCount")
+    entity_refs: Optional[List[Dict[str, Any]]] = Field([], alias="entityRefs")
+
+
+# OpenTelemetry Logs Severity
+class Severity(IntEnum):
+    UNKNOWN = 0
+    TRACE = 1
+    TRACE2 = 2
+    TRACE3 = 3
+    TRACE4 = 4
+    DEBUG = 5
+    DEBUG2 = 6
+    DEBUG3 = 7
+    DEBUG4 = 8
+    INFO = 9
+    INFO2 = 10
+    INFO3 = 11
+    INFO4 = 12
+    WARN = 13
+    WARN2 = 14
+    WARN3 = 15
+    WARN4 = 16
+    ERROR = 17
+    ERROR2 = 18
+    ERROR3 = 19
+    ERROR4 = 20
+    FATAL = 21
+    FATAL2 = 22
+    FATAL3 = 23
+    FATAL4 = 24
+
+
+# OpenTelemetry Logs Models
+class LogRecord(BaseModel):
+    time_unix_nano: Optional[int] = Field("0", alias="timeUnixNano")
+    observed_time_unix_nano: Optional[int] = Field("0", alias="observedTimeUnixNano")
+    severity_number: Severity = Field(Severity.UNKNOWN, alias="severityNumber")
+    severity_text: Optional[str] = Field("", alias="severityText")
+    body: Optional[AnyValue] = None
+    attributes: List[KeyValue] = []
+    dropped_attributes_count: Optional[int] = Field(0, alias="droppedAttributesCount")
+    flags: Optional[int] = 0
+    trace_id: Optional[str] = Field("", alias="traceId")
+    span_id: Optional[str] = Field("", alias="spanId")
+    event_name: Optional[str] = Field("", alias="eventName")
+
+
+class ScopeLogs(BaseModel):
+    scope: Optional[InstrumentationScope] = None
+    log_records: List[LogRecord] = Field([], alias="logRecords")
+    schema_url: Optional[str] = Field("", alias="schemaUrl")
+
+
+class ResourceLogs(BaseModel):
+    resource: Optional[Resource] = None
+    scope_logs: List[ScopeLogs] = Field([], alias="scopeLogs")
+    schema_url: Optional[str] = Field("", alias="schemaUrl")
+
+
+Signal = Union[ResourceLogs]  # TODO: ResourceSpans, ResourceMetrics
 
 
 class WorkflowEvent(BaseModel):
@@ -341,6 +430,37 @@ class TensorlakeClient:
             f"v1/namespaces/{self.namespace}/compute-graphs/{graph}/requests/{request_id}"
         )
         return RequestMetadata(**response.json())
+
+    def request_events(self, graph: str, request_id: str) -> List[Signal]:
+        response = self._get(
+            f"v1/namespaces/{self.namespace}/compute-graphs/{graph}/requests/{request_id}/events"
+        )
+        return self._parse_signals(response.json().get("signals", []))
+
+    def request_logs(self, graph: str, request_id: str) -> List[Signal]:
+        response = self._get(
+            f"v1/namespaces/{self.namespace}/compute-graphs/{graph}/requests/{request_id}/logs"
+        )
+        return self._parse_signals(response.json().get("signals", []))
+
+    def container_logs(self, graph: str, container_id: str) -> List[Signal]:
+        response = self._get(
+            f"v1/namespaces/{self.namespace}/compute-graphs/{graph}/containers/{container_id}/logs"
+        )
+        return self._parse_signals(response.json().get("signals", []))
+
+    def _parse_signals(self, signals_data: List[Dict[str, Any]]) -> List[Signal]:
+        """Parse signal data into appropriate OpenTelemetry model."""
+
+        # NB: This would be better done directly in Pydantic.
+        parsed_signals = []
+        for signal_data in signals_data:
+            try:
+                parsed_signals.append(ResourceLogs(**signal_data))
+            except Exception as e:
+                logger.warning(f"Failed to parse signal: {e}")
+                continue
+        return parsed_signals
 
     def call(
         self,
