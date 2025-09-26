@@ -1,4 +1,7 @@
+import pickle
 from typing import Any, List
+
+from pydantic import BaseModel
 
 from ..function.user_data_serializer import function_input_serializer
 from ..interface.function import Function
@@ -10,6 +13,18 @@ from .ast import ast_from_user_object
 from .ast_node import ASTNode
 from .future_list_metadata import FutureListMetadata
 from .value_node import ValueNode
+
+
+class ReducerFunctionCallMetadata(BaseModel):
+    # Output serializer name override if any.
+    oso: str | None
+
+    def serialize(self) -> bytes:
+        return pickle.dumps(self)
+
+    @classmethod
+    def deserialize(cls, data: bytes) -> "ReducerFunctionCallMetadata":
+        return pickle.loads(data)
 
 
 class ReducerFunctionCallNode(ASTNode):
@@ -50,5 +65,10 @@ class ReducerFunctionCallNode(ASTNode):
             input_node: ASTNode = ast_from_user_object(input, input_serializer)
             node.add_child(input_node)
             node._inputs.nids.append(input_node.id)
+
+        node.serialized_metadata = ReducerFunctionCallMetadata(
+            # Set by the node parent after this node is created.
+            oso=None,
+        ).serialize()
 
         return node

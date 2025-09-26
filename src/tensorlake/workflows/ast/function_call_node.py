@@ -26,6 +26,8 @@ class ArgumentMetadata(BaseModel):
 
 
 class RegularFunctionCallMetadata(BaseModel):
+    # Output serializer name override if any.
+    oso: str | None
     args: List[ArgumentMetadata]
     kwargs: Dict[str, ArgumentMetadata]
 
@@ -145,7 +147,9 @@ class RegularFunctionCallNode(ASTNode):
         process_arguments(function_call.kwargs)
 
         node.serialized_metadata = RegularFunctionCallMetadata(
-            args=args, kwargs=kwargs
+            oso=None,  # Set by the node parent after this node is created.
+            args=args,
+            kwargs=kwargs,
         ).serialize()
 
         return node

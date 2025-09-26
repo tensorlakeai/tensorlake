@@ -15,8 +15,8 @@ class FunctionCallNodeMetadata(BaseModel):
     # Function call node ID in the AST.
     nid: str
     type: FunctionCallType
-    # Serialized metadata, either RegularFunctionCallMetadata or None if REDUCER call type.
-    metadata: bytes | None
+    # Serialized metadata, either RegularFunctionCallMetadata or ReducerFunctionCallMetadata depending on call type.
+    metadata: bytes
 
     def serialize(self) -> bytes:
         return pickle.dumps(self)

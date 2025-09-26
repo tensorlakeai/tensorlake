@@ -7,9 +7,7 @@ import tensorlake.workflows.interface as tensorlake
 from tensorlake.workflows.remote.deploy import deploy
 
 
-# FIXME: Temporary use "pickle" serializer until root function call of the returned
-# call tree inherits its output serializer from the API function.
-@tensorlake.api(output_serializer="pickle")
+@tensorlake.api()
 @tensorlake.function()
 def test_request_context_state_set_get_simple_value_api(
     ctx: tensorlake.RequestContext, value: int
@@ -49,7 +47,7 @@ class UserClass:
         self._data: bytes = b"data" * times
 
 
-@tensorlake.api(output_serializer="pickle")
+@tensorlake.api()
 @tensorlake.function()
 def test_request_context_state_set_get_user_class_instance_api(
     ctx: tensorlake.RequestContext, times: int
@@ -81,7 +79,7 @@ class UserModel(BaseModel):
     name: str
 
 
-@tensorlake.api(output_serializer="pickle")
+@tensorlake.api()
 @tensorlake.function()
 def test_request_context_state_set_get_pydantic_model_api(
     ctx: tensorlake.RequestContext, model_name: str

@@ -12,18 +12,14 @@ class AccumulatedState(BaseModel):
     sum: int = 0
 
 
-# FIXME: Temporary use "pickle" serializer until root function call of the returned
-# call tree inherits its output serializer from the API function.
-@tensorlake.api(output_serializer="pickle")
+@tensorlake.api()
 @tensorlake.function()
 def success_api_function_function_call_collection(x: int) -> AccumulatedState:
     seq = tensorlake.map(transform_int_to_accumulated_state, generate_seq(x))
     return tensorlake.reduce(accumulate_reduce, seq, AccumulatedState(sum=0))
 
 
-# FIXME: Temporary use "pickle" serializer until root function call of the returned
-# call tree inherits its output serializer from the API function.
-@tensorlake.api(output_serializer="pickle")
+@tensorlake.api()
 @tensorlake.function()
 def success_api_function_value_collection(x: int) -> AccumulatedState:
     seq = [transform_int_to_accumulated_state(i) for i in generate_seq(x)]
@@ -74,25 +70,19 @@ def api_reduce_no_items_no_initial(_: Any) -> AccumulatedState:
     return tensorlake.reduce(accumulate_reduce, [])
 
 
-# FIXME: Temporary use "pickle" serializer until root function call of the returned
-# call tree inherits its output serializer from the API function.
-@tensorlake.api(output_serializer="pickle")
+@tensorlake.api()
 @tensorlake.function()
 def api_reduce_no_items_with_initial(_: Any) -> AccumulatedState:
     return tensorlake.reduce(accumulate_reduce, [], AccumulatedState(sum=10))
 
 
-# FIXME: Temporary use "pickle" serializer until root function call of the returned
-# call tree inherits its output serializer from the API function.
-@tensorlake.api(output_serializer="pickle")
+@tensorlake.api()
 @tensorlake.function()
 def api_reduce_one_value_item(_: Any) -> AccumulatedState:
     return tensorlake.reduce(accumulate_reduce, [AccumulatedState(sum=10)])
 
 
-# FIXME: Temporary use "pickle" serializer until root function call of the returned
-# call tree inherits its output serializer from the API function.
-@tensorlake.api(output_serializer="pickle")
+@tensorlake.api()
 @tensorlake.function()
 def api_reduce_one_function_call_item(_: Any) -> AccumulatedState:
     return tensorlake.reduce(accumulate_reduce, [generate_single_value()])

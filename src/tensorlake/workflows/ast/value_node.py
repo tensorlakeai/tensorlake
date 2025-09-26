@@ -29,6 +29,13 @@ class ValueMetadata(BaseModel):
         else:
             return serializer_by_name(self.extra).deserialize(value, [self.cls])
 
+    @property
+    def serializer_name(self) -> str | None:
+        if self.cls is File:
+            return None
+        else:
+            return self.extra
+
 
 class ValueNode(ASTNode):
     """A node that represents a value ready to use.

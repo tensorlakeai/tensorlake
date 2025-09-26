@@ -1,10 +1,12 @@
 import time
 from typing import Any, List
 
-from tensorlake.workflows.ast.function_call_node import (
+from tensorlake.workflows.ast import (
+    ReducerFunctionCallMetadata,
+    RegularFunctionCallMetadata,
     RegularFunctionCallNode,
+    ValueNode,
 )
-from tensorlake.workflows.ast.value_node import ValueNode
 from tensorlake.workflows.function.api_call import (
     api_function_call_with_serialized_payload,
 )
@@ -61,6 +63,8 @@ class Handler:
             blob_store=blob_store,
             logger=self._logger,
         )
+        # Extracted from function call metadata later.
+        self._function_output_serializer_override: str | None = None
 
     def run(self) -> AllocationResult:
         """Runs the allocation.
@@ -97,6 +101,7 @@ class Handler:
 
         return self._response_helper.from_function_output(
             output=output,
+            output_serializer_override=self._function_output_serializer_override,
         )
 
     def _reconstruct_function_call(self) -> RegularFunctionCall:
@@ -110,6 +115,10 @@ class Handler:
                 )
             )
             if node_metadata.type == FunctionCallType.REGULAR:
+                call_metadata: RegularFunctionCallMetadata = (
+                    RegularFunctionCallMetadata.deserialize(node_metadata.metadata)
+                )
+                self._function_output_serializer_override = call_metadata.oso
                 return RegularFunctionCallNode.from_serialized(
                     node_metadata.nid,
                     self._function_ref.function_name,
@@ -121,6 +130,10 @@ class Handler:
                     raise ValueError(
                         f"Expected 2 arguments for reducer function call, got {len(downloaded_args)}"
                     )
+                call_metadata: ReducerFunctionCallMetadata = (
+                    ReducerFunctionCallMetadata.deserialize(node_metadata.metadata)
+                )
+                self._function_output_serializer_override = call_metadata.oso
                 accumulator: Any = downloaded_args[0].to_value()
                 item: Any = downloaded_args[1].to_value()
                 return reducer_function_call(self._function, accumulator, item)
