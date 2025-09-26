@@ -3,10 +3,12 @@ import time
 import traceback
 from typing import Any, Dict, List, Tuple
 
-from tensorlake.workflows.ast.ast import (
+from tensorlake.workflows.ast import (
     ASTNode,
+    ValueMetadata,
     ast_from_user_object,
     flatten_ast,
+    override_output_serializer_at_child_call_tree_root,
     traverse_ast,
 )
 from tensorlake.workflows.ast.function_call_node import (
@@ -20,7 +22,10 @@ from tensorlake.workflows.function.user_data_serializer import (
 from tensorlake.workflows.interface.exceptions import RequestError
 from tensorlake.workflows.interface.function import Function
 from tensorlake.workflows.request_metrics_recorder import RequestMetricsRecorder
-from tensorlake.workflows.user_data_serializer import UserDataSerializer
+from tensorlake.workflows.user_data_serializer import (
+    UserDataSerializer,
+    serializer_by_name,
+)
 
 from ...blob_store.blob_store import BLOBStore
 from ...logger import FunctionExecutorLogger
@@ -69,9 +74,10 @@ class ResponseHelper:
     def from_function_output(
         self,
         output: Any,
+        output_serializer_override: str | None,
     ) -> AllocationResult:
         output_serializer: UserDataSerializer = function_output_serializer(
-            self._function
+            self._function, output_serializer_override
         )
         output_ast: ASTNode = ast_from_user_object(output, output_serializer)
 
@@ -81,13 +87,17 @@ class ResponseHelper:
 
         if isinstance(output_ast, ValueNode):
             uploaded_sos, uploaded_function_outputs_blob = (
-                self._upload_function_output_values([output_ast], output_serializer)
+                self._upload_function_output_values([output_ast])
             )
             value = uploaded_sos[output_ast.id]
             value.manifest.source_function_call_id = output_ast.id
         else:
+            override_output_serializer_at_child_call_tree_root(
+                function_output_serializer_name=output_serializer.name,
+                function_output_ast=output_ast,
+            )
             updates, uploaded_function_outputs_blob = self._upload_function_output_ast(
-                output_ast, output_serializer
+                output_ast
             )
 
         result = AllocationResult(
@@ -136,14 +146,14 @@ class ResponseHelper:
         )
 
     def _upload_function_output_ast(
-        self, root: ASTNode, serializer: UserDataSerializer
+        self, root: ASTNode
     ) -> Tuple[ExecutionPlanUpdates, BLOB]:
         flattened_ast: Dict[str, ASTNode] = flatten_ast(root)
         value_nodes: List[ValueNode] = [
             node for node in flattened_ast.values() if isinstance(node, ValueNode)
         ]
         uploaded_value_node_sos, uploaded_function_outputs_blob = (
-            self._upload_function_output_values(value_nodes, serializer)
+            self._upload_function_output_values(value_nodes)
         )
         uploaded_value_node_sos: Dict[str, SerializedObjectInsideBLOB]
         uploaded_function_outputs_blob: BLOB
@@ -206,7 +216,7 @@ class ResponseHelper:
                         call_metadata=FunctionCallNodeMetadata(
                             nid=node.id,
                             type=FunctionCallType.REDUCER,
-                            metadata=None,
+                            metadata=node.serialized_metadata,
                         ).serialize(),
                     )
                 )
@@ -224,7 +234,7 @@ class ResponseHelper:
         )
 
     def _upload_function_output_values(
-        self, value_nodes: List[ValueNode], serializer: UserDataSerializer
+        self, value_nodes: List[ValueNode]
     ) -> Tuple[Dict[str, SerializedObjectInsideBLOB], BLOB]:
         serialized_objects: Dict[str, SerializedObjectInsideBLOB] = {}
         blob_datas: List[bytes] = []
@@ -235,9 +245,21 @@ class ResponseHelper:
             value_node_serialized_metadata: bytes = ValueNodeMetadata(
                 nid=value_node.id, metadata=value_node.serialized_metadata
             ).serialize()
+            value_metadata: ValueMetadata = ValueMetadata.deserialize(
+                value_node.serialized_metadata
+            )
+            serializer: UserDataSerializer = None
+
+            if value_metadata.serializer_name is not None:
+                serializer = serializer_by_name(value_metadata.serializer_name)
+
             value_node_so: SerializedObjectInsideBLOB = SerializedObjectInsideBLOB(
                 manifest=SerializedObjectManifest(
-                    encoding=serializer.serialized_object_encoding,
+                    encoding=(
+                        SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_RAW
+                        if serializer is None
+                        else serializer.serialized_object_encoding
+                    ),
                     encoding_version=encoding_version,
                     size=len(value_node_serialized_metadata) + len(value_node.value),
                     metadata_size=len(value_node_serialized_metadata),

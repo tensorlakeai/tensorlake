@@ -7,9 +7,7 @@ import tensorlake.workflows.interface as tensorlake
 from tensorlake.workflows.remote.deploy import deploy
 
 
-# FIXME: Temporary use "pickle" serializer until root function call of the returned
-# call tree inherits its output serializer from the API function.
-@tensorlake.api(output_serializer="pickle")
+@tensorlake.api()
 @tensorlake.function()
 def test_function_with_no_args_api(_: Any) -> str:
     return test_function_with_no_args_internal()
@@ -20,9 +18,7 @@ def test_function_with_no_args_internal() -> str:
     return "success"
 
 
-# FIXME: Temporary use "pickle" serializer until root function call of the returned
-# call tree inherits its output serializer from the API function.
-@tensorlake.api(output_serializer="pickle")
+@tensorlake.api()
 @tensorlake.function()
 def test_function_with_only_ctx_arg_api(
     ctx: tensorlake.RequestContext, payload: Any
@@ -35,9 +31,7 @@ def test_function_with_only_ctx_arg_internal(ctx: tensorlake.RequestContext) -> 
     return f"ctx id: {ctx.request_id}"
 
 
-# FIXME: Temporary use "pickle" serializer until root function call of the returned
-# call tree inherits its output serializer from the API function.
-@tensorlake.api(output_serializer="pickle")
+@tensorlake.api()
 @tensorlake.function()
 def test_only_positional_args_api(args: dict[str, Any]) -> str:
     return test_only_positional_args_internal(
@@ -50,9 +44,7 @@ def test_only_positional_args_internal(a: int, b: str, c: float, d: bool, /) -> 
     return f"a={a},b={b},c={c},d={d}"
 
 
-# FIXME: Temporary use "pickle" serializer until root function call of the returned
-# call tree inherits its output serializer from the API function.
-@tensorlake.api(output_serializer="pickle")
+@tensorlake.api()
 @tensorlake.function()
 def test_only_kwargs_api(args: dict[str, Any]) -> str:
     return test_only_kwargs_internal(**args)
@@ -63,9 +55,7 @@ def test_only_kwargs_internal(*, a: int, b: str, c: float, d: bool) -> str:
     return f"a={a},b={b},c={c},d={d}"
 
 
-# FIXME: Temporary use "pickle" serializer until root function call of the returned
-# call tree inherits its output serializer from the API function.
-@tensorlake.api(output_serializer="pickle")
+@tensorlake.api()
 @tensorlake.function()
 def test_mixed_args_api(args: dict[str, Any]) -> str:
     return test_mixed_args_internal(args["a"], args["b"], c=args["c"], d=args["d"])

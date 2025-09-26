@@ -48,8 +48,9 @@ class RemoteRequest(Request):
         if is_file_output:
             return File(content=serialized_output, content_type=output_content_type)
         else:
+            # API function serializer is always statically set in its api_config.
             api_output_serializer: UserDataSerializer = function_output_serializer(
-                self._api_function
+                self._api_function, None
             )
             return api_output_serializer.deserialize(
                 serialized_output, api_return_type_hint

@@ -49,9 +49,7 @@ class ResponsePayload(BaseModel):
     chunks: List[ChunkEmbeddings]
 
 
-# FIXME: Temporary use "pickle" serializer until root function call of the returned
-# call tree inherits its output serializer from the API function.
-@tensorlake.api(output_serializer="pickle")
+@tensorlake.api()
 @tensorlake.function(description="Fake PDF parse workflow")
 def parse_pdf_api(
     ctx: tensorlake.RequestContext, payload: RequestPayload

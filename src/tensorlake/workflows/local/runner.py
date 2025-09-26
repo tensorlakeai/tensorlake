@@ -2,10 +2,14 @@ from typing import Any, Dict, List
 
 from ..ast import (
     ASTNode,
+    ReducerFunctionCallMetadata,
     ReducerFunctionCallNode,
+    RegularFunctionCallMetadata,
     RegularFunctionCallNode,
+    ValueMetadata,
     ValueNode,
     ast_from_user_object,
+    override_output_serializer_at_child_call_tree_root,
 )
 from ..function.function_call import (
     create_self_instance,
@@ -30,6 +34,7 @@ from ..interface.retries import Retries
 from ..registry import get_function
 from ..request_context_base import RequestContextBase
 from ..request_metrics_recorder import RequestMetricsRecorder
+from ..user_data_serializer import UserDataSerializer
 from .request import LocalRequest
 from .request_progress import LocalRequestProgress
 from .request_state import LocalRequestState
@@ -42,8 +47,9 @@ _LOCAL_REQUEST_ID = "local-request"
 class LocalRunner:
     def __init__(self, application: Application):
         self._application: Application = application
+        self._original_function_call: FunctionCall | None = None
         # AST we're running.
-        self._root_node: ASTNode = None
+        self._root_node: ASTNode | None = None
         # Class name => instance.
         self._class_instances: Dict[str, Any] = {}
         # Function name -> serialized current accumulator value.
@@ -57,6 +63,7 @@ class LocalRunner:
 
     def run(self, function_call: FunctionCall) -> Request:
         try:
+            self._original_function_call = function_call
             function: Function = get_function(function_call.function_name)
             self._root_node = ast_from_user_object(
                 function_call, function_input_serializer(function)
@@ -88,6 +95,26 @@ class LocalRunner:
             )
 
         self._root_node: ValueNode
+        # Verify that output serializer override got propagated throught the call tree correctly.
+        # This is not required in local mode because root_node.to_value() will always deserialize correctly.
+        # But we're checking that root_node has the same serializer as the original function output serializer
+        # to catch any potential bugs in serializer propagation logic because it's critical for remote mode.
+        original_function: Function = get_function(
+            self._original_function_call.function_name
+        )
+        root_node_metadata: ValueMetadata = ValueMetadata.deserialize(
+            self._root_node.serialized_metadata
+        )
+        root_node_serializer_name: str | None = root_node_metadata.serializer_name
+        if root_node_serializer_name is not None:
+            original_function_output_serializer = function_output_serializer(
+                original_function, None
+            )
+            if root_node_serializer_name != original_function_output_serializer.name:
+                raise ValueError(
+                    f"Output serializer mismatch, expected {original_function_output_serializer.name}, got {root_node_serializer_name}"
+                )
+
         return LocalRequest(
             id=_LOCAL_REQUEST_ID,
             output=self._root_node.to_value(),
@@ -101,19 +128,30 @@ class LocalRunner:
             old.parent.replace_child(old, new)
 
     def _run_regular_function_call(self, node: RegularFunctionCallNode) -> None:
+        node_metadata: RegularFunctionCallMetadata = (
+            RegularFunctionCallMetadata.deserialize(node.serialized_metadata)
+        )
         function_call: RegularFunctionCall = node.to_regular_function_call()
         function: Function = get_function(function_call.function_name)
+        function_os: UserDataSerializer = function_output_serializer(
+            function, node_metadata.oso
+        )
         output: Any = self._call(function_call, function)
-        output_ast: ASTNode = ast_from_user_object(
-            output, function_output_serializer(function)
+        output_ast: ASTNode = ast_from_user_object(output, function_os)
+        override_output_serializer_at_child_call_tree_root(
+            function_output_serializer_name=function_os.name,
+            function_output_ast=output_ast,
         )
         self._replace_node(node, output_ast)
 
     def _run_reducer_function_call(self, node: ReducerFunctionCallNode) -> None:
+        node_metadata: ReducerFunctionCallMetadata = (
+            ReducerFunctionCallMetadata.deserialize(node.serialized_metadata)
+        )
         reducer_call: ReducerFunctionCall = node.to_reducer_function_call()
         reducer_function: Function = get_function(reducer_call.function_name)
 
-        # inputs contains at least 1 item, this is guranteed by ReducerFunctionCall.
+        # inputs contains at least 2 items, this is guranteed by ReducerFunctionCall.
         inputs: List[Any] = reducer_call.inputs.items
         accumulator: Any = inputs[0]
         for input_value in inputs[1:]:
@@ -122,9 +160,16 @@ class LocalRunner:
             )
             accumulator = self._call(function_call, reducer_function)
 
+        reducer_function_os: UserDataSerializer = function_output_serializer(
+            reducer_function, node_metadata.oso
+        )
         output_ast: ASTNode = ast_from_user_object(
             accumulator,
-            function_output_serializer(reducer_function),
+            reducer_function_os,
+        )
+        override_output_serializer_at_child_call_tree_root(
+            function_output_serializer_name=reducer_function_os.name,
+            function_output_ast=output_ast,
         )
         self._replace_node(node, output_ast)
 
