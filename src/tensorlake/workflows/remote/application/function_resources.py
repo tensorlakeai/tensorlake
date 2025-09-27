@@ -6,12 +6,12 @@ from pydantic import BaseModel
 from ...interface.function import Function
 
 
-class GPUResource(BaseModel):
+class GPUResourceManifest(BaseModel):
     count: int
     model: str
 
 
-def _parse_gpu_resource(gpu: str) -> GPUResource:
+def _parse_gpu_resource(gpu: str) -> GPUResourceManifest:
     # Example: "A100-80GB:2", "H100", "A100-40GB:4"
     parts: List[str] = gpu.split(":")
     if len(parts) > 2:
@@ -24,12 +24,12 @@ def _parse_gpu_resource(gpu: str) -> GPUResource:
     if len(parts) == 2:
         gpu_count = int(parts[1])
 
-    return GPUResource(count=gpu_count, model=gpu_model)
+    return GPUResourceManifest(count=gpu_count, model=gpu_model)
 
 
 def _parse_gpu_resources(
     gpu: str | List[str] | None,
-) -> List[GPUResource]:
+) -> List[GPUResourceManifest]:
     """Parses GPU resources from `gpu` attribute of Function."""
     if gpu is None:
         return []
@@ -40,17 +40,17 @@ def _parse_gpu_resources(
     raise ValueError(f"Invalid GPU format: {gpu}. Expected str or List[str].")
 
 
-class FunctionResources(BaseModel):
+class FunctionResourcesManifest(BaseModel):
     cpus: float
     memory_mb: int
     ephemeral_disk_mb: int
-    gpus: List[GPUResource]
+    gpus: List[GPUResourceManifest]
 
 
 def resources_for_function(
     function: Function,
-) -> FunctionResources:
-    return FunctionResources(
+) -> FunctionResourcesManifest:
+    return FunctionResourcesManifest(
         cpus=function.function_config.cpu,
         memory_mb=math.ceil(
             function.function_config.memory * 1024

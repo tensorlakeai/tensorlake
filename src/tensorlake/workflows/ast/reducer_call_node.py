@@ -16,8 +16,8 @@ from .value_node import ValueNode
 
 
 class ReducerFunctionCallMetadata(BaseModel):
-    # Contains at least one item due to initial + SDK validation.
-    flist: FutureListMetadata
+    # Output serializer name override if any.
+    oso: str | None
 
     def serialize(self) -> bytes:
         return pickle.dumps(self)
@@ -31,6 +31,7 @@ class ReducerFunctionCallNode(ASTNode):
     def __init__(self, reducer_function_name: str):
         super().__init__()
         self._reducer_function_name: str = reducer_function_name
+        self._inputs: FutureListMetadata = FutureListMetadata(nids=[])
 
     @property
     def reducer_function_name(self) -> str:
@@ -41,12 +42,8 @@ class ReducerFunctionCallNode(ASTNode):
 
         All children must be value nodes (they must already be resolved/finished).
         """
-        metadata: ReducerFunctionCallMetadata = ReducerFunctionCallMetadata.deserialize(
-            self.serialized_metadata
-        )
-
         inputs: List[Any] = []
-        for input_node_id in metadata.flist.nids:
+        for input_node_id in self._inputs.nids:
             input_node: ValueNode = self.children[input_node_id]
             inputs.append(input_node.to_value())
 
@@ -64,13 +61,14 @@ class ReducerFunctionCallNode(ASTNode):
         node: ReducerFunctionCallNode = ReducerFunctionCallNode(
             reducer_call.function_name
         )
-        input_node_ids: List[str] = []
         for input in reducer_call.inputs.items:
             input_node: ASTNode = ast_from_user_object(input, input_serializer)
             node.add_child(input_node)
-            input_node_ids.append(input_node.id)
+            node._inputs.nids.append(input_node.id)
 
         node.serialized_metadata = ReducerFunctionCallMetadata(
-            flist=FutureListMetadata(nids=input_node_ids)
+            # Set by the node parent after this node is created.
+            oso=None,
         ).serialize()
+
         return node

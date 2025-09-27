@@ -1,4 +1,9 @@
-from .interface.request_context import RequestContext, RequestProgress, RequestState
+from .interface.request_context import (
+    RequestContext,
+    RequestMetrics,
+    RequestProgress,
+    RequestState,
+)
 
 
 class RequestContextBase(RequestContext):
@@ -7,10 +12,12 @@ class RequestContextBase(RequestContext):
         request_id: str,
         state: RequestState,
         progress: RequestProgress,
+        metrics: RequestMetrics,
     ):
         self._request_id = request_id
         self._state = state
         self._progress = progress
+        self._metrics = metrics
 
     @property
     def request_id(self) -> str:
@@ -23,3 +30,7 @@ class RequestContextBase(RequestContext):
     @property
     def progress(self) -> RequestProgress:
         return self._progress
+
+    @property
+    def metrics(self) -> RequestMetrics:
+        return self._metrics

@@ -1,24 +1,22 @@
 from typing import Any, List
 
+from ..interface.file import File
 from ..interface.function import Function
 from ..interface.function_call import RegularFunctionCall
-from ..registry import get_class, get_function
+from ..registry import get_class
 from .function_call import prepend_request_context_placeholder_to_function_args
 from .type_hints import function_arg_type_hint
 from .user_data_serializer import function_input_serializer
 
 
-def api_function_call_with_object_payload(
-    api: Function | str, object: Any
+def _api_function_call_with_object_payload(
+    api: Function, object: Any
 ) -> RegularFunctionCall:
     """Creates a function call for the API function with the provided payload.
 
     This is used for API function calls done using SDK.
     The function call is compliant with API function calling convention.
     """
-    if isinstance(api, str):
-        api: Function = get_function(api)
-
     # API function call conventions:
     # [optional ctx: tensorlake.RequestContext, payload: Optional type hint]
     args: List[Any] = [object]
@@ -28,12 +26,13 @@ def api_function_call_with_object_payload(
     if api.function_config.class_name is None:
         return api(*args)
     else:
+        # Warning: don't create class instance here as it must be reused by SDK if created once.
         cls: Any = get_class(api.function_config.class_name)
-        return cls().getattr(api.function_config.class_method_name)(*args)
+        return getattr(cls, api.function_config.class_method_name)(*args)
 
 
 def api_function_call_with_serialized_payload(
-    api: Function | str, payload: bytes
+    api: Function, payload: bytes, payload_content_type: str
 ) -> RegularFunctionCall:
     """Creates a function call for the API function with the provided serialized payload.
 
@@ -41,10 +40,20 @@ def api_function_call_with_serialized_payload(
     The function call is compliant with API function calling convention.
     The supplied binary payload is deserialized using the input serializer and type hints of the API function.
     """
-    if isinstance(api, str):
-        api: Function = get_function(api)
+    # We're using API function payload argument type hint to determine how to deserialize it properly.
+    payload_type_hints: List[Any] = function_arg_type_hint(api, -1)
+    payload_is_file: bool = False
+    for hint in payload_type_hints:
+        if hint is File:
+            payload_is_file = True
 
-    deserialized_payload: Any = function_input_serializer(api).deserialize(
-        payload, function_arg_type_hint(api, -1)
-    )
-    return api_function_call_with_object_payload(api, deserialized_payload)
+    if payload_is_file:
+        deserialized_payload: File = File(
+            content_type=payload_content_type, content=payload
+        )
+    else:
+        deserialized_payload: Any = function_input_serializer(api).deserialize(
+            payload, payload_type_hints
+        )
+
+    return _api_function_call_with_object_payload(api, deserialized_payload)

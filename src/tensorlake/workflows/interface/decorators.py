@@ -45,7 +45,6 @@ _DEFAULT_MAX_CONCURRENCY = 1  # No concurrent threads running the function by de
 
 
 def function(
-    name: str | None = None,
     description: str = "",
     cpu: float = _DEFAULT_CPU,
     memory: float = _DEFAULT_MEMORY_GB,
@@ -71,15 +70,14 @@ def function(
             fn = Function(fn)
 
         fn: Function
-        # "{class}.{method}" for methods, otherwise just function name. Doesn't include module name.
-        # All functions and classes in the application share a single namespace.
-        default_name: str = fn._original_function.__name__
-
         fn._function_config = _FunctionConfiguration(
             # set by cls() decorator if this is a class method
             class_name=None,
             class_method_name=None,
-            function_name=default_name if name is None else name,
+            class_init_timeout=None,
+            # "{class}.{method}" for methods, otherwise just function name. Doesn't include module name.
+            # All functions and classes in the application share a single namespace.
+            function_name=fn._original_function.__qualname__,
             description=description,
             image=image,
             secrets=secrets,
@@ -101,7 +99,9 @@ def function(
     return decorator
 
 
-def cls() -> Callable:
+def cls(
+    init_timeout: int = _DEFAULT_TIMEOUT_SEC,
+) -> Callable:
     CLASS = TypeVar("CLASS")
 
     def decorator(original_class: CLASS) -> CLASS:
@@ -123,6 +123,7 @@ def cls() -> Callable:
             if isinstance(attr, Function):
                 attr.function_config.class_name = class_name
                 attr.function_config.class_method_name = attr_name
+                attr.function_config.class_init_timeout = init_timeout
 
         return original_class
 

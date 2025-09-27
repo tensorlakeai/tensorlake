@@ -4,6 +4,10 @@ from typing import Any, List
 
 import pydantic
 
+from tensorlake.function_executor.proto.function_executor_pb2 import (
+    SerializedObjectEncoding,
+)
+
 # API functions use serializers customizable by users because API functions
 # can be called over HTTP where a serialized payload is passed.
 # All non-API functions are called using Python SDK where Pickle is available.
@@ -28,6 +32,11 @@ class UserDataSerializer:
     @property
     def content_type(self) -> str:
         """Returns the content type of the serializer."""
+        raise NotImplementedError("Subclasses should implement this method.")
+
+    @property
+    def serialized_object_encoding(self) -> SerializedObjectEncoding:
+        """Returns the serialized object encoding of the serializer."""
         raise NotImplementedError("Subclasses should implement this method.")
 
     def serialize(self, object: Any) -> bytes:
@@ -62,6 +71,10 @@ class JSONUserDataSerializer(UserDataSerializer):
     @property
     def content_type(self) -> str:
         return self.CONTENT_TYPE
+
+    @property
+    def serialized_object_encoding(self) -> SerializedObjectEncoding:
+        return SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON
 
     def serialize(self, object: Any) -> bytes:
         try:
@@ -124,6 +137,10 @@ class PickleUserDataSerializer(UserDataSerializer):
     @property
     def content_type(self) -> str:
         return self.CONTENT_TYPE
+
+    @property
+    def serialized_object_encoding(self) -> SerializedObjectEncoding:
+        return SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE
 
     def serialize(self, object: Any) -> bytes:
         try:

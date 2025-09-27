@@ -13,11 +13,12 @@ class _FunctionConfiguration:
     # because class objects are created after their methods.
     class_name: str | None
     class_method_name: str | None
+    class_init_timeout: int | None
     function_name: str
     description: str
     image: Image
     secrets: List[str]
-    retries: Retries | None  # Uses API retry policy if None
+    retries: Retries | None  # Uses application retry policy if None
     timeout: int
     cpu: float
     memory: float

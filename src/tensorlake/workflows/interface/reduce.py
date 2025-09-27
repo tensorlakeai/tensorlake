@@ -13,6 +13,7 @@ class ReducerFunctionCall(FunctionCall):
         inputs: FutureList,
     ):
         super().__init__(reducer_function_name)
+        # Contains at least one item due to initial + SDK validation.
         self._inputs: FutureList = inputs
 
     @property
@@ -29,14 +30,17 @@ class ReducerFunctionCall(FunctionCall):
         )
 
 
-class _InitialMissing:
+class _InitialMissingType:
     pass
+
+
+_InitialMissing = _InitialMissingType()
 
 
 def reduce(
     function: Function,
     iterable: Iterable,
-    initial: Any | _InitialMissing = _InitialMissing(),
+    initial: Any | _InitialMissingType = _InitialMissing,
     /,
 ) -> ReducerFunctionCall:
     """Calls the supplied function as a reducer.
