@@ -1,4 +1,5 @@
 from .proto.function_executor_pb2 import (
+    FunctionRef,
     InitializeRequest,
     SerializedObject,
     SerializedObjectEncoding,
@@ -17,17 +18,29 @@ class InitializeRequestValidator:
         Raises: ValueError: If the request is invalid.
         """
         (
-            self._message_validator.required_field("namespace")
-            .required_field("graph_name")
-            .required_field("graph_version")
-            .required_field("function_name")
-            .required_serialized_object("graph")
+            self._message_validator.required_field(
+                "function"
+            ).required_serialized_object("application_code")
         )
-        graph: SerializedObject = self._request.graph
+        self._validate_function_ref()
+        self._validate_application_code()
+
+    def _validate_function_ref(self):
+        function_ref: FunctionRef = self._request.function
+        (
+            MessageValidator(function_ref)
+            .required_field("namespace")
+            .required_field("application_name")
+            .required_field("function_name")
+            .required_field("application_version")
+        )
+
+    def _validate_application_code(self):
+        application_code: SerializedObject = self._request.application_code
         if (
-            graph.manifest.encoding
+            application_code.manifest.encoding
             != SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP
         ):
             raise ValueError(
-                f"Invalid graph encoding: {SerializedObjectEncoding.Name(graph.manifest.encoding)}. Expected: BINARY_ZIP"
+                f"Invalid application code encoding: {SerializedObjectEncoding.Name(application_code.manifest.encoding)}. Expected: BINARY_ZIP"
             )

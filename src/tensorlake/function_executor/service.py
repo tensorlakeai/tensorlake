@@ -6,52 +6,55 @@ import threading
 import time
 import traceback
 import zipfile
-from typing import Dict, Generator, Iterator, List, Optional
+from typing import Any, Dict, Generator, Iterator, List
 
 import grpc
 
-from tensorlake.functions_sdk.functions import Progress, TensorlakeFunctionWrapper
-from tensorlake.functions_sdk.graph_definition import ComputeGraphMetadata
-from tensorlake.functions_sdk.graph_serialization import (
-    GRAPH_MANIFEST_FILE_NAME,
-    GRAPH_METADATA_FILE_NAME,
-    FunctionManifest,
-    GraphManifest,
+from tensorlake.applications import Function, RequestProgress
+from tensorlake.applications.function.function_call import create_self_instance
+from tensorlake.applications.registry import get_function, get_functions, has_function
+from tensorlake.applications.remote.application.zip import (
+    APPLICATION_ZIP_MANIFEST_FILE_NAME,
+    ApplicationZIPManifest,
+    FunctionZIPManifest,
 )
+from tensorlake.applications.request_context_base import RequestContextBase
+from tensorlake.applications.request_metrics_recorder import RequestMetricsRecorder
 
 from .blob_store.blob_store import BLOBStore
 from .handlers.check_health.handler import Handler as CheckHealthHandler
-from .handlers.run_function.handler import Handler as RunTaskHandler
+from .handlers.run_function.handler import Handler as RunAllocationHandler
 from .info import info_response_kv_args
 from .initialize_request_validator import InitializeRequestValidator
-from .invocation_state.invocation_state_proxy_server import InvocationStateProxyServer
-from .invocation_state.proxied_invocation_state import ProxiedInvocationState
 from .logger import FunctionExecutorLogger
 from .proto.function_executor_pb2 import (
-    AwaitTaskProgress,
-    AwaitTaskRequest,
-    CreateTaskRequest,
-    DeleteTaskRequest,
+    Allocation,
+    AllocationResult,
+    AwaitAllocationProgress,
+    AwaitAllocationRequest,
+    CreateAllocationRequest,
+    DeleteAllocationRequest,
     Empty,
+    FunctionRef,
     HealthCheckRequest,
     HealthCheckResponse,
     InfoRequest,
     InfoResponse,
     InitializationFailureReason,
     InitializationOutcomeCode,
-    InitializeDiagnostics,
     InitializeRequest,
     InitializeResponse,
-    InvocationStateRequest,
-    InvocationStateResponse,
-    ListTasksRequest,
-    ListTasksResponse,
+    ListAllocationsRequest,
+    ListAllocationsResponse,
     ProgressUpdate,
-    Task,
-    TaskResult,
+    RequestStateRequest,
+    RequestStateResponse,
+    SerializedObjectEncoding,
 )
 from .proto.function_executor_pb2_grpc import FunctionExecutorServicer
 from .proto.message_validator import MessageValidator
+from .request_state.proxied_request_state import ProxiedRequestState
+from .request_state.request_state_proxy_server import RequestStateProxyServer
 from .user_events import (
     InitializationEventDetails,
     log_user_event_initialization_finished,
@@ -59,23 +62,41 @@ from .user_events import (
 )
 
 
-class _TaskExecution:
+class _AllocationExecution:
     def __init__(self):
         self.complete: bool = False
-        self.thread: Optional[threading.Thread] = None
+        self.thread: threading.Thread | None = None
         self.updated: threading.Condition = threading.Condition()
         self.progress: ProgressUpdate = ProgressUpdate(current=0.0, total=1.0)
 
 
-class _TaskInfo:
-    def __init__(self, task: Task, logger: FunctionExecutorLogger):
-        self.task: Task = task
-        self.execution: _TaskExecution = _TaskExecution()
+class _AllocationInfo:
+    def __init__(self, allocation: Allocation, logger: FunctionExecutorLogger):
+        self.allocation: Allocation = allocation
+        self.execution: _AllocationExecution = _AllocationExecution()
         self.logger: FunctionExecutorLogger = logger.bind(
-            invocation_id=task.graph_invocation_id,
-            task_id=task.task_id,
-            allocation_id=task.allocation_id,
+            invocation_id=allocation.request_id,
+            request_id=allocation.request_id,
+            task_id=allocation.task_id,
+            allocation_id=allocation.allocation_id,
         )
+
+
+class TaskAllocationRequestProgress(RequestProgress):
+    def __init__(self, alloc_info: _AllocationInfo):
+        self._alloc_info: _AllocationInfo = alloc_info
+
+    def update(self, current: float, total: float) -> None:
+        with self._alloc_info.execution.updated:
+            self._alloc_info.execution.progress = ProgressUpdate(
+                current=current, total=total
+            )
+            self._alloc_info.execution.updated.notify_all()
+        # sleep(0) here momentarily releases the GIL, giving other
+        # threads a chance to run - e.g. allowing the FE to handle
+        # incoming RPCs, to report back await_task() progress
+        # messages, &c.
+        time.sleep(0)
 
 
 class Service(FunctionExecutorServicer):
@@ -84,18 +105,15 @@ class Service(FunctionExecutorServicer):
         self._logger: FunctionExecutorLogger = logger.bind(
             module=__name__, **info_response_kv_args()
         )
-        self._namespace: Optional[str] = None
-        self._graph_name: Optional[str] = None
-        self._graph_version: Optional[str] = None
-        self._function_name: Optional[str] = None
-        self._function_wrapper: Optional[TensorlakeFunctionWrapper] = None
-        self._blob_store: Optional[BLOBStore] = None
-        self._graph_metadata: Optional[ComputeGraphMetadata] = None
-        self._invocation_state_proxy_server: Optional[InvocationStateProxyServer] = None
-        self._check_health_handler: Optional[CheckHealthHandler] = None
-        # Task management for create_task/await_task/delete_task
-        self._tasks: Dict[str, _TaskInfo] = {}
-        self._tasks_lock = threading.Lock()
+        self._function_ref: FunctionRef | None = None
+        self._function: Function | None = None
+        self._function_instance_arg: Any | None = None
+        self._blob_store: BLOBStore | None = None
+        self._request_state_proxy_server: RequestStateProxyServer | None = None
+        self._check_health_handler: CheckHealthHandler | None = None
+        # Task management for create_allocation/await_allocation/delete_allocation
+        self._allocations: Dict[str, _AllocationInfo] = {}
+        self._allocations_lock = threading.Lock()
 
     def initialize(
         self, request: InitializeRequest, context: grpc.ServicerContext
@@ -103,33 +121,29 @@ class Service(FunctionExecutorServicer):
         start_time = time.monotonic()
         self._logger.info("initializing function executor service")
 
-        request_validator: InitializeRequestValidator = InitializeRequestValidator(
-            request
-        )
-        request_validator.check()
+        InitializeRequestValidator(request).check()
 
         event_details: InitializationEventDetails = InitializationEventDetails(
-            namespace=request.namespace,
-            graph_name=request.graph_name,
-            graph_version=request.graph_version,
-            function_name=request.function_name,
+            namespace=request.function.namespace,
+            application_name=request.function.application_name,
+            application_version=request.function.application_version,
+            function_name=request.function.function_name,
         )
         log_user_event_initialization_started(event_details)
 
-        self._namespace = request.namespace
-        self._graph_name = request.graph_name
-        self._graph_version = request.graph_version
-        self._function_name = request.function_name
+        self._function_ref = request.function
         self._logger = self._logger.bind(
-            namespace=request.namespace,
-            graph=request.graph_name,
-            graph_version=request.graph_version,
-            fn=request.function_name,
+            namespace=request.function.namespace,
+            graph=request.function.application_name,
+            application=request.function.application_name,
+            graph_version=request.function.application_version,
+            application_version=request.function.application_version,
+            fn=request.function.function_name,
         )
 
         graph_modules_zip_fd, graph_modules_zip_path = tempfile.mkstemp(suffix=".zip")
         with open(graph_modules_zip_fd, "wb") as graph_modules_zip_file:
-            graph_modules_zip_file.write(request.graph.data)
+            graph_modules_zip_file.write(request.application_code.data)
         sys.path.insert(
             0, graph_modules_zip_path
         )  # Add as the first entry so user modules have highest priority
@@ -138,38 +152,48 @@ class Service(FunctionExecutorServicer):
             # Process user controlled input in a try-except block to not treat errors here as our
             # internal platform errors.
             with zipfile.ZipFile(graph_modules_zip_path, "r") as zf:
-                with zf.open(GRAPH_MANIFEST_FILE_NAME) as graph_manifest_file:
-                    graph_manifest: GraphManifest = GraphManifest.model_validate(
-                        json.load(graph_manifest_file)
-                    )
-                with zf.open(GRAPH_METADATA_FILE_NAME) as graph_metadata_file:
-                    self._graph_metadata: ComputeGraphMetadata = (
-                        ComputeGraphMetadata.model_validate(
-                            json.load(graph_metadata_file)
+                with zf.open(
+                    APPLICATION_ZIP_MANIFEST_FILE_NAME
+                ) as app_zip_manifest_file:
+                    app_zip_manifest: ApplicationZIPManifest = (
+                        ApplicationZIPManifest.model_validate(
+                            json.load(app_zip_manifest_file)
                         )
                     )
-            if request.function_name not in graph_manifest.functions:
+
+            if request.function.function_name not in app_zip_manifest.functions:
                 raise ValueError(
-                    f"Function {request.function_name} is not defined in the graph manifest {graph_manifest}"
+                    (
+                        f"Function '{request.function.function_name}' not found in ZIP manifest of application '{request.function.application_name}'. "
+                        f"Available functions: {list(app_zip_manifest.functions.keys())}"
+                    )
                 )
 
-            function_manifest: FunctionManifest = graph_manifest.functions[
-                request.function_name
+            # Load the function module so that the function is available in the registry.
+            function_zip_manifest: FunctionZIPManifest = app_zip_manifest.functions[
+                request.function.function_name
             ]
+            importlib.import_module(function_zip_manifest.module_import_name)
 
-            # Capture output before loading function code.
-            function_module = importlib.import_module(
-                function_manifest.module_import_name
-            )
-            function_class = getattr(
-                function_module, function_manifest.class_import_name
-            )
+            # Verify that the function exists in the registry now.
+            if not has_function(request.function.function_name):
+                raise ValueError(
+                    (
+                        f"Function '{request.function.function_name}' not found in the application '{request.function.application_name}'. "
+                        f"Available functions: {repr(get_functions())}"
+                    )
+                )
+
+            self._function = get_function(request.function.function_name)
             # The function is only loaded once per Function Executor. It's important to use a single
             # loaded function so all the tasks when executed are sharing the same memory. This allows
             # implementing smart caching in customer code. E.g. load a model into GPU only once and
             # share the model's file descriptor between all tasks or download function configuration
             # only once.
-            self._function_wrapper = TensorlakeFunctionWrapper(function_class)
+            if self._function.function_config.class_name is not None:
+                self._function_instance_arg = create_self_instance(
+                    self._function.function_config.class_name
+                )
         except BaseException as e:
             self._logger.error(
                 "function executor service initialization failed",
@@ -183,14 +207,9 @@ class Service(FunctionExecutorServicer):
             return InitializeResponse(
                 outcome_code=InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_FAILURE,
                 failure_reason=InitializationFailureReason.INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR,
-                diagnostics=InitializeDiagnostics(
-                    function_executor_log=self._logger.read_till_the_end(start=0),
-                ),
             )
 
-        available_cpu_count: int = int(
-            self._graph_metadata.functions[request.function_name].resources.cpus
-        )
+        available_cpu_count: int = int(self._function.function_config.cpu)
         self._blob_store = BLOBStore(
             available_cpu_count=available_cpu_count, logger=self._logger
         )
@@ -203,87 +222,67 @@ class Service(FunctionExecutorServicer):
         log_user_event_initialization_finished(event_details, success=True)
         return InitializeResponse(
             outcome_code=InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
-            diagnostics=InitializeDiagnostics(
-                function_executor_log=self._logger.read_till_the_end(start=0),
-            ),
         )
 
-    def initialize_invocation_state_server(
+    def initialize_request_state_server(
         self,
-        client_responses: Iterator[InvocationStateResponse],
+        client_responses: Iterator[RequestStateResponse],
         context: grpc.ServicerContext,
-    ) -> Generator[InvocationStateRequest, None, None]:
+    ) -> Generator[RequestStateRequest, None, None]:
         start_time = time.monotonic()
-        self._logger.info("initializing invocation proxy server")
+        self._logger.info("initializing request state proxy server")
 
-        if self._invocation_state_proxy_server is not None:
+        if self._request_state_proxy_server is not None:
             self._logger.error(
-                "invocation state proxy server already exists, looks like client reconnected without disconnecting first"
+                "request state proxy server already exists, looks like client reconnected without disconnecting first"
             )
             context.abort(
                 grpc.StatusCode.ALREADY_EXISTS,
-                "invocation state proxy server already exists, please disconnect first",
+                "request state proxy server already exists, please disconnect first",
             )
 
-        self._invocation_state_proxy_server = InvocationStateProxyServer(
-            client_responses, self._logger
+        self._request_state_proxy_server = RequestStateProxyServer(
+            # Should match RequestState object user serializer in RequestContext
+            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
+            client_responses=client_responses,
+            logger=self._logger,
         )
 
         self._logger.info(
-            "initialized invocation proxy server",
+            "initialized request state proxy server",
             duration_sec=f"{time.monotonic() - start_time:.3f}",
         )
-        yield from self._invocation_state_proxy_server.run()
-        self._invocation_state_proxy_server = None
+        yield from self._request_state_proxy_server.run()
+        self._request_state_proxy_server = None
 
-    def _validate_new_task(self, task: Task):
-        """Validates the task before creating it.
+    def _validate_new_allocation(self, allocation: Allocation):
+        """Validates the allocation before creating it.
 
-        Raises ValueError if the task is invalid or is not for this FE.
+        Raises ValueError if the allocation is invalid or is not for this FE.
         This is internal error due to wrong use of FE protocol.
         """
         # Validate required fields
         (
-            MessageValidator(task)
-            .required_field("namespace")
-            .required_field("graph_name")
-            .required_field("graph_version")
-            .required_field("function_name")
-            .required_field("graph_invocation_id")
+            MessageValidator(allocation)
+            .required_field("request_id")
             .required_field("task_id")
             .required_field("allocation_id")
-            .required_field("request")
+            .required_field("inputs")
             .not_set_field("result")
         )
 
-        # Validate task request (input data)
+        # Validate allocation inputs
         (
-            MessageValidator(task.request)
-            .required_blob("function_input_blob")
-            .required_serialized_object_inside_blob("function_input")
-            .optional_blob("function_init_value_blob")
-            .optional_serialized_object_inside_blob("function_init_value")
+            MessageValidator(allocation.inputs)
+            .optional_serialized_objects_inside_blob("args")
+            .optional_blobs("arg_blobs")
             .required_blob("function_outputs_blob")
-            .required_blob("invocation_error_blob")
+            .required_blob("request_error_blob")
         )
-
-        # If we run the wrongly routed task then it can steal data from this Server if it belongs
-        # to a different customer.
-        if task.namespace != self._namespace:
+        if len(allocation.inputs.args) != len(allocation.inputs.arg_blobs):
             raise ValueError(
-                f"This Function Executor is not initialized for this namespace {task.namespace}"
-            )
-        if task.graph_name != self._graph_name:
-            raise ValueError(
-                f"This Function Executor is not initialized for this graph_name {task.graph_name}"
-            )
-        if task.graph_version != self._graph_version:
-            raise ValueError(
-                f"This Function Executor is not initialized for this graph_version {task.graph_version}"
-            )
-        if task.function_name != self._function_name:
-            raise ValueError(
-                f"This Function Executor is not initialized for this function_name {task.function_name}"
+                "Mismatched function arguments and functions argument blobs lengths, "
+                f"{len(allocation.inputs.args)} != {len(allocation.inputs.arg_blobs)}"
             )
 
     def check_health(
@@ -301,157 +300,152 @@ class Service(FunctionExecutorServicer):
     ) -> InfoResponse:
         return InfoResponse(**info_response_kv_args())
 
-    def _execute_task_in_thread(self, task_info: _TaskInfo):
-        def progress_reporter(progress: Progress):
-            with task_info.execution.updated:
-                task_info.execution.progress = ProgressUpdate(
-                    current=progress.current, total=progress.total
-                )
-                task_info.execution.updated.notify_all()
-            # sleep(0) here momentarily releases the GIL, giving other
-            # threads a chance to run - e.g. allowing the FE to handle
-            # incoming RPCs, to report back await_task() progress
-            # messages, &c.
-            time.sleep(0)
+    def _execute_allocation_in_thread(self, alloc_info: _AllocationInfo):
+        request_context: RequestContextBase = RequestContextBase(
+            alloc_info.allocation.request_id,
+            state=ProxiedRequestState(
+                allocation_id=alloc_info.allocation.allocation_id,
+                proxy_server=self._request_state_proxy_server,
+            ),
+            progress=TaskAllocationRequestProgress(alloc_info),
+            metrics=RequestMetricsRecorder(),
+        )
 
         try:
-            result: TaskResult = RunTaskHandler(
-                task=task_info.task,
-                invocation_state=ProxiedInvocationState(
-                    task_info.task.task_id, self._invocation_state_proxy_server
-                ),
-                function_wrapper=self._function_wrapper,
-                graph_metadata=self._graph_metadata,
-                progress_reporter=progress_reporter,
+            result: AllocationResult = RunAllocationHandler(
+                allocation=alloc_info.allocation,
+                function_ref=self._function_ref,
+                request_context=request_context,
+                function=self._function,
+                function_instance_arg=self._function_instance_arg,
                 blob_store=self._blob_store,
-                logger=task_info.logger,
+                logger=alloc_info.logger,
             ).run()
             # We don't store any large objects in the result so it's okay to copy it.
-            task_info.task.result.CopyFrom(result)
+            alloc_info.allocation.result.CopyFrom(result)
         except BaseException as e:
             # Only exceptions in our code can be raised here so we have to log them.
-            task_info.logger.error(
-                "task execution failed in background thread",
+            alloc_info.logger.error(
+                "task allocation execution failed in background thread",
                 exc_info=e,
             )
         finally:
-            with task_info.execution.updated:
-                task_info.execution.complete = True
-                task_info.execution.updated.notify_all()
+            with alloc_info.execution.updated:
+                alloc_info.execution.complete = True
+                alloc_info.execution.updated.notify_all()
 
-    def list_tasks(
-        self, request: ListTasksRequest, context: grpc.ServicerContext
-    ) -> ListTasksResponse:
-        tasks: List[Task] = []
-        with self._tasks_lock:
-            for task_info in self._tasks.values():
-                with task_info.execution.updated:
-                    tasks.append(_trimmed_task(task_info.task))
-        return ListTasksResponse(tasks=tasks)
+    def list_allocations(
+        self, request: ListAllocationsRequest, context: grpc.ServicerContext
+    ) -> ListAllocationsResponse:
+        allocations: List[Allocation] = []
+        with self._allocations_lock:
+            for allocation_info in self._allocations.values():
+                with allocation_info.execution.updated:
+                    allocations.append(_trimmed_allocation(allocation_info.allocation))
+        return ListAllocationsResponse(allocations=allocations)
 
-    def create_task(
-        self, request: CreateTaskRequest, context: grpc.ServicerContext
-    ) -> Task:
-        task: Task = request.task
-        self._validate_new_task(task)
+    def create_allocation(
+        self, request: CreateAllocationRequest, context: grpc.ServicerContext
+    ) -> Allocation:
+        alloc: Allocation = request.allocation
+        self._validate_new_allocation(alloc)
 
-        with self._tasks_lock:
-            if task.task_id in self._tasks:
+        with self._allocations_lock:
+            if alloc.allocation_id in self._allocations:
                 context.abort(
                     grpc.StatusCode.ALREADY_EXISTS,
-                    f"Task {task.task_id} already exists",
+                    f"Allocation {alloc.allocation_id} already exists",
                 )
 
-            task_info: _TaskInfo = _TaskInfo(task, self._logger)
-            self._tasks[task.task_id] = task_info
+            alloc_info: _AllocationInfo = _AllocationInfo(alloc, self._logger)
+            self._allocations[alloc.allocation_id] = alloc_info
 
-            task_info.execution.thread = threading.Thread(
-                target=self._execute_task_in_thread,
-                args=(task_info,),
+            alloc_info.execution.thread = threading.Thread(
+                target=self._execute_allocation_in_thread,
+                args=(alloc_info,),
                 daemon=True,
             )
-            task_info.execution.thread.start()
+            alloc_info.execution.thread.start()
 
-        return _trimmed_task(task)
+        return _trimmed_allocation(alloc)
 
-    def await_task(
-        self, request: AwaitTaskRequest, context: grpc.ServicerContext
-    ) -> Generator[AwaitTaskProgress, None, None]:
-        """Wait for task completion and stream progress updates."""
-        task_info: Optional[_TaskInfo] = None
+    def await_allocation(
+        self, request: AwaitAllocationRequest, context: grpc.ServicerContext
+    ) -> Generator[AwaitAllocationProgress, None, None]:
+        """Wait for allocation completion and stream progress updates."""
+        alloc_info: _AllocationInfo | None = None
 
-        with self._tasks_lock:
-            task_info = self._tasks.get(request.task_id)
-            if task_info is None:
+        with self._allocations_lock:
+            alloc_info = self._allocations.get(request.allocation_id)
+            if alloc_info is None:
                 context.abort(
                     grpc.StatusCode.NOT_FOUND,
-                    f"Task {request.task_id} not found",
+                    f"Allocation {request.allocation_id} not found",
                 )
 
-        # Stream progress updates until task completes
-        final_result: Optional[TaskResult] = None
+        # Stream progress updates until allocation completes
+        final_result: AllocationResult | None = None
         sent_first_progress: bool = False
         while True:
-            with task_info.execution.updated:
-                if task_info.execution.complete:
-                    # Don't send default TaskResult() with all fields not set as its meaning is undefined.
+            with alloc_info.execution.updated:
+                if alloc_info.execution.complete:
+                    # Don't send default AllocationResult() with all fields not set as its meaning is undefined.
                     # This happens when the function thread finishes with an unexpected error.
                     final_result = (
-                        task_info.task.result
-                        if task_info.task.HasField("result")
+                        alloc_info.allocation.result
+                        if alloc_info.allocation.HasField("result")
                         else None
                     )
                     break
 
                 if sent_first_progress:
-                    task_info.execution.updated.wait()
+                    alloc_info.execution.updated.wait()
                 else:
                     sent_first_progress = True
 
-                progress = task_info.execution.progress
+                progress = alloc_info.execution.progress
 
             # Do all blocking calls outside of the lock.
             if progress:
-                yield AwaitTaskProgress(progress=progress)
+                yield AwaitAllocationProgress(progress=progress)
 
         # If the final result doesn't get sent before the stream is closed by FE
         # then client treats this as a grey failure with unknown exact cause.
         if final_result is not None:
-            yield AwaitTaskProgress(task_result=final_result)
+            yield AwaitAllocationProgress(allocation_result=final_result)
 
-    def delete_task(
-        self, request: DeleteTaskRequest, context: grpc.ServicerContext
+    def delete_allocation(
+        self, request: DeleteAllocationRequest, context: grpc.ServicerContext
     ) -> Empty:
-        """Delete a task and clean up resources."""
-        task_id: str = request.task_id
+        """Delete an allocation and clean up resources."""
+        allocation_id: str = request.allocation_id
 
-        with self._tasks_lock:
-            task_info = self._tasks.get(task_id)
+        with self._allocations_lock:
+            alloc_info = self._allocations.get(allocation_id)
 
-            if task_info is None:
+            if alloc_info is None:
                 context.abort(
                     grpc.StatusCode.NOT_FOUND,
-                    f"Task {task_id} not found",
+                    f"Allocation {allocation_id} not found",
                 )
 
-            with task_info.execution.updated:
-                if not task_info.execution.complete:
+            with alloc_info.execution.updated:
+                if not alloc_info.execution.complete:
                     context.abort(
                         grpc.StatusCode.FAILED_PRECONDITION,
-                        f"Task {task_id} is still running",
+                        f"Allocation {allocation_id} is still running",
                     )
 
-            self._tasks.pop(task_id, None)
+            self._allocations.pop(allocation_id, None)
 
         return Empty()
 
 
-def _trimmed_task(task: Task) -> Task:
-    """Returns metadata fields of the task without any large fields like request and result."""
-    task_copy = Task()
-    # We don't store any large objects in the request and result
-    # so it's okay to copy it.
-    task_copy.CopyFrom(task)
-    task_copy.ClearField("request")
-    task_copy.ClearField("result")
-    return task_copy
+def _trimmed_allocation(alloc: Allocation) -> Allocation:
+    """Returns metadata fields of the allocation without any large fields like inputs and result."""
+    alloc_copy = Allocation()
+    # We don't store any large objects in the inputs and result so it's okay to copy it.
+    alloc_copy.CopyFrom(alloc)
+    alloc_copy.ClearField("inputs")
+    alloc_copy.ClearField("result")
+    return alloc_copy

@@ -1,188 +1,302 @@
 import hashlib
 import time
 import traceback
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
-from tensorlake.functions_sdk.data_objects import Metrics, TensorlakeData
-from tensorlake.functions_sdk.exceptions import RequestException
-from tensorlake.functions_sdk.functions import FunctionCallResult
-from tensorlake.functions_sdk.graph_definition import ComputeGraphMetadata
-from tensorlake.functions_sdk.object_serializer import (
-    CloudPickleSerializer,
-    JsonSerializer,
+from tensorlake.applications.ast import (
+    ASTNode,
+    ValueMetadata,
+    ast_from_user_object,
+    flatten_ast,
+    override_output_serializer_at_child_call_tree_root,
+    traverse_ast,
+)
+from tensorlake.applications.ast.function_call_node import (
+    RegularFunctionCallNode,
+)
+from tensorlake.applications.ast.reducer_call_node import ReducerFunctionCallNode
+from tensorlake.applications.ast.value_node import ValueNode
+from tensorlake.applications.function.user_data_serializer import (
+    function_output_serializer,
+)
+from tensorlake.applications.interface.exceptions import RequestError
+from tensorlake.applications.interface.function import Function
+from tensorlake.applications.request_metrics_recorder import RequestMetricsRecorder
+from tensorlake.applications.user_data_serializer import (
+    UserDataSerializer,
+    serializer_by_name,
 )
 
 from ...blob_store.blob_store import BLOBStore
 from ...logger import FunctionExecutorLogger
 from ...proto.function_executor_pb2 import (
     BLOB,
+    AllocationFailureReason,
+    AllocationOutcomeCode,
+    AllocationResult,
+    ExecutionPlanUpdate,
+    ExecutionPlanUpdates,
+    FunctionArg,
+    FunctionCall,
     FunctionInputs,
+    FunctionRef,
 )
 from ...proto.function_executor_pb2 import Metrics as MetricsProto
 from ...proto.function_executor_pb2 import (
+    ReduceOp,
     SerializedObjectEncoding,
     SerializedObjectInsideBLOB,
     SerializedObjectManifest,
-    TaskDiagnostics,
-    TaskFailureReason,
-    TaskOutcomeCode,
-    TaskResult,
 )
+from .function_call_node_metadata import FunctionCallNodeMetadata, FunctionCallType
+from .value_node_metadata import ValueNodeMetadata
 
 
 class ResponseHelper:
-    """Helper class for generating TaskResult."""
+    """Helper class for generating AllocationResult."""
 
     def __init__(
         self,
-        function_name: str,
+        function_ref: FunctionRef,
+        function: Function,
         inputs: FunctionInputs,
-        graph_metadata: ComputeGraphMetadata,
+        request_metrics: RequestMetricsRecorder,
         blob_store: BLOBStore,
         logger: FunctionExecutorLogger,
     ):
-        self._function_name: str = function_name
+        self._function_ref: FunctionRef = function_ref
+        self._function: Function = function
         self._inputs: FunctionInputs = inputs
-        self._graph_metadata: ComputeGraphMetadata = graph_metadata
+        self._request_metrics: RequestMetricsRecorder = request_metrics
         self._blob_store: BLOBStore = blob_store
         self._logger: FunctionExecutorLogger = logger.bind(module=__name__)
 
-    def from_function_call(
+    def from_function_output(
         self,
-        result: FunctionCallResult,
-        fe_log_start: int,
-    ) -> TaskResult:
-        if result.exception is not None:
-            return self.from_function_exception(
-                exception=result.exception,
-                metrics=result.metrics,
-                fe_log_start=fe_log_start,
+        output: Any,
+        output_serializer_override: str | None,
+    ) -> AllocationResult:
+        output_serializer: UserDataSerializer = function_output_serializer(
+            self._function, output_serializer_override
+        )
+        output_ast: ASTNode = ast_from_user_object(output, output_serializer)
+
+        value: SerializedObjectInsideBLOB | None = None
+        updates: ExecutionPlanUpdates | None = None
+        uploaded_function_outputs_blob: BLOB
+
+        if isinstance(output_ast, ValueNode):
+            uploaded_sos, uploaded_function_outputs_blob = (
+                self._upload_function_output_values([output_ast])
+            )
+            value = uploaded_sos[output_ast.id]
+            value.manifest.source_function_call_id = output_ast.id
+        else:
+            override_output_serializer_at_child_call_tree_root(
+                function_output_serializer_name=output_serializer.name,
+                function_output_ast=output_ast,
+            )
+            updates, uploaded_function_outputs_blob = self._upload_function_output_ast(
+                output_ast
             )
 
-        if result.edges is None:
-            # Fallback to the graph edges if not provided by the function.
-            # Some functions don't have any outer edges.
-            next_functions = self._graph_metadata.edges.get(self._function_name, [])
-        else:
-            next_functions = result.edges
-
-        function_outputs, uploaded_function_outputs_blob = (
-            self._upload_function_outputs(result.ser_outputs)
-        )
-
-        return TaskResult(
-            outcome_code=TaskOutcomeCode.TASK_OUTCOME_CODE_SUCCESS,
-            function_outputs=function_outputs,
+        result = AllocationResult(
+            outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
             uploaded_function_outputs_blob=uploaded_function_outputs_blob,
-            next_functions=next_functions,
-            metrics=_to_metrics(result.metrics),
-            diagnostics=TaskDiagnostics(
-                function_executor_log=self._logger.read_till_the_end(
-                    start=fe_log_start
-                ),
-            ),
+            metrics=self._get_metrics(),
         )
 
-    def from_function_exception(
-        self, exception: Exception, fe_log_start: int, metrics: Optional[Metrics]
-    ) -> TaskResult:
+        if updates is None:
+            result.value.CopyFrom(value)
+        else:
+            result.updates.CopyFrom(updates)
+
+        return result
+
+    def from_function_exception(self, exception: Exception) -> AllocationResult:
         # Print the exception to stderr so customer can see it there.
         traceback.print_exception(exception)
 
-        invocation_error_output: Optional[SerializedObjectInsideBLOB] = None
-        uploaded_invocation_error_blob: Optional[BLOB] = None
-        if isinstance(exception, RequestException):
-            failure_reason: TaskFailureReason = (
-                TaskFailureReason.TASK_FAILURE_REASON_INVOCATION_ERROR
+        request_error_output: SerializedObjectInsideBLOB | None = None
+        uploaded_request_error_blob: BLOB | None = None
+        if isinstance(exception, RequestError):
+            failure_reason: AllocationFailureReason = (
+                AllocationFailureReason.ALLOCATION_FAILURE_REASON_REQUEST_ERROR
             )
-            invocation_error_output, uploaded_invocation_error_blob = (
-                self._upload_invocation_error_output(exception.message)
+            request_error_output, uploaded_request_error_blob = (
+                self._upload_request_error_output(exception.message)
             )
         else:
-            failure_reason: TaskFailureReason = (
-                TaskFailureReason.TASK_FAILURE_REASON_FUNCTION_ERROR
+            failure_reason: AllocationFailureReason = (
+                AllocationFailureReason.ALLOCATION_FAILURE_REASON_FUNCTION_ERROR
             )
 
-        return TaskResult(
-            outcome_code=TaskOutcomeCode.TASK_OUTCOME_CODE_FAILURE,
+        return AllocationResult(
+            outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,
             failure_reason=failure_reason,
-            invocation_error_output=invocation_error_output,
-            uploaded_invocation_error_blob=uploaded_invocation_error_blob,
-            next_functions=[],
-            metrics=_to_metrics(metrics),
-            diagnostics=TaskDiagnostics(
-                function_executor_log=self._logger.read_till_the_end(
-                    start=fe_log_start
-                ),
-            ),
+            request_error_output=request_error_output,
+            uploaded_request_error_blob=uploaded_request_error_blob,
+            metrics=self._get_metrics(),
         )
 
-    def _upload_function_outputs(
-        self, tl_datas: List[TensorlakeData]
-    ) -> Tuple[List[SerializedObjectInsideBLOB], BLOB]:
-        serialized_objects: List[SerializedObjectInsideBLOB] = []
-        serialized_datas: List[bytes] = []
+    def _get_metrics(self) -> MetricsProto:
+        return MetricsProto(
+            timers=self._request_metrics.timers,
+            counters=self._request_metrics.counters,
+        )
 
-        blob_offset: int = 0
-        for tl_data in tl_datas:
-            serialized_data: bytes = None
-            encoding: SerializedObjectEncoding = None
-            encoding_version: int = 0
-            if tl_data.encoder == JsonSerializer.encoding_type:
-                serialized_data = tl_data.payload.encode("utf-8")
-                encoding = SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON
-            elif tl_data.encoder == CloudPickleSerializer.encoding_type:
-                serialized_data = tl_data.payload
-                encoding = (
-                    SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE
-                )
-            else:
-                self._logger.error(
-                    "Unsupported encoder type",
-                    encoder=tl_data.encoder,
-                    payload_type=type(tl_data.payload),
-                )
+    def _upload_function_output_ast(
+        self, root: ASTNode
+    ) -> Tuple[ExecutionPlanUpdates, BLOB]:
+        flattened_ast: Dict[str, ASTNode] = flatten_ast(root)
+        value_nodes: List[ValueNode] = [
+            node for node in flattened_ast.values() if isinstance(node, ValueNode)
+        ]
+        uploaded_value_node_sos, uploaded_function_outputs_blob = (
+            self._upload_function_output_values(value_nodes)
+        )
+        uploaded_value_node_sos: Dict[str, SerializedObjectInsideBLOB]
+        uploaded_function_outputs_blob: BLOB
+        updates: List[ExecutionPlanUpdate] = []
+
+        for node in traverse_ast(root):
+            if isinstance(node, ValueNode):
                 continue
 
-            serialized_objects.append(
-                SerializedObjectInsideBLOB(
-                    manifest=SerializedObjectManifest(
-                        encoding=encoding,
-                        encoding_version=encoding_version,
-                        size=len(serialized_data),
-                        sha256_hash=_sha256_hexdigest(serialized_data),
-                    ),
-                    offset=blob_offset,
-                )
-            )
-            serialized_datas.append(serialized_data)
-            blob_offset += len(serialized_data)
+            node: RegularFunctionCallNode | ReducerFunctionCallNode
+            update: ExecutionPlanUpdate
+            data_dependencies: List[FunctionArg] = []
+            for child in node.children.values():
+                if isinstance(child, ValueNode):
+                    data_dependencies.append(
+                        FunctionArg(value=uploaded_value_node_sos[child.id])
+                    )
+                elif isinstance(child, RegularFunctionCallNode):
+                    data_dependencies.append(
+                        FunctionArg(
+                            function_call_id=child.id,
+                        )
+                    )
+                elif isinstance(child, ReducerFunctionCallNode):
+                    data_dependencies.append(
+                        FunctionArg(
+                            function_call_id=child.id,
+                        )
+                    )
 
-        serialized_datas_size: int = sum(
-            len(serialized_data) for serialized_data in serialized_datas
+            if isinstance(node, RegularFunctionCallNode):
+                update = ExecutionPlanUpdate(
+                    function_call=FunctionCall(
+                        id=node.id,
+                        target=FunctionRef(
+                            namespace=self._function_ref.namespace,
+                            application_name=self._function_ref.application_name,
+                            function_name=node.function_name,
+                            application_version=self._function_ref.application_version,
+                        ),
+                        args=data_dependencies,
+                        call_metadata=FunctionCallNodeMetadata(
+                            nid=node.id,
+                            type=FunctionCallType.REGULAR,
+                            metadata=node.serialized_metadata,
+                        ).serialize(),
+                    )
+                )
+            elif isinstance(node, ReducerFunctionCallNode):
+                update = ExecutionPlanUpdate(
+                    reduce=ReduceOp(
+                        id=node.id,
+                        reducer=FunctionRef(
+                            namespace=self._function_ref.namespace,
+                            application_name=self._function_ref.application_name,
+                            function_name=node.reducer_function_name,
+                            application_version=self._function_ref.application_version,
+                        ),
+                        collection=data_dependencies,
+                        call_metadata=FunctionCallNodeMetadata(
+                            nid=node.id,
+                            type=FunctionCallType.REDUCER,
+                            metadata=node.serialized_metadata,
+                        ).serialize(),
+                    )
+                )
+            else:
+                raise ValueError(f"Unknown AST node type: {type(node)}")
+
+            updates.append(update)
+
+        return (
+            ExecutionPlanUpdates(
+                updates=updates,
+                root_function_call_id=root.id,
+            ),
+            uploaded_function_outputs_blob,
         )
+
+    def _upload_function_output_values(
+        self, value_nodes: List[ValueNode]
+    ) -> Tuple[Dict[str, SerializedObjectInsideBLOB], BLOB]:
+        serialized_objects: Dict[str, SerializedObjectInsideBLOB] = {}
+        blob_datas: List[bytes] = []
+        blob_offset: int = 0
+        encoding_version: int = 0
+
+        for value_node in value_nodes:
+            value_node_serialized_metadata: bytes = ValueNodeMetadata(
+                nid=value_node.id, metadata=value_node.serialized_metadata
+            ).serialize()
+            value_metadata: ValueMetadata = ValueMetadata.deserialize(
+                value_node.serialized_metadata
+            )
+            serializer: UserDataSerializer = None
+
+            if value_metadata.serializer_name is not None:
+                serializer = serializer_by_name(value_metadata.serializer_name)
+
+            value_node_so: SerializedObjectInsideBLOB = SerializedObjectInsideBLOB(
+                manifest=SerializedObjectManifest(
+                    encoding=(
+                        SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_RAW
+                        if serializer is None
+                        else serializer.serialized_object_encoding
+                    ),
+                    encoding_version=encoding_version,
+                    size=len(value_node_serialized_metadata) + len(value_node.value),
+                    metadata_size=len(value_node_serialized_metadata),
+                    sha256_hash=_sha256_hexdigest(
+                        value_node_serialized_metadata, value_node.value
+                    ),
+                    content_type=value_node.content_type,
+                ),
+                offset=blob_offset,
+            )
+            serialized_objects[value_node.id] = value_node_so
+            blob_datas.append(value_node_serialized_metadata)
+            blob_datas.append(value_node.value)
+            blob_offset += value_node_so.manifest.size
+
         start_time = time.monotonic()
         self._logger.info(
-            "uploading function output",
-            outputs_count=len(serialized_datas),
-            total_size=serialized_datas_size,
+            "uploading function output values",
+            outputs_count=len(serialized_objects),
+            total_size=blob_offset,
         )
         uploaded_blob: BLOB = _upload_outputs(
-            serialized_datas,
+            blob_datas,
             self._inputs.function_outputs_blob,
             self._blob_store,
             self._logger,
         )
         self._logger.info(
-            "function output uploaded",
-            outputs_count=len(serialized_datas),
-            total_size=serialized_datas_size,
+            "function output values uploaded",
+            outputs_count=len(serialized_objects),
+            total_size=blob_offset,
             duration_sec=f"{time.monotonic() - start_time:.3f}",
         )
 
-        return (serialized_objects, uploaded_blob)
+        return serialized_objects, uploaded_blob
 
-    def _upload_invocation_error_output(
+    def _upload_request_error_output(
         self, message: str
     ) -> Tuple[SerializedObjectInsideBLOB, BLOB]:
         data: bytes = message.encode("utf-8")
@@ -193,7 +307,7 @@ class ResponseHelper:
         )
         uploaded_blob: BLOB = _upload_outputs(
             [data],
-            self._inputs.invocation_error_blob,
+            self._inputs.request_error_blob,
             self._blob_store,
             self._logger,
         )
@@ -209,7 +323,8 @@ class ResponseHelper:
                     encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_TEXT,
                     encoding_version=0,
                     size=len(data),
-                    sha256_hash=_sha256_hexdigest(data),
+                    metadata_size=0,
+                    sha256_hash=_sha256_hexdigest(b"", data),
                 ),
                 offset=0,
             ),
@@ -245,14 +360,8 @@ def _upload_outputs(
     )
 
 
-def _to_metrics(metrics: Optional[Metrics]) -> Optional[MetricsProto]:
-    if metrics is None:
-        return None
-    return MetricsProto(
-        timers=metrics.timers,
-        counters=metrics.counters,
-    )
-
-
-def _sha256_hexdigest(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+def _sha256_hexdigest(metadata: bytes, data: bytes) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(metadata)
+    hasher.update(data)
+    return hasher.hexdigest()

@@ -3,29 +3,42 @@ import os
 import subprocess
 import tempfile
 import unittest
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import grpc
 
+# Interface should be imported first before internal modules.
+import tensorlake.applications.interface as tensorlake
+from tensorlake.applications.ast.value_node import ValueMetadata
+from tensorlake.applications.remote.application.zip import zip_application_code
+from tensorlake.applications.user_data_serializer import (
+    JSONUserDataSerializer,
+)
+from tensorlake.function_executor.handlers.run_function.value_node_metadata import (
+    ValueNodeMetadata,
+)
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     BLOB,
-    AwaitTaskProgress,
-    AwaitTaskRequest,
+    Allocation,
+    AllocationResult,
+    AwaitAllocationProgress,
+    AwaitAllocationRequest,
     BLOBChunk,
-    CreateTaskRequest,
-    DeleteTaskRequest,
+    CreateAllocationRequest,
+    DeleteAllocationRequest,
     FunctionInputs,
+    FunctionRef,
+    InitializeRequest,
+    InitializeResponse,
+    SerializedObject,
     SerializedObjectEncoding,
     SerializedObjectInsideBLOB,
     SerializedObjectManifest,
-    Task,
-    TaskResult,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
 from tensorlake.function_executor.proto.server_configuration import GRPC_SERVER_OPTIONS
-from tensorlake.functions_sdk.object_serializer import CloudPickleSerializer
 
 
 class FunctionExecutorProcessContextManager:
@@ -49,9 +62,9 @@ class FunctionExecutorProcessContextManager:
         self._args.extend(extra_args)
         self._extra_env = extra_env
         self._capture_std_outputs = capture_std_outputs
-        self._process: Optional[subprocess.Popen] = None
-        self._stdout: Optional[str] = None
-        self._stderr: Optional[str] = None
+        self._process: subprocess.Popen | None = None
+        self._stdout: str | None = None
+        self._stderr: str | None = None
 
     def __enter__(self) -> "FunctionExecutorProcessContextManager":
         kwargs = {}
@@ -72,11 +85,11 @@ class FunctionExecutorProcessContextManager:
                 self._stderr = self._process.stderr.read().decode("utf-8")
             self._process.__exit__(exc_type, exc_value, traceback)
 
-    def read_stdout(self) -> Optional[str]:
+    def read_stdout(self) -> str | None:
         # Only call this after FE exits.
         return self._stdout
 
-    def read_stderr(self) -> Optional[str]:
+    def read_stderr(self) -> str | None:
         # Only call this after FE exits.
         return self._stderr
 
@@ -99,90 +112,135 @@ def rpc_channel(context_manager: FunctionExecutorProcessContextManager) -> grpc.
         ) from e
 
 
-def run_task(
+def initialize(
     stub: FunctionExecutorStub,
+    app: tensorlake.Application,
+    app_code_dir_path: str,
     function_name: str,
-    input: Any,
-    function_outputs_blob: BLOB,
-    invocation_error_blob: BLOB,
-    timeout_sec: Optional[int] = None,
-) -> TaskResult:
-    function_input_blob: BLOB = create_tmp_blob()
-    function_input_data: bytes = CloudPickleSerializer.serialize(input)
-    write_tmp_blob_bytes(
-        blob=function_input_blob,
-        data=function_input_data,
+) -> InitializeResponse:
+    application_zip: bytes = zip_application_code(
+        code_dir_path=app_code_dir_path,
+        ignored_absolute_paths=set(),
     )
-
-    task_id: str = "test-task"
-    stub.create_task(
-        CreateTaskRequest(
-            task=Task(
+    return stub.initialize(
+        InitializeRequest(
+            function=FunctionRef(
                 namespace="test",
-                graph_name="test",
-                graph_version="1",
+                application_name=app.name,
+                application_version=app.version,
                 function_name=function_name,
-                graph_invocation_id="123",
-                task_id=task_id,
-                allocation_id="test-allocation",
-                request=FunctionInputs(
-                    function_input_blob=function_input_blob,
-                    function_input=SerializedObjectInsideBLOB(
-                        manifest=SerializedObjectManifest(
-                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-                            encoding_version=0,
-                            size=len(function_input_data),
-                            sha256_hash=hashlib.sha256(function_input_data).hexdigest(),
-                        ),
-                        offset=0,
-                    ),
-                    function_outputs_blob=function_outputs_blob,
-                    invocation_error_blob=invocation_error_blob,
+            ),
+            application_code=SerializedObject(
+                manifest=SerializedObjectManifest(
+                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
+                    encoding_version=0,
+                    size=len(application_zip),
+                    sha256_hash=hashlib.sha256(application_zip).hexdigest(),
                 ),
+                data=application_zip,
             ),
         )
     )
 
-    await_task_stream_rpc = stub.await_task(
-        AwaitTaskRequest(task_id=task_id), timeout=timeout_sec
+
+def run_allocation(
+    stub: FunctionExecutorStub,
+    inputs: FunctionInputs,
+    timeout_sec: int | None = None,
+) -> AllocationResult:
+    allocation_id: str = "test-allocation"
+    stub.create_allocation(
+        CreateAllocationRequest(
+            allocation=Allocation(
+                request_id="123",
+                task_id="test-task",
+                allocation_id=allocation_id,
+                inputs=inputs,
+            ),
+        )
     )
-    result: Optional[TaskResult] = None
-    for progress in await_task_stream_rpc:
-        progress: AwaitTaskProgress
-        if progress.WhichOneof("response") == "task_result":
-            result: TaskResult = progress.task_result
+
+    await_allocation_stream_rpc = stub.await_allocation(
+        AwaitAllocationRequest(allocation_id=allocation_id), timeout=timeout_sec
+    )
+    result: AllocationResult | None = None
+    for progress in await_allocation_stream_rpc:
+        progress: AwaitAllocationProgress
+        if progress.WhichOneof("response") == "allocation_result":
+            result = progress.allocation_result
             break
 
-    await_task_stream_rpc.cancel()
-    stub.delete_task(DeleteTaskRequest(task_id=task_id))
+    await_allocation_stream_rpc.cancel()
+    stub.delete_allocation(DeleteAllocationRequest(allocation_id=allocation_id))
 
     if result is None:
-        # Check in case if stream finished by FE without task_result.
-        raise Exception("Task result was not received from the server.")
+        # Check in case if stream finished by FE without allocation_result.
+        raise Exception("Allocation result was not received from the server.")
 
     return result
 
 
-def deserialized_function_output(
+def api_function_inputs(api_payload: Any) -> FunctionInputs:
+    user_serializer: JSONUserDataSerializer = JSONUserDataSerializer()
+    serialized_api_payload: bytes = user_serializer.serialize(api_payload)
+    api_payload_blob: BLOB = create_tmp_blob(
+        chunks_count=1, chunk_size=len(serialized_api_payload)
+    )
+    write_tmp_blob_bytes(api_payload_blob, serialized_api_payload)
+
+    return FunctionInputs(
+        args=[
+            SerializedObjectInsideBLOB(
+                manifest=SerializedObjectManifest(
+                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON,
+                    encoding_version=0,
+                    size=len(serialized_api_payload),
+                    metadata_size=0,  # No metadata for API function calls.
+                    sha256_hash=hashlib.sha256(serialized_api_payload).hexdigest(),
+                ),
+                offset=0,
+            )
+        ],
+        arg_blobs=[api_payload_blob],
+        function_outputs_blob=create_tmp_blob(),
+        request_error_blob=create_tmp_blob(),
+        function_call_metadata=b"",
+    )
+
+
+def download_and_deserialize_so(
     test_case: unittest.TestCase,
-    function_outputs: List[SerializedObjectInsideBLOB],
-    function_outputs_blob: BLOB,
-) -> List[Any]:
-    outputs: List[Any] = []
-    for output in function_outputs:
-        test_case.assertEqual(
-            output.manifest.encoding,
-            SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-        )
-        data: bytes = read_tmp_blob_bytes(
-            function_outputs_blob, output.offset, output.manifest.size
-        )
-        test_case.assertEqual(len(data), output.manifest.size)
-        test_case.assertEqual(
-            hashlib.sha256(data).hexdigest(), output.manifest.sha256_hash
-        )
-        outputs.append(CloudPickleSerializer.deserialize(data))
-    return outputs
+    so: SerializedObjectInsideBLOB,
+    so_blob: BLOB,
+) -> Any:
+    serialized_node_metadata: bytes = read_tmp_blob_bytes(
+        so_blob, so.offset, so.manifest.metadata_size
+    )
+    serialized_data: bytes = read_tmp_blob_bytes(
+        so_blob,
+        so.offset + so.manifest.metadata_size,
+        so.manifest.size - so.manifest.metadata_size,
+    )
+    test_case.assertEqual(
+        hashlib.sha256(serialized_node_metadata + serialized_data).hexdigest(),
+        so.manifest.sha256_hash,
+    )
+
+    node_metadata: ValueNodeMetadata = ValueNodeMetadata.deserialize(
+        serialized_node_metadata
+    )
+    return ValueMetadata.deserialize(node_metadata.metadata).deserialize_value(
+        serialized_data
+    )
+
+
+def read_so_metadata(
+    test_case: unittest.TestCase, so: SerializedObjectInsideBLOB, so_blob: BLOB
+) -> ValueNodeMetadata:
+    serialized_node_metadata: bytes = read_tmp_blob_bytes(
+        so_blob, so.offset, so.manifest.metadata_size
+    )
+    return ValueNodeMetadata.deserialize(serialized_node_metadata)
 
 
 def create_tmp_blob(chunks_count: int = 5, chunk_size: int = 1 * 1024 * 1024) -> BLOB:

@@ -8,7 +8,7 @@ from tensorlake.function_executor.proto import (
     function_executor_pb2 as tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2,
 )
 
-GRPC_GENERATED_VERSION = "1.74.0"
+GRPC_GENERATED_VERSION = "1.75.1"
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -46,33 +46,33 @@ class FunctionExecutorStub(object):
             response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.InitializeResponse.FromString,
             _registered_method=True,
         )
-        self.initialize_invocation_state_server = channel.stream_stream(
-            "/function_executor_service.FunctionExecutor/initialize_invocation_state_server",
-            request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.InvocationStateResponse.SerializeToString,
-            response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.InvocationStateRequest.FromString,
+        self.initialize_request_state_server = channel.stream_stream(
+            "/function_executor_service.FunctionExecutor/initialize_request_state_server",
+            request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RequestStateResponse.SerializeToString,
+            response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RequestStateRequest.FromString,
             _registered_method=True,
         )
-        self.list_tasks = channel.unary_unary(
-            "/function_executor_service.FunctionExecutor/list_tasks",
-            request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.ListTasksRequest.SerializeToString,
-            response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.ListTasksResponse.FromString,
+        self.list_allocations = channel.unary_unary(
+            "/function_executor_service.FunctionExecutor/list_allocations",
+            request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.ListAllocationsRequest.SerializeToString,
+            response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.ListAllocationsResponse.FromString,
             _registered_method=True,
         )
-        self.create_task = channel.unary_unary(
-            "/function_executor_service.FunctionExecutor/create_task",
-            request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.CreateTaskRequest.SerializeToString,
-            response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Task.FromString,
+        self.create_allocation = channel.unary_unary(
+            "/function_executor_service.FunctionExecutor/create_allocation",
+            request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.CreateAllocationRequest.SerializeToString,
+            response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Allocation.FromString,
             _registered_method=True,
         )
-        self.await_task = channel.unary_stream(
-            "/function_executor_service.FunctionExecutor/await_task",
-            request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitTaskRequest.SerializeToString,
-            response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitTaskProgress.FromString,
+        self.await_allocation = channel.unary_stream(
+            "/function_executor_service.FunctionExecutor/await_allocation",
+            request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitAllocationRequest.SerializeToString,
+            response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitAllocationProgress.FromString,
             _registered_method=True,
         )
-        self.delete_task = channel.unary_unary(
-            "/function_executor_service.FunctionExecutor/delete_task",
-            request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.DeleteTaskRequest.SerializeToString,
+        self.delete_allocation = channel.unary_unary(
+            "/function_executor_service.FunctionExecutor/delete_allocation",
+            request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.DeleteAllocationRequest.SerializeToString,
             response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Empty.FromString,
             _registered_method=True,
         )
@@ -94,52 +94,52 @@ class FunctionExecutorServicer(object):
     """Missing associated documentation comment in .proto file."""
 
     def initialize(self, request, context):
-        """Initializes the Function Executor to run tasks
+        """Initializes the Function Executor to run allocations
         for a particular function. This method is called only
         once per Function Executor as it can only run a single function.
-        It should be called before calling RunTask for the function.
+        It should be called before calling create_allocation.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def initialize_invocation_state_server(self, request_iterator, context):
-        """Initializes a server that sends requests to the client to perform actions on
-        a task's graph invocation state. This method is called only once per Function Executor
-        It should be called before calling RunTask for the function.
+    def initialize_request_state_server(self, request_iterator, context):
+        """Initializes a server that sends requests to the client to perform actions on an allocation's
+        request state. This method is called only once per Function Executor
+        It should be called before calling create_allocation.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def list_tasks(self, request, context):
-        """Lists the currently-running tasks."""
+    def list_allocations(self, request, context):
+        """Lists the currently-running allocations."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def create_task(self, request, context):
-        """Creates and starts the task specified in the request."""
+    def create_allocation(self, request, context):
+        """Creates and starts the allocation specified in the request."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def await_task(self, request, context):
-        """Sends progress updates for the task.
+    def await_allocation(self, request, context):
+        """Sends progress updates for the allocation.
         Sends its result once it's complete.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def delete_task(self, request, context):
-        """Deletes the task."""
+    def delete_allocation(self, request, context):
+        """Deletes the allocation."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
     def check_health(self, request, context):
-        """Health check method to check if the FE is able to run tasks.
+        """Health check method to check if the FE is able to run allocations.
         The FE should be initialized before calling this method.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -160,29 +160,29 @@ def add_FunctionExecutorServicer_to_server(servicer, server):
             request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.InitializeRequest.FromString,
             response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.InitializeResponse.SerializeToString,
         ),
-        "initialize_invocation_state_server": grpc.stream_stream_rpc_method_handler(
-            servicer.initialize_invocation_state_server,
-            request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.InvocationStateResponse.FromString,
-            response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.InvocationStateRequest.SerializeToString,
+        "initialize_request_state_server": grpc.stream_stream_rpc_method_handler(
+            servicer.initialize_request_state_server,
+            request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RequestStateResponse.FromString,
+            response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RequestStateRequest.SerializeToString,
         ),
-        "list_tasks": grpc.unary_unary_rpc_method_handler(
-            servicer.list_tasks,
-            request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.ListTasksRequest.FromString,
-            response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.ListTasksResponse.SerializeToString,
+        "list_allocations": grpc.unary_unary_rpc_method_handler(
+            servicer.list_allocations,
+            request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.ListAllocationsRequest.FromString,
+            response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.ListAllocationsResponse.SerializeToString,
         ),
-        "create_task": grpc.unary_unary_rpc_method_handler(
-            servicer.create_task,
-            request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.CreateTaskRequest.FromString,
-            response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Task.SerializeToString,
+        "create_allocation": grpc.unary_unary_rpc_method_handler(
+            servicer.create_allocation,
+            request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.CreateAllocationRequest.FromString,
+            response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Allocation.SerializeToString,
         ),
-        "await_task": grpc.unary_stream_rpc_method_handler(
-            servicer.await_task,
-            request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitTaskRequest.FromString,
-            response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitTaskProgress.SerializeToString,
+        "await_allocation": grpc.unary_stream_rpc_method_handler(
+            servicer.await_allocation,
+            request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitAllocationRequest.FromString,
+            response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitAllocationProgress.SerializeToString,
         ),
-        "delete_task": grpc.unary_unary_rpc_method_handler(
-            servicer.delete_task,
-            request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.DeleteTaskRequest.FromString,
+        "delete_allocation": grpc.unary_unary_rpc_method_handler(
+            servicer.delete_allocation,
+            request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.DeleteAllocationRequest.FromString,
             response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Empty.SerializeToString,
         ),
         "check_health": grpc.unary_unary_rpc_method_handler(
@@ -240,7 +240,7 @@ class FunctionExecutor(object):
         )
 
     @staticmethod
-    def initialize_invocation_state_server(
+    def initialize_request_state_server(
         request_iterator,
         target,
         options=(),
@@ -255,9 +255,9 @@ class FunctionExecutor(object):
         return grpc.experimental.stream_stream(
             request_iterator,
             target,
-            "/function_executor_service.FunctionExecutor/initialize_invocation_state_server",
-            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.InvocationStateResponse.SerializeToString,
-            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.InvocationStateRequest.FromString,
+            "/function_executor_service.FunctionExecutor/initialize_request_state_server",
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RequestStateResponse.SerializeToString,
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RequestStateRequest.FromString,
             options,
             channel_credentials,
             insecure,
@@ -270,7 +270,7 @@ class FunctionExecutor(object):
         )
 
     @staticmethod
-    def list_tasks(
+    def list_allocations(
         request,
         target,
         options=(),
@@ -285,9 +285,9 @@ class FunctionExecutor(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/function_executor_service.FunctionExecutor/list_tasks",
-            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.ListTasksRequest.SerializeToString,
-            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.ListTasksResponse.FromString,
+            "/function_executor_service.FunctionExecutor/list_allocations",
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.ListAllocationsRequest.SerializeToString,
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.ListAllocationsResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -300,7 +300,7 @@ class FunctionExecutor(object):
         )
 
     @staticmethod
-    def create_task(
+    def create_allocation(
         request,
         target,
         options=(),
@@ -315,9 +315,9 @@ class FunctionExecutor(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/function_executor_service.FunctionExecutor/create_task",
-            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.CreateTaskRequest.SerializeToString,
-            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Task.FromString,
+            "/function_executor_service.FunctionExecutor/create_allocation",
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.CreateAllocationRequest.SerializeToString,
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Allocation.FromString,
             options,
             channel_credentials,
             insecure,
@@ -330,7 +330,7 @@ class FunctionExecutor(object):
         )
 
     @staticmethod
-    def await_task(
+    def await_allocation(
         request,
         target,
         options=(),
@@ -345,9 +345,9 @@ class FunctionExecutor(object):
         return grpc.experimental.unary_stream(
             request,
             target,
-            "/function_executor_service.FunctionExecutor/await_task",
-            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitTaskRequest.SerializeToString,
-            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitTaskProgress.FromString,
+            "/function_executor_service.FunctionExecutor/await_allocation",
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitAllocationRequest.SerializeToString,
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitAllocationProgress.FromString,
             options,
             channel_credentials,
             insecure,
@@ -360,7 +360,7 @@ class FunctionExecutor(object):
         )
 
     @staticmethod
-    def delete_task(
+    def delete_allocation(
         request,
         target,
         options=(),
@@ -375,8 +375,8 @@ class FunctionExecutor(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/function_executor_service.FunctionExecutor/delete_task",
-            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.DeleteTaskRequest.SerializeToString,
+            "/function_executor_service.FunctionExecutor/delete_allocation",
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.DeleteAllocationRequest.SerializeToString,
             tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Empty.FromString,
             options,
             channel_credentials,
