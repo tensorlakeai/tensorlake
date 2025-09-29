@@ -211,7 +211,7 @@ class APIClient:
         self,
         manifest_json: str,
         code_zip: bytes,
-        upgrade_requests_to_latest_code: bool,
+        upgrade_running_requests: bool,
     ):
         response = self._post(
             f"v1/namespaces/{self._namespace}/applications",
@@ -219,7 +219,7 @@ class APIClient:
             data={
                 "code_content_type": "application/zip",
                 "application": manifest_json,
-                "upgrade_requests_to_latest_code": upgrade_requests_to_latest_code,
+                "upgrade_requests_to_latest_code": upgrade_running_requests,
             },
         )
         response.raise_for_status()

@@ -16,13 +16,13 @@ from ..remote.application.zip import zip_application_code
 
 def deploy(
     application_source_dir_or_file_path: str,
-    use_latest_application_code_in_running_requests: bool = True,
+    upgrade_running_requests: bool = True,
     load_application_modules: bool = False,
 ) -> None:
     """Deploys all the Tensorlake Functions so they are runnable in remote mode (i.e. on Tensorlake Cloud).
 
     `application_source_dir_or_file_path` is a path to application source code directory or file.
-    `upgrade_requests_to_latest_code` indicates whether to update running requests to use the latest code.
+    `upgrade_running_requests` indicates whether to update running requests to use the deployed code.
     `load_application_modules` indicates whether to load all application code modules so that the registry is populated.
                                Should be set to True when called from CLI, False when called programmatically from test code.
     """
@@ -55,5 +55,5 @@ def deploy(
         api_client.upsert_application(
             manifest_json=app_manifest.model_dump_json(),
             code_zip=app_code,
-            upgrade_requests_to_latest_code=use_latest_application_code_in_running_requests,
+            upgrade_running_requests=upgrade_running_requests,
         )

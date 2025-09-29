@@ -18,7 +18,7 @@ class TestApplicationUpdate(unittest.TestCase):
         # Update functions to v1.
         reload(update_code_v1)
 
-        deploy(__file__, use_latest_application_code_in_running_requests=False)
+        deploy(__file__, upgrade_running_requests=False)
 
         # The request is sleeping in start_func.
         request_v1: tensorlake.Request = tensorlake.call_remote_api(
@@ -32,7 +32,7 @@ class TestApplicationUpdate(unittest.TestCase):
         # Update functions to v2.
         reload(update_code_v2)
 
-        deploy(__file__, use_latest_application_code_in_running_requests=True)
+        deploy(__file__, upgrade_running_requests=True)
 
         # The request should be updated by Server to call the updated graph version with v2 update_code_end_func
         # which returns a different value than v1.
@@ -47,7 +47,7 @@ class TestApplicationUpdate(unittest.TestCase):
         # Update functions to v1.
         reload(update_code_v1)
 
-        deploy(__file__, use_latest_application_code_in_running_requests=False)
+        deploy(__file__, upgrade_running_requests=False)
 
         # The request is sleeping in start_func.
         request_v1: tensorlake.Request = tensorlake.call_remote_api(
@@ -61,7 +61,7 @@ class TestApplicationUpdate(unittest.TestCase):
         # Update functions to v2.
         reload(update_code_v2)
 
-        deploy(__file__, use_latest_application_code_in_running_requests=False)
+        deploy(__file__, upgrade_running_requests=False)
 
         # The request should not be updated by Server so the request should still call v1 update_code_end_func.
         end_func_output: str = request_v1.output()
