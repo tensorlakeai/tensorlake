@@ -18,7 +18,16 @@ from testing import (
 )
 
 # This import will be replaced by `import tensorlake` when we switch to the new SDK UX.
-import tensorlake.workflows.interface as tensorlake
+import tensorlake.applications.interface as tensorlake
+from tensorlake.applications.ast.function_call_node import (
+    ArgumentMetadata,
+    RegularFunctionCallMetadata,
+)
+from tensorlake.applications.ast.value_node import ValueMetadata
+from tensorlake.applications.user_data_serializer import (
+    JSONUserDataSerializer,
+    PickleUserDataSerializer,
+)
 from tensorlake.function_executor.handlers.run_function.function_call_node_metadata import (
     FunctionCallNodeMetadata,
     FunctionCallType,
@@ -45,15 +54,6 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
-)
-from tensorlake.workflows.ast.function_call_node import (
-    ArgumentMetadata,
-    RegularFunctionCallMetadata,
-)
-from tensorlake.workflows.ast.value_node import ValueMetadata
-from tensorlake.workflows.user_data_serializer import (
-    JSONUserDataSerializer,
-    PickleUserDataSerializer,
 )
 
 APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))

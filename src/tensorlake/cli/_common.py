@@ -1,7 +1,6 @@
 import importlib.metadata
 import sys
 from dataclasses import dataclass
-from typing import Optional
 
 import click
 import httpx
@@ -12,7 +11,7 @@ except importlib.metadata.PackageNotFoundError:
     VERSION = "unknown"
 
 
-from tensorlake.functions_sdk.http_client import TensorlakeClient
+from tensorlake.applications.remote.api_client import APIClient
 
 from .config import get_nested_value, load_config
 
@@ -23,13 +22,13 @@ class Context:
 
     base_url: str
     namespace: str
-    api_key: Optional[str] = None
-    default_graph: Optional[str] = None
-    default_request: Optional[str] = None
+    api_key: str | None = None
+    default_application: str | None = None
+    default_request: str | None = None
     version: str = VERSION
-    _client: Optional[httpx.Client] = None
-    _introspect_response: Optional[httpx.Response] = None
-    _tensorlake_client: Optional[TensorlakeClient] = None
+    _client: httpx.Client | None = None
+    _introspect_response: httpx.Response | None = None
+    _api_client: APIClient | None = None
 
     @property
     def client(self) -> httpx.Client:
@@ -44,14 +43,14 @@ class Context:
         return self._client
 
     @property
-    def tensorlake_client(self) -> TensorlakeClient:
-        if self._tensorlake_client is None:
-            self._tensorlake_client = TensorlakeClient(
-                service_url=self.base_url,
-                api_key=self.api_key,
+    def api_client(self) -> APIClient:
+        if self._api_client is None:
+            self._api_client = APIClient(
                 namespace=self.namespace,
+                api_url=self.base_url,
+                api_key=self.api_key,
             )
-        return self._tensorlake_client
+        return self._api_client
 
     @property
     def api_key_id(self):
@@ -83,9 +82,9 @@ class Context:
     @classmethod
     def default(
         cls,
-        base_url: Optional[str] = None,
-        api_key: Optional[str] = None,
-        namespace: Optional[str] = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        namespace: str | None = None,
     ) -> "Context":
         """Create a Context with values from CLI args, environment, saved config, or defaults."""
         config_data = load_config()
@@ -102,14 +101,14 @@ class Context:
             or get_nested_value(config_data, "indexify.namespace")
             or "default"
         )
-        final_default_graph = get_nested_value(config_data, "default.graph")
+        final_default_app = get_nested_value(config_data, "default.application")
         final_default_request = get_nested_value(config_data, "default.request")
 
         return cls(
             base_url=final_base_url,
             api_key=final_api_key,
             namespace=final_namespace,
-            default_graph=final_default_graph,
+            default_application=final_default_app,
             default_request=final_default_request,
         )
 

@@ -10,17 +10,16 @@ from typing import Any, Dict, Generator, Iterator, List
 
 import grpc
 
-# Code that uses SDK has to import first the SDK interfaces to avoid circular imports when importing internal SDK modules.
-import tensorlake.workflows.interface as workflows_interface
-from tensorlake.workflows.function.function_call import create_self_instance
-from tensorlake.workflows.registry import get_function, get_functions, has_function
-from tensorlake.workflows.remote.application.zip import (
+from tensorlake.applications import Function, RequestProgress
+from tensorlake.applications.function.function_call import create_self_instance
+from tensorlake.applications.registry import get_function, get_functions, has_function
+from tensorlake.applications.remote.application.zip import (
     APPLICATION_ZIP_MANIFEST_FILE_NAME,
     ApplicationZIPManifest,
     FunctionZIPManifest,
 )
-from tensorlake.workflows.request_context_base import RequestContextBase
-from tensorlake.workflows.request_metrics_recorder import RequestMetricsRecorder
+from tensorlake.applications.request_context_base import RequestContextBase
+from tensorlake.applications.request_metrics_recorder import RequestMetricsRecorder
 
 from .blob_store.blob_store import BLOBStore
 from .handlers.check_health.handler import Handler as CheckHealthHandler
@@ -83,7 +82,7 @@ class _AllocationInfo:
         )
 
 
-class TaskAllocationRequestProgress(workflows_interface.RequestProgress):
+class TaskAllocationRequestProgress(RequestProgress):
     def __init__(self, alloc_info: _AllocationInfo):
         self._alloc_info: _AllocationInfo = alloc_info
 
@@ -107,7 +106,7 @@ class Service(FunctionExecutorServicer):
             module=__name__, **info_response_kv_args()
         )
         self._function_ref: FunctionRef | None = None
-        self._function: workflows_interface.Function | None = None
+        self._function: Function | None = None
         self._function_instance_arg: Any | None = None
         self._blob_store: BLOBStore | None = None
         self._request_state_proxy_server: RequestStateProxyServer | None = None

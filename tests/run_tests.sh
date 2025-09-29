@@ -8,7 +8,7 @@ if [[ -z "$INDEXIFY_URL" ]]; then
 fi
 
 enable_fe_test_suite=false
-enable_workflows_test_suite=false
+enable_applications_test_suite=false
 enable_cli_test_suite=false
 enable_utils_test_suite=false
 enable_document_ai_test_suite=false
@@ -20,7 +20,7 @@ elif [ "$1" == "--document-ai" ]; then
 else
   # All by default
   enable_fe_test_suite=true
-  enable_workflows_test_suite=true
+  enable_applications_test_suite=true
   enable_cli_test_suite=true
   enable_utils_test_suite=true
 fi
@@ -53,7 +53,7 @@ summary_file=".run_tests_summary.txt"
 rm -f $summary_file
 
 function_executor_test_files=$(find ./function_executor -name 'test_*.py')
-workflows_test_files=$(find ./workflows -name 'test_*.py')
+applications_test_files=$(find ./applications -name 'test_*.py')
 cli_test_files=$(find ./cli -name 'test_*.py')
 utils_test_files=$(find ./utils -name 'test_*.py')
 document_ai_test_files=$(find ./document_ai -name 'test_*.py')
@@ -62,8 +62,8 @@ if [ "$enable_fe_test_suite" = true ]; then
   run_test_suite "$function_executor_test_files" "Function Executor"
 fi
 
-if [ "$enable_workflows_test_suite" = true ]; then
-  run_test_suite "$workflows_test_files" "Workflows"
+if [ "$enable_applications_test_suite" = true ]; then
+  run_test_suite "$applications_test_files" "Applications"
 fi
 
 if [ "$enable_cli_test_suite" = true ]; then

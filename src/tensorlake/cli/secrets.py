@@ -13,7 +13,7 @@ def secrets():
     """
     Serverless Secrets Management
 
-    Secrets are provided to compute graphs as environment variables. Names are case sensitive.
+    Secrets are provided to applications as environment variables. Names are case sensitive.
     """
     pass
 
@@ -36,14 +36,15 @@ def list(ctx: Context):
     table.add_column("Created At", style="green")
 
     for secret in secrets:
-        created_at = datetime.fromisoformat(secret["createdAt"])
-        # Convert to local time
-        local_created_at = created_at.astimezone(
-            datetime.now(timezone.utc).astimezone().tzinfo
-        )
-        local_created_at_iso = local_created_at.isoformat()
+        # FIXME: format createdAt using iso format.
+        # created_at = datetime.fromisoformat(secret["createdAt"])
+        # # Convert to local time
+        # local_created_at = created_at.astimezone(
+        #     datetime.now(timezone.utc).astimezone().tzinfo
+        # )
+        # local_created_at_iso = local_created_at.isoformat()
 
-        table.add_row(secret["name"], local_created_at_iso)
+        table.add_row(secret["name"], secret["createdAt"])
 
     console = Console()
     console.print(table)

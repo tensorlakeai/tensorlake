@@ -18,7 +18,7 @@ import asyncio
 import os
 import tempfile
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict
 
 import aiofiles
 import click
@@ -26,31 +26,32 @@ import httpx
 from httpx_sse import aconnect_sse
 from pydantic import BaseModel
 
-from tensorlake import Image
+from tensorlake.applications import Image
+from tensorlake.applications.image import create_image_context_file, image_hash
 
 
 @dataclass
 class BuildContext:
     """
     Build context for the image builder service.
-    This context contains information about the graph, graph version,
+    This context contains information about the application, application version,
     and function name used for building the image.
 
     Attributes:
-        graph_name (str): The name of the graph to be built.
-        graph_version (str): The version of the graph to be built.
+        application_name (str): The name of the application to be built.
+        application_version (str): The version of the application to be built.
         function_name (str): The name of the function used in the build.
 
     Example:
         context = BuildContext(
-            graph="example_graph",
-            graph_version="v1.0",
+            application_name="example_app",
+            application_version="v1.0",
             function_name="example_function"
         )
     """
 
-    graph_name: str
-    graph_version: str
+    application_name: str
+    application_version: str
     function_name: str
 
 
@@ -63,16 +64,16 @@ class BuildInfo(BaseModel):
         status (str): The status of the build (e.g., "pending", "in_progress", "completed").
         created_at (str): The timestamp when the build was created.
         updated_at (str): The timestamp when the build was last updated.
-        finished_at (Optional[str]): The timestamp when the build was finished.
-        error_message (Optional[str]): An optional error message if the build failed.
+        finished_at (str | None): The timestamp when the build was finished.
+        error_message (str | None): An optional error message if the build failed.
     """
 
     id: str
     status: str
     created_at: str
     updated_at: str
-    finished_at: Optional[str]
-    error_message: Optional[str] = None
+    finished_at: str | None
+    error_message: str | None = None
 
 
 class BuildLogEvent(BaseModel):
@@ -125,8 +126,9 @@ class ImageBuilderV2Client:
             ImageBuilderV2Client: An instance of the ImageBuilderV2Client.
         """
         api_key = os.getenv("TENSORLAKE_API_KEY")
-        server_url = os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")
-        build_url = os.getenv("TENSORLAKE_BUILD_SERVICE", f"{server_url}/images/v2")
+        build_url = os.getenv(
+            "TENSORLAKE_BUILD_SERVICE", "https://api.tensorlake.ai/images/v2"
+        )
         return cls(build_url, api_key)
 
     async def build_collection(
@@ -144,10 +146,10 @@ class ImageBuilderV2Client:
 
         builds = {}
         for image, context in context_collection.items():
-            click.echo(f"Building {image.image_name}")
+            click.echo(f"Building {image.name}")
             build = await self.build(context, image)
-            click.echo(f"Built {image.image_name} with hash {image.hash()}")
-            builds[image.hash()] = build.id
+            click.echo(f"Built {image.name} with hash {image_hash(image)}")
+            builds[image_hash(image)] = build.id
 
         return builds
 
@@ -156,34 +158,34 @@ class ImageBuilderV2Client:
         Build an image using the provided build context.
 
         Args:
-            context (BuildContext): The build context containing information about the graph,
-                                    graph version, and function name.
+            context (BuildContext): The build context containing information about the application,
+                                    application version, and function name.
             image (Image): The image to be built.
         Returns:
             dict: The response from the image builder service.
         """
         click.echo(
-            f"Building {context.graph_name} version {context.graph_version} for {context.function_name}"
+            f"Building {context.application_name} version {context.application_version} for {context.function_name}"
         )
 
-        _fd, context_file = tempfile.mkstemp()
-        image.build_context(context_file)
+        _fd, context_file_path = tempfile.mkstemp()
+        create_image_context_file(image, context_file_path)
 
         click.echo(
-            f"{context.graph_name}: Posting {os.path.getsize(context_file)} bytes of context to build service...."
+            f"{context.application_name}: Posting {os.path.getsize(context_file_path)} bytes of context to build service...."
         )
 
         files = {}
-        async with aiofiles.open(context_file, "rb") as fp:
+        async with aiofiles.open(context_file_path, "rb") as fp:
             files["context"] = await fp.read()
 
-        os.remove(context_file)
+        os.remove(context_file_path)
         data = {
-            "graph_name": context.graph_name,
-            "graph_version": context.graph_version,
+            "graph_name": context.application_name,
+            "graph_version": context.application_version,
             "graph_function_name": context.function_name,
-            "image_hash": image.hash(),
-            "image_name": image.image_name,
+            "image_hash": image_hash(image),
+            "image_name": image.name,
         }
 
         res = await self._client.put(
@@ -196,16 +198,12 @@ class ImageBuilderV2Client:
 
         if not res.is_success:
             error_message = res.text
-            click.secho(
-                f"Error building image {image.image_name}: {error_message}", fg="red"
-            )
-            raise RuntimeError(
-                f"Error building image {image.image_name}: {error_message}"
-            )
+            click.secho(f"Error building image {image.name}: {error_message}", fg="red")
+            raise RuntimeError(f"Error building image {image.name}: {error_message}")
 
         build = BuildInfo.model_validate(res.json())
 
-        click.secho(f"Starting build for image {image.image_name} ...", fg="green")
+        click.secho(f"Starting build for image {image.name} ...", fg="green")
         click.secho(f"Build ID: {build.id}", fg="green")
 
         try:
@@ -297,9 +295,7 @@ class ImageBuilderV2Client:
 
     async def _cancel_build(self, build: BuildInfo, image: Image):
         try:
-            click.secho(
-                f"\nCancelling build for image {image.image_name} ...", fg="yellow"
-            )
+            click.secho(f"\nCancelling build for image {image.name} ...", fg="yellow")
             response = await self._client.post(
                 f"{self._build_service}/builds/{build.id}/cancel",
                 headers=self._headers,
@@ -308,14 +304,14 @@ class ImageBuilderV2Client:
 
             if response.status_code == 202:
                 click.secho(
-                    f"Build for image {image.image_name} cancelled successfully",
+                    f"Build for image {image.name} cancelled successfully",
                     fg="green",
                 )
             else:
                 click.secho(f"Failed to cancel build {build.id}", fg="red")
-            click.secho(f"Cancelled build for image {image.image_name}", fg="yellow")
+            click.secho(f"Cancelled build for image {image.name}", fg="yellow")
         except Exception as e:
             click.secho(
-                f"Failed to cancel build for image {image.image_name}: {e}",
+                f"Failed to cancel build for image {image.name}: {e}",
                 fg="red",
             )

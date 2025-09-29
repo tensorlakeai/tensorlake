@@ -2,7 +2,7 @@ import hashlib
 import time
 from typing import List
 
-from tensorlake.workflows.ast.value_node import ValueNode
+from tensorlake.applications.ast.value_node import ValueNode
 
 from ...blob_store.blob_store import BLOBStore
 from ...logger import FunctionExecutorLogger

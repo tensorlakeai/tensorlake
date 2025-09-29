@@ -14,7 +14,8 @@ from testing import (
     run_allocation,
 )
 
-import tensorlake.workflows.interface as tensorlake
+import tensorlake.applications.interface as tensorlake
+from tensorlake.applications.remote.application.zip import zip_application_code
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     AllocationOutcomeCode,
     AllocationResult,
@@ -27,7 +28,6 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
-from tensorlake.workflows.remote.application.zip import zip_application_code
 
 APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
 

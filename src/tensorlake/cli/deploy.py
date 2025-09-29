@@ -1,103 +1,126 @@
 import asyncio
-from typing import Dict, List
+import os
+import traceback
+from typing import Dict, Set
 
 import click
 
-from tensorlake import Graph, Image
-from tensorlake.builder.client_v2 import ImageBuilderV2Client
+from tensorlake.applications import Application, Image
+from tensorlake.applications.application import get_user_defined_or_default_application
+from tensorlake.applications.image import (
+    ImageInformation,
+    image_infos,
+)
+from tensorlake.applications.remote.application.ignored_code_paths import (
+    ignored_code_paths,
+)
+from tensorlake.applications.remote.application.loader import load_application
+from tensorlake.applications.remote.deploy import deploy as tl_deploy
+from tensorlake.applications.secrets import list_secret_names
+from tensorlake.builder.client_v2 import BuildContext, ImageBuilderV2Client
 from tensorlake.cli._common import Context, pass_auth
 from tensorlake.cli.secrets import warning_missing_secrets
-from tensorlake.functions_sdk.graph_serialization import graph_code_dir_path
-from tensorlake.functions_sdk.remote_graph import RemoteGraph
-from tensorlake.functions_sdk.workflow_module import (
-    ImageInfo,
-    WorkflowModuleInfo,
-    load_workflow_module_info,
+
+
+@click.command(
+    short_help="Deploys application defined in <application-dir-path> directory to Tensorlake Cloud"
 )
-
-
-@click.command()
 @click.option("-p", "--parallel-builds", is_flag=True, default=False)
-@click.option("-r", "--retry", is_flag=True, default=False)
-@click.option("--upgrade-queued-requests", is_flag=True, default=False)
-@click.option("--builder-v2", is_flag=True, default=False)
-@click.argument("workflow_file", type=click.File("r"))
+@click.option(
+    "-u",
+    "--upgrade-running-requests",
+    is_flag=True,
+    default=False,
+    help="Upgrade requests that are already queued or running to use the new deployed version of the application",
+)
+@click.argument(
+    "application-dir-path",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True),
+)
 @pass_auth
 def deploy(
     auth: Context,
-    workflow_file: click.File,
+    application_dir_path: str,
     # TODO: implement with image builder v2
     parallel_builds: bool,
-    # Keeping --retry flag for backward compatibility with stable SDK.
-    # TODO: remove the retry option once we stop using the stable SDK version.
-    retry: bool,
-    upgrade_queued_requests: bool,
-    # We use builder v2 unconditionally, keeping --builder-v2 flag for backward compatibility with
-    # stable SDK. TODO: remove the option once we stop using the stable SDK version.
-    builder_v2: bool,
+    upgrade_running_requests: bool,
 ):
-    """Deploy a workflow to tensorlake."""
+    """Deploys application to tensorlake."""
 
-    click.echo(f"Preparing deployment for {workflow_file.name}")
+    click.echo(f"Preparing deployment for application from {application_dir_path}")
     builder_v2 = ImageBuilderV2Client.from_env()
 
     try:
-        workflow_module_info: WorkflowModuleInfo = load_workflow_module_info(
-            workflow_file.name
-        )
+        application_dir_path: str = os.path.abspath(application_dir_path)
+
+        ignored_absolute_paths: Set[str] = ignored_code_paths(application_dir_path)
+        load_application(application_dir_path, ignored_absolute_paths)
     except Exception as e:
         click.secho(
-            f"Failed loading workflow file, please check the error message: {e}",
+            f"Failed to load the application modules, please check the error message: {e}",
             fg="red",
         )
+        traceback.print_exception(e)
         raise click.Abort
 
-    _validate_workflow_module(workflow_module_info, auth)
+    application: Application = get_user_defined_or_default_application()
+    # warning_missing_secrets(auth, list(list_secret_names()))
 
-    asyncio.run(_prepare_images_v2(builder_v2, workflow_module_info.images))
+    asyncio.run(_prepare_images_v2(builder_v2, application))
 
     click.secho("Everything looks good, deploying now", fg="green")
-    _deploy_graphs(
-        graphs=workflow_module_info.graphs,
-        code_dir_path=graph_code_dir_path(workflow_file.name),
-        upgrade_queued_requests=upgrade_queued_requests,
+
+    _deploy_application(
+        application=application,
+        application_dir_path=application_dir_path,
+        upgrade_running_requests=upgrade_running_requests,
     )
 
 
-def _validate_workflow_module(workflow_module_info: WorkflowModuleInfo, ctx: Context):
-    if len(workflow_module_info.graphs) == 0:
-        raise click.UsageError(
-            "No graphs found in the workflow file, make sure at least one graph is defined as a global variable."
-        )
-    warning_missing_secrets(ctx, list(workflow_module_info.secret_names))
-
-
 async def _prepare_images_v2(
-    builder_v2: ImageBuilderV2Client, images: Dict[Image, ImageInfo]
+    builder_v2: ImageBuilderV2Client,
+    app: Application,
 ):
-    for image, image_info in images.items():
-        for build_context in image_info.build_contexts:
-            click.secho(f"Building image {image.image_name}...", fg="yellow")
-            await builder_v2.build(build_context, image_info.image)
+    images: Dict[Image, ImageInformation] = image_infos()
+    for image_info in images.values():
+        image_info: ImageInformation
+        for function in image_info.functions:
+            click.secho(f"Building image {image_info.image.name}...", fg="yellow")
+            try:
+                await builder_v2.build(
+                    BuildContext(
+                        application_name=app.name,
+                        application_version=app.version,
+                        function_name=function.function_config.function_name,
+                    ),
+                    image_info.image,
+                )
+            except Exception as e:
+                click.secho(
+                    f"Failed to build image {image_info.image.name}, please check the error message: {e}",
+                    fg="red",
+                )
+                traceback.print_exception(e)
+                raise click.Abort
 
-    click.secho(f"Built {len(images)} images with builder v2", fg="green")
+    click.secho(f"Built {len(images)} images", fg="green")
 
 
-def _deploy_graphs(
-    graphs: List[Graph], code_dir_path: str, upgrade_queued_requests: bool
+def _deploy_application(
+    application: Application, application_dir_path: str, upgrade_running_requests: bool
 ):
-    for graph in graphs:
-        try:
-            RemoteGraph.deploy(
-                graph,
-                code_dir_path=code_dir_path,
-                upgrade_tasks_to_latest_version=upgrade_queued_requests,
-            )
-        except Exception as e:
-            click.secho(
-                f"Graph {graph.name} could not be deployed, please check the error message: {e}",
-                fg="red",
-            )
-            raise click.Abort
+    try:
+        tl_deploy(
+            application_source_dir_or_file_path=application_dir_path,
+            upgrade_running_requests=upgrade_running_requests,
+            load_application_modules=False,  # Already loaded
+        )
+    except Exception as e:
+        click.secho(
+            f"Application {application.name} could not be deployed, please check the error message: {e}",
+            fg="red",
+        )
+        traceback.print_exception(e)
+        raise click.Abort
 
-        click.secho(f"Deployed {graph.name}", fg="green")
+    click.secho(f"Deployed {application.name}", fg="green")

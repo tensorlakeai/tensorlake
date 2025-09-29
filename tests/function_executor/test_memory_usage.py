@@ -12,7 +12,7 @@ from testing import (
     run_allocation,
 )
 
-import tensorlake.workflows.interface as tensorlake
+import tensorlake.applications.interface as tensorlake
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     AllocationOutcomeCode,
     AllocationResult,

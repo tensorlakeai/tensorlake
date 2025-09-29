@@ -1,23 +1,23 @@
 import time
 from typing import Any, List
 
-from tensorlake.workflows.ast import (
+from tensorlake.applications.ast import (
     ReducerFunctionCallMetadata,
     RegularFunctionCallMetadata,
     RegularFunctionCallNode,
     ValueNode,
 )
-from tensorlake.workflows.function.api_call import (
+from tensorlake.applications.function.api_call import (
     api_function_call_with_serialized_payload,
 )
-from tensorlake.workflows.function.function_call import (
+from tensorlake.applications.function.function_call import (
     set_request_context_args,
     set_self_arg,
 )
-from tensorlake.workflows.function.reducer_call import reducer_function_call
-from tensorlake.workflows.interface.function import Function
-from tensorlake.workflows.interface.function_call import RegularFunctionCall
-from tensorlake.workflows.request_context_base import RequestContextBase
+from tensorlake.applications.function.reducer_call import reducer_function_call
+from tensorlake.applications.interface.function import Function
+from tensorlake.applications.interface.function_call import RegularFunctionCall
+from tensorlake.applications.request_context_base import RequestContextBase
 
 from ...blob_store.blob_store import BLOBStore
 from ...logger import FunctionExecutorLogger

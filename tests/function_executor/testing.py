@@ -8,7 +8,12 @@ from typing import Any, Dict, List
 import grpc
 
 # Interface should be imported first before internal modules.
-import tensorlake.workflows.interface as tensorlake
+import tensorlake.applications.interface as tensorlake
+from tensorlake.applications.ast.value_node import ValueMetadata
+from tensorlake.applications.remote.application.zip import zip_application_code
+from tensorlake.applications.user_data_serializer import (
+    JSONUserDataSerializer,
+)
 from tensorlake.function_executor.handlers.run_function.value_node_metadata import (
     ValueNodeMetadata,
 )
@@ -34,11 +39,6 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
 from tensorlake.function_executor.proto.server_configuration import GRPC_SERVER_OPTIONS
-from tensorlake.workflows.ast.value_node import ValueMetadata
-from tensorlake.workflows.remote.application.zip import zip_application_code
-from tensorlake.workflows.user_data_serializer import (
-    JSONUserDataSerializer,
-)
 
 
 class FunctionExecutorProcessContextManager:

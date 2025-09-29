@@ -17,7 +17,10 @@ from testing import (
 )
 
 # This import will be replaced by `import tensorlake` when we switch to the new SDK UX.
-import tensorlake.workflows.interface as tensorlake
+import tensorlake.applications.interface as tensorlake
+from tensorlake.applications.user_data_serializer import (
+    PickleUserDataSerializer,
+)
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     AllocationOutcomeCode,
     AllocationResult,
@@ -35,9 +38,6 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
-)
-from tensorlake.workflows.user_data_serializer import (
-    PickleUserDataSerializer,
 )
 
 APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
