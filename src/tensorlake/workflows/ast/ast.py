@@ -32,6 +32,7 @@ def ast_from_user_object(
             # This is important, because otherwise this item will be serialized using
             # the reducer input serializer and then the item will be returned as
             # reducer call output which means reducer call output serializer will not be used.
+            # ReducerFunctionCall.inputs are guaranteed to have at least one item.
             return ast_from_user_object(user_object.inputs.items[0], value_serializer)
     else:
         return ValueNode.from_value(user_object, value_serializer)

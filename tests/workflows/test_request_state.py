@@ -107,8 +107,8 @@ def test_request_context_state_set_get_pydantic_model_internal(
 
 
 class TestRequestContext(unittest.TestCase):
-    @parameterized.parameterized.expand([(False), (True)])
-    def test_request_context_state_set_get_simple_value(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_request_context_state_set_get_simple_value(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
 
@@ -119,8 +119,10 @@ class TestRequestContext(unittest.TestCase):
         output: int = request.output()
         self.assertEqual(output, 11)
 
-    @parameterized.parameterized.expand([(False), (True)])
-    def test_request_context_state_set_get_user_class_instance(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_request_context_state_set_get_user_class_instance(
+        self, _: str, is_remote: bool
+    ):
         if is_remote:
             deploy(__file__)
 
@@ -133,8 +135,10 @@ class TestRequestContext(unittest.TestCase):
         output: str = request.output()
         self.assertEqual(output, "success")
 
-    @parameterized.parameterized.expand([(False), (True)])
-    def test_request_context_state_set_get_pydantic_model(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_request_context_state_set_get_pydantic_model(
+        self, _: str, is_remote: bool
+    ):
         if is_remote:
             deploy(__file__)
 
@@ -147,8 +151,8 @@ class TestRequestContext(unittest.TestCase):
         output: str = request.output()
         self.assertEqual(output, "success")
 
-    @parameterized.parameterized.expand([(False), (True)])
-    def test_request_context_state_get_default_value(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_request_context_state_get_default_value(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
 
@@ -161,9 +165,9 @@ class TestRequestContext(unittest.TestCase):
         output: str = request.output()
         self.assertEqual(output, "default_value")
 
-    @parameterized.parameterized.expand([(False), (True)])
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_request_context_state_get_without_default_value_returns_none(
-        self, is_remote: bool
+        self, _: str, is_remote: bool
     ):
         if is_remote:
             deploy(__file__)

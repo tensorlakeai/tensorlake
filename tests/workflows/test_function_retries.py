@@ -28,8 +28,8 @@ def function_that_always_fails(x: int) -> str:
 
 
 class TestFunctionRetries(unittest.TestCase):
-    @parameterized.parameterized.expand([(True), (False)])
-    def test_function_retries(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_function_retries(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
 
@@ -44,8 +44,8 @@ class TestFunctionRetries(unittest.TestCase):
             duration_sec, 10.0
         )  # 3 retries with max 1 second delay should complete in less than 10 seconds
 
-    @parameterized.parameterized.expand([(True), (False)])
-    def test_function_fails_with_retries_exhausted(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_function_fails_with_retries_exhausted(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
 

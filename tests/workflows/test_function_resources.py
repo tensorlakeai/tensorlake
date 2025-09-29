@@ -13,8 +13,8 @@ def function_with_custom_resources(x: int) -> str:
 
 
 class TestFunctionResources(unittest.TestCase):
-    @parameterized.parameterized.expand([(True), (False)])
-    def test_function_with_custom_resources_succeeds(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_function_with_custom_resources_succeeds(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
         request: tensorlake.Request = tensorlake.call_api(

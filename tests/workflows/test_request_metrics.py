@@ -15,8 +15,8 @@ def emit_metrics(ctx: tensorlake.RequestContext, x: int) -> int:
 
 
 class TestRequestMetrics(unittest.TestCase):
-    @parameterized.parameterized.expand([(True), (False)])
-    def test_metrics_settable(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_metrics_settable(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
 

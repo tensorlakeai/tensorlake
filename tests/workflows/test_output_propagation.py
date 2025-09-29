@@ -43,8 +43,8 @@ def buzz() -> str:
 
 
 class TestFunctionOutputPropagation(unittest.TestCase):
-    @parameterized.parameterized.expand([(True), (False)])
-    def test_success(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_success(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
         request: Request = call_api(
@@ -80,8 +80,8 @@ def concat_strings_value(a: str, b: str) -> str:
 
 
 class TestReducerValueOutputPropagation(unittest.TestCase):
-    @parameterized.parameterized.expand([(True), (False)])
-    def test_success(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_success(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
         request: Request = call_api(
@@ -122,8 +122,8 @@ def concat_strings_actually(a: str, b: str) -> str:
 
 
 class TestReducerSubcallOutputPropagation(unittest.TestCase):
-    @parameterized.parameterized.expand([(True), (False)])
-    def test_success(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_success(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
         request: Request = call_api(

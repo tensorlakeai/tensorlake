@@ -67,8 +67,8 @@ def test_mixed_args_internal(a: int, b: str, /, c: float, *, d: bool) -> str:
 
 
 class TestRegularFunctionCallSignatures(unittest.TestCase):
-    @parameterized.parameterized.expand([(False), (True)])
-    def test_function_with_no_args(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_function_with_no_args(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
 
@@ -77,8 +77,8 @@ class TestRegularFunctionCallSignatures(unittest.TestCase):
         )
         self.assertEqual(request.output(), "success")
 
-    @parameterized.parameterized.expand([(False), (True)])
-    def test_function_with_only_ctx_arg(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_function_with_only_ctx_arg(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
 
@@ -87,8 +87,8 @@ class TestRegularFunctionCallSignatures(unittest.TestCase):
         )
         self.assertEqual(request.output(), f"ctx id: {request.id}")
 
-    @parameterized.parameterized.expand([(False), (True)])
-    def test_only_positional_args(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_only_positional_args(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
 
@@ -99,8 +99,8 @@ class TestRegularFunctionCallSignatures(unittest.TestCase):
         )
         self.assertEqual(request.output(), "a=42,b=hello,c=3.14,d=True")
 
-    @parameterized.parameterized.expand([(False), (True)])
-    def test_only_kwargs(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_only_kwargs(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
 
@@ -111,8 +111,8 @@ class TestRegularFunctionCallSignatures(unittest.TestCase):
         )
         self.assertEqual(request.output(), "a=42,b=hello,c=3.14,d=True")
 
-    @parameterized.parameterized.expand([(False), (True)])
-    def test_mixed_args(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_mixed_args(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
 

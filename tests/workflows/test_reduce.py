@@ -94,8 +94,8 @@ def generate_single_value() -> AccumulatedState:
 
 
 class TestReduce(unittest.TestCase):
-    @parameterized.parameterized.expand([(True), (False)])
-    def test_success_function_call_collection(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_success_function_call_collection(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
 
@@ -105,8 +105,8 @@ class TestReduce(unittest.TestCase):
         result: AccumulatedState = request.output()
         self.assertEqual(result.sum, 15)  # 0 + 1 + 2 + 3 + 4 + 5
 
-    @parameterized.parameterized.expand([(True), (False)])
-    def test_success_value_collection(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_success_value_collection(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
 
@@ -116,8 +116,8 @@ class TestReduce(unittest.TestCase):
         result: AccumulatedState = request.output()
         self.assertEqual(result.sum, 15)  # 0 + 1 + 2 + 3 + 4 + 5
 
-    @parameterized.parameterized.expand([(True), (False)])
-    def test_failure(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_failure(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
 
@@ -126,8 +126,8 @@ class TestReduce(unittest.TestCase):
         )
         self.assertRaises(tensorlake.RequestFailureException, request.output)
 
-    @parameterized.parameterized.expand([(True), (False)])
-    def test_reduce_nothing(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_reduce_nothing(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
 
@@ -136,8 +136,8 @@ class TestReduce(unittest.TestCase):
         )
         self.assertRaises(tensorlake.RequestFailureException, request.output)
 
-    @parameterized.parameterized.expand([(True), (False)])
-    def test_reduce_initial(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_reduce_initial(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
 
@@ -149,8 +149,8 @@ class TestReduce(unittest.TestCase):
         result: AccumulatedState = request.output()
         self.assertEqual(result.sum, 10)
 
-    @parameterized.parameterized.expand([(True), (False)])
-    def test_reduce_one_value_item(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_reduce_one_value_item(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
 
@@ -162,8 +162,8 @@ class TestReduce(unittest.TestCase):
         result: AccumulatedState = request.output()
         self.assertEqual(result.sum, 10)
 
-    @parameterized.parameterized.expand([(True), (False)])
-    def test_reduce_one_function_call_item(self, is_remote: bool):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_reduce_one_function_call_item(self, _: str, is_remote: bool):
         if is_remote:
             deploy(__file__)
 
