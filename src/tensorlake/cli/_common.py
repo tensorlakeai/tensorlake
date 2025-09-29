@@ -1,9 +1,14 @@
 import importlib.metadata
+import json
 import sys
 from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
 
 import click
 import httpx
+from pydantic.json import pydantic_encoder
+from rich import print, print_json
 
 try:
     VERSION = importlib.metadata.version("tensorlake")
@@ -12,6 +17,7 @@ except importlib.metadata.PackageNotFoundError:
 
 
 from tensorlake.applications.remote.api_client import APIClient
+from tensorlake.functions_sdk.http_client import LogEntry, LogsPayload, TensorlakeClient
 
 from .config import get_nested_value, load_config
 
@@ -115,3 +121,58 @@ class Context:
 
 """Pass the Context object to the click command"""
 pass_auth = click.make_pass_decorator(Context)
+
+
+class LogFormat(Enum):
+    TEXT = "text"
+    JSON = "json"
+
+
+def print_application_logs(logs: LogsPayload, format: LogFormat):
+    if format == LogFormat.TEXT:
+        print_text_logs(logs.logs)
+    elif format == LogFormat.JSON:
+        print_json_logs(logs.logs)
+
+
+def print_text_logs(logs: list[LogEntry]):
+    if len(logs) == 0:
+        return
+
+    for log in logs:
+        print(f"{format_log_entry(log)}")
+
+
+def print_json_logs(logs: list[LogEntry]):
+    if len(logs) == 0:
+        return
+
+    print_json([json.dumps(log, default=pydantic_encoder) for log in logs])
+
+
+def format_log_entry(log: LogEntry) -> str:
+    timestamp = format_timestamp(log.timestamp)
+    func = [
+        attr
+        for attr in log.resource_attributes
+        if attr[0] == "ai.tensorlake.function_name"
+    ][0][1]
+    container = [
+        attr
+        for attr in log.resource_attributes
+        if attr[0] == "ai.tensorlake.container.id"
+    ][0][1]
+    request = [
+        attr
+        for attr in log.resource_attributes
+        if attr[0] == "ai.tensorlake.request.id"
+    ]
+
+    if request:
+        return f"{timestamp} [{func} on {container}]@{request[0][1]} {log.body} {log.log_attributes}"
+    else:
+        return f"{timestamp} [{func} on {container}] {log.body} {log.log_attributes}"
+
+
+def format_timestamp(timestamp: int) -> str:
+    datetime.fromtimestamp(timestamp / 1_000_000_000).strftime("%Y-%m-%dT%H:%M:%S.%f%z")

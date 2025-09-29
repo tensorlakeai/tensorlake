@@ -133,6 +133,22 @@ class WorkflowEvent(BaseModel):
         return f"{stdout}{stderr}[bold green]{self.event_name}[/bold green]: {self.payload}"
 
 
+class LogEntry(BaseModel):
+    timestamp: int
+    uuid: str
+    namespace: str
+    application: str
+    body: str
+    log_attributes: str = Field(alias="logAttributes")
+    resource_attributes: list[tuple[str, str]] = Field(alias="resourceAttributes")
+
+
+class LogsPayload(BaseModel):
+    logs: list[LogEntry]
+    next_token: str | None = Field(default=None, alias="nextToken")
+    last_event_time: int | None = Field(default=None, alias="lastEventTime")
+
+
 def log_retries(e: BaseException, sleep_time: float, retries: int):
     print(
         f"Retrying after {sleep_time:.2f} seconds. Retry count: {retries}. Retryable exception: {e.__repr__()}"
@@ -274,6 +290,39 @@ class APIClient:
                 f"v1/namespaces/{self._namespace}/applications/{application_name}"
             ).json()
         )
+
+    def application_logs(
+        self,
+        application: str,
+        function: str | None,
+        request: str | None,
+        container: str | None,
+    ) -> LogsPayload | None:
+        query_params = {}
+        if function:
+            query_params["function"] = function
+        if request:
+            query_params["requestId"] = request
+        if container:
+            query_params["containerId"] = container
+
+        if query_params:
+            query_params_str = "&".join(
+                [f"{key}={value}" for key, value in query_params.items()]
+            )
+            query_params_str = f"?{query_params_str}"
+        else:
+            query_params_str = ""
+
+        try:
+            response = self._get(
+                f"v1/namespaces/{self.namespace}/applications/{application}/logs{query_params_str}"
+            )
+            response.raise_for_status()
+            return LogsPayload(**response.json())
+        except RemoteAPIError as e:
+            print(f"failed to fetch logs: {e}")
+            return None
 
     def logs(
         self, application_name: str, invocation_id: str, allocation_id: str, file: str

@@ -8,7 +8,7 @@ from rich.table import Table
 
 from tensorlake.applications.remote.application.application import ApplicationManifest
 from tensorlake.applications.remote.application.function import FunctionManifest
-from tensorlake.cli._common import Context, pass_auth
+from tensorlake.cli._common import Context, LogFormat, pass_auth, print_application_logs
 
 
 @click.group()
@@ -109,3 +109,58 @@ def info(ctx: Context, json: bool, application_name: str):
         table.add_row(function.name, function.description, str(function.is_api))
 
     print(table)
+
+
+@graph.command(
+    epilog="""
+\b
+Use 'tensorlake config set default.application <name>' to set a default application name.
+"""
+)
+@click.option("--json", "-j", is_flag=True, help="Format output as JSON")
+@click.option(
+    "--function",
+    "-f",
+    default=None,
+    help="Name of the function to filter logs by",
+)
+@click.option(
+    "--request",
+    "-r",
+    default=None,
+    help="Request ID to filter logs by",
+)
+@click.option(
+    "--container",
+    "-c",
+    default=None,
+    help="Container ID to filter logs by",
+)
+@click.argument("application-name", required=False)
+@pass_auth
+def logs(
+    ctx: Context,
+    json: bool,
+    application_name: str,
+    function: str | None,
+    request: str | None,
+    container: str | None,
+):
+    """
+    View logs for a remote application
+    """
+    if not application_name:
+        if ctx.default_application:
+            application_name = ctx.default_application
+            click.echo(f"Using default application from config: {application_name}")
+        else:
+            raise click.UsageError(
+                "No application name provided and no default.application configured"
+            )
+
+    logs = ctx.api_client.application_logs(
+        application_name, function, request, container
+    )
+    format = LogFormat.TEXT if not json else LogFormat.JSON
+
+    print_application_logs(logs, format)
