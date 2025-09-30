@@ -1,4 +1,3 @@
-import hashlib
 import os
 import signal
 import threading
@@ -14,8 +13,7 @@ from testing import (
     run_allocation,
 )
 
-import tensorlake.applications.interface as tensorlake
-from tensorlake.applications.remote.application.zip import zip_application_code
+from tensorlake.applications import Application, api, define_application, function
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     AllocationOutcomeCode,
     AllocationResult,
@@ -31,15 +29,15 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
 
 APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
 
-app: tensorlake.Application = tensorlake.define_application(name=__file__)
+app: Application = define_application(name=__file__)
 
 # Lower - faster tests but more CPU usage.
 HEALTH_CHECK_POLL_PERIOD_SEC = 0.1
 HEALTH_CHECK_TIMEOUT_SEC = 5
 
 
-@tensorlake.api()
-@tensorlake.function()
+@api()
+@function()
 def action_function(action: str) -> str:
     if action == "crash_process":
         print("Crashing process...")
