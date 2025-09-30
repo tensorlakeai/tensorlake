@@ -316,7 +316,7 @@ class APIClient:
 
         try:
             response = self._get(
-                f"v1/namespaces/{self.namespace}/applications/{application}/logs{query_params_str}"
+                f"v1/namespaces/{self._namespace}/applications/{application}/logs{query_params_str}"
             )
             response.raise_for_status()
             return LogsPayload(**response.json())

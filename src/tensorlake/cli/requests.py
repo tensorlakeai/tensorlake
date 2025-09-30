@@ -113,7 +113,7 @@ def info(
     """
     Info about a request
     """
-    [application_name, request_id] = parse_args(args)
+    (application_name, request_id) = parse_args(ctx, args)
 
     request: RequestMetadata = ctx.api_client.request(application_name, request_id)
 
@@ -172,21 +172,24 @@ Use 'tensorlake config set default.graph <name>' to set a default graph name.
 Use 'tensorlake config set default.request <id>' to set a default request ID.
 """
 )
-@click.option("--json", "-j", is_flag=True, help="Format output as JSON")
+@click.option(
+    "--format",
+    "-F",
+    default="compact",
+    help="Format of the logs",
+    type=click.Choice(["compact", "expanded", "long", "json"]),
+)
 @click.argument("args", nargs=-1, required=False)
 @pass_auth
-def logs(ctx: Context, json: bool, args: tuple):
+def logs(ctx: Context, format: str, args: tuple):
     """
     View logs for a remote request
     """
-    [application_name, request_id] = parse_args(ctx, args)
+    (application_name, request) = parse_args(ctx, args)
 
-    logs = ctx.tensorlake_client.application_logs(
-        application_name, None, request_id, None
-    )
+    logs = ctx.api_client.application_logs(application_name, None, request, None)
 
-    format = LogFormat.TEXT if not json else LogFormat.JSON
-    print_application_logs(logs, format)
+    print_application_logs(logs, LogFormat(format))
 
 
 def parse_args(ctx: Context, args: tuple) -> tuple[str, str]:
@@ -221,3 +224,5 @@ def parse_args(ctx: Context, args: tuple) -> tuple[str, str]:
             raise click.UsageError(
                 "No request ID provided and no default.request configured"
             )
+
+    return (application_name, request_id)

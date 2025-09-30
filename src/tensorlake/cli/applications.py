@@ -111,7 +111,7 @@ def info(ctx: Context, json: bool, application_name: str):
     print(table)
 
 
-@graph.command(
+@application.command(
     epilog="""
 \b
 Use 'tensorlake config set default.application <name>' to set a default application name.
@@ -136,6 +136,13 @@ Use 'tensorlake config set default.application <name>' to set a default applicat
     default=None,
     help="Container ID to filter logs by",
 )
+@click.option(
+    "--format",
+    "-F",
+    default="compact",
+    help="Format of the logs",
+    type=click.Choice(["compact", "expanded", "long", "json"]),
+)
 @click.argument("application-name", required=False)
 @pass_auth
 def logs(
@@ -145,6 +152,7 @@ def logs(
     function: str | None,
     request: str | None,
     container: str | None,
+    format: str,
 ):
     """
     View logs for a remote application
@@ -161,6 +169,5 @@ def logs(
     logs = ctx.api_client.application_logs(
         application_name, function, request, container
     )
-    format = LogFormat.TEXT if not json else LogFormat.JSON
 
-    print_application_logs(logs, format)
+    print_application_logs(logs, LogFormat(format))
