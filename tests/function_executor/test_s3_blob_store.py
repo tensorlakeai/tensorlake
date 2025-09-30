@@ -2,7 +2,7 @@ import os
 import sys
 import unittest
 from datetime import datetime
-from typing import List, Optional
+from typing import List
 
 from tensorlake.function_executor.blob_store.s3_blob_store import S3BLOBStore
 from tensorlake.function_executor.logger import FunctionExecutorLogger
@@ -43,8 +43,8 @@ class TestS3BLOBStore(unittest.TestCase):
         cls,
         key: str,
         operation: str,
-        part_number: Optional[int] = None,
-        upload_id: Optional[str] = None,
+        part_number: int | None = None,
+        upload_id: str | None = None,
     ) -> str:
         """Generates a presigned URL for the S3 object."""
         params = {

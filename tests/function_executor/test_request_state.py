@@ -16,8 +16,13 @@ from testing import (
     run_allocation,
 )
 
-# This import will be replaced by `import tensorlake` when we switch to the new SDK UX.
-import tensorlake.applications.interface as tensorlake
+from tensorlake.applications import (
+    Application,
+    RequestContext,
+    api,
+    define_application,
+    function,
+)
 from tensorlake.applications.user_data_serializer import (
     PickleUserDataSerializer,
 )
@@ -42,7 +47,7 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
 
 APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
 
-app: tensorlake.Application = tensorlake.define_application(name=__file__)
+app: Application = define_application(name=__file__)
 
 
 def request_state_client_stub(
@@ -87,9 +92,9 @@ def request_state_client_stub(
     return request_state_client_thread
 
 
-@tensorlake.api()
-@tensorlake.function()
-def set_request_state(ctx: tensorlake.RequestContext, x: int) -> str:
+@api()
+@function()
+def set_request_state(ctx: RequestContext, x: int) -> str:
     ctx.state.set(
         "test_state_key",
         StructuredState(
@@ -238,9 +243,9 @@ class TestSetRequestState(unittest.TestCase):
         )
 
 
-@tensorlake.api()
-@tensorlake.function()
-def check_request_state_is_expected(ctx: tensorlake.RequestContext, x: int) -> str:
+@api()
+@function()
+def check_request_state_is_expected(ctx: RequestContext, x: int) -> str:
     got_state: StructuredState = ctx.state.get("test_state_key")
     expected_state: StructuredState = StructuredState(
         string="hello",
@@ -254,9 +259,9 @@ def check_request_state_is_expected(ctx: tensorlake.RequestContext, x: int) -> s
     )
 
 
-@tensorlake.api()
-@tensorlake.function()
-def check_request_state_is_none(ctx: tensorlake.RequestContext, x: int) -> str:
+@api()
+@function()
+def check_request_state_is_none(ctx: RequestContext, x: int) -> str:
     got_state: StructuredState = ctx.state.get("test_state_key")
     return "success" if got_state is None else "failure"
 
