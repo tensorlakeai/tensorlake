@@ -126,9 +126,8 @@ class ImageBuilderV2Client:
             ImageBuilderV2Client: An instance of the ImageBuilderV2Client.
         """
         api_key = os.getenv("TENSORLAKE_API_KEY")
-        build_url = os.getenv(
-            "TENSORLAKE_BUILD_SERVICE", "https://api.tensorlake.ai/images/v2"
-        )
+        server_url = os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")
+        build_url = os.getenv("TENSORLAKE_BUILD_SERVICE", f"{server_url}/images/v2")
         return cls(build_url, api_key)
 
     async def build_collection(
