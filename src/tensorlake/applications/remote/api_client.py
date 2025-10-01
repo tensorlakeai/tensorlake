@@ -146,7 +146,6 @@ class LogEntry(BaseModel):
 class LogsPayload(BaseModel):
     logs: list[LogEntry]
     next_token: str | None = Field(default=None, alias="nextToken")
-    last_event_time: int | None = Field(default=None, alias="lastEventTime")
 
 
 def log_retries(e: BaseException, sleep_time: float, retries: int):
@@ -319,7 +318,11 @@ class APIClient:
                 f"v1/namespaces/{self._namespace}/applications/{application}/logs{query_params_str}"
             )
             response.raise_for_status()
-            return LogsPayload(**response.json())
+            payload = LogsPayload(**response.json())
+            # Logs default ordering is descending, having the most recent logs first.
+            # Reverse the logs to have the oldest logs first to print on the console.
+            payload.logs.reverse()
+            return payload
         except RemoteAPIError as e:
             print(f"failed to fetch logs: {e}")
             return None
