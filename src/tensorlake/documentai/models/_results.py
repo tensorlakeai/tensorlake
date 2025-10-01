@@ -31,6 +31,13 @@ class Text(BaseModel):
 
     content: str
 
+class Header(BaseModel):
+    """
+    Header type content of a page fragment.
+    """
+
+    level: int
+    content: str
 
 class TableCell(BaseModel):
     """
@@ -79,7 +86,7 @@ class PageFragment(BaseModel):
     """
 
     fragment_type: PageFragmentType
-    content: Union[Text, Table, Figure, Signature]
+    content: Union[Text, Header, Table, Figure, Signature]
     reading_order: Optional[int] = None
     bbox: Optional[dict[str, float]] = None
 
