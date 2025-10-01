@@ -1,6 +1,6 @@
 from typing import Dict
 
-from .interface.request_context import RequestMetrics
+from ..interface.request_context import RequestMetrics
 
 
 class RequestMetricsRecorder(RequestMetrics):

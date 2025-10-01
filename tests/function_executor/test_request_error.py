@@ -11,7 +11,13 @@ from testing import (
     run_allocation,
 )
 
-import tensorlake.applications.interface as tensorlake
+from tensorlake.applications import (
+    Application,
+    RequestError,
+    api,
+    define_application,
+    function,
+)
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     AllocationFailureReason,
     AllocationOutcomeCode,
@@ -26,13 +32,13 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
 
 APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
 
-app: tensorlake.Application = tensorlake.define_application(name=__file__)
+app: Application = define_application(name=__file__)
 
 
-@tensorlake.api()
-@tensorlake.function()
+@api()
+@function()
 def raise_request_error(x: int) -> str:
-    raise tensorlake.RequestError(f"The request can't succeed: {x}")
+    raise RequestError(f"The request can't succeed: {x}")
 
 
 class TestRequestError(unittest.TestCase):

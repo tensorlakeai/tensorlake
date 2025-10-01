@@ -12,7 +12,7 @@ from testing import (
     run_allocation,
 )
 
-import tensorlake.applications.interface as tensorlake
+from tensorlake.applications import Application, api, define_application, function
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     AllocationOutcomeCode,
     AllocationResult,
@@ -25,7 +25,7 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
 
 APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
 
-app: tensorlake.Application = tensorlake.define_application(name=__file__)
+app: Application = define_application(name=__file__)
 
 # This test checks if the memory usage of a Function Executor process is below
 # a known threshold. Customers rely on this threshold because if FE memory usage
@@ -36,8 +36,8 @@ app: tensorlake.Application = tensorlake.define_application(name=__file__)
 _FUNCTION_EXECUTOR_MAX_MEMORY_MB = 85
 
 
-@tensorlake.api()
-@tensorlake.function()
+@api()
+@function()
 def process_rss_mb(x: int) -> int:
     # rss is in bytes
     return math.ceil(psutil.Process().memory_info().rss / (1024 * 1024))

@@ -7,7 +7,7 @@ from ..function.user_data_serializer import function_input_serializer
 from ..interface.function import Function
 from ..interface.function_call import RegularFunctionCall
 from ..interface.future import FutureList
-from ..interface.request_context import RequestContext, RequestContextPlaceholder
+from ..interface.request_context import RequestContext
 from ..registry import get_function
 from ..user_data_serializer import UserDataSerializer
 from .ast import ast_from_user_object
@@ -19,8 +19,6 @@ from .value_node import ValueNode
 class ArgumentMetadata(BaseModel):
     # None if the value is not coming from a particular child node.
     nid: str | None
-    # True if this argument is a request context.
-    ctx: bool
     # Not None if this argument is coming from a FutureList.
     flist: FutureListMetadata | None
 
@@ -69,9 +67,7 @@ class RegularFunctionCallNode(ASTNode):
             ):
                 arg_metadata: ArgumentMetadata
                 arg: Any
-                if arg_metadata.ctx:
-                    arg = RequestContextPlaceholder()
-                elif arg_metadata.flist is not None:
+                if arg_metadata.flist is not None:
                     future_list_metadata: FutureListMetadata = arg_metadata.flist
                     arg: List[Any] = []
                     for future_list_node_id in future_list_metadata.nids:
@@ -115,9 +111,7 @@ class RegularFunctionCallNode(ASTNode):
                 else enumerate(arguments)
             ):
                 arg_metadata: ArgumentMetadata
-                if isinstance(value, RequestContext):
-                    arg_metadata = ArgumentMetadata(nid=None, ctx=True, flist=None)
-                elif isinstance(value, FutureList):
+                if isinstance(value, FutureList):
                     future_list_node_ids: List[str] = []
                     for item in value.items:
                         item_node: ASTNode = ast_from_user_object(
@@ -128,15 +122,12 @@ class RegularFunctionCallNode(ASTNode):
                         future_list_node_ids.append(item_node.id)
                     arg_metadata = ArgumentMetadata(
                         nid=None,
-                        ctx=False,
                         flist=FutureListMetadata(nids=future_list_node_ids),
                     )
                 else:
                     arg_node: ASTNode = ast_from_user_object(value, inputs_serializer)
                     node.add_child(arg_node)
-                    arg_metadata = ArgumentMetadata(
-                        nid=arg_node.id, ctx=False, flist=None
-                    )
+                    arg_metadata = ArgumentMetadata(nid=arg_node.id, flist=None)
 
                 if isinstance(arguments, dict):
                     kwargs[key] = arg_metadata

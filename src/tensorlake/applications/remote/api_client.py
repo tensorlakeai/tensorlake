@@ -28,6 +28,7 @@ from tensorlake.utils.retries import exponential_backoff
 logger = logging.getLogger("tensorlake")
 
 
+_API_NAMESPACE_FROM_ENV: str = os.getenv("INDEXIFY_NAMESPACE", "default")
 _API_URL_FROM_ENV: str = os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")
 _API_KEY_FROM_ENV: str = os.getenv("TENSORLAKE_API_KEY")
 
@@ -141,7 +142,7 @@ def log_retries(e: BaseException, sleep_time: float, retries: int):
 class APIClient:
     def __init__(
         self,
-        namespace: str = "default",
+        namespace: str = _API_NAMESPACE_FROM_ENV,
         api_url: str = _API_URL_FROM_ENV,
         api_key: str | None = _API_KEY_FROM_ENV,
     ):

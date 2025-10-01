@@ -8,7 +8,8 @@ from tensorlake.applications.remote.deploy import deploy
 
 @api()
 @function()
-def emit_metrics(ctx: RequestContext, x: int) -> int:
+def emit_metrics(x: int) -> int:
+    ctx: RequestContext = RequestContext.get()
     ctx.metrics.timer("test_timer", 1.8)
     ctx.metrics.counter("test_counter", 8)
     return x + 1

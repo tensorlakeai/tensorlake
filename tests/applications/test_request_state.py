@@ -16,33 +16,31 @@ from tensorlake.applications.remote.deploy import deploy
 
 @api()
 @function()
-def test_request_context_state_set_get_simple_value_api(
-    ctx: RequestContext, value: int
-) -> str:
+def test_request_context_state_set_get_simple_value_api(value: int) -> str:
+    ctx: RequestContext = RequestContext.get()
     ctx.state.set("key1", value)
-    return test_request_context_state_set_get_simple_value_internal(ctx)
+    return test_request_context_state_set_get_simple_value_internal()
 
 
 @function()
-def test_request_context_state_set_get_simple_value_internal(
-    ctx: RequestContext,
-) -> int:
+def test_request_context_state_set_get_simple_value_internal() -> int:
+    ctx: RequestContext = RequestContext.get()
     return ctx.state.get("key1")
 
 
 @api()
 @function()
-def test_request_context_state_get_default_value_api(
-    ctx: RequestContext, default: str
-) -> str:
+def test_request_context_state_get_default_value_api(default: str) -> str:
+    ctx: RequestContext = RequestContext.get()
     return ctx.state.get("non_existing_key", default)
 
 
 @api()
 @function()
 def test_request_context_state_get_without_default_value_returns_none_api(
-    ctx: RequestContext, _: str
+    _: str,
 ) -> None:
+    ctx: RequestContext = RequestContext.get()
     return ctx.state.get("non_existing_key")
 
 
@@ -56,18 +54,16 @@ class UserClass:
 
 @api()
 @function()
-def test_request_context_state_set_get_user_class_instance_api(
-    ctx: RequestContext, times: int
-) -> str:
+def test_request_context_state_set_get_user_class_instance_api(times: int) -> str:
+    ctx: RequestContext = RequestContext.get()
     user_instance: UserClass = UserClass(times)
     ctx.state.set("user_class", user_instance)
-    return test_request_context_state_set_get_user_class_instance_internal(ctx, times)
+    return test_request_context_state_set_get_user_class_instance_internal(times)
 
 
 @function()
-def test_request_context_state_set_get_user_class_instance_internal(
-    ctx: RequestContext, times: int
-) -> str:
+def test_request_context_state_set_get_user_class_instance_internal(times: int) -> str:
+    ctx: RequestContext = RequestContext.get()
     user_instance: UserClass = ctx.state.get("user_class")
     if not isinstance(user_instance, UserClass):
         raise RequestError("user_instance is not of type UserClass")
@@ -88,18 +84,16 @@ class UserModel(BaseModel):
 
 @api()
 @function()
-def test_request_context_state_set_get_pydantic_model_api(
-    ctx: RequestContext, model_name: str
-) -> str:
+def test_request_context_state_set_get_pydantic_model_api(model_name: str) -> str:
     user_model: UserModel = UserModel(id=1, name=model_name)
+    ctx: RequestContext = RequestContext.get()
     ctx.state.set("user_model", user_model)
-    return test_request_context_state_set_get_pydantic_model_internal(ctx, model_name)
+    return test_request_context_state_set_get_pydantic_model_internal(model_name)
 
 
 @function()
-def test_request_context_state_set_get_pydantic_model_internal(
-    ctx: RequestContext, model_name: str
-) -> str:
+def test_request_context_state_set_get_pydantic_model_internal(model_name: str) -> str:
+    ctx: RequestContext = RequestContext.get()
     user_model: UserModel = ctx.state.get("user_model")
     if not isinstance(user_model, UserModel):
         raise RequestError("user_model is not of type UserModel")

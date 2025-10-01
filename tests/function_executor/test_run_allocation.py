@@ -17,8 +17,14 @@ from testing import (
     write_tmp_blob_bytes,
 )
 
-# This import will be replaced by `import tensorlake` when we switch to the new SDK UX.
-import tensorlake.applications.interface as tensorlake
+from tensorlake.applications import (
+    Application,
+    File,
+    api,
+    cls,
+    define_application,
+    function,
+)
 from tensorlake.applications.ast.function_call_node import (
     ArgumentMetadata,
     RegularFunctionCallMetadata,
@@ -58,7 +64,7 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
 
 APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
 
-app: tensorlake.Application = tensorlake.define_application(name=__file__)
+app: Application = define_application(name=__file__)
 
 
 class FileChunk(BaseModel):
@@ -67,20 +73,20 @@ class FileChunk(BaseModel):
     end: int
 
 
-@tensorlake.api()
-@tensorlake.function()
+@api()
+@function()
 def api_function(url: str) -> List[FileChunk]:
     print(f"api_function called with url: {url}")
     assert url == "https://example.com"
     assert isinstance(url, str)
     return file_chunker(
-        tensorlake.File(content=bytes(b"hello"), content_type="text/plain"),
+        File(content=bytes(b"hello"), content_type="text/plain"),
         num_chunks=3,
     )
 
 
-@tensorlake.function()
-def file_chunker(file: tensorlake.File, num_chunks: int) -> List[FileChunk]:
+@function()
+def file_chunker(file: File, num_chunks: int) -> List[FileChunk]:
     print(f"file_chunker called with file data: {file.content.decode()}")
     return [
         FileChunk(
@@ -90,23 +96,23 @@ def file_chunker(file: tensorlake.File, num_chunks: int) -> List[FileChunk]:
     ]
 
 
-@tensorlake.api()
-@tensorlake.function()
+@api()
+@function()
 def raises_exception(input: int):
     raise Exception("this extractor throws an exception.")
 
 
-@tensorlake.function()
+@function()
 def returns_argument(arg: bytes) -> bytes:
     return arg
 
 
-@tensorlake.cls()
+@cls()
 class FunctionFailingOnInit:
     def __init__(self):
         raise Exception("This function fails on initialization")
 
-    @tensorlake.function()
+    @function()
     def run(self, x: int) -> int:
         return x
 
@@ -190,7 +196,7 @@ class TestRunAllocation(unittest.TestCase):
                 self.assertEqual(len(function_call.args), 2)
                 self.assertTrue(function_call.args[0].HasField("value"))
                 self.assertTrue(function_call.args[1].HasField("value"))
-                arg_0: tensorlake.File = download_and_deserialize_so(
+                arg_0: File = download_and_deserialize_so(
                     self,
                     function_call.args[0].value,
                     function_outputs_blob,
@@ -221,13 +227,11 @@ class TestRunAllocation(unittest.TestCase):
                 )
                 self.assertEqual(len(function_call_metadata.args), 1)
                 self.assertEqual(function_call_metadata.args[0].nid, arg_0_metadata.nid)
-                self.assertEqual(function_call_metadata.args[0].ctx, False)
                 self.assertEqual(function_call_metadata.args[0].flist, None)
                 self.assertEqual(len(function_call_metadata.kwargs), 1)
                 self.assertEqual(
                     function_call_metadata.kwargs["num_chunks"].nid, arg_1_metadata.nid
                 )
-                self.assertEqual(function_call_metadata.kwargs["num_chunks"].ctx, False)
                 self.assertEqual(
                     function_call_metadata.kwargs["num_chunks"].flist, None
                 )
@@ -261,9 +265,7 @@ class TestRunAllocation(unittest.TestCase):
                 user_serializer: PickleUserDataSerializer = PickleUserDataSerializer()
                 serialized_file_arg_metadata: bytes = ValueNodeMetadata(
                     nid="file_arg_id",
-                    metadata=ValueMetadata(
-                        cls=tensorlake.File, extra="text/plain"
-                    ).serialize(),
+                    metadata=ValueMetadata(cls=File, extra="text/plain").serialize(),
                 ).serialize()
                 serialized_file_arg: bytes = (
                     "hello".encode()
@@ -333,16 +335,13 @@ class TestRunAllocation(unittest.TestCase):
                             nid="file_chunker_call",
                             type=FunctionCallType.REGULAR,
                             metadata=RegularFunctionCallMetadata(
-                                args=[
-                                    ArgumentMetadata(
-                                        nid="file_arg_id", ctx=False, flist=None
-                                    )
-                                ],
+                                args=[ArgumentMetadata(nid="file_arg_id", flist=None)],
                                 kwargs={
                                     "num_chunks": ArgumentMetadata(
-                                        nid="num_chunks_arg_id", ctx=False, flist=None
+                                        nid="num_chunks_arg_id", flist=None
                                     ),
                                 },
+                                oso=None,
                             ).serialize(),
                         ).serialize(),
                     ),
@@ -456,12 +455,9 @@ class TestRunAllocation(unittest.TestCase):
                             nid="returns_argument_call",
                             type=FunctionCallType.REGULAR,
                             metadata=RegularFunctionCallMetadata(
-                                args=[
-                                    ArgumentMetadata(
-                                        nid="arg_id", ctx=False, flist=None
-                                    )
-                                ],
+                                args=[ArgumentMetadata(nid="arg_id", flist=None)],
                                 kwargs={},
+                                oso=None,
                             ).serialize(),
                         ).serialize(),
                     ),

@@ -7,8 +7,7 @@ from typing import Any, Dict, List
 
 import grpc
 
-# Interface should be imported first before internal modules.
-import tensorlake.applications.interface as tensorlake
+from tensorlake.applications import Application
 from tensorlake.applications.ast.value_node import ValueMetadata
 from tensorlake.applications.remote.application.zip import zip_application_code
 from tensorlake.applications.user_data_serializer import (
@@ -114,7 +113,7 @@ def rpc_channel(context_manager: FunctionExecutorProcessContextManager) -> grpc.
 
 def initialize(
     stub: FunctionExecutorStub,
-    app: tensorlake.Application,
+    app: Application,
     app_code_dir_path: str,
     function_name: str,
 ) -> InitializeResponse:
