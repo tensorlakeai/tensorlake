@@ -1,7 +1,7 @@
 from typing import Any, Dict
 
 from ..interface.request_context import RequestState
-from ..request_state import REQUEST_STATE_USER_DATA_SERIALIZER
+from ..request_context.request_state import REQUEST_STATE_USER_DATA_SERIALIZER
 
 
 class LocalRequestState(RequestState):

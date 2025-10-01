@@ -227,13 +227,11 @@ class TestRunAllocation(unittest.TestCase):
                 )
                 self.assertEqual(len(function_call_metadata.args), 1)
                 self.assertEqual(function_call_metadata.args[0].nid, arg_0_metadata.nid)
-                self.assertEqual(function_call_metadata.args[0].ctx, False)
                 self.assertEqual(function_call_metadata.args[0].flist, None)
                 self.assertEqual(len(function_call_metadata.kwargs), 1)
                 self.assertEqual(
                     function_call_metadata.kwargs["num_chunks"].nid, arg_1_metadata.nid
                 )
-                self.assertEqual(function_call_metadata.kwargs["num_chunks"].ctx, False)
                 self.assertEqual(
                     function_call_metadata.kwargs["num_chunks"].flist, None
                 )
@@ -337,14 +335,10 @@ class TestRunAllocation(unittest.TestCase):
                             nid="file_chunker_call",
                             type=FunctionCallType.REGULAR,
                             metadata=RegularFunctionCallMetadata(
-                                args=[
-                                    ArgumentMetadata(
-                                        nid="file_arg_id", ctx=False, flist=None
-                                    )
-                                ],
+                                args=[ArgumentMetadata(nid="file_arg_id", flist=None)],
                                 kwargs={
                                     "num_chunks": ArgumentMetadata(
-                                        nid="num_chunks_arg_id", ctx=False, flist=None
+                                        nid="num_chunks_arg_id", flist=None
                                     ),
                                 },
                                 oso=None,
@@ -461,11 +455,7 @@ class TestRunAllocation(unittest.TestCase):
                             nid="returns_argument_call",
                             type=FunctionCallType.REGULAR,
                             metadata=RegularFunctionCallMetadata(
-                                args=[
-                                    ArgumentMetadata(
-                                        nid="arg_id", ctx=False, flist=None
-                                    )
-                                ],
+                                args=[ArgumentMetadata(nid="arg_id", flist=None)],
                                 kwargs={},
                                 oso=None,
                             ).serialize(),

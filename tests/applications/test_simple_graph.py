@@ -5,7 +5,6 @@ from pydantic import BaseModel
 
 from tensorlake.applications import (
     Request,
-    RequestContext,
     api,
     call_local_api,
     call_remote_api,
@@ -20,7 +19,7 @@ class TestGraphRequestPayload(BaseModel):
 
 @api()
 @function(description="test simple graph")
-def test_simple_graph_api(ctx: RequestContext, payload: TestGraphRequestPayload) -> str:
+def test_simple_graph_api(payload: TestGraphRequestPayload) -> str:
     return print_and_return_value("simple graph: " + ", ".join(payload.numbers))
 
 
@@ -32,7 +31,7 @@ def print_and_return_value(value: str) -> str:
 
 class TestSimpleGraph(unittest.TestCase):
     def test_local_api_call(self):
-        request = call_local_api(
+        request: Request = call_local_api(
             test_simple_graph_api,
             TestGraphRequestPayload(numbers=[str(i) for i in range(1, 6)]),
         )

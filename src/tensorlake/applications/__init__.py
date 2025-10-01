@@ -24,7 +24,6 @@ from .interface.reduce import reduce
 from .interface.request import Request
 from .interface.request_context import (
     RequestContext,
-    RequestContextPlaceholder,
     RequestProgress,
     RequestState,
 )
@@ -50,7 +49,6 @@ __all__ = [
     "RemoteAPIError",
     "Request",
     "RequestContext",
-    "RequestContextPlaceholder",
     "RequestFailureException",
     "RequestProgress",
     "RequestState",

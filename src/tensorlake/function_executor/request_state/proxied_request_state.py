@@ -1,7 +1,9 @@
 from typing import Any
 
 from tensorlake.applications.interface.request_context import RequestState
-from tensorlake.applications.request_state import REQUEST_STATE_USER_DATA_SERIALIZER
+from tensorlake.applications.request_context.request_state import (
+    REQUEST_STATE_USER_DATA_SERIALIZER,
+)
 
 from .request_state_proxy_server import RequestStateProxyServer
 

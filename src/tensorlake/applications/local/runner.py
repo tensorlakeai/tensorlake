@@ -1,3 +1,4 @@
+import contextvars
 from typing import Any, Dict, List
 
 from ..ast import (
@@ -13,7 +14,6 @@ from ..ast import (
 )
 from ..function.function_call import (
     create_self_instance,
-    set_request_context_args,
     set_self_arg,
 )
 from ..function.reducer_call import reducer_function_call
@@ -32,8 +32,9 @@ from ..interface.request import Request
 from ..interface.request_context import RequestContext
 from ..interface.retries import Retries
 from ..registry import get_function
-from ..request_context_base import RequestContextBase
-from ..request_metrics_recorder import RequestMetricsRecorder
+from ..request_context.contextvar import set_current_request_context
+from ..request_context.request_context_base import RequestContextBase
+from ..request_context.request_metrics_recorder import RequestMetricsRecorder
 from ..user_data_serializer import UserDataSerializer
 from .request import LocalRequest
 from .request_progress import LocalRequestProgress
@@ -174,8 +175,8 @@ class LocalRunner:
         self._replace_node(node, output_ast)
 
     def _call(self, function_call: RegularFunctionCall, function: Function) -> Any:
-        set_request_context_args(function_call, self._request_context)
         self._set_function_call_instance_args(function_call, function)
+        context: contextvars.Context = contextvars.Context()
 
         # Application retries are used if function retries are not set.
         function_retries: Retries = (
@@ -186,13 +187,18 @@ class LocalRunner:
         runs_left: int = 1 + function_retries.max_retries
         while True:
             try:
-                return function.original_function(
-                    *function_call.args, **function_call.kwargs
-                )
+                return context.run(self._call_with_context, function_call, function)
             except Exception:
                 runs_left -= 1
                 if runs_left == 0:
                     raise
+
+    def _call_with_context(
+        self, function_call: RegularFunctionCall, function: Function
+    ) -> Any:
+        # This function is executed in contextvars.Context of the Tensorlake Function call.
+        set_current_request_context(self._request_context)
+        return function.original_function(*function_call.args, **function_call.kwargs)
 
     def _set_function_call_instance_args(
         self, function_call: FunctionCall, function: Function

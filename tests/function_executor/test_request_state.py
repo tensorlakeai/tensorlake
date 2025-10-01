@@ -94,7 +94,8 @@ def request_state_client_stub(
 
 @api()
 @function()
-def set_request_state(ctx: RequestContext, x: int) -> str:
+def set_request_state(x: int) -> str:
+    ctx: RequestContext = RequestContext.get()
     ctx.state.set(
         "test_state_key",
         StructuredState(
@@ -245,7 +246,8 @@ class TestSetRequestState(unittest.TestCase):
 
 @api()
 @function()
-def check_request_state_is_expected(ctx: RequestContext, x: int) -> str:
+def check_request_state_is_expected(x: int) -> str:
+    ctx: RequestContext = RequestContext.get()
     got_state: StructuredState = ctx.state.get("test_state_key")
     expected_state: StructuredState = StructuredState(
         string="hello",
@@ -261,7 +263,8 @@ def check_request_state_is_expected(ctx: RequestContext, x: int) -> str:
 
 @api()
 @function()
-def check_request_state_is_none(ctx: RequestContext, x: int) -> str:
+def check_request_state_is_none(x: int) -> str:
+    ctx: RequestContext = RequestContext.get()
     got_state: StructuredState = ctx.state.get("test_state_key")
     return "success" if got_state is None else "failure"
 

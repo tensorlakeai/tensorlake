@@ -1,3 +1,4 @@
+import contextvars
 import time
 from typing import Any, List
 
@@ -11,13 +12,17 @@ from tensorlake.applications.function.api_call import (
     api_function_call_with_serialized_payload,
 )
 from tensorlake.applications.function.function_call import (
-    set_request_context_args,
     set_self_arg,
 )
 from tensorlake.applications.function.reducer_call import reducer_function_call
 from tensorlake.applications.interface.function import Function
 from tensorlake.applications.interface.function_call import RegularFunctionCall
-from tensorlake.applications.request_context_base import RequestContextBase
+from tensorlake.applications.request_context.contextvar import (
+    set_current_request_context,
+)
+from tensorlake.applications.request_context.request_context_base import (
+    RequestContextBase,
+)
 
 from ...blob_store.blob_store import BLOBStore
 from ...logger import FunctionExecutorLogger
@@ -90,12 +95,12 @@ class Handler:
 
     def _run(self) -> AllocationResult:
         function_call: RegularFunctionCall = self._reconstruct_function_call()
-        set_request_context_args(function_call, self._request_context)
         if self._function_instance_arg is not None:
             set_self_arg(function_call, self._function_instance_arg)
 
+        context: contextvars.Context = contextvars.Context()
         try:
-            output: Any = self._call(function_call)
+            output: Any = context.run(self._call_with_context, function_call)
         except BaseException as e:
             return self._response_helper.from_function_exception(e)
 
@@ -155,7 +160,9 @@ class Handler:
                 payload_content_type=payload_arg_so.manifest.content_type or "",
             )
 
-    def _call(self, function_call: RegularFunctionCall) -> Any:
+    def _call_with_context(self, function_call: RegularFunctionCall) -> Any:
+        # This function is executed in contextvars.Context of the Tensorlake Function call.
+        set_current_request_context(self._request_context)
         self._logger.info("running function")
         start_time = time.monotonic()
 
