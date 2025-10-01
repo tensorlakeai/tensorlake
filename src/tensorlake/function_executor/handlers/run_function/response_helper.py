@@ -21,7 +21,9 @@ from tensorlake.applications.function.user_data_serializer import (
 )
 from tensorlake.applications.interface.exceptions import RequestError
 from tensorlake.applications.interface.function import Function
-from tensorlake.applications.request_metrics_recorder import RequestMetricsRecorder
+from tensorlake.applications.request_context.request_metrics_recorder import (
+    RequestMetricsRecorder,
+)
 from tensorlake.applications.user_data_serializer import (
     UserDataSerializer,
     serializer_by_name,

@@ -6,7 +6,6 @@ from pydantic import BaseModel
 
 from tensorlake.applications import (
     Request,
-    RequestContext,
     api,
     call_local_api,
     call_remote_api,
@@ -59,7 +58,7 @@ class ResponsePayload(BaseModel):
 
 @api()
 @function(description="Fake PDF parse workflow")
-def parse_pdf_api(ctx: RequestContext, payload: RequestPayload) -> ResponsePayload:
+def parse_pdf_api(payload: RequestPayload) -> ResponsePayload:
     # Right now it's hard to understand which function call is a regular function call and which one is remote
     # Tensorlake call.
     response: FakePDFParseResult = fake_parse_pdf_service_call(

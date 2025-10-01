@@ -3,7 +3,7 @@ from typing import Any
 
 import parameterized
 
-from tensorlake.applications import Request, RequestContext, api, call_api, function
+from tensorlake.applications import Request, api, call_api, function
 from tensorlake.applications.remote.deploy import deploy
 
 
@@ -16,17 +16,6 @@ def test_function_with_no_args_api(_: Any) -> str:
 @function()
 def test_function_with_no_args_internal() -> str:
     return "success"
-
-
-@api()
-@function()
-def test_function_with_only_ctx_arg_api(ctx: RequestContext, payload: Any) -> str:
-    return test_function_with_only_ctx_arg_internal(ctx)
-
-
-@function()
-def test_function_with_only_ctx_arg_internal(ctx: RequestContext) -> str:
-    return f"ctx id: {ctx.request_id}"
 
 
 @api()
@@ -74,16 +63,6 @@ class TestRegularFunctionCallSignatures(unittest.TestCase):
             test_function_with_no_args_api, None, remote=is_remote
         )
         self.assertEqual(request.output(), "success")
-
-    @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_function_with_only_ctx_arg(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy(__file__)
-
-        request: Request = call_api(
-            test_function_with_only_ctx_arg_api, None, remote=is_remote
-        )
-        self.assertEqual(request.output(), f"ctx id: {request.id}")
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_only_positional_args(self, _: str, is_remote: bool):

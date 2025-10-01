@@ -1,5 +1,7 @@
 from typing import Any
 
+from ..request_context.contextvar import get_current_request_context
+
 
 class RequestState:
     """Abstract interface for request state key-value API.
@@ -53,6 +55,15 @@ class RequestProgress:
 class RequestContext:
     """Abstract interface for request context."""
 
+    @classmethod
+    def get(cls) -> "RequestContext":
+        """Returns context of the running request.
+
+        Raises RequestFailureException if called outside of a Tensorlake Function call
+        or if called from a thread spawned by a Tensorlake Function.
+        """
+        return get_current_request_context()
+
     @property
     def request_id(self) -> str:
         raise NotImplementedError()
@@ -68,19 +79,3 @@ class RequestContext:
     @property
     def metrics(self) -> RequestMetrics:
         raise NotImplementedError()
-
-
-class RequestContextPlaceholder(RequestContext):
-    """A placeholder used by user code in place of RequestContext when calling a @tensorlake_function.
-
-    Inherits from RequestContext just to show explicitly that it can be passed into a function call
-    instead of an actual RequestContext instance. Must be serializable by any user serializer because
-    this object is stored in user args and kwargs.
-    """
-
-    def __eq__(self, value):
-        # A placeholder is equal to any other placeholder.
-        # This allows to easily compare function calls in tests.
-        return isinstance(self, RequestContextPlaceholder) and isinstance(
-            value, RequestContextPlaceholder
-        )

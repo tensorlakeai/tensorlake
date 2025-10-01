@@ -3,7 +3,7 @@ from typing import Any, Callable, Dict, List
 
 from .function_call import RegularFunctionCall
 from .image import Image
-from .request_context import RequestContext, RequestContextPlaceholder
+from .request_context import RequestContext
 from .retries import Retries
 
 
@@ -74,20 +74,6 @@ class Function:
         kwargs: Dict[str, Any],
     ) -> RegularFunctionCall:
         """Return function call for the function."""
-        for key, value in kwargs.items():
-            if isinstance(value, RequestContext) or isinstance(
-                value, RequestContextPlaceholder
-            ):
-                kwargs[key] = RequestContextPlaceholder()
-        for i, arg in enumerate(args):
-            if isinstance(arg, RequestContext) or isinstance(
-                arg, RequestContextPlaceholder
-            ):
-                args[i] = RequestContextPlaceholder()
-
-        # TODO: Fail with RequestError if cls.__tensorlake_name__ is not set.
-        # This means the @tensorlake.cls decorator wasn't called on the class.
-
         return RegularFunctionCall(
             function_name=self._function_config.function_name,
             args=args,
@@ -98,6 +84,9 @@ class Function:
         # Called when the Function is called as an `instance` method of class `cls`.
         # We don't need to bind the Function object to the provided instance because
         # all the instances are created using an empty constructor, they are mutually replaceable.
+        #
+        # TODO: Fail with RequestError if cls.__tensorlake_name__ is not set.
+        # This means the @tensorlake.cls decorator wasn't called on the class.
         return self
 
     def __call__(self, *args, **kwargs) -> RegularFunctionCall:

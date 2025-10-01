@@ -18,8 +18,12 @@ from tensorlake.applications.remote.application.zip import (
     ApplicationZIPManifest,
     FunctionZIPManifest,
 )
-from tensorlake.applications.request_context_base import RequestContextBase
-from tensorlake.applications.request_metrics_recorder import RequestMetricsRecorder
+from tensorlake.applications.request_context.request_context_base import (
+    RequestContextBase,
+)
+from tensorlake.applications.request_context.request_metrics_recorder import (
+    RequestMetricsRecorder,
+)
 
 from .blob_store.blob_store import BLOBStore
 from .handlers.check_health.handler import Handler as CheckHealthHandler

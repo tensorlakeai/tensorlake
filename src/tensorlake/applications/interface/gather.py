@@ -1,9 +1,6 @@
 from collections.abc import Iterable
 from typing import Any, List
 
-from ..function.function_call import (
-    prepend_request_context_placeholder_to_function_args,
-)
 from .function import Function
 from .function_call import FunctionCall
 from .future import FutureList
@@ -28,6 +25,5 @@ def map(function: Function, iterable: Iterable) -> FutureList:
     function_calls: List[FunctionCall] = []
     for item in iterable:
         args = [item]
-        prepend_request_context_placeholder_to_function_args(function, args)
         function_calls.append(function(*args))
     return gather(function_calls)

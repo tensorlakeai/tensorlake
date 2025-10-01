@@ -4,7 +4,6 @@ from ..interface.file import File
 from ..interface.function import Function
 from ..interface.function_call import RegularFunctionCall
 from ..registry import get_class
-from .function_call import prepend_request_context_placeholder_to_function_args
 from .type_hints import function_arg_type_hint
 from .user_data_serializer import function_input_serializer
 
@@ -20,8 +19,6 @@ def _api_function_call_with_object_payload(
     # API function call conventions:
     # [optional ctx: tensorlake.RequestContext, payload: Optional type hint]
     args: List[Any] = [object]
-
-    prepend_request_context_placeholder_to_function_args(api, args)
 
     if api.function_config.class_name is None:
         return api(*args)
