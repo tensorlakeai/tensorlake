@@ -4,7 +4,7 @@ import unittest
 
 from testing import (
     FunctionExecutorProcessContextManager,
-    api_function_inputs,
+    application_function_inputs,
     initialize,
     read_tmp_blob_bytes,
     rpc_channel,
@@ -12,10 +12,8 @@ from testing import (
 )
 
 from tensorlake.applications import (
-    Application,
     RequestError,
-    api,
-    define_application,
+    application,
     function,
 )
 from tensorlake.function_executor.proto.function_executor_pb2 import (
@@ -32,10 +30,8 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
 
 APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
 
-app: Application = define_application(name=__file__)
 
-
-@api()
+@application()
 @function()
 def raise_request_error(x: int) -> str:
     raise RequestError(f"The request can't succeed: {x}")
@@ -51,7 +47,8 @@ class TestRequestError(unittest.TestCase):
 
                 initialize_response: InitializeResponse = initialize(
                     stub=stub,
-                    app=app,
+                    app_name="raise_request_error",
+                    app_version="0.1",
                     app_code_dir_path=APPLICATION_CODE_DIR_PATH,
                     function_name="raise_request_error",
                 )
@@ -62,7 +59,7 @@ class TestRequestError(unittest.TestCase):
 
                 alloc_result: AllocationResult = run_allocation(
                     stub,
-                    inputs=api_function_inputs(10),
+                    inputs=application_function_inputs(10),
                 )
 
                 self.assertEqual(

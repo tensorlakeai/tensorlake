@@ -4,12 +4,12 @@ import parameterized
 
 from tensorlake.applications import (
     Request,
-    api,
-    call_api,
+    application,
     function,
     reduce,
+    run_application,
 )
-from tensorlake.applications.remote.deploy import deploy
+from tensorlake.applications.remote.deploy import deploy_applications
 
 
 # The call chain starting from this API function goes through multiple functions
@@ -21,7 +21,7 @@ from tensorlake.applications.remote.deploy import deploy
 # serializer from the API function because its output serializer is JSON while all the
 # other function in call chain use Pickle unless the caller (api function) overrides it
 # because it needs to return its output in json format.
-@api()
+@application()
 @function()
 def api_function_output_propagation(payload: str) -> str:
     return foo()
@@ -46,14 +46,14 @@ class TestFunctionOutputPropagation(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success(self, _: str, is_remote: bool):
         if is_remote:
-            deploy(__file__)
-        request: Request = call_api(
+            deploy_applications(__file__)
+        request: Request = run_application(
             api_function_output_propagation, "test", remote=is_remote
         )
         self.assertEqual(request.output(), "buzz")
 
 
-@api()
+@application()
 @function()
 def api_reducer_value_output_propagation(payload: str) -> str:
     return foo_reducer_value()
@@ -83,14 +83,14 @@ class TestReducerValueOutputPropagation(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success(self, _: str, is_remote: bool):
         if is_remote:
-            deploy(__file__)
-        request: Request = call_api(
+            deploy_applications(__file__)
+        request: Request = run_application(
             api_reducer_value_output_propagation, "test", remote=is_remote
         )
         self.assertEqual(request.output(), "buzz_reducer_value")
 
 
-@api()
+@application()
 @function()
 def api_reducer_subcall_output_propagation(payload: str) -> str:
     return foo_reducer_subcall()
@@ -125,8 +125,8 @@ class TestReducerSubcallOutputPropagation(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success(self, _: str, is_remote: bool):
         if is_remote:
-            deploy(__file__)
-        request: Request = call_api(
+            deploy_applications(__file__)
+        request: Request = run_application(
             api_reducer_subcall_output_propagation, "test", remote=is_remote
         )
         self.assertEqual(request.output(), "buzz_reducer_subcall")

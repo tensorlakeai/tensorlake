@@ -5,14 +5,14 @@ import unittest
 from tensorlake.applications import (
     Request,
     RequestFailureException,
-    api,
-    call_remote_api,
+    application,
     function,
+    run_remote_application,
 )
-from tensorlake.applications.remote.deploy import deploy
+from tensorlake.applications.remote.deploy import deploy_applications
 
 
-@api()
+@application()
 @function()
 def function(crash: bool) -> str:
     if crash:
@@ -26,11 +26,11 @@ def function(crash: bool) -> str:
 
 class TestFunctionProcessCrash(unittest.TestCase):
     def test_function_invoke_successful_after_process_crashes(self):
-        deploy(__file__)
+        deploy_applications(__file__)
 
         print("Running a function that will crash FunctionExecutor process...")
         for i in range(2):
-            request: Request = call_remote_api(
+            request: Request = run_remote_application(
                 function,
                 True,
             )
@@ -42,7 +42,7 @@ class TestFunctionProcessCrash(unittest.TestCase):
         # FIXME: we're only doing periodic Function Executor health checks right now,
         # so we need to wait for the crash to be detected.
         time.sleep(10)
-        success_request: Request = call_remote_api(
+        success_request: Request = run_remote_application(
             function,
             False,
         )

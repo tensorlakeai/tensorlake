@@ -1,17 +1,18 @@
 import unittest
 
+import parameterized
+
 from tensorlake.applications import (
     Request,
     RequestError,
-    api,
-    call_local_api,
-    call_remote_api,
+    application,
     function,
+    run_application,
 )
-from tensorlake.applications.remote.deploy import deploy
+from tensorlake.applications.remote.deploy import deploy_applications
 
 
-@api()
+@application()
 @function()
 def start_func(cmd: str) -> str:
     if cmd == "fail_request":
@@ -25,13 +26,15 @@ def end_func(_: str) -> str:
 
 
 class TestRequestError(unittest.TestCase):
-    def setUp(self):
-        deploy(__file__)
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_expected_message(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
 
-    def test_expected_message(self):
-        request: Request = call_remote_api(
+        request: Request = run_application(
             start_func,
             "fail_request",
+            remote=is_remote,
         )
 
         try:

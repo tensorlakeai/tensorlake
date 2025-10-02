@@ -9,7 +9,7 @@ import grpc
 from models import StructuredField, StructuredState
 from testing import (
     FunctionExecutorProcessContextManager,
-    api_function_inputs,
+    application_function_inputs,
     download_and_deserialize_so,
     initialize,
     rpc_channel,
@@ -17,10 +17,8 @@ from testing import (
 )
 
 from tensorlake.applications import (
-    Application,
     RequestContext,
-    api,
-    define_application,
+    application,
     function,
 )
 from tensorlake.applications.user_data_serializer import (
@@ -46,8 +44,6 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
 )
 
 APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
-
-app: Application = define_application(name=__file__)
 
 
 def request_state_client_stub(
@@ -92,7 +88,7 @@ def request_state_client_stub(
     return request_state_client_thread
 
 
-@api()
+@application()
 @function()
 def set_request_state(x: int) -> str:
     ctx: RequestContext = RequestContext.get()
@@ -111,7 +107,8 @@ class TestSetRequestState(unittest.TestCase):
     def _initialize_function_executor(self, stub: FunctionExecutorStub):
         initialize_response: InitializeResponse = initialize(
             stub,
-            app=app,
+            app_name="set_request_state",
+            app_version="0.1",
             app_code_dir_path=APPLICATION_CODE_DIR_PATH,
             function_name="set_request_state",
         )
@@ -164,7 +161,7 @@ class TestSetRequestState(unittest.TestCase):
                 )
                 alloc_result: AllocationResult = run_allocation(
                     stub,
-                    inputs=api_function_inputs(42),
+                    inputs=application_function_inputs(42),
                 )
                 self.assertEqual(
                     alloc_result.outcome_code,
@@ -226,7 +223,7 @@ class TestSetRequestState(unittest.TestCase):
                 )
                 alloc_result: AllocationResult = run_allocation(
                     stub,
-                    inputs=api_function_inputs(42),
+                    inputs=application_function_inputs(42),
                 )
                 self.assertEqual(
                     alloc_result.outcome_code,
@@ -244,7 +241,7 @@ class TestSetRequestState(unittest.TestCase):
         )
 
 
-@api()
+@application()
 @function()
 def check_request_state_is_expected(x: int) -> str:
     ctx: RequestContext = RequestContext.get()
@@ -261,7 +258,7 @@ def check_request_state_is_expected(x: int) -> str:
     )
 
 
-@api()
+@application()
 @function()
 def check_request_state_is_none(x: int) -> str:
     ctx: RequestContext = RequestContext.get()
@@ -276,7 +273,8 @@ class TestGetInvocationState(unittest.TestCase):
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 initialize_response: InitializeResponse = initialize(
                     stub,
-                    app=app,
+                    app_name="check_request_state_is_expected",
+                    app_version="0.1",
                     app_code_dir_path=APPLICATION_CODE_DIR_PATH,
                     function_name="check_request_state_is_expected",
                 )
@@ -326,7 +324,7 @@ class TestGetInvocationState(unittest.TestCase):
                 )
                 alloc_result: AllocationResult = run_allocation(
                     stub,
-                    inputs=api_function_inputs(33),
+                    inputs=application_function_inputs(33),
                 )
                 self.assertEqual(
                     alloc_result.outcome_code,
@@ -350,7 +348,8 @@ class TestGetInvocationState(unittest.TestCase):
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 initialize_response: InitializeResponse = initialize(
                     stub,
-                    app=app,
+                    app_name="check_request_state_is_none",
+                    app_version="0.1",
                     app_code_dir_path=APPLICATION_CODE_DIR_PATH,
                     function_name="check_request_state_is_none",
                 )
@@ -382,7 +381,7 @@ class TestGetInvocationState(unittest.TestCase):
                 )
                 alloc_result: AllocationResult = run_allocation(
                     stub,
-                    inputs=api_function_inputs(33),
+                    inputs=application_function_inputs(33),
                 )
                 self.assertEqual(
                     alloc_result.outcome_code,
@@ -406,7 +405,8 @@ class TestGetInvocationState(unittest.TestCase):
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 initialize_response: InitializeResponse = initialize(
                     stub,
-                    app=app,
+                    app_name="check_request_state_is_expected",
+                    app_version="0.1",
                     app_code_dir_path=APPLICATION_CODE_DIR_PATH,
                     function_name="check_request_state_is_expected",
                 )
@@ -435,7 +435,7 @@ class TestGetInvocationState(unittest.TestCase):
                 )
                 alloc_result: AllocationResult = run_allocation(
                     stub,
-                    inputs=api_function_inputs(14),
+                    inputs=application_function_inputs(14),
                 )
                 self.assertEqual(
                     alloc_result.outcome_code,

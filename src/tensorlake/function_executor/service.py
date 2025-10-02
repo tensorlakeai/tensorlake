@@ -13,9 +13,9 @@ import grpc
 from tensorlake.applications import Function, RequestProgress
 from tensorlake.applications.function.function_call import create_self_instance
 from tensorlake.applications.registry import get_function, get_functions, has_function
-from tensorlake.applications.remote.application.zip import (
-    APPLICATION_ZIP_MANIFEST_FILE_NAME,
-    ApplicationZIPManifest,
+from tensorlake.applications.remote.code.zip import (
+    CODE_ZIP_MANIFEST_FILE_NAME,
+    CodeZIPManifest,
     FunctionZIPManifest,
 )
 from tensorlake.applications.request_context.request_context_base import (
@@ -156,25 +156,21 @@ class Service(FunctionExecutorServicer):
             # Process user controlled input in a try-except block to not treat errors here as our
             # internal platform errors.
             with zipfile.ZipFile(graph_modules_zip_path, "r") as zf:
-                with zf.open(
-                    APPLICATION_ZIP_MANIFEST_FILE_NAME
-                ) as app_zip_manifest_file:
-                    app_zip_manifest: ApplicationZIPManifest = (
-                        ApplicationZIPManifest.model_validate(
-                            json.load(app_zip_manifest_file)
-                        )
+                with zf.open(CODE_ZIP_MANIFEST_FILE_NAME) as code_zip_manifest_file:
+                    code_zip_manifest: CodeZIPManifest = CodeZIPManifest.model_validate(
+                        json.load(code_zip_manifest_file)
                     )
 
-            if request.function.function_name not in app_zip_manifest.functions:
+            if request.function.function_name not in code_zip_manifest.functions:
                 raise ValueError(
                     (
                         f"Function '{request.function.function_name}' not found in ZIP manifest of application '{request.function.application_name}'. "
-                        f"Available functions: {list(app_zip_manifest.functions.keys())}"
+                        f"Available functions: {list(code_zip_manifest.functions.keys())}"
                     )
                 )
 
             # Load the function module so that the function is available in the registry.
-            function_zip_manifest: FunctionZIPManifest = app_zip_manifest.functions[
+            function_zip_manifest: FunctionZIPManifest = code_zip_manifest.functions[
                 request.function.function_name
             ]
             importlib.import_module(function_zip_manifest.module_import_name)

@@ -7,14 +7,14 @@ from tensorlake.applications import (
     Request,
     RequestContext,
     RequestError,
-    api,
-    call_api,
+    application,
     function,
+    run_application,
 )
-from tensorlake.applications.remote.deploy import deploy
+from tensorlake.applications.remote.deploy import deploy_applications
 
 
-@api()
+@application()
 @function()
 def test_request_context_state_set_get_simple_value_api(value: int) -> str:
     ctx: RequestContext = RequestContext.get()
@@ -28,14 +28,14 @@ def test_request_context_state_set_get_simple_value_internal() -> int:
     return ctx.state.get("key1")
 
 
-@api()
+@application()
 @function()
 def test_request_context_state_get_default_value_api(default: str) -> str:
     ctx: RequestContext = RequestContext.get()
     return ctx.state.get("non_existing_key", default)
 
 
-@api()
+@application()
 @function()
 def test_request_context_state_get_without_default_value_returns_none_api(
     _: str,
@@ -52,7 +52,7 @@ class UserClass:
         self._data: bytes = b"data" * times
 
 
-@api()
+@application()
 @function()
 def test_request_context_state_set_get_user_class_instance_api(times: int) -> str:
     ctx: RequestContext = RequestContext.get()
@@ -82,7 +82,7 @@ class UserModel(BaseModel):
     name: str
 
 
-@api()
+@application()
 @function()
 def test_request_context_state_set_get_pydantic_model_api(model_name: str) -> str:
     user_model: UserModel = UserModel(id=1, name=model_name)
@@ -111,9 +111,9 @@ class TestRequestContext(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_request_context_state_set_get_simple_value(self, _: str, is_remote: bool):
         if is_remote:
-            deploy(__file__)
+            deploy_applications(__file__)
 
-        request: Request = call_api(
+        request: Request = run_application(
             test_request_context_state_set_get_simple_value_api, 11, remote=is_remote
         )
 
@@ -125,9 +125,9 @@ class TestRequestContext(unittest.TestCase):
         self, _: str, is_remote: bool
     ):
         if is_remote:
-            deploy(__file__)
+            deploy_applications(__file__)
 
-        request: Request = call_api(
+        request: Request = run_application(
             test_request_context_state_set_get_user_class_instance_api,
             11,
             remote=is_remote,
@@ -141,9 +141,9 @@ class TestRequestContext(unittest.TestCase):
         self, _: str, is_remote: bool
     ):
         if is_remote:
-            deploy(__file__)
+            deploy_applications(__file__)
 
-        request: Request = call_api(
+        request: Request = run_application(
             test_request_context_state_set_get_pydantic_model_api,
             "test_model_name",
             remote=is_remote,
@@ -155,9 +155,9 @@ class TestRequestContext(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_request_context_state_get_default_value(self, _: str, is_remote: bool):
         if is_remote:
-            deploy(__file__)
+            deploy_applications(__file__)
 
-        request: Request = call_api(
+        request: Request = run_application(
             test_request_context_state_get_default_value_api,
             "default_value",
             remote=is_remote,
@@ -171,9 +171,9 @@ class TestRequestContext(unittest.TestCase):
         self, _: str, is_remote: bool
     ):
         if is_remote:
-            deploy(__file__)
+            deploy_applications(__file__)
 
-        request: Request = call_api(
+        request: Request = run_application(
             test_request_context_state_get_without_default_value_returns_none_api,
             None,
             remote=is_remote,

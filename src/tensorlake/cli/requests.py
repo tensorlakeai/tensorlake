@@ -164,11 +164,12 @@ def info(
 
 @request.command(
     epilog="""
-Arguments:
-  tensorlake request logs <request-id>              # Uses default graph
-  tensorlake request logs <graph-name> <request-id> # Explicit graph name
 \b
-Use 'tensorlake config set default.graph <name>' to set a default graph name.
+Arguments:
+  tensorlake request info <request-id>              # Uses default application
+  tensorlake request info <application-name> <request-id> # Explicit application name
+\b
+Use 'tensorlake config set default.application <name>' to set a default application name.
 Use 'tensorlake config set default.request <id>' to set a default request ID.
 """
 )

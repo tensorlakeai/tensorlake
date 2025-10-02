@@ -6,8 +6,8 @@ from pydantic.json import pydantic_encoder
 from rich import print, print_json
 from rich.table import Table
 
-from tensorlake.applications.remote.application.application import ApplicationManifest
-from tensorlake.applications.remote.application.function import FunctionManifest
+from tensorlake.applications.remote.manifests.application import ApplicationManifest
+from tensorlake.applications.remote.manifests.function import FunctionManifest
 from tensorlake.cli._common import Context, LogFormat, pass_auth, print_application_logs
 
 

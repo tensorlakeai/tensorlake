@@ -1,16 +1,21 @@
-from typing import Callable, List, Literal, TypeVar
+from typing import Callable, Dict, List, Literal, TypeVar
+
+from tensorlake.vendor.nanoid import generate as nanoid
 
 from ..registry import register_class, register_function
 from .function import (
     Function,
-    _APIConfiguration,
+    _ApplicationConfiguration,
     _FunctionConfiguration,
 )
 from .image import Image
 from .retries import Retries
 
 
-def api(
+def application(
+    tags: Dict[str, str] = {},
+    retries: Retries = Retries(),
+    region: str | None = None,
     input_serializer: Literal["json", "pickle"] = "json",
     output_serializer: Literal["json", "pickle"] = "json",
 ) -> Callable:
@@ -19,9 +24,14 @@ def api(
             fn = Function(fn)
 
         fn: Function
-        fn._api_config = _APIConfiguration(
+        fn._application_config = _ApplicationConfiguration(
+            tags=tags,
+            retries=retries,
+            region=region,
             input_serializer=input_serializer,
             output_serializer=output_serializer,
+            # Use a unique random version. We don't provide user controlled versioning at the moment.
+            version=nanoid(),
         )
 
         return fn

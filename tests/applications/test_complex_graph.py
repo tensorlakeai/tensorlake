@@ -7,23 +7,24 @@ from tensorlake.applications import (
     File,
     Request,
     RequestContext,
-    api,
-    call_local_api,
-    call_local_function,
-    call_remote_api,
+    application,
     cls,
     function,
 )
 from tensorlake.applications import map as tl_map
 from tensorlake.applications import reduce as tl_reduce
-from tensorlake.applications.remote.deploy import deploy
+from tensorlake.applications import (
+    run_local_application,
+    run_remote_application,
+)
+from tensorlake.applications.remote.deploy import deploy_applications
 
 
 class TestGraphRequestPayload(BaseModel):
     numbers: List[str]
 
 
-@api()
+@application()
 @function(cpu=1.0, memory=1.0, description="test API function")
 def test_graph_api_fan_in(payload: TestGraphRequestPayload) -> File:
     print(f"Received request with numbers: {payload.numbers}")
@@ -34,7 +35,7 @@ def test_graph_api_fan_in(payload: TestGraphRequestPayload) -> File:
     return store_sum_as_file(sum)
 
 
-@api()
+@application()
 @function(cpu=1.0, memory=1.0, description="test API function")
 def test_graph_api_reduce(payload: TestGraphRequestPayload) -> File:
     print(f"Received request with numbers: {payload.numbers}")
@@ -95,25 +96,9 @@ def store_sum_as_file(total: int) -> File:
 
 
 class TestComplexGraph(unittest.TestCase):
-    def test_local_function_call_of_complex_graph_produces_expected_outputs(self):
-        # Any function can be called in local mode, not only API function.
-        # This eases debugging for people.
-        for function in [test_graph_api_reduce, test_graph_api_fan_in]:
-            request: Request = call_local_function(
-                function(
-                    payload=TestGraphRequestPayload(
-                        numbers=[str(i) for i in range(10, 20)]
-                    ),
-                )
-            )
-
-            file: File = request.output()
-            self.assertEqual(file.content_type, "text/plain; charset=UTF-8")
-            self.assertEqual(file.content, b"Total sum: 280")
-
     def test_local_api_call_of_complex_graph_produces_expected_outputs(self):
         for function in ["test_graph_api_reduce", "test_graph_api_fan_in"]:
-            request = call_local_api(
+            request = run_local_application(
                 function,
                 TestGraphRequestPayload(numbers=[str(i) for i in range(10, 20)]),
             )
@@ -123,9 +108,9 @@ class TestComplexGraph(unittest.TestCase):
             self.assertEqual(file.content, b"Total sum: 280")
 
     def test_remote_api_call_of_complex_graph_produces_expected_outputs(self):
-        deploy(__file__)
+        deploy_applications(__file__)
         for function in ["test_graph_api_reduce", "test_graph_api_fan_in"]:
-            request: Request = call_remote_api(
+            request: Request = run_remote_application(
                 function,
                 TestGraphRequestPayload(numbers=[str(i) for i in range(10, 20)]),
             )

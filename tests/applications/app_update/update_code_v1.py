@@ -3,7 +3,7 @@ import time
 import tensorlake.applications
 
 
-@tensorlake.applications.api()
+@tensorlake.applications.application()
 @tensorlake.applications.function()
 def update_code_start_func(sleep_sec: int) -> str:
     time.sleep(sleep_sec)

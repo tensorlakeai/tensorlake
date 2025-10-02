@@ -7,13 +7,13 @@ import unittest
 from grpc import RpcError
 from testing import (
     FunctionExecutorProcessContextManager,
-    api_function_inputs,
+    application_function_inputs,
     initialize,
     rpc_channel,
     run_allocation,
 )
 
-from tensorlake.applications import Application, api, define_application, function
+from tensorlake.applications import application, function
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     AllocationOutcomeCode,
     AllocationResult,
@@ -29,14 +29,12 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
 
 APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
 
-app: Application = define_application(name=__file__)
-
 # Lower - faster tests but more CPU usage.
 HEALTH_CHECK_POLL_PERIOD_SEC = 0.1
 HEALTH_CHECK_TIMEOUT_SEC = 5
 
 
-@api()
+@application()
 @function()
 def action_function(action: str) -> str:
     if action == "crash_process":
@@ -96,7 +94,8 @@ class TestHealthCheck(unittest.TestCase):
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 response: InitializeResponse = initialize(
                     stub,
-                    app=app,
+                    app_name="action_function",
+                    app_version="0.1",
                     app_code_dir_path=APPLICATION_CODE_DIR_PATH,
                     function_name="action_function",
                 )
@@ -105,7 +104,7 @@ class TestHealthCheck(unittest.TestCase):
                     InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
                 )
 
-                inputs: FunctionInputs = api_function_inputs("deadlock")
+                inputs: FunctionInputs = application_function_inputs("deadlock")
 
                 def run_task_in_thread():
                     try:
@@ -135,7 +134,8 @@ class TestHealthCheck(unittest.TestCase):
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 response: InitializeResponse = initialize(
                     stub,
-                    app=app,
+                    app_name="action_function",
+                    app_version="0.1",
                     app_code_dir_path=APPLICATION_CODE_DIR_PATH,
                     function_name="action_function",
                 )
@@ -147,7 +147,7 @@ class TestHealthCheck(unittest.TestCase):
                 def run_task_in_thread():
                     alloc_result: AllocationResult = run_allocation(
                         stub,
-                        inputs=api_function_inputs("raise_exception"),
+                        inputs=application_function_inputs("raise_exception"),
                     )
                     self.assertEqual(
                         alloc_result.outcome_code,
@@ -171,7 +171,8 @@ class TestHealthCheck(unittest.TestCase):
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 response: InitializeResponse = initialize(
                     stub,
-                    app=app,
+                    app_name="action_function",
+                    app_version="0.1",
                     app_code_dir_path=APPLICATION_CODE_DIR_PATH,
                     function_name="action_function",
                 )
@@ -185,7 +186,7 @@ class TestHealthCheck(unittest.TestCase):
                         # Due to "tcp keep-alive" property of the health checks the task should unblock with RpcError.
                         run_allocation(
                             stub,
-                            inputs=api_function_inputs("crash_process"),
+                            inputs=application_function_inputs("crash_process"),
                         )
                         self.fail("Run task should have failed.")
                     except RpcError:
@@ -203,7 +204,8 @@ class TestHealthCheck(unittest.TestCase):
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 response: InitializeResponse = initialize(
                     stub,
-                    app=app,
+                    app_name="action_function",
+                    app_version="0.1",
                     app_code_dir_path=APPLICATION_CODE_DIR_PATH,
                     function_name="action_function",
                 )
@@ -217,7 +219,7 @@ class TestHealthCheck(unittest.TestCase):
                         # Due to "tcp keep-alive" property of the health checks the task should unblock with RpcError.
                         run_allocation(
                             stub,
-                            inputs=api_function_inputs("close_connections"),
+                            inputs=application_function_inputs("close_connections"),
                         )
                         self.fail("Run task should have failed.")
                     except RpcError:

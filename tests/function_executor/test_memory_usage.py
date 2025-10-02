@@ -5,14 +5,17 @@ import unittest
 import psutil
 from testing import (
     FunctionExecutorProcessContextManager,
-    api_function_inputs,
+    application_function_inputs,
     download_and_deserialize_so,
     initialize,
     rpc_channel,
     run_allocation,
 )
 
-from tensorlake.applications import Application, api, define_application, function
+from tensorlake.applications import (
+    application,
+    function,
+)
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     AllocationOutcomeCode,
     AllocationResult,
@@ -25,7 +28,6 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
 
 APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
 
-app: Application = define_application(name=__file__)
 
 # This test checks if the memory usage of a Function Executor process is below
 # a known threshold. Customers rely on this threshold because if FE memory usage
@@ -36,7 +38,7 @@ app: Application = define_application(name=__file__)
 _FUNCTION_EXECUTOR_MAX_MEMORY_MB = 85
 
 
-@api()
+@application()
 @function()
 def process_rss_mb(x: int) -> int:
     # rss is in bytes
@@ -50,7 +52,8 @@ class TestMemoryUsage(unittest.TestCase):
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 initialize_response: InitializeResponse = initialize(
                     stub=stub,
-                    app=app,
+                    app_name="process_rss_mb",
+                    app_version="0.1",
                     app_code_dir_path=APPLICATION_CODE_DIR_PATH,
                     function_name="process_rss_mb",
                 )
@@ -61,7 +64,7 @@ class TestMemoryUsage(unittest.TestCase):
 
                 alloc_result: AllocationResult = run_allocation(
                     stub,
-                    inputs=api_function_inputs(0),
+                    inputs=application_function_inputs(0),
                 )
 
                 self.assertEqual(

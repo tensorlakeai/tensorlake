@@ -4,21 +4,21 @@ import sys
 from typing import Generator, Set
 
 
-def load_application(code_dir_or_filepath: str, ignored_paths: Set[str]) -> None:
-    """Loads all Python files from the application code directory or just loads from the supplied file path.
+def load_code(code_dir_or_filepath: str, ignored_paths: Set[str]) -> None:
+    """Loads all Python files from the code directory or just loads from the supplied file path.
 
     The supplied paths must be absolute.
     """
 
     if not os.path.isabs(code_dir_or_filepath):
         raise ValueError(
-            f"The deployed application code directory of file path `{code_dir_or_filepath}` must be absolute."
+            f"The deployed code directory of file path `{code_dir_or_filepath}` must be absolute."
         )
 
     for ignored_path in ignored_paths:
         if not os.path.isabs(ignored_path):
             raise ValueError(
-                f"All deployed application ignored paths must be absolute, but got `{ignored_path}`."
+                f"All deployed ignored paths must be absolute, but got `{ignored_path}`."
             )
 
     code_dir_path: str = (
@@ -30,9 +30,7 @@ def load_application(code_dir_or_filepath: str, ignored_paths: Set[str]) -> None
         # Makes `import foo` work if foo.py is in the code directory.
         sys.path.insert(0, code_dir_path)
 
-    for py_file_absolute_path in walk_application_code(
-        code_dir_or_filepath, ignored_paths
-    ):
+    for py_file_absolute_path in walk_code(code_dir_or_filepath, ignored_paths):
         py_file_path_inside_code_dir: str = os.path.relpath(
             py_file_absolute_path, code_dir_path
         )
@@ -47,17 +45,17 @@ def load_application(code_dir_or_filepath: str, ignored_paths: Set[str]) -> None
         importlib.import_module(module_import_name)
 
 
-# Allow soft links in application code directory. This allows users to include dirs and files
-# into application code directory that are not really inside the directory.
+# Allow soft links in code directory. This allows users to include dirs and files
+# into code directory that are not really inside the directory.
 # This might result in infinite recursion but we protect from it by checking the size of
 # the ZIP archive as we go.
 _FOLLOW_LINKS = True
 
 
-def walk_application_code(
+def walk_code(
     code_dir_or_file_path: str, ignored_absolute_paths: Set[str]
 ) -> Generator[str, None, None]:
-    """Yields all absolute Python file paths from the application code directory or just yields the supplied file path."""
+    """Yields all absolute Python file paths from the code directory or just yields the supplied file path."""
     if os.path.isfile(code_dir_or_file_path):
         if code_dir_or_file_path.endswith(".py"):
             yield os.path.abspath(code_dir_or_file_path)

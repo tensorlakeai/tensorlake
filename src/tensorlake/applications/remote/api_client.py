@@ -18,7 +18,7 @@ from tensorlake.applications.interface.exceptions import (
     RequestFailureException,
     RequestNotFinished,
 )
-from tensorlake.applications.remote.application.manifests import ApplicationManifest
+from tensorlake.applications.remote.manifests.application import ApplicationManifest
 from tensorlake.utils.http_client import (
     _TRANSIENT_HTTPX_ERRORS,
     get_httpx_client,

@@ -6,7 +6,7 @@ from typing import List
 from pydantic import BaseModel
 from testing import (
     FunctionExecutorProcessContextManager,
-    api_function_inputs,
+    application_function_inputs,
     create_tmp_blob,
     download_and_deserialize_so,
     initialize,
@@ -18,11 +18,9 @@ from testing import (
 )
 
 from tensorlake.applications import (
-    Application,
     File,
-    api,
+    application,
     cls,
-    define_application,
     function,
 )
 from tensorlake.applications.ast.function_call_node import (
@@ -64,8 +62,6 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
 
 APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
 
-app: Application = define_application(name=__file__)
-
 
 class FileChunk(BaseModel):
     data: bytes
@@ -73,7 +69,7 @@ class FileChunk(BaseModel):
     end: int
 
 
-@api()
+@application()
 @function()
 def api_function(url: str) -> List[FileChunk]:
     print(f"api_function called with url: {url}")
@@ -96,7 +92,7 @@ def file_chunker(file: File, num_chunks: int) -> List[FileChunk]:
     ]
 
 
-@api()
+@application()
 @function()
 def raises_exception(input: int):
     raise Exception("this extractor throws an exception.")
@@ -126,7 +122,8 @@ class TestRunAllocation(unittest.TestCase):
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 initialize_response: InitializeResponse = initialize(
                     stub,
-                    app=app,
+                    app_name="api_function",
+                    app_version="0.1",
                     app_code_dir_path=APPLICATION_CODE_DIR_PATH,
                     function_name="api_function",
                 )
@@ -187,8 +184,8 @@ class TestRunAllocation(unittest.TestCase):
                     function_call.target,
                     FunctionRef(
                         namespace="test",
-                        application_name=app.name,
-                        application_version=app.version,
+                        application_name="api_function",
+                        application_version="0.1",
                         function_name="file_chunker",
                     ),
                 )
@@ -253,7 +250,8 @@ class TestRunAllocation(unittest.TestCase):
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 initialize_response: InitializeResponse = initialize(
                     stub,
-                    app=app,
+                    app_name="file_chunker",
+                    app_version="0.1",
                     app_code_dir_path=APPLICATION_CODE_DIR_PATH,
                     function_name="file_chunker",
                 )
@@ -396,7 +394,8 @@ class TestRunAllocation(unittest.TestCase):
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 initialize_response: InitializeResponse = initialize(
                     stub,
-                    app=app,
+                    app_name="returns_argument",
+                    app_version="0.1",
                     app_code_dir_path=APPLICATION_CODE_DIR_PATH,
                     function_name="returns_argument",
                 )
@@ -527,7 +526,8 @@ class TestRunAllocation(unittest.TestCase):
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 initialize_response: InitializeResponse = initialize(
                     stub,
-                    app=app,
+                    app_name="raises_exception",
+                    app_version="0.1",
                     app_code_dir_path=APPLICATION_CODE_DIR_PATH,
                     function_name="raises_exception",
                 )
@@ -538,7 +538,7 @@ class TestRunAllocation(unittest.TestCase):
 
                 alloc_result: AllocationResult = run_allocation(
                     stub,
-                    inputs=api_function_inputs(10),
+                    inputs=application_function_inputs(10),
                 )
                 self.assertEqual(
                     alloc_result.outcome_code,
@@ -569,7 +569,8 @@ class TestRunAllocation(unittest.TestCase):
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 initialize_response: InitializeResponse = initialize(
                     stub,
-                    app=app,
+                    app_name="FunctionFailingOnInit.run",
+                    app_version="0.1",
                     app_code_dir_path=APPLICATION_CODE_DIR_PATH,
                     function_name="FunctionFailingOnInit.run",
                 )

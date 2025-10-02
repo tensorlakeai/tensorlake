@@ -7,9 +7,9 @@ from typing import Any, Dict, List
 
 import grpc
 
-from tensorlake.applications import Application
 from tensorlake.applications.ast.value_node import ValueMetadata
-from tensorlake.applications.remote.application.zip import zip_application_code
+from tensorlake.applications.registry import get_functions
+from tensorlake.applications.remote.code.zip import zip_code
 from tensorlake.applications.user_data_serializer import (
     JSONUserDataSerializer,
 )
@@ -113,20 +113,22 @@ def rpc_channel(context_manager: FunctionExecutorProcessContextManager) -> grpc.
 
 def initialize(
     stub: FunctionExecutorStub,
-    app: Application,
+    app_name: str,
+    app_version: str,
     app_code_dir_path: str,
     function_name: str,
 ) -> InitializeResponse:
-    application_zip: bytes = zip_application_code(
+    application_zip: bytes = zip_code(
         code_dir_path=app_code_dir_path,
         ignored_absolute_paths=set(),
+        all_functions=get_functions(),
     )
     return stub.initialize(
         InitializeRequest(
             function=FunctionRef(
                 namespace="test",
-                application_name=app.name,
-                application_version=app.version,
+                application_name=app_name,
+                application_version=app_version,
                 function_name=function_name,
             ),
             application_code=SerializedObject(
@@ -179,13 +181,13 @@ def run_allocation(
     return result
 
 
-def api_function_inputs(api_payload: Any) -> FunctionInputs:
+def application_function_inputs(payload: Any) -> FunctionInputs:
     user_serializer: JSONUserDataSerializer = JSONUserDataSerializer()
-    serialized_api_payload: bytes = user_serializer.serialize(api_payload)
-    api_payload_blob: BLOB = create_tmp_blob(
-        chunks_count=1, chunk_size=len(serialized_api_payload)
+    serialized_payload: bytes = user_serializer.serialize(payload)
+    payload_blob: BLOB = create_tmp_blob(
+        chunks_count=1, chunk_size=len(serialized_payload)
     )
-    write_tmp_blob_bytes(api_payload_blob, serialized_api_payload)
+    write_tmp_blob_bytes(payload_blob, serialized_payload)
 
     return FunctionInputs(
         args=[
@@ -193,14 +195,14 @@ def api_function_inputs(api_payload: Any) -> FunctionInputs:
                 manifest=SerializedObjectManifest(
                     encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON,
                     encoding_version=0,
-                    size=len(serialized_api_payload),
+                    size=len(serialized_payload),
                     metadata_size=0,  # No metadata for API function calls.
-                    sha256_hash=hashlib.sha256(serialized_api_payload).hexdigest(),
+                    sha256_hash=hashlib.sha256(serialized_payload).hexdigest(),
                 ),
                 offset=0,
             )
         ],
-        arg_blobs=[api_payload_blob],
+        arg_blobs=[payload_blob],
         function_outputs_blob=create_tmp_blob(),
         request_error_blob=create_tmp_blob(),
         function_call_metadata=b"",

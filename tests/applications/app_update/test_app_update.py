@@ -4,8 +4,8 @@ from importlib import reload
 import update_code_v1
 import update_code_v2
 
-from tensorlake.applications import Request, call_remote_api, define_application
-from tensorlake.applications.remote.deploy import deploy
+from tensorlake.applications import Request, define_application, run_remote_application
+from tensorlake.applications.remote.deploy import deploy_applications
 
 
 class TestApplicationUpdate(unittest.TestCase):
@@ -18,10 +18,10 @@ class TestApplicationUpdate(unittest.TestCase):
         # Update functions to v1.
         reload(update_code_v1)
 
-        deploy(__file__, upgrade_running_requests=False)
+        deploy_applications(__file__, upgrade_running_requests=False)
 
         # The request is sleeping in start_func.
-        request_v1: Request = call_remote_api("update_code_start_func", 10)
+        request_v1: Request = run_remote_application("update_code_start_func", 10)
 
         # Update the app version to a new random value.
         define_application(
@@ -30,7 +30,7 @@ class TestApplicationUpdate(unittest.TestCase):
         # Update functions to v2.
         reload(update_code_v2)
 
-        deploy(__file__, upgrade_running_requests=True)
+        deploy_applications(__file__, upgrade_running_requests=True)
 
         # The request should be updated by Server to call the updated graph version with v2 update_code_end_func
         # which returns a different value than v1.
@@ -45,10 +45,10 @@ class TestApplicationUpdate(unittest.TestCase):
         # Update functions to v1.
         reload(update_code_v1)
 
-        deploy(__file__, upgrade_running_requests=False)
+        deploy_applications(__file__, upgrade_running_requests=False)
 
         # The request is sleeping in start_func.
-        request_v1: Request = call_remote_api("update_code_start_func", 10)
+        request_v1: Request = run_remote_application("update_code_start_func", 10)
 
         # Update the app version to a new random value.
         define_application(
@@ -57,7 +57,7 @@ class TestApplicationUpdate(unittest.TestCase):
         # Update functions to v2.
         reload(update_code_v2)
 
-        deploy(__file__, upgrade_running_requests=False)
+        deploy_applications(__file__, upgrade_running_requests=False)
 
         # The request should not be updated by Server so the request should still call v1 update_code_end_func.
         end_func_output: str = request_v1.output()

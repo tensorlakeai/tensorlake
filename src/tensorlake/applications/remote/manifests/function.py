@@ -8,8 +8,7 @@ from typing import (
 
 from typing_extensions import get_args, get_origin, get_type_hints
 
-from ...interface.application import Application
-from ...interface.function import Function
+from ...interface.function import Function, _ApplicationConfiguration
 from .function_resources import resources_for_function
 from .manifests import (
     FunctionManifest,
@@ -178,13 +177,16 @@ def _function_signature_info(
     return parameters, return_type_schema
 
 
-def create_function_manifest(app: Application, function: Function) -> FunctionManifest:
+def create_function_manifest(
+    application_function: Function, application_version: str, function: Function
+) -> FunctionManifest:
+    app_config: _ApplicationConfiguration = application_function.application_config
     retry_policy: RetryPolicyManifest = (
         RetryPolicyManifest(
-            max_retries=app.retries.max_retries,
-            initial_delay_sec=app.retries.initial_delay,
-            max_delay_sec=app.retries.max_delay,
-            delay_multiplier=app.retries.delay_multiplier,
+            max_retries=app_config.retries.max_retries,
+            initial_delay_sec=app_config.retries.initial_delay,
+            max_delay_sec=app_config.retries.max_delay,
+            delay_multiplier=app_config.retries.delay_multiplier,
         )
         if function.function_config.retries is None
         else RetryPolicyManifest(
@@ -200,15 +202,17 @@ def create_function_manifest(app: Application, function: Function) -> FunctionMa
     parameters, return_type_json_schema = _function_signature_info(function)
 
     cache_key: str | None = (
-        f"version_function={app.version}:{function.function_config.function_name}"
+        f"version_function={application_version}:{function.function_config.function_name}"
         if function.function_config.cacheable
         else None
     )
 
     app_placement_constraints: PlacementConstraintsManifest = (
         PlacementConstraintsManifest(filter_expressions=[])
-        if app.region is None
-        else PlacementConstraintsManifest(filter_expressions=[f"region=={app.region}"])
+        if app_config.region is None
+        else PlacementConstraintsManifest(
+            filter_expressions=[f"region=={app_config.region}"]
+        )
     )
     placement_constraints = (
         app_placement_constraints
@@ -221,7 +225,7 @@ def create_function_manifest(app: Application, function: Function) -> FunctionMa
     return FunctionManifest(
         name=function.function_config.function_name,
         description=function.function_config.description,
-        is_api=function.api_config is not None,
+        is_api=function.application_config is not None,
         secret_names=function.function_config.secrets,
         # When a function doesn't have a class_init_timeout set it means it's not a class method.
         # In this case FE initialization timeout should be the same as function timeout.

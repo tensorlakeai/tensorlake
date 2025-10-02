@@ -6,14 +6,16 @@ from pydantic import BaseModel
 
 from tensorlake.applications import (
     Request,
-    api,
-    call_local_api,
-    call_remote_api,
+    application,
     cls,
     function,
 )
 from tensorlake.applications import map as tl_map
-from tensorlake.applications.remote.deploy import deploy
+from tensorlake.applications import (
+    run_local_application,
+    run_remote_application,
+)
+from tensorlake.applications.remote.deploy import deploy_applications
 
 # This test doesn't verify much but it's used to simulate primary use case of the SDK
 # and see how easy it is to express it using the current SDK UX.
@@ -56,7 +58,7 @@ class ResponsePayload(BaseModel):
     chunks: List[ChunkEmbeddings]
 
 
-@api()
+@application()
 @function(description="Fake PDF parse workflow")
 def parse_pdf_api(payload: RequestPayload) -> ResponsePayload:
     # Right now it's hard to understand which function call is a regular function call and which one is remote
@@ -130,7 +132,7 @@ class IndexEmbedding:
 
 class TestPDFParseDataWorkflow(unittest.TestCase):
     def test_local_api_call(self):
-        request: Request = call_local_api(
+        request: Request = run_local_application(
             parse_pdf_api,
             RequestPayload(url="http://example.com/sample.pdf", page_range="1-5"),
         )
@@ -138,8 +140,8 @@ class TestPDFParseDataWorkflow(unittest.TestCase):
         self.assertEqual(len(payload.chunks), 5)
 
     def test_remote_api_call(self):
-        deploy(__file__)
-        request: Request = call_remote_api(
+        deploy_applications(__file__)
+        request: Request = run_remote_application(
             parse_pdf_api,
             RequestPayload(url="http://example.com/sample.pdf", page_range="1-5"),
         )

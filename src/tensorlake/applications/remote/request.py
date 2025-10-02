@@ -12,13 +12,11 @@ from .api_client import APIClient
 class RemoteRequest(Request):
     def __init__(
         self,
-        application_name: str,
-        api_function: Function,
+        application: Function,
         request_id: str,
         client: APIClient,
     ):
-        self._application_name: str = application_name
-        self._api_function: Function = api_function
+        self._application: Function = application
         self._request_id: str = request_id
         self._client: APIClient = client
 
@@ -27,19 +25,20 @@ class RemoteRequest(Request):
         return self._request_id
 
     def output(self) -> Any:
+        app_name: str = self._application.function_config.function_name
         self._client.wait_on_request_completion(
-            application_name=self._application_name, request_id=self._request_id
+            application_name=app_name, request_id=self._request_id
         )
         serialized_output: bytes
         output_content_type: str
         serialized_output, output_content_type = self._client.request_output(
-            application_name=self._application_name,
+            application_name=app_name,
             request_id=self._request_id,
         )
         # When deserializing API function inputs we use its payload type hints to
         # deserialize the output correctly. Here we're doing a symmetric operation.
         # We use API function return value type hint. This is a consistent UX for API functions.
-        api_return_type_hint: List[Any] = function_return_type_hint(self._api_function)
+        api_return_type_hint: List[Any] = function_return_type_hint(self._application)
         is_file_output: bool = False
         for type_hint in api_return_type_hint:
             if type_hint is File:
@@ -50,7 +49,7 @@ class RemoteRequest(Request):
         else:
             # API function serializer is always statically set in its api_config.
             api_output_serializer: UserDataSerializer = function_output_serializer(
-                self._api_function, None
+                self._application, None
             )
             return api_output_serializer.deserialize(
                 serialized_output, api_return_type_hint

@@ -3,7 +3,6 @@ from typing import Any, Callable, Dict, List
 
 from .function_call import RegularFunctionCall
 from .image import Image
-from .request_context import RequestContext
 from .retries import Retries
 
 
@@ -30,9 +29,13 @@ class _FunctionConfiguration:
 
 
 @dataclass
-class _APIConfiguration:
+class _ApplicationConfiguration:
+    tags: Dict[str, str]
+    retries: Retries
+    region: str | None
     input_serializer: str
     output_serializer: str
+    version: str
 
 
 class Function:
@@ -45,7 +48,7 @@ class Function:
     def __init__(self, original_function: Callable):
         self._original_function: Callable = original_function
         self._function_config: _FunctionConfiguration | None = None
-        self._api_config: _APIConfiguration | None = None
+        self._application_config: _ApplicationConfiguration | None = None
 
     @property
     def original_function(self) -> Callable:
@@ -56,15 +59,15 @@ class Function:
         return self._function_config
 
     @property
-    def api_config(self) -> _APIConfiguration | None:
-        return self._api_config
+    def application_config(self) -> _ApplicationConfiguration | None:
+        return self._application_config
 
     def __repr__(self) -> str:
         return (
             f"<Tensorlake Function(\n"
             f"  original_function={self._original_function!r},\n"
             f"  _function_config={self._function_config!r},\n"
-            f"  _api_config={self._api_config!r}\n"
+            f"  _application_config={self._application_config!r}\n"
             f")>"
         )
 
