@@ -12,14 +12,6 @@ def register_function(fn_name: str, fn: Any) -> None:
     """Register a Tensorlake Function."""
     global _function_registry
 
-    if fn_name in _function_registry:
-        # This happens if the module that defined the application gets imported multiple times.
-        # This happens e.g. in tests where the same module is imported as __main__ and as a regular
-        # module under its real name when pickle loads classes from it.
-        print(
-            "Warning: Overwriting existing Tensorlake Function.",
-            repr(_function_registry[fn_name]),
-        )
     _function_registry[fn_name] = fn
 
 
@@ -48,10 +40,12 @@ def get_functions() -> List[Any]:
 def register_class(cls_name: str, cls: Any) -> None:
     global _class_registry
 
-    if cls_name in _class_registry:
-        # TODO: Figure out how to return error here.
-        print(f"Warning: Tensorlake Class '{cls_name}' already exists.")
     _class_registry[cls_name] = cls
+
+
+def has_class(cls_name: str) -> bool:
+    global _class_registry
+    return cls_name in _class_registry
 
 
 def get_class(cls_name: str) -> Any:

@@ -5,6 +5,14 @@ class TensorlakeException(Exception):
         super().__init__(message)
 
 
+class ApplicationValidateError(TensorlakeException):
+    """Raised when an error is detected in application code."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        # TODO: Add line number, file name, code snippet, etc.
+
+
 class RemoteAPIError(TensorlakeException):
     """Raised when a remote API call fails."""
 

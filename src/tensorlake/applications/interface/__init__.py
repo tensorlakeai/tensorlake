@@ -9,6 +9,7 @@ from tensorlake.applications.interface.run import (
 
 from .decorators import application, cls, function
 from .exceptions import (
+    ApplicationValidateError,
     RemoteAPIError,
     RequestError,
     RequestFailureException,
@@ -38,6 +39,7 @@ __all__ = [
     "gather",
     "map",
     "reduce",
+    "ApplicationValidateError",
     "File",
     "Function",
     "FunctionCall",
