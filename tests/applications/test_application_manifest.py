@@ -1,22 +1,27 @@
 import unittest
 from typing import List
 
-from tensorlake.applications import Retries, cls, define_application, function
-from tensorlake.applications.application import define_default_application
+from tensorlake.applications import Retries, application, cls, function
 from tensorlake.applications.registry import get_functions
-from tensorlake.applications.remote.application.application import (
+from tensorlake.applications.remote.manifests.application import (
     ApplicationManifest,
     create_application_manifest,
 )
-from tensorlake.applications.remote.application.function import (
+from tensorlake.applications.remote.manifests.function import (
     ParameterManifest,
     RetryPolicyManifest,
 )
-from tensorlake.applications.remote.application.function_resources import (
+from tensorlake.applications.remote.manifests.function_resources import (
     FunctionResourcesManifest,
 )
 
 # The tests in this file verify application manifest generation for various functions.
+
+
+@application()
+@function()
+def default_application_function(x: int) -> str:
+    return "success"
 
 
 @function()
@@ -39,7 +44,8 @@ class FunctionWithInitializationTimeout:
 class TestFunctionManifestTimeouts(unittest.TestCase):
     def test_expected_timeouts(self):
         app_manifest: ApplicationManifest = create_application_manifest(
-            app=define_default_application(), functions=get_functions()
+            application_function=default_application_function,
+            all_functions=get_functions(),
         )
 
         self.assertEqual(
@@ -88,10 +94,21 @@ def function_with_custom_retries(x: int) -> str:
     return "success"
 
 
+@application(
+    retries=Retries(
+        max_retries=3,
+    )
+)
+@function()
+def application_function_with_custom_retries(x: int) -> str:
+    return "success"
+
+
 class TestFunctionManifestRetries(unittest.TestCase):
     def test_default_graph_retries(self):
         app_manifest: ApplicationManifest = create_application_manifest(
-            app=define_default_application(), functions=get_functions()
+            application_function=default_application_function,
+            all_functions=get_functions(),
         )
 
         retry_policy_metadata: RetryPolicyManifest = app_manifest.functions[
@@ -106,13 +123,8 @@ class TestFunctionManifestRetries(unittest.TestCase):
     def test_custom_application_retries(self):
         # Tests that custom application level retries get applied to functions that don't have their own retry policy.
         app_manifest: ApplicationManifest = create_application_manifest(
-            app=define_application(
-                name="TestFunctionManifestRetries.test_custom_application_retries",
-                retries=Retries(
-                    max_retries=3,
-                ),
-            ),
-            functions=get_functions(),
+            application_function=application_function_with_custom_retries,
+            all_functions=get_functions(),
         )
 
         retry_policy_metadata: RetryPolicyManifest = app_manifest.functions[
@@ -127,13 +139,8 @@ class TestFunctionManifestRetries(unittest.TestCase):
     def test_custom_function_retries(self):
         # Tests that custom app level retries don't get applied to functions that have their own retry policy.
         app_manifest: ApplicationManifest = create_application_manifest(
-            app=define_application(
-                name="TestFunctionManifestRetries.test_custom_function_retries",
-                retries=Retries(
-                    max_retries=3,
-                ),
-            ),
-            functions=get_functions(),
+            application_function=application_function_with_custom_retries,
+            all_functions=get_functions(),
         )
 
         retry_policy_metadata: RetryPolicyManifest = app_manifest.functions[
@@ -169,7 +176,8 @@ def function_with_many_gpus_and_models(x: int) -> str:
 class TestFunctionManifestResources(unittest.TestCase):
     def test_default_function_resources(self):
         app_manifest: ApplicationManifest = create_application_manifest(
-            app=define_default_application(), functions=get_functions()
+            application_function=default_application_function,
+            all_functions=get_functions(),
         )
 
         resource_metadata: FunctionResourcesManifest = app_manifest.functions[
@@ -183,7 +191,8 @@ class TestFunctionManifestResources(unittest.TestCase):
 
     def test_custom_function_resources(self):
         app_manifest: ApplicationManifest = create_application_manifest(
-            app=define_default_application(), functions=get_functions()
+            application_function=default_application_function,
+            all_functions=get_functions(),
         )
 
         resource_metadata: FunctionResourcesManifest = app_manifest.functions[
@@ -199,7 +208,8 @@ class TestFunctionManifestResources(unittest.TestCase):
 
     def test_custom_function_resources_many_gpus_per_model(self):
         app_manifest: ApplicationManifest = create_application_manifest(
-            app=define_default_application(), functions=get_functions()
+            application_function=default_application_function,
+            all_functions=get_functions(),
         )
 
         resource_metadata: FunctionResourcesManifest = app_manifest.functions[
@@ -215,7 +225,8 @@ class TestFunctionManifestResources(unittest.TestCase):
 
     def test_custom_function_resources_many_gpu_models(self):
         app_manifest: ApplicationManifest = create_application_manifest(
-            app=define_default_application(), functions=get_functions()
+            application_function=default_application_function,
+            all_functions=get_functions(),
         )
 
         resource_metadata: FunctionResourcesManifest = app_manifest.functions[
@@ -252,7 +263,8 @@ def function_with_complex_types(items: List[str], mapping: dict = None) -> str |
 class TestGraphMetadataParameterExtraction(unittest.TestCase):
     def test_parameter_extraction_basic_types(self):
         app_manifest: ApplicationManifest = create_application_manifest(
-            app=define_default_application(), functions=get_functions()
+            application_function=default_application_function,
+            all_functions=get_functions(),
         )
         parameters: List[ParameterManifest] | None = app_manifest.functions[
             "function_with_basic_types"
@@ -278,7 +290,8 @@ class TestGraphMetadataParameterExtraction(unittest.TestCase):
 
     def test_parameter_extraction_return_type(self):
         app_manifest: ApplicationManifest = create_application_manifest(
-            app=define_default_application(), functions=get_functions()
+            application_function=default_application_function,
+            all_functions=get_functions(),
         )
         self.assertEqual(
             app_manifest.functions["function_with_list_return_type"].return_type,
@@ -287,7 +300,8 @@ class TestGraphMetadataParameterExtraction(unittest.TestCase):
 
     def test_parameter_extraction_complex_types(self):
         app_manifest: ApplicationManifest = create_application_manifest(
-            app=define_default_application(), functions=get_functions()
+            application_function=default_application_function,
+            all_functions=get_functions(),
         )
         parameters: List[ParameterManifest] | None = app_manifest.functions[
             "function_with_complex_types"
@@ -325,7 +339,8 @@ def function_with_custom_concurrency(x: int) -> str:
 class TestGraphMetadataFunctionConcurrency(unittest.TestCase):
     def test_function_with_default_concurrency(self):
         app_manifest: ApplicationManifest = create_application_manifest(
-            app=define_default_application(), functions=get_functions()
+            application_function=default_application_function,
+            all_functions=get_functions(),
         )
         self.assertEqual(
             app_manifest.functions["function_with_default_concurrency"].max_concurrency,
@@ -334,7 +349,8 @@ class TestGraphMetadataFunctionConcurrency(unittest.TestCase):
 
     def test_function_with_custom_concurrency(self):
         app_manifest: ApplicationManifest = create_application_manifest(
-            app=define_default_application(), functions=get_functions()
+            application_function=default_application_function,
+            all_functions=get_functions(),
         )
         self.assertEqual(
             app_manifest.functions["function_with_custom_concurrency"].max_concurrency,

@@ -1,6 +1,11 @@
 import unittest
 
-from tensorlake.applications import Request, api, call_local_api, function
+from tensorlake.applications import (
+    Request,
+    application,
+    function,
+    run_local_application,
+)
 
 
 @function()
@@ -13,7 +18,7 @@ def add_three(x: int) -> int:
     return x + 3
 
 
-@api()
+@application()
 @function(secrets=["SECRET_NAME"])
 def api_router_func(x: int) -> int:
     if x % 2 == 0:
@@ -26,7 +31,7 @@ class TestSecrets(unittest.TestCase):
     def test_api_func_secrets_settable(self):
         # Only test local graph mode here because behavior of secrets in remote graph depends
         # on Executor flavor.
-        request: Request = call_local_api(
+        request: Request = run_local_application(
             api_router_func,
             2,
         )

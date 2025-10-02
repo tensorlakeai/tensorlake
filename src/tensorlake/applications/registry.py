@@ -2,32 +2,10 @@ from typing import Any, List
 
 # Not importing Function and etc here to avoid circular imports.
 
-_application: Any | None = None
 # function name -> Function
 _function_registry: dict[str, Any] = {}
 # Class name -> original class
 _class_registry: dict[str, Any] = {}
-
-
-def set_application(application: Any) -> None:
-    """Registers the supplied Tensorlake Application.
-
-    Overwrites previously set Application (it's a singleton)."""
-    global _application
-    if _application is not None:
-        # This happens if the module that defined the application gets imported multiple times.
-        # This happens e.g. in tests where the same module is imported as __main__ and as a regular
-        # module under its real name when pickle loads classes from it.
-        print(
-            "Warning: Overwriting existing Tensorlake Application.", repr(_application)
-        )
-    _application = application
-
-
-def get_application() -> Any | None:
-    """Returns the registered Tensorlake Application."""
-    global _application
-    return _application
 
 
 def register_function(fn_name: str, fn: Any) -> None:

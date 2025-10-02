@@ -1,62 +1,57 @@
 import os
-from typing import Set
+from typing import List, Set
 
-from ..application import get_user_defined_or_default_application
-from ..interface.application import Application
+from ..applications import filter_applications
+from ..interface.function import Function
 from ..registry import get_functions
 from ..remote.api_client import APIClient
-from ..remote.application.application import (
+from ..remote.manifests.application import (
     ApplicationManifest,
     create_application_manifest,
 )
-from ..remote.application.ignored_code_paths import ignored_code_paths
-from ..remote.application.loader import load_application
-from ..remote.application.zip import zip_application_code
+from .code.ignored_code_paths import ignored_code_paths
+from .code.loader import load_code
+from .code.zip import zip_code
 
 
-def deploy(
-    application_source_dir_or_file_path: str,
+def deploy_applications(
+    applications_file_path: str,
     upgrade_running_requests: bool = True,
-    load_application_modules: bool = False,
+    load_source_dir_modules: bool = False,
 ) -> None:
-    """Deploys all the Tensorlake Functions so they are runnable in remote mode (i.e. on Tensorlake Cloud).
+    """Deploys all applications in the supplied .py file so they are runnable in remote mode (i.e. on Tensorlake Cloud).
 
-    `application_source_dir_or_file_path` is a path to application source code directory or file.
+    `application_file_path` is a path to the .py file where the applications are defined.
     `upgrade_running_requests` indicates whether to update running requests to use the deployed code.
-    `load_application_modules` indicates whether to load all application code modules so that the registry is populated.
+    `load_source_dir_modules` indicates whether to load all applications code modules so that the registry is populated.
                                Should be set to True when called from CLI, False when called programmatically from test code.
     """
     # TODO: Validate the graph.
 
     # Work with absolute paths to make sure that the path comparisons work correctly.
-    application_source_dir_or_file_path: str = os.path.abspath(
-        application_source_dir_or_file_path
-    )
-    application_source_dir_path: str = (
-        os.path.dirname(application_source_dir_or_file_path)
-        if os.path.isfile(application_source_dir_or_file_path)
-        else application_source_dir_or_file_path
-    )
+    applications_file_path: str = os.path.abspath(applications_file_path)
+    applications_dir_path: str = os.path.dirname(applications_file_path)
+    ignored_absolute_paths: Set[str] = ignored_code_paths(applications_dir_path)
 
-    ignored_absolute_paths: Set[str] = ignored_code_paths(application_source_dir_path)
-
-    if load_application_modules:
-        load_application(application_source_dir_or_file_path, ignored_absolute_paths)
-
-    # Define default application if the caller didn't define a custom one.
-    application: Application = get_user_defined_or_default_application()
+    if load_source_dir_modules:
+        load_code(applications_file_path)
 
     # Now the application is fully loaded into memory so we can use the registry.
-    app_manifest: ApplicationManifest = create_application_manifest(
-        app=application, functions=get_functions()
-    )
-    app_code: bytes = zip_application_code(
-        application_source_dir_path, ignored_absolute_paths
+    functions: List[Function] = get_functions()
+    app_code: bytes = zip_code(
+        code_dir_path=applications_dir_path,
+        ignored_absolute_paths=ignored_absolute_paths,
+        all_functions=functions,
     )
 
-    with APIClient() as api_client:
-        api_client.upsert_application(
-            manifest_json=app_manifest.model_dump_json(),
-            code_zip=app_code,
-            upgrade_running_requests=upgrade_running_requests,
+    for application in filter_applications(functions):
+        app_manifest: ApplicationManifest = create_application_manifest(
+            application_function=application, all_functions=functions
         )
+
+        with APIClient() as api_client:
+            api_client.upsert_application(
+                manifest_json=app_manifest.model_dump_json(),
+                code_zip=app_code,
+                upgrade_running_requests=upgrade_running_requests,
+            )

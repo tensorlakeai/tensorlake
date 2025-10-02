@@ -7,16 +7,16 @@ from tensorlake.applications import (
     Request,
     RequestFailureException,
     Retries,
-    api,
-    call_api,
+    application,
     function,
+    run_application,
 )
-from tensorlake.applications.remote.deploy import deploy
+from tensorlake.applications.remote.deploy import deploy_applications
 
 function_with_retry_policy_call_number = 0
 
 
-@api()
+@application()
 @function(retries=Retries(max_retries=3))
 def function_that_succeeds_on_3rd_retry(x: int) -> str:
     global function_with_retry_policy_call_number
@@ -28,7 +28,7 @@ def function_that_succeeds_on_3rd_retry(x: int) -> str:
         raise Exception("Function failed, please retry")
 
 
-@api()
+@application()
 @function(retries=Retries(max_retries=3))
 def function_that_always_fails(x: int) -> str:
     raise Exception("Function always fails")
@@ -38,10 +38,10 @@ class TestFunctionRetries(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_function_retries(self, _: str, is_remote: bool):
         if is_remote:
-            deploy(__file__)
+            deploy_applications(__file__)
 
         start_time: float = time.monotonic()
-        request: Request = call_api(
+        request: Request = run_application(
             function_that_succeeds_on_3rd_retry, 1, remote=is_remote
         )
         self.assertEqual(request.output(), "success")
@@ -54,10 +54,12 @@ class TestFunctionRetries(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_function_fails_with_retries_exhausted(self, _: str, is_remote: bool):
         if is_remote:
-            deploy(__file__)
+            deploy_applications(__file__)
 
         start_time: float = time.monotonic()
-        request: Request = call_api(function_that_always_fails, 1, remote=is_remote)
+        request: Request = run_application(
+            function_that_always_fails, 1, remote=is_remote
+        )
         self.assertRaises(RequestFailureException, request.output)
         duration_sec: float = time.monotonic() - start_time
 

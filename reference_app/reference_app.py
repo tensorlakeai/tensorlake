@@ -8,13 +8,14 @@ from pydantic import BaseModel
 from tensorlake.applications import (
     Image,
     Request,
-    api,
-    call_remote_api,
-    define_application,
+    application,
     function,
 )
 from tensorlake.applications import map as tl_map
 from tensorlake.applications import reduce as tl_reduce
+from tensorlake.applications import (
+    run_remote_application,
+)
 
 mapper_image = Image(name="generator").run("pip install httpx")
 process_image = Image(name="process").run("pip install numpy")
@@ -25,9 +26,9 @@ class Total(BaseModel):
     val: int = 0
 
 
-@api()
-@function(image=mapper_image)
-def api_function(a: int) -> Total:
+@application()
+@function(image=mapper_image, description="Sums the squares of a sequence of numbers")
+def sequence_summer(a: int) -> Total:
     return tl_reduce(reducer, tl_map(processor, range(a)))
 
 
@@ -42,10 +43,7 @@ def reducer(total: Total, new: Total) -> Total:
     return total
 
 
-define_application(name="sequence_summer", description="Simple Sequence Summer")
-
-
 if __name__ == "__main__":
-    request: Request = call_remote_api(api_function, 10)
+    request: Request = run_remote_application(sequence_summer, 10)
     assert request.output().val == sum(x**2 for x in range(10))
     print("Request completed successfully with output:", request.output())

@@ -31,6 +31,7 @@ class Text(BaseModel):
 
     content: str
 
+
 class Header(BaseModel):
     """
     Header type content of a page fragment.
@@ -38,6 +39,7 @@ class Header(BaseModel):
 
     level: int
     content: str
+
 
 class TableCell(BaseModel):
     """

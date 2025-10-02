@@ -1,6 +1,6 @@
-import tensorlake.applications
+from tensorlake.applications import function
 
 
-@tensorlake.applications.function()
+@function()
 def update_code_end_func() -> str:
     return "update_code_end_func_v2"

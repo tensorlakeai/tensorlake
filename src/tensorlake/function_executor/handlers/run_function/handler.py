@@ -8,8 +8,8 @@ from tensorlake.applications.ast import (
     RegularFunctionCallNode,
     ValueNode,
 )
-from tensorlake.applications.function.api_call import (
-    api_function_call_with_serialized_payload,
+from tensorlake.applications.function.application_call import (
+    application_function_call_with_serialized_payload,
 )
 from tensorlake.applications.function.function_call import (
     set_self_arg,
@@ -37,7 +37,10 @@ from ...user_events import (
     log_user_event_allocations_finished,
     log_user_event_allocations_started,
 )
-from .download import download_api_function_payload_bytes, download_function_arguments
+from .download import (
+    download_application_function_payload_bytes,
+    download_function_arguments,
+)
 from .function_call_node_metadata import FunctionCallNodeMetadata, FunctionCallType
 from .response_helper import ResponseHelper
 
@@ -147,15 +150,17 @@ class Handler:
                     f"Received function call with unexpected function call node metadata type: {node_metadata.type}"
                 )
         else:
-            if self._function.api_config is None:
-                raise ValueError("Received non API function call without SDK metadata")
+            if self._function.application_config is None:
+                raise ValueError(
+                    "Non-application function was called without SDK metadata"
+                )
 
-            payload: bytes = download_api_function_payload_bytes(
+            payload: bytes = download_application_function_payload_bytes(
                 self._allocation, self._blob_store, self._logger
             )
             payload_arg_so: SerializedObjectInsideBLOB = self._allocation.inputs.args[0]
-            return api_function_call_with_serialized_payload(
-                api=self._function,
+            return application_function_call_with_serialized_payload(
+                application=self._function,
                 payload=payload,
                 payload_content_type=payload_arg_so.manifest.content_type or "",
             )

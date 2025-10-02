@@ -54,7 +54,7 @@ def download_function_arguments(
     return args
 
 
-def download_api_function_payload_bytes(
+def download_application_function_payload_bytes(
     allocation: Allocation, blob_store: BLOBStore, logger: FunctionExecutorLogger
 ) -> bytes:
     start_time = time.monotonic()
@@ -63,16 +63,16 @@ def download_api_function_payload_bytes(
 
     if len(allocation.inputs.args) != 1 or len(allocation.inputs.arg_blobs) != 1:
         raise ValueError(
-            "API function calls must have exactly one argument and one argument blob, "
+            "Application function calls must have exactly one argument and one argument blob, "
             f"got {len(allocation.inputs.args)} args and {len(allocation.inputs.arg_blobs)} arg blobs"
         )
 
-    api_payload_blob: BLOB = allocation.inputs.arg_blobs[0]
-    api_payload_so: SerializedObjectInsideBLOB = allocation.inputs.args[0]
+    app_payload_blob: BLOB = allocation.inputs.arg_blobs[0]
+    app_payload_so: SerializedObjectInsideBLOB = allocation.inputs.args[0]
 
     _, payload = _download_serialized_object(
-        blob=api_payload_blob,
-        so=api_payload_so,
+        blob=app_payload_blob,
+        so=app_payload_so,
         blob_store=blob_store,
         logger=logger,
     )

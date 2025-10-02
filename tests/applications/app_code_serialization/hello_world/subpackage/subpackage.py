@@ -5,7 +5,7 @@ from hello_world.subpackage.const import (
     WORLD_NAME,
 )
 
-from tensorlake.applications import api, cls, function
+from tensorlake.applications import application, cls, function
 
 # Import from parent module using relative import path. We can do this because this Python file is part of a package
 # and the parent directory is a Python package too.
@@ -19,7 +19,7 @@ def subpackage_hello_world() -> str:
     return hello_world() + " from " + WORLD_NAME + " and " + WORLD_NAME_2
 
 
-@api()
+@application()
 @function()
 def tensorlake_function_subpackage_hello_world(_: str) -> str:
     return subpackage_hello_world()
@@ -27,7 +27,7 @@ def tensorlake_function_subpackage_hello_world(_: str) -> str:
 
 @cls()
 class TensorlakeFunctionSubpackageHelloWorld:
-    @api()
+    @application()
     @function()
     def run(self, _: str) -> str:
         return subpackage_hello_world()

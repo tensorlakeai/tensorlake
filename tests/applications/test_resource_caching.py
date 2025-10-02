@@ -1,8 +1,14 @@
 import os
 import unittest
 
-from tensorlake.applications import Request, api, call_remote_api, cls, function
-from tensorlake.applications.remote.deploy import deploy
+from tensorlake.applications import (
+    Request,
+    application,
+    cls,
+    function,
+    run_remote_application,
+)
+from tensorlake.applications.remote.deploy import deploy_applications
 
 # The tests in this file verify publicly stated performance critical behaviors of Tensorlake Applications.
 
@@ -10,7 +16,7 @@ cached_pipe_in_fd: int | None = None
 cached_pipe_out_fd: int | None = None
 
 
-@api()
+@application()
 @function()
 def fd_caching_function(action: str) -> str:
     global cached_pipe_in_fd
@@ -34,24 +40,24 @@ def fd_caching_function(action: str) -> str:
 
 class TestFileDescriptorCaching(unittest.TestCase):
     def setUp(self) -> None:
-        deploy(__file__)
+        deploy_applications(__file__)
 
     def test_second_write_goes_to_cached_file_descriptor_if_same_func(self):
-        request: Request = call_remote_api(fd_caching_function, "create_fd")
+        request: Request = run_remote_application(fd_caching_function, "create_fd")
         output: str = request.output()
         self.assertEqual(output, "success")
 
         # Fails if the file descriptor is not cached between different invocations of
         # the same function version. File descriptor caching is required to e.g. not
         # load a model into GPU on each invocation.
-        request = call_remote_api(fd_caching_function, "write_fd")
+        request = run_remote_application(fd_caching_function, "write_fd")
         output: str = request.output()
         self.assertEqual(output, "success")
 
         # Fail if the write to the cached file descriptor didn's happen for any reason.
         # This verifies that the file descriptor state is not altered between invocations
         # of the same function version.
-        request = call_remote_api(fd_caching_function, "read_fd")
+        request = run_remote_application(fd_caching_function, "read_fd")
         output: str = request.output()
         self.assertEqual(output, "write_to_cacheable_fd\n")
 
@@ -65,7 +71,7 @@ class FunctionClass:
         global cached_function_class_instance
         cached_function_class_instance = self
 
-    @api()
+    @application()
     @function()
     def run(self, action: str) -> str:
         global function_class_constructor_calls
@@ -94,18 +100,18 @@ cached_function_class_instance: FunctionClass | None = None
 
 class TestFunctionClassInstanceCaching(unittest.TestCase):
     def setUp(self):
-        deploy(__file__)
+        deploy_applications(__file__)
 
     def test_function_class_instance_caching(self):
         # Run many times to ensure that the behavior is repeatable over many invocations.
         for i in range(5):
             # The object is created once and cached in memory.
-            request: Request = call_remote_api(FunctionClass.run, "check")
+            request: Request = run_remote_application(FunctionClass.run, "check")
             output: str = request.output()
             self.assertEqual(output, "success")
 
             # Every new request will reuse the cached compute object.
-            request = call_remote_api(FunctionClass.run, "check")
+            request = run_remote_application(FunctionClass.run, "check")
             output = request.output()
             self.assertEqual(output, "success")
 

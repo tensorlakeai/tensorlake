@@ -7,27 +7,29 @@ from pydantic import BaseModel
 from tensorlake.applications import (
     Request,
     RequestFailureException,
-    api,
-    call_api,
+    application,
     function,
 )
 from tensorlake.applications import map as tl_map
 from tensorlake.applications import reduce as tl_reduce
-from tensorlake.applications.remote.deploy import deploy
+from tensorlake.applications import (
+    run_application,
+)
+from tensorlake.applications.remote.deploy import deploy_applications
 
 
 class AccumulatedState(BaseModel):
     sum: int = 0
 
 
-@api()
+@application()
 @function()
 def success_api_function_function_call_collection(x: int) -> AccumulatedState:
     seq = tl_map(transform_int_to_accumulated_state, generate_seq(x))
     return tl_reduce(accumulate_reduce, seq, AccumulatedState(sum=0))
 
 
-@api()
+@application()
 @function()
 def success_api_function_value_collection(x: int) -> AccumulatedState:
     seq = [transform_int_to_accumulated_state(i) for i in generate_seq(x)]
@@ -55,7 +57,7 @@ def store_result(acc: AccumulatedState) -> int:
     return acc.sum
 
 
-@api()
+@application()
 @function()
 def fail_api_function(x: int) -> AccumulatedState:
     seq = [transform_int_to_accumulated_state(i) for i in generate_seq(x)]
@@ -72,25 +74,25 @@ def accumulate_reduce_fail_at_3(
     return acc
 
 
-@api()
+@application()
 @function()
 def api_reduce_no_items_no_initial(_: Any) -> AccumulatedState:
     return tl_reduce(accumulate_reduce, [])
 
 
-@api()
+@application()
 @function()
 def api_reduce_no_items_with_initial(_: Any) -> AccumulatedState:
     return tl_reduce(accumulate_reduce, [], AccumulatedState(sum=10))
 
 
-@api()
+@application()
 @function()
 def api_reduce_one_value_item(_: Any) -> AccumulatedState:
     return tl_reduce(accumulate_reduce, [AccumulatedState(sum=10)])
 
 
-@api()
+@application()
 @function()
 def api_reduce_one_function_call_item(_: Any) -> AccumulatedState:
     return tl_reduce(accumulate_reduce, [generate_single_value()])
@@ -105,9 +107,9 @@ class TestReduce(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success_function_call_collection(self, _: str, is_remote: bool):
         if is_remote:
-            deploy(__file__)
+            deploy_applications(__file__)
 
-        request: Request = call_api(
+        request: Request = run_application(
             success_api_function_function_call_collection, 6, remote=is_remote
         )
         result: AccumulatedState = request.output()
@@ -116,9 +118,9 @@ class TestReduce(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success_value_collection(self, _: str, is_remote: bool):
         if is_remote:
-            deploy(__file__)
+            deploy_applications(__file__)
 
-        request: Request = call_api(
+        request: Request = run_application(
             success_api_function_value_collection, 6, remote=is_remote
         )
         result: AccumulatedState = request.output()
@@ -127,17 +129,17 @@ class TestReduce(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_failure(self, _: str, is_remote: bool):
         if is_remote:
-            deploy(__file__)
+            deploy_applications(__file__)
 
-        request: Request = call_api(fail_api_function, 6, remote=is_remote)
+        request: Request = run_application(fail_api_function, 6, remote=is_remote)
         self.assertRaises(RequestFailureException, request.output)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_reduce_nothing(self, _: str, is_remote: bool):
         if is_remote:
-            deploy(__file__)
+            deploy_applications(__file__)
 
-        request: Request = call_api(
+        request: Request = run_application(
             api_reduce_no_items_no_initial, None, remote=is_remote
         )
         self.assertRaises(RequestFailureException, request.output)
@@ -145,9 +147,9 @@ class TestReduce(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_reduce_initial(self, _: str, is_remote: bool):
         if is_remote:
-            deploy(__file__)
+            deploy_applications(__file__)
 
-        request: Request = call_api(
+        request: Request = run_application(
             api_reduce_no_items_with_initial,
             None,
             remote=is_remote,
@@ -158,9 +160,9 @@ class TestReduce(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_reduce_one_value_item(self, _: str, is_remote: bool):
         if is_remote:
-            deploy(__file__)
+            deploy_applications(__file__)
 
-        request: Request = call_api(
+        request: Request = run_application(
             api_reduce_one_value_item,
             None,
             remote=is_remote,
@@ -171,9 +173,9 @@ class TestReduce(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_reduce_one_function_call_item(self, _: str, is_remote: bool):
         if is_remote:
-            deploy(__file__)
+            deploy_applications(__file__)
 
-        request: Request = call_api(
+        request: Request = run_application(
             api_reduce_one_function_call_item,
             None,
             remote=is_remote,

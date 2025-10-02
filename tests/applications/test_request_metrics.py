@@ -2,11 +2,17 @@ import unittest
 
 import parameterized
 
-from tensorlake.applications import Request, RequestContext, api, call_api, function
-from tensorlake.applications.remote.deploy import deploy
+from tensorlake.applications import (
+    Request,
+    RequestContext,
+    application,
+    function,
+    run_application,
+)
+from tensorlake.applications.remote.deploy import deploy_applications
 
 
-@api()
+@application()
 @function()
 def emit_metrics(x: int) -> int:
     ctx: RequestContext = RequestContext.get()
@@ -19,9 +25,9 @@ class TestRequestMetrics(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_metrics_settable(self, _: str, is_remote: bool):
         if is_remote:
-            deploy(__file__)
+            deploy_applications(__file__)
 
-        request: Request = call_api(emit_metrics, 1, remote=is_remote)
+        request: Request = run_application(emit_metrics, 1, remote=is_remote)
         self.assertEqual(request.output(), 2)
 
         # No verification of metrics values yet because SDK doesn't yet provide an interface
