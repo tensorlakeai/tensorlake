@@ -1,7 +1,7 @@
 import asyncio
 import os
 import traceback
-from typing import Dict, List, Set
+from typing import Dict, List
 
 import click
 
@@ -16,9 +16,6 @@ from tensorlake.applications.interface.function import (
     _FunctionConfiguration,
 )
 from tensorlake.applications.registry import get_functions
-from tensorlake.applications.remote.code.ignored_code_paths import (
-    ignored_code_paths,
-)
 from tensorlake.applications.remote.code.loader import load_code
 from tensorlake.applications.remote.deploy import deploy_applications
 from tensorlake.applications.secrets import list_secret_names
@@ -28,7 +25,7 @@ from tensorlake.cli.secrets import warning_missing_secrets
 
 
 @click.command(
-    short_help="Deploys applications defined in <code-dir-path> directory to Tensorlake Cloud"
+    short_help="Deploys applications defined in <application-file-path> .py file to Tensorlake Cloud"
 )
 @click.option("-p", "--parallel-builds", is_flag=True, default=False)
 @click.option(
@@ -39,30 +36,28 @@ from tensorlake.cli.secrets import warning_missing_secrets
     help="Upgrade requests that are already queued or running to use the new deployed version of the applications",
 )
 @click.argument(
-    "code-dir-path",
-    type=click.Path(exists=True, file_okay=False, dir_okay=True),
+    "application-file-path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False),
 )
 @pass_auth
 def deploy(
     auth: Context,
-    code_dir_path: str,
+    application_file_path: str,
     # TODO: implement with image builder v2
     parallel_builds: bool,
     upgrade_running_requests: bool,
 ):
     """Deploys applications to Tensorlake Cloud."""
 
-    click.echo(f"Preparing deployment for applications from {code_dir_path}")
+    click.echo(f"Preparing deployment for applications from {application_file_path}")
     builder_v2 = ImageBuilderV2Client.from_env()
 
     try:
-        code_dir_path: str = os.path.abspath(code_dir_path)
-
-        ignored_absolute_paths: Set[str] = ignored_code_paths(code_dir_path)
-        load_code(code_dir_path, ignored_absolute_paths)
+        application_file_path: str = os.path.abspath(application_file_path)
+        load_code(application_file_path)
     except Exception as e:
         click.secho(
-            f"Failed to load the code directory modules, please check the error message: {e}",
+            f"Failed to load the application file, please check the error message: {e}",
             fg="red",
         )
         traceback.print_exception(e)
@@ -76,7 +71,7 @@ def deploy(
     click.secho("Everything looks good, deploying now", fg="green")
 
     _deploy_applications(
-        code_dir_path=code_dir_path,
+        application_file_path=application_file_path,
         upgrade_running_requests=upgrade_running_requests,
     )
 
@@ -114,10 +109,10 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: List[Func
     click.secho(f"Built all images", fg="green")
 
 
-def _deploy_applications(code_dir_path: str, upgrade_running_requests: bool):
+def _deploy_applications(application_file_path: str, upgrade_running_requests: bool):
     try:
         deploy_applications(
-            source_dir_or_file_path=code_dir_path,
+            applications_file_path=application_file_path,
             upgrade_running_requests=upgrade_running_requests,
             load_source_dir_modules=False,  # Already loaded
         )

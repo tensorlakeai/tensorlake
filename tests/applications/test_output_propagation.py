@@ -127,7 +127,7 @@ class TestReducerSubcallOutputPropagation(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(
-            api_reducer_subcall_output_propagation, "test", remote=is_remote
+            "api_reducer_subcall_output_propagation", "test", remote=is_remote
         )
         self.assertEqual(request.output(), "buzz_reducer_subcall")
 

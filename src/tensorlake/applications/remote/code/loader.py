@@ -4,45 +4,32 @@ import sys
 from typing import Generator, Set
 
 
-def load_code(code_dir_or_filepath: str, ignored_paths: Set[str]) -> None:
-    """Loads all Python files from the code directory or just loads from the supplied file path.
+def load_code(application_file_path: str) -> None:
+    """Loads the supplied python file with application.
 
-    The supplied paths must be absolute.
+    The supplied path must be absolute.
     """
 
-    if not os.path.isabs(code_dir_or_filepath):
+    if not os.path.isabs(application_file_path):
         raise ValueError(
-            f"The deployed code directory of file path `{code_dir_or_filepath}` must be absolute."
+            f"The deployed application file path `{application_file_path}` must be absolute."
         )
 
-    for ignored_path in ignored_paths:
-        if not os.path.isabs(ignored_path):
-            raise ValueError(
-                f"All deployed ignored paths must be absolute, but got `{ignored_path}`."
-            )
-
-    code_dir_path: str = (
-        code_dir_or_filepath
-        if os.path.isdir(code_dir_or_filepath)
-        else os.path.dirname(code_dir_or_filepath)
-    )
+    code_dir_path: str = os.path.dirname(application_file_path)
     if code_dir_path not in sys.path:
         # Makes `import foo` work if foo.py is in the code directory.
         sys.path.insert(0, code_dir_path)
 
-    for py_file_absolute_path in walk_code(code_dir_or_filepath, ignored_paths):
-        py_file_path_inside_code_dir: str = os.path.relpath(
-            py_file_absolute_path, code_dir_path
-        )
-        module_import_name: str = py_file_path_inside_code_dir.replace(
-            os.path.sep, "."
-        )[
-            :-3
-        ]  # Remove the ".py" suffix
+    py_file_path_inside_code_dir: str = os.path.relpath(
+        application_file_path, code_dir_path
+    )
+    module_import_name: str = py_file_path_inside_code_dir.replace(os.path.sep, ".")[
+        :-3
+    ]  # Remove the ".py" suffix
 
-        # Note: the same module can be imported multiple times using different import paths.
-        # In this case user gets a warning message.
-        importlib.import_module(module_import_name)
+    # Note: the same module can be imported multiple times using different import paths.
+    # In this case user gets a warning message.
+    importlib.import_module(module_import_name)
 
 
 # Allow soft links in code directory. This allows users to include dirs and files

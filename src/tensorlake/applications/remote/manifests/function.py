@@ -6,16 +6,32 @@ from typing import (
     Union,
 )
 
+from pydantic import BaseModel
 from typing_extensions import get_args, get_origin, get_type_hints
 
 from ...interface.function import Function, _ApplicationConfiguration
-from .function_resources import resources_for_function
-from .manifests import (
-    FunctionManifest,
+from .function_manifests import (
+    FunctionResourcesManifest,
     ParameterManifest,
     PlacementConstraintsManifest,
     RetryPolicyManifest,
 )
+from .function_resources import resources_for_function
+
+
+class FunctionManifest(BaseModel):
+    name: str
+    description: str
+    secret_names: List[str]
+    initialization_timeout_sec: int
+    timeout_sec: int
+    resources: FunctionResourcesManifest
+    retry_policy: RetryPolicyManifest
+    cache_key: str | None
+    parameters: List[ParameterManifest] | None
+    return_type: Dict[str, Any] | None  # JSON Schema object
+    placement_constraints: PlacementConstraintsManifest
+    max_concurrency: int
 
 
 def _parse_docstring_parameters(docstring: str) -> Dict[str, str]:

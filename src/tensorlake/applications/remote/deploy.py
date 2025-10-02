@@ -15,13 +15,13 @@ from .code.zip import zip_code
 
 
 def deploy_applications(
-    source_dir_or_file_path: str,
+    applications_file_path: str,
     upgrade_running_requests: bool = True,
     load_source_dir_modules: bool = False,
 ) -> None:
-    """Deploys all applications in the supplied directory so they are runnable in remote mode (i.e. on Tensorlake Cloud).
+    """Deploys all applications in the supplied .py file so they are runnable in remote mode (i.e. on Tensorlake Cloud).
 
-    `source_dir_or_file_path` is a path to source code directory or file where the applications are defined.
+    `application_file_path` is a path to the .py file where the applications are defined.
     `upgrade_running_requests` indicates whether to update running requests to use the deployed code.
     `load_source_dir_modules` indicates whether to load all applications code modules so that the registry is populated.
                                Should be set to True when called from CLI, False when called programmatically from test code.
@@ -29,22 +29,17 @@ def deploy_applications(
     # TODO: Validate the graph.
 
     # Work with absolute paths to make sure that the path comparisons work correctly.
-    source_dir_or_file_path: str = os.path.abspath(source_dir_or_file_path)
-    source_dir_path: str = (
-        os.path.dirname(source_dir_or_file_path)
-        if os.path.isfile(source_dir_or_file_path)
-        else source_dir_or_file_path
-    )
-
-    ignored_absolute_paths: Set[str] = ignored_code_paths(source_dir_path)
+    applications_file_path: str = os.path.abspath(applications_file_path)
+    applications_dir_path: str = os.path.dirname(applications_file_path)
+    ignored_absolute_paths: Set[str] = ignored_code_paths(applications_dir_path)
 
     if load_source_dir_modules:
-        load_code(source_dir_or_file_path, ignored_absolute_paths)
+        load_code(applications_file_path)
 
     # Now the application is fully loaded into memory so we can use the registry.
     functions: List[Function] = get_functions()
     app_code: bytes = zip_code(
-        code_dir_path=source_dir_path,
+        code_dir_path=applications_dir_path,
         ignored_absolute_paths=ignored_absolute_paths,
         all_functions=functions,
     )

@@ -8,7 +8,7 @@ from tensorlake.applications.ast import (
     RegularFunctionCallNode,
     ValueNode,
 )
-from tensorlake.applications.function.app_call import (
+from tensorlake.applications.function.application_call import (
     application_function_call_with_serialized_payload,
 )
 from tensorlake.applications.function.function_call import (
@@ -151,7 +151,9 @@ class Handler:
                 )
         else:
             if self._function.application_config is None:
-                raise ValueError("Received regular function call without SDK metadata")
+                raise ValueError(
+                    "Non-application function was called without SDK metadata"
+                )
 
             payload: bytes = download_application_function_payload_bytes(
                 self._allocation, self._blob_store, self._logger

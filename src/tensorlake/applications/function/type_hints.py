@@ -1,4 +1,5 @@
 import inspect
+import pickle
 from types import UnionType
 from typing import Any, List, Union, get_args, get_origin
 
@@ -37,6 +38,14 @@ def function_return_type_hint(function: Function) -> List[Any]:
         return []
 
     return _resolve_type_hint(function_signature.return_annotation)
+
+
+def serialize_type_hints(type_hints: List[Any]) -> bytes:
+    return pickle.dumps(type_hints)
+
+
+def deserialize_type_hints(serialized_type_hints: bytes) -> List[Any]:
+    return pickle.loads(serialized_type_hints)
 
 
 def _function_signature(function: Function) -> inspect.Signature:

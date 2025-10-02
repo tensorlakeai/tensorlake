@@ -359,30 +359,6 @@ class APIClient:
     def call(
         self,
         application_name: str,
-        api_function_name: str,
-        payload: bytes,
-        payload_content_type: str,
-        block_until_done: bool = False,
-    ) -> str:
-        if not block_until_done:
-            return self._call(
-                application_name, api_function_name, payload, payload_content_type
-            )
-        events = self.call_stream(
-            application_name, api_function_name, payload, payload_content_type
-        )
-        try:
-            while True:
-                print(str(next(events)))
-        except StopIteration as result:
-            # TODO: Once we only support Python >= 3.13, we can just return events.close().
-            events.close()
-            return result.value
-
-    def _call(
-        self,
-        application_name: str,
-        api_function_name: str,
         payload: bytes,
         payload_content_type: str,
     ) -> str:
@@ -394,58 +370,13 @@ class APIClient:
             "data": payload,
         }
         response = self._post(
-            f"v1/namespaces/{self._namespace}/applications/{application_name}/{api_function_name}",
+            f"v1/namespaces/{self._namespace}/applications/{application_name}",
             **kwargs,
         )
         return response.json()["request_id"]
 
-    def call_stream(
-        self,
-        application_name: str,
-        api_function_name: str,
-        payload: bytes,
-        payload_content_type: str,
-    ) -> Generator[WorkflowEvent, None, str]:
-        kwargs = {
-            "headers": {
-                "Content-Type": payload_content_type,
-            },
-            "data": payload,
-        }
-        self._add_api_key(kwargs)
-        request_id: str | None = None
-        try:
-            with connect_sse(
-                self._client,
-                "POST",
-                f"v1/namespaces/{self._namespace}/applications/{application_name}/{api_function_name}",
-                **kwargs,
-            ) as event_source:
-                if not event_source.response.is_success:
-                    resp = event_source.response.read().decode("utf-8")
-                    raise Exception(f"failed to wait for request: {resp}")
-                for sse in event_source.iter_sse():
-                    for event in self._parse_request_events_from_sse_event(
-                        application_name, sse
-                    ):
-                        if request_id is None:
-                            request_id = event.payload.request_id
-                        yield event
-
-        except _TRANSIENT_HTTPX_ERRORS:
-            if request_id is None:
-                print("request ID is unknown, cannot block until done")
-                raise
-
-            self.wait_on_request_completion(application_name, request_id, **kwargs)
-
-        if request_id is None:
-            raise Exception("request ID not returned")
-
-        return request_id
-
     def _parse_request_events_from_sse_event(
-        self, application_name: str, sse: ServerSentEvent
+        self, sse: ServerSentEvent
     ) -> Iterator[WorkflowEvent]:
         obj = json.loads(sse.data)
 
@@ -469,26 +400,6 @@ class APIClient:
             # Handle all other event types
             event_payload = RequestProgressPayload.model_validate(event_data)
             event = WorkflowEvent(event_name=event_name, payload=event_payload)
-
-            # Log failures with their stdout/stderr
-            if (
-                event.event_name == "TaskCompleted"
-                and isinstance(event.payload, RequestProgressPayload)
-                and event.payload.outcome == "failure"
-            ):
-                event.stdout = self.logs(
-                    application_name,
-                    event.payload.request_id,
-                    event.payload.allocation_id,
-                    "stdout",
-                )
-
-                event.stderr = self.logs(
-                    application_name,
-                    event.payload.request_id,
-                    event.payload.allocation_id,
-                    "stderr",
-                )
 
             yield event
 
@@ -514,9 +425,7 @@ class APIClient:
                 resp = event_source.response.read().decode("utf-8")
                 raise Exception(f"failed to wait for request: {resp}")
             for sse in event_source.iter_sse():
-                events = self._parse_request_events_from_sse_event(
-                    application_name, sse
-                )
+                events = self._parse_request_events_from_sse_event(sse)
                 for event in events:
                     if event.event_name == "RequestFinished":
                         break

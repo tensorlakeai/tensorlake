@@ -2,7 +2,7 @@ import math
 from typing import List
 
 from ...interface.function import Function
-from .manifests import FunctionResourcesManifest, GPUResourceManifest
+from .function_manifests import FunctionResourcesManifest, GPUResourceManifest
 
 
 def _parse_gpu_resource(gpu: str) -> GPUResourceManifest:

@@ -4,6 +4,7 @@ from ..interface.file import File
 from ..interface.function import Function
 from ..interface.function_call import RegularFunctionCall
 from ..registry import get_class
+from ..user_data_serializer import UserDataSerializer
 from .type_hints import function_arg_type_hint
 from .user_data_serializer import function_input_serializer
 
@@ -56,3 +57,19 @@ def application_function_call_with_serialized_payload(
     return _application_function_call_with_object_payload(
         application, deserialized_payload
     )
+
+
+def serialize_application_call_payload(
+    input_serializer: UserDataSerializer, payload: Any
+) -> tuple[bytes, str]:
+    """Serializes the application payload using the application function input serializer.
+
+    Returns a tuple of (serialized_payload, content_type).
+    """
+    if isinstance(payload, File):
+        return payload.content, payload.content_type
+    else:
+        return (
+            input_serializer.serialize(payload),
+            input_serializer.content_type,
+        )

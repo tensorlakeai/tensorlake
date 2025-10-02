@@ -110,7 +110,7 @@ def function(
 
 
 def cls(
-    init_timeout: int = _DEFAULT_TIMEOUT_SEC,
+    init_timeout: int | None = None,
 ) -> Callable:
     CLASS = TypeVar("CLASS")
 
