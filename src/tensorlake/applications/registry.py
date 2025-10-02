@@ -54,6 +54,11 @@ def register_class(cls_name: str, cls: Any) -> None:
     _class_registry[cls_name] = cls
 
 
+def has_class(cls_name: str) -> bool:
+    global _class_registry
+    return cls_name in _class_registry
+
+
 def get_class(cls_name: str) -> Any:
     """Return the class object associated with the given name.
 

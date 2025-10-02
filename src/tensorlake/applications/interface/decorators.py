@@ -2,7 +2,14 @@ from typing import Callable, Dict, List, Literal, TypeVar
 
 from tensorlake.vendor.nanoid import generate as nanoid
 
-from ..registry import register_class, register_function
+from ..registry import (
+    get_class,
+    get_function,
+    has_class,
+    has_function,
+    register_class,
+    register_function,
+)
 from .function import (
     Function,
     _ApplicationConfiguration,
@@ -102,6 +109,18 @@ def function(
             max_concurrency=max_concurrency,
         )
 
+        if has_function(fn._function_config.function_name):
+            existing_fn: Function = get_function(fn._function_config.function_name)
+            if existing_fn.original_function.__module__ == "__main__":
+                # Ignore already registered functions defined in __main__.
+                # This is needed because pickle.loads imports __main__ module
+                # second time but with its real name (i.e. real_name.py) when unpickling
+                # classes stored in function call and application entrypoint metadata.
+                # So two modules exist for real_name.py in sys.modules:
+                # * __main__
+                # * real_name
+                return fn
+
         register_function(fn._function_config.function_name, fn)
 
         return fn
@@ -117,13 +136,25 @@ def cls(
     def decorator(original_class: CLASS) -> CLASS:
         # Doesn't include module name. This is good because all Tensorlake functions and classes share a single namespace.
         class_name: str = original_class.__qualname__
-        original_class.__tensorlake_original_init__ = original_class.__init__
-        original_class.__tensorlake_name__ = class_name
+
+        if has_class(class_name):
+            existing_cls: CLASS = get_class(class_name)
+            if existing_cls.__module__ == "__main__":
+                # Ignore already registered classes defined in __main__.
+                # This is needed because pickle.loads imports __main__ module
+                # second time but with its real name (i.e. real_name.py) when unpickling
+                # classes stored in function call and application entrypoint metadata.
+                # So two modules exist for real_name.py in sys.modules:
+                # * __main__
+                # * real_name
+                return original_class
 
         def __tensorlake_empty_init__(self):
             # Don't do anything in this constructor when the class methods are called CLASS().method(...).
             pass
 
+        original_class.__tensorlake_original_init__ = original_class.__init__
+        original_class.__tensorlake_name__ = class_name
         original_class.__init__ = __tensorlake_empty_init__
 
         register_class(class_name, original_class)
