@@ -1,8 +1,18 @@
+import inspect
+import os.path
 from typing import Callable, Dict, List, Literal, TypeVar
 
 from tensorlake.vendor.nanoid import generate as nanoid
 
-from ..registry import register_class, register_function
+from ..registry import (
+    get_class,
+    get_function,
+    has_class,
+    has_function,
+    register_class,
+    register_function,
+)
+from .exceptions import ApplicationValidateError
 from .function import (
     Function,
     _ApplicationConfiguration,
@@ -102,6 +112,37 @@ def function(
             max_concurrency=max_concurrency,
         )
 
+        if has_function(fn._function_config.function_name):
+            existing_fn: Function = get_function(fn._function_config.function_name)
+            existing_fn_file_path: str | None = inspect.getsourcefile(
+                existing_fn.original_function
+            )
+            fn_file_path: str | None = inspect.getsourcefile(fn.original_function)
+            if existing_fn_file_path is not None:
+                existing_fn_file_path = os.path.abspath(existing_fn_file_path)
+            if fn_file_path is not None:
+                fn_file_path = os.path.abspath(fn_file_path)
+            # Allow re-registering the same function from the same file.
+            # This is needed because pickle.loads imports __main__ module
+            # second time but with its real name (i.e. real_name.py) when unpickling
+            # classes stored in function call and application entrypoint metadata.
+            # So two modules exist for real_name.py in sys.modules:
+            # * __main__
+            # * real_name
+            # Another legitimate use case if when user redefines the function
+            # in the same file. This is a valid Python code.
+            if (
+                existing_fn_file_path != fn_file_path
+                or existing_fn_file_path is None
+                or fn_file_path is None
+            ):
+                raise ApplicationValidateError(
+                    f"Function '{fn._function_config.function_name}' already exists. "
+                    f"First defined in {existing_fn_file_path}, "
+                    f"redefined in {fn_file_path}. "
+                    "Please rename one of the functions."
+                )
+
         register_function(fn._function_config.function_name, fn)
 
         return fn
@@ -117,13 +158,43 @@ def cls(
     def decorator(original_class: CLASS) -> CLASS:
         # Doesn't include module name. This is good because all Tensorlake functions and classes share a single namespace.
         class_name: str = original_class.__qualname__
-        original_class.__tensorlake_original_init__ = original_class.__init__
-        original_class.__tensorlake_name__ = class_name
+
+        # TODO: Update the existing class in case new definition is loaded.
+        if has_class(class_name):
+            existing_cls: CLASS = get_class(class_name)
+            existing_cls_file_path: str | None = inspect.getsourcefile(existing_cls)
+            cls_file_path: str | None = inspect.getsourcefile(original_class)
+            if existing_cls_file_path is not None:
+                existing_cls_file_path = os.path.abspath(existing_cls_file_path)
+            if cls_file_path is not None:
+                cls_file_path = os.path.abspath(cls_file_path)
+            # Allow re-registering the same class from the same file.
+            # This is needed because pickle.loads imports __main__ module
+            # second time but with its real name (i.e. real_name.py) when unpickling
+            # classes stored in function call and application entrypoint metadata.
+            # So two modules exist for real_name.py in sys.modules:
+            # * __main__
+            # * real_name
+            # Another legitimate use case if when user redefines the class
+            # in the same file. This is a valid Python code.
+            if (
+                existing_cls_file_path != cls_file_path
+                or existing_cls_file_path is None
+                or cls_file_path is None
+            ):
+                raise ApplicationValidateError(
+                    f"Class '{class_name}' already exists. "
+                    f"First defined in {existing_cls_file_path}, "
+                    f"redefined in {cls_file_path}. "
+                    "Please rename one of the classes."
+                )
 
         def __tensorlake_empty_init__(self):
             # Don't do anything in this constructor when the class methods are called CLASS().method(...).
             pass
 
+        original_class.__tensorlake_original_init__ = original_class.__init__
+        original_class.__tensorlake_name__ = class_name
         original_class.__init__ = __tensorlake_empty_init__
 
         register_class(class_name, original_class)

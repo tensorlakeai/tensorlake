@@ -54,8 +54,9 @@ def zip_code(
         )
         return zip_buffer.getvalue()
     except Exception:
-        _save_zip_for_debugging(zip_buffer)
         raise
+    finally:
+        _save_zip_for_debugging(zip_buffer)
 
 
 def _zip_code(

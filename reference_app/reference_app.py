@@ -1,8 +1,8 @@
 # Reference test application for developing tensorlake CLI.
 # This is what we expect the user experience is going to look like and what will guide the development of the tensorlake CLI.
 
-# Running "tensorlake prepare reference_app.py" will build the images and make sure everything is ready.
-# Running "tensorlake deploy reference_app.py" will check everything is ready and deploy the application to tensorlake.
+# Running "tensorlake prepare reference_app/reference_app.py" will build the images and make sure everything is ready.
+# Running "tensorlake deploy reference_app/reference_app.py" will check everything is ready and deploy the application to tensorlake.
 from pydantic import BaseModel
 
 from tensorlake.applications import (

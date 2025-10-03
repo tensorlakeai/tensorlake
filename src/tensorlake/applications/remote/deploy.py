@@ -23,8 +23,9 @@ def deploy_applications(
 
     `application_file_path` is a path to the .py file where the applications are defined.
     `upgrade_running_requests` indicates whether to update running requests to use the deployed code.
-    `load_source_dir_modules` indicates whether to load all applications code modules so that the registry is populated.
-                               Should be set to True when called from CLI, False when called programmatically from test code.
+    `load_source_dir_modules` indicates whether to load the .py file so all applications from it get added to the registry.
+                               Should be set to True when called from CLI, False when called programmatically from test code
+                               because applications in test code are already loaded into registry.
     """
     # TODO: Validate the graph.
 
