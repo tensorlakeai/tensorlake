@@ -248,7 +248,7 @@ message AllocationResult {
 // Allocation represents an allocation with its metadata and execution result
 message Allocation {
     optional string request_id = 1;
-    optional string task_id = 2;
+    optional string function_call_id = 2;
     optional string allocation_id = 3;
     // Input data for allocation execution (not returned when getting/listing allocations)
     optional FunctionInputs inputs = 4;

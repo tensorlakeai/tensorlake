@@ -56,7 +56,7 @@ class AllocationEventDetails:
     application_version: str
     function_name: str
     request_id: str
-    task_id: str
+    function_call_id: str
     allocation_id: str
 
 
@@ -74,7 +74,8 @@ def log_user_event_allocations_started(
                     "application_version": alloc_info.application_version,
                     "fn": alloc_info.function_name,
                     "request_id": alloc_info.request_id,
-                    "task_id": alloc_info.task_id,
+                    "task_id": alloc_info.function_call_id,
+                    "fn_call_id": alloc_info.function_call_id,
                     "allocation_id": alloc_info.allocation_id,
                 }
                 for alloc_info in details
@@ -97,7 +98,8 @@ def log_user_event_allocations_finished(
                     "application_version": alloc_info.application_version,
                     "fn": alloc_info.function_name,
                     "request_id": alloc_info.request_id,
-                    "task_id": alloc_info.task_id,
+                    "task_id": alloc_info.function_call_id,
+                    "fn_call_id": alloc_info.function_call_id,
                     "allocation_id": alloc_info.allocation_id,
                 }
                 for alloc_info in details

@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from typing import Generator, Iterator, List
+from typing import Iterator, List
 
 import httpx
 from httpx_sse import ServerSentEvent, connect_sse
@@ -40,12 +40,6 @@ class DataPayload(BaseModel):
     sha256_hash: str
 
 
-class RequestProgress(BaseModel):
-    pending_tasks: int
-    successful_tasks: int
-    failed_tasks: int
-
-
 class RequestError(BaseModel):
     function_name: str
     message: str
@@ -53,17 +47,20 @@ class RequestError(BaseModel):
 
 class ShallowRequestMetadata(BaseModel):
     id: str
+    created_at: int
     # dict when failure outcome
     # str when success outcome
     # None when not finished
     outcome: dict | str | None = None
-    created_at: int
+    function_runs_count: int
+    application_version: str
 
 
 class Allocation(BaseModel):
     id: str
-    server_id: str = Field(alias="executor_id")
-    container_id: str = Field(alias="function_executor_id")
+    function_name: str
+    executor_id: str
+    function_executor_id: str
     created_at: int
     # dict when failure outcome
     # str when success outcome
@@ -75,7 +72,9 @@ class Allocation(BaseModel):
 
 class FunctionRun(BaseModel):
     id: str
-    function_name: str
+    name: str
+    application: str
+    namespace: str
     status: str
     outcome: str
     created_at: int
@@ -93,6 +92,7 @@ class RequestMetadata(BaseModel):
     created_at: int
     request_error: RequestError | None = None
     output: DataPayload | None = None
+    function_runs: List[FunctionRun]
 
 
 class RequestCreatedEvent(BaseModel):
@@ -105,8 +105,8 @@ class RequestFinishedEvent(BaseModel):
 
 class RequestProgressPayload(BaseModel):
     request_id: str
-    fn_name: str
-    task_id: str
+    function_name: str
+    function_run_id: str
     allocation_id: str | None = None
     executor_id: str | None = None
     outcome: str | None = None

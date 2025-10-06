@@ -79,9 +79,8 @@ class _AllocationInfo:
         self.allocation: Allocation = allocation
         self.execution: _AllocationExecution = _AllocationExecution()
         self.logger: FunctionExecutorLogger = logger.bind(
-            invocation_id=allocation.request_id,
             request_id=allocation.request_id,
-            task_id=allocation.task_id,
+            fn_call_id=allocation.function_call_id,
             allocation_id=allocation.allocation_id,
         )
 
@@ -138,24 +137,22 @@ class Service(FunctionExecutorServicer):
         self._function_ref = request.function
         self._logger = self._logger.bind(
             namespace=request.function.namespace,
-            graph=request.function.application_name,
-            application=request.function.application_name,
-            graph_version=request.function.application_version,
-            application_version=request.function.application_version,
+            app=request.function.application_name,
+            app_version=request.function.application_version,
             fn=request.function.function_name,
         )
 
-        graph_modules_zip_fd, graph_modules_zip_path = tempfile.mkstemp(suffix=".zip")
-        with open(graph_modules_zip_fd, "wb") as graph_modules_zip_file:
+        app_modules_zip_fd, app_modules_zip_path = tempfile.mkstemp(suffix=".zip")
+        with open(app_modules_zip_fd, "wb") as graph_modules_zip_file:
             graph_modules_zip_file.write(request.application_code.data)
         sys.path.insert(
-            0, graph_modules_zip_path
+            0, app_modules_zip_path
         )  # Add as the first entry so user modules have highest priority
 
         try:
             # Process user controlled input in a try-except block to not treat errors here as our
             # internal platform errors.
-            with zipfile.ZipFile(graph_modules_zip_path, "r") as zf:
+            with zipfile.ZipFile(app_modules_zip_path, "r") as zf:
                 with zf.open(CODE_ZIP_MANIFEST_FILE_NAME) as code_zip_manifest_file:
                     code_zip_manifest: CodeZIPManifest = CodeZIPManifest.model_validate(
                         json.load(code_zip_manifest_file)
@@ -265,7 +262,7 @@ class Service(FunctionExecutorServicer):
         (
             MessageValidator(allocation)
             .required_field("request_id")
-            .required_field("task_id")
+            .required_field("function_call_id")
             .required_field("allocation_id")
             .required_field("inputs")
             .not_set_field("result")
