@@ -476,21 +476,21 @@ class AllocationResult(_message.Message):
     ) -> None: ...
 
 class Allocation(_message.Message):
-    __slots__ = ("request_id", "task_id", "allocation_id", "inputs", "result")
+    __slots__ = ("request_id", "function_call_id", "allocation_id", "inputs", "result")
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
-    TASK_ID_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_CALL_ID_FIELD_NUMBER: _ClassVar[int]
     ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
     INPUTS_FIELD_NUMBER: _ClassVar[int]
     RESULT_FIELD_NUMBER: _ClassVar[int]
     request_id: str
-    task_id: str
+    function_call_id: str
     allocation_id: str
     inputs: FunctionInputs
     result: AllocationResult
     def __init__(
         self,
         request_id: _Optional[str] = ...,
-        task_id: _Optional[str] = ...,
+        function_call_id: _Optional[str] = ...,
         allocation_id: _Optional[str] = ...,
         inputs: _Optional[_Union[FunctionInputs, _Mapping]] = ...,
         result: _Optional[_Union[AllocationResult, _Mapping]] = ...,
