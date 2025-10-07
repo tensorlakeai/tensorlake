@@ -154,7 +154,7 @@ def run_allocation(
         CreateAllocationRequest(
             allocation=Allocation(
                 request_id="123",
-                task_id="test-task",
+                function_call_id="test-function-call",
                 allocation_id=allocation_id,
                 inputs=inputs,
             ),
