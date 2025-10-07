@@ -85,7 +85,7 @@ class _AllocationInfo:
         )
 
 
-class TaskAllocationRequestProgress(RequestProgress):
+class AllocationRequestProgress(RequestProgress):
     def __init__(self, alloc_info: _AllocationInfo):
         self._alloc_info: _AllocationInfo = alloc_info
 
@@ -97,7 +97,7 @@ class TaskAllocationRequestProgress(RequestProgress):
             self._alloc_info.execution.updated.notify_all()
         # sleep(0) here momentarily releases the GIL, giving other
         # threads a chance to run - e.g. allowing the FE to handle
-        # incoming RPCs, to report back await_task() progress
+        # incoming RPCs, to report back await_allocation() progress
         # messages, &c.
         time.sleep(0)
 
@@ -114,7 +114,7 @@ class Service(FunctionExecutorServicer):
         self._blob_store: BLOBStore | None = None
         self._request_state_proxy_server: RequestStateProxyServer | None = None
         self._check_health_handler: CheckHealthHandler | None = None
-        # Task management for create_allocation/await_allocation/delete_allocation
+        # Allocation management for create_allocation/await_allocation/delete_allocation
         self._allocations: Dict[str, _AllocationInfo] = {}
         self._allocations_lock = threading.Lock()
 
@@ -183,9 +183,9 @@ class Service(FunctionExecutorServicer):
 
             self._function = get_function(request.function.function_name)
             # The function is only loaded once per Function Executor. It's important to use a single
-            # loaded function so all the tasks when executed are sharing the same memory. This allows
+            # loaded function so all the allocations when executed are sharing the same memory. This allows
             # implementing smart caching in customer code. E.g. load a model into GPU only once and
-            # share the model's file descriptor between all tasks or download function configuration
+            # share the model's file descriptor between all allocs or download function configuration
             # only once.
             if self._function.function_config.class_name is not None:
                 self._function_instance_arg = create_self_instance(
@@ -304,7 +304,7 @@ class Service(FunctionExecutorServicer):
                 allocation_id=alloc_info.allocation.allocation_id,
                 proxy_server=self._request_state_proxy_server,
             ),
-            progress=TaskAllocationRequestProgress(alloc_info),
+            progress=AllocationRequestProgress(alloc_info),
             metrics=RequestMetricsRecorder(),
         )
 
@@ -323,7 +323,7 @@ class Service(FunctionExecutorServicer):
         except BaseException as e:
             # Only exceptions in our code can be raised here so we have to log them.
             alloc_info.logger.error(
-                "task allocation execution failed in background thread",
+                "allocation execution failed in background thread",
                 exc_info=e,
             )
         finally:

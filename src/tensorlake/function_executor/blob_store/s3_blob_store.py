@@ -43,20 +43,27 @@ class S3BLOBStore:
         """
 
         def on_retry(
-            e: httpx.HTTPStatusError,
+            e: Exception,
             sleep_time: float,
             retries: int,
         ) -> None:
+            status_code: str = "None"
+            response: str = "None"
+            if isinstance(e, httpx.HTTPStatusError):
+                status_code = e.response.status_code
+                response = e.response.text
+
             # The URI can be presigned, it should not be logged as it provides access to customer data.
             # Response text doesn't contain the URI, so it can be logged.
             logger.error(
                 "retrying S3 get",
-                status_code=e.response.status_code,
-                response=e.response.text,
+                status_code=status_code,
+                response=response,
                 offset=offset,
                 size=len(destination),
                 sleep_time=sleep_time,
                 retries=retries,
+                exc_info=e,
             )
 
         @exponential_backoff(
@@ -122,19 +129,25 @@ class S3BLOBStore:
         source_size: int = sum(len(data) for data in source)
 
         def on_retry(
-            e: httpx.HTTPStatusError,
+            e: Exception,
             sleep_time: float,
             retries: int,
         ) -> None:
             # The URI can be presigned, it should not be logged as it provides access to customer data.
             # Response text doesn't contain the URI, so it can be logged.
+            status_code: str = "None"
+            response: str = "None"
+            if isinstance(e, httpx.HTTPStatusError):
+                status_code = e.response.status_code
+                response = e.response.text
             logger.error(
                 "retrying S3 put",
-                status_code=e.response.status_code,
-                response=e.response.text,
+                status_code=status_code,
+                response=response,
                 size=source_size,
                 sleep_time=sleep_time,
                 retries=retries,
+                exc_info=e,
             )
 
         @exponential_backoff(
