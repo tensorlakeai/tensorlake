@@ -1,8 +1,6 @@
 import importlib.metadata
 import json
-import os
 import sys
-from asyncio.unix_events import SelectorEventLoop
 from cmath import e
 from dataclasses import dataclass
 from datetime import datetime
@@ -20,7 +18,7 @@ except importlib.metadata.PackageNotFoundError:
 
 from tensorlake.applications.remote.api_client import APIClient, LogEntry, LogsPayload
 
-from .config import get_nested_value, load_config
+from .config import get_nested_value, load_config, load_credentials_token
 
 
 @dataclass
@@ -30,8 +28,11 @@ class Context:
     base_url: str
     namespace: str
     api_key: str | None = None
+    personal_access_token: str | None = None
     default_application: str | None = None
     default_request: str | None = None
+    default_project: str | None = None
+    default_organization: str | None = None
     version: str = VERSION
     _client: httpx.Client | None = None
     _introspect_response: httpx.Response | None = None
@@ -44,6 +45,9 @@ class Context:
                 "Accept": "application/json",
                 "User-Agent": f"Tensorlake CLI (python/{sys.version_info[0]}.{sys.version_info[1]} sdk/{self.version})",
             }
+            if self.personal_access_token:
+                headers["Authorization"] = f"Bearer {self.personal_access_token}"
+
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
             self._client = httpx.Client(base_url=self.base_url, headers=headers)
@@ -52,11 +56,16 @@ class Context:
     @property
     def api_client(self) -> APIClient:
         if self._api_client is None:
+            bearer_token = self.personal_access_token
+            if self.api_key:
+                bearer_token = self.api_key
+
             self._api_client = APIClient(
                 namespace=self.namespace,
                 api_url=self.base_url,
-                api_key=self.api_key,
+                api_key=bearer_token,
             )
+
         return self._api_client
 
     @property
@@ -65,11 +74,35 @@ class Context:
 
     @property
     def project_id(self):
-        return self._introspect().json().get("projectId")
+        """
+        Get the project ID associated with the API key, or from config if no API key is set.
+        """
+        if self.api_key:
+            return self._introspect().json().get("projectId")
+
+        if not self.default_project:
+            click.echo(
+                "No default project found. Please configure a default project with 'tensorlake config init'.",
+                err=True,
+            )
+
+        return self.default_project
 
     @property
     def organization_id(self):
-        return self._introspect().json().get("organizationId")
+        """
+        Get the organization ID associated with the API key, or from config if no API key is set.
+        """
+        if self.api_key:
+            self._introspect().json().get("organizationId")
+
+        if not self.default_organization:
+            click.echo(
+                "No default organization found. Please configure a default organization with 'tensorlake config init'.",
+                err=True,
+            )
+
+        return self.default_organization
 
     def _introspect(self) -> httpx.Response:
         if self._introspect_response is None:
@@ -95,6 +128,7 @@ class Context:
     ) -> "Context":
         """Create a Context with values from CLI args, environment, saved config, or defaults."""
         config_data = load_config()
+        personal_access_token = load_credentials_token()
 
         # Use CLI/env values first, then saved config, then hardcoded defaults
         final_base_url = (
@@ -111,12 +145,20 @@ class Context:
         final_default_app = get_nested_value(config_data, "default.application")
         final_default_request = get_nested_value(config_data, "default.request")
 
+        final_default_project = get_nested_value(config_data, "default.project")
+        final_default_organization = get_nested_value(
+            config_data, "default.organization"
+        )
+
         return cls(
             base_url=final_base_url,
             api_key=final_api_key,
+            personal_access_token=personal_access_token,
             namespace=final_namespace,
             default_application=final_default_app,
             default_request=final_default_request,
+            default_project=final_default_project,
+            default_organization=final_default_organization,
         )
 
 
