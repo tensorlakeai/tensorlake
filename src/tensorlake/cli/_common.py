@@ -26,6 +26,7 @@ class Context:
     """Class for CLI context."""
 
     base_url: str
+    cloud_url: str
     namespace: str
     api_key: str | None = None
     personal_access_token: str | None = None
@@ -123,6 +124,7 @@ class Context:
     def default(
         cls,
         base_url: str | None = None,
+        cloud_url: str | None = None,
         api_key: str | None = None,
         namespace: str | None = None,
     ) -> "Context":
@@ -136,6 +138,13 @@ class Context:
             or get_nested_value(config_data, "indexify.url")
             or "https://api.tensorlake.ai"
         )
+
+        final_cloud_url = (
+            cloud_url
+            or get_nested_value(config_data, "indexify.cloud_url")
+            or "https://cloud.tensorlake.ai"
+        )
+
         final_api_key = api_key or get_nested_value(config_data, "tensorlake.apikey")
         final_namespace = (
             namespace
@@ -152,6 +161,7 @@ class Context:
 
         return cls(
             base_url=final_base_url,
+            cloud_url=final_cloud_url,
             api_key=final_api_key,
             personal_access_token=personal_access_token,
             namespace=final_namespace,

@@ -49,8 +49,10 @@ def status(ctx: Context, output: str):
 
 
 @auth.command(help="Login to TensorLake")
-def login():
-    login_start_url = "https://api.tensorlake.ai/platform/cli/login/start"
+@pass_auth
+def login(ctx: Context):
+
+    login_start_url = f"{ctx.base_url}/platform/cli/login/start"
 
     start_response = httpx.post(login_start_url)
 
@@ -66,7 +68,7 @@ def login():
     click.echo(f"Your code is: {user_code}")
     click.echo("Opening web browser...")
 
-    verification_uri = "https://cloud.tensorlake.ai/cli/login"
+    verification_uri = f"{ctx.cloud_url}/cli/login"
 
     try:
         webbrowser.open(verification_uri)
@@ -79,9 +81,7 @@ def login():
 
     click.echo("A web browser has been opened for you to log in.")
 
-    poll_url = (
-        f"https://api.tensorlake.ai/platform/cli/login/poll?device_code={device_code}"
-    )
+    poll_url = f"{ctx.base_url}/platform/cli/login/poll?device_code={device_code}"
 
     while True:
         poll_response = httpx.get(poll_url)
@@ -122,7 +122,7 @@ def login():
         if status == "approved":
             break
 
-    exchange_token_url = "https://api.tensorlake.ai/platform/cli/login/exchange"
+    exchange_token_url = f"{ctx.base_url}/platform/cli/login/exchange"
 
     exchange_response = httpx.post(
         exchange_token_url, json={"device_code": device_code}
@@ -136,11 +136,11 @@ def login():
     exchange_response_body = exchange_response.json()
 
     access_token = exchange_response_body["access_token"]
-    _save_token(access_token)
+    _save_credentials(access_token)
     click.echo("Login successful!")
 
 
-def _save_token(token: str):
+def _save_credentials(token: str):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
     config = {"token": token}
