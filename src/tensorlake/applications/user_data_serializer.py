@@ -1,3 +1,4 @@
+import inspect
 import json
 import pickle
 from typing import Any, List
@@ -89,7 +90,9 @@ class JSONUserDataSerializer(UserDataSerializer):
 
     def deserialize(self, data: bytes, possible_types: List[Any]) -> Any:
         model_classes: List[Any] = [
-            t for t in possible_types if issubclass(t, pydantic.BaseModel)
+            t
+            for t in possible_types
+            if inspect.isclass(t) and issubclass(t, pydantic.BaseModel)
         ]
 
         decoded_data: str = data.decode("utf-8")
