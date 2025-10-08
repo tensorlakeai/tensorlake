@@ -91,7 +91,6 @@ class RequestMetadata(BaseModel):
     application_version: str
     created_at: int
     request_error: RequestError | None = None
-    output: DataPayload | None = None
     function_runs: List[FunctionRun]
 
 
@@ -461,11 +460,6 @@ class APIClient:
                 raise RequestErrorException(request.request_error.message)
 
         # request.outcome is str at this point so the request is finished successfully.
-        if request.output is None:
-            raise ValueError(
-                "Request is finished but has no output, something went wrong."
-            )
-
         return self._download_request_output(
             application_name=application_name,
             request_id=request_id,
