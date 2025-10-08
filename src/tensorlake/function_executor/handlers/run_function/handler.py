@@ -86,7 +86,7 @@ class Handler:
                 application_version=self._function_ref.application_version,
                 function_name=self._function_ref.function_name,
                 request_id=self._allocation.request_id,
-                task_id=self._allocation.task_id,
+                function_call_id=self._allocation.function_call_id,
                 allocation_id=self._allocation.allocation_id,
             )
         ]

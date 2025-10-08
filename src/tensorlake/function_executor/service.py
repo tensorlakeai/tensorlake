@@ -79,14 +79,13 @@ class _AllocationInfo:
         self.allocation: Allocation = allocation
         self.execution: _AllocationExecution = _AllocationExecution()
         self.logger: FunctionExecutorLogger = logger.bind(
-            invocation_id=allocation.request_id,
             request_id=allocation.request_id,
-            task_id=allocation.task_id,
+            fn_call_id=allocation.function_call_id,
             allocation_id=allocation.allocation_id,
         )
 
 
-class TaskAllocationRequestProgress(RequestProgress):
+class AllocationRequestProgress(RequestProgress):
     def __init__(self, alloc_info: _AllocationInfo):
         self._alloc_info: _AllocationInfo = alloc_info
 
@@ -98,7 +97,7 @@ class TaskAllocationRequestProgress(RequestProgress):
             self._alloc_info.execution.updated.notify_all()
         # sleep(0) here momentarily releases the GIL, giving other
         # threads a chance to run - e.g. allowing the FE to handle
-        # incoming RPCs, to report back await_task() progress
+        # incoming RPCs, to report back await_allocation() progress
         # messages, &c.
         time.sleep(0)
 
@@ -115,7 +114,7 @@ class Service(FunctionExecutorServicer):
         self._blob_store: BLOBStore | None = None
         self._request_state_proxy_server: RequestStateProxyServer | None = None
         self._check_health_handler: CheckHealthHandler | None = None
-        # Task management for create_allocation/await_allocation/delete_allocation
+        # Allocation management for create_allocation/await_allocation/delete_allocation
         self._allocations: Dict[str, _AllocationInfo] = {}
         self._allocations_lock = threading.Lock()
 
@@ -138,24 +137,22 @@ class Service(FunctionExecutorServicer):
         self._function_ref = request.function
         self._logger = self._logger.bind(
             namespace=request.function.namespace,
-            graph=request.function.application_name,
-            application=request.function.application_name,
-            graph_version=request.function.application_version,
-            application_version=request.function.application_version,
+            app=request.function.application_name,
+            app_version=request.function.application_version,
             fn=request.function.function_name,
         )
 
-        graph_modules_zip_fd, graph_modules_zip_path = tempfile.mkstemp(suffix=".zip")
-        with open(graph_modules_zip_fd, "wb") as graph_modules_zip_file:
+        app_modules_zip_fd, app_modules_zip_path = tempfile.mkstemp(suffix=".zip")
+        with open(app_modules_zip_fd, "wb") as graph_modules_zip_file:
             graph_modules_zip_file.write(request.application_code.data)
         sys.path.insert(
-            0, graph_modules_zip_path
+            0, app_modules_zip_path
         )  # Add as the first entry so user modules have highest priority
 
         try:
             # Process user controlled input in a try-except block to not treat errors here as our
             # internal platform errors.
-            with zipfile.ZipFile(graph_modules_zip_path, "r") as zf:
+            with zipfile.ZipFile(app_modules_zip_path, "r") as zf:
                 with zf.open(CODE_ZIP_MANIFEST_FILE_NAME) as code_zip_manifest_file:
                     code_zip_manifest: CodeZIPManifest = CodeZIPManifest.model_validate(
                         json.load(code_zip_manifest_file)
@@ -186,9 +183,9 @@ class Service(FunctionExecutorServicer):
 
             self._function = get_function(request.function.function_name)
             # The function is only loaded once per Function Executor. It's important to use a single
-            # loaded function so all the tasks when executed are sharing the same memory. This allows
+            # loaded function so all the allocations when executed are sharing the same memory. This allows
             # implementing smart caching in customer code. E.g. load a model into GPU only once and
-            # share the model's file descriptor between all tasks or download function configuration
+            # share the model's file descriptor between all allocs or download function configuration
             # only once.
             if self._function.function_config.class_name is not None:
                 self._function_instance_arg = create_self_instance(
@@ -265,7 +262,7 @@ class Service(FunctionExecutorServicer):
         (
             MessageValidator(allocation)
             .required_field("request_id")
-            .required_field("task_id")
+            .required_field("function_call_id")
             .required_field("allocation_id")
             .required_field("inputs")
             .not_set_field("result")
@@ -307,7 +304,7 @@ class Service(FunctionExecutorServicer):
                 allocation_id=alloc_info.allocation.allocation_id,
                 proxy_server=self._request_state_proxy_server,
             ),
-            progress=TaskAllocationRequestProgress(alloc_info),
+            progress=AllocationRequestProgress(alloc_info),
             metrics=RequestMetricsRecorder(),
         )
 
@@ -326,7 +323,7 @@ class Service(FunctionExecutorServicer):
         except BaseException as e:
             # Only exceptions in our code can be raised here so we have to log them.
             alloc_info.logger.error(
-                "task allocation execution failed in background thread",
+                "allocation execution failed in background thread",
                 exc_info=e,
             )
         finally:

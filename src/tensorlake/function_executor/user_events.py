@@ -4,8 +4,9 @@
 # allocation IDs which can be shared by the users with Tensorlake support to
 # improve the support experience.
 #
-# The events have strict structured json format because they might be used for
+# The events have strict structured json format because they are used for
 # automatic Function Executor log stream processing in the future.
+# The event attribute names are human readable because they are visible to users.
 import datetime
 import json
 from dataclasses import dataclass
@@ -28,7 +29,7 @@ def log_user_event_initialization_started(details: InitializationEventDetails) -
             "namespace": details.namespace,
             "application": details.application_name,
             "application_version": details.application_version,
-            "fn": details.function_name,
+            "function": details.function_name,
         }
     )
 
@@ -44,7 +45,7 @@ def log_user_event_initialization_finished(
             "namespace": details.namespace,
             "application": details.application_name,
             "application_version": details.application_version,
-            "fn": details.function_name,
+            "function": details.function_name,
         }
     )
 
@@ -56,7 +57,7 @@ class AllocationEventDetails:
     application_version: str
     function_name: str
     request_id: str
-    task_id: str
+    function_call_id: str
     allocation_id: str
 
 
@@ -72,9 +73,9 @@ def log_user_event_allocations_started(
                     "namespace": alloc_info.namespace,
                     "application": alloc_info.application_name,
                     "application_version": alloc_info.application_version,
-                    "fn": alloc_info.function_name,
+                    "function": alloc_info.function_name,
                     "request_id": alloc_info.request_id,
-                    "task_id": alloc_info.task_id,
+                    "function_call_id": alloc_info.function_call_id,
                     "allocation_id": alloc_info.allocation_id,
                 }
                 for alloc_info in details
@@ -95,9 +96,9 @@ def log_user_event_allocations_finished(
                     "namespace": alloc_info.namespace,
                     "application": alloc_info.application_name,
                     "application_version": alloc_info.application_version,
-                    "fn": alloc_info.function_name,
+                    "function": alloc_info.function_name,
                     "request_id": alloc_info.request_id,
-                    "task_id": alloc_info.task_id,
+                    "function_call_id": alloc_info.function_call_id,
                     "allocation_id": alloc_info.allocation_id,
                 }
                 for alloc_info in details

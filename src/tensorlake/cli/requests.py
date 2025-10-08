@@ -152,8 +152,8 @@ def info(
             for allocation in function_run.allocations:
                 allocations_table.add_row(
                     allocation.id,
-                    allocation.server_id,
-                    allocation.container_id,
+                    allocation.executor_id,
+                    allocation.function_executor_id,
                     str(allocation.created_at),
                     allocation.outcome,
                     str(allocation.attempt_number),
