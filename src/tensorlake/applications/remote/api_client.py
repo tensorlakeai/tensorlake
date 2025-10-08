@@ -91,7 +91,6 @@ class RequestMetadata(BaseModel):
     application_version: str
     created_at: int
     request_error: RequestError | None = None
-    output: DataPayload | None = None
     function_runs: List[FunctionRun]
 
 
