@@ -1,11 +1,12 @@
 import json
 import os
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
 import click
 import httpx
+
+from tensorlake.cli._common import Context
 
 CONFIG_DIR = Path.home() / ".config" / "tensorlake"
 CONFIG_FILE = CONFIG_DIR / ".tensorlake_config"
@@ -150,7 +151,7 @@ def load_config() -> Dict[str, Any]:
         return _parse_toml(content)
 
 
-def load_credentials_token() -> str | None:
+def load_credentials_token(ctx: Context) -> str | None:
     """
     Load the personal access token from the credentials file if it exists and is valid.
     """
@@ -158,10 +159,11 @@ def load_credentials_token() -> str | None:
         with open(CREDENTIALS_PATH, "r", encoding="utf-8") as f:
             credentials = json.load(f)
 
-            if "token" not in credentials:
+            scoped = ctx.get(ctx.base_url)
+            if scoped is None:
                 return None
 
-            return credentials.get("token")
+            return scoped.get("token")
     except (FileNotFoundError, json.JSONDecodeError):
         return None
 
@@ -208,15 +210,15 @@ def config():
 
 
 @config.command()
-def init():
+def init(ctx: Context):
     """Initialize the configuration."""
-    personal_access_token = load_credentials_token()
+    personal_access_token = load_credentials_token(ctx)
     if not personal_access_token:
         click.echo("No valid credentials found. Please log in first.", err=True)
         return
 
     organizations_response = httpx.get(
-        "https://api.tensorlake.ai/platform/v1/organizations",
+        f"{ctx.base_url}/platform/v1/organizations",
         headers={"Authorization": f"Bearer {personal_access_token}"},
     )
 
@@ -250,7 +252,7 @@ def init():
         organization_id = organizations[choice - 1]["id"]
 
     projects_response = httpx.get(
-        f"https://api.tensorlake.ai/platform/v1/organizations/{organization_id}/projects",
+        f"{ctx.base_url}/platform/v1/organizations/{organization_id}/projects",
         headers={"Authorization": f"Bearer {personal_access_token}"},
     )
     if projects_response.status_code != 200:
