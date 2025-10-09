@@ -2,7 +2,6 @@ import json
 import os
 import time
 import webbrowser
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import click
@@ -36,6 +35,7 @@ def status(ctx: Context, output: str):
         print(
             json.dumps(
                 {
+                    "endpoint": ctx.base_url,
                     "organizationId": ctx.organization_id,
                     "projectId": ctx.project_id,
                     "apiKeyId": ctx.api_key_id,
@@ -43,6 +43,7 @@ def status(ctx: Context, output: str):
             )
         )
         return
+    click.echo(f"Endpoint: {ctx.base_url}")
     click.echo(f"Organization ID: {ctx.organization_id}")
     click.echo(f"Project ID     : {ctx.project_id}")
     click.echo(f"API Key ID     : {ctx.api_key_id}")
@@ -51,7 +52,6 @@ def status(ctx: Context, output: str):
 @auth.command(help="Login to TensorLake")
 @pass_auth
 def login(ctx: Context):
-
     login_start_url = f"{ctx.base_url}/platform/cli/login/start"
 
     start_response = httpx.post(login_start_url)
@@ -136,15 +136,20 @@ def login(ctx: Context):
     exchange_response_body = exchange_response.json()
 
     access_token = exchange_response_body["access_token"]
-    _save_credentials(access_token)
+    _save_credentials(ctx, access_token)
     click.echo("Login successful!")
 
 
-def _save_credentials(token: str):
+def _save_credentials(ctx: Context, token: str):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-    config = {"token": token}
-    with open(CREDENTIALS_PATH, "w", encoding="utf-8") as f:
+    with open(CREDENTIALS_PATH, "w+", encoding="utf-8") as f:
+        try:
+            config = json.load(f)
+        except json.JSONDecodeError:
+            config = {}
+
+        config[ctx.base_url] = {"token": token}
         json.dump(config, f)
 
     os.chmod(CREDENTIALS_PATH, 0o600)
