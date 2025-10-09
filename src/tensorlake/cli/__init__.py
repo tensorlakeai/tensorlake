@@ -12,6 +12,8 @@ Use 'tensorlake config' to manage settings:
   indexify.namespace    - Namespace (default: 'default')
   default.application   - Default application name for commands
   default.request       - Default request ID for request info
+  default.project       - Default project ID for requests and deployments
+  default.organization  - Default organization ID for requests and deployments
 """
 )
 @click.version_option(

@@ -1,10 +1,15 @@
+import json
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
 import click
+import httpx
 
-CONFIG_FILE = Path.home() / ".tensorlake_config"
+CONFIG_DIR = Path.home() / ".config" / "tensorlake"
+CONFIG_FILE = CONFIG_DIR / ".tensorlake_config"
+CREDENTIALS_PATH = CONFIG_DIR / "credentials.json"
 
 
 def _parse_toml(content: str) -> Dict[str, Any]:
@@ -145,6 +150,22 @@ def load_config() -> Dict[str, Any]:
         return _parse_toml(content)
 
 
+def load_credentials_token() -> str | None:
+    """
+    Load the personal access token from the credentials file if it exists and is valid.
+    """
+    try:
+        with open(CREDENTIALS_PATH, "r", encoding="utf-8") as f:
+            credentials = json.load(f)
+
+            if "token" not in credentials:
+                return None
+
+            return credentials.get("token")
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
 def save_config(config: Dict[str, Any]) -> None:
     """Save configuration to the TOML file."""
     content = _serialize_toml(config)
@@ -184,6 +205,82 @@ def set_nested_value(config: Dict[str, Any], key: str, value: str) -> None:
 def config():
     """Manage tensorlake configuration."""
     pass
+
+
+@config.command()
+def init():
+    """Initialize the configuration."""
+    personal_access_token = load_credentials_token()
+    if not personal_access_token:
+        click.echo("No valid credentials found. Please log in first.", err=True)
+        return
+
+    organizations_response = httpx.get(
+        "https://api.tensorlake.ai/platform/v1/organizations",
+        headers={"Authorization": f"Bearer {personal_access_token}"},
+    )
+
+    if organizations_response.status_code != 200:
+        click.echo(
+            f"Failed to fetch organizations: {organizations_response.text}", err=True
+        )
+        return
+
+    organizations_page = organizations_response.json()
+    if not organizations_page.get("items"):
+        click.echo("No organizations found for the provided token.", err=True)
+        return
+
+    organizations = organizations_page["items"]
+    if len(organizations) == 1:
+        organization = organizations[0]
+        organization_id = organization["id"]
+        click.echo(
+            f"Only one organization found. Using organization ID: {organization_id}"
+        )
+    else:
+        click.echo("Multiple organizations found:")
+        for idx, org in enumerate(organizations, 1):
+            click.echo(f"{idx}. {org['name']} (ID: {org['id']})")
+
+        choice = click.prompt(
+            "Select an organization by number",
+            type=click.IntRange(1, len(organizations)),
+        )
+        organization_id = organizations[choice - 1]["id"]
+
+    projects_response = httpx.get(
+        f"https://api.tensorlake.ai/platform/v1/organizations/{organization_id}/projects",
+        headers={"Authorization": f"Bearer {personal_access_token}"},
+    )
+    if projects_response.status_code != 200:
+        click.echo(f"Failed to fetch projects: {projects_response.text}", err=True)
+        return
+    projects_page = projects_response.json()
+    if not projects_page.get("items"):
+        click.echo("No projects found in the selected organization.", err=True)
+        return
+
+    projects = projects_page["items"]
+    if len(projects) == 1:
+        project = projects[0]
+        project_id = project["id"]
+        click.echo(f"Only one project found. Using project ID: {project_id}")
+    else:
+        click.echo("Multiple projects found:")
+        for idx, proj in enumerate(projects, 1):
+            click.echo(f"{idx}. {proj['name']} (ID: {proj['id']})")
+
+        choice = click.prompt(
+            "Select a project by number", type=click.IntRange(1, len(projects))
+        )
+        project_id = projects[choice - 1]["id"]
+
+    config_data = load_config()
+    set_nested_value(config_data, "default.organization", organization_id)
+    set_nested_value(config_data, "default.project", project_id)
+    save_config(config_data)
+    click.echo("Configuration initialized successfully.")
 
 
 @config.command()
