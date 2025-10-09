@@ -252,8 +252,6 @@ class ImageBuilderV2Client:
                         event.message,
                         nl=False,
                         err=False,
-                        fg="black",
-                        dim=True,
                     )
                 case "stderr":
                     click.secho(event.message, fg="red", err=True)
