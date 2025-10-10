@@ -147,8 +147,17 @@ def _deploy_applications(
                 field_examples = []
                 
                 for field_name, field_schema in properties.items():
-                    field_type_name = field_schema.get('type', 'value')
+                    # Handle different schema formats
+                    if 'type' in field_schema:
+                        field_type_name = field_schema['type']
+                    elif 'anyOf' in field_schema:
+                        # Show all types in the union
+                        types = [item.get('type') for item in field_schema['anyOf'] if item.get('type')]
+                        field_type_name = ' | '.join(types) if types else 'value'
+                    else:
+                        field_type_name = 'value'
                     field_examples.append(f'"{field_name}": <{field_type_name}>')
+
                 param_type = '{' + ', '.join(field_examples) + '}'
             else:
                 type_name = getattr(param_annotation, '__name__', str(param_annotation))
