@@ -150,7 +150,7 @@ class Handler:
                     f"Received function call with unexpected function call node metadata type: {node_metadata.type}"
                 )
         else:
-            if self._function.application_config is None:
+            if self._function._application_config is None:
                 raise ValueError(
                     "Non-application function was called without SDK metadata"
                 )
@@ -172,7 +172,7 @@ class Handler:
         start_time = time.monotonic()
 
         try:
-            return self._function.original_function(
+            return self._function._original_function(
                 *function_call.args, **function_call.kwargs
             )
         finally:

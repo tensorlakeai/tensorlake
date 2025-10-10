@@ -21,12 +21,12 @@ def _application_function_call_with_object_payload(
     # [payload: Optional type hint]
     args: List[Any] = [object]
 
-    if application.function_config.class_name is None:
+    if application._function_config.class_name is None:
         return application(*args)
     else:
         # Warning: don't create class instance here as it must be reused by SDK if created once.
-        cls: Any = get_class(application.function_config.class_name)
-        return getattr(cls, application.function_config.class_method_name)(*args)
+        cls: Any = get_class(application._function_config.class_name)
+        return getattr(cls, application._function_config.class_method_name)(*args)
 
 
 def application_function_call_with_serialized_payload(

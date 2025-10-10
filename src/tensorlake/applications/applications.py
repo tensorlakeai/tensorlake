@@ -9,6 +9,6 @@ def filter_applications(
     """Yields all applications out of the supplied functions."""
     for function in functions:
         function: Function
-        if function.application_config is None:
+        if function._application_config is None:
             continue
         yield function
