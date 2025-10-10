@@ -7,10 +7,7 @@ import click
 
 from tensorlake.applications import Function, Image
 from tensorlake.applications.applications import filter_applications
-from tensorlake.applications.image import (
-    ImageInformation,
-    image_infos,
-)
+from tensorlake.applications.image import ImageInformation, image_infos
 from tensorlake.applications.interface.function import (
     _ApplicationConfiguration,
     _FunctionConfiguration,
@@ -71,8 +68,10 @@ def deploy(
     click.secho("Everything looks good, deploying now", fg="green")
 
     _deploy_applications(
+        auth=auth,
         application_file_path=application_file_path,
         upgrade_running_requests=upgrade_running_requests,
+        functions=functions,
     )
 
 
@@ -106,10 +105,15 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: List[Func
                     traceback.print_exception(e)
                     raise click.Abort
 
-    click.secho(f"Built all images", fg="green")
+    click.secho("Built all images", fg="green")
 
 
-def _deploy_applications(application_file_path: str, upgrade_running_requests: bool):
+def _deploy_applications(
+    auth: Context,
+    application_file_path: str,
+    upgrade_running_requests: bool,
+    functions: List[Function],
+):
     try:
         deploy_applications(
             applications_file_path=application_file_path,
@@ -124,4 +128,36 @@ def _deploy_applications(application_file_path: str, upgrade_running_requests: b
         traceback.print_exception(e)
         raise click.Abort
 
-    click.secho(f"Deployed all applications", fg="green")
+    # Display success message with deployment information
+    deployed_apps = filter_applications(functions)
+
+    try:
+        application = next(deployed_apps)
+        fn_config: _FunctionConfiguration = application.function_config
+
+        # Get parameter type from function signature
+        import inspect
+        sig = inspect.signature(application.original_function)
+        first_param = next(iter(sig.parameters.values()), None)
+
+        if first_param and first_param.annotation != inspect.Parameter.empty:
+            type_map = {int: "<integer>", str: "<string>", float: "<float>", bool: "<boolean>"}
+            param_type = type_map.get(first_param.annotation, f"<{first_param.annotation.__name__}>")
+        else:
+            param_type = "<value>"
+
+        click.secho(
+            f"""Deployed application: {fn_config.function_name}
+curl -X POST {auth.base_url}/v1/namespaces/{auth.namespace}/applications/{fn_config.function_name} \\
+-H "Authorization: Bearer $TENSORLAKE_API_KEY" \\
+-H "accept: application/json" \\
+-H "Content-Type: application/json" \\
+-d '{param_type}'
+""",
+            fg="green",
+        )
+    except StopIteration:
+        click.secho("Deployed application", fg="green")
+        click.secho(
+            "Error generating curl command\n", fg="yellow"
+        )
