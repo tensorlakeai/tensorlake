@@ -7,14 +7,10 @@ class ASTNode:
     """A node in the abstract syntax tree."""
 
     def __init__(self):
-        # Alphabet size is 64.
-        # ID length is 8.
-        # Unique combinations: 64^8 = 281 474 976 710 656.
-        # The IDs have to be unique per request, good enough random space to avoid collisions.
-        self._id: str = nanoid_generate(
-            alphabet="_-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
-            size=8,
-        )
+        # We need full sized nanoid here because we can run a request
+        # for months and we don't want to ever collide these IDs between
+        # function calls of the same request.
+        self._id: str = nanoid_generate()
         self._serialized_metadata: bytes | None = None
         self._parent: "ASTNode | None" = None
         # ID -> AST

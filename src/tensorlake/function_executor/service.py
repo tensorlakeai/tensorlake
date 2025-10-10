@@ -187,9 +187,9 @@ class Service(FunctionExecutorServicer):
             # implementing smart caching in customer code. E.g. load a model into GPU only once and
             # share the model's file descriptor between all allocs or download function configuration
             # only once.
-            if self._function.function_config.class_name is not None:
+            if self._function._function_config.class_name is not None:
                 self._function_instance_arg = create_self_instance(
-                    self._function.function_config.class_name
+                    self._function._function_config.class_name
                 )
         except BaseException as e:
             self._logger.error(
@@ -206,7 +206,7 @@ class Service(FunctionExecutorServicer):
                 failure_reason=InitializationFailureReason.INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR,
             )
 
-        available_cpu_count: int = int(self._function.function_config.cpu)
+        available_cpu_count: int = int(self._function._function_config.cpu)
         self._blob_store = BLOBStore(
             available_cpu_count=available_cpu_count, logger=self._logger
         )

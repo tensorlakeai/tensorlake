@@ -1,6 +1,6 @@
 import time
 import unittest
-from typing import Any, List
+from typing import List
 
 from pydantic import BaseModel
 
@@ -64,14 +64,14 @@ class ResponsePayload(BaseModel):
 def parse_pdf_api(payload: RequestPayload) -> ResponsePayload:
     # This is a blocking call of Tensorlake Function.
     # All function calls are blocking by default. To make a non-blocking call
-    # users have to do .aio.call() on the Function/anything else they want to call
-    # in a non-blocking way.
+    # users have to do .run() on the Function/anything else if they want
+    # to call in a non-blocking way.
     response: FakePDFParseResult = fake_parse_pdf_service_call(
         file=payload.url,
         page_range=payload.page_range,
     )
     # Use map operation running in background as argument to other function calls.
-    chunk_embeddings: Future = tl_map.aio.call(
+    chunk_embeddings: Future = tl_map.run(
         chunk_and_embed, [chunk.content for chunk in response.chunks]
     )
 
@@ -83,7 +83,7 @@ def parse_pdf_api(payload: RequestPayload) -> ResponsePayload:
     chunks: List[ChunkEmbeddings] = chunk_embeddings.result()
 
     # Spawn a recurring background function to watch for the PDF file updates.
-    watch_pdf_updates.aio.call_later(
+    watch_pdf_updates.run_later(
         start_delay=60, url=payload.url, page_range=payload.page_range
     )
     return ResponsePayload(chunks=chunks)
@@ -102,7 +102,7 @@ def chunk_and_embed(page: str) -> ChunkEmbeddings:
     output = ChunkEmbeddings(chunk_embeddings=chunk_embeddings)
     # Spawn IndexEmbedding function call in background to save the embeddings.
     # We're not interested in waiting for it to complete or value the function returned.
-    IndexEmbedding().run.aio.call(output)
+    IndexEmbedding().index.run_later(output)
 
     return output
 
@@ -117,7 +117,7 @@ class IndexEmbedding:
         )
 
     @function()
-    def run(self, chunk_embeddings: ChunkEmbeddings) -> None:
+    def index(self, chunk_embeddings: ChunkEmbeddings) -> None:
         print(f"DB uri: {self.fake_embedding_db_uri}")
         print(chunk_embeddings)
         for chunk_embedding in chunk_embeddings.chunk_embeddings:
@@ -136,7 +136,7 @@ def watch_pdf_updates(url: str, page_range: str) -> None:
     time.sleep(0.1)
     print(f"Checked {url} for updates, no updates found.")
     # Schedule next check in 60 seconds.
-    watch_pdf_updates.aio.call_later(start_delay=60, url=url, page_range=page_range)
+    watch_pdf_updates.run_later(start_delay=60, url=url, page_range=page_range)
 
 
 class TestPDFParseDataWorkflow(unittest.TestCase):
