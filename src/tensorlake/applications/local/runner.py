@@ -179,9 +179,9 @@ class LocalRunner:
 
         # Application retries are used if function retries are not set.
         function_retries: Retries = (
-            self._application.application_config.retries
-            if function.function_config.retries is None
-            else function.function_config.retries
+            self._application._application_config.retries
+            if function._function_config.retries is None
+            else function._function_config.retries
         )
         runs_left: int = 1 + function_retries.max_retries
         while True:
@@ -197,21 +197,21 @@ class LocalRunner:
     ) -> Any:
         # This function is executed in contextvars.Context of the Tensorlake Function call.
         set_current_request_context(self._request_context)
-        return function.original_function(*function_call.args, **function_call.kwargs)
+        return function._original_function(*function_call.args, **function_call.kwargs)
 
     def _set_function_call_instance_args(
         self, function_call: FunctionCall, function: Function
     ) -> None:
-        if function.function_config.class_name is None:
+        if function._function_config.class_name is None:
             return
 
-        if function.function_config.class_name not in self._class_instances:
-            self._class_instances[function.function_config.class_name] = (
-                create_self_instance(function.function_config.class_name)
+        if function._function_config.class_name not in self._class_instances:
+            self._class_instances[function._function_config.class_name] = (
+                create_self_instance(function._function_config.class_name)
             )
 
         set_self_arg(
-            function_call, self._class_instances[function.function_config.class_name]
+            function_call, self._class_instances[function._function_config.class_name]
         )
 
 

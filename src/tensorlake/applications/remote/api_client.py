@@ -5,7 +5,7 @@ from typing import Iterator, List
 
 import httpx
 from httpx_sse import ServerSentEvent, connect_sse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from rich import print  # TODO: Migrate to use click.echo
 
 from tensorlake.applications.interface.exceptions import (
@@ -275,19 +275,6 @@ class APIClient:
                 f"v1/namespaces/{self._namespace}/applications/{application_name}"
             ).json()
         )
-
-    def logs(
-        self, application_name: str, invocation_id: str, allocation_id: str, file: str
-    ) -> str | None:
-        try:
-            response = self._get(
-                f"namespaces/{self._namespace}/applications/{application_name}/invocations/{invocation_id}/allocations/{allocation_id}/logs/{file}"
-            )
-            response.raise_for_status()
-            return response.content.decode("utf-8")
-        except RemoteAPIError as e:
-            print(f"failed to fetch logs: {e}")
-            return None
 
     def call(
         self,

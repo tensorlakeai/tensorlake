@@ -12,7 +12,7 @@ from ..registry import (
     register_class,
     register_function,
 )
-from .exceptions import ApplicationValidateError
+from .exceptions import ApplicationValidationError
 from .function import (
     Function,
     _ApplicationConfiguration,
@@ -75,8 +75,6 @@ def function(
     secrets: List[str] = [],
     retries: Retries | None = None,
     region: str | None = None,
-    cacheable: bool = False,
-    max_concurrency: int = _DEFAULT_MAX_CONCURRENCY,
 ) -> Callable:
     """Decorator to register a function with the Tensorlake framework.
 
@@ -108,16 +106,18 @@ def function(
             ephemeral_disk=ephemeral_disk,
             gpu=gpu,
             region=region,
-            cacheable=cacheable,
-            max_concurrency=max_concurrency,
+            # Hidden from users because not implemented in Server yet.
+            cacheable=False,
+            # Hidden from users because not implemented in Telemetry yet.
+            max_concurrency=_DEFAULT_MAX_CONCURRENCY,
         )
 
         if has_function(fn._function_config.function_name):
             existing_fn: Function = get_function(fn._function_config.function_name)
             existing_fn_file_path: str | None = inspect.getsourcefile(
-                existing_fn.original_function
+                existing_fn._original_function
             )
-            fn_file_path: str | None = inspect.getsourcefile(fn.original_function)
+            fn_file_path: str | None = inspect.getsourcefile(fn._original_function)
             if existing_fn_file_path is not None:
                 existing_fn_file_path = os.path.abspath(existing_fn_file_path)
             if fn_file_path is not None:
@@ -136,7 +136,7 @@ def function(
                 or existing_fn_file_path is None
                 or fn_file_path is None
             ):
-                raise ApplicationValidateError(
+                raise ApplicationValidationError(
                     f"Function '{fn._function_config.function_name}' already exists. "
                     f"First defined in {existing_fn_file_path}, "
                     f"redefined in {fn_file_path}. "
@@ -182,7 +182,7 @@ def cls(
                 or existing_cls_file_path is None
                 or cls_file_path is None
             ):
-                raise ApplicationValidateError(
+                raise ApplicationValidationError(
                     f"Class '{class_name}' already exists. "
                     f"First defined in {existing_cls_file_path}, "
                     f"redefined in {cls_file_path}. "
@@ -202,9 +202,9 @@ def cls(
         for attr_name in dir(original_class):
             attr = getattr(original_class, attr_name)
             if isinstance(attr, Function):
-                attr.function_config.class_name = class_name
-                attr.function_config.class_method_name = attr_name
-                attr.function_config.class_init_timeout = init_timeout
+                attr._function_config.class_name = class_name
+                attr._function_config.class_method_name = attr_name
+                attr._function_config.class_init_timeout = init_timeout
 
         return original_class
 

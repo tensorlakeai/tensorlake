@@ -165,11 +165,11 @@ def _function_signature_info(
     function: Function,
 ) -> tuple[List[ParameterManifest], Dict[str, str]]:
     """Extract parameter names, types, and return type from TensorlakeCompute function."""
-    signature = inspect.signature(function.original_function)
-    type_hints = get_type_hints(function.original_function)
+    signature = inspect.signature(function._original_function)
+    type_hints = get_type_hints(function._original_function)
 
     # Extract parameter descriptions from docstring
-    docstring = inspect.getdoc(function.original_function) or ""
+    docstring = inspect.getdoc(function._original_function) or ""
     param_descriptions = _parse_docstring_parameters(docstring)
 
     parameters: List[ParameterManifest] = []
@@ -207,7 +207,7 @@ def _function_signature_info(
 def create_function_manifest(
     application_function: Function, application_version: str, function: Function
 ) -> FunctionManifest:
-    app_config: _ApplicationConfiguration = application_function.application_config
+    app_config: _ApplicationConfiguration = application_function._application_config
     retry_policy: RetryPolicyManifest = (
         RetryPolicyManifest(
             max_retries=app_config.retries.max_retries,
@@ -215,12 +215,12 @@ def create_function_manifest(
             max_delay_sec=app_config.retries.max_delay,
             delay_multiplier=app_config.retries.delay_multiplier,
         )
-        if function.function_config.retries is None
+        if function._function_config.retries is None
         else RetryPolicyManifest(
-            max_retries=function.function_config.retries.max_retries,
-            initial_delay_sec=function.function_config.retries.initial_delay,
-            max_delay_sec=function.function_config.retries.max_delay,
-            delay_multiplier=function.function_config.retries.delay_multiplier,
+            max_retries=function._function_config.retries.max_retries,
+            initial_delay_sec=function._function_config.retries.initial_delay,
+            max_delay_sec=function._function_config.retries.max_delay,
+            delay_multiplier=function._function_config.retries.delay_multiplier,
         )
     )
 
@@ -229,8 +229,8 @@ def create_function_manifest(
     parameters, return_type_json_schema = _function_signature_info(function)
 
     cache_key: str | None = (
-        f"version_function={application_version}:{function.function_config.function_name}"
-        if function.function_config.cacheable
+        f"version_function={application_version}:{function._function_config.function_name}"
+        if function._function_config.cacheable
         else None
     )
 
@@ -243,30 +243,30 @@ def create_function_manifest(
     )
     placement_constraints = (
         app_placement_constraints
-        if function.function_config.region is None
+        if function._function_config.region is None
         else PlacementConstraintsManifest(
-            filter_expressions=[f"region=={function.function_config.region}"]
+            filter_expressions=[f"region=={function._function_config.region}"]
         )
     )
 
     return FunctionManifest(
-        name=function.function_config.function_name,
-        description=function.function_config.description,
-        is_api=function.application_config is not None,
-        secret_names=function.function_config.secrets,
+        name=function._function_config.function_name,
+        description=function._function_config.description,
+        is_api=function._application_config is not None,
+        secret_names=function._function_config.secrets,
         # When a function doesn't have a class_init_timeout set it means it's not a class method.
         # In this case FE initialization timeout should be the same as function timeout.
         initialization_timeout_sec=(
-            function.function_config.timeout
-            if function.function_config.class_init_timeout is None
-            else function.function_config.class_init_timeout
+            function._function_config.timeout
+            if function._function_config.class_init_timeout is None
+            else function._function_config.class_init_timeout
         ),
-        timeout_sec=function.function_config.timeout,
+        timeout_sec=function._function_config.timeout,
         resources=resources_for_function(function),
         retry_policy=retry_policy,
         cache_key=cache_key,
         parameters=parameters,
         return_type=return_type_json_schema,
         placement_constraints=placement_constraints,
-        max_concurrency=function.function_config.max_concurrency,
+        max_concurrency=function._function_config.max_concurrency,
     )

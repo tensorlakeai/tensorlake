@@ -42,7 +42,7 @@ def run_remote_application(application: Function | str, payload: Any) -> Request
     # TODO: validate the graph.
     # TODO: validate that the supplied function is an API function.
     app_name: str = (
-        application.function_config.function_name
+        application._function_config.function_name
         if isinstance(application, Function)
         else application
     )

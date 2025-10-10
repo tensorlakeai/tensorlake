@@ -32,7 +32,7 @@ def update_generated_code(version: str, reload: bool = True) -> None:
         importlib.reload(generated_code)
         # Hacky way to update the application version to a new random value.
         func: Function = generated_code.code_update_start_func
-        func.application_config.version = version
+        func._application_config.version = version
 
 
 update_generated_code(nanoid(), reload=False)

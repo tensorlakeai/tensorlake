@@ -60,6 +60,6 @@ def reduce(
         inputs.items.insert(0, initial)
 
     return ReducerFunctionCall(
-        reducer_function_name=function.function_config.function_name,
+        reducer_function_name=function._function_config.function_name,
         inputs=inputs,
     )

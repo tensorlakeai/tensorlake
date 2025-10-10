@@ -5,8 +5,8 @@ class TensorlakeException(Exception):
         super().__init__(message)
 
 
-class ApplicationValidateError(TensorlakeException):
-    """Raised when an error is detected in application code."""
+class ApplicationValidationError(TensorlakeException):
+    """Raised when an error is detected in application configuration."""
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
