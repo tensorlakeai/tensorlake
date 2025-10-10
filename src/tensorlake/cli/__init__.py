@@ -1,6 +1,15 @@
 import click
 
-from . import _common, applications, auth, config, deploy, parse, requests, secrets
+from . import (
+    _common,
+    applications,
+    auth,
+    config,
+    deploy,
+    parse,
+    requests,
+    secrets,
+)
 
 
 @click.group(
