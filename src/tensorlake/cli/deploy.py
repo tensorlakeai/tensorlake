@@ -128,9 +128,7 @@ def _deploy_applications(
         traceback.print_exception(e)
         raise click.Abort
 
-    # Display success message with deployment information
     deployed_apps = filter_applications(functions)
-
     try:
         application = next(deployed_apps)
         fn_config: _FunctionConfiguration = application.function_config
@@ -141,8 +139,20 @@ def _deploy_applications(
         first_param = next(iter(sig.parameters.values()), None)
 
         if first_param and first_param.annotation != inspect.Parameter.empty:
-            type_map = {int: "<integer>", str: "<string>", float: "<float>", bool: "<boolean>"}
-            param_type = type_map.get(first_param.annotation, f"<{first_param.annotation.__name__}>")
+            param_annotation = first_param.annotation
+
+            if hasattr(param_annotation, 'model_json_schema') or hasattr(param_annotation, 'schema'):
+                schema = getattr(param_annotation, 'model_json_schema', lambda: None)() or getattr(param_annotation, 'schema', lambda: {})()
+                properties = schema.get('properties', {})
+                field_examples = []
+                
+                for field_name, field_schema in properties.items():
+                    field_type_name = field_schema.get('type', 'value')
+                    field_examples.append(f'"{field_name}": <{field_type_name}>')
+                param_type = '{' + ', '.join(field_examples) + '}'
+            else:
+                type_name = getattr(param_annotation, '__name__', str(param_annotation))
+                param_type = f"<{type_name}>"
         else:
             param_type = "<value>"
 
