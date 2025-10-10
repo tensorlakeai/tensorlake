@@ -326,19 +326,6 @@ class APIClient:
             print(f"failed to fetch logs: {e}")
             return None
 
-    def logs(
-        self, application_name: str, invocation_id: str, allocation_id: str, file: str
-    ) -> str | None:
-        try:
-            response = self._get(
-                f"namespaces/{self._namespace}/applications/{application_name}/invocations/{invocation_id}/allocations/{allocation_id}/logs/{file}"
-            )
-            response.raise_for_status()
-            return response.content.decode("utf-8")
-        except RemoteAPIError as e:
-            print(f"failed to fetch logs: {e}")
-            return None
-
     def requests(self, application_name: str) -> List[ShallowRequestMetadata]:
         response = self._get(
             f"v1/namespaces/{self._namespace}/applications/{application_name}/requests"

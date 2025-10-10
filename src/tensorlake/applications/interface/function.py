@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List
 
+from .callable import TensorlakeCallable
+from .exceptions import TensorlakeException
 from .function_call import RegularFunctionCall
 from .image import Image
 from .retries import Retries
@@ -38,7 +40,20 @@ class _ApplicationConfiguration:
     version: str
 
 
-class Function:
+@dataclass
+class _AsyncCallConfig:
+    start_delay: int | None
+
+
+_IMMEDIATE_ASYNC_CALL_CONFIG = _AsyncCallConfig(start_delay=None)
+
+# (Function, _AsyncCallConfig, List args, Dict kwargs) -> Future
+__runtime_hook_async_function_call = None
+# (Function, List args, Dict kwargs) -> Any
+__runtime_hook_sync_function_call = None
+
+
+class Function(TensorlakeCallable):
     """Class that represents a Tensorlake Function configured by user.
 
     No validation is done at object creation time because Function objects
@@ -50,17 +65,28 @@ class Function:
         self._function_config: _FunctionConfiguration | None = None
         self._application_config: _ApplicationConfiguration | None = None
 
-    @property
-    def original_function(self) -> Callable:
-        return self._original_function
+    def run(self, *args, **kwargs) -> RegularFunctionCall:
+        """Creates a function call that will be executed asynchronously as soon as possible."""
+        return self._async_call(_IMMEDIATE_ASYNC_CALL_CONFIG, list(args), dict(kwargs))
 
-    @property
-    def function_config(self) -> _FunctionConfiguration | None:
-        return self._function_config
+    def run_later(self, start_delay: float, *args, **kwargs) -> RegularFunctionCall:
+        """Creates a function call that will be executed asynchronously after at least start_delay seconds."""
+        if start_delay < 0:
+            raise ValueError("start_delay must be non-negative")
+        return self._async_call(
+            _AsyncCallConfig(start_delay=start_delay), list(args), dict(kwargs)
+        )
 
-    @property
-    def application_config(self) -> _ApplicationConfiguration | None:
-        return self._application_config
+    def __call__(self, *args, **kwargs) -> Any | RegularFunctionCall:
+        # Called when the Function is called using () operator.
+        #
+        # TODO: implement the current_tensorlake_function_is_async() check
+        # to decide whether to call _async_call or _sync_call.
+        # This is only needed when we support async Tensorlake Functions.
+        # if current_tensorlake_function_is_async():
+        #     return self._async_call(_IMMEDIATE_ASYNC_CALL_CONFIG, list(args), dict(kwargs))
+        # else:
+        return self._sync_call(list(args), dict(kwargs))
 
     def __repr__(self) -> str:
         return (
@@ -71,17 +97,26 @@ class Function:
             f")>"
         )
 
-    def _call(
+    def _async_call(
         self,
+        config: _AsyncCallConfig,
         args: List[Any],
         kwargs: Dict[str, Any],
     ) -> RegularFunctionCall:
-        """Return function call for the function."""
-        return RegularFunctionCall(
-            function_name=self._function_config.function_name,
-            args=args,
-            kwargs=kwargs,
-        )
+        """Returns function call for the function."""
+        if __runtime_hook_async_function_call is None:
+            raise TensorlakeException(
+                "Internal Error: No Tensorlake runtime hook is set for async function calls"
+            )
+        return __runtime_hook_async_function_call(self, config, args, kwargs)
+
+    def _sync_call(self, args: List[Any], kwargs: Dict[str, Any]) -> Any:
+        """Call the function synchronously."""
+        if __runtime_hook_sync_function_call is None:
+            raise TensorlakeException(
+                "Internal Error: No Tensorlake runtime hook is set for sync function calls"
+            )
+        return __runtime_hook_sync_function_call(self, args, kwargs)
 
     def __get__(self, instance: Any | None, cls: Any) -> "Function":
         # Called when the Function is called as an `instance` method of class `cls`.
@@ -91,10 +126,6 @@ class Function:
         # TODO: Fail with RequestError if cls.__tensorlake_name__ is not set.
         # This means the @tensorlake.cls decorator wasn't called on the class.
         return self
-
-    def __call__(self, *args, **kwargs) -> RegularFunctionCall:
-        # Called when the Function is called as a regular function.
-        return self._call(list(args), dict(kwargs))
 
     def __reduce__(self):
         # This helps users to see that they made a coding mistake and returned a Tensorlake Function
