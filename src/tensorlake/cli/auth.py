@@ -8,9 +8,7 @@ import click
 import httpx
 
 from tensorlake.cli._common import Context, pass_auth
-
-CONFIG_DIR = Path.home() / ".config" / "tensorlake"
-CREDENTIALS_PATH = CONFIG_DIR / "credentials.json"
+from tensorlake.cli._configuration import save_credentials
 
 
 @click.group()
@@ -31,6 +29,10 @@ def auth():
 )
 @pass_auth
 def status(ctx: Context, output: str):
+    # This property loads data from the API and can raise an exception if the API key is invalid.
+    # Get the value first, so we don't print partial information if there is an error.
+    api_key_id = ctx.api_key_id
+
     if output == "json":
         print(
             json.dumps(
@@ -38,15 +40,15 @@ def status(ctx: Context, output: str):
                     "endpoint": ctx.base_url,
                     "organizationId": ctx.organization_id,
                     "projectId": ctx.project_id,
-                    "apiKeyId": ctx.api_key_id,
+                    "apiKeyId": api_key_id,
                 }
             )
         )
         return
-    click.echo(f"Endpoint: {ctx.base_url}")
-    click.echo(f"Organization ID: {ctx.organization_id}")
-    click.echo(f"Project ID     : {ctx.project_id}")
-    click.echo(f"API Key ID     : {ctx.api_key_id}")
+    click.echo(f"Endpoint        : {ctx.base_url}")
+    click.echo(f"Organization ID : {ctx.organization_id}")
+    click.echo(f"Project ID      : {ctx.project_id}")
+    click.echo(f"API Key ID      : {api_key_id}")
 
 
 @auth.command(help="Login to TensorLake")
@@ -136,20 +138,5 @@ def login(ctx: Context):
     exchange_response_body = exchange_response.json()
 
     access_token = exchange_response_body["access_token"]
-    _save_credentials(ctx, access_token)
+    save_credentials(ctx.base_url, access_token)
     click.echo("Login successful!")
-
-
-def _save_credentials(ctx: Context, token: str):
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-    with open(CREDENTIALS_PATH, "w+", encoding="utf-8") as f:
-        try:
-            config = json.load(f)
-        except json.JSONDecodeError:
-            config = {}
-
-        config[ctx.base_url] = {"token": token}
-        json.dump(config, f)
-
-    os.chmod(CREDENTIALS_PATH, 0o600)
