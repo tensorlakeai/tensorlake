@@ -31,7 +31,7 @@ def image_infos() -> Dict[Image, ImageInformation]:
     image_infos: Dict[Image, ImageInformation] = {}
     for func in get_functions():
         func: Function
-        image: Image = func.function_config.image
+        image: Image = func._function_config.image
         if image not in image_infos:
             image_infos[image] = ImageInformation(image=image, functions=[])
         image_infos[image].functions.append(func)

@@ -31,10 +31,10 @@ class ApplicationManifest(BaseModel):
 def create_application_manifest(
     application_function: Function, all_functions: List[Function]
 ) -> ApplicationManifest:
-    app_config: _ApplicationConfiguration = application_function.application_config
+    app_config: _ApplicationConfiguration = application_function._application_config
 
     function_manifests: Dict[str, FunctionManifest] = {
-        fn.function_config.function_name: create_function_manifest(
+        fn._function_config.function_name: create_function_manifest(
             application_function, app_config.version, fn
         )
         for fn in all_functions
@@ -46,13 +46,13 @@ def create_application_manifest(
         serialized_output_type_hints
     ).decode("utf-8")
     return ApplicationManifest(
-        name=application_function.function_config.function_name,
-        description=application_function.function_config.description,
+        name=application_function._function_config.function_name,
+        description=application_function._function_config.description,
         tags=app_config.tags,
         version=app_config.version,
         functions=function_manifests,
         entrypoint=EntryPointManifest(
-            function_name=application_function.function_config.function_name,
+            function_name=application_function._function_config.function_name,
             input_serializer=function_input_serializer(application_function).name,
             output_serializer=function_output_serializer(
                 application_function, None

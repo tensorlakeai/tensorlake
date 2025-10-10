@@ -9,6 +9,8 @@ class FunctionCall(Future):
     def __init__(self, function_name: str):
         self._function_name: str = function_name
 
+    # TODO: Hide these properties using _suffix because
+    # users should not need to access them directly.
     @property
     def function_name(self) -> str:
         return self._function_name

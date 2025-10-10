@@ -3,7 +3,7 @@ import unittest
 import parameterized
 
 from tensorlake.applications import (
-    ApplicationValidateError,
+    ApplicationValidationError,
     Request,
     application,
     function,
@@ -35,7 +35,7 @@ class TestMultipleFunctionDefinitions(unittest.TestCase):
         self.assertEqual(request.output(), "function_1_redefined")
 
     def test_redefine_same_function_in_different_files_fails(self):
-        with self.assertRaises(ApplicationValidateError):
+        with self.assertRaises(ApplicationValidationError):
             import function_1
 
 
