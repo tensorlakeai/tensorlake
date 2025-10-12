@@ -135,7 +135,6 @@ def _deserialize_error_response(resp: httpx.Response) -> ErrorResponse:
         error_response = ErrorResponse(
             message=str(e),
             code=ErrorCode.INTERNAL_ERROR,
-            timestamp=int(resp.headers.get("Date", 0)),
             trace_id=resp.headers.get("X-Trace-ID"),
             details=None,
         )
