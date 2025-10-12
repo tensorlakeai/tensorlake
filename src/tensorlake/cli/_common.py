@@ -78,7 +78,10 @@ class Context:
 
     @property
     def api_key_id(self):
-        return self._introspect().json().get("id")
+        if self.api_key:
+            return self._introspect().json().get("id")
+        else:
+            return None
 
     @property
     def project_id(self):

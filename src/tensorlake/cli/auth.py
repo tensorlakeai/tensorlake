@@ -29,26 +29,31 @@ def auth():
 )
 @pass_auth
 def status(ctx: Context, output: str):
-    # This property loads data from the API and can raise an exception if the API key is invalid.
-    # Get the value first, so we don't print partial information if there is an error.
-    api_key_id = ctx.api_key_id
+    data = {
+        "endpoint": ctx.base_url,
+        "organizationId": ctx.organization_id,
+        "projectId": ctx.project_id,
+    }
+
+    if ctx.api_key_id is not None:
+        data["apiKeyId"] = ctx.api_key_id
+
+    if ctx.personal_access_token is not None:
+        replacement = "*" * len(ctx.personal_access_token[:-6])
+        data["personalAccessToken"] = replacement + ctx.personal_access_token[-6:]
 
     if output == "json":
-        print(
-            json.dumps(
-                {
-                    "endpoint": ctx.base_url,
-                    "organizationId": ctx.organization_id,
-                    "projectId": ctx.project_id,
-                    "apiKeyId": api_key_id,
-                }
-            )
-        )
+        print(json.dumps(data))
         return
-    click.echo(f"Endpoint        : {ctx.base_url}")
-    click.echo(f"Organization ID : {ctx.organization_id}")
-    click.echo(f"Project ID      : {ctx.project_id}")
-    click.echo(f"API Key ID      : {api_key_id}")
+
+    click.echo(f"Dashboard Endpoint    : {ctx.cloud_url}")
+    click.echo(f"API Endpoint          : {data['endpoint']}")
+    click.echo(f"Organization ID       : {data['organizationId']}")
+    click.echo(f"Project ID            : {data['projectId']}")
+    if data.get("apiKeyId") is not None:
+        click.echo(f"API Key ID            : {data['apiKeyId']}")
+    if data.get("personalAccessToken") is not None:
+        click.echo(f"Personal Access Token : {data['personalAccessToken']}")
 
 
 @auth.command(help="Login to TensorLake")
@@ -67,8 +72,12 @@ def login(ctx: Context):
     device_code = start_response_body["device_code"]
     user_code = start_response_body["user_code"]
 
+    click.echo("We're going to open a web browser for you to enter a one-time code.")
     click.echo(f"Your code is: {user_code}")
     click.echo("Opening web browser...")
+
+    # Give people time to read the messages above
+    time.sleep(5)
 
     verification_uri = f"{ctx.cloud_url}/cli/login"
 
@@ -76,12 +85,11 @@ def login(ctx: Context):
         webbrowser.open(verification_uri)
     except webbrowser.Error:
         click.echo(
-            "Failed to open web browser. Please open the following URL manually:"
+            "Failed to open web browser. Please open the following URL manually and enter the code:"
         )
         click.echo(verification_uri)
-        click.echo(f"Enter the code: {user_code}")
 
-    click.echo("A web browser has been opened for you to log in.")
+    click.echo("Waiting for the code to be processed...")
 
     poll_url = f"{ctx.base_url}/platform/cli/login/poll?device_code={device_code}"
 
@@ -109,10 +117,6 @@ def login(ctx: Context):
                 raise click.ClickException(f"Unknown status: {status}")
 
         if wait_time > 0:
-            click.echo(
-                f"Waiting for approval... (checking again in {wait_time} seconds)"
-            )
-
             time.sleep(wait_time)
 
         if status == "expired":
@@ -140,3 +144,6 @@ def login(ctx: Context):
     access_token = exchange_response_body["access_token"]
     save_credentials(ctx.base_url, access_token)
     click.echo("Login successful!")
+    click.echo(
+        "Next, run `tensorlake config init` if you want to configure your CLI experience."
+    )
