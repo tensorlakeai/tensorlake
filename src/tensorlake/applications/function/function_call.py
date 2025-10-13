@@ -15,4 +15,4 @@ def create_self_instance(class_name: str) -> Any:
 
 
 def set_self_arg(function_call: RegularFunctionCall, self_instance: Any) -> None:
-    function_call.args.insert(0, self_instance)
+    function_call._args.insert(0, self_instance)

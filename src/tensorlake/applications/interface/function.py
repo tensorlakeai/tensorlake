@@ -1,9 +1,8 @@
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, Iterable, List
 
-from .callable import TensorlakeCallable
-from .exceptions import TensorlakeException
-from .function_call import RegularFunctionCall
+from .function_call import ReducerFunctionCall, RegularFunctionCall
+from .future import Future, FutureList
 from .image import Image
 from .retries import Retries
 
@@ -40,20 +39,22 @@ class _ApplicationConfiguration:
     version: str
 
 
-@dataclass
-class _AsyncCallConfig:
-    start_delay: int | None
+__runtime_hook_start_function_calls: Callable[
+    [List[RegularFunctionCall | ReducerFunctionCall]], None
+] = None
+__runtime_hook_start_and_wait_function_calls: Callable[
+    [List[RegularFunctionCall | ReducerFunctionCall]], List[Any]
+] = None
 
 
-_IMMEDIATE_ASYNC_CALL_CONFIG = _AsyncCallConfig(start_delay=None)
-
-# (Function, _AsyncCallConfig, List args, Dict kwargs) -> Future
-__runtime_hook_async_function_call = None
-# (Function, List args, Dict kwargs) -> Any
-__runtime_hook_sync_function_call = None
+class _InitialMissingType:
+    pass
 
 
-class Function(TensorlakeCallable):
+_InitialMissing = _InitialMissingType()
+
+
+class Function:
     """Class that represents a Tensorlake Function configured by user.
 
     No validation is done at object creation time because Function objects
@@ -65,58 +66,133 @@ class Function(TensorlakeCallable):
         self._function_config: _FunctionConfiguration | None = None
         self._application_config: _ApplicationConfiguration | None = None
 
-    def run(self, *args, **kwargs) -> RegularFunctionCall:
-        """Creates a function call that will be executed asynchronously as soon as possible."""
-        return self._async_call(_IMMEDIATE_ASYNC_CALL_CONFIG, list(args), dict(kwargs))
+    def __call__(self, *args, **kwargs) -> Any:
+        """Does a blocking function call and returns its result."""
+        # Called when the Function is called using () operator.
+        global __runtime_hook_start_and_wait_function_calls
+        function_call: RegularFunctionCall = RegularFunctionCall(
+            function_name=self._function_config.function_name,
+            args=list(args),
+            kwargs=dict(kwargs),
+            start_delay=None,
+        )
+        return __runtime_hook_start_and_wait_function_calls([function_call])[0]
 
-    def run_later(self, start_delay: float, *args, **kwargs) -> RegularFunctionCall:
-        """Creates a function call that will be executed asynchronously after at least start_delay seconds."""
+    def map(self, iterable: Iterable) -> List[Any]:
+        """Returns a list with every item transformed using the function.
+
+        Blocks until the result is ready.
+        Similar to https://docs.python.org/3/library/functions.html#map except all transformations
+        are done in parallel.
+        """
+        global __runtime_hook_start_and_wait_function_calls
+        map_calls: List[RegularFunctionCall] = self._make_map_calls(iterable)
+        return __runtime_hook_start_and_wait_function_calls(map_calls)
+
+    def reduce(
+        self,
+        iterable: Iterable,
+        initial: Any | _InitialMissingType = _InitialMissing,
+        /,
+    ) -> Any:
+        """Calls the function as a reducer of the supplied iterable.
+
+        Blocks until the result is ready.
+        Similar to https://docs.python.org/3/library/functools.html#functools.reduce.
+        """
+        global __runtime_hook_start_and_wait_function_calls
+        reducer_call: ReducerFunctionCall = self._make_reducer_call(iterable, initial)
+        return __runtime_hook_start_and_wait_function_calls([reducer_call])[0]
+
+    def future(self, *args, **kwargs) -> Future:
+        """Runs a non-blocking function call and returns its Future."""
+        global __runtime_hook_start_function_calls
+        function_call: RegularFunctionCall = RegularFunctionCall(
+            function_name=self._function_config.function_name,
+            args=list(args),
+            kwargs=dict(kwargs),
+            start_delay=None,
+        )
+        __runtime_hook_start_function_calls([function_call])
+        return function_call.to_future()
+
+    def later_future(self, start_delay: float, *args, **kwargs) -> Future:
+        """Runs a non-blocking function call after start_delay seconds and returns its Future."""
         if start_delay < 0:
             raise ValueError("start_delay must be non-negative")
-        return self._async_call(
-            _AsyncCallConfig(start_delay=start_delay), list(args), dict(kwargs)
+        global __runtime_hook_start_function_calls
+        function_call: RegularFunctionCall = RegularFunctionCall(
+            function_name=self._function_config.function_name,
+            args=list(args),
+            kwargs=dict(kwargs),
+            start_delay=start_delay,
         )
+        __runtime_hook_start_function_calls([function_call])
+        return function_call.to_future()
 
-    def __call__(self, *args, **kwargs) -> Any | RegularFunctionCall:
-        # Called when the Function is called using () operator.
-        #
-        # TODO: implement the current_tensorlake_function_is_async() check
-        # to decide whether to call _async_call or _sync_call.
-        # This is only needed when we support async Tensorlake Functions.
-        # if current_tensorlake_function_is_async():
-        #     return self._async_call(_IMMEDIATE_ASYNC_CALL_CONFIG, list(args), dict(kwargs))
-        # else:
-        return self._sync_call(list(args), dict(kwargs))
+    def map_future(self, iterable: Iterable) -> Future:
+        """Returns a future that resolves into a list with every item transformed using the function.
+
+        Similar to https://docs.python.org/3/library/functions.html#map except all transformations
+        are done in parallel.
+        """
+        global __runtime_hook_start_function_calls
+        map_calls: List[RegularFunctionCall] = self._make_map_calls(iterable)
+        __runtime_hook_start_function_calls(map_calls)
+        return FutureList([call.to_future() for call in map_calls])
+
+    def reduce_future(
+        self,
+        iterable: Iterable,
+        initial: Any | _InitialMissingType = _InitialMissing,
+        /,
+    ) -> Future:
+        """Calls the function as a reducer of the supplied iterable and returns a Future with the result.
+
+        Similar to https://docs.python.org/3/library/functools.html#functools.reduce.
+        """
+        global __runtime_hook_start_function_calls
+        reducer_call: ReducerFunctionCall = self._make_reducer_call(iterable, initial)
+        __runtime_hook_start_function_calls([reducer_call])
+        return reducer_call.to_future()
 
     def __repr__(self) -> str:
         return (
             f"<Tensorlake Function(\n"
             f"  original_function={self._original_function!r},\n"
-            f"  _function_config={self._function_config!r},\n"
-            f"  _application_config={self._application_config!r}\n"
+            f"  function_config={self._function_config!r},\n"
+            f"  application_config={self._application_config!r}\n"
             f")>"
         )
 
-    def _async_call(
-        self,
-        config: _AsyncCallConfig,
-        args: List[Any],
-        kwargs: Dict[str, Any],
-    ) -> RegularFunctionCall:
-        """Returns function call for the function."""
-        if __runtime_hook_async_function_call is None:
-            raise TensorlakeException(
-                "Internal Error: No Tensorlake runtime hook is set for async function calls"
+    def _make_map_calls(self, iterable: Iterable) -> List[RegularFunctionCall]:
+        map_calls: List[RegularFunctionCall] = []
+        for item in iterable:
+            map_calls.append(
+                RegularFunctionCall(
+                    function_name=self._function_config.function_name,
+                    args=[item],
+                    kwargs={},
+                    start_delay=None,
+                )
             )
-        return __runtime_hook_async_function_call(self, config, args, kwargs)
+        return map_calls
 
-    def _sync_call(self, args: List[Any], kwargs: Dict[str, Any]) -> Any:
-        """Call the function synchronously."""
-        if __runtime_hook_sync_function_call is None:
-            raise TensorlakeException(
-                "Internal Error: No Tensorlake runtime hook is set for sync function calls"
-            )
-        return __runtime_hook_sync_function_call(self, args, kwargs)
+    def _make_reducer_call(
+        self, iterable: Iterable, initial: Any | _InitialMissingType
+    ) -> ReducerFunctionCall:
+        inputs: List[Any] = list(iterable)
+        if len(inputs) == 0 and initial is _InitialMissing:
+            raise TypeError("reduce() of empty iterable with no initial value")
+
+        if initial is not _InitialMissing:
+            inputs.insert(0, initial)
+
+        return ReducerFunctionCall(
+            reducer_function_name=self._function_config.function_name,
+            inputs=inputs,
+            start_delay=None,
+        )
 
     def __get__(self, instance: Any | None, cls: Any) -> "Function":
         # Called when the Function is called as an `instance` method of class `cls`.
