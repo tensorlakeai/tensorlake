@@ -5,9 +5,9 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
+import tensorlake.cli.config as config_module
 from tensorlake.cli import cli
 from tensorlake.cli._common import Context
-import tensorlake.cli.config as config_module
 
 
 class TestPATEnvironmentVariable(unittest.TestCase):

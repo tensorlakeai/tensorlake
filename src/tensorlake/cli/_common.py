@@ -131,7 +131,7 @@ class Context:
     ) -> "Context":
         """Create a Context with values from CLI args, environment, saved config, or defaults."""
         config_data = load_config()
-        
+
         # Load PAT from credentials file if not provided via CLI/env
         file_personal_access_token = load_credentials_token()
 
@@ -149,10 +149,12 @@ class Context:
         )
 
         final_api_key = api_key or get_nested_value(config_data, "tensorlake.apikey")
-        
+
         # Priority: CLI/env PAT > credentials file PAT
-        final_personal_access_token = personal_access_token or file_personal_access_token
-        
+        final_personal_access_token = (
+            personal_access_token or file_personal_access_token
+        )
+
         final_namespace = (
             namespace
             or get_nested_value(config_data, "indexify.namespace")
