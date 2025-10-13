@@ -45,7 +45,6 @@ def deploy(
     upgrade_running_requests: bool,
 ):
     """Deploys applications to Tensorlake Cloud."""
-
     click.echo(f"Preparing deployment for applications from {application_file_path}")
     builder_v2 = ImageBuilderV2Client.from_env()
 
@@ -53,9 +52,9 @@ def deploy(
         application_file_path: str = os.path.abspath(application_file_path)
         load_code(application_file_path)
     except Exception as e:
-        click.secho(
+        click.echo(
             f"Failed to load the application file, please check the error message: {e}",
-            fg="red",
+            err=True
         )
         traceback.print_exception(e)
         raise click.Abort
@@ -65,7 +64,7 @@ def deploy(
     functions: List[Function] = get_functions()
     asyncio.run(_prepare_images_v2(builder_v2, functions))
 
-    click.secho("Everything looks good, deploying now", fg="green")
+    click.echo("Everything looks good, deploying now")
 
     _deploy_applications(
         auth=auth,
@@ -84,9 +83,8 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: List[Func
         for image_info in images.values():
             image_info: ImageInformation
             for function in image_info.functions:
-                click.secho(
+                click.echo(
                     f"Building image {image_info.image.name} for application {fn_config.function_name} ...",
-                    fg="yellow",
                 )
                 try:
                     await builder.build(
@@ -98,14 +96,14 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: List[Func
                         image_info.image,
                     )
                 except Exception as e:
-                    click.secho(
+                    click.echo(
                         f"Failed to build image {image_info.image.name}, please check the error message: {e}",
-                        fg="red",
+                        err=True,
                     )
                     traceback.print_exception(e)
                     raise click.Abort
 
-    click.secho("Built all images", fg="green")
+    click.secho("Built all images", bold=True)
 
 
 def _deploy_applications(
@@ -121,9 +119,8 @@ def _deploy_applications(
             load_source_dir_modules=False,  # Already loaded
         )
     except Exception as e:
-        click.secho(
-            f"Applications could not be deployed, please check the error message: {e}",
-            fg="red",
+        click.echo(
+            f"Applications could not be deployed, please check the error message: {e}", err=True
         )
         traceback.print_exception(e)
         raise click.Abort
@@ -145,7 +142,7 @@ def _deploy_applications(
                 schema = getattr(param_annotation, 'model_json_schema', lambda: None)() or getattr(param_annotation, 'schema', lambda: {})()
                 properties = schema.get('properties', {})
                 field_examples = []
-                
+
                 for field_name, field_schema in properties.items():
                     # Handle different schema formats
                     if 'type' in field_schema:
@@ -166,17 +163,18 @@ def _deploy_applications(
             param_type = "<value>"
 
         click.secho(
-            f"""Deployed application: {fn_config.function_name}
+            f"Deployed application: {fn_config.function_name}\n",
+            bold=True,
+        )
+        click.echo(
+            f"""To invoke the application, use the following curl command:
 curl -X POST {auth.base_url}/v1/namespaces/{auth.namespace}/applications/{fn_config.function_name} \\
--H "Authorization: Bearer $TENSORLAKE_API_KEY" \\
--H "accept: application/json" \\
--H "Content-Type: application/json" \\
--d '{param_type}'
+  -H "Authorization: Bearer $TENSORLAKE_API_KEY" \\
+  -H "accept: application/json" \\
+  -H "Content-Type: application/json" \\
+  -d '{param_type}'
 """,
-            fg="green",
         )
     except StopIteration:
-        click.secho("Deployed application", fg="green")
-        click.secho(
-            "Error generating curl command\n", fg="yellow"
-        )
+        click.echo("Successfully deployed application", bold=True)
+        click.echo("Error generating curl command\n", err=True)
