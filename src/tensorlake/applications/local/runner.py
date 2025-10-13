@@ -64,7 +64,7 @@ class LocalRunner:
     def run(self, function_call: FunctionCall) -> Request:
         try:
             self._original_function_call = function_call
-            function: Function = get_function(function_call.function_name)
+            function: Function = get_function(function_call._function_name)
             self._root_node = ast_from_user_object(
                 function_call, function_input_serializer(function)
             )
@@ -100,7 +100,7 @@ class LocalRunner:
         # But we're checking that root_node has the same serializer as the original function output serializer
         # to catch any potential bugs in serializer propagation logic because it's critical for remote mode.
         original_function: Function = get_function(
-            self._original_function_call.function_name
+            self._original_function_call._function_name
         )
         root_node_metadata: ValueMetadata = ValueMetadata.deserialize(
             self._root_node.serialized_metadata
@@ -132,7 +132,7 @@ class LocalRunner:
             RegularFunctionCallMetadata.deserialize(node.serialized_metadata)
         )
         function_call: RegularFunctionCall = node.to_regular_function_call()
-        function: Function = get_function(function_call.function_name)
+        function: Function = get_function(function_call._function_name)
         function_os: UserDataSerializer = function_output_serializer(
             function, node_metadata.oso
         )
@@ -197,7 +197,9 @@ class LocalRunner:
     ) -> Any:
         # This function is executed in contextvars.Context of the Tensorlake Function call.
         set_current_request_context(self._request_context)
-        return function._original_function(*function_call.args, **function_call.kwargs)
+        return function._original_function(
+            *function_call._args, **function_call._kwargs
+        )
 
     def _set_function_call_instance_args(
         self, function_call: FunctionCall, function: Function

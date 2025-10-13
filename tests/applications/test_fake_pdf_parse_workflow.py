@@ -10,9 +10,6 @@ from tensorlake.applications import (
     application,
     cls,
     function,
-)
-from tensorlake.applications import map as tl_map
-from tensorlake.applications import (
     run_local_application,
     run_remote_application,
 )
@@ -71,19 +68,19 @@ def parse_pdf_api(payload: RequestPayload) -> ResponsePayload:
         page_range=payload.page_range,
     )
     # Use map operation running in background as argument to other function calls.
-    chunk_embeddings: Future = tl_map.run(
-        chunk_and_embed, [chunk.content for chunk in response.chunks]
+    chunk_embeddings: Future = chunk_and_embed.map_future(
+        [chunk.content for chunk in response.chunks]
     )
 
-    # We can't return tl_map here because there's no parent function call node to which we can
-    # attach map as a data dependency. Due to this limitation we have to use a blocking call.
+    # We can't return chunk_embeddings future here because there's no function call ID associated with it.
+    # Due to this limitation we have to use a blocking call.
     #
     # NB: when we support async Tensorlake Functions we will be able to
     # do `await chunk_embeddings` instead of calling result() here.
     chunks: List[ChunkEmbeddings] = chunk_embeddings.result()
 
     # Spawn a recurring background function to watch for the PDF file updates.
-    watch_pdf_updates.run_later(
+    watch_pdf_updates.later_future(
         start_delay=60, url=payload.url, page_range=payload.page_range
     )
     return ResponsePayload(chunks=chunks)
@@ -102,7 +99,7 @@ def chunk_and_embed(page: str) -> ChunkEmbeddings:
     output = ChunkEmbeddings(chunk_embeddings=chunk_embeddings)
     # Spawn IndexEmbedding function call in background to save the embeddings.
     # We're not interested in waiting for it to complete or value the function returned.
-    IndexEmbedding().index.run_later(output)
+    IndexEmbedding().index.later_future(output)
 
     return output
 
@@ -136,7 +133,7 @@ def watch_pdf_updates(url: str, page_range: str) -> None:
     time.sleep(0.1)
     print(f"Checked {url} for updates, no updates found.")
     # Schedule next check in 60 seconds.
-    watch_pdf_updates.run_later(start_delay=60, url=url, page_range=page_range)
+    watch_pdf_updates.later_future(start_delay=60, url=url, page_range=page_range)
 
 
 class TestPDFParseDataWorkflow(unittest.TestCase):
