@@ -5,18 +5,13 @@ from ..function.application_call import (
     serialize_application_call_payload,
 )
 from ..function.user_data_serializer import function_input_serializer
-
-# from ..local.runner import LocalRunner
+from ..local.runner import LocalRunner
 from ..registry import get_function
 
 # from ..remote.runner import RemoteRunner
 from ..user_data_serializer import UserDataSerializer
 from .function import Function
 from .request import Request
-
-
-def run_local_application():
-    pass
 
 
 def run_remote_application():
@@ -27,31 +22,31 @@ def run_application():
     pass
 
 
-# Commented out while reimplementing local and remote runners.
-# def run_local_application(application: Function | str, payload: Any) -> Request:
-#     """Runs the application function locally with the given payload and returns the request."""
-#     # TODO: validate the graph.
-#     # TODO: validate that the supplied function is an API function.
+def run_local_application(application: Function | str, payload: Any) -> Request:
+    """Runs the application function locally with the given payload and returns the request."""
+    # TODO: validate the graph.
+    # TODO: validate that the supplied function is an API function.
 
-#     if isinstance(application, str):
-#         application: Function = get_function(application)
+    if isinstance(application, str):
+        application: Function = get_function(application)
 
-#     input_serializer: UserDataSerializer = function_input_serializer(application)
-#     # Serialize payload first to make local UX and remote UX as similar as possible.
-#     serialized_payload: bytes
-#     content_type: str
-#     serialized_payload, content_type = serialize_application_call_payload(
-#         input_serializer, payload
-#     )
-#     return LocalRunner(application=application).run(
-#         application_function_call_with_serialized_payload(
-#             application=application,
-#             payload=serialized_payload,
-#             payload_content_type=content_type,
-#         )
-#     )
+    input_serializer: UserDataSerializer = function_input_serializer(application)
+    # Serialize payload first to make local UX and remote UX as similar as possible.
+    serialized_payload: bytes
+    content_type: str
+    serialized_payload, content_type = serialize_application_call_payload(
+        input_serializer, payload
+    )
+    return LocalRunner(application=application).run(
+        application_function_call_with_serialized_payload(
+            application=application,
+            payload=serialized_payload,
+            payload_content_type=content_type,
+        )
+    )
 
 
+# Commented out while reimplementing remote runners.
 # def run_remote_application(application: Function | str, payload: Any) -> Request:
 #     """Runs the application function remotely (i.e. on Tensorlake Cloud) with the given payload and returns the request."""
 #     # TODO: validate the graph.

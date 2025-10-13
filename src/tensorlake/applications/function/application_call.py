@@ -2,7 +2,7 @@ from typing import Any, List
 
 from ..interface.file import File
 from ..interface.function import Function
-from ..interface.function_call import RegularFunctionCall
+from ..interface.futures import RegularFunctionCall
 from ..registry import get_class
 from ..user_data_serializer import UserDataSerializer
 from .type_hints import function_arg_type_hint

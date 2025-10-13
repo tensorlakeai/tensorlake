@@ -1,33 +1,17 @@
-import pickle
 from typing import Any
 
-from pydantic import BaseModel
-
 from ..interface.file import File
+from ..interface.futures import new_request_scoped_id
 from ..user_data_serializer import UserDataSerializer, serializer_by_name
-from .ast_node import ASTNode
+from .ast_node import ASTNode, ASTNodeMetadata
 
 
-class ValueMetadata(BaseModel):
+class ValueMetadata(ASTNodeMetadata):
     # Python class of the serialized value object
     cls: Any
     # Content type for File.
     # Serializer name for non-File.
     extra: str
-
-    def serialize(self) -> bytes:
-        # Use pickle because only it can dump a class reference (cls).
-        return pickle.dumps(self)
-
-    @classmethod
-    def deserialize(cls, data: bytes) -> "ValueMetadata":
-        return pickle.loads(data)
-
-    def deserialize_value(self, value: bytes) -> Any:
-        if self.cls is File:
-            return File(content=value, content_type=self.extra)
-        else:
-            return serializer_by_name(self.extra).deserialize(value, [self.cls])
 
     @property
     def serializer_name(self) -> str | None:
@@ -36,6 +20,20 @@ class ValueMetadata(BaseModel):
         else:
             return self.extra
 
+    def serialize_value(self, value: Any) -> bytes:
+        if self.serializer_name is None:
+            return value  # file bytes
+        else:
+            return serializer_by_name(self.serializer_name).serialize(value)
+
+    def deserialize_value(self, value: bytes) -> Any:
+        if self.serializer_name is None:
+            return File(content=value, content_type=self.extra)
+        else:
+            return serializer_by_name(self.serializer_name).deserialize(
+                value, [self.cls]
+            )
+
 
 class ValueNode(ASTNode):
     """A node that represents a value ready to use.
@@ -43,52 +41,44 @@ class ValueNode(ASTNode):
     Children are always an empty list.
     """
 
-    def __init__(
-        self,
-        value: bytes,
-    ):
-        super().__init__()
-        self._value: bytes = value
-        # A workaround to not deserialize metadata to get file content type when generating function output in FE.
-        self._content_type: str | None = None
+    def __init__(self, id: str):
+        super().__init__(id)
+        self._value: None | Any = None
+        self._metadata: ValueMetadata | None = None
 
     @property
-    def value(self) -> bytes:
+    def value(self) -> Any:
         return self._value
 
-    @property
-    def content_type(self) -> str | None:
-        return self._content_type
+    @value.setter
+    def value(self, value: Any) -> None:
+        self._value = value
 
     def replace_child(self, old_child: "ASTNode", new_child: "ASTNode") -> None:
         raise ValueError("Value node has no children to replace")
 
-    def to_value(self) -> Any:
-        """Converts the value node back to its original value."""
-        metadata: ValueMetadata = ValueMetadata.deserialize(self.serialized_metadata)
-        return metadata.deserialize_value(self._value)
-
     @classmethod
     def from_value(cls, value: Any, user_serializer: UserDataSerializer) -> "ValueNode":
         if isinstance(value, File):
-            node: ValueNode = ValueNode(value.content)
-            node.serialized_metadata = ValueMetadata(
-                cls=File, extra=value.content_type
-            ).serialize()
-            node._content_type = value.content_type
+            node: ValueNode = ValueNode(id=new_request_scoped_id())
+            node.value = value.content
+            node.metadata = ValueMetadata(
+                nid=node.id, cls=File, extra=value.content_type
+            )
             return node
         else:
-            node: ValueNode = ValueNode(user_serializer.serialize(value))
-            node.serialized_metadata = ValueMetadata(
-                cls=type(value), extra=user_serializer.name
-            ).serialize()
+            node: ValueNode = ValueNode(id=new_request_scoped_id())
+            node.value = value
+            node.metadata = ValueMetadata(
+                nid=node.id, cls=type(value), extra=user_serializer.name
+            )
             return node
 
     @classmethod
     def from_serialized(
         cls, node_id: str, value: bytes, metadata: bytes
     ) -> "ValueNode":
-        node: ValueNode = ValueNode(value)
-        node._id = node_id
-        node.serialized_metadata = metadata
+        node: ValueNode = ValueNode(id=node_id)
+        node.metadata = ValueMetadata.deserialize(metadata)
+        node.value = node.metadata.deserialize_value(value)
         return node

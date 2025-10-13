@@ -1,7 +1,6 @@
 from typing import Any, Dict
 
-from ..interface.function_call import RegularFunctionCall
-from ..interface.reduce import ReducerFunctionCall
+from ..interface.futures import ReducerFunctionCall, RegularFunctionCall
 from ..user_data_serializer import UserDataSerializer
 from .ast_node import ASTNode
 
@@ -25,7 +24,7 @@ def ast_from_user_object(
     if isinstance(user_object, RegularFunctionCall):
         return RegularFunctionCallNode.from_regular_function_call(user_object)
     elif isinstance(user_object, ReducerFunctionCall):
-        if len(user_object.inputs.items) >= 2:
+        if len(user_object.inputs) >= 2:
             return ReducerFunctionCallNode.from_reducer_function_call(user_object)
         else:
             # Return the single item directly, no need to create a reducer call node.
@@ -33,7 +32,7 @@ def ast_from_user_object(
             # the reducer input serializer and then the item will be returned as
             # reducer call output which means reducer call output serializer will not be used.
             # ReducerFunctionCall.inputs are guaranteed to have at least one item.
-            return ast_from_user_object(user_object.inputs.items[0], value_serializer)
+            return ast_from_user_object(user_object.inputs[0], value_serializer)
     else:
         return ValueNode.from_value(user_object, value_serializer)
 

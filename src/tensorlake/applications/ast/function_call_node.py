@@ -1,59 +1,57 @@
-import pickle
 from typing import Any, Dict, List
 
 from pydantic import BaseModel
 
 from ..function.user_data_serializer import function_input_serializer
 from ..interface.function import Function
-from ..interface.function_call import RegularFunctionCall
-from ..interface.future import FutureList
-from ..interface.request_context import RequestContext
+from ..interface.futures import Collection, RegularFunctionCall
 from ..registry import get_function
 from ..user_data_serializer import UserDataSerializer
 from .ast import ast_from_user_object
-from .ast_node import ASTNode
-from .future_list_metadata import FutureListMetadata
+from .ast_node import ASTNode, ASTNodeMetadata
+from .collection import CollectionMetadata
 from .value_node import ValueNode
 
 
 class ArgumentMetadata(BaseModel):
     # None if the value is not coming from a particular child node.
     nid: str | None
-    # Not None if this argument is coming from a FutureList.
-    flist: FutureListMetadata | None
+    # Not None if this argument is coming from a Collection.
+    # Once server/runtime understands collections they'll have their own AST node type.
+    # And this field will be removed.
+    col: CollectionMetadata | None
 
 
-class RegularFunctionCallMetadata(BaseModel):
+class RegularFunctionCallMetadata(ASTNodeMetadata):
     # Output serializer name override if any.
     oso: str | None
     args: List[ArgumentMetadata]
     kwargs: Dict[str, ArgumentMetadata]
 
-    def serialize(self) -> bytes:
-        return pickle.dumps(self)
-
-    @classmethod
-    def deserialize(cls, data: bytes) -> "RegularFunctionCallMetadata":
-        return pickle.loads(data)
-
 
 class RegularFunctionCallNode(ASTNode):
-    def __init__(self, function_name: str):
-        super().__init__()
-        self._function_name = function_name
+    def __init__(self, node_id: str, function_name: str, start_delay: float | None):
+        super().__init__(node_id)
+        self._function_name: str = function_name
+        self._start_delay: float | None = start_delay
 
     @property
     def function_name(self) -> str:
         return self._function_name
+
+    @property
+    def start_delay(self) -> float | None:
+        return self._start_delay
+
+    @property
+    def metadata(self) -> RegularFunctionCallMetadata:
+        return self._metadata
 
     def to_regular_function_call(self) -> RegularFunctionCall:
         """Converts the AST node back to its original RegularFunctionCall.
 
         All children must be value nodes (they must already be resolved/finished).
         """
-        metadata: RegularFunctionCallMetadata = RegularFunctionCallMetadata.deserialize(
-            self.serialized_metadata
-        )
         args: List[Any] = []
         kwargs: Dict[str, Any] = {}
 
@@ -67,11 +65,11 @@ class RegularFunctionCallNode(ASTNode):
             ):
                 arg_metadata: ArgumentMetadata
                 arg: Any
-                if arg_metadata.flist is not None:
-                    future_list_metadata: FutureListMetadata = arg_metadata.flist
+                if arg_metadata.col is not None:
+                    collection_metadata: CollectionMetadata = arg_metadata.col
                     arg: List[Any] = []
-                    for future_list_node_id in future_list_metadata.nids:
-                        child_node: ValueNode = self.children[future_list_node_id]
+                    for collection_item_node_id in collection_metadata.nids:
+                        child_node: ValueNode = self.children[collection_item_node_id]
                         arg.append(child_node.to_value())
                 elif arg_metadata.nid is not None:
                     child_node: ValueNode = self.children[arg_metadata.nid]
@@ -84,11 +82,14 @@ class RegularFunctionCallNode(ASTNode):
                 else:
                     args.append(arg)
 
-        process_arguments(metadata.args)
-        process_arguments(metadata.kwargs)
+        process_arguments(self.metadata.args)
+        process_arguments(self.metadata.kwargs)
 
         return RegularFunctionCall(
-            function_name=self.function_name, args=args, kwargs=kwargs
+            function_name=self.function_name,
+            args=args,
+            kwargs=kwargs,
+            start_delay=self.start_delay,
         )
 
     @classmethod
@@ -98,7 +99,9 @@ class RegularFunctionCallNode(ASTNode):
         function: Function = get_function(function_call._function_name)
         inputs_serializer: UserDataSerializer = function_input_serializer(function)
         node: RegularFunctionCallNode = RegularFunctionCallNode(
-            function_call._function_name
+            node_id=function_call.id,
+            function_name=function_call.function_name,
+            start_delay=function_call.start_delay,
         )
         args: List[ArgumentMetadata] = []
         # Arg name -> Arg metadata.
@@ -111,33 +114,34 @@ class RegularFunctionCallNode(ASTNode):
                 else enumerate(arguments)
             ):
                 arg_metadata: ArgumentMetadata
-                if isinstance(value, FutureList):
-                    future_list_node_ids: List[str] = []
-                    for item in value._items:
+                if isinstance(value, Collection):
+                    collection_items_node_ids: List[str] = []
+                    for item in value.items:
                         item_node: ASTNode = ast_from_user_object(
                             item, inputs_serializer
                         )
                         node.children[item_node.id] = item_node
                         item_node.parent = node
-                        future_list_node_ids.append(item_node.id)
+                        collection_items_node_ids.append(item_node.id)
                     arg_metadata = ArgumentMetadata(
                         nid=None,
-                        flist=FutureListMetadata(nids=future_list_node_ids),
+                        col=CollectionMetadata(nids=collection_items_node_ids),
                     )
                 else:
                     arg_node: ASTNode = ast_from_user_object(value, inputs_serializer)
                     node.add_child(arg_node)
-                    arg_metadata = ArgumentMetadata(nid=arg_node.id, flist=None)
+                    arg_metadata = ArgumentMetadata(nid=arg_node.id, col=None)
 
                 if isinstance(arguments, dict):
                     kwargs[key] = arg_metadata
                 else:
                     args.append(arg_metadata)
 
-        process_arguments(function_call._args)
-        process_arguments(function_call._kwargs)
+        process_arguments(function_call.args)
+        process_arguments(function_call.kwargs)
 
-        node.serialized_metadata = RegularFunctionCallMetadata(
+        node.metadata = RegularFunctionCallMetadata(
+            nid=node.id,
             oso=None,  # Set by the node parent after this node is created.
             args=args,
             kwargs=kwargs,
@@ -148,14 +152,18 @@ class RegularFunctionCallNode(ASTNode):
     @classmethod
     def from_serialized(
         cls,
-        node_id: str,
         function_name: str,
         metadata: bytes,
         children: List[ValueNode],
     ) -> "RegularFunctionCallNode":
-        node: RegularFunctionCallNode = RegularFunctionCallNode(function_name)
-        node._id = node_id
-        node.serialized_metadata = metadata
+        metadata: RegularFunctionCallMetadata = RegularFunctionCallMetadata.deserialize(
+            metadata
+        )
+        # Start delay is not relevant when we run deserialized function call node.
+        node: RegularFunctionCallNode = RegularFunctionCallNode(
+            node_id=metadata.nid, function_name=function_name, start_delay=None
+        )
+        node.metadata = metadata
         for child in children:
             node.add_child(child)
         return node

@@ -1,7 +1,6 @@
 from typing import Any
 
-from ..interface.function_call import RegularFunctionCall
-from ..interface.request_context import RequestContext
+from ..interface.futures import RegularFunctionCall
 from ..registry import get_class
 
 
