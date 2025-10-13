@@ -208,11 +208,8 @@ class TestCloudURLIntegration(unittest.TestCase):
 class TestCloudURLWithAuthLogin(unittest.TestCase):
     """Test that cloud URL is used correctly in the auth login flow"""
 
-    @respx.mock
-    @patch("webbrowser.open")
-    def test_auth_login_uses_cloud_url_for_browser(self, mock_browser_open):
-        """Test that auth login opens browser with the correct cloud URL"""
-        # Set up HTTP mocks for the login flow
+    def setup_login_mocks(self):
+        """Set up common HTTP mocks for the login flow"""
         start_mock = respx.post("https://api.tensorlake.ai/platform/cli/login/start")
         start_mock.return_value = httpx.Response(
             200,
@@ -237,6 +234,12 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
             200,
             json={"access_token": "test_access_token"},
         )
+
+    @respx.mock
+    @patch("webbrowser.open")
+    def test_auth_login_uses_cloud_url_for_browser(self, mock_browser_open):
+        """Test that auth login opens browser with the correct cloud URL"""
+        self.setup_login_mocks()
 
         with mock_auth_credentials_path():
             runner = CliRunner()
@@ -254,32 +257,7 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
     def test_auth_login_uses_custom_cloud_url_from_env(self, mock_browser_open):
         """Test that auth login respects TENSORLAKE_CLOUD_URL environment variable"""
         custom_cloud_url = "https://staging-cloud.tensorlake.ai"
-
-        # Set up HTTP mocks for the login flow
-        start_mock = respx.post("https://api.tensorlake.ai/platform/cli/login/start")
-        start_mock.return_value = httpx.Response(
-            200,
-            json={
-                "device_code": "test_device_code",
-                "user_code": "TEST123",
-            },
-        )
-
-        poll_mock = respx.get(
-            "https://api.tensorlake.ai/platform/cli/login/poll?device_code=test_device_code"
-        )
-        poll_mock.return_value = httpx.Response(
-            200,
-            json={"status": "approved"},
-        )
-
-        exchange_mock = respx.post(
-            "https://api.tensorlake.ai/platform/cli/login/exchange"
-        )
-        exchange_mock.return_value = httpx.Response(
-            200,
-            json={"access_token": "test_access_token"},
-        )
+        self.setup_login_mocks()
 
         with mock_auth_credentials_path():
             runner = CliRunner(env={"TENSORLAKE_CLOUD_URL": custom_cloud_url})
@@ -295,32 +273,7 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
     def test_auth_login_uses_custom_cloud_url_from_cli_flag(self, mock_browser_open):
         """Test that auth login respects --cloud-url CLI flag"""
         custom_cloud_url = "https://dev-cloud.tensorlake.ai"
-
-        # Set up HTTP mocks for the login flow
-        start_mock = respx.post("https://api.tensorlake.ai/platform/cli/login/start")
-        start_mock.return_value = httpx.Response(
-            200,
-            json={
-                "device_code": "test_device_code",
-                "user_code": "TEST123",
-            },
-        )
-
-        poll_mock = respx.get(
-            "https://api.tensorlake.ai/platform/cli/login/poll?device_code=test_device_code"
-        )
-        poll_mock.return_value = httpx.Response(
-            200,
-            json={"status": "approved"},
-        )
-
-        exchange_mock = respx.post(
-            "https://api.tensorlake.ai/platform/cli/login/exchange"
-        )
-        exchange_mock.return_value = httpx.Response(
-            200,
-            json={"access_token": "test_access_token"},
-        )
+        self.setup_login_mocks()
 
         with mock_auth_credentials_path():
             runner = CliRunner()
@@ -343,32 +296,7 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
         """Test that custom cloud URL is shown in error message when browser fails"""
         mock_browser_open.side_effect = webbrowser.Error("Browser open failed")
         custom_cloud_url = "https://custom-cloud.example.com"
-
-        # Set up HTTP mocks for the login flow
-        start_mock = respx.post("https://api.tensorlake.ai/platform/cli/login/start")
-        start_mock.return_value = httpx.Response(
-            200,
-            json={
-                "device_code": "test_device_code",
-                "user_code": "TEST123",
-            },
-        )
-
-        poll_mock = respx.get(
-            "https://api.tensorlake.ai/platform/cli/login/poll?device_code=test_device_code"
-        )
-        poll_mock.return_value = httpx.Response(
-            200,
-            json={"status": "approved"},
-        )
-
-        exchange_mock = respx.post(
-            "https://api.tensorlake.ai/platform/cli/login/exchange"
-        )
-        exchange_mock.return_value = httpx.Response(
-            200,
-            json={"access_token": "test_access_token"},
-        )
+        self.setup_login_mocks()
 
         with mock_auth_credentials_path():
             runner = CliRunner()
