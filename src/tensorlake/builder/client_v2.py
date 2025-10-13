@@ -197,13 +197,13 @@ class ImageBuilderV2Client:
 
         if not res.is_success:
             error_message = res.text
-            click.secho(f"Error building image {image.name}: {error_message}", fg="red")
+            click.echo(f"Error building image {image.name}: {error_message}", err=True)
             raise RuntimeError(f"Error building image {image.name}: {error_message}")
 
         build = BuildInfo.model_validate(res.json())
 
-        click.secho(f"Starting build for image {image.name} ...", fg="green")
-        click.secho(f"Build ID: {build.id}", fg="green")
+        click.echo(f"Starting build for image {image.name} ...")
+        click.echo(f"Build ID: {build.id}")
 
         try:
             return await self.stream_logs(build)
@@ -244,7 +244,7 @@ class ImageBuilderV2Client:
 
     def _print_build_log_event(self, event: BuildLogEvent):
         if event.build_status == "pending":
-            click.secho("Build waiting in queue...", fg="yellow")
+            click.secho("Build waiting in queue...")
         else:
             match event.stream:
                 case "stdout":
@@ -254,9 +254,9 @@ class ImageBuilderV2Client:
                         err=False,
                     )
                 case "stderr":
-                    click.secho(event.message, fg="red", err=True)
+                    click.secho(event.message, err=True)
                 case "info":
-                    click.secho(f"{event.timestamp}: {event.message}", fg="blue")
+                    click.secho(f"{event.timestamp}: {event.message}")
 
     async def build_info(self, build_id: str) -> BuildInfo:
         """

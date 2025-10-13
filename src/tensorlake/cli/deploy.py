@@ -64,7 +64,7 @@ def deploy(
     functions: List[Function] = get_functions()
     asyncio.run(_prepare_images_v2(builder_v2, functions))
 
-    click.echo("Everything looks good, deploying now")
+    click.echo("Everything looks good, deploying now\n")
 
     _deploy_applications(
         auth=auth,
@@ -103,7 +103,7 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: List[Func
                     traceback.print_exception(e)
                     raise click.Abort
 
-    click.secho("Built all images", bold=True)
+    click.secho("\nBuilt all images")
 
 
 def _deploy_applications(
@@ -162,10 +162,7 @@ def _deploy_applications(
         else:
             param_type = "<value>"
 
-        click.secho(
-            f"Deployed application: {fn_config.function_name}\n",
-            bold=True,
-        )
+        click.echo(f"Deployed application: {fn_config.function_name}\n")
         click.echo(
             f"""To invoke the application, use the following curl command:
 curl -X POST {auth.base_url}/v1/namespaces/{auth.namespace}/applications/{fn_config.function_name} \\
@@ -176,5 +173,5 @@ curl -X POST {auth.base_url}/v1/namespaces/{auth.namespace}/applications/{fn_con
 """,
         )
     except StopIteration:
-        click.echo("Successfully deployed application", bold=True)
+        click.echo("Successfully deployed application")
         click.echo("Error generating curl command\n", err=True)
