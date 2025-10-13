@@ -141,7 +141,7 @@ class Context:
 
         final_cloud_url = (
             cloud_url
-            or get_nested_value(config_data, "indexify.cloud_url")
+            or get_nested_value(config_data, "tensorlake.cloud_url")
             or "https://cloud.tensorlake.ai"
         )
 
