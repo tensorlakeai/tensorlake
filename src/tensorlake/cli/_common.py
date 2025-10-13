@@ -126,11 +126,14 @@ class Context:
         base_url: str | None = None,
         cloud_url: str | None = None,
         api_key: str | None = None,
+        personal_access_token: str | None = None,
         namespace: str | None = None,
     ) -> "Context":
         """Create a Context with values from CLI args, environment, saved config, or defaults."""
         config_data = load_config()
-        personal_access_token = load_credentials_token()
+
+        # Load PAT from credentials file if not provided via CLI/env
+        file_personal_access_token = load_credentials_token()
 
         # Use CLI/env values first, then saved config, then hardcoded defaults
         final_base_url = (
@@ -141,11 +144,17 @@ class Context:
 
         final_cloud_url = (
             cloud_url
-            or get_nested_value(config_data, "indexify.cloud_url")
+            or get_nested_value(config_data, "tensorlake.cloud_url")
             or "https://cloud.tensorlake.ai"
         )
 
         final_api_key = api_key or get_nested_value(config_data, "tensorlake.apikey")
+
+        # Priority: CLI/env PAT > credentials file PAT
+        final_personal_access_token = (
+            personal_access_token or file_personal_access_token
+        )
+
         final_namespace = (
             namespace
             or get_nested_value(config_data, "indexify.namespace")
@@ -163,7 +172,7 @@ class Context:
             base_url=final_base_url,
             cloud_url=final_cloud_url,
             api_key=final_api_key,
-            personal_access_token=personal_access_token,
+            personal_access_token=final_personal_access_token,
             namespace=final_namespace,
             default_application=final_default_app,
             default_request=final_default_request,
