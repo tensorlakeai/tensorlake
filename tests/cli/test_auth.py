@@ -1,0 +1,96 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from click.testing import CliRunner
+
+from tensorlake.cli import cli
+from tensorlake.cli._common import Context
+import tensorlake.cli.config as config_module
+
+
+class TestPATEnvironmentVariable(unittest.TestCase):
+    """Test that TENSORLAKE_PAT environment variable works correctly"""
+
+    def test_pat_from_env_variable(self):
+        """Test that PAT can be provided via TENSORLAKE_PAT environment variable"""
+        test_pat = "test_personal_access_token_12345"
+        
+        # Create context with PAT from environment variable simulation
+        ctx = Context.default(personal_access_token=test_pat)
+        
+        self.assertEqual(ctx.personal_access_token, test_pat)
+
+    def test_pat_priority_env_over_file(self):
+        """Test that PAT from env var takes priority over credentials file"""
+        env_pat = "env_token_12345"
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir) / ".config" / "tensorlake"
+            config_dir.mkdir(parents=True)
+            credentials_path = config_dir / "credentials.json"
+            
+            # Write a PAT to the credentials file
+            with open(credentials_path, "w") as f:
+                json.dump({"token": "file_token_67890"}, f)
+            
+            original_credentials_path = config_module.CREDENTIALS_PATH
+            
+            try:
+                config_module.CREDENTIALS_PATH = credentials_path
+                
+                # PAT from parameter (simulating env var) should take priority
+                ctx = Context.default(personal_access_token=env_pat)
+                self.assertEqual(ctx.personal_access_token, env_pat)
+            finally:
+                config_module.CREDENTIALS_PATH = original_credentials_path
+
+    def test_pat_falls_back_to_file(self):
+        """Test that PAT falls back to credentials file when env var not provided"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir) / ".config" / "tensorlake"
+            config_dir.mkdir(parents=True)
+            credentials_path = config_dir / "credentials.json"
+            
+            # Write a PAT to the credentials file
+            file_pat = "file_token_67890"
+            with open(credentials_path, "w") as f:
+                json.dump({"token": file_pat}, f)
+            
+            original_credentials_path = config_module.CREDENTIALS_PATH
+            
+            try:
+                config_module.CREDENTIALS_PATH = credentials_path
+                
+                # Without env var, should use file PAT
+                ctx = Context.default()
+                self.assertEqual(ctx.personal_access_token, file_pat)
+            finally:
+                config_module.CREDENTIALS_PATH = original_credentials_path
+
+    def test_cli_accepts_pat_flag(self):
+        """Test that CLI accepts --pat flag"""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["--pat", "test_token_123", "--help"],
+            prog_name="tensorlake",
+        )
+        
+        self.assertEqual(result.exit_code, 0)
+        # Verify help text mentions PAT
+        self.assertIn("--pat", result.output)
+
+    def test_cli_help_mentions_tensorlake_pat(self):
+        """Test that CLI help text mentions TENSORLAKE_PAT environment variable"""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--help"], prog_name="tensorlake")
+        
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("TENSORLAKE_PAT", result.output)
+        self.assertIn("Personal Access Token", result.output)
+
+
+if __name__ == "__main__":
+    unittest.main()

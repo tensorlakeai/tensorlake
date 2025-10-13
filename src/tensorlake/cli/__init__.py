@@ -15,6 +15,12 @@ Use 'tensorlake config' to manage settings:
   default.request       - Default request ID for request info
   default.project       - Default project ID for requests and deployments
   default.organization  - Default organization ID for requests and deployments
+
+\b
+Authentication:
+  Use --api-key or TENSORLAKE_API_KEY for API key authentication
+  Use --pat or TENSORLAKE_PAT for Personal Access Token authentication
+  Use 'tensorlake auth login' to obtain a PAT interactively
 """
 )
 @click.version_option(
@@ -38,6 +44,12 @@ Use 'tensorlake config' to manage settings:
     help="The Tensorlake Indexify server API key",
 )
 @click.option(
+    "--pat",
+    "personal_access_token",
+    envvar="TENSORLAKE_PAT",
+    help="The Tensorlake Personal Access Token",
+)
+@click.option(
     "--namespace",
     envvar="INDEXIFY_NAMESPACE",
     help="The namespace to use",
@@ -48,13 +60,18 @@ def cli(
     base_url: str | None,
     cloud_url: str | None,
     api_key: str | None,
+    personal_access_token: str | None,
     namespace: str | None,
 ):
     """
     Tensorlake CLI for Tensorlake Cloud.
     """
     ctx.obj = _common.Context.default(
-        base_url=base_url, cloud_url=cloud_url, api_key=api_key, namespace=namespace
+        base_url=base_url,
+        cloud_url=cloud_url,
+        api_key=api_key,
+        personal_access_token=personal_access_token,
+        namespace=namespace,
     )
 
 
