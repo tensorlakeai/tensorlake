@@ -13,9 +13,7 @@ from .file import File
 from .function import Function, FunctionAIO
 from .function_call import FunctionCall
 from .future import Future
-from .gather import gather, map
 from .image import Image
-from .reduce import reduce
 from .request import Request
 from .request_context import (
     RequestContext,
@@ -36,9 +34,6 @@ __all__ = [
     "run_local_application",
     "run_remote_application",
     "function",
-    "gather",
-    "map",
-    "reduce",
     "ApplicationValidationError",
     "File",
     "Function",

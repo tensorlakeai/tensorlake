@@ -95,10 +95,10 @@ class RegularFunctionCallNode(ASTNode):
     def from_regular_function_call(
         cls, function_call: RegularFunctionCall
     ) -> "RegularFunctionCallNode":
-        function: Function = get_function(function_call.function_name)
+        function: Function = get_function(function_call._function_name)
         inputs_serializer: UserDataSerializer = function_input_serializer(function)
         node: RegularFunctionCallNode = RegularFunctionCallNode(
-            function_call.function_name
+            function_call._function_name
         )
         args: List[ArgumentMetadata] = []
         # Arg name -> Arg metadata.
@@ -113,7 +113,7 @@ class RegularFunctionCallNode(ASTNode):
                 arg_metadata: ArgumentMetadata
                 if isinstance(value, FutureList):
                     future_list_node_ids: List[str] = []
-                    for item in value.items:
+                    for item in value._items:
                         item_node: ASTNode = ast_from_user_object(
                             item, inputs_serializer
                         )
@@ -134,8 +134,8 @@ class RegularFunctionCallNode(ASTNode):
                 else:
                     args.append(arg_metadata)
 
-        process_arguments(function_call.args)
-        process_arguments(function_call.kwargs)
+        process_arguments(function_call._args)
+        process_arguments(function_call._kwargs)
 
         node.serialized_metadata = RegularFunctionCallMetadata(
             oso=None,  # Set by the node parent after this node is created.

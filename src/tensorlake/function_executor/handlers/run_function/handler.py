@@ -97,6 +97,7 @@ class Handler:
             log_user_event_allocations_finished(event_details)
 
     def _run(self) -> AllocationResult:
+        # TODO: input deserialization should be treated as customer code execution.
         function_call: RegularFunctionCall = self._reconstruct_function_call()
         if self._function_instance_arg is not None:
             set_self_arg(function_call, self._function_instance_arg)
@@ -107,6 +108,7 @@ class Handler:
         except BaseException as e:
             return self._response_helper.from_function_exception(e)
 
+        # TODO: output serialization should be treated as customer code execution.
         return self._response_helper.from_function_output(
             output=output,
             output_serializer_override=self._function_output_serializer_override,
@@ -173,7 +175,7 @@ class Handler:
 
         try:
             return self._function._original_function(
-                *function_call.args, **function_call.kwargs
+                *function_call._args, **function_call._kwargs
             )
         finally:
             self._logger.info(
