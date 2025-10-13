@@ -1,8 +1,14 @@
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List
 
-from .function_call import ReducerFunctionCall, RegularFunctionCall
-from .future import Future, FutureList
+from ..runtime_hooks import start_and_wait_function_calls, start_function_calls
+from .futures import (
+    Collection,
+    Future,
+    ReducerFunctionCall,
+    RegularFunctionCall,
+    new_request_scoped_id,
+)
 from .image import Image
 from .retries import Retries
 
@@ -39,14 +45,6 @@ class _ApplicationConfiguration:
     version: str
 
 
-__runtime_hook_start_function_calls: Callable[
-    [List[RegularFunctionCall | ReducerFunctionCall]], None
-] = None
-__runtime_hook_start_and_wait_function_calls: Callable[
-    [List[RegularFunctionCall | ReducerFunctionCall]], List[Any]
-] = None
-
-
 class _InitialMissingType:
     pass
 
@@ -69,14 +67,13 @@ class Function:
     def __call__(self, *args, **kwargs) -> Any:
         """Does a blocking function call and returns its result."""
         # Called when the Function is called using () operator.
-        global __runtime_hook_start_and_wait_function_calls
         function_call: RegularFunctionCall = RegularFunctionCall(
             function_name=self._function_config.function_name,
             args=list(args),
             kwargs=dict(kwargs),
             start_delay=None,
         )
-        return __runtime_hook_start_and_wait_function_calls([function_call])[0]
+        return start_and_wait_function_calls([function_call])[0]
 
     def map(self, iterable: Iterable) -> List[Any]:
         """Returns a list with every item transformed using the function.
@@ -85,9 +82,8 @@ class Function:
         Similar to https://docs.python.org/3/library/functions.html#map except all transformations
         are done in parallel.
         """
-        global __runtime_hook_start_and_wait_function_calls
         map_calls: List[RegularFunctionCall] = self._make_map_calls(iterable)
-        return __runtime_hook_start_and_wait_function_calls(map_calls)
+        return start_and_wait_function_calls(map_calls)
 
     def reduce(
         self,
@@ -100,35 +96,30 @@ class Function:
         Blocks until the result is ready.
         Similar to https://docs.python.org/3/library/functools.html#functools.reduce.
         """
-        global __runtime_hook_start_and_wait_function_calls
         reducer_call: ReducerFunctionCall = self._make_reducer_call(iterable, initial)
-        return __runtime_hook_start_and_wait_function_calls([reducer_call])[0]
+        return start_and_wait_function_calls([reducer_call])[0]
 
     def future(self, *args, **kwargs) -> Future:
         """Runs a non-blocking function call and returns its Future."""
-        global __runtime_hook_start_function_calls
-        function_call: RegularFunctionCall = RegularFunctionCall(
-            function_name=self._function_config.function_name,
-            args=list(args),
-            kwargs=dict(kwargs),
-            start_delay=None,
+        function_call: RegularFunctionCall = self._make_function_call(
+            None, *args, **kwargs
         )
-        __runtime_hook_start_function_calls([function_call])
-        return function_call.to_future()
+        start_function_calls([function_call])
+        return function_call
 
-    def later_future(self, start_delay: float, *args, **kwargs) -> Future:
+    def delayed_future(self, start_delay: float, *args, **kwargs) -> Future:
         """Runs a non-blocking function call after start_delay seconds and returns its Future."""
         if start_delay < 0:
             raise ValueError("start_delay must be non-negative")
-        global __runtime_hook_start_function_calls
         function_call: RegularFunctionCall = RegularFunctionCall(
+            id=new_request_scoped_id(),
             function_name=self._function_config.function_name,
             args=list(args),
             kwargs=dict(kwargs),
             start_delay=start_delay,
         )
-        __runtime_hook_start_function_calls([function_call])
-        return function_call.to_future()
+        start_function_calls([function_call])
+        return function_call
 
     def map_future(self, iterable: Iterable) -> Future:
         """Returns a future that resolves into a list with every item transformed using the function.
@@ -136,10 +127,12 @@ class Function:
         Similar to https://docs.python.org/3/library/functions.html#map except all transformations
         are done in parallel.
         """
-        global __runtime_hook_start_function_calls
         map_calls: List[RegularFunctionCall] = self._make_map_calls(iterable)
-        __runtime_hook_start_function_calls(map_calls)
-        return FutureList([call.to_future() for call in map_calls])
+        # Once Server understands collection we'll be issueing a single collection call here.
+        start_function_calls(map_calls)
+        return Collection(
+            id=new_request_scoped_id(), items=[call for call in map_calls]
+        )
 
     def reduce_future(
         self,
@@ -151,10 +144,9 @@ class Function:
 
         Similar to https://docs.python.org/3/library/functools.html#functools.reduce.
         """
-        global __runtime_hook_start_function_calls
         reducer_call: ReducerFunctionCall = self._make_reducer_call(iterable, initial)
-        __runtime_hook_start_function_calls([reducer_call])
-        return reducer_call.to_future()
+        start_function_calls([reducer_call])
+        return reducer_call
 
     def __repr__(self) -> str:
         return (
@@ -165,11 +157,23 @@ class Function:
             f")>"
         )
 
+    def _make_function_call(
+        self, start_delay: float | None, *args, **kwargs
+    ) -> RegularFunctionCall:
+        return RegularFunctionCall(
+            id=new_request_scoped_id(),
+            function_name=self._function_config.function_name,
+            args=list(args),
+            kwargs=dict(kwargs),
+            start_delay=start_delay,
+        )
+
     def _make_map_calls(self, iterable: Iterable) -> List[RegularFunctionCall]:
         map_calls: List[RegularFunctionCall] = []
         for item in iterable:
             map_calls.append(
                 RegularFunctionCall(
+                    id=new_request_scoped_id(),
                     function_name=self._function_config.function_name,
                     args=[item],
                     kwargs={},
@@ -189,6 +193,7 @@ class Function:
             inputs.insert(0, initial)
 
         return ReducerFunctionCall(
+            id=new_request_scoped_id(),
             reducer_function_name=self._function_config.function_name,
             inputs=inputs,
             start_delay=None,

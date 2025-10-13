@@ -15,8 +15,8 @@ from tensorlake.applications.function.function_call import (
     set_self_arg,
 )
 from tensorlake.applications.function.reducer_call import reducer_function_call
+from tensorlake.applications.interface.call_tree import RegularFunctionCall
 from tensorlake.applications.interface.function import Function
-from tensorlake.applications.interface.function_call import RegularFunctionCall
 from tensorlake.applications.request_context.contextvar import (
     set_current_request_context,
 )
@@ -130,7 +130,6 @@ class Handler:
                 )
                 self._function_output_serializer_override = call_metadata.oso
                 return RegularFunctionCallNode.from_serialized(
-                    node_metadata.nid,
                     self._function_ref.function_name,
                     node_metadata.metadata,
                     downloaded_args,

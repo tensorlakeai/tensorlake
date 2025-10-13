@@ -1,21 +1,41 @@
+import pickle
 from typing import Dict
 
-from tensorlake.vendor.nanoid.nanoid import generate as nanoid_generate
+from pydantic import BaseModel
+
+
+class ASTNodeMetadata(BaseModel):
+    nid: str  # Node ID in the AST
+
+    def serialize(self) -> bytes:
+        # Use pickle it dumps a class references and loads
+        # original serialized instance type so we don't have
+        # to store .node_type enum in metadata.
+        return pickle.dumps(self)
+
+    @classmethod
+    def deserialize(cls, data: bytes) -> "ASTNodeMetadata":
+        return pickle.loads(data)
 
 
 class ASTNode:
     """A node in the abstract syntax tree."""
 
-    def __init__(self):
-        # We need full sized nanoid here because we can run a request
-        # for months and we don't want to ever collide these IDs between
-        # function calls of the same request.
-        self._id: str = nanoid_generate()
-        self._serialized_metadata: bytes | None = None
+    def __init__(self, id: str):
+        self._id: str = id
         self._parent: "ASTNode | None" = None
         # ID -> AST
         # Data dependencies of the node.
         self._children: Dict[str, "ASTNode"] = {}
+        self._metadata: ASTNodeMetadata | None = None
+
+    @property
+    def metadata(self) -> ASTNodeMetadata | None:
+        return self._metadata
+
+    @metadata.setter
+    def metadata(self, value: ASTNodeMetadata) -> None:
+        self._metadata = value
 
     @property
     def id(self) -> str:
@@ -32,14 +52,6 @@ class ASTNode:
     @property
     def children(self) -> Dict[str, "ASTNode"]:
         return self._children
-
-    @property
-    def serialized_metadata(self) -> bytes | None:
-        return self._serialized_metadata
-
-    @serialized_metadata.setter
-    def serialized_metadata(self, metadata: bytes) -> None:
-        self._serialized_metadata = metadata
 
     def __eq__(self, value):
         if not isinstance(value, ASTNode):
