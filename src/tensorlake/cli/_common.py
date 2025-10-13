@@ -95,7 +95,7 @@ class Context:
         Get the organization ID associated with the API key, or from config if no API key is set.
         """
         if self.api_key:
-            self._introspect().json().get("organizationId")
+            return self._introspect().json().get("organizationId")
 
         if not self.default_organization:
             click.echo(
