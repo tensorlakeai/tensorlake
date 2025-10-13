@@ -10,8 +10,7 @@ from .exceptions import (
     RequestNotFinished,
 )
 from .file import File
-from .function import Function, FunctionAIO
-from .function_call import FunctionCall
+from .function import Function
 from .future import Future
 from .image import Image
 from .request import Request
@@ -37,8 +36,6 @@ __all__ = [
     "ApplicationValidationError",
     "File",
     "Function",
-    "FunctionAIO",
-    "FunctionCall",
     "Future",
     "Image",
     "RemoteAPIError",

@@ -4,6 +4,9 @@ from tensorlake.vendor.nanoid.nanoid import generate as nanoid_generate
 
 from .future import Future, FutureType
 
+# Classes in this module are not part of SDK interface but we keep them here
+# to avoid circular imports.
+
 
 class FunctionCall:
     """Abstract base class for function calls."""
