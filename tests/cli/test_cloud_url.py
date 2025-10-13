@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import webbrowser
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,7 +24,7 @@ class TestCloudURL(unittest.TestCase):
     def test_cloud_url_from_cli_option(self):
         """Test cloud URL override via CLI option"""
         runner = CliRunner()
-        
+
         # We can't easily test Context from within CLI invocation, but we can verify
         # that the CLI accepts the option without error
         result = runner.invoke(
@@ -31,7 +32,7 @@ class TestCloudURL(unittest.TestCase):
             ["--cloud-url", "https://custom-cloud.example.com", "--help"],
             prog_name="tensorlake",
         )
-        
+
         self.assertEqual(
             result.exit_code,
             0,
@@ -40,14 +41,16 @@ class TestCloudURL(unittest.TestCase):
 
     def test_cloud_url_from_environment_variable(self):
         """Test cloud URL override via TENSORLAKE_CLOUD_URL environment variable"""
-        runner = CliRunner(env={"TENSORLAKE_CLOUD_URL": "https://env-cloud.example.com"})
-        
+        runner = CliRunner(
+            env={"TENSORLAKE_CLOUD_URL": "https://env-cloud.example.com"}
+        )
+
         result = runner.invoke(
             cli,
             ["--help"],
             prog_name="tensorlake",
         )
-        
+
         self.assertEqual(
             result.exit_code,
             0,
@@ -60,20 +63,23 @@ class TestCloudURL(unittest.TestCase):
             config_dir = Path(tmpdir) / ".config" / "tensorlake"
             config_dir.mkdir(parents=True)
             config_file = config_dir / ".tensorlake_config"
-            
+
             # Mock the config directory
             import tensorlake.cli.config as config_module
+
             original_config_dir = config_module.CONFIG_DIR
             original_config_file = config_module.CONFIG_FILE
-            
+
             try:
                 config_module.CONFIG_DIR = config_dir
                 config_module.CONFIG_FILE = config_file
-                
+
                 # Save config with custom cloud URL
-                config_data = {"tensorlake": {"cloud_url": "https://config-cloud.example.com"}}
+                config_data = {
+                    "tensorlake": {"cloud_url": "https://config-cloud.example.com"}
+                }
                 save_config(config_data)
-                
+
                 # Load context and verify
                 ctx = Context.default()
                 self.assertEqual(ctx.cloud_url, "https://config-cloud.example.com")
@@ -88,27 +94,30 @@ class TestCloudURL(unittest.TestCase):
             config_dir = Path(tmpdir) / ".config" / "tensorlake"
             config_dir.mkdir(parents=True)
             config_file = config_dir / ".tensorlake_config"
-            
+
             import tensorlake.cli.config as config_module
+
             original_config_dir = config_module.CONFIG_DIR
             original_config_file = config_module.CONFIG_FILE
-            
+
             try:
                 config_module.CONFIG_DIR = config_dir
                 config_module.CONFIG_FILE = config_file
-                
+
                 # Save config with custom cloud URL
-                config_data = {"tensorlake": {"cloud_url": "https://config-cloud.example.com"}}
+                config_data = {
+                    "tensorlake": {"cloud_url": "https://config-cloud.example.com"}
+                }
                 save_config(config_data)
-                
+
                 # Test 1: Config overrides default
                 ctx = Context.default()
                 self.assertEqual(ctx.cloud_url, "https://config-cloud.example.com")
-                
+
                 # Test 2: CLI/env parameter overrides config
                 ctx = Context.default(cloud_url="https://cli-cloud.example.com")
                 self.assertEqual(ctx.cloud_url, "https://cli-cloud.example.com")
-                
+
                 # Test 3: Explicit None falls back to config
                 ctx = Context.default(cloud_url=None)
                 self.assertEqual(ctx.cloud_url, "https://config-cloud.example.com")
@@ -120,7 +129,7 @@ class TestCloudURL(unittest.TestCase):
         """Test that cloud URL configuration is documented in help text"""
         runner = CliRunner()
         result = runner.invoke(cli, ["--help"], prog_name="tensorlake")
-        
+
         self.assertEqual(result.exit_code, 0)
         self.assertIn("--cloud-url", result.output)
         self.assertIn("tensorlake.cloud_url", result.output)
@@ -130,7 +139,7 @@ class TestCloudURL(unittest.TestCase):
         """Test that TENSORLAKE_CLOUD_URL environment variable is shown in help"""
         runner = CliRunner()
         result = runner.invoke(cli, ["--help"], prog_name="tensorlake")
-        
+
         self.assertEqual(result.exit_code, 0)
         # Click shows environment variables in the help text
         self.assertIn("--cloud-url", result.output)
@@ -154,7 +163,7 @@ class TestCloudURLIntegration(unittest.TestCase):
             "http://localhost:8080",
             "https://custom.domain.com/path",
         ]
-        
+
         for url in test_cases:
             with self.subTest(url=url):
                 ctx = Context.default(cloud_url=url)
@@ -166,7 +175,7 @@ class TestCloudURLIntegration(unittest.TestCase):
             base_url="https://api.example.com",
             cloud_url="https://cloud.example.com",
         )
-        
+
         self.assertEqual(ctx.base_url, "https://api.example.com")
         self.assertEqual(ctx.cloud_url, "https://cloud.example.com")
         self.assertNotEqual(ctx.base_url, ctx.cloud_url)
@@ -197,7 +206,9 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
             json={"status": "approved"},
         )
 
-        exchange_mock = respx.post("https://api.tensorlake.ai/platform/cli/login/exchange")
+        exchange_mock = respx.post(
+            "https://api.tensorlake.ai/platform/cli/login/exchange"
+        )
         exchange_mock.return_value = httpx.Response(
             200,
             json={"access_token": "test_access_token"},
@@ -208,9 +219,13 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
         with runner.isolated_filesystem():
             result = runner.invoke(cli, ["auth", "login"], prog_name="tensorlake")
 
-            self.assertEqual(result.exit_code, 0, f"Failed with output: {result.output}")
+            self.assertEqual(
+                result.exit_code, 0, f"Failed with output: {result.output}"
+            )
             # Verify browser was opened with default cloud URL
-            mock_browser_open.assert_called_once_with("https://cloud.tensorlake.ai/cli/login")
+            mock_browser_open.assert_called_once_with(
+                "https://cloud.tensorlake.ai/cli/login"
+            )
 
     @respx.mock
     @patch("webbrowser.open")
@@ -236,7 +251,9 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
             json={"status": "approved"},
         )
 
-        exchange_mock = respx.post("https://api.tensorlake.ai/platform/cli/login/exchange")
+        exchange_mock = respx.post(
+            "https://api.tensorlake.ai/platform/cli/login/exchange"
+        )
         exchange_mock.return_value = httpx.Response(
             200,
             json={"access_token": "test_access_token"},
@@ -247,7 +264,9 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
         with runner.isolated_filesystem():
             result = runner.invoke(cli, ["auth", "login"], prog_name="tensorlake")
 
-            self.assertEqual(result.exit_code, 0, f"Failed with output: {result.output}")
+            self.assertEqual(
+                result.exit_code, 0, f"Failed with output: {result.output}"
+            )
             # Verify browser was opened with custom cloud URL
             mock_browser_open.assert_called_once_with(f"{custom_cloud_url}/cli/login")
 
@@ -275,7 +294,9 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
             json={"status": "approved"},
         )
 
-        exchange_mock = respx.post("https://api.tensorlake.ai/platform/cli/login/exchange")
+        exchange_mock = respx.post(
+            "https://api.tensorlake.ai/platform/cli/login/exchange"
+        )
         exchange_mock.return_value = httpx.Response(
             200,
             json={"access_token": "test_access_token"},
@@ -290,19 +311,21 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
                 prog_name="tensorlake",
             )
 
-            self.assertEqual(result.exit_code, 0, f"Failed with output: {result.output}")
+            self.assertEqual(
+                result.exit_code, 0, f"Failed with output: {result.output}"
+            )
             # Verify browser was opened with custom cloud URL from CLI flag
             mock_browser_open.assert_called_once_with(f"{custom_cloud_url}/cli/login")
 
     @respx.mock
     @patch("webbrowser.open")
-    def test_auth_login_shows_custom_cloud_url_on_browser_error(self, mock_browser_open):
+    def test_auth_login_shows_custom_cloud_url_on_browser_error(
+        self, mock_browser_open
+    ):
         """Test that custom cloud URL is shown in error message when browser fails"""
-        import webbrowser
-        
         # Make webbrowser.open raise a webbrowser.Error
         mock_browser_open.side_effect = webbrowser.Error("Browser open failed")
-        
+
         custom_cloud_url = "https://custom-cloud.example.com"
 
         # Set up mocks
@@ -323,7 +346,9 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
             json={"status": "approved"},
         )
 
-        exchange_mock = respx.post("https://api.tensorlake.ai/platform/cli/login/exchange")
+        exchange_mock = respx.post(
+            "https://api.tensorlake.ai/platform/cli/login/exchange"
+        )
         exchange_mock.return_value = httpx.Response(
             200,
             json={"access_token": "test_access_token"},
@@ -339,7 +364,9 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
             )
 
             # Command should still succeed
-            self.assertEqual(result.exit_code, 0, f"Failed with output: {result.output}")
+            self.assertEqual(
+                result.exit_code, 0, f"Failed with output: {result.output}"
+            )
             # Verify the custom URL is displayed in output for manual opening
             self.assertIn(custom_cloud_url, result.output)
             self.assertIn("/cli/login", result.output)
