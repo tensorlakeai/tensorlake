@@ -22,11 +22,11 @@ from ..function.user_data_serializer import (
     function_output_serializer,
 )
 from ..interface.function import Function
-from ..interface.function_call import (
+from ..interface.futures import (
     FunctionCall,
+    ReducerFunctionCall,
     RegularFunctionCall,
 )
-from ..interface.reduce import ReducerFunctionCall
 from ..interface.request import Request
 from ..interface.request_context import RequestContext
 from ..interface.retries import Retries

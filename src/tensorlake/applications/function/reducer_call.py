@@ -1,7 +1,7 @@
 from typing import Any, List
 
 from ..interface.function import Function
-from ..interface.function_call import RegularFunctionCall
+from ..interface.futures import RegularFunctionCall
 
 
 def reducer_function_call(

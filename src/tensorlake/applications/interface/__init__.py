@@ -11,7 +11,7 @@ from .exceptions import (
 )
 from .file import File
 from .function import Function
-from .future import Future
+from .futures import Future
 from .image import Image
 from .request import Request
 from .request_context import (

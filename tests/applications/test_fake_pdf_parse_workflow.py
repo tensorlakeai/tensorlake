@@ -80,7 +80,7 @@ def parse_pdf_api(payload: RequestPayload) -> ResponsePayload:
     chunks: List[ChunkEmbeddings] = chunk_embeddings.result()
 
     # Spawn a recurring background function to watch for the PDF file updates.
-    watch_pdf_updates.later_future(
+    watch_pdf_updates.delayed_future(
         start_delay=60, url=payload.url, page_range=payload.page_range
     )
     return ResponsePayload(chunks=chunks)
@@ -99,7 +99,7 @@ def chunk_and_embed(page: str) -> ChunkEmbeddings:
     output = ChunkEmbeddings(chunk_embeddings=chunk_embeddings)
     # Spawn IndexEmbedding function call in background to save the embeddings.
     # We're not interested in waiting for it to complete or value the function returned.
-    IndexEmbedding().index.later_future(output)
+    IndexEmbedding().index.delayed_future(output)
 
     return output
 
@@ -133,7 +133,7 @@ def watch_pdf_updates(url: str, page_range: str) -> None:
     time.sleep(0.1)
     print(f"Checked {url} for updates, no updates found.")
     # Schedule next check in 60 seconds.
-    watch_pdf_updates.later_future(start_delay=60, url=url, page_range=page_range)
+    watch_pdf_updates.delayed_future(start_delay=60, url=url, page_range=page_range)
 
 
 class TestPDFParseDataWorkflow(unittest.TestCase):
