@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import webbrowser
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +12,29 @@ from click.testing import CliRunner
 from tensorlake.cli import cli
 from tensorlake.cli._common import Context
 from tensorlake.cli.config import save_config
+
+
+@contextmanager
+def mock_auth_credentials_path():
+    """Context manager to temporarily override auth module's credentials path with a temp directory"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_dir = Path(tmpdir) / ".config" / "tensorlake"
+        config_dir.mkdir(parents=True)
+        credentials_path = config_dir / "credentials.json"
+
+        import tensorlake.cli.auth as auth_module
+
+        original_config_dir = auth_module.CONFIG_DIR
+        original_credentials_path = auth_module.CREDENTIALS_PATH
+
+        try:
+            auth_module.CONFIG_DIR = config_dir
+            auth_module.CREDENTIALS_PATH = credentials_path
+            yield
+        finally:
+            # Restore original values
+            auth_module.CONFIG_DIR = original_config_dir
+            auth_module.CREDENTIALS_PATH = original_credentials_path
 
 
 class TestCloudURL(unittest.TestCase):
@@ -184,11 +208,8 @@ class TestCloudURLIntegration(unittest.TestCase):
 class TestCloudURLWithAuthLogin(unittest.TestCase):
     """Test that cloud URL is used correctly in the auth login flow"""
 
-    @respx.mock
-    @patch("webbrowser.open")
-    def test_auth_login_uses_cloud_url_for_browser(self, mock_browser_open):
-        """Test that auth login opens browser with the correct cloud URL"""
-        # Set up mocks for the login flow
+    def setup_login_mocks(self):
+        """Set up common HTTP mocks for the login flow"""
         start_mock = respx.post("https://api.tensorlake.ai/platform/cli/login/start")
         start_mock.return_value = httpx.Response(
             200,
@@ -214,15 +235,19 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
             json={"access_token": "test_access_token"},
         )
 
-        # Test with default cloud URL
-        runner = CliRunner()
-        with runner.isolated_filesystem():
+    @respx.mock
+    @patch("webbrowser.open")
+    def test_auth_login_uses_cloud_url_for_browser(self, mock_browser_open):
+        """Test that auth login opens browser with the correct cloud URL"""
+        self.setup_login_mocks()
+
+        with mock_auth_credentials_path():
+            runner = CliRunner()
             result = runner.invoke(cli, ["auth", "login"], prog_name="tensorlake")
 
             self.assertEqual(
                 result.exit_code, 0, f"Failed with output: {result.output}"
             )
-            # Verify browser was opened with default cloud URL
             mock_browser_open.assert_called_once_with(
                 "https://cloud.tensorlake.ai/cli/login"
             )
@@ -232,42 +257,15 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
     def test_auth_login_uses_custom_cloud_url_from_env(self, mock_browser_open):
         """Test that auth login respects TENSORLAKE_CLOUD_URL environment variable"""
         custom_cloud_url = "https://staging-cloud.tensorlake.ai"
+        self.setup_login_mocks()
 
-        # Set up mocks
-        start_mock = respx.post("https://api.tensorlake.ai/platform/cli/login/start")
-        start_mock.return_value = httpx.Response(
-            200,
-            json={
-                "device_code": "test_device_code",
-                "user_code": "TEST123",
-            },
-        )
-
-        poll_mock = respx.get(
-            "https://api.tensorlake.ai/platform/cli/login/poll?device_code=test_device_code"
-        )
-        poll_mock.return_value = httpx.Response(
-            200,
-            json={"status": "approved"},
-        )
-
-        exchange_mock = respx.post(
-            "https://api.tensorlake.ai/platform/cli/login/exchange"
-        )
-        exchange_mock.return_value = httpx.Response(
-            200,
-            json={"access_token": "test_access_token"},
-        )
-
-        # Test with custom cloud URL from environment variable
-        runner = CliRunner(env={"TENSORLAKE_CLOUD_URL": custom_cloud_url})
-        with runner.isolated_filesystem():
+        with mock_auth_credentials_path():
+            runner = CliRunner(env={"TENSORLAKE_CLOUD_URL": custom_cloud_url})
             result = runner.invoke(cli, ["auth", "login"], prog_name="tensorlake")
 
             self.assertEqual(
                 result.exit_code, 0, f"Failed with output: {result.output}"
             )
-            # Verify browser was opened with custom cloud URL
             mock_browser_open.assert_called_once_with(f"{custom_cloud_url}/cli/login")
 
     @respx.mock
@@ -275,36 +273,10 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
     def test_auth_login_uses_custom_cloud_url_from_cli_flag(self, mock_browser_open):
         """Test that auth login respects --cloud-url CLI flag"""
         custom_cloud_url = "https://dev-cloud.tensorlake.ai"
+        self.setup_login_mocks()
 
-        # Set up mocks
-        start_mock = respx.post("https://api.tensorlake.ai/platform/cli/login/start")
-        start_mock.return_value = httpx.Response(
-            200,
-            json={
-                "device_code": "test_device_code",
-                "user_code": "TEST123",
-            },
-        )
-
-        poll_mock = respx.get(
-            "https://api.tensorlake.ai/platform/cli/login/poll?device_code=test_device_code"
-        )
-        poll_mock.return_value = httpx.Response(
-            200,
-            json={"status": "approved"},
-        )
-
-        exchange_mock = respx.post(
-            "https://api.tensorlake.ai/platform/cli/login/exchange"
-        )
-        exchange_mock.return_value = httpx.Response(
-            200,
-            json={"access_token": "test_access_token"},
-        )
-
-        # Test with custom cloud URL from CLI flag
-        runner = CliRunner()
-        with runner.isolated_filesystem():
+        with mock_auth_credentials_path():
+            runner = CliRunner()
             result = runner.invoke(
                 cli,
                 ["--cloud-url", custom_cloud_url, "auth", "login"],
@@ -314,7 +286,6 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
             self.assertEqual(
                 result.exit_code, 0, f"Failed with output: {result.output}"
             )
-            # Verify browser was opened with custom cloud URL from CLI flag
             mock_browser_open.assert_called_once_with(f"{custom_cloud_url}/cli/login")
 
     @respx.mock
@@ -323,40 +294,12 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
         self, mock_browser_open
     ):
         """Test that custom cloud URL is shown in error message when browser fails"""
-        # Make webbrowser.open raise a webbrowser.Error
         mock_browser_open.side_effect = webbrowser.Error("Browser open failed")
-
         custom_cloud_url = "https://custom-cloud.example.com"
+        self.setup_login_mocks()
 
-        # Set up mocks
-        start_mock = respx.post("https://api.tensorlake.ai/platform/cli/login/start")
-        start_mock.return_value = httpx.Response(
-            200,
-            json={
-                "device_code": "test_device_code",
-                "user_code": "TEST123",
-            },
-        )
-
-        poll_mock = respx.get(
-            "https://api.tensorlake.ai/platform/cli/login/poll?device_code=test_device_code"
-        )
-        poll_mock.return_value = httpx.Response(
-            200,
-            json={"status": "approved"},
-        )
-
-        exchange_mock = respx.post(
-            "https://api.tensorlake.ai/platform/cli/login/exchange"
-        )
-        exchange_mock.return_value = httpx.Response(
-            200,
-            json={"access_token": "test_access_token"},
-        )
-
-        # Test with custom cloud URL - browser fails to open
-        runner = CliRunner()
-        with runner.isolated_filesystem():
+        with mock_auth_credentials_path():
+            runner = CliRunner()
             result = runner.invoke(
                 cli,
                 ["--cloud-url", custom_cloud_url, "auth", "login"],
