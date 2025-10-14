@@ -12,6 +12,7 @@ from . import (
 
 
 @click.group(
+    cls=_common.AliasedGroup,
     epilog="""
 \b
 Authentication:

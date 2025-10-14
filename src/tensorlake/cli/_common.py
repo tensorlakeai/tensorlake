@@ -190,6 +190,57 @@ class Context:
 pass_auth = click.make_pass_decorator(Context)
 
 
+class AliasedGroup(click.Group):
+    """
+    A Click Group that supports command aliases through prefix matching.
+
+    This allows users to type abbreviated commands as long as they are unambiguous.
+    For example, 'application' can be invoked as 'app', 'request' as 'req', etc.
+
+    Example:
+        tensorlake app list  -> tensorlake application list
+        tensorlake req info  -> tensorlake request info
+        tensorlake sec set   -> tensorlake secrets set
+    """
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        """
+        Get a command by name or prefix.
+
+        First tries exact match, then falls back to prefix matching.
+        If multiple commands match the prefix, returns None (ambiguous).
+        """
+        # Try exact match first
+        rv = super().get_command(ctx, cmd_name)
+        if rv is not None:
+            return rv
+
+        # Try prefix matching
+        matches = [
+            x for x in self.list_commands(ctx)
+            if x.lower().startswith(cmd_name.lower())
+        ]
+
+        if not matches:
+            return None
+
+        if len(matches) == 1:
+            return super().get_command(ctx, matches[0])
+
+        # Multiple matches - ambiguous
+        ctx.fail(f"Ambiguous command '{cmd_name}'. Could be: {', '.join(sorted(matches))}")
+
+    def resolve_command(self, ctx: click.Context, args: list[str]) -> tuple[str, click.Command, list[str]]:
+        """
+        Resolve command name to always return the full command name, not the alias.
+
+        This ensures that when users type 'tensorlake app list', the help text
+        and error messages show 'application' instead of 'app'.
+        """
+        _, cmd, args = super().resolve_command(ctx, args)
+        return cmd.name, cmd, args
+
+
 START_LINE = "┏"
 LINE = "┃"
 END_LINE = "┗"
