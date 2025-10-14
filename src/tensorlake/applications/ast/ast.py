@@ -1,6 +1,6 @@
 from typing import Any, Dict
 
-from ..interface.futures import ReducerFunctionCall, RegularFunctionCall
+from ..interface.futures import FunctionCallFuture, ReduceOperationFuture
 from ..user_data_serializer import UserDataSerializer
 from .ast_node import ASTNode
 
@@ -21,9 +21,9 @@ def ast_from_user_object(
     from .reducer_call_node import ReducerFunctionCallNode
     from .value_node import ValueNode
 
-    if isinstance(user_object, RegularFunctionCall):
+    if isinstance(user_object, FunctionCallFuture):
         return RegularFunctionCallNode.from_regular_function_call(user_object)
-    elif isinstance(user_object, ReducerFunctionCall):
+    elif isinstance(user_object, ReduceOperationFuture):
         if len(user_object.inputs) >= 2:
             return ReducerFunctionCallNode.from_reducer_function_call(user_object)
         else:

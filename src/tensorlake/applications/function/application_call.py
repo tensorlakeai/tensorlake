@@ -2,7 +2,7 @@ from typing import Any, List
 
 from ..interface.file import File
 from ..interface.function import Function
-from ..interface.futures import RegularFunctionCall
+from ..interface.futures import FunctionCallFuture
 from ..registry import get_class
 from ..user_data_serializer import UserDataSerializer
 from .type_hints import function_arg_type_hint
@@ -11,7 +11,7 @@ from .user_data_serializer import function_input_serializer
 
 def _application_function_call_with_object_payload(
     application: Function, object: Any
-) -> RegularFunctionCall:
+) -> FunctionCallFuture:
     """Creates a function call for the application function with the provided payload.
 
     This is used for application function calls done using SDK.
@@ -31,7 +31,7 @@ def _application_function_call_with_object_payload(
 
 def application_function_call_with_serialized_payload(
     application: Function, payload: bytes, payload_content_type: str
-) -> RegularFunctionCall:
+) -> FunctionCallFuture:
     """Creates a function call for the API function with the provided serialized payload.
 
     This is used for API function calls done over HTTP.
@@ -73,3 +73,23 @@ def serialize_application_call_payload(
             input_serializer.serialize(payload),
             input_serializer.content_type,
         )
+
+
+def deserialize_application_call_output(
+    serialized_output: bytes,
+    serialized_output_content_type: str,
+    return_type_hints: List[Any],
+    output_serializer: UserDataSerializer,
+) -> Any | File:
+    """Deserializes the application function call output using the application function return type hints."""
+    is_file_output: bool = False
+    for type_hint in return_type_hints:
+        if type_hint is File:
+            is_file_output = True
+
+    if is_file_output:
+        return File(
+            content=serialized_output, content_type=serialized_output_content_type
+        )
+    else:
+        return output_serializer.deserialize(serialized_output, return_type_hints)

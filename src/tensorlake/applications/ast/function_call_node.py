@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 from ..function.user_data_serializer import function_input_serializer
 from ..interface.function import Function
-from ..interface.futures import Collection, RegularFunctionCall
+from ..interface.futures import CollectionFuture, FunctionCallFuture
 from ..registry import get_function
 from ..user_data_serializer import UserDataSerializer
 from .ast import ast_from_user_object
@@ -47,7 +47,7 @@ class RegularFunctionCallNode(ASTNode):
     def metadata(self) -> RegularFunctionCallMetadata:
         return self._metadata
 
-    def to_regular_function_call(self) -> RegularFunctionCall:
+    def to_regular_function_call(self) -> FunctionCallFuture:
         """Converts the AST node back to its original RegularFunctionCall.
 
         All children must be value nodes (they must already be resolved/finished).
@@ -85,7 +85,7 @@ class RegularFunctionCallNode(ASTNode):
         process_arguments(self.metadata.args)
         process_arguments(self.metadata.kwargs)
 
-        return RegularFunctionCall(
+        return FunctionCallFuture(
             function_name=self.function_name,
             args=args,
             kwargs=kwargs,
@@ -94,7 +94,7 @@ class RegularFunctionCallNode(ASTNode):
 
     @classmethod
     def from_regular_function_call(
-        cls, function_call: RegularFunctionCall
+        cls, function_call: FunctionCallFuture
     ) -> "RegularFunctionCallNode":
         function: Function = get_function(function_call._function_name)
         inputs_serializer: UserDataSerializer = function_input_serializer(function)
@@ -114,7 +114,7 @@ class RegularFunctionCallNode(ASTNode):
                 else enumerate(arguments)
             ):
                 arg_metadata: ArgumentMetadata
-                if isinstance(value, Collection):
+                if isinstance(value, CollectionFuture):
                     collection_items_node_ids: List[str] = []
                     for item in value.items:
                         item_node: ASTNode = ast_from_user_object(
