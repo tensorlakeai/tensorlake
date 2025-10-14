@@ -242,8 +242,8 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
         self.setup_login_mocks()
 
         with mock_auth_credentials_path():
-            # Explicitly set INDEXIFY_URL to ensure test doesn't inherit from CI environment
-            runner = CliRunner(env={"INDEXIFY_URL": "https://api.tensorlake.ai"})
+            # Explicitly set TENSORLAKE_API_URL to ensure test doesn't inherit from CI environment
+            runner = CliRunner(env={"TENSORLAKE_API_URL": "https://api.tensorlake.ai"})
             result = runner.invoke(cli, ["auth", "login"], prog_name="tensorlake")
 
             self.assertEqual(
@@ -261,10 +261,10 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
         self.setup_login_mocks()
 
         with mock_auth_credentials_path():
-            # Set both INDEXIFY_URL and TENSORLAKE_CLOUD_URL to control the test environment
+            # Set both TENSORLAKE_API_URL and TENSORLAKE_CLOUD_URL to control the test environment
             runner = CliRunner(
                 env={
-                    "INDEXIFY_URL": "https://api.tensorlake.ai",
+                    "TENSORLAKE_API_URL": "https://api.tensorlake.ai",
                     "TENSORLAKE_CLOUD_URL": custom_cloud_url,
                 }
             )
@@ -283,8 +283,8 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
         self.setup_login_mocks()
 
         with mock_auth_credentials_path():
-            # Explicitly set INDEXIFY_URL to ensure test doesn't inherit from CI environment
-            runner = CliRunner(env={"INDEXIFY_URL": "https://api.tensorlake.ai"})
+            # Explicitly set TENSORLAKE_API_URL to ensure test doesn't inherit from CI environment
+            runner = CliRunner(env={"TENSORLAKE_API_URL": "https://api.tensorlake.ai"})
             result = runner.invoke(
                 cli,
                 ["--cloud-url", custom_cloud_url, "auth", "login"],
@@ -307,8 +307,8 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
         self.setup_login_mocks()
 
         with mock_auth_credentials_path():
-            # Explicitly set INDEXIFY_URL to ensure test doesn't inherit from CI environment
-            runner = CliRunner(env={"INDEXIFY_URL": "https://api.tensorlake.ai"})
+            # Explicitly set TENSORLAKE_API_URL to ensure test doesn't inherit from CI environment
+            runner = CliRunner(env={"TENSORLAKE_API_URL": "https://api.tensorlake.ai"})
             result = runner.invoke(
                 cli,
                 ["--cloud-url", custom_cloud_url, "auth", "login"],

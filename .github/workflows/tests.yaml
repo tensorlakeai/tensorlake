@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 env:
-  INDEXIFY_URL: http://localhost:8900
+  TENSORLAKE_API_URL: http://localhost:8900
 
 jobs:
   run_tests:
@@ -122,5 +122,5 @@ jobs:
 
       - name: Run tests
         env:
-          INDEXIFY_URL: http://127.0.0.1:8900
+          TENSORLAKE_API_URL: http://127.0.0.1:8900
         run: make test

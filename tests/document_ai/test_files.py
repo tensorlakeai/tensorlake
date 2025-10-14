@@ -6,9 +6,9 @@ from tensorlake.documentai import DocumentAI
 
 class TestFiles(unittest.TestCase):
     def setUp(self):
-        server_url = os.getenv("INDEXIFY_URL")
+        server_url = os.getenv("TENSORLAKE_API_URL")
         self.assertIsNotNone(
-            server_url, "INDEXIFY_URL environment variable is not set."
+            server_url, "TENSORLAKE_API_URL environment variable is not set."
         )
 
         api_key = os.getenv("TENSORLAKE_API_KEY")

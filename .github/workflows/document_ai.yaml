@@ -53,7 +53,7 @@ jobs:
       - name: Run Document AI tests
         run: make test_document_ai
         env:
-          INDEXIFY_URL: ${{ secrets.INDEXIFY_URL }}
+          TENSORLAKE_API_URL: ${{ secrets.TENSORLAKE_API_URL }}
           TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
 
   test_document_ai_main:
@@ -84,5 +84,5 @@ jobs:
       - name: Run Document AI tests
         run: make test_document_ai
         env:
-          INDEXIFY_URL: ${{ secrets.INDEXIFY_URL }}
+          TENSORLAKE_API_URL: ${{ secrets.TENSORLAKE_API_URL }}
           TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
