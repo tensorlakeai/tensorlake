@@ -11,30 +11,30 @@ from click.testing import CliRunner
 
 from tensorlake.cli import cli
 from tensorlake.cli._common import Context
-from tensorlake.cli.config import save_config
+from tensorlake.cli._configuration import save_config
 
 
 @contextmanager
 def mock_auth_credentials_path():
-    """Context manager to temporarily override auth module's credentials path with a temp directory"""
+    """Context manager to temporarily override _configuration module's credentials path with a temp directory"""
     with tempfile.TemporaryDirectory() as tmpdir:
         config_dir = Path(tmpdir) / ".config" / "tensorlake"
         config_dir.mkdir(parents=True)
-        credentials_path = config_dir / "credentials.json"
+        credentials_path = config_dir / "credentials.toml"
 
-        import tensorlake.cli.auth as auth_module
+        import tensorlake.cli._configuration as config_module
 
-        original_config_dir = auth_module.CONFIG_DIR
-        original_credentials_path = auth_module.CREDENTIALS_PATH
+        original_config_dir = config_module.CONFIG_DIR
+        original_credentials_path = config_module.CREDENTIALS_PATH
 
         try:
-            auth_module.CONFIG_DIR = config_dir
-            auth_module.CREDENTIALS_PATH = credentials_path
+            config_module.CONFIG_DIR = config_dir
+            config_module.CREDENTIALS_PATH = credentials_path
             yield
         finally:
             # Restore original values
-            auth_module.CONFIG_DIR = original_config_dir
-            auth_module.CREDENTIALS_PATH = original_credentials_path
+            config_module.CONFIG_DIR = original_config_dir
+            config_module.CREDENTIALS_PATH = original_credentials_path
 
 
 class TestCloudURL(unittest.TestCase):
@@ -89,7 +89,7 @@ class TestCloudURL(unittest.TestCase):
             config_file = config_dir / ".tensorlake_config"
 
             # Mock the config directory
-            import tensorlake.cli.config as config_module
+            import tensorlake.cli._configuration as config_module
 
             original_config_dir = config_module.CONFIG_DIR
             original_config_file = config_module.CONFIG_FILE
@@ -119,7 +119,7 @@ class TestCloudURL(unittest.TestCase):
             config_dir.mkdir(parents=True)
             config_file = config_dir / ".tensorlake_config"
 
-            import tensorlake.cli.config as config_module
+            import tensorlake.cli._configuration as config_module
 
             original_config_dir = config_module.CONFIG_DIR
             original_config_file = config_module.CONFIG_FILE
