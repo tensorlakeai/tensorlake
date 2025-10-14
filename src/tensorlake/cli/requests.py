@@ -23,12 +23,7 @@ def request():
     pass
 
 
-@request.command(
-    epilog="""
-\b
-Use 'tensorlake config set default.application <name>' to set a default application name.
-"""
-)
+@request.command()
 @pass_auth
 @click.option(
     "--verbose", "-v", is_flag=True, help="Include all application information"
@@ -83,17 +78,7 @@ def list(ctx: Context, verbose: bool, use_json: bool, application_name: str):
     print(table)
 
 
-@request.command(
-    epilog="""
-\b
-Arguments:
-  tensorlake request info <request-id>              # Uses default application
-  tensorlake request info <application-name> <request-id> # Explicit application name
-\b
-Use 'tensorlake config set default.application <name>' to set a default application name.
-Use 'tensorlake config set default.request <id>' to set a default request ID.
-"""
-)
+@request.command()
 @click.option(
     "--json",
     "use_json",
@@ -111,7 +96,11 @@ def info(
     args: tuple,
 ):
     """
-    Info about a request
+    Info about a request.
+    
+    Arguments:
+      tensorlake request info <request-id>              # Uses default application
+      tensorlake request info <application-name> <request-id> # Explicit application name
     """
     (application_name, request_id) = parse_args(ctx, args)
 
@@ -162,17 +151,7 @@ def info(
             print(allocations_table)
 
 
-@request.command(
-    epilog="""
-\b
-Arguments:
-  tensorlake request info <request-id>              # Uses default application
-  tensorlake request info <application-name> <request-id> # Explicit application name
-\b
-Use 'tensorlake config set default.application <name>' to set a default application name.
-Use 'tensorlake config set default.request <id>' to set a default request ID.
-"""
-)
+@request.command()
 @click.option(
     "--format",
     "-F",
@@ -184,7 +163,11 @@ Use 'tensorlake config set default.request <id>' to set a default request ID.
 @pass_auth
 def logs(ctx: Context, format: str, args: tuple):
     """
-    View logs for a remote request
+    View logs for a remote request.
+    
+    Arguments:
+      tensorlake request logs <request-id>              # Uses default application
+      tensorlake request logs <application-name> <request-id> # Explicit application name
     """
     (application_name, request) = parse_args(ctx, args)
 

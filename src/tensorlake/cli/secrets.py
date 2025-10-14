@@ -27,12 +27,12 @@ def list(ctx: Context):
 
     if not ctx.organization_id:
         raise click.UsageError(
-            "No organization provided or default organization configured. Please configure a default organization with 'tensorlake config init'.",
+            "No organization provided or default organization configured.",
         )
 
     if not ctx.project_id:
         raise click.UsageError(
-            "No project provided or default project configured. Please configure a default project with 'tensorlake config init'."
+            "No project provided or default project configured."
         )
 
     secrets = _get_all_existing_secrets(ctx)

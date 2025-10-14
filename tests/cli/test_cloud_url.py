@@ -156,8 +156,6 @@ class TestCloudURL(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0)
         self.assertIn("--cloud-url", result.output)
-        self.assertIn("tensorlake.cloud_url", result.output)
-        self.assertIn("https://cloud.tensorlake.ai", result.output)
 
     def test_env_variable_name_in_help(self):
         """Test that TENSORLAKE_CLOUD_URL environment variable is shown in help"""

@@ -4,7 +4,6 @@ from . import (
     _common,
     applications,
     auth,
-    config,
     deploy,
     parse,
     requests,
@@ -14,17 +13,6 @@ from . import (
 
 @click.group(
     epilog="""
-\b
-Use 'tensorlake config' to manage settings:
-  tensorlake.apikey     - API key for authentication
-  tensorlake.api_url    - API server URL (default: 'https://api.tensorlake.ai')
-  tensorlake.cloud_url  - Cloud URL (default: 'https://cloud.tensorlake.ai')
-  indexify.namespace    - Namespace (default: 'default')
-  default.application   - Default application name for commands
-  default.request       - Default request ID for request info
-  default.project       - Default project ID for requests and deployments
-  default.organization  - Default organization ID for requests and deployments
-
 \b
 Authentication:
   Use --api-key or TENSORLAKE_API_KEY for API key authentication
@@ -87,7 +75,6 @@ def cli(
 
 cli.add_command(auth.login)
 cli.add_command(auth.whoami)
-cli.add_command(config.config)
 cli.add_command(deploy.deploy)
 cli.add_command(applications.application)
 cli.add_command(requests.request)

@@ -59,12 +59,7 @@ def list(ctx: Context, verbose: bool, use_json: bool):
         print(table)
 
 
-@application.command(
-    epilog="""
-\b
-Use 'tensorlake config set default.application <name>' to set a default application name.
-"""
-)
+@application.command()
 @click.option(
     "--json",
     "-j",
@@ -111,12 +106,7 @@ def info(ctx: Context, json: bool, application_name: str):
     print(table)
 
 
-@application.command(
-    epilog="""
-\b
-Use 'tensorlake config set default.application <name>' to set a default application name.
-"""
-)
+@application.command()
 @click.option("--json", "-j", is_flag=True, help="Format output as JSON")
 @click.option(
     "--function",

@@ -136,6 +136,3 @@ def login(ctx: Context):
     access_token = exchange_response_body["access_token"]
     save_credentials(ctx.base_url, access_token)
     click.echo("Login successful!")
-    click.echo(
-        "Next, run `tensorlake config init` if you want to configure your CLI experience."
-    )
