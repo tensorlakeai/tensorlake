@@ -176,9 +176,9 @@ class TestLocalConfigPriority(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = original_local_config
 
     def test_priority_order_complete(self):
-        """Test complete priority order: CLI > env > local > global > default"""
+        """Test priority order: CLI > local config > None (global config NOT used for org/project)"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Setup global config
+            # Setup global config (should NOT be used for org/project IDs)
             global_config_dir = Path(tmpdir) / ".config" / "tensorlake"
             global_config_dir.mkdir(parents=True)
             global_config_file = global_config_dir / ".tensorlake_config"
@@ -204,20 +204,23 @@ class TestLocalConfigPriority(unittest.TestCase):
                 config_module.CONFIG_FILE = global_config_file
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
-                # Test 1: Only global config
+                # Test 1: Without local config, org/project are None (not from global)
                 local_config_path.unlink()  # Remove local
                 ctx = Context.default()
-                self.assertEqual(ctx.organization_id, "global_org")
+                self.assertIsNone(ctx.organization_id)
+                self.assertIsNone(ctx.project_id)
 
-                # Test 2: Local overrides global
+                # Test 2: Local config provides org/project
                 with open(local_config_path, "w") as f:
                     f.write(dumps(local_config_data))
                 ctx = Context.default()
                 self.assertEqual(ctx.organization_id, "local_org")
+                self.assertEqual(ctx.project_id, "local_proj")
 
-                # Test 3: CLI overrides local
-                ctx = Context.default(organization_id="cli_org")
+                # Test 3: CLI args override local config
+                ctx = Context.default(organization_id="cli_org", project_id="cli_proj")
                 self.assertEqual(ctx.organization_id, "cli_org")
+                self.assertEqual(ctx.project_id, "cli_proj")
             finally:
                 config_module.CONFIG_DIR = original_config_dir
                 config_module.CONFIG_FILE = original_config_file

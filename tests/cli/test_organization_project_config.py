@@ -6,7 +6,6 @@ from click.testing import CliRunner
 
 from tensorlake.cli import cli
 from tensorlake.cli._common import Context
-from tensorlake.cli._configuration import save_config
 
 
 class TestOrganizationIDConfiguration(unittest.TestCase):
@@ -36,74 +35,61 @@ class TestOrganizationIDConfiguration(unittest.TestCase):
             f"CLI failed with output: {result.output}",
         )
 
-    def test_organization_id_from_config_file(self):
-        """Test organization ID override via config file (default.organization)"""
+    def test_organization_id_from_local_config_file(self):
+        """Test organization ID loaded from local .tensorlake.toml file"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_dir = Path(tmpdir) / ".config" / "tensorlake"
-            config_dir.mkdir(parents=True)
-            config_file = config_dir / ".tensorlake_config"
+            local_config_path = Path(tmpdir) / ".tensorlake.toml"
 
-            # Mock the config directory
             import tensorlake.cli._configuration as config_module
+            from tensorlake.cli._configuration import save_local_config
 
-            original_config_dir = config_module.CONFIG_DIR
-            original_config_file = config_module.CONFIG_FILE
+            original_local_config = config_module.LOCAL_CONFIG_FILE
 
             try:
-                config_module.CONFIG_DIR = config_dir
-                config_module.CONFIG_FILE = config_file
+                config_module.LOCAL_CONFIG_FILE = local_config_path
 
-                # Save config with custom organization ID
-                config_data = {
-                    "default": {"organization": "config_org_789"}
-                }
-                save_config(config_data)
+                # Save local config with custom organization ID
+                config_data = {"organization": "local_org_789"}
+                save_local_config(config_data)
 
                 # Load context and verify
                 ctx = Context.default()
-                self.assertEqual(ctx.default_organization, "config_org_789")
-                self.assertEqual(ctx.organization_id, "config_org_789")
+                self.assertEqual(ctx.default_organization, "local_org_789")
+                self.assertEqual(ctx.organization_id, "local_org_789")
             finally:
                 # Restore original values
-                config_module.CONFIG_DIR = original_config_dir
-                config_module.CONFIG_FILE = original_config_file
+                config_module.LOCAL_CONFIG_FILE = original_local_config
 
     def test_organization_id_priority_order(self):
-        """Test that organization ID priority order is: CLI/Env > Config > None"""
+        """Test that organization ID priority order is: CLI/Env > Local Config > None"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_dir = Path(tmpdir) / ".config" / "tensorlake"
-            config_dir.mkdir(parents=True)
-            config_file = config_dir / ".tensorlake_config"
+            local_config_path = Path(tmpdir) / ".tensorlake.toml"
 
             import tensorlake.cli._configuration as config_module
+            from tensorlake.cli._configuration import save_local_config
 
-            original_config_dir = config_module.CONFIG_DIR
-            original_config_file = config_module.CONFIG_FILE
+            original_local_config = config_module.LOCAL_CONFIG_FILE
 
             try:
-                config_module.CONFIG_DIR = config_dir
-                config_module.CONFIG_FILE = config_file
+                config_module.LOCAL_CONFIG_FILE = local_config_path
 
-                # Save config with custom organization ID
-                config_data = {
-                    "default": {"organization": "config_org_abc"}
-                }
-                save_config(config_data)
+                # Save local config with custom organization ID
+                config_data = {"organization": "local_org_abc"}
+                save_local_config(config_data)
 
-                # Test 1: Config overrides default (None)
+                # Test 1: Local config overrides default (None)
                 ctx = Context.default()
-                self.assertEqual(ctx.organization_id, "config_org_abc")
+                self.assertEqual(ctx.organization_id, "local_org_abc")
 
-                # Test 2: CLI/env parameter overrides config
+                # Test 2: CLI/env parameter overrides local config
                 ctx = Context.default(organization_id="cli_org_xyz")
                 self.assertEqual(ctx.organization_id, "cli_org_xyz")
 
-                # Test 3: Explicit None falls back to config
+                # Test 3: Explicit None falls back to local config
                 ctx = Context.default(organization_id=None)
-                self.assertEqual(ctx.organization_id, "config_org_abc")
+                self.assertEqual(ctx.organization_id, "local_org_abc")
             finally:
-                config_module.CONFIG_DIR = original_config_dir
-                config_module.CONFIG_FILE = original_config_file
+                config_module.LOCAL_CONFIG_FILE = original_local_config
 
     def test_organization_flag_in_help_text(self):
         """Test that organization flag is documented in help text"""
@@ -142,74 +128,61 @@ class TestProjectIDConfiguration(unittest.TestCase):
             f"CLI failed with output: {result.output}",
         )
 
-    def test_project_id_from_config_file(self):
-        """Test project ID override via config file (default.project)"""
+    def test_project_id_from_local_config_file(self):
+        """Test project ID loaded from local .tensorlake.toml file"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_dir = Path(tmpdir) / ".config" / "tensorlake"
-            config_dir.mkdir(parents=True)
-            config_file = config_dir / ".tensorlake_config"
+            local_config_path = Path(tmpdir) / ".tensorlake.toml"
 
-            # Mock the config directory
             import tensorlake.cli._configuration as config_module
+            from tensorlake.cli._configuration import save_local_config
 
-            original_config_dir = config_module.CONFIG_DIR
-            original_config_file = config_module.CONFIG_FILE
+            original_local_config = config_module.LOCAL_CONFIG_FILE
 
             try:
-                config_module.CONFIG_DIR = config_dir
-                config_module.CONFIG_FILE = config_file
+                config_module.LOCAL_CONFIG_FILE = local_config_path
 
-                # Save config with custom project ID
-                config_data = {
-                    "default": {"project": "config_proj_789"}
-                }
-                save_config(config_data)
+                # Save local config with custom project ID
+                config_data = {"project": "local_proj_789"}
+                save_local_config(config_data)
 
                 # Load context and verify
                 ctx = Context.default()
-                self.assertEqual(ctx.default_project, "config_proj_789")
-                self.assertEqual(ctx.project_id, "config_proj_789")
+                self.assertEqual(ctx.default_project, "local_proj_789")
+                self.assertEqual(ctx.project_id, "local_proj_789")
             finally:
                 # Restore original values
-                config_module.CONFIG_DIR = original_config_dir
-                config_module.CONFIG_FILE = original_config_file
+                config_module.LOCAL_CONFIG_FILE = original_local_config
 
     def test_project_id_priority_order(self):
-        """Test that project ID priority order is: CLI/Env > Config > None"""
+        """Test that project ID priority order is: CLI/Env > Local Config > None"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_dir = Path(tmpdir) / ".config" / "tensorlake"
-            config_dir.mkdir(parents=True)
-            config_file = config_dir / ".tensorlake_config"
+            local_config_path = Path(tmpdir) / ".tensorlake.toml"
 
             import tensorlake.cli._configuration as config_module
+            from tensorlake.cli._configuration import save_local_config
 
-            original_config_dir = config_module.CONFIG_DIR
-            original_config_file = config_module.CONFIG_FILE
+            original_local_config = config_module.LOCAL_CONFIG_FILE
 
             try:
-                config_module.CONFIG_DIR = config_dir
-                config_module.CONFIG_FILE = config_file
+                config_module.LOCAL_CONFIG_FILE = local_config_path
 
-                # Save config with custom project ID
-                config_data = {
-                    "default": {"project": "config_proj_abc"}
-                }
-                save_config(config_data)
+                # Save local config with custom project ID
+                config_data = {"project": "local_proj_abc"}
+                save_local_config(config_data)
 
-                # Test 1: Config overrides default (None)
+                # Test 1: Local config overrides default (None)
                 ctx = Context.default()
-                self.assertEqual(ctx.project_id, "config_proj_abc")
+                self.assertEqual(ctx.project_id, "local_proj_abc")
 
-                # Test 2: CLI/env parameter overrides config
+                # Test 2: CLI/env parameter overrides local config
                 ctx = Context.default(project_id="cli_proj_xyz")
                 self.assertEqual(ctx.project_id, "cli_proj_xyz")
 
-                # Test 3: Explicit None falls back to config
+                # Test 3: Explicit None falls back to local config
                 ctx = Context.default(project_id=None)
-                self.assertEqual(ctx.project_id, "config_proj_abc")
+                self.assertEqual(ctx.project_id, "local_proj_abc")
             finally:
-                config_module.CONFIG_DIR = original_config_dir
-                config_module.CONFIG_FILE = original_config_file
+                config_module.LOCAL_CONFIG_FILE = original_local_config
 
     def test_project_flag_in_help_text(self):
         """Test that project flag is documented in help text"""
@@ -233,68 +206,56 @@ class TestOrganizationAndProjectIDTogether(unittest.TestCase):
         self.assertEqual(ctx.organization_id, "org_123")
         self.assertEqual(ctx.project_id, "proj_456")
 
-    def test_both_ids_from_config_file(self):
-        """Test both organization and project IDs via config file"""
+    def test_both_ids_from_local_config_file(self):
+        """Test both organization and project IDs via local config file"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_dir = Path(tmpdir) / ".config" / "tensorlake"
-            config_dir.mkdir(parents=True)
-            config_file = config_dir / ".tensorlake_config"
+            local_config_path = Path(tmpdir) / ".tensorlake.toml"
 
             import tensorlake.cli._configuration as config_module
+            from tensorlake.cli._configuration import save_local_config
 
-            original_config_dir = config_module.CONFIG_DIR
-            original_config_file = config_module.CONFIG_FILE
+            original_local_config = config_module.LOCAL_CONFIG_FILE
 
             try:
-                config_module.CONFIG_DIR = config_dir
-                config_module.CONFIG_FILE = config_file
+                config_module.LOCAL_CONFIG_FILE = local_config_path
 
-                # Save config with both IDs
+                # Save local config with both IDs
                 config_data = {
-                    "default": {
-                        "organization": "config_org_111",
-                        "project": "config_proj_222"
-                    }
+                    "organization": "local_org_111",
+                    "project": "local_proj_222"
                 }
-                save_config(config_data)
+                save_local_config(config_data)
 
                 # Load context and verify
                 ctx = Context.default()
-                self.assertEqual(ctx.organization_id, "config_org_111")
-                self.assertEqual(ctx.project_id, "config_proj_222")
+                self.assertEqual(ctx.organization_id, "local_org_111")
+                self.assertEqual(ctx.project_id, "local_proj_222")
             finally:
-                config_module.CONFIG_DIR = original_config_dir
-                config_module.CONFIG_FILE = original_config_file
+                config_module.LOCAL_CONFIG_FILE = original_local_config
 
     def test_mixed_sources_for_ids(self):
-        """Test organization from CLI and project from config file"""
+        """Test organization from CLI and project from local config file"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_dir = Path(tmpdir) / ".config" / "tensorlake"
-            config_dir.mkdir(parents=True)
-            config_file = config_dir / ".tensorlake_config"
+            local_config_path = Path(tmpdir) / ".tensorlake.toml"
 
             import tensorlake.cli._configuration as config_module
+            from tensorlake.cli._configuration import save_local_config
 
-            original_config_dir = config_module.CONFIG_DIR
-            original_config_file = config_module.CONFIG_FILE
+            original_local_config = config_module.LOCAL_CONFIG_FILE
 
             try:
-                config_module.CONFIG_DIR = config_dir
-                config_module.CONFIG_FILE = config_file
+                config_module.LOCAL_CONFIG_FILE = local_config_path
 
-                # Save config with project ID only
-                config_data = {
-                    "default": {"project": "config_proj_999"}
-                }
-                save_config(config_data)
+                # Save local config with project ID only
+                config_data = {"project": "local_proj_999"}
+                save_local_config(config_data)
 
-                # Provide organization via CLI, project from config
+                # Provide organization via CLI, project from local config
                 ctx = Context.default(organization_id="cli_org_888")
                 self.assertEqual(ctx.organization_id, "cli_org_888")
-                self.assertEqual(ctx.project_id, "config_proj_999")
+                self.assertEqual(ctx.project_id, "local_proj_999")
             finally:
-                config_module.CONFIG_DIR = original_config_dir
-                config_module.CONFIG_FILE = original_config_file
+                config_module.LOCAL_CONFIG_FILE = original_local_config
 
     def test_cli_runner_with_both_flags(self):
         """Test CLI runner accepts both --organization and --project flags"""
