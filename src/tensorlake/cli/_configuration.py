@@ -52,15 +52,20 @@ def save_credentials(base_url: str, token: str):
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-    with open(CREDENTIALS_PATH, "w+", encoding="utf-8") as f:
-        try:
+    # Read existing credentials first if file exists
+    if CREDENTIALS_PATH.exists():
+        with open(CREDENTIALS_PATH, "r", encoding="utf-8") as f:
             config = parse(f.read())
-        except FileNotFoundError:
-            config = document()
+    else:
+        config = document()
 
-        section = table()
-        section["token"] = token
-        config[base_url] = section
+    # Update config with new endpoint credentials
+    section = table()
+    section["token"] = token
+    config[base_url] = section
+
+    # Write updated config back to file
+    with open(CREDENTIALS_PATH, "w", encoding="utf-8") as f:
         f.write(dumps(config))
 
     os.chmod(CREDENTIALS_PATH, 0o600)
