@@ -1,6 +1,6 @@
 from typing import Any
 
-from ..interface.futures import RegularFunctionCall
+from ..interface.futures import FunctionCallFuture
 from ..registry import get_class
 
 
@@ -13,5 +13,5 @@ def create_self_instance(class_name: str) -> Any:
     return instance
 
 
-def set_self_arg(function_call: RegularFunctionCall, self_instance: Any) -> None:
+def set_self_arg(function_call: FunctionCallFuture, self_instance: Any) -> None:
     function_call._args.insert(0, self_instance)
