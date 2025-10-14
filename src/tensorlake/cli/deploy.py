@@ -54,7 +54,7 @@ def deploy(
     except Exception as e:
         click.echo(
             f"Failed to load the application file, please check the error message: {e}",
-            err=True
+            err=True,
         )
         traceback.print_exception(e)
         raise click.Abort
@@ -120,7 +120,8 @@ def _deploy_applications(
         )
     except Exception as e:
         click.echo(
-            f"Applications could not be deployed, please check the error message: {e}", err=True
+            f"Applications could not be deployed, please check the error message: {e}",
+            err=True,
         )
         traceback.print_exception(e)
         raise click.Abort
@@ -132,32 +133,42 @@ def _deploy_applications(
 
         # Get parameter type from function signature
         import inspect
+
         sig = inspect.signature(application.original_function)
         first_param = next(iter(sig.parameters.values()), None)
 
         if first_param and first_param.annotation != inspect.Parameter.empty:
             param_annotation = first_param.annotation
 
-            if hasattr(param_annotation, 'model_json_schema') or hasattr(param_annotation, 'schema'):
-                schema = getattr(param_annotation, 'model_json_schema', lambda: None)() or getattr(param_annotation, 'schema', lambda: {})()
-                properties = schema.get('properties', {})
+            if hasattr(param_annotation, "model_json_schema") or hasattr(
+                param_annotation, "schema"
+            ):
+                schema = (
+                    getattr(param_annotation, "model_json_schema", lambda: None)()
+                    or getattr(param_annotation, "schema", lambda: {})()
+                )
+                properties = schema.get("properties", {})
                 field_examples = []
 
                 for field_name, field_schema in properties.items():
                     # Handle different schema formats
-                    if 'type' in field_schema:
-                        field_type_name = field_schema['type']
-                    elif 'anyOf' in field_schema:
+                    if "type" in field_schema:
+                        field_type_name = field_schema["type"]
+                    elif "anyOf" in field_schema:
                         # Show all types in the union
-                        types = [item.get('type') for item in field_schema['anyOf'] if item.get('type')]
-                        field_type_name = ' | '.join(types) if types else 'value'
+                        types = [
+                            item.get("type")
+                            for item in field_schema["anyOf"]
+                            if item.get("type")
+                        ]
+                        field_type_name = " | ".join(types) if types else "value"
                     else:
-                        field_type_name = 'value'
+                        field_type_name = "value"
                     field_examples.append(f'"{field_name}": <{field_type_name}>')
 
-                param_type = '{' + ', '.join(field_examples) + '}'
+                param_type = "{" + ", ".join(field_examples) + "}"
             else:
-                type_name = getattr(param_annotation, '__name__', str(param_annotation))
+                type_name = getattr(param_annotation, "__name__", str(param_annotation))
                 param_type = f"<{type_name}>"
         else:
             param_type = "<value>"
