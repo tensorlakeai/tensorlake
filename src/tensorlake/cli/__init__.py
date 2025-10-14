@@ -52,6 +52,18 @@ Authentication:
     envvar="INDEXIFY_NAMESPACE",
     help="The namespace to use",
 )
+@click.option(
+    "--organization",
+    "organization_id",
+    envvar="TENSORLAKE_ORGANIZATION_ID",
+    help="The organization ID to use",
+)
+@click.option(
+    "--project",
+    "project_id",
+    envvar="TENSORLAKE_PROJECT_ID",
+    help="The project ID to use",
+)
 @click.pass_context
 def cli(
     ctx: click.Context,
@@ -60,6 +72,8 @@ def cli(
     api_key: str | None,
     personal_access_token: str | None,
     namespace: str | None,
+    organization_id: str | None,
+    project_id: str | None,
 ):
     """
     Tensorlake CLI for Tensorlake Cloud.
@@ -70,6 +84,8 @@ def cli(
         api_key=api_key,
         personal_access_token=personal_access_token,
         namespace=namespace,
+        organization_id=organization_id,
+        project_id=project_id,
     )
 
 

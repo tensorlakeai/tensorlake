@@ -126,6 +126,8 @@ class Context:
         api_key: str | None = None,
         personal_access_token: str | None = None,
         namespace: str | None = None,
+        organization_id: str | None = None,
+        project_id: str | None = None,
     ) -> "Context":
         """Create a Context with values from CLI args, environment, saved config, or defaults."""
         config_data = load_config()
@@ -163,8 +165,11 @@ class Context:
         final_default_app = get_nested_value(config_data, "default.application")
         final_default_request = get_nested_value(config_data, "default.request")
 
-        final_default_project = get_nested_value(config_data, "default.project")
-        final_default_organization = get_nested_value(
+        # Priority: CLI/env > config file > None
+        final_default_project = project_id or get_nested_value(
+            config_data, "default.project"
+        )
+        final_default_organization = organization_id or get_nested_value(
             config_data, "default.organization"
         )
 
