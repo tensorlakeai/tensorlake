@@ -131,8 +131,10 @@ class Context:
         config_data = load_config()
 
         # Use CLI/env values first, then saved config, then hardcoded defaults
+        # Check new config key first, then fall back to old key for backward compatibility
         final_base_url = (
             base_url
+            or get_nested_value(config_data, "tensorlake.api_url")
             or get_nested_value(config_data, "indexify.url")
             or "https://api.tensorlake.ai"
         )

@@ -116,8 +116,8 @@ class ImageBuilderV2Client:
         Create an instance of the ImageBuilderV2Client using environment variables.
 
         The API key is retrieved from the TENSORLAKE_API_KEY environment variable.
-        The build service URL is retrieved from the INDEXIFY_URL environment variable,
-        defaulting to "https://api.tensorlake.ai" if not set.
+        The build service URL is retrieved from the TENSORLAKE_API_URL environment variable
+        (or INDEXIFY_URL for backward compatibility), defaulting to "https://api.tensorlake.ai" if not set.
 
         The TENSORLAKE_BUILD_SERVICE environment variable can be used to specify
         a different build service URL, mainly for debugging or local testing.
@@ -126,7 +126,10 @@ class ImageBuilderV2Client:
             ImageBuilderV2Client: An instance of the ImageBuilderV2Client.
         """
         api_key = os.getenv("TENSORLAKE_API_KEY")
-        server_url = os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")
+        # Check TENSORLAKE_API_URL first, then fall back to INDEXIFY_URL for backward compatibility
+        server_url = os.getenv("TENSORLAKE_API_URL") or os.getenv(
+            "INDEXIFY_URL", "https://api.tensorlake.ai"
+        )
         build_url = os.getenv("TENSORLAKE_BUILD_SERVICE", f"{server_url}/images/v2")
         return cls(build_url, api_key)
 

@@ -17,7 +17,7 @@ from . import (
 \b
 Use 'tensorlake config' to manage settings:
   tensorlake.apikey     - API key for authentication
-  indexify.url          - Server URL (default: 'https://api.tensorlake.ai')
+  tensorlake.api_url    - API server URL (default: 'https://api.tensorlake.ai')
   tensorlake.cloud_url  - Cloud URL (default: 'https://cloud.tensorlake.ai')
   indexify.namespace    - Namespace (default: 'default')
   default.application   - Default application name for commands
@@ -36,10 +36,11 @@ Authentication:
     version=_common.VERSION, package_name="tensorlake", prog_name="tensorlake"
 )
 @click.option(
+    "--api-url",
     "--indexify-url",
     "base_url",
-    envvar="INDEXIFY_URL",
-    help="The Indexify server URL",
+    envvar=["TENSORLAKE_API_URL", "INDEXIFY_URL"],
+    help="The TensorLake API server URL",
 )
 @click.option(
     "--cloud-url",
