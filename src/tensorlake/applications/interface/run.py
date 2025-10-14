@@ -1,9 +1,5 @@
 from typing import Any
 
-from ..function.application_call import (
-    application_function_call_with_serialized_payload,
-    serialize_application_call_payload,
-)
 from ..function.user_data_serializer import function_input_serializer
 from ..local.runner import LocalRunner
 from ..registry import get_function
@@ -30,20 +26,7 @@ def run_local_application(application: Function | str, payload: Any) -> Request:
     if isinstance(application, str):
         application: Function = get_function(application)
 
-    input_serializer: UserDataSerializer = function_input_serializer(application)
-    # Serialize payload first to make local UX and remote UX as similar as possible.
-    serialized_payload: bytes
-    content_type: str
-    serialized_payload, content_type = serialize_application_call_payload(
-        input_serializer, payload
-    )
-    return LocalRunner(application=application).run(
-        application_function_call_with_serialized_payload(
-            application=application,
-            payload=serialized_payload,
-            payload_content_type=content_type,
-        )
-    )
+    return LocalRunner(app=application, app_payload=payload).run()
 
 
 # Commented out while reimplementing remote runners.

@@ -1,7 +1,7 @@
 from typing import Any
 
 from ..interface.file import File
-from ..interface.futures import new_request_scoped_id
+from ..interface.futures import request_scoped_id
 from ..user_data_serializer import UserDataSerializer, serializer_by_name
 from .ast_node import ASTNode, ASTNodeMetadata
 
@@ -60,14 +60,14 @@ class ValueNode(ASTNode):
     @classmethod
     def from_value(cls, value: Any, user_serializer: UserDataSerializer) -> "ValueNode":
         if isinstance(value, File):
-            node: ValueNode = ValueNode(id=new_request_scoped_id())
+            node: ValueNode = ValueNode(id=request_scoped_id())
             node.value = value.content
             node.metadata = ValueMetadata(
                 nid=node.id, cls=File, extra=value.content_type
             )
             return node
         else:
-            node: ValueNode = ValueNode(id=new_request_scoped_id())
+            node: ValueNode = ValueNode(id=request_scoped_id())
             node.value = value
             node.metadata = ValueMetadata(
                 nid=node.id, cls=type(value), extra=user_serializer.name

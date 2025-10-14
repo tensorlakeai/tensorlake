@@ -2,7 +2,7 @@ from typing import Any, List
 
 from ..function.user_data_serializer import function_input_serializer
 from ..interface.function import Function
-from ..interface.futures import ReducerFunctionCall
+from ..interface.futures import ReduceOperationFuture
 from ..registry import get_function
 from ..user_data_serializer import UserDataSerializer
 from .ast import ast_from_user_object
@@ -26,7 +26,7 @@ class ReducerFunctionCallNode(ASTNode):
     def reducer_function_name(self) -> str:
         return self._reducer_function_name
 
-    def to_reducer_function_call(self) -> ReducerFunctionCall:
+    def to_reducer_function_call(self) -> ReduceOperationFuture:
         """Converts the node back to its original ReducerFunctionCall.
 
         All children must be value nodes (they must already be resolved/finished).
@@ -36,7 +36,7 @@ class ReducerFunctionCallNode(ASTNode):
             input_node: ValueNode = self.children[input_node_id]
             inputs.append(input_node.value)
 
-        return ReducerFunctionCall(
+        return ReduceOperationFuture(
             id=self.id,
             reducer_function_name=self.reducer_function_name,
             inputs=inputs,
@@ -45,7 +45,7 @@ class ReducerFunctionCallNode(ASTNode):
 
     @classmethod
     def from_reducer_function_call(
-        cls, reducer_call: ReducerFunctionCall
+        cls, reducer_call: ReduceOperationFuture
     ) -> "ReducerFunctionCallNode":
         function: Function = get_function(reducer_call._function_name)
         input_serializer: UserDataSerializer = function_input_serializer(function)

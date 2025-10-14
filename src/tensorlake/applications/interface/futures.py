@@ -6,6 +6,25 @@ from tensorlake.vendor.nanoid.nanoid import generate as nanoid_generate
 from ..runtime_hooks import wait_futures
 
 
+class _FutureResultMissingType:
+    pass
+
+
+_FutureResultMissing = _FutureResultMissingType()
+
+
+def request_scoped_id() -> str:
+    """Generates a unique ID scoped to a single request.
+
+    This ID is used to identify function calls, futures and values (data payloads)
+    within a single request.
+    """
+    # We need full sized nanoid here because we can run a request
+    # for months and we don't want to ever collide these IDs between
+    # function calls of the same request.
+    return nanoid_generate()
+
+
 class Future:
     """An object representing an ongoing computation in a Tensorlake Application.
 
@@ -14,6 +33,20 @@ class Future:
     between Tensorlake Functions because it's used as function arguments
     and return values.
     """
+
+    def __init__(self, id: str, start_delay: float | None):
+        self._id: str = id
+        self._start_delay: float | None = start_delay
+        self._result: Any | _FutureResultMissingType = _FutureResultMissing
+        self._exception: BaseException | None = None
+
+    @property
+    def id(self) -> str:
+        return self._id
+
+    @property
+    def start_delay(self) -> float | None:
+        return self._start_delay
 
     def __await__(self):
         """Returns the result of the future when awaited, blocking until it is available.
@@ -29,7 +62,16 @@ class Future:
         If timeout is not None and the result does not become available within timeout seconds,
         a TimeoutError is raised.
         """
-        return wait_futures([self], is_async=False, timeout=timeout)
+        if self._result is _FutureResultMissing and self._exception is None:
+            try:
+                self._result = wait_futures([self], is_async=False, timeout=timeout)[0]
+            except BaseException as ex:
+                self._exception = ex
+
+        if self._exception is None:
+            return self._result
+        else:
+            raise self._exception
 
     @classmethod
     def gather(cls, items: Iterable[Any | "Future"]) -> "Future":
@@ -39,52 +81,19 @@ class Future:
         """
         # The futures in the items collection should be started already.
         # So we don't have to start them here.
-        return Collection(id=new_request_scoped_id(), items=list(items))
-
-
-def new_request_scoped_id() -> str:
-    """Generates a unique ID scoped to a single request.
-
-    This ID is used to identify function calls, futures and values (data payloads)
-    within a single request.
-    """
-    # We need full sized nanoid here because we can run a request
-    # for months and we don't want to ever collide these IDs between
-    # function calls of the same request.
-    return nanoid_generate()
-
-
-class FunctionCall(Future):
-    """Abstract base class for function calls."""
-
-    def __init__(self, id: str, function_name: str, start_delay: float | None):
-        self._id: str = id
-        self._function_name: str = function_name
-        self._start_delay: float | None = start_delay
-
-    @property
-    def id(self) -> str:
-        return self._id
-
-    @property
-    def function_name(self) -> str:
-        return self._function_name
-
-    @property
-    def start_delay(self) -> float | None:
-        return self._start_delay
+        return CollectionFuture(id=request_scoped_id(), items=list(items))
 
     def __reduce__(self):
-        # This helps users to see that they made a coding mistake and returned a Tensorlake Function
-        # call embedded inside some other object like a list.
+        # This helps users to see that they made a coding mistake and used a Tensorlake Future
+        # embedded inside some other object like a list.
         raise TypeError(
-            f"Attempt to pickle a Tensorlake Function Call. "
-            "Please return a single Tensorlake Function Call from your Tensorlake Function. "
-            "A Tensorlake Function Call cannot be a part of another returned object, i.e. a list."
+            f"Attempt to pickle a Tensorlake Future. "
+            "A Tensorlake Future cannot be stored inside an object "
+            "which is a function argument or returned from a function."
         )
 
 
-class RegularFunctionCall(FunctionCall):
+class FunctionCallFuture(Future):
     """Represents a regular call of a Tensorlake Function."""
 
     def __init__(
@@ -95,10 +104,15 @@ class RegularFunctionCall(FunctionCall):
         kwargs: Dict[str, Any],
         start_delay: float | None,
     ):
-        super().__init__(id=id, function_name=function_name, start_delay=start_delay)
+        super().__init__(id=id, start_delay=start_delay)
 
+        self._function_name: str = function_name
         self._args: List[Any] = args
         self._kwargs: Dict[str, Any] = kwargs
+
+    @property
+    def function_name(self) -> str:
+        return self._function_name
 
     @property
     def args(self) -> List[Any]:
@@ -110,7 +124,7 @@ class RegularFunctionCall(FunctionCall):
 
     def __repr__(self) -> str:
         return (
-            f"<Tensorlake RegularFunctionCall(\n"
+            f"<Tensorlake FunctionCallFuture(\n"
             f"  id={self._id!r},\n"
             f"  function_name={self._function_name!r},\n"
             f"  start_delay={self._start_delay!r},\n"
@@ -124,7 +138,9 @@ class RegularFunctionCall(FunctionCall):
         )
 
 
-class ReducerFunctionCall(FunctionCall):
+class ReduceOperationFuture(Future):
+    """Represents a reduce operation."""
+
     def __init__(
         self,
         id: str,
@@ -132,11 +148,14 @@ class ReducerFunctionCall(FunctionCall):
         inputs: List[Any | Future],
         start_delay: float | None,
     ):
-        super().__init__(
-            id=id, function_name=reducer_function_name, start_delay=start_delay
-        )
+        super().__init__(id=id, start_delay=start_delay)
+        self._function_name: str = reducer_function_name
         # Contains at least one item due to initial + SDK validation.
         self._inputs: List[Any | Future] = inputs
+
+    @property
+    def function_name(self) -> str:
+        return self._function_name
 
     @property
     def inputs(self) -> List[Any | Future]:
@@ -144,7 +163,7 @@ class ReducerFunctionCall(FunctionCall):
 
     def __repr__(self) -> str:
         return (
-            f"<Tensorlake ReducerFunctionCall(\n"
+            f"<Tensorlake ReduceOperationFuture(\n"
             f"  id={self._id!r},\n"
             f"  function_name={self._function_name!r},\n"
             f"  start_delay={self._start_delay!r},\n"
@@ -153,7 +172,7 @@ class ReducerFunctionCall(FunctionCall):
         )
 
 
-class Collection(Future):
+class CollectionFuture(Future):
     """A list of futures and values that resolves into a list of values.
 
     If an item is not a future then it's treated as a ready value.
@@ -165,12 +184,8 @@ class Collection(Future):
     """
 
     def __init__(self, id: str, items: List[Any | Future]):
-        self._id: str = id
+        super().__init__(id=id, start_delay=None)
         self._items: List[Any | Future] = items
-
-    @property
-    def id(self) -> str:
-        return self._id
 
     @property
     def items(self) -> List[Any | Future]:
@@ -198,7 +213,7 @@ class Collection(Future):
         return list(self._items)
 
     def __repr__(self) -> str:
-        return f"Tensorlake Collection(items={self._items!r})"
+        return f"Tensorlake CollectionFuture(items={self._items!r})"
 
     def __reduce__(self):
         # This helps users to see that they made a coding mistake and returned a Tensorlake Collection

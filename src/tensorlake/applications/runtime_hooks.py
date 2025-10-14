@@ -5,6 +5,7 @@ from typing import Any, Callable, List, TypeVar
 # Type vars to make it clear what we expect without importing the corresponding SDK classes.
 # This avoids circular dependencies.
 Future = TypeVar("Future")
+# Either a FunctionCallFuture or a ReduceOperationFuture
 FunctionCall = TypeVar("FunctionCall")
 
 
@@ -15,6 +16,10 @@ __wait_futures: Callable[[List[Future], bool, float | None], List[Any]] | None =
 def wait_futures(
     futures: List[Future], is_async: bool, timeout: float | None
 ) -> List[Any]:
+    """Waits for the given futures to complete and returns their results.
+
+    Raises an Exception representing the failure if any of the futures fail.
+    """
     global __wait_futures
     if __wait_futures is None:
         raise RuntimeError(
@@ -38,6 +43,7 @@ __start_function_calls: Callable[[List[FunctionCall]], None] = None
 
 
 def start_function_calls(function_calls: List[FunctionCall]) -> None:
+    """Starts the given function calls."""
     global __start_function_calls
     if __start_function_calls is None:
         raise RuntimeError(
@@ -61,6 +67,10 @@ __start_and_wait_function_calls: Callable[[List[FunctionCall]], List[Any]] = Non
 
 
 def start_and_wait_function_calls(function_calls: List[FunctionCall]) -> List[Any]:
+    """Starts the given function calls and waits for them to complete, returning their results.
+
+    Raises an Exception representing the failure if any of the function calls fail.
+    """
     global __start_and_wait_function_calls
     if __start_and_wait_function_calls is None:
         raise RuntimeError(
