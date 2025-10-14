@@ -2,16 +2,13 @@ import json
 import os
 import time
 import webbrowser
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import click
 import httpx
 
 from tensorlake.cli._common import Context, pass_auth
-
-CONFIG_DIR = Path.home() / ".config" / "tensorlake"
-CREDENTIALS_PATH = CONFIG_DIR / "credentials.json"
+from tensorlake.cli._configuration import save_credentials
 
 
 @click.group()
@@ -32,26 +29,36 @@ def auth():
 )
 @pass_auth
 def status(ctx: Context, output: str):
+    data = {
+        "endpoint": ctx.base_url,
+        "organizationId": ctx.organization_id,
+        "projectId": ctx.project_id,
+    }
+
+    if ctx.api_key_id is not None:
+        data["apiKeyId"] = ctx.api_key_id
+
+    if ctx.personal_access_token is not None:
+        replacement = "*" * len(ctx.personal_access_token[:-6])
+        data["personalAccessToken"] = replacement + ctx.personal_access_token[-6:]
+
     if output == "json":
-        print(
-            json.dumps(
-                {
-                    "organizationId": ctx.organization_id,
-                    "projectId": ctx.project_id,
-                    "apiKeyId": ctx.api_key_id,
-                }
-            )
-        )
+        print(json.dumps(data))
         return
-    click.echo(f"Organization ID: {ctx.organization_id}")
-    click.echo(f"Project ID     : {ctx.project_id}")
-    click.echo(f"API Key ID     : {ctx.api_key_id}")
+
+    click.echo(f"Dashboard Endpoint    : {ctx.cloud_url}")
+    click.echo(f"API Endpoint          : {data['endpoint']}")
+    click.echo(f"Organization ID       : {data['organizationId']}")
+    click.echo(f"Project ID            : {data['projectId']}")
+    if data.get("apiKeyId") is not None:
+        click.echo(f"API Key ID            : {data['apiKeyId']}")
+    if data.get("personalAccessToken") is not None:
+        click.echo(f"Personal Access Token : {data['personalAccessToken']}")
 
 
 @auth.command(help="Login to TensorLake")
 @pass_auth
 def login(ctx: Context):
-
     login_start_url = f"{ctx.base_url}/platform/cli/login/start"
 
     start_response = httpx.post(login_start_url)
@@ -65,8 +72,12 @@ def login(ctx: Context):
     device_code = start_response_body["device_code"]
     user_code = start_response_body["user_code"]
 
+    click.echo("We're going to open a web browser for you to enter a one-time code.")
     click.echo(f"Your code is: {user_code}")
     click.echo("Opening web browser...")
+
+    # Give people time to read the messages above
+    time.sleep(5)
 
     verification_uri = f"{ctx.cloud_url}/cli/login"
 
@@ -74,12 +85,11 @@ def login(ctx: Context):
         webbrowser.open(verification_uri)
     except webbrowser.Error:
         click.echo(
-            "Failed to open web browser. Please open the following URL manually:"
+            "Failed to open web browser. Please open the following URL manually and enter the code:"
         )
         click.echo(verification_uri)
-        click.echo(f"Enter the code: {user_code}")
 
-    click.echo("A web browser has been opened for you to log in.")
+    click.echo("Waiting for the code to be processed...")
 
     poll_url = f"{ctx.base_url}/platform/cli/login/poll?device_code={device_code}"
 
@@ -107,10 +117,6 @@ def login(ctx: Context):
                 raise click.ClickException(f"Unknown status: {status}")
 
         if wait_time > 0:
-            click.echo(
-                f"Waiting for approval... (checking again in {wait_time} seconds)"
-            )
-
             time.sleep(wait_time)
 
         if status == "expired":
@@ -136,15 +142,8 @@ def login(ctx: Context):
     exchange_response_body = exchange_response.json()
 
     access_token = exchange_response_body["access_token"]
-    _save_credentials(access_token)
+    save_credentials(ctx.base_url, access_token)
     click.echo("Login successful!")
-
-
-def _save_credentials(token: str):
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-    config = {"token": token}
-    with open(CREDENTIALS_PATH, "w", encoding="utf-8") as f:
-        json.dump(config, f)
-
-    os.chmod(CREDENTIALS_PATH, 0o600)
+    click.echo(
+        "Next, run `tensorlake config init` if you want to configure your CLI experience."
+    )

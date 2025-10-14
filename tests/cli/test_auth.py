@@ -1,11 +1,11 @@
-import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from click.testing import CliRunner
+from tomlkit import document, dumps, table
 
-import tensorlake.cli.config as config_module
+import tensorlake.cli._configuration as config_module
 from tensorlake.cli import cli
 from tensorlake.cli._common import Context
 
@@ -29,45 +29,61 @@ class TestPATEnvironmentVariable(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir) / ".config" / "tensorlake"
             config_dir.mkdir(parents=True)
-            credentials_path = config_dir / "credentials.json"
+            credentials_path = config_dir / "credentials.toml"
 
-            # Write a PAT to the credentials file
+            # Write a PAT to the credentials file in TOML format (endpoint-scoped)
+            config = document()
+            section = table()
+            section["token"] = "file_token_67890"
+            config["https://api.tensorlake.ai"] = section
+
             with open(credentials_path, "w") as f:
-                json.dump({"token": "file_token_67890"}, f)
+                f.write(dumps(config))
 
             original_credentials_path = config_module.CREDENTIALS_PATH
+            original_config_dir = config_module.CONFIG_DIR
 
             try:
                 config_module.CREDENTIALS_PATH = credentials_path
+                config_module.CONFIG_DIR = config_dir
 
                 # PAT from parameter (simulating env var) should take priority
                 ctx = Context.default(personal_access_token=env_pat)
                 self.assertEqual(ctx.personal_access_token, env_pat)
             finally:
                 config_module.CREDENTIALS_PATH = original_credentials_path
+                config_module.CONFIG_DIR = original_config_dir
 
     def test_pat_falls_back_to_file(self):
         """Test that PAT falls back to credentials file when env var not provided"""
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir) / ".config" / "tensorlake"
             config_dir.mkdir(parents=True)
-            credentials_path = config_dir / "credentials.json"
+            credentials_path = config_dir / "credentials.toml"
 
-            # Write a PAT to the credentials file
+            # Write a PAT to the credentials file in TOML format (endpoint-scoped)
             file_pat = "file_token_67890"
+            config = document()
+            section = table()
+            section["token"] = file_pat
+            config["https://api.tensorlake.ai"] = section
+
             with open(credentials_path, "w") as f:
-                json.dump({"token": file_pat}, f)
+                f.write(dumps(config))
 
             original_credentials_path = config_module.CREDENTIALS_PATH
+            original_config_dir = config_module.CONFIG_DIR
 
             try:
                 config_module.CREDENTIALS_PATH = credentials_path
+                config_module.CONFIG_DIR = config_dir
 
                 # Without env var, should use file PAT
                 ctx = Context.default()
                 self.assertEqual(ctx.personal_access_token, file_pat)
             finally:
                 config_module.CREDENTIALS_PATH = original_credentials_path
+                config_module.CONFIG_DIR = original_config_dir
 
     def test_cli_accepts_pat_flag(self):
         """Test that CLI accepts --pat flag"""

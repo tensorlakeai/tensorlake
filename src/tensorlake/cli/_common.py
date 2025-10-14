@@ -1,10 +1,10 @@
 import importlib.metadata
 import json
 import sys
-from cmath import e
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
 import click
 import httpx
@@ -17,8 +17,11 @@ except importlib.metadata.PackageNotFoundError:
 
 
 from tensorlake.applications.remote.api_client import APIClient, LogEntry, LogsPayload
-
-from .config import get_nested_value, load_config, load_credentials_token
+from tensorlake.cli._configuration import (
+    get_nested_value,
+    load_config,
+    load_credentials,
+)
 
 
 @dataclass
@@ -48,9 +51,13 @@ class Context:
             }
             if self.personal_access_token:
                 headers["Authorization"] = f"Bearer {self.personal_access_token}"
-
-            if self.api_key:
+            elif self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
+            else:
+                raise click.UsageError(
+                    "Missing API key or personal access token. Please run `tensorlake auth login` to authenticate."
+                )
+
             self._client = httpx.Client(base_url=self.base_url, headers=headers)
         return self._client
 
@@ -71,7 +78,10 @@ class Context:
 
     @property
     def api_key_id(self):
-        return self._introspect().json().get("id")
+        if self.api_key:
+            return self._introspect().json().get("id")
+        else:
+            return None
 
     @property
     def project_id(self):
@@ -80,12 +90,6 @@ class Context:
         """
         if self.api_key:
             return self._introspect().json().get("projectId")
-
-        if not self.default_project:
-            click.echo(
-                "No default project found. Please configure a default project with 'tensorlake config init'.",
-                err=True,
-            )
 
         return self.default_project
 
@@ -97,12 +101,6 @@ class Context:
         if self.api_key:
             return self._introspect().json().get("organizationId")
 
-        if not self.default_organization:
-            click.echo(
-                "No default organization found. Please configure a default organization with 'tensorlake config init'.",
-                err=True,
-            )
-
         return self.default_organization
 
     def _introspect(self) -> httpx.Response:
@@ -110,7 +108,7 @@ class Context:
             introspect_response = self.client.post("/platform/v1/keys/introspect")
             if introspect_response.status_code == 401:
                 raise click.UsageError(
-                    "The Tensorlake API key is not valid. Please supply the API key to use, either via the TENSORLAKE_API_KEY environment variable or the --api-key command-line argument."
+                    "The Tensorlake API key is not valid. Please supply the API key with the `--api-key` flag, or run `tensorlake auth login` to authenticate you."
                 )
             if introspect_response.status_code == 404:
                 raise click.ClickException(
@@ -132,9 +130,6 @@ class Context:
         """Create a Context with values from CLI args, environment, saved config, or defaults."""
         config_data = load_config()
 
-        # Load PAT from credentials file if not provided via CLI/env
-        file_personal_access_token = load_credentials_token()
-
         # Use CLI/env values first, then saved config, then hardcoded defaults
         final_base_url = (
             base_url
@@ -149,6 +144,9 @@ class Context:
         )
 
         final_api_key = api_key or get_nested_value(config_data, "tensorlake.apikey")
+
+        # Load PAT from credentials file (endpoint-scoped) if not provided via CLI/env
+        file_personal_access_token = load_credentials(final_base_url)
 
         # Priority: CLI/env PAT > credentials file PAT
         final_personal_access_token = (
