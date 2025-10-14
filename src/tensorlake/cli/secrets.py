@@ -158,9 +158,8 @@ def warning_missing_secrets(
     missing_secrets = [s for s in secrets if s not in existing_secret_names]
 
     if len(missing_secrets) > 0:
-        click.secho(
-            f"Your Tensorlake project has missing secrets: {', '.join(missing_secrets)}. Graph invocations may fail until these secrets are set.",
-            fg="yellow",
+        click.echo(
+            f"Your Tensorlake project has missing secrets: {', '.join(missing_secrets)}. Application invocations may fail until these secrets are set.",
         )
 
     return len(missing_secrets) == 0, missing_secrets
