@@ -180,14 +180,15 @@ class Context:
         ) or get_nested_value(global_config_data, "default.request")
 
         # Priority: CLI/env > local config > global config > None
+        # Note: local config uses root-level keys, global config uses default.* keys
         final_default_project = (
             project_id
-            or get_nested_value(local_config_data, "default.project")
+            or get_nested_value(local_config_data, "project")
             or get_nested_value(global_config_data, "default.project")
         )
         final_default_organization = (
             organization_id
-            or get_nested_value(local_config_data, "default.organization")
+            or get_nested_value(local_config_data, "organization")
             or get_nested_value(global_config_data, "default.organization")
         )
 

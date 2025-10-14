@@ -92,9 +92,10 @@ def init(ctx: Context):
 
     # Step 3: Save to local .tensorlake.toml
     click.echo()
-    config_data = {}
-    set_nested_value(config_data, "default.organization", organization_id)
-    set_nested_value(config_data, "default.project", project_id)
+    config_data = {
+        "organization": organization_id,
+        "project": project_id,
+    }
     save_local_config(config_data)
 
     click.echo("Configuration saved to .tensorlake.toml")

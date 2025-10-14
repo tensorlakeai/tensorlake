@@ -28,7 +28,7 @@ class TestLocalConfigFile(unittest.TestCase):
             local_config_path = Path(tmpdir) / ".tensorlake.toml"
 
             # Create a local config file
-            config_data = {"default": {"organization": "local_org_123", "project": "local_proj_456"}}
+            config_data = {"organization": "local_org_123", "project": "local_proj_456"}
             with open(local_config_path, "w") as f:
                 f.write(dumps(config_data))
 
@@ -39,8 +39,8 @@ class TestLocalConfigFile(unittest.TestCase):
 
                 # Load and verify
                 loaded = load_local_config()
-                self.assertEqual(loaded["default"]["organization"], "local_org_123")
-                self.assertEqual(loaded["default"]["project"], "local_proj_456")
+                self.assertEqual(loaded["organization"], "local_org_123")
+                self.assertEqual(loaded["project"], "local_proj_456")
             finally:
                 config_module.LOCAL_CONFIG_FILE = original_local_config
 
@@ -69,7 +69,7 @@ class TestLocalConfigFile(unittest.TestCase):
             try:
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
-                config_data = {"default": {"organization": "test_org", "project": "test_proj"}}
+                config_data = {"organization": "test_org", "project": "test_proj"}
                 save_local_config(config_data)
 
                 # Verify file was created
@@ -78,8 +78,8 @@ class TestLocalConfigFile(unittest.TestCase):
                 # Verify content
                 with open(local_config_path, "r") as f:
                     loaded = parse(f.read())
-                self.assertEqual(loaded["default"]["organization"], "test_org")
-                self.assertEqual(loaded["default"]["project"], "test_proj")
+                self.assertEqual(loaded["organization"], "test_org")
+                self.assertEqual(loaded["project"], "test_proj")
             finally:
                 config_module.LOCAL_CONFIG_FILE = original_local_config
 
@@ -93,7 +93,7 @@ class TestLocalConfigFile(unittest.TestCase):
             try:
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
-                config_data = {"default": {"organization": "test_org"}}
+                config_data = {"organization": "test_org"}
                 save_local_config(config_data)
 
                 # Check permissions (0600 = owner read/write only)
@@ -129,9 +129,7 @@ class TestLocalConfigPriority(unittest.TestCase):
 
             # Setup local config
             local_config_path = Path(tmpdir) / ".tensorlake.toml"
-            local_config_data = {
-                "default": {"organization": "local_org", "project": "local_proj"}
-            }
+            local_config_data = {"organization": "local_org", "project": "local_proj"}
             with open(local_config_path, "w") as f:
                 f.write(dumps(local_config_data))
 
@@ -193,9 +191,7 @@ class TestLocalConfigPriority(unittest.TestCase):
 
             # Setup local config
             local_config_path = Path(tmpdir) / ".tensorlake.toml"
-            local_config_data = {
-                "default": {"organization": "local_org", "project": "local_proj"}
-            }
+            local_config_data = {"organization": "local_org", "project": "local_proj"}
             with open(local_config_path, "w") as f:
                 f.write(dumps(local_config_data))
 
@@ -300,8 +296,8 @@ class TestInitCommand(unittest.TestCase):
                 # Verify content
                 with open(local_config_path, "r") as f:
                     config = parse(f.read())
-                self.assertEqual(config["default"]["organization"], "org_123")
-                self.assertEqual(config["default"]["project"], "proj_456")
+                self.assertEqual(config["organization"], "org_123")
+                self.assertEqual(config["project"], "proj_456")
             finally:
                 config_module.CONFIG_DIR = original_config_dir
                 config_module.CREDENTIALS_PATH = original_credentials_path
@@ -376,8 +372,8 @@ class TestInitCommand(unittest.TestCase):
                 # Verify file content
                 with open(local_config_path, "r") as f:
                     config = parse(f.read())
-                self.assertEqual(config["default"]["organization"], "org_2")
-                self.assertEqual(config["default"]["project"], "proj_1")
+                self.assertEqual(config["organization"], "org_2")
+                self.assertEqual(config["project"], "proj_1")
             finally:
                 config_module.CONFIG_DIR = original_config_dir
                 config_module.CREDENTIALS_PATH = original_credentials_path
