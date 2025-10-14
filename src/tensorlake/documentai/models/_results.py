@@ -171,3 +171,8 @@ class ParseResult(BaseModel):
         default=None,
         description="Labels associated with the parse job.",
     )
+
+    total_pages: Optional[int] = Field(
+        default=None,
+        description="The total number of pages in the document that was parsed.",
+    )
