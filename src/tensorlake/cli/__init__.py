@@ -5,6 +5,7 @@ from . import (
     applications,
     auth,
     deploy,
+    init,
     parse,
     requests,
     secrets,
@@ -92,6 +93,7 @@ def cli(
 
 cli.add_command(auth.login)
 cli.add_command(auth.whoami)
+cli.add_command(init.init)
 cli.add_command(deploy.deploy)
 cli.add_command(applications.application)
 cli.add_command(requests.request)

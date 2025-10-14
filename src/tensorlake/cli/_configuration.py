@@ -14,6 +14,9 @@ CREDENTIALS_PATH = CONFIG_DIR / "credentials.toml"
 # Legacy credentials file (pre-endpoint-scoping)
 LEGACY_CREDENTIALS_PATH = CONFIG_DIR / "credentials.json"
 
+# Local project configuration file
+LOCAL_CONFIG_FILE = Path.cwd() / ".tensorlake.toml"
+
 
 def load_config() -> dict[str, Any]:
     """Load configuration from the TOML file."""
@@ -31,6 +34,24 @@ def save_config(config: dict[str, Any]) -> None:
 
     # Set restrictive permissions (0600) to protect sensitive data like API keys
     os.chmod(CONFIG_FILE, 0o600)
+
+
+def load_local_config() -> dict[str, Any]:
+    """Load configuration from the local project .tensorlake.toml file."""
+    if not LOCAL_CONFIG_FILE.exists():
+        return {}
+
+    with open(LOCAL_CONFIG_FILE, "r", encoding="utf-8") as f:
+        return parse(f.read())
+
+
+def save_local_config(config: dict[str, Any]) -> None:
+    """Save configuration to the local project .tensorlake.toml file."""
+    with open(LOCAL_CONFIG_FILE, "w", encoding="utf-8") as f:
+        f.write(dumps(config))
+
+    # Set restrictive permissions (0600) to protect sensitive data
+    os.chmod(LOCAL_CONFIG_FILE, 0o600)
 
 
 def load_credentials(base_url: str) -> str | None:

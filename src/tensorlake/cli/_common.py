@@ -21,6 +21,7 @@ from tensorlake.cli._configuration import (
     get_nested_value,
     load_config,
     load_credentials,
+    load_local_config,
 )
 
 
@@ -130,24 +131,32 @@ class Context:
         project_id: str | None = None,
     ) -> "Context":
         """Create a Context with values from CLI args, environment, saved config, or defaults."""
-        config_data = load_config()
+        # Load both local and global config
+        local_config_data = load_local_config()
+        global_config_data = load_config()
 
-        # Use CLI/env values first, then saved config, then hardcoded defaults
+        # Use CLI/env values first, then local config, then global config, then hardcoded defaults
         # Check new config key first, then fall back to old key for backward compatibility
         final_base_url = (
             base_url
-            or get_nested_value(config_data, "tensorlake.api_url")
-            or get_nested_value(config_data, "indexify.url")
+            or get_nested_value(local_config_data, "tensorlake.api_url")
+            or get_nested_value(global_config_data, "tensorlake.api_url")
+            or get_nested_value(global_config_data, "indexify.url")
             or "https://api.tensorlake.ai"
         )
 
         final_cloud_url = (
             cloud_url
-            or get_nested_value(config_data, "tensorlake.cloud_url")
+            or get_nested_value(local_config_data, "tensorlake.cloud_url")
+            or get_nested_value(global_config_data, "tensorlake.cloud_url")
             or "https://cloud.tensorlake.ai"
         )
 
-        final_api_key = api_key or get_nested_value(config_data, "tensorlake.apikey")
+        final_api_key = (
+            api_key
+            or get_nested_value(local_config_data, "tensorlake.apikey")
+            or get_nested_value(global_config_data, "tensorlake.apikey")
+        )
 
         # Load PAT from credentials file (endpoint-scoped) if not provided via CLI/env
         file_personal_access_token = load_credentials(final_base_url)
@@ -159,18 +168,27 @@ class Context:
 
         final_namespace = (
             namespace
-            or get_nested_value(config_data, "indexify.namespace")
+            or get_nested_value(local_config_data, "indexify.namespace")
+            or get_nested_value(global_config_data, "indexify.namespace")
             or "default"
         )
-        final_default_app = get_nested_value(config_data, "default.application")
-        final_default_request = get_nested_value(config_data, "default.request")
+        final_default_app = get_nested_value(
+            local_config_data, "default.application"
+        ) or get_nested_value(global_config_data, "default.application")
+        final_default_request = get_nested_value(
+            local_config_data, "default.request"
+        ) or get_nested_value(global_config_data, "default.request")
 
-        # Priority: CLI/env > config file > None
-        final_default_project = project_id or get_nested_value(
-            config_data, "default.project"
+        # Priority: CLI/env > local config > global config > None
+        final_default_project = (
+            project_id
+            or get_nested_value(local_config_data, "default.project")
+            or get_nested_value(global_config_data, "default.project")
         )
-        final_default_organization = organization_id or get_nested_value(
-            config_data, "default.organization"
+        final_default_organization = (
+            organization_id
+            or get_nested_value(local_config_data, "default.organization")
+            or get_nested_value(global_config_data, "default.organization")
         )
 
         return cls(
