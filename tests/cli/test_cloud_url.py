@@ -205,8 +205,8 @@ class TestCloudURLIntegration(unittest.TestCase):
         self.assertNotEqual(ctx.base_url, ctx.cloud_url)
 
 
-class TestCloudURLWithAuthLogin(unittest.TestCase):
-    """Test that cloud URL is used correctly in the auth login flow"""
+class TestCloudURLWithLogin(unittest.TestCase):
+    """Test that cloud URL is used correctly in the login flow"""
 
     def setup_login_mocks(self):
         """Set up common HTTP mocks for the login flow"""
@@ -237,14 +237,14 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
 
     @respx.mock
     @patch("webbrowser.open")
-    def test_auth_login_uses_cloud_url_for_browser(self, mock_browser_open):
-        """Test that auth login opens browser with the correct cloud URL"""
+    def test_login_uses_cloud_url_for_browser(self, mock_browser_open):
+        """Test that login opens browser with the correct cloud URL"""
         self.setup_login_mocks()
 
         with mock_auth_credentials_path():
             # Explicitly set TENSORLAKE_API_URL to ensure test doesn't inherit from CI environment
             runner = CliRunner(env={"TENSORLAKE_API_URL": "https://api.tensorlake.ai"})
-            result = runner.invoke(cli, ["auth", "login"], prog_name="tensorlake")
+            result = runner.invoke(cli, ["login"], prog_name="tensorlake")
 
             self.assertEqual(
                 result.exit_code, 0, f"Failed with output: {result.output}"
@@ -255,8 +255,8 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
 
     @respx.mock
     @patch("webbrowser.open")
-    def test_auth_login_uses_custom_cloud_url_from_env(self, mock_browser_open):
-        """Test that auth login respects TENSORLAKE_CLOUD_URL environment variable"""
+    def test_login_uses_custom_cloud_url_from_env(self, mock_browser_open):
+        """Test that login respects TENSORLAKE_CLOUD_URL environment variable"""
         custom_cloud_url = "https://staging-cloud.tensorlake.ai"
         self.setup_login_mocks()
 
@@ -268,7 +268,7 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
                     "TENSORLAKE_CLOUD_URL": custom_cloud_url,
                 }
             )
-            result = runner.invoke(cli, ["auth", "login"], prog_name="tensorlake")
+            result = runner.invoke(cli, ["login"], prog_name="tensorlake")
 
             self.assertEqual(
                 result.exit_code, 0, f"Failed with output: {result.output}"
@@ -277,8 +277,8 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
 
     @respx.mock
     @patch("webbrowser.open")
-    def test_auth_login_uses_custom_cloud_url_from_cli_flag(self, mock_browser_open):
-        """Test that auth login respects --cloud-url CLI flag"""
+    def test_login_uses_custom_cloud_url_from_cli_flag(self, mock_browser_open):
+        """Test that login respects --cloud-url CLI flag"""
         custom_cloud_url = "https://dev-cloud.tensorlake.ai"
         self.setup_login_mocks()
 
@@ -287,7 +287,7 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
             runner = CliRunner(env={"TENSORLAKE_API_URL": "https://api.tensorlake.ai"})
             result = runner.invoke(
                 cli,
-                ["--cloud-url", custom_cloud_url, "auth", "login"],
+                ["--cloud-url", custom_cloud_url, "login"],
                 prog_name="tensorlake",
             )
 
@@ -298,7 +298,7 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
 
     @respx.mock
     @patch("webbrowser.open")
-    def test_auth_login_shows_custom_cloud_url_on_browser_error(
+    def test_login_shows_custom_cloud_url_on_browser_error(
         self, mock_browser_open
     ):
         """Test that custom cloud URL is shown in error message when browser fails"""
@@ -311,7 +311,7 @@ class TestCloudURLWithAuthLogin(unittest.TestCase):
             runner = CliRunner(env={"TENSORLAKE_API_URL": "https://api.tensorlake.ai"})
             result = runner.invoke(
                 cli,
-                ["--cloud-url", custom_cloud_url, "auth", "login"],
+                ["--cloud-url", custom_cloud_url, "login"],
                 prog_name="tensorlake",
             )
 

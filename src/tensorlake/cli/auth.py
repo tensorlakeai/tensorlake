@@ -11,15 +11,7 @@ from tensorlake.cli._common import Context, pass_auth
 from tensorlake.cli._configuration import save_credentials
 
 
-@click.group()
-def auth():
-    """
-    Authentication commands
-    """
-    pass
-
-
-@auth.command(help="Print authentication status")
+@click.command(help="Print authentication status")
 @click.option(
     "--output",
     "-o",
@@ -28,7 +20,7 @@ def auth():
     help="Output format",
 )
 @pass_auth
-def status(ctx: Context, output: str):
+def whoami(ctx: Context, output: str):
     data = {
         "endpoint": ctx.base_url,
         "organizationId": ctx.organization_id,
@@ -56,7 +48,7 @@ def status(ctx: Context, output: str):
         click.echo(f"Personal Access Token : {data['personalAccessToken']}")
 
 
-@auth.command(help="Login to TensorLake")
+@click.command(help="Login to TensorLake")
 @pass_auth
 def login(ctx: Context):
     login_start_url = f"{ctx.base_url}/platform/cli/login/start"

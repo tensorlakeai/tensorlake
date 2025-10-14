@@ -27,7 +27,7 @@ def init(ctx: Context):
     """Initialize the configuration."""
     personal_access_token = load_credentials(ctx.base_url)
     if not personal_access_token:
-        click.echo("No valid credentials found. Please log in first.", err=True)
+        click.echo("No valid credentials found. Please run 'tensorlake login' first.", err=True)
         return
 
     organizations_response = httpx.get(

@@ -55,7 +55,7 @@ class Context:
                 headers["Authorization"] = f"Bearer {self.api_key}"
             else:
                 raise click.UsageError(
-                    "Missing API key or personal access token. Please run `tensorlake auth login` to authenticate."
+                    "Missing API key or personal access token. Please run `tensorlake login` to authenticate."
                 )
 
             self._client = httpx.Client(base_url=self.base_url, headers=headers)
@@ -108,7 +108,7 @@ class Context:
             introspect_response = self.client.post("/platform/v1/keys/introspect")
             if introspect_response.status_code == 401:
                 raise click.UsageError(
-                    "The Tensorlake API key is not valid. Please supply the API key with the `--api-key` flag, or run `tensorlake auth login` to authenticate you."
+                    "The Tensorlake API key is not valid. Please supply the API key with the `--api-key` flag, or run `tensorlake login` to authenticate you."
                 )
             if introspect_response.status_code == 404:
                 raise click.ClickException(

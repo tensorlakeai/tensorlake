@@ -29,7 +29,7 @@ Use 'tensorlake config' to manage settings:
 Authentication:
   Use --api-key or TENSORLAKE_API_KEY for API key authentication
   Use --pat or TENSORLAKE_PAT for Personal Access Token authentication
-  Use 'tensorlake auth login' to obtain a PAT interactively
+  Use 'tensorlake login' to obtain a PAT interactively
 """
 )
 @click.version_option(
@@ -85,7 +85,8 @@ def cli(
     )
 
 
-cli.add_command(auth.auth)
+cli.add_command(auth.login)
+cli.add_command(auth.whoami)
 cli.add_command(config.config)
 cli.add_command(deploy.deploy)
 cli.add_command(applications.application)
