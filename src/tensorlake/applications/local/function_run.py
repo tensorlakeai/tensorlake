@@ -15,6 +15,7 @@ from ..interface.futures import (
 from ..interface.request_context import RequestContext
 from ..interface.retries import Retries
 from ..request_context.contextvar import set_current_request_context
+from .exceptions import StopFunctionRun
 
 
 @dataclass
@@ -53,7 +54,10 @@ class LocalFunctionRun:
         self._request_context: RequestContext = request_context
         self._result_queue: SimpleQueue = result_queue
         self._state: LocalFunctionRunState = LocalFunctionRunState.RUNNING
-        self._thread: threading.Thread = threading.Thread(target=self._run_in_thread)
+        # daemon = True doesn't block the program from exiting if the thread is still running.
+        self._thread: threading.Thread = threading.Thread(
+            target=self._run_in_thread, daemon=True
+        )
         self._thread.start()
 
     @property
@@ -62,6 +66,9 @@ class LocalFunctionRun:
             self._state == LocalFunctionRunState.SUCCESS
             or self._state == LocalFunctionRunState.FAILED
         )
+
+    def wait(self) -> None:
+        self._thread.join()
 
     def _run_in_thread(self) -> None:
         context: contextvars.Context = contextvars.Context()
@@ -80,11 +87,21 @@ class LocalFunctionRun:
                 self._state = LocalFunctionRunState.FAILED
                 self._result_queue.put(LocalFunctionRunResult(value=None, exception=e))
                 return
+            except StopFunctionRun:
+                self._state = LocalFunctionRunState.FAILED
+                self._result_queue.put(
+                    LocalFunctionRunResult(
+                        value=None,
+                        exception=RequestFailureException("Function run stopped"),
+                    )
+                )
+                return
             except BaseException as e:
                 runs_left -= 1
                 if runs_left == 0:
                     self._state = LocalFunctionRunState.FAILED
-                    # We only print exceptions in remote mode, do the same here.
+                    # We only print exceptions in remote mode but don't propagate them to SDK
+                    # and return a generic RequestFailureException instead. Do the same here.
                     traceback.print_exception(e)
                     self._result_queue.put(
                         LocalFunctionRunResult(

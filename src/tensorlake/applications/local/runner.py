@@ -1,5 +1,6 @@
 import contextvars
 import traceback
+from queue import Empty as QueueEmptyError
 from queue import SimpleQueue
 from typing import Any, Dict, List
 
@@ -41,7 +42,6 @@ from ..interface.request import Request
 from ..interface.request_context import RequestContext
 from ..interface.retries import Retries
 from ..registry import get_function
-from ..request_context.contextvar import set_current_request_context
 from ..request_context.request_context_base import RequestContextBase
 from ..request_context.request_metrics_recorder import RequestMetricsRecorder
 from ..runtime_hooks import (
@@ -51,7 +51,9 @@ from ..runtime_hooks import (
 )
 from ..user_data_serializer import UserDataSerializer
 from .blob_store import BLOB, BLOBStore
+from .exceptions import StopFunctionRun
 from .function_run import LocalFunctionRun, LocalFunctionRunResult
+from .future import LocalFuture
 from .request import LocalRequest
 from .request_progress import LocalRequestProgress
 from .request_state import LocalRequestState
@@ -67,15 +69,12 @@ class LocalRunner:
         self._blob_store: BLOBStore = BLOBStore()
         # Futures currently known to the runner.
         # Future ID -> Future
-        self._futures: Dict[str, FunctionCallFuture | ReduceOperationFuture] = {}
+        self._futures: Dict[str, LocalFuture] = {}
         # Function runs that are currently running or completed already.
         # Future ID -> LocalFunctionRun
         self._function_runs: Dict[str, LocalFunctionRun] = {}
-        # Future ID -> exception
-        # There's an entry if function run failed.
-        self._function_run_exceptions: Dict[
-            str, RequestFailureException | RequestError
-        ] = {}
+        # None when request finished successfully.
+        self._exception: RequestFailureException | RequestError | None = None
         # Class name => instance.
         self._class_instances: Dict[str, Any] = {}
         self._request_context: RequestContext = RequestContextBase(
@@ -110,13 +109,13 @@ class LocalRunner:
             )
             set_wait_futures_hook(self._runtime_hook_wait_futures)
 
-            self._run()
+            self._control_loop()
 
-            if app_function_call.id in self._function_run_exceptions:
+            if self._exception is not None:
                 return LocalRequest(
                     id=_LOCAL_REQUEST_ID,
                     output=None,
-                    exception=self._function_run_exceptions[app_function_call.id],
+                    exception=self._exception,
                 )
 
             app_output_blob: BLOB = self._blob_store.get(app_function_call.id)
@@ -134,7 +133,11 @@ class LocalRunner:
                 exception=None,
             )
         except BaseException as e:
-            # We only print exceptions in remote mode, do the same here.
+            # This is an unexpected exception in LocalRunner code itself.
+            # The function run exception is stored in self._exception and handled above.
+            #
+            # We only print exceptions in remote mode but don't propagate them to SDK
+            # and return a generic RequestFailureException instead. Do the same here.
             traceback.print_exception(e)
             return LocalRequest(
                 id=_LOCAL_REQUEST_ID,
@@ -145,15 +148,22 @@ class LocalRunner:
     def _runtime_hook_start_function_calls(
         self, function_calls: List[FunctionCallFuture | ReduceOperationFuture]
     ) -> None:
-        pass
+        self._user_code_cancellation_point()
 
     def _runtime_hook_start_and_wait_function_calls(
         self, function_calls: List[FunctionCallFuture | ReduceOperationFuture]
     ) -> None:
-        pass
+        self._user_code_cancellation_point()
 
     def _runtime_hook_wait_futures(self, futures: List[Future]) -> None:
-        pass
+        self._user_code_cancellation_point()
+
+    def _user_code_cancellation_point(self) -> None:
+        # Every runtime hook call is a cancellation point for user code.
+        # Raise StopFunctionRun to stop executing further user code
+        # and reduce wait time for existing function run completion.
+        if self._exception is not None:
+            raise StopFunctionRun()
 
     def _finished(self) -> bool:
         for future in self._futures.values():
@@ -162,19 +172,69 @@ class LocalRunner:
 
         return all(fr.finished for fr in self._function_runs.values())
 
-    def _run(self) -> None:
+    def _control_loop(self) -> None:
         while not self._finished():
-            for future in self._futures.values():
-                if future.id in self._function_runs:
-                    continue
+            self._start_runnable_function_calls()
+            self._process_function_run_result()
+            if self._exception is not None:
+                # The request failed. Wait until function runs finish and then exit.
+                # We have to wait because otherwise function runs will keep printing
+                # arbitrary logs to stdout/stderr and hold resources after request
+                # should be finished running.
+                print("Request failed, waiting for existing function runs to finish...")
+                self._wait_all_function_runs()
+                break
 
-                pass
+    def _process_function_run_result(self) -> None:
+        try:
+            # Wait at most 100ms. This is the precision of function call timers.
+            result: LocalFunctionRunResult = self._function_run_result_queue.get(
+                timeout=0.1
+            )
+            if result.exception is None:
+                # TODO: handle the output properly.
+                self._blob_store.put(result.value)
+            else:
+                self._exception = result.exception
+        except QueueEmptyError:
+            pass  # No new result so far.
 
-    def _replace_node(self, old: ASTNode, new: ASTNode) -> None:
-        if old is self._root_node:
-            self._root_node = new
+    def _wait_all_function_runs(self) -> None:
+        for fr in self._function_runs.values():
+            fr.wait()
+
+    def _start_runnable_function_calls(self) -> None:
+        for future in self._futures.values():
+            if future.id in self._function_runs:
+                continue
+
+            if self._is_runnable(future):
+                if isinstance(future, FunctionCallFuture):
+                    self._run_function_call(future)
+                elif isinstance(future, ReduceOperationFuture):
+                    self._run_reducer_operation(future)
+                else:
+                    raise RequestFailureException("Unknown future type")
+
+    def _is_runnable(self, future: Future) -> bool:
+        if isinstance(future, FunctionCallFuture):
+            for arg in future._args:
+                if isinstance(arg, Future):
+                    if arg.id not in self._blob_store.blobs:
+                        return False
+            for _, kwarg in future._kwargs.items():
+                if isinstance(kwarg, Future):
+                    if kwarg.id not in self._blob_store.blobs:
+                        return False
+            return True
+        elif isinstance(future, ReduceOperationFuture):
+            for item in future.inputs.items:
+                if isinstance(item, Future):
+                    if item.id not in self._blob_store.blobs:
+                        return False
+            return True
         else:
-            old.parent.replace_child(old, new)
+            raise RequestFailureException("Unknown future type")
 
     def _run_regular_function_call(self, node: RegularFunctionCallNode) -> None:
         node_metadata: RegularFunctionCallMetadata = (
@@ -241,15 +301,6 @@ class LocalRunner:
                 if runs_left == 0:
                     raise
 
-    def _call_with_context(
-        self, function_call: FunctionCallFuture, function: Function
-    ) -> Any:
-        # This function is executed in contextvars.Context of the Tensorlake Function call.
-        set_current_request_context(self._request_context)
-        return function._original_function(
-            *function_call._args, **function_call._kwargs
-        )
-
     def _set_function_call_instance_args(
         self, function_call: FunctionCall, function: Function
     ) -> None:
@@ -264,22 +315,3 @@ class LocalRunner:
         set_self_arg(
             function_call, self._class_instances[function._function_config.class_name]
         )
-
-
-def _find_non_value_node_with_value_only_children(ast: ASTNode) -> ASTNode | None:
-    if isinstance(ast, ValueNode):
-        return None
-
-    all_children_are_values: bool = True
-    for child in ast.children.values():
-        child: ASTNode
-        if not isinstance(child, ValueNode):
-            all_children_are_values = False
-
-        child_result: ASTNode | None = _find_non_value_node_with_value_only_children(
-            child
-        )
-        if child_result is not None:
-            return child_result
-
-    return ast if all_children_are_values else None
