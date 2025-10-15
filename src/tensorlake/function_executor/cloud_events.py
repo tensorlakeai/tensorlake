@@ -48,7 +48,7 @@ class Resource(BaseModel):
     fn: str
 
 
-def push_event_to_collector(
+def push_cloud_event_to_collector(
     resource: Resource,
     event: dict[str, Any],
     collector_url: str | None = None,
