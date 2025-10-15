@@ -7,10 +7,9 @@
 # The events have strict structured json format because they are used for
 # automatic Function Executor log stream processing in the future.
 # The event attribute names are human readable because they are visible to users.
-import datetime
-import json
 from dataclasses import dataclass
-from typing import Any, Dict, List
+
+from tensorlake.function_executor.cloud_events import print_cloud_event
 
 
 @dataclass
@@ -23,9 +22,10 @@ class InitializationEventDetails:
 
 def log_user_event_initialization_started(details: InitializationEventDetails) -> None:
     # Using standardized tags, see https://github.com/tensorlakeai/indexify/blob/main/docs/tags.md.
-    _log_event(
+    print_cloud_event(
         {
             "event": "function_executor_initialization_started",
+            "message": "Initializing function executor",
             "namespace": details.namespace,
             "application": details.application_name,
             "application_version": details.application_version,
@@ -38,9 +38,10 @@ def log_user_event_initialization_finished(
     details: InitializationEventDetails, success: bool
 ) -> None:
     # Using standardized tags, see https://github.com/tensorlakeai/indexify/blob/main/docs/tags.md.
-    _log_event(
+    print_cloud_event(
         {
             "event": "function_executor_initialization_finished",
+            "message": "Function executor initialization completed",
             "success": success,
             "namespace": details.namespace,
             "application": details.application_name,
@@ -62,12 +63,13 @@ class AllocationEventDetails:
 
 
 def log_user_event_allocations_started(
-    details: List[AllocationEventDetails],
+    details: list[AllocationEventDetails],
 ) -> None:
     # Using standardized tags, see https://github.com/tensorlakeai/indexify/blob/main/docs/tags.md.
-    _log_event(
+    print_cloud_event(
         {
             "event": "allocations_started",
+            "message": "Starting allocations",
             "allocations": [
                 {
                     "namespace": alloc_info.namespace,
@@ -85,12 +87,13 @@ def log_user_event_allocations_started(
 
 
 def log_user_event_allocations_finished(
-    details: List[AllocationEventDetails],
+    details: list[AllocationEventDetails],
 ) -> None:
     # Using standardized tags, see https://github.com/tensorlakeai/indexify/blob/main/docs/tags.md.
-    _log_event(
+    print_cloud_event(
         {
             "event": "allocations_finished",
+            "message": "Allocations completed",
             "allocations": [
                 {
                     "namespace": alloc_info.namespace,
@@ -105,14 +108,3 @@ def log_user_event_allocations_finished(
             ],
         }
     )
-
-
-# Suffix used to make it clear to users that this log line is not made by them.
-# This also helps to filter the events during automatic FE log stream processing.
-_EVENT_SUFFIX = "tensorlake_event:"
-
-
-def _log_event(event: Dict[str, Any]) -> None:
-    event["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z"
-    # Flush stdout to make sure that the last event in FE log stream is always visible.
-    print(_EVENT_SUFFIX, json.dumps(event), flush=True)
