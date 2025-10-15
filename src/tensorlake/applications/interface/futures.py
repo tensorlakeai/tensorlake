@@ -37,6 +37,7 @@ class Future:
     def __init__(self, id: str, start_delay: float | None):
         self._id: str = id
         self._start_delay: float | None = start_delay
+        # Local cache in case user calls result() multiple times.
         self._result: Any | _FutureResultMissingType = _FutureResultMissing
         self._exception: BaseException | None = None
 
@@ -93,26 +94,56 @@ class Future:
         )
 
 
-class FunctionCallFuture(Future):
+class FunctionCallFutureBase(Future):
+    """Base class for all Tensorlake Function call related futures."""
+
+    def __init__(
+        self,
+        id: str,
+        start_delay: float | None,
+        function_name: str,
+        output_serializer_name_override: str | None,
+    ):
+        super().__init__(id=id, start_delay=start_delay)
+        self._function_name: str = function_name
+        # If set, overrides the output serializer of this future's Tensorlake Function.
+        # This is used when the output of this future is consumed by another Tensorlake Function
+        # with a different output serializer. The serializer override is inherited from the very
+        # first future in the chain of futures.
+        self._output_serializer_name_override: str | None = (
+            output_serializer_name_override
+        )
+
+    @property
+    def function_name(self) -> str:
+        return self._function_name
+
+    @property
+    def output_serializer_name_override(self) -> str | None:
+        return self._output_serializer_name_override
+
+
+class FunctionCallFuture(FunctionCallFutureBase):
     """Represents a regular call of a Tensorlake Function."""
 
     def __init__(
         self,
         id: str,
         function_name: str,
+        start_delay: float | None,
+        output_serializer_name_override: str | None,
         args: List[Any],
         kwargs: Dict[str, Any],
-        start_delay: float | None,
     ):
-        super().__init__(id=id, start_delay=start_delay)
+        super().__init__(
+            id=id,
+            start_delay=start_delay,
+            function_name=function_name,
+            output_serializer_name_override=output_serializer_name_override,
+        )
 
-        self._function_name: str = function_name
         self._args: List[Any] = args
         self._kwargs: Dict[str, Any] = kwargs
-
-    @property
-    def function_name(self) -> str:
-        return self._function_name
 
     @property
     def args(self) -> List[Any]:
@@ -125,37 +156,39 @@ class FunctionCallFuture(Future):
     def __repr__(self) -> str:
         return (
             f"<Tensorlake FunctionCallFuture(\n"
-            f"  id={self._id!r},\n"
-            f"  function_name={self._function_name!r},\n"
-            f"  start_delay={self._start_delay!r},\n"
+            f"  id={self.id!r},\n"
+            f"  function_name={self.function_name!r},\n"
+            f"  start_delay={self.start_delay!r},\n"
+            f"  output_serializer_name_override={self.output_serializer_name_override!r},\n"
             f"  args=[\n    "
-            + ",\n    ".join(repr(arg) for arg in self._args)
+            + ",\n    ".join(repr(arg) for arg in self.args)
             + "\n  ],\n"
             f"  kwargs={{\n    "
-            + ",\n    ".join(f"{k!r}: {v!r}" for k, v in self._kwargs.items())
+            + ",\n    ".join(f"{k!r}: {v!r}" for k, v in self.kwargs.items())
             + "\n  }}\n"
             f")>"
         )
 
 
-class ReduceOperationFuture(Future):
+class ReduceOperationFuture(FunctionCallFutureBase):
     """Represents a reduce operation."""
 
     def __init__(
         self,
         id: str,
-        reducer_function_name: str,
-        inputs: List[Any | Future],
+        function_name: str,
         start_delay: float | None,
+        output_serializer_name_override: str | None,
+        inputs: List[Any | Future],
     ):
-        super().__init__(id=id, start_delay=start_delay)
-        self._function_name: str = reducer_function_name
+        super().__init__(
+            id=id,
+            start_delay=start_delay,
+            function_name=function_name,
+            output_serializer_name_override=output_serializer_name_override,
+        )
         # Contains at least one item due to initial + SDK validation.
         self._inputs: List[Any | Future] = inputs
-
-    @property
-    def function_name(self) -> str:
-        return self._function_name
 
     @property
     def inputs(self) -> List[Any | Future]:
@@ -164,10 +197,11 @@ class ReduceOperationFuture(Future):
     def __repr__(self) -> str:
         return (
             f"<Tensorlake ReduceOperationFuture(\n"
-            f"  id={self._id!r},\n"
-            f"  function_name={self._function_name!r},\n"
-            f"  start_delay={self._start_delay!r},\n"
-            f"  inputs={self._inputs!r},\n"
+            f"  id={self.id!r},\n"
+            f"  function_name={self.function_name!r},\n"
+            f"  start_delay={self.start_delay!r},\n"
+            f"  output_serializer_name_override={self.output_serializer_name_override!r},\n"
+            f"  inputs={self.inputs!r},\n"
             f")>"
         )
 
@@ -213,7 +247,13 @@ class CollectionFuture(Future):
         return list(self._items)
 
     def __repr__(self) -> str:
-        return f"Tensorlake CollectionFuture(items={self._items!r})"
+        return (
+            f"Tensorlake CollectionFuture(\n"
+            f"  id={self.id!r},\n"
+            f"  start_delay={self.start_delay!r},\n"
+            f"  items={self._items!r}\n"
+            f")"
+        )
 
     def __reduce__(self):
         # This helps users to see that they made a coding mistake and returned a Tensorlake Collection

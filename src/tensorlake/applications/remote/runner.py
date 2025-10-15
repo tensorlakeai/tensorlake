@@ -1,6 +1,6 @@
 from typing import Any
 
-from ..function.application_call import serialize_application_call_payload
+from ..function.user_data_serializer import serialize_value
 from ..interface.request import Request
 from ..user_data_serializer import UserDataSerializer, serializer_by_name
 from .api_client import APIClient
@@ -33,8 +33,8 @@ class RemoteRunner:
 
         serialized_payload: bytes
         content_type: str
-        serialized_payload, content_type = serialize_application_call_payload(
-            input_serializer, self._payload
+        serialized_payload, content_type = serialize_value(
+            self._payload, input_serializer
         )
 
         request_id: str = self._client.call(
