@@ -280,6 +280,10 @@ def require_auth_and_project(f):
 
         # Import here to avoid circular dependency
         from tensorlake.cli.init import run_init_flow
+        from tensorlake.cli._project_detection import find_project_root
+
+        # Detect project root automatically
+        project_root = find_project_root()
 
         try:
             org_id, proj_id = run_init_flow(
@@ -287,6 +291,7 @@ def require_auth_and_project(f):
                 interactive=True,
                 create_local_config=True,
                 skip_if_provided=False,
+                project_root=project_root,
             )
 
             # Create a new context with the org/project IDs

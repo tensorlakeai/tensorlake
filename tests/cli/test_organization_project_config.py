@@ -50,7 +50,7 @@ class TestOrganizationIDConfiguration(unittest.TestCase):
 
                 # Save local config with custom organization ID
                 config_data = {"organization": "local_org_789"}
-                save_local_config(config_data)
+                save_local_config(config_data, local_config_path.parent)
 
                 # Load context and verify
                 ctx = Context.default()
@@ -75,7 +75,7 @@ class TestOrganizationIDConfiguration(unittest.TestCase):
 
                 # Save local config with custom organization ID
                 config_data = {"organization": "local_org_abc"}
-                save_local_config(config_data)
+                save_local_config(config_data, local_config_path.parent)
 
                 # Test 1: Local config overrides default (None)
                 ctx = Context.default()
@@ -143,7 +143,7 @@ class TestProjectIDConfiguration(unittest.TestCase):
 
                 # Save local config with custom project ID
                 config_data = {"project": "local_proj_789"}
-                save_local_config(config_data)
+                save_local_config(config_data, local_config_path.parent)
 
                 # Load context and verify
                 ctx = Context.default()
@@ -168,7 +168,7 @@ class TestProjectIDConfiguration(unittest.TestCase):
 
                 # Save local config with custom project ID
                 config_data = {"project": "local_proj_abc"}
-                save_local_config(config_data)
+                save_local_config(config_data, local_config_path.parent)
 
                 # Test 1: Local config overrides default (None)
                 ctx = Context.default()
@@ -224,7 +224,7 @@ class TestOrganizationAndProjectIDTogether(unittest.TestCase):
                     "organization": "local_org_111",
                     "project": "local_proj_222"
                 }
-                save_local_config(config_data)
+                save_local_config(config_data, local_config_path.parent)
 
                 # Load context and verify
                 ctx = Context.default()
@@ -248,7 +248,7 @@ class TestOrganizationAndProjectIDTogether(unittest.TestCase):
 
                 # Save local config with project ID only
                 config_data = {"project": "local_proj_999"}
-                save_local_config(config_data)
+                save_local_config(config_data, local_config_path.parent)
 
                 # Provide organization via CLI, project from local config
                 ctx = Context.default(organization_id="cli_org_888")

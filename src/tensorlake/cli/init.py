@@ -1,4 +1,5 @@
-from typing import Tuple
+from pathlib import Path
+from typing import Optional, Tuple
 
 import click
 import httpx
@@ -16,6 +17,7 @@ def run_init_flow(
     interactive: bool = True,
     create_local_config: bool = True,
     skip_if_provided: bool = True,
+    project_root: Path = Path.cwd(),
 ) -> Tuple[str, str]:
     """
     Run the init flow to select organization and project.
@@ -25,6 +27,7 @@ def run_init_flow(
         interactive: If True, display messages and prompts to user
         create_local_config: If True, save selections to .tensorlake.toml
         skip_if_provided: If True, skip if org/project already in ctx (from CLI/env)
+        project_root: Project root directory where .tensorlake.toml will be created
 
     Returns:
         Tuple of (organization_id, project_id)
@@ -141,14 +144,16 @@ def run_init_flow(
     if create_local_config:
         if interactive:
             click.echo()
+
         config_data = {
             "organization": organization_id,
             "project": project_id,
         }
-        save_local_config(config_data)
+        save_local_config(config_data, project_root)
 
         if interactive:
-            click.echo("Configuration saved to .tensorlake.toml")
+            config_path = project_root / ".tensorlake.toml"
+            click.echo(f"Configuration saved to {config_path}")
             click.echo(
                 "\nYou can now use TensorLake commands in this project without specifying --organization and --project flags."
             )
@@ -157,7 +162,44 @@ def run_init_flow(
 
 
 @click.command()
+@click.option(
+    "--directory",
+    "-d",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    help="Project directory (default: auto-detect from current directory)",
+)
+@click.option(
+    "--no-confirm",
+    is_flag=True,
+    help="Skip confirmation of detected project directory",
+)
 @pass_auth
-def init(ctx: Context):
+def init(ctx: Context, directory: Optional[Path], no_confirm: bool):
     """Initialize TensorLake configuration for this project."""
-    run_init_flow(ctx, interactive=True, create_local_config=True, skip_if_provided=False)
+    from tensorlake.cli._project_detection import (
+        find_project_root,
+        find_project_root_interactive,
+        get_detection_reason,
+    )
+
+    # Determine project root
+    if directory:
+        # User explicitly specified directory
+        project_root = directory.resolve()
+        click.echo(f"Using specified directory: {project_root}")
+    else:
+        # Auto-detect project root
+        if no_confirm:
+            project_root = find_project_root()
+            reason = get_detection_reason(project_root)
+            click.echo(f"Using project root: {project_root} ({reason})")
+        else:
+            project_root = find_project_root_interactive()
+
+    run_init_flow(
+        ctx,
+        interactive=True,
+        create_local_config=True,
+        skip_if_provided=False,
+        project_root=project_root,
+    )

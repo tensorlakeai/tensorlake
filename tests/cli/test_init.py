@@ -70,7 +70,7 @@ class TestLocalConfigFile(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
                 config_data = {"organization": "test_org", "project": "test_proj"}
-                save_local_config(config_data)
+                save_local_config(config_data, local_config_path.parent)
 
                 # Verify file was created
                 self.assertTrue(local_config_path.exists())
@@ -94,7 +94,7 @@ class TestLocalConfigFile(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
                 config_data = {"organization": "test_org"}
-                save_local_config(config_data)
+                save_local_config(config_data, local_config_path.parent)
 
                 # Check permissions (0600 = owner read/write only)
                 import os
@@ -283,7 +283,7 @@ class TestInitCommand(unittest.TestCase):
                 # Run init command
                 result = runner.invoke(
                     cli,
-                    ["init"],
+                    ["init", "--no-confirm", "--directory", str(local_config_path.parent)],
                     prog_name="tensorlake",
                 )
 
@@ -291,7 +291,7 @@ class TestInitCommand(unittest.TestCase):
                 self.assertEqual(result.exit_code, 0, f"CLI failed: {result.output}")
                 self.assertIn("Test Organization", result.output)
                 self.assertIn("Test Project", result.output)
-                self.assertIn("Configuration saved to .tensorlake.toml", result.output)
+                self.assertIn("Configuration saved to", result.output)
 
                 # Verify file was created
                 self.assertTrue(local_config_path.exists())
@@ -362,7 +362,7 @@ class TestInitCommand(unittest.TestCase):
                 # User selects: 2 (Organization Two), then 1 (Project Alpha)
                 result = runner.invoke(
                     cli,
-                    ["init"],
+                    ["init", "--no-confirm", "--directory", str(local_config_path.parent)],
                     prog_name="tensorlake",
                     input="2\n1\n",  # Select org 2, then project 1
                 )
@@ -406,7 +406,7 @@ class TestInitCommand(unittest.TestCase):
                 # Run init command without credentials
                 result = runner.invoke(
                     cli,
-                    ["init"],
+                    ["init", "--no-confirm", "--directory", str(local_config_path.parent)],
                     prog_name="tensorlake",
                 )
 
@@ -453,7 +453,7 @@ class TestInitCommand(unittest.TestCase):
                 # Run init command
                 result = runner.invoke(
                     cli,
-                    ["init"],
+                    ["init", "--no-confirm", "--directory", str(local_config_path.parent)],
                     prog_name="tensorlake",
                 )
 
@@ -514,7 +514,11 @@ class TestInitWithIncompleteConfig(unittest.TestCase):
                     )
                 )
 
-                result = runner.invoke(cli, ["init"], prog_name="tensorlake")
+                result = runner.invoke(
+                    cli,
+                    ["init", "--no-confirm", "--directory", str(local_config_path.parent)],
+                    prog_name="tensorlake",
+                )
 
                 # Should succeed
                 self.assertEqual(result.exit_code, 0, f"CLI failed: {result.output}")
@@ -577,7 +581,11 @@ class TestInitWithIncompleteConfig(unittest.TestCase):
                     )
                 )
 
-                result = runner.invoke(cli, ["init"], prog_name="tensorlake")
+                result = runner.invoke(
+                    cli,
+                    ["init", "--no-confirm", "--directory", str(local_config_path.parent)],
+                    prog_name="tensorlake",
+                )
 
                 # Should succeed
                 self.assertEqual(result.exit_code, 0, f"CLI failed: {result.output}")
@@ -640,7 +648,11 @@ class TestInitWithIncompleteConfig(unittest.TestCase):
                     )
                 )
 
-                result = runner.invoke(cli, ["init"], prog_name="tensorlake")
+                result = runner.invoke(
+                    cli,
+                    ["init", "--no-confirm", "--directory", str(local_config_path.parent)],
+                    prog_name="tensorlake",
+                )
 
                 # Should succeed
                 self.assertEqual(result.exit_code, 0, f"CLI failed: {result.output}")

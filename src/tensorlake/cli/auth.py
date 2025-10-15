@@ -154,8 +154,18 @@ def login(ctx: Context):
 
         # Import here to avoid circular dependency
         from tensorlake.cli.init import run_init_flow
+        from tensorlake.cli._project_detection import find_project_root
+
+        # Detect project root automatically for login flow
+        project_root = find_project_root()
 
         try:
-            run_init_flow(updated_ctx, interactive=True, create_local_config=True, skip_if_provided=False)
+            run_init_flow(
+                updated_ctx,
+                interactive=True,
+                create_local_config=True,
+                skip_if_provided=False,
+                project_root=project_root,
+            )
         except click.Abort:
             click.echo("\nYou can run 'tensorlake init' later to complete the setup.", err=True)

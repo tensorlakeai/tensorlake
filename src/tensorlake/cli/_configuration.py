@@ -37,21 +37,47 @@ def save_config(config: dict[str, Any]) -> None:
 
 
 def load_local_config() -> dict[str, Any]:
-    """Load configuration from the local project .tensorlake.toml file."""
-    if not LOCAL_CONFIG_FILE.exists():
+    """
+    Load configuration from the local project .tensorlake.toml file.
+    Searches current directory and parent directories for .tensorlake.toml.
+
+    If LOCAL_CONFIG_FILE is set (e.g., in tests), uses that path directly.
+    Otherwise, searches upward from current directory.
+    """
+    # If LOCAL_CONFIG_FILE is set to a specific path (e.g., by tests), use it directly
+    if LOCAL_CONFIG_FILE != Path.cwd() / ".tensorlake.toml":
+        if LOCAL_CONFIG_FILE.exists():
+            with open(LOCAL_CONFIG_FILE, "r", encoding="utf-8") as f:
+                return parse(f.read())
         return {}
 
-    with open(LOCAL_CONFIG_FILE, "r", encoding="utf-8") as f:
-        return parse(f.read())
+    # Normal operation: search upward from current directory
+    current = Path.cwd()
+
+    for parent in [current] + list(current.parents):
+        config_file = parent / ".tensorlake.toml"
+        if config_file.exists():
+            with open(config_file, "r", encoding="utf-8") as f:
+                return parse(f.read())
+
+    return {}
 
 
-def save_local_config(config: dict[str, Any]) -> None:
-    """Save configuration to the local project .tensorlake.toml file."""
-    with open(LOCAL_CONFIG_FILE, "w", encoding="utf-8") as f:
+def save_local_config(config: dict[str, Any], project_root: Path) -> None:
+    """
+    Save configuration to the local project .tensorlake.toml file.
+
+    Args:
+        config: Configuration dictionary to save
+        project_root: Project root directory where .tensorlake.toml will be created
+    """
+    config_path = project_root / ".tensorlake.toml"
+
+    with open(config_path, "w", encoding="utf-8") as f:
         f.write(dumps(config))
 
     # Set restrictive permissions (0600) to protect sensitive data
-    os.chmod(LOCAL_CONFIG_FILE, 0o600)
+    os.chmod(config_path, 0o600)
 
 
 def load_credentials(base_url: str) -> str | None:

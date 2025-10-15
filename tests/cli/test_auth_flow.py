@@ -68,7 +68,11 @@ class TestAutoInitFlow(unittest.TestCase):
                 )
 
                 runner = CliRunner()
-                result = runner.invoke(cli, ["secrets", "list"], prog_name="tensorlake")
+
+                # Mock find_project_root to return the temp directory
+                from unittest.mock import patch
+                with patch("tensorlake.cli._project_detection.find_project_root", return_value=local_config_path.parent):
+                    result = runner.invoke(cli, ["secrets", "list"], prog_name="tensorlake")
 
                 # Should succeed after auto-init
                 self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
@@ -147,7 +151,7 @@ class TestAutoInitFlow(unittest.TestCase):
                 )
 
                 save_credentials("https://api.tensorlake.ai", "test_pat")
-                save_local_config({"organization": "org_999", "project": "proj_888"})
+                save_local_config({"organization": "org_999", "project": "proj_888"}, local_config_path.parent)
 
                 # Mock secrets API call
                 import respx
@@ -462,7 +466,7 @@ class TestLoginInitChaining(unittest.TestCase):
                 runner = CliRunner()
                 from unittest.mock import patch
 
-                with patch("webbrowser.open"):
+                with patch("webbrowser.open"), patch("tensorlake.cli._project_detection.find_project_root", return_value=local_config_path.parent):
                     result = runner.invoke(cli, ["login"], prog_name="tensorlake")
 
                 # Should succeed and show both login and init messages
