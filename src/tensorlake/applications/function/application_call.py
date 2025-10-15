@@ -57,39 +57,3 @@ def application_function_call_with_serialized_payload(
     return _application_function_call_with_object_payload(
         application, deserialized_payload
     )
-
-
-def serialize_application_call_payload(
-    input_serializer: UserDataSerializer, payload: Any
-) -> tuple[bytes, str]:
-    """Serializes the application payload using the application function input serializer.
-
-    Returns a tuple of (serialized_payload, content_type).
-    """
-    if isinstance(payload, File):
-        return payload.content, payload.content_type
-    else:
-        return (
-            input_serializer.serialize(payload),
-            input_serializer.content_type,
-        )
-
-
-def deserialize_application_call_output(
-    serialized_output: bytes,
-    serialized_output_content_type: str,
-    return_type_hints: List[Any],
-    output_serializer: UserDataSerializer,
-) -> Any | File:
-    """Deserializes the application function call output using the application function return type hints."""
-    is_file_output: bool = False
-    for type_hint in return_type_hints:
-        if type_hint is File:
-            is_file_output = True
-
-    if is_file_output:
-        return File(
-            content=serialized_output, content_type=serialized_output_content_type
-        )
-    else:
-        return output_serializer.deserialize(serialized_output, return_type_hints)
