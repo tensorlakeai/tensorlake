@@ -22,19 +22,27 @@ def mock_auth_credentials_path():
         config_dir.mkdir(parents=True)
         credentials_path = config_dir / "credentials.toml"
 
+        # Also create a local config file to prevent auto-init after login
+        local_config_path = Path(tmpdir) / ".tensorlake.toml"
+        with open(local_config_path, "w") as f:
+            f.write('organization = "test_org"\nproject = "test_proj"\n')
+
         import tensorlake.cli._configuration as config_module
 
         original_config_dir = config_module.CONFIG_DIR
         original_credentials_path = config_module.CREDENTIALS_PATH
+        original_local_config = config_module.LOCAL_CONFIG_FILE
 
         try:
             config_module.CONFIG_DIR = config_dir
             config_module.CREDENTIALS_PATH = credentials_path
+            config_module.LOCAL_CONFIG_FILE = local_config_path
             yield
         finally:
             # Restore original values
             config_module.CONFIG_DIR = original_config_dir
             config_module.CREDENTIALS_PATH = original_credentials_path
+            config_module.LOCAL_CONFIG_FILE = original_local_config
 
 
 class TestCloudURL(unittest.TestCase):

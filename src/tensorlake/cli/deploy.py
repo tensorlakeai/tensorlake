@@ -17,7 +17,7 @@ from tensorlake.applications.remote.code.loader import load_code
 from tensorlake.applications.remote.deploy import deploy_applications
 from tensorlake.applications.secrets import list_secret_names
 from tensorlake.builder.client_v2 import BuildContext, ImageBuilderV2Client
-from tensorlake.cli._common import Context, pass_auth
+from tensorlake.cli._common import Context, require_auth_and_project
 from tensorlake.cli.secrets import warning_missing_secrets
 
 
@@ -36,7 +36,7 @@ from tensorlake.cli.secrets import warning_missing_secrets
     "application-file-path",
     type=click.Path(exists=True, file_okay=True, dir_okay=False),
 )
-@pass_auth
+@require_auth_and_project
 def deploy(
     auth: Context,
     application_file_path: str,

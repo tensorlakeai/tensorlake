@@ -119,6 +119,31 @@ class Context:
             self._introspect_response = introspect_response
         return self._introspect_response
 
+    def has_authentication(self) -> bool:
+        """Check if any form of authentication is available."""
+        return self.api_key is not None or self.personal_access_token is not None
+
+    def has_org_and_project(self) -> bool:
+        """Check if organization and project IDs are available from any source."""
+        return self.organization_id is not None and self.project_id is not None
+
+    def needs_init(self) -> bool:
+        """
+        Check if init flow should run.
+        Init is needed if we have PAT but no org/project IDs.
+        If using API key, org/project come from introspection, so init not needed.
+        """
+        if self.api_key:
+            # API key provides org/project via introspection
+            return False
+
+        if not self.has_authentication():
+            # No auth at all - need login first, not init
+            return False
+
+        # Have PAT but missing org/project
+        return not self.has_org_and_project()
+
     @classmethod
     def default(
         cls,
@@ -206,6 +231,84 @@ class Context:
 
 """Pass the Context object to the click command"""
 pass_auth = click.make_pass_decorator(Context)
+
+
+def require_auth_and_project(f):
+    """
+    Decorator that ensures authentication and org/project IDs are available.
+
+    This decorator:
+    1. Checks if authentication exists (API key or PAT)
+    2. If using API key, org/project come from introspection automatically
+    3. If using PAT but no org/project, automatically runs init flow
+    4. If no auth at all, shows error message to run 'tensorlake login'
+
+    Usage:
+        @click.command()
+        @require_auth_and_project
+        def my_command(ctx: Context):
+            # ctx.organization_id and ctx.project_id are guaranteed to be available
+            pass
+    """
+    import functools
+
+    @pass_auth
+    @functools.wraps(f)
+    def wrapper(ctx: Context, *args, **kwargs):
+        # Check if we have any authentication
+        if not ctx.has_authentication():
+            raise click.UsageError(
+                "No authentication found. Please run 'tensorlake login' to authenticate."
+            )
+
+        # If using API key, org/project come from introspection
+        # If already have org/project from any source, we're good
+        if ctx.has_org_and_project():
+            return f(ctx, *args, **kwargs)
+
+        # At this point: we have auth but no org/project
+        # If using API key, something is wrong (should have gotten them from introspection)
+        if ctx.api_key:
+            raise click.UsageError(
+                "API key is set but could not determine organization and project. "
+                "Please check your API key or provide --organization and --project flags."
+            )
+
+        # We have PAT but no org/project - need to run init
+        click.echo("Organization and project IDs are required for this command.")
+        click.echo("Running initialization flow to set up your project...\n")
+
+        # Import here to avoid circular dependency
+        from tensorlake.cli.init import run_init_flow
+
+        try:
+            org_id, proj_id = run_init_flow(
+                ctx,
+                interactive=True,
+                create_local_config=True,
+                skip_if_provided=False,
+            )
+
+            # Create a new context with the org/project IDs
+            updated_ctx = Context.default(
+                base_url=ctx.base_url,
+                cloud_url=ctx.cloud_url,
+                api_key=ctx.api_key,
+                personal_access_token=ctx.personal_access_token,
+                namespace=ctx.namespace,
+                organization_id=org_id,
+                project_id=proj_id,
+            )
+
+            return f(updated_ctx, *args, **kwargs)
+        except click.Abort:
+            click.echo(
+                "\nInitialization aborted. Please run 'tensorlake init' to complete setup.",
+                err=True,
+            )
+            raise
+
+    return wrapper
 
 
 class AliasedGroup(click.Group):

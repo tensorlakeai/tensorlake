@@ -5,7 +5,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from tensorlake.cli._common import Context, pass_auth
+from tensorlake.cli._common import Context, require_auth_and_project
 
 
 @click.group()
@@ -19,21 +19,11 @@ def secrets():
 
 
 @secrets.command()
-@pass_auth
+@require_auth_and_project
 def list(ctx: Context):
     """
     List all secrets in the current project.
     """
-
-    if not ctx.organization_id:
-        raise click.UsageError(
-            "No organization provided or default organization configured.",
-        )
-
-    if not ctx.project_id:
-        raise click.UsageError(
-            "No project provided or default project configured."
-        )
 
     secrets = _get_all_existing_secrets(ctx)
     if len(secrets) == 0:
@@ -66,7 +56,7 @@ def list(ctx: Context):
 
 @secrets.command()
 @click.argument("secrets", nargs=-1)
-@pass_auth
+@require_auth_and_project
 def set(ctx: Context, secrets: str):
     """
     Set one of many secrets in the current project.
@@ -115,7 +105,7 @@ def set(ctx: Context, secrets: str):
 
 @secrets.command()
 @click.argument("secret_names", nargs=-1)
-@pass_auth
+@require_auth_and_project
 def unset(ctx: Context, secret_names: str):
     """
     Unset one or many secrets in the current project.

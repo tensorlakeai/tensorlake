@@ -136,3 +136,26 @@ def login(ctx: Context):
     access_token = exchange_response_body["access_token"]
     save_credentials(ctx.base_url, access_token)
     click.echo("Login successful!")
+
+    # After successful login, check if we need to run init
+    # Recreate context with the new PAT to check if org/project are available
+    updated_ctx = Context.default(
+        base_url=ctx.base_url,
+        cloud_url=ctx.cloud_url,
+        personal_access_token=access_token,
+        # Preserve CLI flags and env vars if they were provided
+        organization_id=ctx.default_organization,
+        project_id=ctx.default_project,
+    )
+
+    # Check if org/project are available from ANY source (CLI, env, local config)
+    if not updated_ctx.has_org_and_project():
+        click.echo("\nNo organization and project configuration found. Let's set up your project.\n")
+
+        # Import here to avoid circular dependency
+        from tensorlake.cli.init import run_init_flow
+
+        try:
+            run_init_flow(updated_ctx, interactive=True, create_local_config=True, skip_if_provided=False)
+        except click.Abort:
+            click.echo("\nYou can run 'tensorlake init' later to complete the setup.", err=True)
