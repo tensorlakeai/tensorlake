@@ -1,10 +1,10 @@
 import datetime
 import json
-import httpx
 import os
 import uuid
 from typing import Any
 
+import httpx
 from pydantic import BaseModel
 
 
@@ -51,6 +51,7 @@ class Resource(BaseModel):
 def push_event_to_collector(
     resource: Resource,
     event: dict[str, Any],
+    collector_url: str | None = None,
 ) -> None:
     """
     Pushes the given event to a log collector.
@@ -61,7 +62,11 @@ def push_event_to_collector(
     because it's designed to be embedded into the executor.
     The executor needs to handle HTTP errors and collect metrics.
     """
-    collector_url = os.environ.get("TENSORLAKE_COLLECTOR_URL")
+    collector_url = (
+        os.environ.get("TENSORLAKE_COLLECTOR_URL")
+        if collector_url is None
+        else collector_url
+    )
     if collector_url:
         body = resource.model_dump()
         body["event"] = new_cloud_event(event)
