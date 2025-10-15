@@ -96,13 +96,36 @@ class Function:
         Blocks until the result is ready.
         Similar to https://docs.python.org/3/library/functools.html#functools.reduce.
         """
-        reducer_call: ReduceOperationFuture = self._make_reducer_call(iterable, initial)
+        reducer_call: ReduceOperationFuture = self._make_reducer_call(
+            iterable=iterable,
+            initial=initial,
+            output_serializer_name_override=None,  # No oso for blocking calls
+        )
         return start_and_wait_function_calls([reducer_call])[0]
 
     def future(self, *args, **kwargs) -> Future:
         """Runs a non-blocking function call and returns its Future."""
         function_call: FunctionCallFuture = self._make_function_call(
-            None, *args, **kwargs
+            start_delay=None, output_serializer_override=None, *args, **kwargs
+        )
+        start_function_calls([function_call])
+        return function_call
+
+    # TODO: determine application_output_serializer automatically by getting the currently running
+    # Tensorlake Function contextvars.Context
+    def request_output_future(
+        self, application_output_serializer: str, *args, **kwargs
+    ) -> Future:
+        """Runs a non-blocking function call and returns its Future.
+
+        The output serializer of the returned future is overridden with the application
+        output serializer so the future can be used as a return value of application function.
+        """
+        function_call: FunctionCallFuture = self._make_function_call(
+            start_delay=None,
+            output_serializer_override=application_output_serializer,
+            *args,
+            **kwargs,
         )
         start_function_calls([function_call])
         return function_call
@@ -111,12 +134,8 @@ class Function:
         """Runs a non-blocking function call after start_delay seconds and returns its Future."""
         if start_delay < 0:
             raise ValueError("start_delay must be non-negative")
-        function_call: FunctionCallFuture = FunctionCallFuture(
-            id=request_scoped_id(),
-            function_name=self._function_config.function_name,
-            args=list(args),
-            kwargs=dict(kwargs),
-            start_delay=start_delay,
+        function_call: FunctionCallFuture = self._make_function_call(
+            start_delay=start_delay, output_serializer_override=None, *args, **kwargs
         )
         start_function_calls([function_call])
         return function_call
@@ -144,7 +163,11 @@ class Function:
 
         Similar to https://docs.python.org/3/library/functools.html#functools.reduce.
         """
-        reducer_call: ReduceOperationFuture = self._make_reducer_call(iterable, initial)
+        reducer_call: ReduceOperationFuture = self._make_reducer_call(
+            iterable=iterable,
+            initial=initial,
+            output_serializer_name_override=None,
+        )
         start_function_calls([reducer_call])
         return reducer_call
 
@@ -158,14 +181,19 @@ class Function:
         )
 
     def _make_function_call(
-        self, start_delay: float | None, *args, **kwargs
+        self,
+        start_delay: float | None,
+        output_serializer_override: str | None,
+        *args,
+        **kwargs,
     ) -> FunctionCallFuture:
         return FunctionCallFuture(
             id=request_scoped_id(),
             function_name=self._function_config.function_name,
+            start_delay=start_delay,
+            output_serializer_override=output_serializer_override,
             args=list(args),
             kwargs=dict(kwargs),
-            start_delay=start_delay,
         )
 
     def _make_map_calls(self, iterable: Iterable) -> List[FunctionCallFuture]:
@@ -175,15 +203,19 @@ class Function:
                 FunctionCallFuture(
                     id=request_scoped_id(),
                     function_name=self._function_config.function_name,
+                    start_delay=None,
+                    output_serializer_override=None,
                     args=[item],
                     kwargs={},
-                    start_delay=None,
                 )
             )
         return map_calls
 
     def _make_reducer_call(
-        self, iterable: Iterable, initial: Any | _InitialMissingType
+        self,
+        iterable: Iterable,
+        initial: Any | _InitialMissingType,
+        output_serializer_name_override: str | None,
     ) -> ReduceOperationFuture:
         inputs: List[Any] = list(iterable)
         if len(inputs) == 0 and initial is _InitialMissing:
@@ -194,9 +226,10 @@ class Function:
 
         return ReduceOperationFuture(
             id=request_scoped_id(),
-            reducer_function_name=self._function_config.function_name,
-            inputs=inputs,
+            function_name=self._function_config.function_name,
             start_delay=None,
+            output_serializer_name_override=output_serializer_name_override,
+            inputs=inputs,
         )
 
     def __get__(self, instance: Any | None, cls: Any) -> "Function":

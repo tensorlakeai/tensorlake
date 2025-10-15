@@ -38,7 +38,7 @@ class ReducerFunctionCallNode(ASTNode):
 
         return ReduceOperationFuture(
             id=self.id,
-            reducer_function_name=self.reducer_function_name,
+            function_name=self.reducer_function_name,
             inputs=inputs,
             start_delay=None,
         )

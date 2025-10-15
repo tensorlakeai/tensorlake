@@ -14,4 +14,4 @@ def create_self_instance(class_name: str) -> Any:
 
 
 def set_self_arg(function_call: FunctionCallFuture, self_instance: Any) -> None:
-    function_call._args.insert(0, self_instance)
+    function_call.args.insert(0, self_instance)

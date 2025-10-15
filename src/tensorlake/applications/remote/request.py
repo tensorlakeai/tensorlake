@@ -1,11 +1,10 @@
 import base64
 from typing import Any, List
 
-from ..function.application_call import deserialize_application_call_output
 from ..function.type_hints import deserialize_type_hints
-from ..interface.file import File
+from ..function.user_data_serializer import deserialize_value
 from ..interface.request import Request
-from ..user_data_serializer import UserDataSerializer, serializer_by_name
+from ..user_data_serializer import serializer_by_name
 from .api_client import APIClient
 from .manifests.application import ApplicationManifest
 
@@ -55,11 +54,11 @@ class RemoteRequest(Request):
             # This usually happens when the application function return types are not loaded into current process.
             return_type_hints: List[Any] = []
 
-        return deserialize_application_call_output(
-            serialized_output=serialized_output,
-            serialized_output_content_type=output_content_type,
-            return_type_hints=return_type_hints,
-            output_serializer=serializer_by_name(
+        return deserialize_value(
+            serialized_value=serialized_output,
+            serialized_value_content_type=output_content_type,
+            serializer=serializer_by_name(
                 self._application_manifest.entrypoint.output_serializer
             ),
+            type_hints=return_type_hints,
         )

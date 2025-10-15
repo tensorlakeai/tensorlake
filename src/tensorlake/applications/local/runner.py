@@ -1,46 +1,35 @@
-import contextvars
 import traceback
 from queue import Empty as QueueEmptyError
 from queue import SimpleQueue
 from typing import Any, Dict, List
 
-from ..ast import (
-    ASTNode,
-    ReducerFunctionCallMetadata,
-    ReducerFunctionCallNode,
-    RegularFunctionCallMetadata,
-    RegularFunctionCallNode,
-    ValueMetadata,
-    ValueNode,
-    ast_from_user_object,
-    override_output_serializer_at_child_call_tree_root,
-)
 from ..function.application_call import (
     application_function_call_with_serialized_payload,
-    deserialize_application_call_output,
-    serialize_application_call_payload,
 )
 from ..function.function_call import (
     create_self_instance,
-    set_self_arg,
 )
-from ..function.reducer_call import reducer_function_call
-from ..function.type_hints import function_return_type_hint
 from ..function.user_data_serializer import (
+    deserialize_value,
     function_input_serializer,
     function_output_serializer,
+    serialize_value,
 )
-from ..interface.exceptions import RequestError, RequestFailureException
+from ..interface.exceptions import (
+    RequestError,
+    RequestFailureException,
+    TensorlakeException,
+)
 from ..interface.file import File
 from ..interface.function import Function
 from ..interface.futures import (
     FunctionCallFuture,
     Future,
     ReduceOperationFuture,
+    request_scoped_id,
 )
 from ..interface.request import Request
 from ..interface.request_context import RequestContext
-from ..interface.retries import Retries
 from ..registry import get_function
 from ..request_context.request_context_base import RequestContextBase
 from ..request_context.request_metrics_recorder import RequestMetricsRecorder
@@ -49,11 +38,12 @@ from ..runtime_hooks import (
     set_start_function_calls_hook,
     set_wait_futures_hook,
 )
-from ..user_data_serializer import UserDataSerializer
+from ..user_data_serializer import UserDataSerializer, serializer_by_name
 from .blob_store import BLOB, BLOBStore
-from .exceptions import StopFunctionRun
-from .function_run import LocalFunctionRun, LocalFunctionRunResult
-from .future import LocalFuture
+from .function_run import LocalFunctionRun
+from .future import FutureType, LocalFuture
+from .future_run import LocalFutureRun, LocalFutureRunResult, StopLocalFutureRun
+from .reduce_run import LocalReduceRun
 from .request import LocalRequest
 from .request_progress import LocalRequestProgress
 from .request_state import LocalRequestState
@@ -68,13 +58,14 @@ class LocalRunner:
         # Future ID -> BLOB if future succeeded.
         self._blob_store: BLOBStore = BLOBStore()
         # Futures currently known to the runner.
-        # Future ID -> Future
+        # Future ID -> LocalFuture
         self._futures: Dict[str, LocalFuture] = {}
         # Function runs that are currently running or completed already.
-        # Future ID -> LocalFunctionRun
-        self._function_runs: Dict[str, LocalFunctionRun] = {}
+        # Future ID -> LocalFutureRun
+        self._future_runs: Dict[str, LocalFutureRun] = {}
+        # Exception that caused the request to fail.
         # None when request finished successfully.
-        self._exception: RequestFailureException | RequestError | None = None
+        self._request_exception: RequestFailureException | RequestError | None = None
         # Class name => instance.
         self._class_instances: Dict[str, Any] = {}
         self._request_context: RequestContext = RequestContextBase(
@@ -83,16 +74,14 @@ class LocalRunner:
             progress=LocalRequestProgress(),
             metrics=RequestMetricsRecorder(),
         )
-        # SimpleQueue[LocalFunctionRunResult]
-        self._function_run_result_queue: SimpleQueue = SimpleQueue()
+        # SimpleQueue[LocalFutureRunResult]
+        self._feature_run_result_queue: SimpleQueue = SimpleQueue()
 
     def run(self) -> Request:
         try:
             input_serializer: UserDataSerializer = function_input_serializer(self._app)
-            serialized_payload: bytes
-            content_type: str
-            serialized_payload, content_type = serialize_application_call_payload(
-                input_serializer, self._app_payload
+            serialized_payload, content_type = serialize_value(
+                self._app_payload, input_serializer
             )
             app_function_call: FunctionCallFuture = (
                 application_function_call_with_serialized_payload(
@@ -101,7 +90,9 @@ class LocalRunner:
                     payload_content_type=content_type,
                 )
             )
-            self._futures[app_function_call.id] = app_function_call
+            self._futures[app_function_call.id] = LocalFuture(
+                future=app_function_call,
+            )
 
             set_start_function_calls_hook(self._runtime_hook_start_function_calls)
             set_start_and_wait_function_calls_hook(
@@ -111,25 +102,17 @@ class LocalRunner:
 
             self._control_loop()
 
-            if self._exception is not None:
+            if self._request_exception is not None:
                 return LocalRequest(
                     id=_LOCAL_REQUEST_ID,
                     output=None,
-                    exception=self._exception,
+                    exception=self._request_exception,
                 )
 
             app_output_blob: BLOB = self._blob_store.get(app_function_call.id)
-            output: File | Any = deserialize_application_call_output(
-                serialized_output=app_output_blob.data,
-                serialized_output_content_type=app_output_blob.content_type,
-                return_type_hints=function_return_type_hint(self._app),
-                # No output serializer override for application functions.
-                output_serializer=function_output_serializer(self._app, None),
-            )
-
             return LocalRequest(
                 id=_LOCAL_REQUEST_ID,
-                output=output,
+                output=_deserialize_blob_value(app_output_blob),
                 exception=None,
             )
         except BaseException as e:
@@ -149,169 +132,270 @@ class LocalRunner:
         self, function_calls: List[FunctionCallFuture | ReduceOperationFuture]
     ) -> None:
         self._user_code_cancellation_point()
+        # TODO
 
     def _runtime_hook_start_and_wait_function_calls(
         self, function_calls: List[FunctionCallFuture | ReduceOperationFuture]
     ) -> None:
         self._user_code_cancellation_point()
+        # TODO
 
     def _runtime_hook_wait_futures(self, futures: List[Future]) -> None:
         self._user_code_cancellation_point()
+        # TODO
 
     def _user_code_cancellation_point(self) -> None:
         # Every runtime hook call is a cancellation point for user code.
         # Raise StopFunctionRun to stop executing further user code
         # and reduce wait time for existing function run completion.
-        if self._exception is not None:
-            raise StopFunctionRun()
+        if self._request_exception is not None:
+            raise StopLocalFutureRun()
 
     def _finished(self) -> bool:
+        if self._request_exception is not None:
+            return True
+
         for future in self._futures.values():
-            if future.id not in self._function_runs:
+            if future.id not in self._future_runs:
+                # The future didn't run yet.
                 return False
 
-        return all(fr.finished for fr in self._function_runs.values())
+        return all(fr.finished for fr in self._future_runs.values())
 
     def _control_loop(self) -> None:
         while not self._finished():
-            self._start_runnable_function_calls()
-            self._process_function_run_result()
-            if self._exception is not None:
-                # The request failed. Wait until function runs finish and then exit.
-                # We have to wait because otherwise function runs will keep printing
+            self._start_runnable_futures()
+            # Process one future run result at a time because it takes ~0.1s at most.
+            # This keeps our timers accurate enough.
+            self._wait_and_process_future_run_result()
+            if self._request_exception is not None:
+                # The request failed. Wait until future runs finish and then exit.
+                # We have to wait because otherwise future runs will keep printing
                 # arbitrary logs to stdout/stderr and hold resources after request
                 # should be finished running.
-                print("Request failed, waiting for existing function runs to finish...")
-                self._wait_all_function_runs()
+                print("Request failed, waiting for existing future runs to finish...")
+                self._wait_all_future_runs()
                 break
 
-    def _process_function_run_result(self) -> None:
-        try:
-            # Wait at most 100ms. This is the precision of function call timers.
-            result: LocalFunctionRunResult = self._function_run_result_queue.get(
-                timeout=0.1
-            )
-            if result.exception is None:
-                # TODO: handle the output properly.
-                self._blob_store.put(result.value)
-            else:
-                self._exception = result.exception
-        except QueueEmptyError:
-            pass  # No new result so far.
-
-    def _wait_all_function_runs(self) -> None:
-        for fr in self._function_runs.values():
-            fr.wait()
-
-    def _start_runnable_function_calls(self) -> None:
+    def _start_runnable_futures(self) -> None:
         for future in self._futures.values():
-            if future.id in self._function_runs:
+            future: LocalFuture
+            if future.id in self._future_runs:
                 continue
 
-            if self._is_runnable(future):
-                if isinstance(future, FunctionCallFuture):
-                    self._run_function_call(future)
-                elif isinstance(future, ReduceOperationFuture):
-                    self._run_reducer_operation(future)
-                else:
-                    raise RequestFailureException("Unknown future type")
+            if not future.start_time_elapsed:
+                continue
 
-    def _is_runnable(self, future: Future) -> bool:
+            if not self._has_all_data_dependencies(future):
+                continue
+
+            self._run_future(future)
+
+    def _wait_and_process_future_run_result(self) -> None:
+        try:
+            # Wait at most 100ms. This is the precision of function call timers.
+            result: LocalFunctionRunResult | LocalReduceRunResult = (
+                self._feature_run_result_queue.get(timeout=0.1)
+            )
+        except QueueEmptyError:
+            # No new result for now.
+            return
+
+        self._process_future_run_result(result)
+
+    def _process_future_run_result(self, result: LocalFutureRunResult) -> None:
+        if result.exception is None:
+            self._request_exception = result.exception
+            return
+
+        future: LocalFuture = self._futures[result.id]
+        function: Function = get_function(future.future.function_name)
+        if isinstance(result.output, Future):
+            # The future is already registered using runtime hook.
+            if result.output.id not in self._futures:
+                raise TensorlakeException(
+                    "Internal error: future returned from future run is not registered"
+                )
+            output_future: LocalFuture = self._futures[result.output.id]
+
+            if output_future.output_consumer_future_id is not None:
+                raise TensorlakeException(
+                    "Internal error: future returned from future run is already consumed by another future"
+                )
+            output_future.output_consumer_future_id = result.id
+
+            if self._blob_store.has(output_future.future.id):
+                # The output future is already finished.
+                self._propagate_future_output_to_consumers(output_future)
+        else:
+            self._blob_store.put(
+                _future_output_value_to_blob(
+                    function=function,
+                    future_id=future.future.id,
+                    output=result.output,
+                    output_serializer_name_override=future.future.output_serializer_name_override,
+                )
+            )
+            self._propagate_future_output_to_consumers(future)
+
+    def _wait_all_future_runs(self) -> None:
+        for fr in self._future_runs.values():
+            fr.wait()
+
+    def _has_all_data_dependencies(self, future: LocalFuture) -> bool:
+        future: FutureType = future.future
         if isinstance(future, FunctionCallFuture):
-            for arg in future._args:
+            for arg in future.args:
                 if isinstance(arg, Future):
-                    if arg.id not in self._blob_store.blobs:
+                    if not self._blob_store.has(arg.id):
                         return False
-            for _, kwarg in future._kwargs.items():
-                if isinstance(kwarg, Future):
-                    if kwarg.id not in self._blob_store.blobs:
+            for arg in future.kwargs.values():
+                if isinstance(arg, Future):
+                    if not self._blob_store.has(arg.id):
                         return False
             return True
         elif isinstance(future, ReduceOperationFuture):
-            for item in future.inputs.items:
-                if isinstance(item, Future):
-                    if item.id not in self._blob_store.blobs:
+            for input_item in future.inputs:
+                if isinstance(input_item, Future):
+                    if not self._blob_store.has(input_item.id):
                         return False
             return True
-        else:
-            raise RequestFailureException("Unknown future type")
 
-    def _run_regular_function_call(self, node: RegularFunctionCallNode) -> None:
-        node_metadata: RegularFunctionCallMetadata = (
-            RegularFunctionCallMetadata.deserialize(node.serialized_metadata)
+        raise TensorlakeException(
+            "Internal error: unexpected future type: {}".format(type(future))
         )
-        function_call: FunctionCallFuture = node.to_regular_function_call()
-        function: Function = get_function(function_call._function_name)
-        function_os: UserDataSerializer = function_output_serializer(
-            function, node_metadata.oso
-        )
-        output: Any = self._call(function_call, function)
-        output_ast: ASTNode = ast_from_user_object(output, function_os)
-        override_output_serializer_at_child_call_tree_root(
-            function_output_serializer_name=function_os.name,
-            function_output_ast=output_ast,
-        )
-        self._replace_node(node, output_ast)
 
-    def _run_reducer_function_call(self, node: ReducerFunctionCallNode) -> None:
-        node_metadata: ReducerFunctionCallMetadata = (
-            ReducerFunctionCallMetadata.deserialize(node.serialized_metadata)
-        )
-        reducer_call: ReduceOperationFuture = node.to_reducer_function_call()
-        reducer_function: Function = get_function(reducer_call.function_name)
-
-        # inputs contains at least 2 items, this is guranteed by ReducerFunctionCall.
-        inputs: List[Any] = reducer_call.inputs.items
-        accumulator: Any = inputs[0]
-        for input_value in inputs[1:]:
-            function_call: FunctionCallFuture = reducer_function_call(
-                reducer_function, accumulator, input_value
+    def _propagate_future_output_to_consumers(self, future: LocalFuture) -> None:
+        current_future: LocalFuture = future
+        while current_future.output_consumer_future_id is not None:
+            consumer_future: LocalFuture = self._futures[
+                current_future.output_consumer_future_id
+            ]
+            consumer_future_output: BLOB = self._blob_store.get(
+                current_future.future.id
             )
-            accumulator = self._call(function_call, reducer_function)
+            consumer_future_output.id = consumer_future.future.id
+            self._blob_store.put(consumer_future_output)
+            current_future = consumer_future
 
-        reducer_function_os: UserDataSerializer = function_output_serializer(
-            reducer_function, node_metadata.oso
-        )
-        output_ast: ASTNode = ast_from_user_object(
-            accumulator,
-            reducer_function_os,
-        )
-        override_output_serializer_at_child_call_tree_root(
-            function_output_serializer_name=reducer_function_os.name,
-            function_output_ast=output_ast,
-        )
-        self._replace_node(node, output_ast)
+    def _run_future(self, future: LocalFuture) -> None:
+        """Runs the supplied future using a new LocalFutureRun object.
 
-    def _call(self, function_call: FunctionCallFuture, function: Function) -> Any:
-        self._set_function_call_instance_args(function_call, function)
-        context: contextvars.Context = contextvars.Context()
+        The future must be runnable, i.e. all its data dependencies are available
+        in blob store and its start time delay has elapsed.
+        """
+        if isinstance(future.future, FunctionCallFuture):
+            self._run_function_call_future(future)
+        elif isinstance(future.future, ReduceOperationFuture):
+            self._run_reduce_operation_future(future)
 
-        # Application retries are used if function retries are not set.
-        function_retries: Retries = (
-            self._app._application_config.retries
-            if function._function_config.retries is None
-            else function._function_config.retries
+    def _run_function_call_future(self, future: LocalFuture) -> None:
+        future: FunctionCallFuture = future.future
+        function: Function = get_function(future.function_name)
+
+        for arg_ix, arg in enumerate(future.args):
+            if isinstance(arg, Future):
+                arg_blob: BLOB = self._blob_store.get(arg.id)
+                arg_value: Any = _deserialize_blob_value(arg_blob)
+                future.args[arg_ix] = arg_value
+        for kwarg_key, kwarg in future.kwargs.items():
+            if isinstance(kwarg, Future):
+                kwarg_blob: BLOB = self._blob_store.get(kwarg.id)
+                kwarg_value: Any = _deserialize_blob_value(kwarg_blob)
+                future.kwargs[kwarg_key] = kwarg_value
+
+        function_run: LocalFunctionRun = LocalFunctionRun(
+            application=self._app,
+            function=function,
+            function_call=future,
+            class_instance=self._function_self_arg(function),
+            request_context=self._request_context,
+            result_queue=self._feature_run_result_queue,
         )
-        runs_left: int = 1 + function_retries.max_retries
-        while True:
-            try:
-                return context.run(self._call_with_context, function_call, function)
-            except Exception:
-                runs_left -= 1
-                if runs_left == 0:
-                    raise
+        function_run.start()
+        self._future_runs[future.id] = function_run
 
-    def _set_function_call_instance_args(
-        self, function_call: FunctionCall, function: Function
-    ) -> None:
+    def _function_self_arg(self, function: Function) -> Any | None:
         if function._function_config.class_name is None:
-            return
+            return None
 
         if function._function_config.class_name not in self._class_instances:
             self._class_instances[function._function_config.class_name] = (
                 create_self_instance(function._function_config.class_name)
             )
 
-        set_self_arg(
-            function_call, self._class_instances[function._function_config.class_name]
-        )
+        return self._class_instances[function._function_config.class_name]
+
+    def _run_reduce_operation_future(self, future: LocalFuture) -> None:
+        # TODO
+        pass
+
+    def _break_reduce_operation_into_function_calls(
+        self, reduce_operation: ReduceOperationFuture
+    ) -> None:
+        if len(reduce_operation.inputs) == 1:
+            self._futures[reduce_operation.id] = LocalFuture(
+                future=reduce_operation,
+            )
+            self._process_future_run_result(
+                LocalFunctionRunResult(
+                    id=reduce_operation.id,
+                    output=reduce_operation.inputs[0],
+                    exception=None,
+                )
+            )
+        else:
+            # Create a chain of function calls to reduce all inputs one by one.
+            # Ordering of calls is important here. We should reduce ["a", "b", "c", "d"]
+            # using string concat function into "abcd".
+            function_calls: List[FunctionCallFuture] = [
+                FunctionCallFuture(
+                    id=request_scoped_id(),
+                    function_name=user_call.function_name,
+                    args=[user_call.inputs[0], user_call.inputs[1]],
+                    kwargs={},
+                    start_delay=user_call.start_delay,
+                )
+            ]
+            for input_item in user_call.inputs[2:]:
+                function_calls.append(
+                    FunctionCallFuture(
+                        id=request_scoped_id(),
+                        function_name=user_call.function_name,
+                        args=[function_calls[-1], input_item],
+                        kwargs={},
+                        start_delay=user_call.start_delay,
+                    )
+                )
+            # The last function call's output is the ReduceOperationFuture's output.
+            function_calls[-1].id = user_call.id
+
+
+def _deserialize_blob_value(blob: BLOB) -> Any | File:
+    return deserialize_value(
+        serialized_value=blob.data,
+        serialized_value_content_type=blob.content_type,
+        serializer=serializer_by_name(blob.serializer_name),
+        type_hints=[blob.cls],
+    )
+
+
+def _future_output_value_to_blob(
+    function: Function,
+    future_id: str,
+    output: Any,
+    output_serializer_name_override: str | None,
+) -> BLOB:
+    function_os: UserDataSerializer = function_output_serializer(
+        function, output_serializer_name_override
+    )
+    serialized_output, serialized_output_content_type = serialize_value(
+        output, function_os
+    )
+    return BLOB(
+        id=future_id,
+        data=serialized_output,
+        serializer_name=function_os.name,
+        content_type=serialized_output_content_type,
+        cls=type(output),
+    )

@@ -1,37 +1,28 @@
 import contextvars
-import threading
 import traceback
-from dataclasses import dataclass
-from enum import Enum
 from queue import SimpleQueue
 from typing import Any
 
+from ..function.function_call import (
+    set_self_arg,
+)
 from ..interface.exceptions import RequestError, RequestFailureException
 from ..interface.function import Function
 from ..interface.futures import (
     FunctionCallFuture,
-    Future,
 )
 from ..interface.request_context import RequestContext
 from ..interface.retries import Retries
 from ..request_context.contextvar import set_current_request_context
-from .exceptions import StopFunctionRun
+from .future_run import (
+    LocalFutureRun,
+    LocalFutureRunResult,
+    LocalFutureRunState,
+    StopLocalFutureRun,
+)
 
 
-@dataclass
-class LocalFunctionRunResult:
-    # Either value or exception are set.
-    value: Any | Future | None
-    exception: RequestError | RequestFailureException | None
-
-
-class LocalFunctionRunState(Enum):
-    RUNNING = 1
-    SUCCESS = 2
-    FAILED = 3
-
-
-class LocalFunctionRun:
+class LocalFunctionRun(LocalFutureRun):
     """Runs a function call in a separate thread and returns its results.
 
     The function call future must has all its data dependecies resolved and
@@ -45,77 +36,85 @@ class LocalFunctionRun:
         application: Function,
         function: Function,
         function_call: FunctionCallFuture,
+        class_instance: Any | None,
         request_context: RequestContext,
-        result_queue: SimpleQueue,  # SimpleQueue[LocalFunctionRunResult]
+        result_queue: SimpleQueue,
     ):
-        self._application: Function = application
+        super().__init__(
+            application=application,
+            future=function_call,
+            request_context=request_context,
+            result_queue=result_queue,
+        )
         self._function: Function = function
         self._function_call: FunctionCallFuture = function_call
-        self._request_context: RequestContext = request_context
-        self._result_queue: SimpleQueue = result_queue
-        self._state: LocalFunctionRunState = LocalFunctionRunState.RUNNING
-        # daemon = True doesn't block the program from exiting if the thread is still running.
-        self._thread: threading.Thread = threading.Thread(
-            target=self._run_in_thread, daemon=True
-        )
-        self._thread.start()
-
-    @property
-    def finished(self) -> bool:
-        return (
-            self._state == LocalFunctionRunState.SUCCESS
-            or self._state == LocalFunctionRunState.FAILED
-        )
-
-    def wait(self) -> None:
-        self._thread.join()
+        self._class_instance: Any | None = class_instance
 
     def _run_in_thread(self) -> None:
         context: contextvars.Context = contextvars.Context()
-        # Application retries are used if function retries are not set.
-        retries: Retries = (
-            self._application._application_config.retries
-            if self._function._function_config.retries is None
-            else self._function._function_config.retries
+        result: LocalFutureRunResult = context.run(
+            run_function_call,
+            application=self._application,
+            function=self._function,
+            function_call=self._function_call,
+            class_instance=self._class_instance,
+            request_context=self._request_context,
         )
-        runs_left: int = 1 + retries.max_retries
-        while True:
-            try:
-                return context.run(self._run_with_context)
-            except RequestError as e:
-                # Never retry on RequestError.
-                self._state = LocalFunctionRunState.FAILED
-                self._result_queue.put(LocalFunctionRunResult(value=None, exception=e))
-                return
-            except StopFunctionRun:
-                self._state = LocalFunctionRunState.FAILED
-                self._result_queue.put(
-                    LocalFunctionRunResult(
-                        value=None,
-                        exception=RequestFailureException("Function run stopped"),
-                    )
-                )
-                return
-            except BaseException as e:
-                runs_left -= 1
-                if runs_left == 0:
-                    self._state = LocalFunctionRunState.FAILED
-                    # We only print exceptions in remote mode but don't propagate them to SDK
-                    # and return a generic RequestFailureException instead. Do the same here.
-                    traceback.print_exception(e)
-                    self._result_queue.put(
-                        LocalFunctionRunResult(
-                            value=None,
-                            exception=RequestFailureException("Function failed"),
-                        )
-                    )
-                    return
+        if result.exception is None:
+            self._state = LocalFutureRunState.SUCCESS
+        else:
+            self._state = LocalFutureRunState.FAILED
+        self._result_queue.put(result)
 
-    def _run_with_context(self) -> None:
-        # This function is executed in contextvars.Context of the Tensorlake Function call.
-        set_current_request_context(self._request_context)
-        result: Any = self._function._original_function(
-            *self._function_call._args, **self._function_call._kwargs
-        )
-        self._state = LocalFunctionRunState.SUCCESS
-        self._result_queue.put(LocalFunctionRunResult(value=result, exception=None))
+
+def run_function_call(
+    application: Function,
+    function: Function,
+    function_call: FunctionCallFuture,
+    class_instance: Any | None,
+    request_context: RequestContext,
+) -> LocalFutureRunResult:
+    """Runs the function call and returns its result.
+
+    Doesn't raise any exceptions, instead returns them in LocalFutureRunResult.exception.
+    """
+    # This function is executed in contextvars.Context of the Tensorlake Function call.
+    set_current_request_context(request_context)
+    if class_instance is not None:
+        set_self_arg(function_call, class_instance)
+
+    # Application retries are used if function retries are not set.
+    retries: Retries = (
+        application._application_config.retries
+        if function._function_config.retries is None
+        else function._function_config.retries
+    )
+    runs_left: int = 1 + retries.max_retries
+    while True:
+        try:
+            result: Any = function._original_function(
+                *function_call.args, **function_call.kwargs
+            )
+            return LocalFutureRunResult(
+                id=function_call.id, output=result, exception=None
+            )
+        except RequestError as e:
+            # Never retry on RequestError.
+            return LocalFutureRunResult(id=function_call.id, output=None, exception=e)
+        except StopLocalFutureRun:
+            return LocalFutureRunResult(
+                id=function_call.id,
+                output=None,
+                exception=RequestFailureException("Function run stopped"),
+            )
+        except BaseException as e:
+            runs_left -= 1
+            if runs_left == 0:
+                # We only print exceptions in remote mode but don't propagate them to SDK
+                # and return a generic RequestFailureException instead. Do the same here.
+                traceback.print_exception(e)
+                return LocalFutureRunResult(
+                    id=function_call.id,
+                    output=None,
+                    exception=RequestFailureException("Function failed"),
+                )
