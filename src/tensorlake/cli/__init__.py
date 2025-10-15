@@ -78,7 +78,7 @@ def cli(
     project_id: str | None,
 ):
     """
-    Tensorlake CLI for Tensorlake Cloud.
+    Tensorlake CLI.
     """
     ctx.obj = _common.Context.default(
         base_url=base_url,
