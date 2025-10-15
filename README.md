@@ -13,7 +13,7 @@
 [![Documentation](https://img.shields.io/badge/docs-tensorlake.ai-blue)](https://docs.tensorlake.ai)
 [![Slack](https://img.shields.io/badge/slack-TensorlakeCloud-purple?logo=slack)](https://join.slack.com/t/tensorlakecloud/shared_invite/zt-32fq4nmib-gO0OM5RIar3zLOBm~ZGqKg)
 
-TensorLake transforms unstructured documents into AI-ready data through Document Ingestion APIs and enables building scalable data processing pipelines with a serverless workflow runtime. 
+TensorLake transforms unstructured documents into AI-ready data through Document Ingestion APIs and enables building scalable data processing pipelines with a serverless workflow runtime.
 
 ![gh_animation](https://github.com/user-attachments/assets/bc57d5f5-c745-4a36-926a-d85767b9115e)
 </div>
@@ -293,9 +293,28 @@ run_workflow(cloud_workflow)
 python examples/readme_example.py
 ```
 
-## Learn more about workflows 
+## Extra Tools
 
-* [Serverless Workflows Documentation](https://docs.tensorlake.ai/workflows/quickstart)
-* [Key programming concepts in Tensorlake Workflows](https://docs.tensorlake.ai/workflows/compute)
-* [Dependencies and container images in Tensorlake Workflows](https://docs.tensorlake.ai/workflows/images)
+### Python Analyzer
+
+Analyze Python files containing Tensorlake applications without deploying them. This tool extracts metadata about images, functions, and applications in JSON format.
+
+**Note**: The analyzer extracts ALL functions with `@function()` decorator, including standalone functions that don't have `@application()`.
+
+```bash
+# Output to stdout
+tensorlake-python-analyzer myapp.py
+
+# Pretty-print JSON
+tensorlake-python-analyzer --pretty myapp.py
+
+# Save to file
+tensorlake-python-analyzer myapp.py -o analysis.json --pretty
+```
+
+## Learn more about Tensorlake Applications
+
+* [Serverless Applications Documentation](https://docs.tensorlake.ai/applications/quickstart)
+* [Key programming concepts in Tensorlake Workflows](https://docs.tensorlake.ai/applications/compute)
+* [Dependencies and container images in Tensorlake Workflows](https://docs.tensorlake.ai/applications/images)
 * [Open Source Workflow Compute Engine](https://docs.tensorlake.ai/opensource/indexify)

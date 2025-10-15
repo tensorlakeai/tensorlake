@@ -1,41 +1,50 @@
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
+
+from pydantic import BaseModel, Field
 
 from .function_call import RegularFunctionCall
 from .image import Image
 from .retries import Retries
 
 
-@dataclass
-class _FunctionConfiguration:
+class _FunctionConfiguration(BaseModel):
+    """Function configuration with validation."""
+
     # None for non-method functions, only available after all modules are loaded
     # because class objects are created after their methods.
-    class_name: str | None
-    class_method_name: str | None
-    class_init_timeout: int | None
+    class_name: Optional[str] = None
+    class_method_name: Optional[str] = None
+    class_init_timeout: Optional[int] = None
     function_name: str
     description: str
     image: Image
-    secrets: List[str]
-    retries: Retries | None  # Uses application retry policy if None
+    secrets: List[str] = Field(default_factory=list)
+    retries: Optional[Retries] = None  # Uses application retry policy if None
     timeout: int
     cpu: float
     memory: float
     ephemeral_disk: float
-    gpu: None | str | List[str]
-    region: str | None
+    gpu: Optional[str | List[str]] = None
+    region: Optional[str] = None
     cacheable: bool
     max_concurrency: int
 
+    class Config:
+        arbitrary_types_allowed = True
 
-@dataclass
-class _ApplicationConfiguration:
-    tags: Dict[str, str]
+
+class _ApplicationConfiguration(BaseModel):
+    """Application configuration with validation."""
+
+    tags: Dict[str, str] = Field(default_factory=dict)
     retries: Retries
-    region: str | None
+    region: Optional[str] = None
     input_serializer: str
     output_serializer: str
     version: str
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
 class Function:
