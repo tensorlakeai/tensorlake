@@ -33,6 +33,9 @@ class BLOBStore:
             )
         return self._store[blob_id]
 
+    def has(self, blob_id: str) -> bool:
+        return blob_id in self._store
+
     def delete(self, blob_id: str):
         if blob_id not in self._store:
             raise ValueError(
