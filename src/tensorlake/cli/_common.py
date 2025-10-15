@@ -50,10 +50,10 @@ class Context:
                 "Accept": "application/json",
                 "User-Agent": f"Tensorlake CLI (python/{sys.version_info[0]}.{sys.version_info[1]} sdk/{self.version})",
             }
-            if self.personal_access_token:
-                headers["Authorization"] = f"Bearer {self.personal_access_token}"
-            elif self.api_key:
+            if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
+            elif self.personal_access_token:
+                headers["Authorization"] = f"Bearer {self.personal_access_token}"
             else:
                 raise click.UsageError(
                     "Missing API key or personal access token. Please run `tensorlake login` to authenticate."
@@ -65,9 +65,9 @@ class Context:
     @property
     def api_client(self) -> APIClient:
         if self._api_client is None:
-            bearer_token = self.personal_access_token
-            if self.api_key:
-                bearer_token = self.api_key
+            bearer_token = self.api_key
+            if not bearer_token:
+                bearer_token = self.personal_access_token
 
             self._api_client = APIClient(
                 namespace=self.namespace,
