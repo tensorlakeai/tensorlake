@@ -466,6 +466,199 @@ class TestInitCommand(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = original_local_config
 
 
+class TestInitWithIncompleteConfig(unittest.TestCase):
+    """Test that init command handles incomplete/corrupt local config files"""
+
+    @respx.mock
+    def test_init_repairs_config_missing_organization(self):
+        """Test that init overwrites config file that's missing organization"""
+        runner = CliRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            credentials_dir = Path(tmpdir) / ".config" / "tensorlake"
+            credentials_dir.mkdir(parents=True)
+            credentials_path = credentials_dir / "credentials.toml"
+
+            local_config_path = Path(tmpdir) / "project" / ".tensorlake.toml"
+            local_config_path.parent.mkdir(parents=True)
+
+            # Create incomplete config (missing organization)
+            with open(local_config_path, "w") as f:
+                f.write('project = "old_proj"\n')
+
+            original_config_dir = config_module.CONFIG_DIR
+            original_credentials_path = config_module.CREDENTIALS_PATH
+            original_local_config = config_module.LOCAL_CONFIG_FILE
+
+            try:
+                config_module.CONFIG_DIR = credentials_dir
+                config_module.CREDENTIALS_PATH = credentials_path
+                config_module.LOCAL_CONFIG_FILE = local_config_path
+
+                save_credentials("https://api.tensorlake.ai", "test_token_123")
+
+                # Mock API responses
+                respx.get("https://api.tensorlake.ai/platform/v1/organizations").mock(
+                    return_value=httpx.Response(
+                        200,
+                        json={"items": [{"id": "new_org", "name": "New Org"}]},
+                    )
+                )
+
+                respx.get(
+                    "https://api.tensorlake.ai/platform/v1/organizations/new_org/projects"
+                ).mock(
+                    return_value=httpx.Response(
+                        200,
+                        json={"items": [{"id": "new_proj", "name": "New Project"}]},
+                    )
+                )
+
+                result = runner.invoke(cli, ["init"], prog_name="tensorlake")
+
+                # Should succeed
+                self.assertEqual(result.exit_code, 0, f"CLI failed: {result.output}")
+                self.assertIn("New Org", result.output)
+                self.assertIn("New Project", result.output)
+
+                # Verify config was repaired
+                with open(local_config_path, "r") as f:
+                    config = parse(f.read())
+                self.assertEqual(config["organization"], "new_org")
+                self.assertEqual(config["project"], "new_proj")
+
+            finally:
+                config_module.CONFIG_DIR = original_config_dir
+                config_module.CREDENTIALS_PATH = original_credentials_path
+                config_module.LOCAL_CONFIG_FILE = original_local_config
+
+    @respx.mock
+    def test_init_repairs_config_missing_project(self):
+        """Test that init overwrites config file that's missing project"""
+        runner = CliRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            credentials_dir = Path(tmpdir) / ".config" / "tensorlake"
+            credentials_dir.mkdir(parents=True)
+            credentials_path = credentials_dir / "credentials.toml"
+
+            local_config_path = Path(tmpdir) / "project" / ".tensorlake.toml"
+            local_config_path.parent.mkdir(parents=True)
+
+            # Create incomplete config (missing project)
+            with open(local_config_path, "w") as f:
+                f.write('organization = "old_org"\n')
+
+            original_config_dir = config_module.CONFIG_DIR
+            original_credentials_path = config_module.CREDENTIALS_PATH
+            original_local_config = config_module.LOCAL_CONFIG_FILE
+
+            try:
+                config_module.CONFIG_DIR = credentials_dir
+                config_module.CREDENTIALS_PATH = credentials_path
+                config_module.LOCAL_CONFIG_FILE = local_config_path
+
+                save_credentials("https://api.tensorlake.ai", "test_token_123")
+
+                # Mock API responses
+                respx.get("https://api.tensorlake.ai/platform/v1/organizations").mock(
+                    return_value=httpx.Response(
+                        200,
+                        json={"items": [{"id": "new_org", "name": "New Org"}]},
+                    )
+                )
+
+                respx.get(
+                    "https://api.tensorlake.ai/platform/v1/organizations/new_org/projects"
+                ).mock(
+                    return_value=httpx.Response(
+                        200,
+                        json={"items": [{"id": "new_proj", "name": "New Project"}]},
+                    )
+                )
+
+                result = runner.invoke(cli, ["init"], prog_name="tensorlake")
+
+                # Should succeed
+                self.assertEqual(result.exit_code, 0, f"CLI failed: {result.output}")
+                self.assertIn("New Org", result.output)
+                self.assertIn("New Project", result.output)
+
+                # Verify config was repaired
+                with open(local_config_path, "r") as f:
+                    config = parse(f.read())
+                self.assertEqual(config["organization"], "new_org")
+                self.assertEqual(config["project"], "new_proj")
+
+            finally:
+                config_module.CONFIG_DIR = original_config_dir
+                config_module.CREDENTIALS_PATH = original_credentials_path
+                config_module.LOCAL_CONFIG_FILE = original_local_config
+
+    @respx.mock
+    def test_init_repairs_config_with_empty_values(self):
+        """Test that init overwrites config file with empty string values"""
+        runner = CliRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            credentials_dir = Path(tmpdir) / ".config" / "tensorlake"
+            credentials_dir.mkdir(parents=True)
+            credentials_path = credentials_dir / "credentials.toml"
+
+            local_config_path = Path(tmpdir) / "project" / ".tensorlake.toml"
+            local_config_path.parent.mkdir(parents=True)
+
+            # Create config with empty values
+            with open(local_config_path, "w") as f:
+                f.write('organization = ""\nproject = ""\n')
+
+            original_config_dir = config_module.CONFIG_DIR
+            original_credentials_path = config_module.CREDENTIALS_PATH
+            original_local_config = config_module.LOCAL_CONFIG_FILE
+
+            try:
+                config_module.CONFIG_DIR = credentials_dir
+                config_module.CREDENTIALS_PATH = credentials_path
+                config_module.LOCAL_CONFIG_FILE = local_config_path
+
+                save_credentials("https://api.tensorlake.ai", "test_token_123")
+
+                # Mock API responses
+                respx.get("https://api.tensorlake.ai/platform/v1/organizations").mock(
+                    return_value=httpx.Response(
+                        200,
+                        json={"items": [{"id": "new_org", "name": "New Org"}]},
+                    )
+                )
+
+                respx.get(
+                    "https://api.tensorlake.ai/platform/v1/organizations/new_org/projects"
+                ).mock(
+                    return_value=httpx.Response(
+                        200,
+                        json={"items": [{"id": "new_proj", "name": "New Project"}]},
+                    )
+                )
+
+                result = runner.invoke(cli, ["init"], prog_name="tensorlake")
+
+                # Should succeed
+                self.assertEqual(result.exit_code, 0, f"CLI failed: {result.output}")
+                self.assertIn("New Org", result.output)
+                self.assertIn("New Project", result.output)
+
+                # Verify config was repaired
+                with open(local_config_path, "r") as f:
+                    config = parse(f.read())
+                self.assertEqual(config["organization"], "new_org")
+                self.assertEqual(config["project"], "new_proj")
+
+            finally:
+                config_module.CONFIG_DIR = original_config_dir
+                config_module.CREDENTIALS_PATH = original_credentials_path
+                config_module.LOCAL_CONFIG_FILE = original_local_config
+
+
 class TestInitCommandInHelp(unittest.TestCase):
     """Test that init command appears in CLI help"""
 

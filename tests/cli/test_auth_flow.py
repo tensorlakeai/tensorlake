@@ -598,24 +598,51 @@ class TestContextHelperMethods(unittest.TestCase):
 
     def test_has_org_and_project_with_only_org(self):
         """Test has_org_and_project returns False when only org is set"""
-        from tensorlake.cli._common import Context
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_config_path = Path(tmpdir) / ".tensorlake.toml"
 
-        ctx = Context.default(organization_id="org_123")
-        self.assertFalse(ctx.has_org_and_project())
+            original_local_config = config_module.LOCAL_CONFIG_FILE
+            try:
+                config_module.LOCAL_CONFIG_FILE = local_config_path
+
+                from tensorlake.cli._common import Context
+
+                ctx = Context.default(organization_id="org_123")
+                self.assertFalse(ctx.has_org_and_project())
+            finally:
+                config_module.LOCAL_CONFIG_FILE = original_local_config
 
     def test_has_org_and_project_with_only_project(self):
         """Test has_org_and_project returns False when only project is set"""
-        from tensorlake.cli._common import Context
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_config_path = Path(tmpdir) / ".tensorlake.toml"
 
-        ctx = Context.default(project_id="proj_456")
-        self.assertFalse(ctx.has_org_and_project())
+            original_local_config = config_module.LOCAL_CONFIG_FILE
+            try:
+                config_module.LOCAL_CONFIG_FILE = local_config_path
+
+                from tensorlake.cli._common import Context
+
+                ctx = Context.default(project_id="proj_456")
+                self.assertFalse(ctx.has_org_and_project())
+            finally:
+                config_module.LOCAL_CONFIG_FILE = original_local_config
 
     def test_needs_init_with_pat_no_config(self):
         """Test needs_init returns True when PAT exists but no org/project"""
-        from tensorlake.cli._common import Context
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_config_path = Path(tmpdir) / ".tensorlake.toml"
 
-        ctx = Context.default(personal_access_token="test_pat")
-        self.assertTrue(ctx.needs_init())
+            original_local_config = config_module.LOCAL_CONFIG_FILE
+            try:
+                config_module.LOCAL_CONFIG_FILE = local_config_path
+
+                from tensorlake.cli._common import Context
+
+                ctx = Context.default(personal_access_token="test_pat")
+                self.assertTrue(ctx.needs_init())
+            finally:
+                config_module.LOCAL_CONFIG_FILE = original_local_config
 
     def test_needs_init_with_api_key(self):
         """Test needs_init returns False when using API key (introspection provides org/project)"""
