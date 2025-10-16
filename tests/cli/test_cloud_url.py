@@ -158,17 +158,17 @@ class TestCloudURL(unittest.TestCase):
                 config_module.CONFIG_FILE = original_config_file
 
     def test_cloud_url_in_help_text(self):
-        """Test that cloud URL configuration is documented in login command help text"""
+        """Test that cloud URL configuration is documented in main CLI help text"""
         runner = CliRunner()
-        result = runner.invoke(cli, ["login", "--help"], prog_name="tensorlake")
+        result = runner.invoke(cli, ["--help"], prog_name="tensorlake")
 
         self.assertEqual(result.exit_code, 0)
         self.assertIn("--cloud-url", result.output)
 
     def test_env_variable_name_in_help(self):
-        """Test that TENSORLAKE_CLOUD_URL environment variable is shown in login help"""
+        """Test that TENSORLAKE_CLOUD_URL environment variable is shown in main CLI help"""
         runner = CliRunner()
-        result = runner.invoke(cli, ["login", "--help"], prog_name="tensorlake")
+        result = runner.invoke(cli, ["--help"], prog_name="tensorlake")
 
         self.assertEqual(result.exit_code, 0)
         # Click shows environment variables in the help text
