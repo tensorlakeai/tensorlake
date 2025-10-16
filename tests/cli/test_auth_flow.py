@@ -71,8 +71,14 @@ class TestAutoInitFlow(unittest.TestCase):
 
                 # Mock find_project_root to return the temp directory
                 from unittest.mock import patch
-                with patch("tensorlake.cli._project_detection.find_project_root", return_value=local_config_path.parent):
-                    result = runner.invoke(cli, ["secrets", "list"], prog_name="tensorlake")
+
+                with patch(
+                    "tensorlake.cli._project_detection.find_project_root",
+                    return_value=local_config_path.parent,
+                ):
+                    result = runner.invoke(
+                        cli, ["secrets", "list"], prog_name="tensorlake"
+                    )
 
                 # Should succeed after auto-init
                 self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
@@ -93,8 +99,9 @@ class TestAutoInitFlow(unittest.TestCase):
                 config_module.CREDENTIALS_PATH = original_credentials_path
                 config_module.LOCAL_CONFIG_FILE = original_local_config
 
-    def test_command_fails_gracefully_without_auth(self):
-        """Test that commands show helpful error when no authentication exists"""
+    @respx.mock
+    def test_command_auto_login_without_auth(self):
+        """Test that commands automatically trigger login flow when no authentication exists"""
         with tempfile.TemporaryDirectory() as tmpdir:
             # Setup paths with no credentials
             config_dir = Path(tmpdir) / ".config" / "tensorlake"
@@ -112,13 +119,80 @@ class TestAutoInitFlow(unittest.TestCase):
                 config_module.CREDENTIALS_PATH = credentials_path
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
-                runner = CliRunner()
-                result = runner.invoke(cli, ["secrets", "list"], prog_name="tensorlake")
+                # Mock login flow
+                respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
+                    return_value=httpx.Response(
+                        200,
+                        json={"device_code": "test_device", "user_code": "TEST123"},
+                    )
+                )
 
-                # Should fail with helpful message
-                self.assertNotEqual(result.exit_code, 0)
-                self.assertIn("No authentication found", result.output)
-                self.assertIn("tensorlake login", result.output)
+                respx.get(
+                    "https://api.tensorlake.ai/platform/cli/login/poll?device_code=test_device"
+                ).mock(
+                    return_value=httpx.Response(
+                        200,
+                        json={"status": "approved"},
+                    )
+                )
+
+                respx.post(
+                    "https://api.tensorlake.ai/platform/cli/login/exchange"
+                ).mock(
+                    return_value=httpx.Response(
+                        200,
+                        json={"access_token": "test_token"},
+                    )
+                )
+
+                # Mock init flow
+                respx.get("https://api.tensorlake.ai/platform/v1/organizations").mock(
+                    return_value=httpx.Response(
+                        200,
+                        json={"items": [{"id": "org_auto", "name": "Auto Org"}]},
+                    )
+                )
+
+                respx.get(
+                    "https://api.tensorlake.ai/platform/v1/organizations/org_auto/projects"
+                ).mock(
+                    return_value=httpx.Response(
+                        200,
+                        json={"items": [{"id": "proj_auto", "name": "Auto Project"}]},
+                    )
+                )
+
+                # Mock secrets API call (the actual command after login/init completes)
+                respx.get(
+                    "https://api.tensorlake.ai/platform/v1/organizations/org_auto/projects/proj_auto/secrets?pageSize=100"
+                ).mock(
+                    return_value=httpx.Response(
+                        200,
+                        json={"items": []},
+                    )
+                )
+
+                runner = CliRunner()
+                from unittest.mock import patch
+
+                with patch("webbrowser.open"), patch(
+                    "tensorlake.cli._project_detection.find_project_root",
+                    return_value=local_config_path.parent,
+                ):
+                    result = runner.invoke(
+                        cli, ["secrets", "list"], prog_name="tensorlake"
+                    )
+
+                # Should succeed after auto-login and auto-init
+                self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
+                self.assertIn("It seems like you're not logged in", result.output)
+                self.assertIn("Let's log you in", result.output)
+                self.assertIn("Login successful", result.output)
+                self.assertIn("Configuration saved", result.output)
+
+                # Verify credentials and local config were created
+                self.assertTrue(credentials_path.exists())
+                self.assertTrue(local_config_path.exists())
 
             finally:
                 config_module.CONFIG_DIR = original_config_dir
@@ -151,7 +225,10 @@ class TestAutoInitFlow(unittest.TestCase):
                 )
 
                 save_credentials("https://api.tensorlake.ai", "test_pat")
-                save_local_config({"organization": "org_999", "project": "proj_888"}, local_config_path.parent)
+                save_local_config(
+                    {"organization": "org_999", "project": "proj_888"},
+                    local_config_path.parent,
+                )
 
                 # Mock secrets API call
                 import respx
@@ -466,13 +543,18 @@ class TestLoginInitChaining(unittest.TestCase):
                 runner = CliRunner()
                 from unittest.mock import patch
 
-                with patch("webbrowser.open"), patch("tensorlake.cli._project_detection.find_project_root", return_value=local_config_path.parent):
+                with patch("webbrowser.open"), patch(
+                    "tensorlake.cli._project_detection.find_project_root",
+                    return_value=local_config_path.parent,
+                ):
                     result = runner.invoke(cli, ["login"], prog_name="tensorlake")
 
                 # Should succeed and show both login and init messages
                 self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
                 self.assertIn("Login successful", result.output)
-                self.assertIn("No organization and project configuration found", result.output)
+                self.assertIn(
+                    "No organization and project configuration found", result.output
+                )
                 self.assertIn("Auto Org", result.output)
                 self.assertIn("Auto Project", result.output)
                 self.assertIn("Configuration saved", result.output)

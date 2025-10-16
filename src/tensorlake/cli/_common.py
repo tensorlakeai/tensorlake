@@ -265,9 +265,46 @@ def require_auth_and_project(f):
     def wrapper(ctx: Context, *args, **kwargs):
         # Check if we have any authentication
         if not ctx.has_authentication():
-            raise click.UsageError(
-                "No authentication found. Please run 'tensorlake login' to authenticate."
-            )
+            # No authentication - automatically run login flow
+            click.echo("It seems like you're not logged in. Let's log you in...\n")
+
+            # Import here to avoid circular dependency
+            from tensorlake.cli.auth import run_login_flow
+
+            try:
+                # Run login flow, which will also run init if needed
+                run_login_flow(ctx, auto_init=True)
+
+                # Reload context with new credentials
+                # The login flow will have saved credentials and potentially created local config
+                updated_ctx = Context.default(
+                    base_url=ctx.base_url,
+                    cloud_url=ctx.cloud_url,
+                    namespace=ctx.namespace,
+                    # Let Context.default reload everything from saved credentials and config
+                )
+
+                # Verify authentication is now available
+                if not updated_ctx.has_authentication():
+                    raise click.UsageError(
+                        "Authentication failed. Please try running 'tensorlake login' manually."
+                    )
+
+                # Verify org/project are now available
+                if not updated_ctx.has_org_and_project():
+                    raise click.UsageError(
+                        "Organization and project configuration missing. Please run 'tensorlake init'."
+                    )
+
+                # Continue with the command using the updated context
+                return f(updated_ctx, *args, **kwargs)
+
+            except click.Abort:
+                click.echo(
+                    "\nAuthentication cancelled. Please run 'tensorlake login' to authenticate.",
+                    err=True,
+                )
+                raise
 
         # If using API key, org/project come from introspection
         # If already have org/project from any source, we're good
