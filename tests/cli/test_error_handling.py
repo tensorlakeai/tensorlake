@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 from click.testing import CliRunner
+from test_helpers import get_base_url, make_endpoint_url
 from tomlkit import document, dumps, table
 
 import tensorlake.cli._configuration as config_module
@@ -69,7 +70,7 @@ class TestConfigurationSourceTracking(unittest.TestCase):
         config = document()
         section = table()
         section["token"] = test_pat
-        config["https://api.tensorlake.ai"] = section
+        config[get_base_url()] = section
 
         with open(credentials_path, "w") as f:
             f.write(dumps(config))
@@ -178,7 +179,7 @@ class TestHTTPErrorHandling(unittest.TestCase):
         config = document()
         section = table()
         section["token"] = test_pat
-        config["https://api.tensorlake.ai"] = section
+        config[get_base_url()] = section
 
         with open(credentials_path, "w") as f:
             f.write(dumps(config))
@@ -208,7 +209,9 @@ class TestHTTPErrorHandling(unittest.TestCase):
         mock_response.text = "Permission denied"
 
         mock_request = MagicMock()
-        mock_request.url = "https://api.tensorlake.ai/platform/v1/organizations/org_456/projects/proj_789/secrets"
+        mock_request.url = make_endpoint_url(
+            "/platform/v1/organizations/org_456/projects/proj_789/secrets"
+        )
 
         http_error = httpx.HTTPStatusError(
             "403 Forbidden", request=mock_request, response=mock_response
@@ -239,7 +242,9 @@ class TestHTTPErrorHandling(unittest.TestCase):
         mock_response.text = "Permission denied"
 
         mock_request = MagicMock()
-        mock_request.url = "https://api.tensorlake.ai/platform/v1/organizations/org_456/projects/proj_789/secrets"
+        mock_request.url = make_endpoint_url(
+            "/platform/v1/organizations/org_456/projects/proj_789/secrets"
+        )
 
         http_error = httpx.HTTPStatusError(
             "403 Forbidden", request=mock_request, response=mock_response

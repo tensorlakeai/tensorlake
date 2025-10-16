@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
+from test_helpers import get_base_url
 
 import tensorlake.cli._configuration as config_module
 from tensorlake.applications.remote.api_client import ApplicationListItem
@@ -31,10 +32,13 @@ class TestApplicationsList(unittest.TestCase):
         with open(local_config_path, "w") as f:
             f.write('organization = "test_org"\nproject = "test_proj"\n')
 
+        # Get the base_url that will be used at runtime
+        base_url = get_base_url()
+
         # Create credentials file with PAT to skip auto-login
-        # Format: [base_url]\ntoken = "value"
+        # Use the resolved base_url as the key to match what Context.default() will use
         with open(credentials_path, "w") as f:
-            f.write('["https://api.tensorlake.ai"]\ntoken = "test_token"\n')
+            f.write(f'["{base_url}"]\ntoken = "test_token"\n')
 
         # Save original paths
         self.original_credentials_path = config_module.CREDENTIALS_PATH

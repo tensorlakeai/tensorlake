@@ -1,10 +1,12 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
+from test_helpers import get_base_url
 from tomlkit import document, dumps, table
 
 import tensorlake.cli._configuration as config_module
@@ -91,12 +93,15 @@ class TestWhoamiWithPAT(unittest.TestCase):
         config_module.CONFIG_DIR = config_dir
         config_module.LOCAL_CONFIG_FILE = local_config_path
 
-        # Create credentials file with PAT
+        # Get the base_url that will be used at runtime
+        base_url = get_base_url()
+
+        # Create credentials file with PAT using the resolved base_url
         self.test_pat = "test_personal_access_token_1234567890"
         config = document()
         section = table()
         section["token"] = self.test_pat
-        config["https://api.tensorlake.ai"] = section
+        config[base_url] = section
 
         with open(credentials_path, "w") as f:
             f.write(dumps(config))

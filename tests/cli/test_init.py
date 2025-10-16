@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import respx
 from click.testing import CliRunner
+from test_helpers import get_base_url, make_endpoint_url
 from tomlkit import document, dumps, parse, table
 
 import tensorlake.cli._configuration as config_module
@@ -257,10 +258,10 @@ class TestInitCommand(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
                 # Save credentials AFTER setting the paths
-                save_credentials("https://api.tensorlake.ai", "test_token_123")
+                save_credentials(get_base_url(), "test_token_123")
 
                 # Mock API responses
-                respx.get("https://api.tensorlake.ai/platform/v1/organizations").mock(
+                respx.get(make_endpoint_url("/platform/v1/organizations")).mock(
                     return_value=httpx.Response(
                         200,
                         json={
@@ -270,7 +271,7 @@ class TestInitCommand(unittest.TestCase):
                 )
 
                 respx.get(
-                    "https://api.tensorlake.ai/platform/v1/organizations/org_123/projects"
+                    make_endpoint_url("/platform/v1/organizations/org_123/projects")
                 ).mock(
                     return_value=httpx.Response(
                         200,
@@ -334,10 +335,10 @@ class TestInitCommand(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
                 # Save credentials AFTER setting the paths
-                save_credentials("https://api.tensorlake.ai", "test_token_123")
+                save_credentials(get_base_url(), "test_token_123")
 
                 # Mock API responses
-                respx.get("https://api.tensorlake.ai/platform/v1/organizations").mock(
+                respx.get(make_endpoint_url("/platform/v1/organizations")).mock(
                     return_value=httpx.Response(
                         200,
                         json={
@@ -350,7 +351,7 @@ class TestInitCommand(unittest.TestCase):
                 )
 
                 respx.get(
-                    "https://api.tensorlake.ai/platform/v1/organizations/org_2/projects"
+                    make_endpoint_url("/platform/v1/organizations/org_2/projects")
                 ).mock(
                     return_value=httpx.Response(
                         200,
@@ -460,10 +461,10 @@ class TestInitCommand(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
                 # Save credentials AFTER setting the paths
-                save_credentials("https://api.tensorlake.ai", "test_token_123")
+                save_credentials(get_base_url(), "test_token_123")
 
                 # Mock API error
-                respx.get("https://api.tensorlake.ai/platform/v1/organizations").mock(
+                respx.get(make_endpoint_url("/platform/v1/organizations")).mock(
                     return_value=httpx.Response(
                         500, json={"error": "Internal Server Error"}
                     )
@@ -519,10 +520,10 @@ class TestInitWithIncompleteConfig(unittest.TestCase):
                 config_module.CREDENTIALS_PATH = credentials_path
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
-                save_credentials("https://api.tensorlake.ai", "test_token_123")
+                save_credentials(get_base_url(), "test_token_123")
 
                 # Mock API responses
-                respx.get("https://api.tensorlake.ai/platform/v1/organizations").mock(
+                respx.get(make_endpoint_url("/platform/v1/organizations")).mock(
                     return_value=httpx.Response(
                         200,
                         json={"items": [{"id": "new_org", "name": "New Org"}]},
@@ -530,7 +531,7 @@ class TestInitWithIncompleteConfig(unittest.TestCase):
                 )
 
                 respx.get(
-                    "https://api.tensorlake.ai/platform/v1/organizations/new_org/projects"
+                    make_endpoint_url("/platform/v1/organizations/new_org/projects")
                 ).mock(
                     return_value=httpx.Response(
                         200,
@@ -592,10 +593,10 @@ class TestInitWithIncompleteConfig(unittest.TestCase):
                 config_module.CREDENTIALS_PATH = credentials_path
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
-                save_credentials("https://api.tensorlake.ai", "test_token_123")
+                save_credentials(get_base_url(), "test_token_123")
 
                 # Mock API responses
-                respx.get("https://api.tensorlake.ai/platform/v1/organizations").mock(
+                respx.get(make_endpoint_url("/platform/v1/organizations")).mock(
                     return_value=httpx.Response(
                         200,
                         json={"items": [{"id": "new_org", "name": "New Org"}]},
@@ -603,7 +604,7 @@ class TestInitWithIncompleteConfig(unittest.TestCase):
                 )
 
                 respx.get(
-                    "https://api.tensorlake.ai/platform/v1/organizations/new_org/projects"
+                    make_endpoint_url("/platform/v1/organizations/new_org/projects")
                 ).mock(
                     return_value=httpx.Response(
                         200,
@@ -665,10 +666,10 @@ class TestInitWithIncompleteConfig(unittest.TestCase):
                 config_module.CREDENTIALS_PATH = credentials_path
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
-                save_credentials("https://api.tensorlake.ai", "test_token_123")
+                save_credentials(get_base_url(), "test_token_123")
 
                 # Mock API responses
-                respx.get("https://api.tensorlake.ai/platform/v1/organizations").mock(
+                respx.get(make_endpoint_url("/platform/v1/organizations")).mock(
                     return_value=httpx.Response(
                         200,
                         json={"items": [{"id": "new_org", "name": "New Org"}]},
@@ -676,7 +677,7 @@ class TestInitWithIncompleteConfig(unittest.TestCase):
                 )
 
                 respx.get(
-                    "https://api.tensorlake.ai/platform/v1/organizations/new_org/projects"
+                    make_endpoint_url("/platform/v1/organizations/new_org/projects")
                 ).mock(
                     return_value=httpx.Response(
                         200,

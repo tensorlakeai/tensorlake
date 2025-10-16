@@ -11,6 +11,7 @@ from unittest.mock import patch
 import httpx
 import respx
 from click.testing import CliRunner
+from test_helpers import get_base_url
 from tomlkit import parse
 
 import tensorlake.cli._configuration as config_module
@@ -47,6 +48,10 @@ class TestLoginSuccessFlow(unittest.TestCase):
 
         self.credentials_path = credentials_path
 
+        # Determine the base_url that will be used at runtime
+        # This matches the resolution logic in Context.default()
+        self.base_url = get_base_url()
+
     def tearDown(self):
         """Restore original configuration"""
         config_module.CREDENTIALS_PATH = self.original_credentials_path
@@ -58,7 +63,7 @@ class TestLoginSuccessFlow(unittest.TestCase):
     def test_successful_login_flow(self):
         """Test complete successful login flow"""
         # Mock login start
-        respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/start").mock(
             return_value=httpx.Response(
                 200,
                 json={"device_code": "test_device_123", "user_code": "ABCD-1234"},
@@ -67,7 +72,7 @@ class TestLoginSuccessFlow(unittest.TestCase):
 
         # Mock poll with immediate success
         respx.get(
-            "https://api.tensorlake.ai/platform/cli/login/poll?device_code=test_device_123"
+            f"{self.base_url}/platform/cli/login/poll?device_code=test_device_123"
         ).mock(
             return_value=httpx.Response(
                 200,
@@ -76,7 +81,7 @@ class TestLoginSuccessFlow(unittest.TestCase):
         )
 
         # Mock token exchange
-        respx.post("https://api.tensorlake.ai/platform/cli/login/exchange").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/exchange").mock(
             return_value=httpx.Response(
                 200,
                 json={"access_token": "test_access_token_xyz"},
@@ -98,19 +103,19 @@ class TestLoginSuccessFlow(unittest.TestCase):
         # Verify browser was opened
         mock_browser.assert_called_once_with("https://cloud.tensorlake.ai/cli/login")
 
-        # Verify credentials were saved
+        # Verify credentials were saved with the correct endpoint key
         self.assertTrue(self.credentials_path.exists())
         with open(self.credentials_path, "r") as f:
             credentials = parse(f.read())
             self.assertEqual(
-                credentials["https://api.tensorlake.ai"]["token"],
+                credentials[self.base_url]["token"],
                 "test_access_token_xyz",
             )
 
     @respx.mock
     def test_login_displays_user_code(self):
         """Test that user code is displayed during login"""
-        respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/start").mock(
             return_value=httpx.Response(
                 200,
                 json={"device_code": "device_code", "user_code": "TEST-9999"},
@@ -118,10 +123,10 @@ class TestLoginSuccessFlow(unittest.TestCase):
         )
 
         respx.get(
-            "https://api.tensorlake.ai/platform/cli/login/poll?device_code=device_code"
+            f"{self.base_url}/platform/cli/login/poll?device_code=device_code"
         ).mock(return_value=httpx.Response(200, json={"status": "approved"}))
 
-        respx.post("https://api.tensorlake.ai/platform/cli/login/exchange").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/exchange").mock(
             return_value=httpx.Response(200, json={"access_token": "token"})
         )
 
@@ -137,7 +142,7 @@ class TestLoginSuccessFlow(unittest.TestCase):
     @respx.mock
     def test_login_polls_until_approved(self):
         """Test that login polls multiple times before approval"""
-        respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/start").mock(
             return_value=httpx.Response(
                 200,
                 json={"device_code": "device_code", "user_code": "CODE-1234"},
@@ -151,10 +156,10 @@ class TestLoginSuccessFlow(unittest.TestCase):
             httpx.Response(200, json={"status": "approved"}),
         ]
         respx.get(
-            "https://api.tensorlake.ai/platform/cli/login/poll?device_code=device_code"
+            f"{self.base_url}/platform/cli/login/poll?device_code=device_code"
         ).mock(side_effect=poll_responses)
 
-        respx.post("https://api.tensorlake.ai/platform/cli/login/exchange").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/exchange").mock(
             return_value=httpx.Response(200, json={"access_token": "token"})
         )
 
@@ -190,6 +195,9 @@ class TestLoginErrorHandling(unittest.TestCase):
         config_module.CONFIG_DIR = config_dir
         config_module.LOCAL_CONFIG_FILE = local_config_path
 
+        # Determine the base_url that will be used at runtime
+        self.base_url = get_base_url()
+
     def tearDown(self):
         """Restore original configuration"""
         config_module.CREDENTIALS_PATH = self.original_credentials_path
@@ -200,7 +208,7 @@ class TestLoginErrorHandling(unittest.TestCase):
     @respx.mock
     def test_login_start_failure(self):
         """Test login failure when start endpoint fails"""
-        respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/start").mock(
             return_value=httpx.Response(500, text="Internal server error")
         )
 
@@ -213,7 +221,7 @@ class TestLoginErrorHandling(unittest.TestCase):
     @respx.mock
     def test_login_poll_failure(self):
         """Test login failure when poll endpoint fails"""
-        respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/start").mock(
             return_value=httpx.Response(
                 200,
                 json={"device_code": "device_code", "user_code": "CODE"},
@@ -221,7 +229,7 @@ class TestLoginErrorHandling(unittest.TestCase):
         )
 
         respx.get(
-            "https://api.tensorlake.ai/platform/cli/login/poll?device_code=device_code"
+            f"{self.base_url}/platform/cli/login/poll?device_code=device_code"
         ).mock(return_value=httpx.Response(500, text="Internal server error"))
 
         runner = CliRunner()
@@ -235,7 +243,7 @@ class TestLoginErrorHandling(unittest.TestCase):
     @respx.mock
     def test_login_exchange_failure(self):
         """Test login failure when token exchange fails"""
-        respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/start").mock(
             return_value=httpx.Response(
                 200,
                 json={"device_code": "device_code", "user_code": "CODE"},
@@ -243,10 +251,10 @@ class TestLoginErrorHandling(unittest.TestCase):
         )
 
         respx.get(
-            "https://api.tensorlake.ai/platform/cli/login/poll?device_code=device_code"
+            f"{self.base_url}/platform/cli/login/poll?device_code=device_code"
         ).mock(return_value=httpx.Response(200, json={"status": "approved"}))
 
-        respx.post("https://api.tensorlake.ai/platform/cli/login/exchange").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/exchange").mock(
             return_value=httpx.Response(500, text="Internal server error")
         )
 
@@ -261,7 +269,7 @@ class TestLoginErrorHandling(unittest.TestCase):
     @respx.mock
     def test_login_expired(self):
         """Test login failure when request expires"""
-        respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/start").mock(
             return_value=httpx.Response(
                 200,
                 json={"device_code": "device_code", "user_code": "CODE"},
@@ -269,7 +277,7 @@ class TestLoginErrorHandling(unittest.TestCase):
         )
 
         respx.get(
-            "https://api.tensorlake.ai/platform/cli/login/poll?device_code=device_code"
+            f"{self.base_url}/platform/cli/login/poll?device_code=device_code"
         ).mock(return_value=httpx.Response(200, json={"status": "expired"}))
 
         runner = CliRunner()
@@ -284,7 +292,7 @@ class TestLoginErrorHandling(unittest.TestCase):
     @respx.mock
     def test_login_failed(self):
         """Test login failure when request fails"""
-        respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/start").mock(
             return_value=httpx.Response(
                 200,
                 json={"device_code": "device_code", "user_code": "CODE"},
@@ -292,7 +300,7 @@ class TestLoginErrorHandling(unittest.TestCase):
         )
 
         respx.get(
-            "https://api.tensorlake.ai/platform/cli/login/poll?device_code=device_code"
+            f"{self.base_url}/platform/cli/login/poll?device_code=device_code"
         ).mock(return_value=httpx.Response(200, json={"status": "failed"}))
 
         runner = CliRunner()
@@ -307,7 +315,7 @@ class TestLoginErrorHandling(unittest.TestCase):
     @respx.mock
     def test_login_unknown_status(self):
         """Test login failure with unknown status from poll endpoint"""
-        respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/start").mock(
             return_value=httpx.Response(
                 200,
                 json={"device_code": "device_code", "user_code": "CODE"},
@@ -315,7 +323,7 @@ class TestLoginErrorHandling(unittest.TestCase):
         )
 
         respx.get(
-            "https://api.tensorlake.ai/platform/cli/login/poll?device_code=device_code"
+            f"{self.base_url}/platform/cli/login/poll?device_code=device_code"
         ).mock(return_value=httpx.Response(200, json={"status": "unknown_status"}))
 
         runner = CliRunner()
@@ -352,6 +360,9 @@ class TestLoginBrowserHandling(unittest.TestCase):
         config_module.CONFIG_DIR = config_dir
         config_module.LOCAL_CONFIG_FILE = local_config_path
 
+        # Determine the base_url that will be used at runtime
+        self.base_url = get_base_url()
+
     def tearDown(self):
         """Restore original configuration"""
         config_module.CREDENTIALS_PATH = self.original_credentials_path
@@ -362,7 +373,7 @@ class TestLoginBrowserHandling(unittest.TestCase):
     @respx.mock
     def test_browser_open_failure_shows_manual_url(self):
         """Test that manual URL is displayed when browser fails to open"""
-        respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/start").mock(
             return_value=httpx.Response(
                 200,
                 json={"device_code": "device_code", "user_code": "MANUAL-CODE"},
@@ -370,10 +381,10 @@ class TestLoginBrowserHandling(unittest.TestCase):
         )
 
         respx.get(
-            "https://api.tensorlake.ai/platform/cli/login/poll?device_code=device_code"
+            f"{self.base_url}/platform/cli/login/poll?device_code=device_code"
         ).mock(return_value=httpx.Response(200, json={"status": "approved"}))
 
-        respx.post("https://api.tensorlake.ai/platform/cli/login/exchange").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/exchange").mock(
             return_value=httpx.Response(200, json={"access_token": "token"})
         )
 
@@ -393,7 +404,7 @@ class TestLoginBrowserHandling(unittest.TestCase):
     @respx.mock
     def test_browser_opens_with_correct_url(self):
         """Test that browser opens with correct verification URL"""
-        respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/start").mock(
             return_value=httpx.Response(
                 200,
                 json={"device_code": "device_code", "user_code": "CODE"},
@@ -401,10 +412,10 @@ class TestLoginBrowserHandling(unittest.TestCase):
         )
 
         respx.get(
-            "https://api.tensorlake.ai/platform/cli/login/poll?device_code=device_code"
+            f"{self.base_url}/platform/cli/login/poll?device_code=device_code"
         ).mock(return_value=httpx.Response(200, json={"status": "approved"}))
 
-        respx.post("https://api.tensorlake.ai/platform/cli/login/exchange").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/exchange").mock(
             return_value=httpx.Response(200, json={"access_token": "token"})
         )
 
@@ -442,6 +453,9 @@ class TestLoginCredentialStorage(unittest.TestCase):
         config_module.CONFIG_DIR = config_dir
         config_module.LOCAL_CONFIG_FILE = local_config_path
 
+        # Determine the base_url that will be used at runtime
+        self.base_url = get_base_url()
+
     def tearDown(self):
         """Restore original configuration"""
         config_module.CREDENTIALS_PATH = self.original_credentials_path
@@ -454,7 +468,7 @@ class TestLoginCredentialStorage(unittest.TestCase):
         """Test that credentials are saved in endpoint-scoped TOML format"""
         test_token = "test_access_token_12345"
 
-        respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/start").mock(
             return_value=httpx.Response(
                 200,
                 json={"device_code": "device_code", "user_code": "CODE"},
@@ -462,10 +476,10 @@ class TestLoginCredentialStorage(unittest.TestCase):
         )
 
         respx.get(
-            "https://api.tensorlake.ai/platform/cli/login/poll?device_code=device_code"
+            f"{self.base_url}/platform/cli/login/poll?device_code=device_code"
         ).mock(return_value=httpx.Response(200, json={"status": "approved"}))
 
-        respx.post("https://api.tensorlake.ai/platform/cli/login/exchange").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/exchange").mock(
             return_value=httpx.Response(200, json={"access_token": test_token})
         )
 
@@ -481,14 +495,14 @@ class TestLoginCredentialStorage(unittest.TestCase):
         with open(self.credentials_path, "r") as f:
             credentials = parse(f.read())
 
-        # Check endpoint-scoped format
-        self.assertIn("https://api.tensorlake.ai", credentials)
-        self.assertEqual(credentials["https://api.tensorlake.ai"]["token"], test_token)
+        # Check endpoint-scoped format with the resolved base_url
+        self.assertIn(self.base_url, credentials)
+        self.assertEqual(credentials[self.base_url]["token"], test_token)
 
     @respx.mock
     def test_credentials_file_has_secure_permissions(self):
         """Test that credentials file has restrictive permissions (0600)"""
-        respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/start").mock(
             return_value=httpx.Response(
                 200,
                 json={"device_code": "device_code", "user_code": "CODE"},
@@ -496,10 +510,10 @@ class TestLoginCredentialStorage(unittest.TestCase):
         )
 
         respx.get(
-            "https://api.tensorlake.ai/platform/cli/login/poll?device_code=device_code"
+            f"{self.base_url}/platform/cli/login/poll?device_code=device_code"
         ).mock(return_value=httpx.Response(200, json={"status": "approved"}))
 
-        respx.post("https://api.tensorlake.ai/platform/cli/login/exchange").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/exchange").mock(
             return_value=httpx.Response(200, json={"access_token": "token"})
         )
 
@@ -520,7 +534,7 @@ class TestLoginCredentialStorage(unittest.TestCase):
         """Test that saved credentials can be loaded by Context"""
         test_token = "test_token_xyz_789"
 
-        respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/start").mock(
             return_value=httpx.Response(
                 200,
                 json={"device_code": "device_code", "user_code": "CODE"},
@@ -528,10 +542,10 @@ class TestLoginCredentialStorage(unittest.TestCase):
         )
 
         respx.get(
-            "https://api.tensorlake.ai/platform/cli/login/poll?device_code=device_code"
+            f"{self.base_url}/platform/cli/login/poll?device_code=device_code"
         ).mock(return_value=httpx.Response(200, json={"status": "approved"}))
 
-        respx.post("https://api.tensorlake.ai/platform/cli/login/exchange").mock(
+        respx.post(f"{self.base_url}/platform/cli/login/exchange").mock(
             return_value=httpx.Response(200, json={"access_token": test_token})
         )
 
@@ -542,10 +556,10 @@ class TestLoginCredentialStorage(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0)
 
-        # Verify credentials can be loaded
+        # Verify credentials can be loaded with the resolved base_url
         from tensorlake.cli._configuration import load_credentials
 
-        loaded_token = load_credentials("https://api.tensorlake.ai")
+        loaded_token = load_credentials(self.base_url)
         self.assertEqual(loaded_token, test_token)
 
 

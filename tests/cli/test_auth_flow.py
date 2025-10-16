@@ -1,5 +1,6 @@
 """Tests for automatic authentication and configuration flow"""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from unittest.mock import patch
 import httpx
 import respx
 from click.testing import CliRunner
+from test_helpers import get_base_url, make_endpoint_url
 from tomlkit import dumps
 
 import tensorlake.cli._configuration as config_module
@@ -41,10 +43,10 @@ class TestAutoInitFlow(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
                 # Save credentials (PAT)
-                save_credentials("https://api.tensorlake.ai", "test_pat")
+                save_credentials(get_base_url(), "test_pat")
 
                 # Mock init flow API calls
-                respx.get("https://api.tensorlake.ai/platform/v1/organizations").mock(
+                respx.get(make_endpoint_url("/platform/v1/organizations")).mock(
                     return_value=httpx.Response(
                         200,
                         json={"items": [{"id": "org_123", "name": "Test Org"}]},
@@ -52,7 +54,7 @@ class TestAutoInitFlow(unittest.TestCase):
                 )
 
                 respx.get(
-                    "https://api.tensorlake.ai/platform/v1/organizations/org_123/projects"
+                    make_endpoint_url("/platform/v1/organizations/org_123/projects")
                 ).mock(
                     return_value=httpx.Response(
                         200,
@@ -62,7 +64,9 @@ class TestAutoInitFlow(unittest.TestCase):
 
                 # Mock secrets API call (the actual command after init completes)
                 respx.get(
-                    "https://api.tensorlake.ai/platform/v1/organizations/org_123/projects/proj_456/secrets?pageSize=100"
+                    make_endpoint_url(
+                        "/platform/v1/organizations/org_123/projects/proj_456/secrets?pageSize=100"
+                    )
                 ).mock(
                     return_value=httpx.Response(
                         200,
@@ -122,7 +126,7 @@ class TestAutoInitFlow(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
                 # Mock login flow
-                respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
+                respx.post(make_endpoint_url("/platform/cli/login/start")).mock(
                     return_value=httpx.Response(
                         200,
                         json={"device_code": "test_device", "user_code": "TEST123"},
@@ -130,7 +134,9 @@ class TestAutoInitFlow(unittest.TestCase):
                 )
 
                 respx.get(
-                    "https://api.tensorlake.ai/platform/cli/login/poll?device_code=test_device"
+                    make_endpoint_url(
+                        "/platform/cli/login/poll?device_code=test_device"
+                    )
                 ).mock(
                     return_value=httpx.Response(
                         200,
@@ -138,9 +144,7 @@ class TestAutoInitFlow(unittest.TestCase):
                     )
                 )
 
-                respx.post(
-                    "https://api.tensorlake.ai/platform/cli/login/exchange"
-                ).mock(
+                respx.post(make_endpoint_url("/platform/cli/login/exchange")).mock(
                     return_value=httpx.Response(
                         200,
                         json={"access_token": "test_token"},
@@ -148,7 +152,7 @@ class TestAutoInitFlow(unittest.TestCase):
                 )
 
                 # Mock init flow
-                respx.get("https://api.tensorlake.ai/platform/v1/organizations").mock(
+                respx.get(make_endpoint_url("/platform/v1/organizations")).mock(
                     return_value=httpx.Response(
                         200,
                         json={"items": [{"id": "org_auto", "name": "Auto Org"}]},
@@ -156,7 +160,7 @@ class TestAutoInitFlow(unittest.TestCase):
                 )
 
                 respx.get(
-                    "https://api.tensorlake.ai/platform/v1/organizations/org_auto/projects"
+                    make_endpoint_url("/platform/v1/organizations/org_auto/projects")
                 ).mock(
                     return_value=httpx.Response(
                         200,
@@ -166,7 +170,9 @@ class TestAutoInitFlow(unittest.TestCase):
 
                 # Mock secrets API call (the actual command after login/init completes)
                 respx.get(
-                    "https://api.tensorlake.ai/platform/v1/organizations/org_auto/projects/proj_auto/secrets?pageSize=100"
+                    make_endpoint_url(
+                        "/platform/v1/organizations/org_auto/projects/proj_auto/secrets?pageSize=100"
+                    )
                 ).mock(
                     return_value=httpx.Response(
                         200,
@@ -220,7 +226,7 @@ class TestAutoInitFlow(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
                 # Save credentials and local config
-                save_credentials("https://api.tensorlake.ai", "test_pat")
+                save_credentials(get_base_url(), "test_pat")
                 save_local_config(
                     {"organization": "org_999", "project": "proj_888"},
                     local_config_path.parent.parent,
@@ -228,7 +234,9 @@ class TestAutoInitFlow(unittest.TestCase):
 
                 # Mock secrets API call
                 respx.get(
-                    "https://api.tensorlake.ai/platform/v1/organizations/org_999/projects/proj_888/secrets?pageSize=100"
+                    make_endpoint_url(
+                        "/platform/v1/organizations/org_999/projects/proj_888/secrets?pageSize=100"
+                    )
                 ).mock(
                     return_value=httpx.Response(
                         200,
@@ -273,11 +281,13 @@ class TestAutoInitFlow(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
                 # Save credentials (no local config)
-                save_credentials("https://api.tensorlake.ai", "test_pat")
+                save_credentials(get_base_url(), "test_pat")
 
                 # Mock secrets API call
                 respx.get(
-                    "https://api.tensorlake.ai/platform/v1/organizations/cli_org/projects/cli_proj/secrets?pageSize=100"
+                    make_endpoint_url(
+                        "/platform/v1/organizations/cli_org/projects/cli_proj/secrets?pageSize=100"
+                    )
                 ).mock(
                     return_value=httpx.Response(
                         200,
@@ -339,7 +349,7 @@ class TestLoginInitChaining(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
                 # Mock login flow
-                respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
+                respx.post(make_endpoint_url("/platform/cli/login/start")).mock(
                     return_value=httpx.Response(
                         200,
                         json={"device_code": "test_device", "user_code": "TEST123"},
@@ -347,7 +357,9 @@ class TestLoginInitChaining(unittest.TestCase):
                 )
 
                 respx.get(
-                    "https://api.tensorlake.ai/platform/cli/login/poll?device_code=test_device"
+                    make_endpoint_url(
+                        "/platform/cli/login/poll?device_code=test_device"
+                    )
                 ).mock(
                     return_value=httpx.Response(
                         200,
@@ -355,9 +367,7 @@ class TestLoginInitChaining(unittest.TestCase):
                     )
                 )
 
-                respx.post(
-                    "https://api.tensorlake.ai/platform/cli/login/exchange"
-                ).mock(
+                respx.post(make_endpoint_url("/platform/cli/login/exchange")).mock(
                     return_value=httpx.Response(
                         200,
                         json={"access_token": "test_token"},
@@ -411,7 +421,7 @@ class TestLoginInitChaining(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
                 # Mock login flow
-                respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
+                respx.post(make_endpoint_url("/platform/cli/login/start")).mock(
                     return_value=httpx.Response(
                         200,
                         json={"device_code": "test_device", "user_code": "TEST123"},
@@ -419,7 +429,9 @@ class TestLoginInitChaining(unittest.TestCase):
                 )
 
                 respx.get(
-                    "https://api.tensorlake.ai/platform/cli/login/poll?device_code=test_device"
+                    make_endpoint_url(
+                        "/platform/cli/login/poll?device_code=test_device"
+                    )
                 ).mock(
                     return_value=httpx.Response(
                         200,
@@ -427,9 +439,7 @@ class TestLoginInitChaining(unittest.TestCase):
                     )
                 )
 
-                respx.post(
-                    "https://api.tensorlake.ai/platform/cli/login/exchange"
-                ).mock(
+                respx.post(make_endpoint_url("/platform/cli/login/exchange")).mock(
                     return_value=httpx.Response(
                         200,
                         json={"access_token": "test_token"},
@@ -488,7 +498,7 @@ class TestLoginInitChaining(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
                 # Mock login flow
-                respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
+                respx.post(make_endpoint_url("/platform/cli/login/start")).mock(
                     return_value=httpx.Response(
                         200,
                         json={"device_code": "test_device", "user_code": "TEST123"},
@@ -496,7 +506,9 @@ class TestLoginInitChaining(unittest.TestCase):
                 )
 
                 respx.get(
-                    "https://api.tensorlake.ai/platform/cli/login/poll?device_code=test_device"
+                    make_endpoint_url(
+                        "/platform/cli/login/poll?device_code=test_device"
+                    )
                 ).mock(
                     return_value=httpx.Response(
                         200,
@@ -504,9 +516,7 @@ class TestLoginInitChaining(unittest.TestCase):
                     )
                 )
 
-                respx.post(
-                    "https://api.tensorlake.ai/platform/cli/login/exchange"
-                ).mock(
+                respx.post(make_endpoint_url("/platform/cli/login/exchange")).mock(
                     return_value=httpx.Response(
                         200,
                         json={"access_token": "test_token"},
@@ -514,7 +524,7 @@ class TestLoginInitChaining(unittest.TestCase):
                 )
 
                 # Mock init flow
-                respx.get("https://api.tensorlake.ai/platform/v1/organizations").mock(
+                respx.get(make_endpoint_url("/platform/v1/organizations")).mock(
                     return_value=httpx.Response(
                         200,
                         json={"items": [{"id": "org_auto", "name": "Auto Org"}]},
@@ -522,7 +532,7 @@ class TestLoginInitChaining(unittest.TestCase):
                 )
 
                 respx.get(
-                    "https://api.tensorlake.ai/platform/v1/organizations/org_auto/projects"
+                    make_endpoint_url("/platform/v1/organizations/org_auto/projects")
                 ).mock(
                     return_value=httpx.Response(
                         200,
@@ -581,7 +591,7 @@ class TestLoginInitChaining(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
                 # Mock login flow
-                respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
+                respx.post(make_endpoint_url("/platform/cli/login/start")).mock(
                     return_value=httpx.Response(
                         200,
                         json={"device_code": "test_device", "user_code": "TEST123"},
@@ -589,7 +599,9 @@ class TestLoginInitChaining(unittest.TestCase):
                 )
 
                 respx.get(
-                    "https://api.tensorlake.ai/platform/cli/login/poll?device_code=test_device"
+                    make_endpoint_url(
+                        "/platform/cli/login/poll?device_code=test_device"
+                    )
                 ).mock(
                     return_value=httpx.Response(
                         200,
@@ -597,9 +609,7 @@ class TestLoginInitChaining(unittest.TestCase):
                     )
                 )
 
-                respx.post(
-                    "https://api.tensorlake.ai/platform/cli/login/exchange"
-                ).mock(
+                respx.post(make_endpoint_url("/platform/cli/login/exchange")).mock(
                     return_value=httpx.Response(
                         200,
                         json={"access_token": "test_token"},

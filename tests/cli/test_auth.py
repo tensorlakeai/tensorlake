@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from click.testing import CliRunner
+from test_helpers import get_base_url
 from tomlkit import document, dumps, table
 
 import tensorlake.cli._configuration as config_module
@@ -35,7 +36,7 @@ class TestPATEnvironmentVariable(unittest.TestCase):
             config = document()
             section = table()
             section["token"] = "file_token_67890"
-            config["https://api.tensorlake.ai"] = section
+            config[get_base_url()] = section
 
             with open(credentials_path, "w") as f:
                 f.write(dumps(config))
@@ -60,30 +61,37 @@ class TestPATEnvironmentVariable(unittest.TestCase):
             config_dir = Path(tmpdir) / ".config" / "tensorlake"
             config_dir.mkdir(parents=True)
             credentials_path = config_dir / "credentials.toml"
+            local_config_dir = Path(tmpdir) / ".tensorlake"
+            local_config_dir.mkdir(parents=True, exist_ok=True)
+            local_config_path = local_config_dir / "config.toml"
 
             # Write a PAT to the credentials file in TOML format (endpoint-scoped)
             file_pat = "file_token_67890"
             config = document()
             section = table()
             section["token"] = file_pat
-            config["https://api.tensorlake.ai"] = section
+            config[get_base_url()] = section
 
             with open(credentials_path, "w") as f:
                 f.write(dumps(config))
 
             original_credentials_path = config_module.CREDENTIALS_PATH
             original_config_dir = config_module.CONFIG_DIR
+            original_local_config_file = config_module.LOCAL_CONFIG_FILE
 
             try:
                 config_module.CREDENTIALS_PATH = credentials_path
                 config_module.CONFIG_DIR = config_dir
+                config_module.LOCAL_CONFIG_FILE = local_config_path
 
                 # Without env var, should use file PAT
-                ctx = Context.default()
+                # Need to pass base_url explicitly since Context.default() doesn't auto-read env vars
+                ctx = Context.default(base_url=get_base_url())
                 self.assertEqual(ctx.personal_access_token, file_pat)
             finally:
                 config_module.CREDENTIALS_PATH = original_credentials_path
                 config_module.CONFIG_DIR = original_config_dir
+                config_module.LOCAL_CONFIG_FILE = original_local_config_file
 
     def test_cli_accepts_pat_flag(self):
         """Test that CLI accepts --pat flag"""

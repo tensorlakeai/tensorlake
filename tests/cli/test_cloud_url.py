@@ -8,6 +8,7 @@ from unittest.mock import patch
 import httpx
 import respx
 from click.testing import CliRunner
+from test_helpers import make_endpoint_url
 
 from tensorlake.cli import cli
 from tensorlake.cli._common import Context
@@ -216,9 +217,13 @@ class TestCloudURLIntegration(unittest.TestCase):
 class TestCloudURLWithLogin(unittest.TestCase):
     """Test that cloud URL is used correctly in the login flow"""
 
-    def setup_login_mocks(self):
-        """Set up common HTTP mocks for the login flow"""
-        start_mock = respx.post("https://api.tensorlake.ai/platform/cli/login/start")
+    def setup_login_mocks(self, base_url="https://api.tensorlake.ai"):
+        """Set up common HTTP mocks for the login flow
+
+        Args:
+            base_url: The API base URL to mock (defaults to production URL)
+        """
+        start_mock = respx.post(f"{base_url}/platform/cli/login/start")
         start_mock.return_value = httpx.Response(
             200,
             json={
@@ -228,16 +233,14 @@ class TestCloudURLWithLogin(unittest.TestCase):
         )
 
         poll_mock = respx.get(
-            "https://api.tensorlake.ai/platform/cli/login/poll?device_code=test_device_code"
+            f"{base_url}/platform/cli/login/poll?device_code=test_device_code"
         )
         poll_mock.return_value = httpx.Response(
             200,
             json={"status": "approved"},
         )
 
-        exchange_mock = respx.post(
-            "https://api.tensorlake.ai/platform/cli/login/exchange"
-        )
+        exchange_mock = respx.post(f"{base_url}/platform/cli/login/exchange")
         exchange_mock.return_value = httpx.Response(
             200,
             json={"access_token": "test_access_token"},
