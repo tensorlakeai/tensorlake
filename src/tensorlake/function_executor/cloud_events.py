@@ -32,8 +32,8 @@ def new_cloud_event(event: dict[str, Any]) -> dict[str, Any]:
         "specversion": "1.0",
         "id": str(uuid.uuid4()),
         "time": current_time(),
-        "type": "ai.tensorlake.executor.event",
-        "source": "/tensorlake/executor",
+        "type": "ai.tensorlake.event",
+        "source": "/tensorlake/function_executor",
         "data": event,
     }
     return event_dict
