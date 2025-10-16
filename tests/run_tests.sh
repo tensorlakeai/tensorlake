@@ -18,9 +18,10 @@ if [[ "$1" == "--function-executor" ]]; then
 elif [ "$1" == "--document-ai" ]; then
   enable_document_ai_test_suite=true
 else
-  # All by default (excluding CLI tests)
+  # All by default
   enable_fe_test_suite=true
   enable_applications_test_suite=true
+  enable_cli_test_suite=true
   enable_utils_test_suite=true
 fi
 
