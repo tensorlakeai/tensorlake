@@ -29,10 +29,7 @@ logger = logging.getLogger("tensorlake")
 
 
 _API_NAMESPACE_FROM_ENV: str = os.getenv("INDEXIFY_NAMESPACE", "default")
-# Check TENSORLAKE_API_URL first, then fall back to INDEXIFY_URL for backward compatibility
-_API_URL_FROM_ENV: str = os.getenv("TENSORLAKE_API_URL") or os.getenv(
-    "INDEXIFY_URL", "https://api.tensorlake.ai"
-)
+_API_URL_FROM_ENV: str = os.getenv("TENSORLAKE_API_URL", "https://api.tensorlake.ai")
 _API_KEY_FROM_ENV: str = os.getenv("TENSORLAKE_API_KEY")
 
 

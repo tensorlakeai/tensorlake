@@ -27,9 +27,8 @@ Authentication:
 )
 @click.option(
     "--api-url",
-    "--indexify-url",
     "base_url",
-    envvar=["TENSORLAKE_API_URL", "INDEXIFY_URL"],
+    envvar="TENSORLAKE_API_URL",
     help="The TensorLake API server URL",
 )
 @click.option(

@@ -56,10 +56,6 @@ def get_server_url(region: Region) -> str:
     if tensorlake_api_url:
         return tensorlake_api_url
 
-    indexify_url = os.getenv("INDEXIFY_URL")
-    if indexify_url:
-        return indexify_url
-
     if region == Region.EU:
         return "https://api.eu.tensorlake.ai"
 
