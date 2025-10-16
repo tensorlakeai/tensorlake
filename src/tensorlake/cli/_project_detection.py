@@ -146,3 +146,63 @@ def warn_if_nested_configs(project_root: Path) -> None:
         for config in configs:
             marker = " (will be used)" if config.parent == project_root else ""
             click.echo(f"  - {config}{marker}")
+
+
+def find_gitignore_path(start_path: Optional[Path] = None) -> Optional[Path]:
+    """
+    Find the most relevant .gitignore file by locating the git repository root.
+
+    Args:
+        start_path: Starting directory (defaults to current working directory)
+
+    Returns:
+        Path to .gitignore at git root, or None if no git repo found
+    """
+    if start_path is None:
+        start_path = Path.cwd()
+
+    current = start_path.resolve()
+
+    # Find the .git directory by traversing upward
+    for parent in [current] + list(current.parents):
+        if (parent / ".git").is_dir():
+            # Found git root, return .gitignore path at this level
+            return parent / ".gitignore"
+
+    # No git repository found
+    return None
+
+
+def add_to_gitignore(gitignore_path: Path, entry: str) -> None:
+    """
+    Add an entry to a .gitignore file if it doesn't already exist.
+
+    Creates the .gitignore file if it doesn't exist.
+
+    Args:
+        gitignore_path: Path to the .gitignore file
+        entry: Entry to add (e.g., ".tensorlake.toml")
+    """
+    # Check if entry already exists
+    if gitignore_path.exists():
+        with open(gitignore_path, "r", encoding="utf-8") as f:
+            content = f.read()
+            lines = content.splitlines()
+
+            # Check if entry already exists (exact match or as pattern)
+            for line in lines:
+                line = line.strip()
+                if line == entry or line == f"/{entry}":
+                    # Entry already exists, nothing to do
+                    return
+
+        # Entry doesn't exist, append it
+        # Ensure file ends with newline before appending
+        with open(gitignore_path, "a", encoding="utf-8") as f:
+            if content and not content.endswith("\n"):
+                f.write("\n")
+            f.write(f"{entry}\n")
+    else:
+        # Create new .gitignore file with the entry
+        with open(gitignore_path, "w", encoding="utf-8") as f:
+            f.write(f"{entry}\n")

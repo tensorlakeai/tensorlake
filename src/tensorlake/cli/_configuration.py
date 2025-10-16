@@ -79,6 +79,26 @@ def save_local_config(config: dict[str, Any], project_root: Path) -> None:
     # Set restrictive permissions (0600) to protect sensitive data
     os.chmod(config_path, 0o600)
 
+    # Add .tensorlake.toml to .gitignore
+    try:
+        from tensorlake.cli._project_detection import (
+            add_to_gitignore,
+            find_gitignore_path,
+        )
+
+        # Try to find .gitignore at git root
+        gitignore_path = find_gitignore_path(project_root)
+
+        # If no git repository found, create .gitignore next to .tensorlake.toml
+        if gitignore_path is None:
+            gitignore_path = project_root / ".gitignore"
+
+        # Add the entry
+        add_to_gitignore(gitignore_path, ".tensorlake.toml")
+    except Exception:
+        # Silently ignore any errors - this is a non-critical operation
+        pass
+
 
 def load_credentials(base_url: str) -> str | None:
     """

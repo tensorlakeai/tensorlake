@@ -168,8 +168,8 @@ def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
             )
 
             # Import here to avoid circular dependency
-            from tensorlake.cli.init import run_init_flow
             from tensorlake.cli._project_detection import find_project_root
+            from tensorlake.cli.init import run_init_flow
 
             # Detect project root automatically for login flow
             project_root = find_project_root()

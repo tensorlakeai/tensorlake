@@ -5,8 +5,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from tensorlake.cli._configuration import save_local_config
 from tensorlake.cli._project_detection import (
+    add_to_gitignore,
     check_for_nested_configs,
+    find_gitignore_path,
     find_project_root,
     find_project_root_interactive,
     get_detection_reason,
@@ -290,6 +293,211 @@ class TestCheckForNestedConfigs(unittest.TestCase):
                 self.assertEqual(configs[0].parent, subdir)
             finally:
                 os.chdir(original_cwd)
+
+
+class TestFindGitignorePath(unittest.TestCase):
+    """Test find_gitignore_path function."""
+
+    def test_find_gitignore_in_git_repository(self):
+        """Test finding .gitignore in a git repository."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir).resolve()
+            git_dir = project_dir / ".git"
+            git_dir.mkdir()
+
+            result = find_gitignore_path(project_dir)
+            expected = project_dir / ".gitignore"
+            self.assertEqual(result, expected)
+
+    def test_find_gitignore_in_parent_git_repository(self):
+        """Test finding .gitignore in parent directory's git repository."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir).resolve()
+            git_dir = project_dir / ".git"
+            git_dir.mkdir()
+
+            # Start from subdirectory
+            subdir = project_dir / "src" / "tensorlake"
+            subdir.mkdir(parents=True)
+
+            result = find_gitignore_path(subdir)
+            expected = project_dir / ".gitignore"
+            self.assertEqual(result, expected)
+
+    def test_find_gitignore_without_git_repository(self):
+        """Test that None is returned when no git repository exists."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir).resolve()
+            # No .git directory
+
+            result = find_gitignore_path(project_dir)
+            self.assertIsNone(result)
+
+    def test_find_gitignore_uses_current_directory_as_default(self):
+        """Test that current directory is used when start_path is None."""
+        # This should return a result or None depending on whether we're in a git repo
+        result = find_gitignore_path(None)
+        # Just verify it returns a Path or None (don't assert specific value)
+        self.assertTrue(result is None or isinstance(result, Path))
+
+
+class TestAddToGitignore(unittest.TestCase):
+    """Test add_to_gitignore function."""
+
+    def test_create_new_gitignore_file(self):
+        """Test creating a new .gitignore file with an entry."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gitignore_path = Path(tmpdir) / ".gitignore"
+            self.assertFalse(gitignore_path.exists())
+
+            add_to_gitignore(gitignore_path, ".tensorlake.toml")
+
+            # Verify file was created
+            self.assertTrue(gitignore_path.exists())
+
+            # Verify content
+            with open(gitignore_path, "r") as f:
+                content = f.read()
+            self.assertEqual(content, ".tensorlake.toml\n")
+
+    def test_append_to_existing_gitignore(self):
+        """Test appending to an existing .gitignore file."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gitignore_path = Path(tmpdir) / ".gitignore"
+
+            # Create existing .gitignore with some content
+            with open(gitignore_path, "w") as f:
+                f.write("*.pyc\n__pycache__/\n")
+
+            add_to_gitignore(gitignore_path, ".tensorlake.toml")
+
+            # Verify content was appended
+            with open(gitignore_path, "r") as f:
+                content = f.read()
+            self.assertEqual(content, "*.pyc\n__pycache__/\n.tensorlake.toml\n")
+
+    def test_skip_duplicate_entry_exact_match(self):
+        """Test that duplicate entries are not added."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gitignore_path = Path(tmpdir) / ".gitignore"
+
+            # Create .gitignore with the entry already present
+            with open(gitignore_path, "w") as f:
+                f.write("*.pyc\n.tensorlake.toml\n__pycache__/\n")
+
+            add_to_gitignore(gitignore_path, ".tensorlake.toml")
+
+            # Verify content wasn't duplicated
+            with open(gitignore_path, "r") as f:
+                content = f.read()
+            self.assertEqual(content, "*.pyc\n.tensorlake.toml\n__pycache__/\n")
+
+    def test_skip_duplicate_entry_with_leading_slash(self):
+        """Test that entries with leading slash are detected as duplicates."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gitignore_path = Path(tmpdir) / ".gitignore"
+
+            # Create .gitignore with entry that has leading slash
+            with open(gitignore_path, "w") as f:
+                f.write("*.pyc\n/.tensorlake.toml\n")
+
+            add_to_gitignore(gitignore_path, ".tensorlake.toml")
+
+            # Verify content wasn't duplicated
+            with open(gitignore_path, "r") as f:
+                content = f.read()
+            self.assertEqual(content, "*.pyc\n/.tensorlake.toml\n")
+
+    def test_append_to_file_without_trailing_newline(self):
+        """Test appending when existing file doesn't end with newline."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gitignore_path = Path(tmpdir) / ".gitignore"
+
+            # Create .gitignore without trailing newline
+            with open(gitignore_path, "w") as f:
+                f.write("*.pyc")
+
+            add_to_gitignore(gitignore_path, ".tensorlake.toml")
+
+            # Verify newline was added before the new entry
+            with open(gitignore_path, "r") as f:
+                content = f.read()
+            self.assertEqual(content, "*.pyc\n.tensorlake.toml\n")
+
+
+class TestSaveLocalConfigGitignoreIntegration(unittest.TestCase):
+    """Test that save_local_config updates .gitignore."""
+
+    def test_save_local_config_updates_gitignore_in_git_repo(self):
+        """Test that saving config adds .tensorlake.toml to .gitignore in git repo."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir).resolve()
+
+            # Create git repository
+            git_dir = project_dir / ".git"
+            git_dir.mkdir()
+
+            # Save local config
+            config_data = {"organization": "test_org", "project": "test_proj"}
+            save_local_config(config_data, project_dir)
+
+            # Verify .tensorlake.toml was created
+            config_path = project_dir / ".tensorlake.toml"
+            self.assertTrue(config_path.exists())
+
+            # Verify .gitignore was created/updated at git root
+            gitignore_path = project_dir / ".gitignore"
+            self.assertTrue(gitignore_path.exists())
+
+            # Verify .tensorlake.toml is in .gitignore
+            with open(gitignore_path, "r") as f:
+                content = f.read()
+            self.assertIn(".tensorlake.toml", content)
+
+    def test_save_local_config_updates_gitignore_without_git_repo(self):
+        """Test that saving config creates .gitignore next to config when no git repo."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir).resolve()
+            # No .git directory
+
+            # Save local config
+            config_data = {"organization": "test_org", "project": "test_proj"}
+            save_local_config(config_data, project_dir)
+
+            # Verify .tensorlake.toml was created
+            config_path = project_dir / ".tensorlake.toml"
+            self.assertTrue(config_path.exists())
+
+            # Verify .gitignore was created next to config
+            gitignore_path = project_dir / ".gitignore"
+            self.assertTrue(gitignore_path.exists())
+
+            # Verify .tensorlake.toml is in .gitignore
+            with open(gitignore_path, "r") as f:
+                content = f.read()
+            self.assertIn(".tensorlake.toml", content)
+
+    def test_save_local_config_doesnt_duplicate_gitignore_entry(self):
+        """Test that saving config twice doesn't duplicate .gitignore entry."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir).resolve()
+
+            # Create git repository
+            git_dir = project_dir / ".git"
+            git_dir.mkdir()
+
+            # Save local config twice
+            config_data = {"organization": "test_org", "project": "test_proj"}
+            save_local_config(config_data, project_dir)
+            save_local_config(config_data, project_dir)
+
+            # Verify .gitignore has only one entry
+            gitignore_path = project_dir / ".gitignore"
+            with open(gitignore_path, "r") as f:
+                content = f.read()
+            # Count occurrences
+            count = content.count(".tensorlake.toml")
+            self.assertEqual(count, 1, "Entry should appear only once")
 
 
 if __name__ == "__main__":
