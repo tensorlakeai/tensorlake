@@ -25,6 +25,16 @@ from tensorlake.utils.http_client import (
 )
 from tensorlake.utils.retries import exponential_backoff
 
+
+# Model for applications returned by the list endpoint
+class ApplicationListItem(BaseModel):
+    name: str
+    description: str
+    tags: dict[str, str]
+    version: str
+    tombstoned: bool = False
+    created_at: int | None = None
+
 logger = logging.getLogger("tensorlake")
 
 
@@ -248,10 +258,10 @@ class APIClient:
         )
         response.raise_for_status()
 
-    def applications(self) -> List[ApplicationManifest]:
-        """Returns manifest json dicts for all existing applications."""
+    def applications(self) -> List[ApplicationListItem]:
+        """Returns list of all existing applications."""
         return [
-            ApplicationManifest(**app)
+            ApplicationListItem(**app)
             for app in self._get(
                 f"v1/namespaces/{self._namespace}/applications"
             ).json()["applications"]
