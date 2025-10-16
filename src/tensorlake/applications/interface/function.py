@@ -1,12 +1,14 @@
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List
 
-from ..runtime_hooks import start_and_wait_function_calls, start_function_calls
-from .futures import (
-    CollectionFuture,
-    FunctionCallFuture,
-    Future,
-    ReduceOperationFuture,
+from .awaitable import (
+    Awaitable,
+    AwaitableList,
+    FunctionCallAwaitable,
+    _InitialMissing,
+    _InitialMissingType,
+    make_map_operation_awaitable,
+    make_reduce_operation_awaitable,
     request_scoped_id,
 )
 from .image import Image
@@ -45,13 +47,6 @@ class _ApplicationConfiguration:
     version: str
 
 
-class _InitialMissingType:
-    pass
-
-
-_InitialMissing = _InitialMissingType()
-
-
 class Function:
     """Class that represents a Tensorlake Function configured by user.
 
@@ -63,31 +58,43 @@ class Function:
         self._original_function: Callable = original_function
         self._function_config: _FunctionConfiguration | None = None
         self._application_config: _ApplicationConfiguration | None = None
+        self._awaitables_factory: _FunctionAwaitablesFactory = (
+            _FunctionAwaitablesFactory(self)
+        )
 
     def __call__(self, *args, **kwargs) -> Any:
         """Does a blocking function call and returns its result."""
         # Called when the Function is called using () operator.
-        function_call: FunctionCallFuture = FunctionCallFuture(
-            function_name=self._function_config.function_name,
-            args=list(args),
-            kwargs=dict(kwargs),
-            start_delay=None,
+        return (
+            FunctionCallAwaitable(
+                id=request_scoped_id(),
+                function_name=self._function_config.function_name,
+                args=list(args),
+                kwargs=dict(kwargs),
+            )
+            .run()
+            .result()
         )
-        return start_and_wait_function_calls([function_call])[0]
 
-    def map(self, iterable: Iterable) -> List[Any]:
+    def map(self, iterable: Iterable[Any | Awaitable]) -> List[Any]:
         """Returns a list with every item transformed using the function.
 
         Blocks until the result is ready.
         Similar to https://docs.python.org/3/library/functions.html#map except all transformations
         are done in parallel.
         """
-        map_calls: List[FunctionCallFuture] = self._make_map_calls(iterable)
-        return start_and_wait_function_calls(map_calls)
+        return (
+            make_map_operation_awaitable(
+                function_name=self._function_config.function_name,
+                iterable=iterable,
+            )
+            .run()
+            .result()
+        )
 
     def reduce(
         self,
-        iterable: Iterable,
+        iterable: Iterable[Any | Awaitable],
         initial: Any | _InitialMissingType = _InitialMissing,
         /,
     ) -> Any:
@@ -96,80 +103,20 @@ class Function:
         Blocks until the result is ready.
         Similar to https://docs.python.org/3/library/functools.html#functools.reduce.
         """
-        reducer_call: ReduceOperationFuture = self._make_reducer_call(
-            iterable=iterable,
-            initial=initial,
-            output_serializer_name_override=None,  # No oso for blocking calls
-        )
-        return start_and_wait_function_calls([reducer_call])[0]
-
-    def future(self, *args, **kwargs) -> Future:
-        """Runs a non-blocking function call and returns its Future."""
-        function_call: FunctionCallFuture = self._make_function_call(
-            start_delay=None, output_serializer_override=None, *args, **kwargs
-        )
-        start_function_calls([function_call])
-        return function_call
-
-    # TODO: determine application_output_serializer automatically by getting the currently running
-    # Tensorlake Function contextvars.Context
-    def request_output_future(
-        self, application_output_serializer: str, *args, **kwargs
-    ) -> Future:
-        """Runs a non-blocking function call and returns its Future.
-
-        The output serializer of the returned future is overridden with the application
-        output serializer so the future can be used as a return value of application function.
-        """
-        function_call: FunctionCallFuture = self._make_function_call(
-            start_delay=None,
-            output_serializer_override=application_output_serializer,
-            *args,
-            **kwargs,
-        )
-        start_function_calls([function_call])
-        return function_call
-
-    def delayed_future(self, start_delay: float, *args, **kwargs) -> Future:
-        """Runs a non-blocking function call after start_delay seconds and returns its Future."""
-        if start_delay < 0:
-            raise ValueError("start_delay must be non-negative")
-        function_call: FunctionCallFuture = self._make_function_call(
-            start_delay=start_delay, output_serializer_override=None, *args, **kwargs
-        )
-        start_function_calls([function_call])
-        return function_call
-
-    def map_future(self, iterable: Iterable) -> Future:
-        """Returns a future that resolves into a list with every item transformed using the function.
-
-        Similar to https://docs.python.org/3/library/functions.html#map except all transformations
-        are done in parallel.
-        """
-        map_calls: List[FunctionCallFuture] = self._make_map_calls(iterable)
-        # Once Server understands collection we'll be issueing a single collection call here.
-        start_function_calls(map_calls)
-        return CollectionFuture(
-            id=request_scoped_id(), items=[call for call in map_calls]
+        return (
+            make_reduce_operation_awaitable(
+                function_name=self._function_config.function_name,
+                iterable=iterable,
+                initial=initial,
+            )
+            .run()
+            .result()
         )
 
-    def reduce_future(
-        self,
-        iterable: Iterable,
-        initial: Any | _InitialMissingType = _InitialMissing,
-        /,
-    ) -> Future:
-        """Calls the function as a reducer of the supplied iterable and returns a Future with the result.
-
-        Similar to https://docs.python.org/3/library/functools.html#functools.reduce.
-        """
-        reducer_call: ReduceOperationFuture = self._make_reducer_call(
-            iterable=iterable,
-            initial=initial,
-            output_serializer_name_override=None,
-        )
-        start_function_calls([reducer_call])
-        return reducer_call
+    @property
+    def awaitable(self) -> "_FunctionAwaitablesFactory":
+        """Returns function factory for creating awaitables."""
+        return self._awaitables_factory
 
     def __repr__(self) -> str:
         return (
@@ -178,58 +125,6 @@ class Function:
             f"  function_config={self._function_config!r},\n"
             f"  application_config={self._application_config!r}\n"
             f")>"
-        )
-
-    def _make_function_call(
-        self,
-        start_delay: float | None,
-        output_serializer_override: str | None,
-        *args,
-        **kwargs,
-    ) -> FunctionCallFuture:
-        return FunctionCallFuture(
-            id=request_scoped_id(),
-            function_name=self._function_config.function_name,
-            start_delay=start_delay,
-            output_serializer_override=output_serializer_override,
-            args=list(args),
-            kwargs=dict(kwargs),
-        )
-
-    def _make_map_calls(self, iterable: Iterable) -> List[FunctionCallFuture]:
-        map_calls: List[FunctionCallFuture] = []
-        for item in iterable:
-            map_calls.append(
-                FunctionCallFuture(
-                    id=request_scoped_id(),
-                    function_name=self._function_config.function_name,
-                    start_delay=None,
-                    output_serializer_override=None,
-                    args=[item],
-                    kwargs={},
-                )
-            )
-        return map_calls
-
-    def _make_reducer_call(
-        self,
-        iterable: Iterable,
-        initial: Any | _InitialMissingType,
-        output_serializer_name_override: str | None,
-    ) -> ReduceOperationFuture:
-        inputs: List[Any] = list(iterable)
-        if len(inputs) == 0 and initial is _InitialMissing:
-            raise TypeError("reduce() of empty iterable with no initial value")
-
-        if initial is not _InitialMissing:
-            inputs.insert(0, initial)
-
-        return ReduceOperationFuture(
-            id=request_scoped_id(),
-            function_name=self._function_config.function_name,
-            start_delay=None,
-            output_serializer_name_override=output_serializer_name_override,
-            inputs=inputs,
         )
 
     def __get__(self, instance: Any | None, cls: Any) -> "Function":
@@ -248,4 +143,43 @@ class Function:
             f"Attempt to pickle a Tensorlake Function. "
             "Please return a single Tensorlake Function Call from your Tensorlake Function. "
             "A Tensorlake Function Call cannot be a part of another returned object, i.e. a list."
+        )
+
+
+class _FunctionAwaitablesFactory:
+    """Factory for creating awaitables for a specific Tensorlake Function.
+
+    This class is returned by Function.awaitable property.
+    """
+
+    def __init__(self, function: Function):
+        self._function: Function = function
+
+    def __call__(self, *args, **kwargs) -> Awaitable:
+        """Returns an awaitable that represents a call of the function."""
+        return FunctionCallAwaitable(
+            id=request_scoped_id(),
+            function_name=self._function._function_config.function_name,
+            args=list(args),
+            kwargs=dict(kwargs),
+        )
+
+    def map(self, iterable: Iterable[Any | Awaitable]) -> Awaitable:
+        """Returns an awaitable that represents mapping the function over the iterable."""
+        return make_map_operation_awaitable(
+            function_name=self._function._function_config.function_name,
+            iterable=iterable,
+        )
+
+    def reduce(
+        self,
+        iterable: Iterable[Any | Awaitable],
+        initial: Any | _InitialMissingType = _InitialMissing,
+        /,
+    ) -> Awaitable:
+        """Returns an awaitable that represents reducing the iterable using the function."""
+        return make_reduce_operation_awaitable(
+            function_name=self._function._function_config.function_name,
+            iterable=iterable,
+            initial=initial,
         )

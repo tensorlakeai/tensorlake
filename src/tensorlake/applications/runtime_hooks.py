@@ -9,16 +9,17 @@ Future = TypeVar("Future")
 FunctionCall = TypeVar("FunctionCall")
 
 
-# (Futures, is_async: bool, timeout: float | None) -> List[Any]
-__wait_futures: Callable[[List[Future], bool, float | None], List[Any]] | None = None
+# (Futures, timeout: float | None, return_when: int) -> List[Any]
+__wait_futures: Callable[[List[Future], float | None, int], List[Any]] | None = None
 
 
 def wait_futures(
-    futures: List[Future], is_async: bool, timeout: float | None
-) -> List[Any]:
-    """Waits for the given futures to complete and returns their results.
+    futures: List[Future], timeout: float | None, return_when: int
+) -> tuple[List[Future], List[Future]]:
+    """Waits for the given futures to complete respecting the timeout and return_when.
 
-    Raises an Exception representing the failure if any of the futures fail.
+    The future's results (value or exception) are set on return.
+    Returns a tuple of two lists: (done_futures, not_done_futures).
     """
     global __wait_futures
     if __wait_futures is None:
@@ -26,7 +27,7 @@ def wait_futures(
             "Internal error: __wait_futures runtime hook not initialized"
         )
 
-    return __wait_futures(futures, is_async, timeout)
+    return __wait_futures(futures, timeout, return_when)
 
 
 def set_wait_futures_hook(hook: Any) -> None:
@@ -39,52 +40,25 @@ def set_wait_futures_hook(hook: Any) -> None:
     __wait_futures = hook
 
 
-__start_function_calls: Callable[[List[FunctionCall]], None] = None
+__run_function_calls: Callable[[List[FunctionCall]], List[Future]] = None
 
 
-def start_function_calls(function_calls: List[FunctionCall]) -> None:
-    """Starts the given function calls."""
-    global __start_function_calls
-    if __start_function_calls is None:
+def run_function_calls(function_calls: List[FunctionCall]) -> List[Future]:
+    """Starts running the given function calls and returns their Futures."""
+    global __run_function_calls
+    if __run_function_calls is None:
         raise RuntimeError(
-            "Internal error: __start_function_calls runtime hook not initialized"
+            "Internal error: __run_function_calls runtime hook not initialized"
         )
 
-    return __start_function_calls(function_calls)
+    return __run_function_calls(function_calls)
 
 
-def set_start_function_calls_hook(hook: Any) -> None:
-    global __start_function_calls
-    if __start_function_calls is not None:
+def set_run_function_calls_hook(hook: Any) -> None:
+    global __run_function_calls
+    if __run_function_calls is not None:
         raise RuntimeError(
-            "Internal error: __start_function_calls runtime hook already initialized"
+            "Internal error: __run_function_calls runtime hook already initialized"
         )
 
-    __start_function_calls = hook
-
-
-__start_and_wait_function_calls: Callable[[List[FunctionCall]], List[Any]] = None
-
-
-def start_and_wait_function_calls(function_calls: List[FunctionCall]) -> List[Any]:
-    """Starts the given function calls and waits for them to complete, returning their results.
-
-    Raises an Exception representing the failure if any of the function calls fail.
-    """
-    global __start_and_wait_function_calls
-    if __start_and_wait_function_calls is None:
-        raise RuntimeError(
-            "Internal error: __start_and_wait_function_calls runtime hook not initialized"
-        )
-
-    return __start_and_wait_function_calls(function_calls)
-
-
-def set_start_and_wait_function_calls_hook(hook: Any) -> None:
-    global __start_and_wait_function_calls
-    if __start_and_wait_function_calls is not None:
-        raise RuntimeError(
-            "Internal error: __start_and_wait_function_calls runtime hook already initialized"
-        )
-
-    __start_and_wait_function_calls = hook
+    __run_function_calls = hook
