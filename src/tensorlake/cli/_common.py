@@ -34,8 +34,8 @@ class Context:
     namespace: str
     api_key: str | None = None
     personal_access_token: str | None = None
-    default_project: str | None = None
-    default_organization: str | None = None
+    configured_project_id: str | None = None
+    configured_organization_id: str | None = None
     version: str = VERSION
     _client: httpx.Client | None = None
     _introspect_response: httpx.Response | None = None
@@ -98,7 +98,7 @@ class Context:
         if self.api_key:
             return self._introspect().json().get("projectId")
 
-        return self.default_project
+        return self.configured_project_id
 
     @property
     def organization_id(self):
@@ -108,7 +108,7 @@ class Context:
         if self.api_key:
             return self._introspect().json().get("organizationId")
 
-        return self.default_organization
+        return self.configured_organization_id
 
     def _introspect(self) -> httpx.Response:
         if self._introspect_response is None:
@@ -205,10 +205,10 @@ class Context:
         # Priority: CLI/env > local config > None
         # Note: Organization and project IDs are NOT loaded from global config
         # They must come from CLI flags, env vars, or local .tensorlake.toml only
-        final_default_project = project_id or get_nested_value(
+        final_configured_project_id = project_id or get_nested_value(
             local_config_data, "project"
         )
-        final_default_organization = organization_id or get_nested_value(
+        final_configured_organization_id = organization_id or get_nested_value(
             local_config_data, "organization"
         )
 
@@ -218,8 +218,8 @@ class Context:
             api_key=final_api_key,
             personal_access_token=final_personal_access_token,
             namespace=final_namespace,
-            default_project=final_default_project,
-            default_organization=final_default_organization,
+            configured_project_id=final_configured_project_id,
+            configured_organization_id=final_configured_organization_id,
         )
 
 
