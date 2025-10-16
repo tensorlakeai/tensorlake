@@ -1,7 +1,10 @@
 """Tests for the login command"""
 
+import os
+import stat
 import tempfile
 import unittest
+import webbrowser
 from pathlib import Path
 from unittest.mock import patch
 
@@ -377,8 +380,6 @@ class TestLoginBrowserHandling(unittest.TestCase):
         runner = CliRunner()
 
         # Mock browser.open to raise an error
-        import webbrowser
-
         with patch("webbrowser.open", side_effect=webbrowser.Error("No browser")):
             with patch("time.sleep"):
                 result = runner.invoke(cli, ["login"], prog_name="tensorlake")
@@ -487,9 +488,6 @@ class TestLoginCredentialStorage(unittest.TestCase):
     @respx.mock
     def test_credentials_file_has_secure_permissions(self):
         """Test that credentials file has restrictive permissions (0600)"""
-        import os
-        import stat
-
         respx.post("https://api.tensorlake.ai/platform/cli/login/start").mock(
             return_value=httpx.Response(
                 200,

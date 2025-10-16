@@ -1,5 +1,6 @@
 """Tests for the applications (ls) command"""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -46,15 +47,11 @@ class TestApplicationsList(unittest.TestCase):
         config_module.LOCAL_CONFIG_FILE = local_config_path
 
         # Save original cwd and change to temp dir
-        import os
-
         self.original_cwd = os.getcwd()
         os.chdir(self.tmpdir.name)
 
     def tearDown(self):
         """Restore original configuration"""
-        import os
-
         os.chdir(self.original_cwd)
         config_module.CREDENTIALS_PATH = self.original_credentials_path
         config_module.CONFIG_DIR = self.original_config_dir

@@ -113,8 +113,6 @@ class TestTokenPriority(unittest.TestCase):
 
     def test_api_key_takes_priority_over_pat(self):
         """Test that API key is used when both API key and PAT are provided"""
-        from tensorlake.cli._common import Context
-
         # Create context with both API key and PAT
         ctx = Context.default(
             api_key="test_api_key_123", personal_access_token="test_pat_456"
@@ -130,8 +128,6 @@ class TestTokenPriority(unittest.TestCase):
 
     def test_pat_used_when_no_api_key(self):
         """Test that PAT is used when only PAT is provided"""
-        from tensorlake.cli._common import Context
-
         # Create context with only PAT
         ctx = Context.default(personal_access_token="test_pat_789")
 
@@ -156,8 +152,6 @@ class TestTokenPriority(unittest.TestCase):
             try:
                 config_module.CREDENTIALS_PATH = credentials_path
                 config_module.CONFIG_DIR = config_dir
-
-                from tensorlake.cli._common import Context
 
                 # Create context with only API key
                 ctx = Context.default(api_key="test_api_key_999")

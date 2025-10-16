@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 from click.testing import CliRunner
-from tomlkit import document, dumps
+from tomlkit import document, dumps, table
 
 import tensorlake.cli._configuration as config_module
 from tensorlake.cli import cli
@@ -67,8 +67,6 @@ class TestConfigurationSourceTracking(unittest.TestCase):
         # Create credentials file with PAT
         test_pat = "test_personal_access_token_123"
         config = document()
-        from tomlkit import table
-
         section = table()
         section["token"] = test_pat
         config["https://api.tensorlake.ai"] = section
@@ -178,8 +176,6 @@ class TestHTTPErrorHandling(unittest.TestCase):
         # Create credentials file with PAT
         test_pat = "test_personal_access_token_123"
         config = document()
-        from tomlkit import table
-
         section = table()
         section["token"] = test_pat
         config["https://api.tensorlake.ai"] = section

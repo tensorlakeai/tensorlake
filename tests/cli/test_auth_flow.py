@@ -3,6 +3,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 import respx
@@ -11,6 +12,8 @@ from tomlkit import dumps
 
 import tensorlake.cli._configuration as config_module
 from tensorlake.cli import cli
+from tensorlake.cli._common import Context
+from tensorlake.cli._configuration import save_credentials, save_local_config
 
 
 class TestAutoInitFlow(unittest.TestCase):
@@ -38,8 +41,6 @@ class TestAutoInitFlow(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
                 # Save credentials (PAT)
-                from tensorlake.cli._configuration import save_credentials
-
                 save_credentials("https://api.tensorlake.ai", "test_pat")
 
                 # Mock init flow API calls
@@ -72,8 +73,6 @@ class TestAutoInitFlow(unittest.TestCase):
                 runner = CliRunner()
 
                 # Mock find_project_root to return the temp directory
-                from unittest.mock import patch
-
                 with patch(
                     "tensorlake.cli._project_detection.find_project_root",
                     return_value=local_config_path.parent.parent,
@@ -176,8 +175,6 @@ class TestAutoInitFlow(unittest.TestCase):
                 )
 
                 runner = CliRunner()
-                from unittest.mock import patch
-
                 with patch("webbrowser.open"), patch(
                     "tensorlake.cli._project_detection.find_project_root",
                     return_value=local_config_path.parent.parent,
@@ -223,11 +220,6 @@ class TestAutoInitFlow(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
                 # Save credentials and local config
-                from tensorlake.cli._configuration import (
-                    save_credentials,
-                    save_local_config,
-                )
-
                 save_credentials("https://api.tensorlake.ai", "test_pat")
                 save_local_config(
                     {"organization": "org_999", "project": "proj_888"},
@@ -235,8 +227,6 @@ class TestAutoInitFlow(unittest.TestCase):
                 )
 
                 # Mock secrets API call
-                import respx
-
                 respx.get(
                     "https://api.tensorlake.ai/platform/v1/organizations/org_999/projects/proj_888/secrets?pageSize=100"
                 ).mock(
@@ -283,13 +273,9 @@ class TestAutoInitFlow(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
                 # Save credentials (no local config)
-                from tensorlake.cli._configuration import save_credentials
-
                 save_credentials("https://api.tensorlake.ai", "test_pat")
 
                 # Mock secrets API call
-                import respx
-
                 respx.get(
                     "https://api.tensorlake.ai/platform/v1/organizations/cli_org/projects/cli_proj/secrets?pageSize=100"
                 ).mock(
@@ -386,8 +372,6 @@ class TestLoginInitChaining(unittest.TestCase):
                     }
                 )
 
-                from unittest.mock import patch
-
                 with patch("webbrowser.open"):
                     result = runner.invoke(cli, ["login"], prog_name="tensorlake")
 
@@ -454,8 +438,6 @@ class TestLoginInitChaining(unittest.TestCase):
 
                 # Provide org/project via CLI flags
                 runner = CliRunner()
-
-                from unittest.mock import patch
 
                 with patch("webbrowser.open"):
                     result = runner.invoke(
@@ -549,8 +531,6 @@ class TestLoginInitChaining(unittest.TestCase):
                 )
 
                 runner = CliRunner()
-                from unittest.mock import patch
-
                 with patch("webbrowser.open"), patch(
                     "tensorlake.cli._project_detection.find_project_root",
                     return_value=local_config_path.parent.parent,
@@ -627,8 +607,6 @@ class TestLoginInitChaining(unittest.TestCase):
                 )
 
                 runner = CliRunner()
-                from unittest.mock import patch
-
                 with patch("webbrowser.open"):
                     result = runner.invoke(cli, ["login"], prog_name="tensorlake")
 
@@ -649,15 +627,11 @@ class TestContextHelperMethods(unittest.TestCase):
 
     def test_has_authentication_with_api_key(self):
         """Test has_authentication returns True when API key is set"""
-        from tensorlake.cli._common import Context
-
         ctx = Context.default(api_key="test_api_key")
         self.assertTrue(ctx.has_authentication())
 
     def test_has_authentication_with_pat(self):
         """Test has_authentication returns True when PAT is set"""
-        from tensorlake.cli._common import Context
-
         ctx = Context.default(personal_access_token="test_pat")
         self.assertTrue(ctx.has_authentication())
 
@@ -676,8 +650,6 @@ class TestContextHelperMethods(unittest.TestCase):
                 config_module.CONFIG_DIR = config_dir
                 config_module.CREDENTIALS_PATH = credentials_path
 
-                from tensorlake.cli._common import Context
-
                 ctx = Context.default()
                 self.assertFalse(ctx.has_authentication())
             finally:
@@ -686,8 +658,6 @@ class TestContextHelperMethods(unittest.TestCase):
 
     def test_has_org_and_project_with_both(self):
         """Test has_org_and_project returns True when both are set"""
-        from tensorlake.cli._common import Context
-
         ctx = Context.default(organization_id="org_123", project_id="proj_456")
         self.assertTrue(ctx.has_org_and_project())
 
@@ -701,8 +671,6 @@ class TestContextHelperMethods(unittest.TestCase):
             original_local_config = config_module.LOCAL_CONFIG_FILE
             try:
                 config_module.LOCAL_CONFIG_FILE = local_config_path
-
-                from tensorlake.cli._common import Context
 
                 ctx = Context.default(organization_id="org_123")
                 self.assertFalse(ctx.has_org_and_project())
@@ -720,8 +688,6 @@ class TestContextHelperMethods(unittest.TestCase):
             try:
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
-                from tensorlake.cli._common import Context
-
                 ctx = Context.default(project_id="proj_456")
                 self.assertFalse(ctx.has_org_and_project())
             finally:
@@ -738,8 +704,6 @@ class TestContextHelperMethods(unittest.TestCase):
             try:
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
-                from tensorlake.cli._common import Context
-
                 ctx = Context.default(personal_access_token="test_pat")
                 self.assertTrue(ctx.needs_init())
             finally:
@@ -747,15 +711,11 @@ class TestContextHelperMethods(unittest.TestCase):
 
     def test_needs_init_with_api_key(self):
         """Test needs_init returns False when using API key (introspection provides org/project)"""
-        from tensorlake.cli._common import Context
-
         ctx = Context.default(api_key="test_api_key")
         self.assertFalse(ctx.needs_init())
 
     def test_needs_init_with_pat_and_config(self):
         """Test needs_init returns False when PAT and org/project both exist"""
-        from tensorlake.cli._common import Context
-
         ctx = Context.default(
             personal_access_token="test_pat",
             organization_id="org_123",

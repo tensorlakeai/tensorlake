@@ -3,7 +3,10 @@ import os
 from pathlib import Path
 from typing import Any
 
+import click
 from tomlkit import document, dumps, parse, table
+
+from tensorlake.cli._project_detection import add_to_gitignore, find_gitignore_path
 
 CONFIG_DIR = Path.home() / ".config" / "tensorlake"
 
@@ -74,8 +77,6 @@ def save_local_config(config: dict[str, Any], project_root: Path) -> None:
     Raises:
         click.ClickException: If .tensorlake exists as a file (not a directory)
     """
-    import click
-
     config_dir = project_root / ".tensorlake"
     config_path = config_dir / "config.toml"
 
@@ -98,11 +99,6 @@ def save_local_config(config: dict[str, Any], project_root: Path) -> None:
 
     # Add .tensorlake/ to .gitignore
     try:
-        from tensorlake.cli._project_detection import (
-            add_to_gitignore,
-            find_gitignore_path,
-        )
-
         # Try to find .gitignore at git root
         gitignore_path = find_gitignore_path(project_root)
 

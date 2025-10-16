@@ -1,5 +1,6 @@
 """Tests for project root detection functionality."""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -247,8 +248,6 @@ class TestCheckForNestedConfigs(unittest.TestCase):
             project_dir = Path(tmpdir).resolve()
 
             # Change to temp directory so check doesn't find parent configs
-            import os
-
             original_cwd = os.getcwd()
             try:
                 os.chdir(project_dir)
@@ -267,8 +266,6 @@ class TestCheckForNestedConfigs(unittest.TestCase):
             config_file.touch()
 
             # Change to this directory for the test
-            import os
-
             original_cwd = os.getcwd()
             try:
                 os.chdir(project_dir)
@@ -295,8 +292,6 @@ class TestCheckForNestedConfigs(unittest.TestCase):
             config2.touch()
 
             # Change to subdirectory for the test
-            import os
-
             original_cwd = os.getcwd()
             try:
                 os.chdir(subdir)

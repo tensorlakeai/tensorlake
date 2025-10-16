@@ -1,3 +1,5 @@
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -98,9 +100,6 @@ class TestLocalConfigFile(unittest.TestCase):
                 save_local_config(config_data, local_config_path.parent.parent)
 
                 # Check permissions (0600 = owner read/write only)
-                import os
-                import stat
-
                 file_stat = os.stat(local_config_path)
                 permissions = stat.filemode(file_stat.st_mode)
                 # Should be -rw------- on Unix-like systems
