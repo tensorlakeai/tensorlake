@@ -27,17 +27,6 @@ class FakePDFParseResult(BaseModel):
     chunks: List[FakePDFChunk]
 
 
-def fake_parse_pdf_service_call(file: str, page_range: str) -> FakePDFParseResult:
-    time.sleep(0.001)  # Simulate network call
-    start, end = map(int, page_range.split("-"))
-    return FakePDFParseResult(
-        chunks=[
-            FakePDFChunk(content=f"Parsed page {i} content")
-            for i in range(start, end + 1)
-        ]
-    )
-
-
 class ChunkEmbedding(BaseModel):
     chunk: str
     embedding: float
@@ -68,9 +57,9 @@ def parse_pdf_api(payload: RequestPayload) -> ResponsePayload:
         page_range=payload.page_range,
     )
     # Use map operation running in background as argument to other function calls.
-    chunk_embeddings: Future = chunk_and_embed.map_future(
+    chunk_embeddings: Future = chunk_and_embed.function_call.map(
         [chunk.content for chunk in response.chunks]
-    )
+    ).run()
 
     # We can't return chunk_embeddings future here because there's no function call ID associated with it.
     # Due to this limitation we have to use a blocking call.
@@ -80,13 +69,26 @@ def parse_pdf_api(payload: RequestPayload) -> ResponsePayload:
     chunks: List[ChunkEmbeddings] = chunk_embeddings.result()
 
     # Spawn a recurring background function to watch for the PDF file updates.
-    watch_pdf_updates.delayed_future(
-        start_delay=60, url=payload.url, page_range=payload.page_range
-    )
+    watch_pdf_updates.function_call(
+        url=payload.url, page_range=payload.page_range
+    ).run_later(start_delay=60)
     return ResponsePayload(chunks=chunks)
 
 
-@function()
+def fake_parse_pdf_service_call(file: str, page_range: str) -> FakePDFParseResult:
+    time.sleep(0.001)  # Simulate network call
+    start, end = map(int, page_range.split("-"))
+    return FakePDFParseResult(
+        chunks=[
+            FakePDFChunk(content=f"Parsed page {i} content")
+            for i in range(start, end + 1)
+        ]
+    )
+
+
+@function(
+    description="Chunks the supplied page and returns chunks and their embeddings"
+)
 def chunk_and_embed(page: str) -> ChunkEmbeddings:
     texts: List[str] = [page[i : i + 5] for i in range(0, len(page), 5)]
     embeddings: List[float] = [
@@ -99,7 +101,7 @@ def chunk_and_embed(page: str) -> ChunkEmbeddings:
     output = ChunkEmbeddings(chunk_embeddings=chunk_embeddings)
     # Spawn IndexEmbedding function call in background to save the embeddings.
     # We're not interested in waiting for it to complete or value the function returned.
-    IndexEmbedding().index.delayed_future(output)
+    IndexEmbedding().index.function_call(output).run()
 
     return output
 
@@ -133,7 +135,9 @@ def watch_pdf_updates(url: str, page_range: str) -> None:
     time.sleep(0.1)
     print(f"Checked {url} for updates, no updates found.")
     # Schedule next check in 60 seconds.
-    watch_pdf_updates.delayed_future(start_delay=60, url=url, page_range=page_range)
+    watch_pdf_updates.function_call(url=url, page_range=page_range).run_later(
+        start_delay=60
+    )
 
 
 class TestPDFParseDataWorkflow(unittest.TestCase):
