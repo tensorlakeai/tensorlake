@@ -14,7 +14,7 @@ class TestOrganizationIDConfiguration(unittest.TestCase):
     def test_organization_id_from_cli_option(self):
         """Test organization ID override via CLI option"""
         ctx = Context.default(organization_id="cli_org_123")
-        self.assertEqual(ctx.configured_organization_id, "cli_org_123")
+        self.assertEqual(ctx.organization_id_value, "cli_org_123")
         self.assertEqual(ctx.organization_id, "cli_org_123")
 
     def test_organization_id_from_environment_variable(self):
@@ -52,7 +52,7 @@ class TestOrganizationIDConfiguration(unittest.TestCase):
 
                 # Load context and verify
                 ctx = Context.default()
-                self.assertEqual(ctx.configured_organization_id, "local_org_789")
+                self.assertEqual(ctx.organization_id_value, "local_org_789")
                 self.assertEqual(ctx.organization_id, "local_org_789")
             finally:
                 # Restore original values
@@ -105,7 +105,7 @@ class TestProjectIDConfiguration(unittest.TestCase):
     def test_project_id_from_cli_option(self):
         """Test project ID override via CLI option"""
         ctx = Context.default(project_id="cli_proj_123")
-        self.assertEqual(ctx.configured_project_id, "cli_proj_123")
+        self.assertEqual(ctx.project_id_value, "cli_proj_123")
         self.assertEqual(ctx.project_id, "cli_proj_123")
 
     def test_project_id_from_environment_variable(self):
@@ -143,7 +143,7 @@ class TestProjectIDConfiguration(unittest.TestCase):
 
                 # Load context and verify
                 ctx = Context.default()
-                self.assertEqual(ctx.configured_project_id, "local_proj_789")
+                self.assertEqual(ctx.project_id_value, "local_proj_789")
                 self.assertEqual(ctx.project_id, "local_proj_789")
             finally:
                 # Restore original values

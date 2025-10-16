@@ -4,7 +4,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 import click
 import httpx
@@ -34,15 +34,16 @@ class Context:
     namespace: str
     api_key: str | None = None
     personal_access_token: str | None = None
-    project_id_from_config: str | None = None
-    organization_id_from_config: str | None = None
     version: str = VERSION
     debug: bool = False
     _client: httpx.Client | None = None
     _introspect_response: httpx.Response | None = None
     _api_client: APIClient | None = None
-    organization_id_from_cli: str | None = None
-    project_id_from_cli: str | None = None
+    # Organization and project ID with source tracking
+    organization_id_value: str | None = None
+    organization_id_source: Literal["cli", "config"] | None = None
+    project_id_value: str | None = None
+    project_id_source: Literal["cli", "config"] | None = None
 
     @property
     def client(self) -> httpx.Client:
@@ -71,17 +72,26 @@ class Context:
     @property
     def api_client(self) -> APIClient:
         if self._api_client is None:
-            bearer_token = self.api_key
-            if not bearer_token:
+            # Determine which authentication method to use
+            # IMPORTANT: Only pass api_key if using actual API key (not PAT)
+            # This ensures X-Forwarded headers are set correctly for PAT
+            if self.api_key:
+                # Using API key - pass it and let server get org/project via introspection
+                bearer_token = self.api_key
+                org_id = None
+                proj_id = None
+            else:
+                # Using PAT - pass PAT as api_key AND org/project for X-Forwarded headers
                 bearer_token = self.personal_access_token
+                org_id = self.organization_id
+                proj_id = self.project_id
 
-            # Pass organization and project IDs to API client for X-Forwarded headers
             self._api_client = APIClient(
                 namespace=self.namespace,
                 api_url=self.base_url,
                 api_key=bearer_token,
-                organization_id=self.organization_id if not self.api_key else None,
-                project_id=self.project_id if not self.api_key else None,
+                organization_id=org_id,
+                project_id=proj_id,
             )
 
         return self._api_client
@@ -101,7 +111,7 @@ class Context:
         if self.api_key:
             return self._introspect().json().get("projectId")
 
-        return self.project_id_from_config
+        return self.project_id_value
 
     @property
     def organization_id(self):
@@ -111,7 +121,7 @@ class Context:
         if self.api_key:
             return self._introspect().json().get("organizationId")
 
-        return self.organization_id_from_config
+        return self.organization_id_value
 
     def _introspect(self) -> httpx.Response:
         if self._introspect_response is None:
@@ -186,6 +196,20 @@ class Context:
         # Have PAT but missing org/project
         return not self.has_org_and_project()
 
+    @property
+    def organization_id_from_cli(self) -> str | None:
+        """Get organization ID if it was provided via CLI, otherwise None."""
+        if self.organization_id_source == "cli":
+            return self.organization_id_value
+        return None
+
+    @property
+    def project_id_from_cli(self) -> str | None:
+        """Get project ID if it was provided via CLI, otherwise None."""
+        if self.project_id_source == "cli":
+            return self.project_id_value
+        return None
+
     def get_organization_source(self) -> str:
         """
         Get the source of the organization ID.
@@ -196,10 +220,10 @@ class Context:
         if self.api_key:
             return "API key introspection"
 
-        if self.organization_id_from_cli:
+        if self.organization_id_source == "cli":
             return "CLI flag or environment variable"
 
-        if self.organization_id_from_config:
+        if self.organization_id_source == "config":
             return "local config (.tensorlake.toml)"
 
         return "not configured"
@@ -214,10 +238,10 @@ class Context:
         if self.api_key:
             return "API key introspection"
 
-        if self.project_id_from_cli:
+        if self.project_id_source == "cli":
             return "CLI flag or environment variable"
 
-        if self.project_id_from_config:
+        if self.project_id_source == "config":
             return "local config (.tensorlake.toml)"
 
         return "not configured"
@@ -287,17 +311,32 @@ class Context:
     @classmethod
     def _resolve_project_config(
         cls, organization_id: str | None, project_id: str | None, local_config: dict
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[str | None, Literal["cli", "config"] | None, str | None, Literal["cli", "config"] | None]:
         """Resolve organization and project IDs from CLI args or local config.
 
         Note: Organization and project IDs are NOT loaded from global config.
         They must come from CLI flags, env vars, or local .tensorlake.toml only.
+
+        Returns:
+            tuple of (org_id, org_source, project_id, project_source)
         """
-        final_organization_id = organization_id or get_nested_value(
-            local_config, "organization"
-        )
-        final_project_id = project_id or get_nested_value(local_config, "project")
-        return final_organization_id, final_project_id
+        # Resolve organization ID and track source
+        if organization_id:
+            final_organization_id = organization_id
+            org_source = "cli"
+        else:
+            final_organization_id = get_nested_value(local_config, "organization")
+            org_source = "config" if final_organization_id else None
+
+        # Resolve project ID and track source
+        if project_id:
+            final_project_id = project_id
+            proj_source = "cli"
+        else:
+            final_project_id = get_nested_value(local_config, "project")
+            proj_source = "config" if final_project_id else None
+
+        return final_organization_id, org_source, final_project_id, proj_source
 
     @classmethod
     def default(
@@ -333,9 +372,12 @@ class Context:
         final_namespace = cls._resolve_namespace(
             namespace, local_config_data, global_config_data
         )
-        final_organization_id, final_project_id = cls._resolve_project_config(
-            organization_id, project_id, local_config_data
-        )
+        (
+            final_organization_id,
+            org_source,
+            final_project_id,
+            proj_source,
+        ) = cls._resolve_project_config(organization_id, project_id, local_config_data)
 
         return cls(
             base_url=final_base_url,
@@ -343,11 +385,11 @@ class Context:
             api_key=final_api_key,
             personal_access_token=final_personal_access_token,
             namespace=final_namespace,
-            project_id_from_config=final_project_id,
-            organization_id_from_config=final_organization_id,
             debug=debug,
-            organization_id_from_cli=organization_id,
-            project_id_from_cli=project_id,
+            organization_id_value=final_organization_id,
+            organization_id_source=org_source,
+            project_id_value=final_project_id,
+            project_id_source=proj_source,
         )
 
 

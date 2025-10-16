@@ -175,8 +175,8 @@ def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
             cloud_url=ctx.cloud_url,
             personal_access_token=access_token,
             # Preserve CLI flags and env vars if they were provided
-            organization_id=ctx.configured_organization_id,
-            project_id=ctx.configured_project_id,
+            organization_id=ctx.organization_id_from_cli,
+            project_id=ctx.project_id_from_cli,
         )
 
         # Check if org/project are available from ANY source (CLI, env, local config)
