@@ -45,17 +45,6 @@ class RequestError(BaseModel):
     message: str
 
 
-class ShallowRequestMetadata(BaseModel):
-    id: str
-    created_at: int
-    # dict when failure outcome
-    # str when success outcome
-    # None when not finished
-    outcome: dict | str | None = None
-    function_runs_count: int
-    application_version: str
-
-
 class Allocation(BaseModel):
     id: str
     function_name: str
@@ -130,21 +119,6 @@ class WorkflowEvent(BaseModel):
         )
 
         return f"{stdout}{stderr}[bold green]{self.event_name}[/bold green]: {self.payload}"
-
-
-class LogEntry(BaseModel):
-    timestamp: int
-    uuid: str
-    namespace: str
-    application: str
-    body: str
-    log_attributes: str = Field(alias="logAttributes")
-    resource_attributes: list[tuple[str, str]] = Field(alias="resourceAttributes")
-
-
-class LogsPayload(BaseModel):
-    logs: list[LogEntry]
-    next_token: str | None = Field(default=None, alias="nextToken")
 
 
 def log_retries(e: BaseException, sleep_time: float, retries: int):
@@ -274,17 +248,6 @@ class APIClient:
         )
         response.raise_for_status()
 
-    def function_runs(
-        self, application_name: str, request_id: str
-    ) -> List[FunctionRun]:
-        response = self._get(
-            f"v1/namespaces/{self._namespace}/applications/{application_name}/requests/{request_id}/function-runs"
-        )
-        return [
-            FunctionRun(**function_run)
-            for function_run in response.json()["function_runs"]
-        ]
-
     def applications(self) -> List[ApplicationManifest]:
         """Returns manifest json dicts for all existing applications."""
         return [
@@ -302,43 +265,6 @@ class APIClient:
             ).json()
         )
 
-    def application_logs(
-        self,
-        application: str,
-        function: str | None,
-        request: str | None,
-        container: str | None,
-    ) -> LogsPayload | None:
-        query_params = {}
-        if function:
-            query_params["function"] = function
-        if request:
-            query_params["requestId"] = request
-        if container:
-            query_params["containerId"] = container
-
-        if query_params:
-            query_params_str = "&".join(
-                [f"{key}={value}" for key, value in query_params.items()]
-            )
-            query_params_str = f"?{query_params_str}"
-        else:
-            query_params_str = ""
-
-        try:
-            response = self._get(
-                f"v1/namespaces/{self._namespace}/applications/{application}/logs{query_params_str}"
-            )
-            response.raise_for_status()
-            payload = LogsPayload(**response.json())
-            # Logs default ordering is descending, having the most recent logs first.
-            # Reverse the logs to have the oldest logs first to print on the console.
-            payload.logs.reverse()
-            return payload
-        except RemoteAPIError as e:
-            print(f"failed to fetch logs: {e}")
-            return None
-
     def logs(
         self, application_name: str, invocation_id: str, allocation_id: str, file: str
     ) -> str | None:
@@ -351,22 +277,6 @@ class APIClient:
         except RemoteAPIError as e:
             print(f"failed to fetch logs: {e}")
             return None
-
-    def requests(self, application_name: str) -> List[ShallowRequestMetadata]:
-        response = self._get(
-            f"v1/namespaces/{self._namespace}/applications/{application_name}/requests"
-        )
-        requests: List[ShallowRequestMetadata] = []
-        for request in response.json()["requests"]:
-            requests.append(ShallowRequestMetadata(**request))
-
-        return requests
-
-    def request(self, application_name: str, request_id: str) -> RequestMetadata:
-        response = self._get(
-            f"v1/namespaces/{self._namespace}/applications/{application_name}/requests/{request_id}"
-        )
-        return RequestMetadata(**response.json())
 
     def call(
         self,

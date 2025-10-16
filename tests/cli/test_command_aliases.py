@@ -14,7 +14,6 @@ class TestCommandAliases(unittest.TestCase):
 
         # Test all main commands with exact names
         test_cases = [
-            "request",
             "secrets",
             "deploy",
             "parse",
@@ -30,14 +29,6 @@ class TestCommandAliases(unittest.TestCase):
                     0,
                     f"Command '{cmd}' failed: {result.output}",
                 )
-
-    def test_request_alias_req(self):
-        """Test that 'req' works as alias for 'request'"""
-        runner = CliRunner()
-        result = runner.invoke(cli, ["req", "--help"], prog_name="tensorlake")
-
-        self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
-        self.assertIn("request", result.output.lower())
 
     def test_secrets_alias_sec(self):
         """Test that 'sec' works as alias for 'secrets'"""
@@ -83,30 +74,6 @@ class TestCommandAliases(unittest.TestCase):
 class TestSubcommandsWithAliases(unittest.TestCase):
     """Test that subcommands work correctly when parent command is aliased"""
 
-    def test_req_list_subcommand(self):
-        """Test that 'req list' works (request list via alias)"""
-        runner = CliRunner()
-        result = runner.invoke(cli, ["req", "list", "--help"], prog_name="tensorlake")
-
-        self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
-        self.assertIn("list", result.output.lower())
-
-    def test_req_info_subcommand(self):
-        """Test that 'req info' works (request info via alias)"""
-        runner = CliRunner()
-        result = runner.invoke(cli, ["req", "info", "--help"], prog_name="tensorlake")
-
-        self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
-        self.assertIn("info", result.output.lower())
-
-    def test_req_logs_subcommand(self):
-        """Test that 'req logs' works (request logs via alias)"""
-        runner = CliRunner()
-        result = runner.invoke(cli, ["req", "logs", "--help"], prog_name="tensorlake")
-
-        self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
-        self.assertIn("logs", result.output.lower())
-
     def test_sec_list_subcommand(self):
         """Test that 'sec list' works (secrets list via alias)"""
         runner = CliRunner()
@@ -148,7 +115,6 @@ class TestVariousAliasPrefixes(unittest.TestCase):
         runner = CliRunner()
 
         test_cases = [
-            ("re", "request"),
             ("se", "secrets"),
             ("de", "deploy"),
             ("pa", "parse"),
@@ -170,7 +136,6 @@ class TestVariousAliasPrefixes(unittest.TestCase):
         runner = CliRunner()
 
         test_cases = [
-            ("reque", "request"),
             ("secre", "secrets"),
             ("deplo", "deploy"),
             ("pars", "parse"),
@@ -218,21 +183,21 @@ class TestCaseInsensitivity(unittest.TestCase):
     def test_uppercase_alias(self):
         """Test that uppercase aliases work"""
         runner = CliRunner()
-        result = runner.invoke(cli, ["REQ", "--help"], prog_name="tensorlake")
+        result = runner.invoke(cli, ["SEC", "--help"], prog_name="tensorlake")
 
         self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
 
     def test_mixed_case_alias(self):
         """Test that mixed case aliases work"""
         runner = CliRunner()
-        result = runner.invoke(cli, ["ReQ", "--help"], prog_name="tensorlake")
+        result = runner.invoke(cli, ["SeC", "--help"], prog_name="tensorlake")
 
         self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
 
     def test_lowercase_alias(self):
         """Test that lowercase aliases work (should be default)"""
         runner = CliRunner()
-        result = runner.invoke(cli, ["req", "--help"], prog_name="tensorlake")
+        result = runner.invoke(cli, ["sec", "--help"], prog_name="tensorlake")
 
         self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
 
@@ -248,10 +213,9 @@ class TestAliasesNotInHelpList(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
 
         # Should show full command names
-        self.assertIn("request", result.output.lower())
         self.assertIn("secrets", result.output.lower())
 
-        # Should NOT show aliases like 'app', 'req', 'sec' in the command list
+        # Should NOT show aliases like 'sec' in the command list
         # (They might appear in descriptions but not as separate commands)
         lines = result.output.lower().split("\n")
         command_section = False

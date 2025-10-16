@@ -16,7 +16,7 @@ except importlib.metadata.PackageNotFoundError:
     VERSION = "unknown"
 
 
-from tensorlake.applications.remote.api_client import APIClient, LogEntry, LogsPayload
+from tensorlake.applications.remote.api_client import APIClient
 from tensorlake.cli._configuration import (
     get_nested_value,
     load_config,
@@ -35,7 +35,6 @@ class Context:
     api_key: str | None = None
     personal_access_token: str | None = None
     default_application: str | None = None
-    default_request: str | None = None
     default_project: str | None = None
     default_organization: str | None = None
     version: str = VERSION
@@ -206,9 +205,6 @@ class Context:
         final_default_app = get_nested_value(
             local_config_data, "default.application"
         ) or get_nested_value(global_config_data, "default.application")
-        final_default_request = get_nested_value(
-            local_config_data, "default.request"
-        ) or get_nested_value(global_config_data, "default.request")
 
         # Priority: CLI/env > local config > None
         # Note: Organization and project IDs are NOT loaded from global config
@@ -227,7 +223,6 @@ class Context:
             personal_access_token=final_personal_access_token,
             namespace=final_namespace,
             default_application=final_default_app,
-            default_request=final_default_request,
             default_project=final_default_project,
             default_organization=final_default_organization,
         )
@@ -411,109 +406,3 @@ class AliasedGroup(click.Group):
         return cmd.name, cmd, args
 
 
-START_LINE = "┏"
-LINE = "┃"
-END_LINE = "┗"
-
-
-class LogFormat(Enum):
-    COMPACT = "compact"
-    EXPANDED = "expanded"
-    LONG = "long"
-    JSON = "json"
-
-
-def print_application_logs(logs: LogsPayload, format: LogFormat):
-    if format == LogFormat.LONG:
-        print_text_logs(logs.logs)
-    elif format == LogFormat.JSON:
-        print_json_logs(logs.logs)
-    elif format == LogFormat.COMPACT:
-        print_pretty_logs(logs.logs)
-    elif format == LogFormat.EXPANDED:
-        print_pretty_logs(logs.logs, full=True)
-
-
-def print_text_logs(logs: list[LogEntry]):
-    if len(logs) == 0:
-        return
-
-    for log in logs:
-        print(format_log_entry(log))
-
-
-def print_json_logs(logs: list[LogEntry]):
-    if len(logs) == 0:
-        return
-
-    for line in logs:
-        print_json(line.model_dump_json(), sort_keys=True)
-
-
-def format_log_entry(log: LogEntry) -> str:
-    timestamp = format_timestamp(log.timestamp)
-    keys = [
-        "ai.tensorlake.function_name",
-        "ai.tensorlake.container.id",
-        "ai.tensorlake.request.id",
-    ]
-    attrs = {key: value for key, value in log.resource_attributes if key in keys}
-    return f"{timestamp} {log.body} {attrs} {log.log_attributes}"
-
-
-def print_pretty_logs(logs: list[LogEntry], full: bool = False):
-    if len(logs) == 0:
-        return
-
-    for line in logs:
-        sys.stdout.write(format_pretty_log_entry(line, full=full))
-
-
-def format_timestamp(timestamp: int) -> str:
-    return datetime.fromtimestamp(timestamp / 1_000_000_000).strftime(
-        "%Y-%m-%dT%H:%M:%S%z"
-    )
-
-
-def format_pretty_log_entry(log: LogEntry, full: bool = False) -> str:
-    """
-    Format a single LogEntry in a human-friendly, colorized style.
-    """
-    ts = format_timestamp(log.timestamp)
-
-    # extract common resource attributes
-    resource = dict(log.resource_attributes or [])
-    function_name = resource.get("ai.tensorlake.function_name")
-    container_id = resource.get("ai.tensorlake.container.id")
-    request_id = resource.get("ai.tensorlake.request.id")
-
-    source = f"at {log.application}/{function_name}"
-    if request_id:
-        source += f":{request_id}"
-    if container_id:
-        source += f" [{container_id}]"
-
-    attrs = (
-        json.dumps(json.loads(log.log_attributes), indent=2, sort_keys=True)
-        if full
-        else None
-    )
-
-    second_line_prefix = LINE if attrs else END_LINE
-    ts_dim = click.style(ts, dim=True)
-    src_dim = click.style(source, dim=True, italic=True)
-
-    message = f"{START_LINE} {log.body} {ts_dim}\n"
-    message += f"{second_line_prefix} {src_dim}\n"
-
-    if attrs:
-        lines = attrs.splitlines()
-        line_number = 1
-        for line in lines[:-1]:
-            line_dim = click.style(f"[{line_number:2d}] {line}", dim=True)
-            message += f"{LINE} {line_dim}\n"
-            line_number += 1
-        line_dim = click.style(f"[{line_number:2d}] {lines[-1]}", dim=True)
-        message += f"{END_LINE} {line_dim}\n"
-
-    return message

@@ -6,7 +6,6 @@ from . import (
     deploy,
     init,
     parse,
-    requests,
     secrets,
 )
 
@@ -93,6 +92,5 @@ cli.add_command(auth.login)
 cli.add_command(auth.whoami)
 cli.add_command(init.init)
 cli.add_command(deploy.deploy)
-cli.add_command(requests.request)
 cli.add_command(secrets.secrets)
 cli.add_command(parse.parse)
