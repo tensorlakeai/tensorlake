@@ -48,13 +48,16 @@ def whoami(ctx: Context, output: str):
         click.echo(f"Personal Access Token : {data['personalAccessToken']}")
 
 
-def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
+def run_login_flow(
+    ctx: Context, auto_init: bool = True, cloud_url_override: str | None = None
+) -> str:
     """
     Run the interactive login flow.
 
     Args:
         ctx: Context object with configuration
         auto_init: If True, automatically run init flow after login if org/project are missing
+        cloud_url_override: Optional override for the cloud URL (takes precedence over ctx.cloud_url)
 
     Returns:
         The access token obtained from successful login
@@ -63,6 +66,9 @@ def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
         click.ClickException: If login fails at any step
         click.Abort: If user cancels the login process
     """
+    # Use override if provided, otherwise fall back to context cloud_url
+    cloud_url = cloud_url_override if cloud_url_override is not None else ctx.cloud_url
+
     login_start_url = f"{ctx.base_url}/platform/cli/login/start"
 
     start_response = httpx.post(login_start_url)
@@ -83,7 +89,7 @@ def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
     # Give people time to read the messages above
     time.sleep(5)
 
-    verification_uri = f"{ctx.cloud_url}/cli/login"
+    verification_uri = f"{cloud_url}/cli/login"
 
     try:
         webbrowser.open(verification_uri)
@@ -154,7 +160,6 @@ def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
         # Recreate context with the new PAT to check if org/project are available
         updated_ctx = Context.default(
             base_url=ctx.base_url,
-            cloud_url=ctx.cloud_url,
             personal_access_token=access_token,
             # Preserve CLI flags and env vars if they were provided
             organization_id=ctx.default_organization,
@@ -192,7 +197,13 @@ def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
 
 
 @click.command(help="Login to TensorLake")
+@click.option(
+    "--cloud-url",
+    "cloud_url",
+    envvar="TENSORLAKE_CLOUD_URL",
+    help="The Tensorlake Cloud URL",
+)
 @pass_auth
-def login(ctx: Context):
+def login(ctx: Context, cloud_url: str | None):
     """Login to TensorLake using device code flow."""
-    run_login_flow(ctx, auto_init=True)
+    run_login_flow(ctx, auto_init=True, cloud_url_override=cloud_url)

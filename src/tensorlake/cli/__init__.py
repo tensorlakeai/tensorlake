@@ -33,12 +33,6 @@ Authentication:
     help="The TensorLake API server URL",
 )
 @click.option(
-    "--cloud-url",
-    "cloud_url",
-    envvar="TENSORLAKE_CLOUD_URL",
-    help="The Tensorlake Cloud URL",
-)
-@click.option(
     "--api-key",
     envvar="TENSORLAKE_API_KEY",
     help="The Tensorlake Indexify server API key",
@@ -70,7 +64,6 @@ Authentication:
 def cli(
     ctx: click.Context,
     base_url: str | None,
-    cloud_url: str | None,
     api_key: str | None,
     personal_access_token: str | None,
     namespace: str | None,
@@ -82,7 +75,6 @@ def cli(
     """
     ctx.obj = _common.Context.default(
         base_url=base_url,
-        cloud_url=cloud_url,
         api_key=api_key,
         personal_access_token=personal_access_token,
         namespace=namespace,

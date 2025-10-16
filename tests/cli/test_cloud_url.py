@@ -54,14 +54,13 @@ class TestCloudURL(unittest.TestCase):
         self.assertEqual(ctx.cloud_url, "https://cloud.tensorlake.ai")
 
     def test_cloud_url_from_cli_option(self):
-        """Test cloud URL override via CLI option"""
+        """Test cloud URL override via CLI option on login command"""
         runner = CliRunner()
 
-        # We can't easily test Context from within CLI invocation, but we can verify
-        # that the CLI accepts the option without error
+        # Verify that the login command accepts the --cloud-url option without error
         result = runner.invoke(
             cli,
-            ["--cloud-url", "https://custom-cloud.example.com", "--help"],
+            ["login", "--cloud-url", "https://custom-cloud.example.com", "--help"],
             prog_name="tensorlake",
         )
 
@@ -293,7 +292,7 @@ class TestCloudURLWithLogin(unittest.TestCase):
             runner = CliRunner(env={"TENSORLAKE_API_URL": "https://api.tensorlake.ai"})
             result = runner.invoke(
                 cli,
-                ["--cloud-url", custom_cloud_url, "login"],
+                ["login", "--cloud-url", custom_cloud_url],
                 prog_name="tensorlake",
             )
 
@@ -315,7 +314,7 @@ class TestCloudURLWithLogin(unittest.TestCase):
             runner = CliRunner(env={"TENSORLAKE_API_URL": "https://api.tensorlake.ai"})
             result = runner.invoke(
                 cli,
-                ["--cloud-url", custom_cloud_url, "login"],
+                ["login", "--cloud-url", custom_cloud_url],
                 prog_name="tensorlake",
             )
 

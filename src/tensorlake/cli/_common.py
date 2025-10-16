@@ -277,7 +277,6 @@ def require_auth_and_project(f):
                 # The login flow will have saved credentials and potentially created local config
                 updated_ctx = Context.default(
                     base_url=ctx.base_url,
-                    cloud_url=ctx.cloud_url,
                     namespace=ctx.namespace,
                     # Let Context.default reload everything from saved credentials and config
                 )
@@ -340,7 +339,6 @@ def require_auth_and_project(f):
             # Create a new context with the org/project IDs
             updated_ctx = Context.default(
                 base_url=ctx.base_url,
-                cloud_url=ctx.cloud_url,
                 api_key=ctx.api_key,
                 personal_access_token=ctx.personal_access_token,
                 namespace=ctx.namespace,
