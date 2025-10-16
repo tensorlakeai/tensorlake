@@ -34,9 +34,9 @@ class TestOrganizationIDConfiguration(unittest.TestCase):
         )
 
     def test_organization_id_from_local_config_file(self):
-        """Test organization ID loaded from local .tensorlake.toml file"""
+        """Test organization ID loaded from local .tensorlake/config.toml file"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            local_config_path = Path(tmpdir) / ".tensorlake.toml"
+            local_config_path = Path(tmpdir) / ".tensorlake" / "config.toml"
 
             import tensorlake.cli._configuration as config_module
             from tensorlake.cli._configuration import save_local_config
@@ -48,7 +48,7 @@ class TestOrganizationIDConfiguration(unittest.TestCase):
 
                 # Save local config with custom organization ID
                 config_data = {"organization": "local_org_789"}
-                save_local_config(config_data, local_config_path.parent)
+                save_local_config(config_data, local_config_path.parent.parent)
 
                 # Load context and verify
                 ctx = Context.default()
@@ -61,7 +61,7 @@ class TestOrganizationIDConfiguration(unittest.TestCase):
     def test_organization_id_priority_order(self):
         """Test that organization ID priority order is: CLI/Env > Local Config > None"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            local_config_path = Path(tmpdir) / ".tensorlake.toml"
+            local_config_path = Path(tmpdir) / ".tensorlake" / "config.toml"
 
             import tensorlake.cli._configuration as config_module
             from tensorlake.cli._configuration import save_local_config
@@ -73,7 +73,7 @@ class TestOrganizationIDConfiguration(unittest.TestCase):
 
                 # Save local config with custom organization ID
                 config_data = {"organization": "local_org_abc"}
-                save_local_config(config_data, local_config_path.parent)
+                save_local_config(config_data, local_config_path.parent.parent)
 
                 # Test 1: Local config overrides default (None)
                 ctx = Context.default()
@@ -125,9 +125,9 @@ class TestProjectIDConfiguration(unittest.TestCase):
         )
 
     def test_project_id_from_local_config_file(self):
-        """Test project ID loaded from local .tensorlake.toml file"""
+        """Test project ID loaded from local .tensorlake/config.toml file"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            local_config_path = Path(tmpdir) / ".tensorlake.toml"
+            local_config_path = Path(tmpdir) / ".tensorlake" / "config.toml"
 
             import tensorlake.cli._configuration as config_module
             from tensorlake.cli._configuration import save_local_config
@@ -139,7 +139,7 @@ class TestProjectIDConfiguration(unittest.TestCase):
 
                 # Save local config with custom project ID
                 config_data = {"project": "local_proj_789"}
-                save_local_config(config_data, local_config_path.parent)
+                save_local_config(config_data, local_config_path.parent.parent)
 
                 # Load context and verify
                 ctx = Context.default()
@@ -152,7 +152,7 @@ class TestProjectIDConfiguration(unittest.TestCase):
     def test_project_id_priority_order(self):
         """Test that project ID priority order is: CLI/Env > Local Config > None"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            local_config_path = Path(tmpdir) / ".tensorlake.toml"
+            local_config_path = Path(tmpdir) / ".tensorlake" / "config.toml"
 
             import tensorlake.cli._configuration as config_module
             from tensorlake.cli._configuration import save_local_config
@@ -164,7 +164,7 @@ class TestProjectIDConfiguration(unittest.TestCase):
 
                 # Save local config with custom project ID
                 config_data = {"project": "local_proj_abc"}
-                save_local_config(config_data, local_config_path.parent)
+                save_local_config(config_data, local_config_path.parent.parent)
 
                 # Test 1: Local config overrides default (None)
                 ctx = Context.default()
@@ -202,7 +202,7 @@ class TestOrganizationAndProjectIDTogether(unittest.TestCase):
     def test_both_ids_from_local_config_file(self):
         """Test both organization and project IDs via local config file"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            local_config_path = Path(tmpdir) / ".tensorlake.toml"
+            local_config_path = Path(tmpdir) / ".tensorlake" / "config.toml"
 
             import tensorlake.cli._configuration as config_module
             from tensorlake.cli._configuration import save_local_config
@@ -217,7 +217,7 @@ class TestOrganizationAndProjectIDTogether(unittest.TestCase):
                     "organization": "local_org_111",
                     "project": "local_proj_222",
                 }
-                save_local_config(config_data, local_config_path.parent)
+                save_local_config(config_data, local_config_path.parent.parent)
 
                 # Load context and verify
                 ctx = Context.default()
@@ -229,7 +229,7 @@ class TestOrganizationAndProjectIDTogether(unittest.TestCase):
     def test_mixed_sources_for_ids(self):
         """Test organization from CLI and project from local config file"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            local_config_path = Path(tmpdir) / ".tensorlake.toml"
+            local_config_path = Path(tmpdir) / ".tensorlake" / "config.toml"
 
             import tensorlake.cli._configuration as config_module
             from tensorlake.cli._configuration import save_local_config
@@ -241,7 +241,7 @@ class TestOrganizationAndProjectIDTogether(unittest.TestCase):
 
                 # Save local config with project ID only
                 config_data = {"project": "local_proj_999"}
-                save_local_config(config_data, local_config_path.parent)
+                save_local_config(config_data, local_config_path.parent.parent)
 
                 # Provide organization via CLI, project from local config
                 ctx = Context.default(organization_id="cli_org_888")

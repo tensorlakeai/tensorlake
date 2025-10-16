@@ -50,7 +50,9 @@ class TestConfigurationSourceTracking(unittest.TestCase):
         config_dir = Path(self.tmpdir.name) / ".config" / "tensorlake"
         config_dir.mkdir(parents=True)
         credentials_path = config_dir / "credentials.toml"
-        local_config_path = Path(self.tmpdir.name) / ".tensorlake.toml"
+        local_config_dir = Path(self.tmpdir.name) / ".tensorlake"
+        local_config_dir.mkdir(parents=True, exist_ok=True)
+        local_config_path = local_config_dir / "config.toml"
 
         # Save original paths
         self.original_credentials_path = config_module.CREDENTIALS_PATH
@@ -100,7 +102,7 @@ class TestConfigurationSourceTracking(unittest.TestCase):
 
         ctx = Context.default()
         self.assertEqual(
-            ctx.get_organization_source(), "local config (.tensorlake.toml)"
+            ctx.get_organization_source(), "local config (.tensorlake/config.toml)"
         )
 
     def test_project_source_from_cli(self):
@@ -119,7 +121,9 @@ class TestConfigurationSourceTracking(unittest.TestCase):
             f.write(dumps(local_config))
 
         ctx = Context.default()
-        self.assertEqual(ctx.get_project_source(), "local config (.tensorlake.toml)")
+        self.assertEqual(
+            ctx.get_project_source(), "local config (.tensorlake/config.toml)"
+        )
 
     @patch("tensorlake.cli._common.httpx.Client")
     def test_source_from_api_key_introspection(self, mock_client_class):
@@ -157,7 +161,9 @@ class TestHTTPErrorHandling(unittest.TestCase):
         config_dir = Path(self.tmpdir.name) / ".config" / "tensorlake"
         config_dir.mkdir(parents=True)
         credentials_path = config_dir / "credentials.toml"
-        local_config_path = Path(self.tmpdir.name) / ".tensorlake.toml"
+        local_config_dir = Path(self.tmpdir.name) / ".tensorlake"
+        local_config_dir.mkdir(parents=True, exist_ok=True)
+        local_config_path = local_config_dir / "config.toml"
 
         # Save original paths
         self.original_credentials_path = config_module.CREDENTIALS_PATH

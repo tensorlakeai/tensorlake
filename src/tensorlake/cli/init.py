@@ -25,9 +25,9 @@ def run_init_flow(
     Args:
         ctx: Context object with authentication and configuration
         interactive: If True, display messages and prompts to user
-        create_local_config: If True, save selections to .tensorlake.toml
+        create_local_config: If True, save selections to .tensorlake/config.toml
         skip_if_provided: If True, skip if org/project already in ctx (from CLI/env)
-        project_root: Project root directory where .tensorlake.toml will be created
+        project_root: Project root directory where .tensorlake/ will be created
 
     Returns:
         Tuple of (organization_id, project_id)
@@ -45,7 +45,7 @@ def run_init_flow(
     local_config = load_local_config()
     if local_config.get("organization") and local_config.get("project"):
         if interactive:
-            click.echo("Local configuration already exists in .tensorlake.toml")
+            click.echo("Local configuration already exists in .tensorlake/config.toml")
         return local_config["organization"], local_config["project"]
 
     personal_access_token = load_credentials(ctx.base_url)
@@ -142,7 +142,7 @@ def run_init_flow(
         if interactive:
             click.echo(f"Selected: {project['name']}")
 
-    # Step 3: Save to local .tensorlake.toml (if requested)
+    # Step 3: Save to local .tensorlake/config.toml (if requested)
     if create_local_config:
         if interactive:
             click.echo()
@@ -154,7 +154,7 @@ def run_init_flow(
         save_local_config(config_data, project_root)
 
         if interactive:
-            config_path = project_root / ".tensorlake.toml"
+            config_path = project_root / ".tensorlake" / "config.toml"
             click.echo(f"Configuration saved to {config_path}")
             click.echo(
                 "\nYou can now use TensorLake commands in this project without specifying --organization and --project flags."

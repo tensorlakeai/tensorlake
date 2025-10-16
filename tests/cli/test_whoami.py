@@ -77,7 +77,9 @@ class TestWhoamiWithPAT(unittest.TestCase):
         config_dir = Path(self.tmpdir.name) / ".config" / "tensorlake"
         config_dir.mkdir(parents=True)
         credentials_path = config_dir / "credentials.toml"
-        local_config_path = Path(self.tmpdir.name) / ".tensorlake.toml"
+        local_config_dir = Path(self.tmpdir.name) / ".tensorlake"
+        local_config_dir.mkdir(parents=True, exist_ok=True)
+        local_config_path = local_config_dir / "config.toml"
 
         # Save original paths
         self.original_credentials_path = config_module.CREDENTIALS_PATH

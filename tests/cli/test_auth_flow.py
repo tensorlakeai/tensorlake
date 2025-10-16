@@ -24,8 +24,9 @@ class TestAutoInitFlow(unittest.TestCase):
             config_dir = Path(tmpdir) / ".config" / "tensorlake"
             config_dir.mkdir(parents=True)
             credentials_path = config_dir / "credentials.toml"
-            local_config_path = Path(tmpdir) / "project" / ".tensorlake.toml"
-            local_config_path.parent.mkdir(parents=True)
+            local_config_dir = Path(tmpdir) / "project" / ".tensorlake"
+            local_config_dir.mkdir(parents=True)
+            local_config_path = local_config_dir / "config.toml"
 
             original_config_dir = config_module.CONFIG_DIR
             original_credentials_path = config_module.CREDENTIALS_PATH
@@ -75,7 +76,7 @@ class TestAutoInitFlow(unittest.TestCase):
 
                 with patch(
                     "tensorlake.cli._project_detection.find_project_root",
-                    return_value=local_config_path.parent,
+                    return_value=local_config_path.parent.parent,
                 ):
                     result = runner.invoke(
                         cli, ["secrets", "list"], prog_name="tensorlake"
@@ -108,8 +109,9 @@ class TestAutoInitFlow(unittest.TestCase):
             config_dir = Path(tmpdir) / ".config" / "tensorlake"
             config_dir.mkdir(parents=True)
             credentials_path = config_dir / "credentials.toml"
-            local_config_path = Path(tmpdir) / "project" / ".tensorlake.toml"
-            local_config_path.parent.mkdir(parents=True)
+            local_config_dir = Path(tmpdir) / "project" / ".tensorlake"
+            local_config_dir.mkdir(parents=True)
+            local_config_path = local_config_dir / "config.toml"
 
             original_config_dir = config_module.CONFIG_DIR
             original_credentials_path = config_module.CREDENTIALS_PATH
@@ -178,7 +180,7 @@ class TestAutoInitFlow(unittest.TestCase):
 
                 with patch("webbrowser.open"), patch(
                     "tensorlake.cli._project_detection.find_project_root",
-                    return_value=local_config_path.parent,
+                    return_value=local_config_path.parent.parent,
                 ):
                     result = runner.invoke(
                         cli, ["secrets", "list"], prog_name="tensorlake"
@@ -207,8 +209,9 @@ class TestAutoInitFlow(unittest.TestCase):
             config_dir = Path(tmpdir) / ".config" / "tensorlake"
             config_dir.mkdir(parents=True)
             credentials_path = config_dir / "credentials.toml"
-            local_config_path = Path(tmpdir) / "project" / ".tensorlake.toml"
-            local_config_path.parent.mkdir(parents=True)
+            local_config_dir = Path(tmpdir) / "project" / ".tensorlake"
+            local_config_dir.mkdir(parents=True)
+            local_config_path = local_config_dir / "config.toml"
 
             original_config_dir = config_module.CONFIG_DIR
             original_credentials_path = config_module.CREDENTIALS_PATH
@@ -228,7 +231,7 @@ class TestAutoInitFlow(unittest.TestCase):
                 save_credentials("https://api.tensorlake.ai", "test_pat")
                 save_local_config(
                     {"organization": "org_999", "project": "proj_888"},
-                    local_config_path.parent,
+                    local_config_path.parent.parent,
                 )
 
                 # Mock secrets API call
@@ -266,8 +269,9 @@ class TestAutoInitFlow(unittest.TestCase):
             config_dir = Path(tmpdir) / ".config" / "tensorlake"
             config_dir.mkdir(parents=True)
             credentials_path = config_dir / "credentials.toml"
-            local_config_path = Path(tmpdir) / "project" / ".tensorlake.toml"
-            local_config_path.parent.mkdir(parents=True)
+            local_config_dir = Path(tmpdir) / "project" / ".tensorlake"
+            local_config_dir.mkdir(parents=True)
+            local_config_path = local_config_dir / "config.toml"
 
             original_config_dir = config_module.CONFIG_DIR
             original_credentials_path = config_module.CREDENTIALS_PATH
@@ -335,8 +339,9 @@ class TestLoginInitChaining(unittest.TestCase):
             config_dir = Path(tmpdir) / ".config" / "tensorlake"
             config_dir.mkdir(parents=True)
             credentials_path = config_dir / "credentials.toml"
-            local_config_path = Path(tmpdir) / "project" / ".tensorlake.toml"
-            local_config_path.parent.mkdir(parents=True)
+            local_config_dir = Path(tmpdir) / "project" / ".tensorlake"
+            local_config_dir.mkdir(parents=True)
+            local_config_path = local_config_dir / "config.toml"
 
             original_config_dir = config_module.CONFIG_DIR
             original_credentials_path = config_module.CREDENTIALS_PATH
@@ -408,8 +413,9 @@ class TestLoginInitChaining(unittest.TestCase):
             config_dir = Path(tmpdir) / ".config" / "tensorlake"
             config_dir.mkdir(parents=True)
             credentials_path = config_dir / "credentials.toml"
-            local_config_path = Path(tmpdir) / "project" / ".tensorlake.toml"
-            local_config_path.parent.mkdir(parents=True)
+            local_config_dir = Path(tmpdir) / "project" / ".tensorlake"
+            local_config_dir.mkdir(parents=True)
+            local_config_path = local_config_dir / "config.toml"
 
             original_config_dir = config_module.CONFIG_DIR
             original_credentials_path = config_module.CREDENTIALS_PATH
@@ -486,8 +492,9 @@ class TestLoginInitChaining(unittest.TestCase):
             config_dir = Path(tmpdir) / ".config" / "tensorlake"
             config_dir.mkdir(parents=True)
             credentials_path = config_dir / "credentials.toml"
-            local_config_path = Path(tmpdir) / "project" / ".tensorlake.toml"
-            local_config_path.parent.mkdir(parents=True)
+            local_config_dir = Path(tmpdir) / "project" / ".tensorlake"
+            local_config_dir.mkdir(parents=True)
+            local_config_path = local_config_dir / "config.toml"
 
             original_config_dir = config_module.CONFIG_DIR
             original_credentials_path = config_module.CREDENTIALS_PATH
@@ -546,7 +553,7 @@ class TestLoginInitChaining(unittest.TestCase):
 
                 with patch("webbrowser.open"), patch(
                     "tensorlake.cli._project_detection.find_project_root",
-                    return_value=local_config_path.parent,
+                    return_value=local_config_path.parent.parent,
                 ):
                     result = runner.invoke(cli, ["login"], prog_name="tensorlake")
 
@@ -576,8 +583,9 @@ class TestLoginInitChaining(unittest.TestCase):
             config_dir = Path(tmpdir) / ".config" / "tensorlake"
             config_dir.mkdir(parents=True)
             credentials_path = config_dir / "credentials.toml"
-            local_config_path = Path(tmpdir) / "project" / ".tensorlake.toml"
-            local_config_path.parent.mkdir(parents=True)
+            local_config_dir = Path(tmpdir) / "project" / ".tensorlake"
+            local_config_dir.mkdir(parents=True)
+            local_config_path = local_config_dir / "config.toml"
 
             # Create existing local config
             with open(local_config_path, "w") as f:
@@ -686,7 +694,9 @@ class TestContextHelperMethods(unittest.TestCase):
     def test_has_org_and_project_with_only_org(self):
         """Test has_org_and_project returns False when only org is set"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            local_config_path = Path(tmpdir) / ".tensorlake.toml"
+            local_config_dir = Path(tmpdir) / ".tensorlake"
+            local_config_dir.mkdir(parents=True, exist_ok=True)
+            local_config_path = local_config_dir / "config.toml"
 
             original_local_config = config_module.LOCAL_CONFIG_FILE
             try:
@@ -702,7 +712,9 @@ class TestContextHelperMethods(unittest.TestCase):
     def test_has_org_and_project_with_only_project(self):
         """Test has_org_and_project returns False when only project is set"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            local_config_path = Path(tmpdir) / ".tensorlake.toml"
+            local_config_dir = Path(tmpdir) / ".tensorlake"
+            local_config_dir.mkdir(parents=True, exist_ok=True)
+            local_config_path = local_config_dir / "config.toml"
 
             original_local_config = config_module.LOCAL_CONFIG_FILE
             try:
@@ -718,7 +730,9 @@ class TestContextHelperMethods(unittest.TestCase):
     def test_needs_init_with_pat_no_config(self):
         """Test needs_init returns True when PAT exists but no org/project"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            local_config_path = Path(tmpdir) / ".tensorlake.toml"
+            local_config_dir = Path(tmpdir) / ".tensorlake"
+            local_config_dir.mkdir(parents=True, exist_ok=True)
+            local_config_path = local_config_dir / "config.toml"
 
             original_local_config = config_module.LOCAL_CONFIG_FILE
             try:

@@ -20,12 +20,13 @@ from tensorlake.cli._configuration import (
 
 
 class TestLocalConfigFile(unittest.TestCase):
-    """Test local .tensorlake.toml configuration file functionality"""
+    """Test local .tensorlake/config.toml configuration file functionality"""
 
     def test_load_local_config_when_file_exists(self):
-        """Test loading local config from .tensorlake.toml"""
+        """Test loading local config from .tensorlake/config.toml"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            local_config_path = Path(tmpdir) / ".tensorlake.toml"
+            local_config_path = Path(tmpdir) / ".tensorlake" / "config.toml"
+            local_config_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Create a local config file
             config_data = {"organization": "local_org_123", "project": "local_proj_456"}
@@ -47,7 +48,7 @@ class TestLocalConfigFile(unittest.TestCase):
     def test_load_local_config_when_file_missing(self):
         """Test loading local config when file doesn't exist returns empty dict"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            local_config_path = Path(tmpdir) / ".tensorlake.toml"
+            local_config_path = Path(tmpdir) / ".tensorlake" / "config.toml"
 
             original_local_config = config_module.LOCAL_CONFIG_FILE
 
@@ -60,9 +61,9 @@ class TestLocalConfigFile(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = original_local_config
 
     def test_save_local_config_creates_file(self):
-        """Test saving local config creates .tensorlake.toml"""
+        """Test saving local config creates .tensorlake/config.toml"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            local_config_path = Path(tmpdir) / ".tensorlake.toml"
+            local_config_path = Path(tmpdir) / ".tensorlake" / "config.toml"
 
             original_local_config = config_module.LOCAL_CONFIG_FILE
 
@@ -70,7 +71,7 @@ class TestLocalConfigFile(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
                 config_data = {"organization": "test_org", "project": "test_proj"}
-                save_local_config(config_data, local_config_path.parent)
+                save_local_config(config_data, local_config_path.parent.parent)
 
                 # Verify file was created
                 self.assertTrue(local_config_path.exists())
@@ -86,7 +87,7 @@ class TestLocalConfigFile(unittest.TestCase):
     def test_save_local_config_sets_permissions(self):
         """Test that saving local config sets restrictive permissions (0600)"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            local_config_path = Path(tmpdir) / ".tensorlake.toml"
+            local_config_path = Path(tmpdir) / ".tensorlake" / "config.toml"
 
             original_local_config = config_module.LOCAL_CONFIG_FILE
 
@@ -94,7 +95,7 @@ class TestLocalConfigFile(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
                 config_data = {"organization": "test_org"}
-                save_local_config(config_data, local_config_path.parent)
+                save_local_config(config_data, local_config_path.parent.parent)
 
                 # Check permissions (0600 = owner read/write only)
                 import os
@@ -115,7 +116,7 @@ class TestLocalConfigPriority(unittest.TestCase):
     """Test that local config takes priority over global config"""
 
     def test_local_config_overrides_global_config(self):
-        """Test that local .tensorlake.toml overrides global config"""
+        """Test that local .tensorlake/config.toml overrides global config"""
         with tempfile.TemporaryDirectory() as tmpdir:
             # Setup global config
             global_config_dir = Path(tmpdir) / ".config" / "tensorlake"
@@ -129,7 +130,8 @@ class TestLocalConfigPriority(unittest.TestCase):
                 f.write(dumps(global_config_data))
 
             # Setup local config
-            local_config_path = Path(tmpdir) / ".tensorlake.toml"
+            local_config_path = Path(tmpdir) / ".tensorlake" / "config.toml"
+            local_config_path.parent.mkdir(parents=True, exist_ok=True)
             local_config_data = {"organization": "local_org", "project": "local_proj"}
             with open(local_config_path, "w") as f:
                 f.write(dumps(local_config_data))
@@ -155,7 +157,8 @@ class TestLocalConfigPriority(unittest.TestCase):
     def test_cli_args_override_local_config(self):
         """Test that CLI arguments take priority over local config"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            local_config_path = Path(tmpdir) / ".tensorlake.toml"
+            local_config_path = Path(tmpdir) / ".tensorlake" / "config.toml"
+            local_config_path.parent.mkdir(parents=True, exist_ok=True)
             local_config_data = {
                 "default": {"organization": "local_org", "project": "local_proj"}
             }
@@ -189,7 +192,8 @@ class TestLocalConfigPriority(unittest.TestCase):
                 f.write(dumps(global_config_data))
 
             # Setup local config
-            local_config_path = Path(tmpdir) / ".tensorlake.toml"
+            local_config_path = Path(tmpdir) / ".tensorlake" / "config.toml"
+            local_config_path.parent.mkdir(parents=True, exist_ok=True)
             local_config_data = {"organization": "local_org", "project": "local_proj"}
             with open(local_config_path, "w") as f:
                 f.write(dumps(local_config_data))
@@ -241,8 +245,8 @@ class TestInitCommand(unittest.TestCase):
             credentials_path = credentials_dir / "credentials.toml"
 
             # Setup local config path
-            local_config_path = Path(tmpdir) / "project" / ".tensorlake.toml"
-            local_config_path.parent.mkdir(parents=True)
+            local_config_path = Path(tmpdir) / "project" / ".tensorlake" / "config.toml"
+            local_config_path.parent.mkdir(parents=True, exist_ok=True)
 
             original_config_dir = config_module.CONFIG_DIR
             original_credentials_path = config_module.CREDENTIALS_PATH
@@ -282,7 +286,7 @@ class TestInitCommand(unittest.TestCase):
                         "init",
                         "--no-confirm",
                         "--directory",
-                        str(local_config_path.parent),
+                        str(local_config_path.parent.parent),
                     ],
                     prog_name="tensorlake",
                 )
@@ -318,8 +322,8 @@ class TestInitCommand(unittest.TestCase):
             credentials_path = credentials_dir / "credentials.toml"
 
             # Setup local config path
-            local_config_path = Path(tmpdir) / "project" / ".tensorlake.toml"
-            local_config_path.parent.mkdir(parents=True)
+            local_config_path = Path(tmpdir) / "project" / ".tensorlake" / "config.toml"
+            local_config_path.parent.mkdir(parents=True, exist_ok=True)
 
             original_config_dir = config_module.CONFIG_DIR
             original_credentials_path = config_module.CREDENTIALS_PATH
@@ -368,7 +372,7 @@ class TestInitCommand(unittest.TestCase):
                         "init",
                         "--no-confirm",
                         "--directory",
-                        str(local_config_path.parent),
+                        str(local_config_path.parent.parent),
                     ],
                     prog_name="tensorlake",
                     input="2\n1\n",  # Select org 2, then project 1
@@ -398,8 +402,9 @@ class TestInitCommand(unittest.TestCase):
             credentials_dir.mkdir(parents=True)
             credentials_path = credentials_dir / "credentials.toml"
 
-            local_config_path = Path(tmpdir) / "project" / ".tensorlake.toml"
-            local_config_path.parent.mkdir(parents=True)
+            local_config_dir = Path(tmpdir) / "project" / ".tensorlake"
+            local_config_dir.mkdir(parents=True)
+            local_config_path = local_config_dir / "config.toml"
 
             original_config_dir = config_module.CONFIG_DIR
             original_credentials_path = config_module.CREDENTIALS_PATH
@@ -417,7 +422,7 @@ class TestInitCommand(unittest.TestCase):
                         "init",
                         "--no-confirm",
                         "--directory",
-                        str(local_config_path.parent),
+                        str(local_config_path.parent.parent),
                     ],
                     prog_name="tensorlake",
                 )
@@ -442,8 +447,9 @@ class TestInitCommand(unittest.TestCase):
             credentials_dir.mkdir(parents=True)
             credentials_path = credentials_dir / "credentials.toml"
 
-            local_config_path = Path(tmpdir) / "project" / ".tensorlake.toml"
-            local_config_path.parent.mkdir(parents=True)
+            local_config_dir = Path(tmpdir) / "project" / ".tensorlake"
+            local_config_dir.mkdir(parents=True)
+            local_config_path = local_config_dir / "config.toml"
 
             original_config_dir = config_module.CONFIG_DIR
             original_credentials_path = config_module.CREDENTIALS_PATH
@@ -471,7 +477,7 @@ class TestInitCommand(unittest.TestCase):
                         "init",
                         "--no-confirm",
                         "--directory",
-                        str(local_config_path.parent),
+                        str(local_config_path.parent.parent),
                     ],
                     prog_name="tensorlake",
                 )
@@ -498,8 +504,8 @@ class TestInitWithIncompleteConfig(unittest.TestCase):
             credentials_dir.mkdir(parents=True)
             credentials_path = credentials_dir / "credentials.toml"
 
-            local_config_path = Path(tmpdir) / "project" / ".tensorlake.toml"
-            local_config_path.parent.mkdir(parents=True)
+            local_config_path = Path(tmpdir) / "project" / ".tensorlake" / "config.toml"
+            local_config_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Create incomplete config (missing organization)
             with open(local_config_path, "w") as f:
@@ -539,7 +545,7 @@ class TestInitWithIncompleteConfig(unittest.TestCase):
                         "init",
                         "--no-confirm",
                         "--directory",
-                        str(local_config_path.parent),
+                        str(local_config_path.parent.parent),
                     ],
                     prog_name="tensorlake",
                 )
@@ -570,8 +576,9 @@ class TestInitWithIncompleteConfig(unittest.TestCase):
             credentials_dir.mkdir(parents=True)
             credentials_path = credentials_dir / "credentials.toml"
 
-            local_config_path = Path(tmpdir) / "project" / ".tensorlake.toml"
-            local_config_path.parent.mkdir(parents=True)
+            local_config_dir = Path(tmpdir) / "project" / ".tensorlake"
+            local_config_dir.mkdir(parents=True)
+            local_config_path = local_config_dir / "config.toml"
 
             # Create incomplete config (missing project)
             with open(local_config_path, "w") as f:
@@ -611,7 +618,7 @@ class TestInitWithIncompleteConfig(unittest.TestCase):
                         "init",
                         "--no-confirm",
                         "--directory",
-                        str(local_config_path.parent),
+                        str(local_config_path.parent.parent),
                     ],
                     prog_name="tensorlake",
                 )
@@ -642,8 +649,9 @@ class TestInitWithIncompleteConfig(unittest.TestCase):
             credentials_dir.mkdir(parents=True)
             credentials_path = credentials_dir / "credentials.toml"
 
-            local_config_path = Path(tmpdir) / "project" / ".tensorlake.toml"
-            local_config_path.parent.mkdir(parents=True)
+            local_config_dir = Path(tmpdir) / "project" / ".tensorlake"
+            local_config_dir.mkdir(parents=True)
+            local_config_path = local_config_dir / "config.toml"
 
             # Create config with empty values
             with open(local_config_path, "w") as f:
@@ -683,7 +691,7 @@ class TestInitWithIncompleteConfig(unittest.TestCase):
                         "init",
                         "--no-confirm",
                         "--directory",
-                        str(local_config_path.parent),
+                        str(local_config_path.parent.parent),
                     ],
                     prog_name="tensorlake",
                 )

@@ -23,8 +23,10 @@ class TestLoginSuccessFlow(unittest.TestCase):
         config_dir = Path(self.tmpdir.name) / ".config" / "tensorlake"
         config_dir.mkdir(parents=True)
         credentials_path = config_dir / "credentials.toml"
-        local_config_path = Path(self.tmpdir.name) / "project" / ".tensorlake.toml"
-        local_config_path.parent.mkdir(parents=True)
+        local_config_path = (
+            Path(self.tmpdir.name) / "project" / ".tensorlake" / "config.toml"
+        )
+        local_config_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Create local config to skip auto-init
         with open(local_config_path, "w") as f:
@@ -173,7 +175,9 @@ class TestLoginErrorHandling(unittest.TestCase):
         config_dir = Path(self.tmpdir.name) / ".config" / "tensorlake"
         config_dir.mkdir(parents=True)
         credentials_path = config_dir / "credentials.toml"
-        local_config_path = Path(self.tmpdir.name) / ".tensorlake.toml"
+        local_config_dir = Path(self.tmpdir.name) / ".tensorlake"
+        local_config_dir.mkdir(parents=True, exist_ok=True)
+        local_config_path = local_config_dir / "config.toml"
 
         self.original_credentials_path = config_module.CREDENTIALS_PATH
         self.original_config_dir = config_module.CONFIG_DIR
@@ -329,7 +333,9 @@ class TestLoginBrowserHandling(unittest.TestCase):
         config_dir = Path(self.tmpdir.name) / ".config" / "tensorlake"
         config_dir.mkdir(parents=True)
         credentials_path = config_dir / "credentials.toml"
-        local_config_path = Path(self.tmpdir.name) / ".tensorlake.toml"
+        local_config_dir = Path(self.tmpdir.name) / ".tensorlake"
+        local_config_dir.mkdir(parents=True, exist_ok=True)
+        local_config_path = local_config_dir / "config.toml"
 
         # Create local config to skip auto-init
         with open(local_config_path, "w") as f:
@@ -419,7 +425,9 @@ class TestLoginCredentialStorage(unittest.TestCase):
         config_dir = Path(self.tmpdir.name) / ".config" / "tensorlake"
         config_dir.mkdir(parents=True)
         self.credentials_path = config_dir / "credentials.toml"
-        local_config_path = Path(self.tmpdir.name) / ".tensorlake.toml"
+        local_config_dir = Path(self.tmpdir.name) / ".tensorlake"
+        local_config_dir.mkdir(parents=True, exist_ok=True)
+        local_config_path = local_config_dir / "config.toml"
 
         # Create local config to skip auto-init
         with open(local_config_path, "w") as f:

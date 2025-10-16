@@ -23,7 +23,9 @@ def mock_auth_credentials_path():
         credentials_path = config_dir / "credentials.toml"
 
         # Also create a local config file to prevent auto-init after login
-        local_config_path = Path(tmpdir) / ".tensorlake.toml"
+        local_config_dir = Path(tmpdir) / ".tensorlake"
+        local_config_dir.mkdir(parents=True, exist_ok=True)
+        local_config_path = local_config_dir / "config.toml"
         with open(local_config_path, "w") as f:
             f.write('organization = "test_org"\nproject = "test_proj"\n')
 

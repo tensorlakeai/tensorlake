@@ -22,7 +22,9 @@ class TestApplicationsList(unittest.TestCase):
         config_dir = Path(self.tmpdir.name) / ".config" / "tensorlake"
         config_dir.mkdir(parents=True)
         credentials_path = config_dir / "credentials.toml"
-        local_config_path = Path(self.tmpdir.name) / ".tensorlake.toml"
+        local_config_dir = Path(self.tmpdir.name) / ".tensorlake"
+        local_config_dir.mkdir(parents=True, exist_ok=True)
+        local_config_path = local_config_dir / "config.toml"
 
         # Create local config to skip auto-init
         with open(local_config_path, "w") as f:

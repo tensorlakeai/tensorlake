@@ -11,7 +11,7 @@ def find_project_root(start_path: Optional[Path] = None) -> Path:
     Find the project root directory by looking for common project markers.
 
     Priority order:
-    1. Existing .tensorlake.toml in current or parent directories
+    1. Existing .tensorlake/config.toml in current or parent directories
     2. .git directory (most common indicator)
     3. Python project files (pyproject.toml, setup.py, etc.)
     4. Fall back to current directory
@@ -27,10 +27,10 @@ def find_project_root(start_path: Optional[Path] = None) -> Path:
 
     current = start_path.resolve()
 
-    # Strategy 1: Look for existing .tensorlake.toml
+    # Strategy 1: Look for existing .tensorlake/config.toml
     # This ensures we don't create multiple config files in different directories
     for parent in [current] + list(current.parents):
-        if (parent / ".tensorlake.toml").exists():
+        if (parent / ".tensorlake" / "config.toml").exists():
             return parent
 
     # Strategy 2: Look for .git directory (most reliable indicator of project root)
@@ -96,8 +96,8 @@ def get_detection_reason(path: Path) -> str:
     Returns:
         String explaining why this path was selected
     """
-    if (path / ".tensorlake.toml").exists():
-        return "Found existing .tensorlake.toml"
+    if (path / ".tensorlake" / "config.toml").exists():
+        return "Found existing .tensorlake/config.toml"
     if (path / ".git").is_dir():
         return "Found .git directory"
     if (path / "pyproject.toml").exists():
@@ -113,19 +113,19 @@ def get_detection_reason(path: Path) -> str:
 
 def check_for_nested_configs(project_root: Path) -> list[Path]:
     """
-    Check for multiple .tensorlake.toml files in the current path hierarchy.
+    Check for multiple .tensorlake/config.toml files in the current path hierarchy.
 
     Args:
         project_root: The project root to check from
 
     Returns:
-        List of paths to all .tensorlake.toml files found
+        List of paths to all .tensorlake/config.toml files found
     """
     current = Path.cwd().resolve()
     configs = []
 
     for parent in [current] + list(current.parents):
-        config = parent / ".tensorlake.toml"
+        config = parent / ".tensorlake" / "config.toml"
         if config.exists():
             configs.append(config)
 
@@ -134,7 +134,7 @@ def check_for_nested_configs(project_root: Path) -> list[Path]:
 
 def warn_if_nested_configs(project_root: Path) -> None:
     """
-    Warn if there are multiple .tensorlake.toml files in the hierarchy.
+    Warn if there are multiple .tensorlake/config.toml files in the hierarchy.
 
     Args:
         project_root: The project root being used
@@ -142,9 +142,9 @@ def warn_if_nested_configs(project_root: Path) -> None:
     configs = check_for_nested_configs(project_root)
 
     if len(configs) > 1:
-        click.echo("\nWarning: Multiple .tensorlake.toml files found:")
+        click.echo("\nWarning: Multiple .tensorlake/config.toml files found:")
         for config in configs:
-            marker = " (will be used)" if config.parent == project_root else ""
+            marker = " (will be used)" if config.parent.parent == project_root else ""
             click.echo(f"  - {config}{marker}")
 
 
@@ -181,7 +181,7 @@ def add_to_gitignore(gitignore_path: Path, entry: str) -> None:
 
     Args:
         gitignore_path: Path to the .gitignore file
-        entry: Entry to add (e.g., ".tensorlake.toml")
+        entry: Entry to add (e.g., ".tensorlake/")
     """
     # Check if entry already exists
     if gitignore_path.exists():

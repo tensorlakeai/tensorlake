@@ -15,7 +15,7 @@ CREDENTIALS_PATH = CONFIG_DIR / "credentials.toml"
 LEGACY_CREDENTIALS_PATH = CONFIG_DIR / "credentials.json"
 
 # Local project configuration file
-LOCAL_CONFIG_FILE = Path.cwd() / ".tensorlake.toml"
+LOCAL_CONFIG_FILE = Path.cwd() / ".tensorlake" / "config.toml"
 
 
 def load_config() -> dict[str, Any]:
@@ -38,14 +38,14 @@ def save_config(config: dict[str, Any]) -> None:
 
 def load_local_config() -> dict[str, Any]:
     """
-    Load configuration from the local project .tensorlake.toml file.
-    Searches current directory and parent directories for .tensorlake.toml.
+    Load configuration from the local project .tensorlake/config.toml file.
+    Searches current directory and parent directories for .tensorlake/config.toml.
 
     If LOCAL_CONFIG_FILE is set (e.g., in tests), uses that path directly.
     Otherwise, searches upward from current directory.
     """
     # If LOCAL_CONFIG_FILE is set to a specific path (e.g., by tests), use it directly
-    if LOCAL_CONFIG_FILE != Path.cwd() / ".tensorlake.toml":
+    if LOCAL_CONFIG_FILE != Path.cwd() / ".tensorlake" / "config.toml":
         if LOCAL_CONFIG_FILE.exists():
             with open(LOCAL_CONFIG_FILE, "r", encoding="utf-8") as f:
                 return parse(f.read())
@@ -55,7 +55,7 @@ def load_local_config() -> dict[str, Any]:
     current = Path.cwd()
 
     for parent in [current] + list(current.parents):
-        config_file = parent / ".tensorlake.toml"
+        config_file = parent / ".tensorlake" / "config.toml"
         if config_file.exists():
             with open(config_file, "r", encoding="utf-8") as f:
                 return parse(f.read())
@@ -65,21 +65,38 @@ def load_local_config() -> dict[str, Any]:
 
 def save_local_config(config: dict[str, Any], project_root: Path) -> None:
     """
-    Save configuration to the local project .tensorlake.toml file.
+    Save configuration to the local project .tensorlake/config.toml file.
 
     Args:
         config: Configuration dictionary to save
-        project_root: Project root directory where .tensorlake.toml will be created
-    """
-    config_path = project_root / ".tensorlake.toml"
+        project_root: Project root directory where .tensorlake/ directory will be created
 
+    Raises:
+        click.ClickException: If .tensorlake exists as a file (not a directory)
+    """
+    import click
+
+    config_dir = project_root / ".tensorlake"
+    config_path = config_dir / "config.toml"
+
+    # Check if .tensorlake exists as a file (not a directory)
+    if config_dir.exists() and not config_dir.is_dir():
+        raise click.ClickException(
+            f"Cannot create configuration directory: '{config_dir}' exists as a file.\n"
+            f"Please rename or remove this file and try again."
+        )
+
+    # Create .tensorlake directory if it doesn't exist
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write configuration file
     with open(config_path, "w", encoding="utf-8") as f:
         f.write(dumps(config))
 
     # Set restrictive permissions (0600) to protect sensitive data
     os.chmod(config_path, 0o600)
 
-    # Add .tensorlake.toml to .gitignore
+    # Add .tensorlake/ to .gitignore
     try:
         from tensorlake.cli._project_detection import (
             add_to_gitignore,
@@ -89,12 +106,12 @@ def save_local_config(config: dict[str, Any], project_root: Path) -> None:
         # Try to find .gitignore at git root
         gitignore_path = find_gitignore_path(project_root)
 
-        # If no git repository found, create .gitignore next to .tensorlake.toml
+        # If no git repository found, create .gitignore next to .tensorlake/
         if gitignore_path is None:
             gitignore_path = project_root / ".gitignore"
 
-        # Add the entry
-        add_to_gitignore(gitignore_path, ".tensorlake.toml")
+        # Add the directory entry
+        add_to_gitignore(gitignore_path, ".tensorlake/")
     except Exception:
         # Silently ignore any errors - this is a non-critical operation
         pass

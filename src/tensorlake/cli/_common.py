@@ -228,7 +228,7 @@ class Context:
             return "CLI flag or environment variable"
 
         if self.organization_id_source == "config":
-            return "local config (.tensorlake.toml)"
+            return "local config (.tensorlake/config.toml)"
 
         return "not configured"
 
@@ -246,7 +246,7 @@ class Context:
             return "CLI flag or environment variable"
 
         if self.project_id_source == "config":
-            return "local config (.tensorlake.toml)"
+            return "local config (.tensorlake/config.toml)"
 
         return "not configured"
 
@@ -324,7 +324,7 @@ class Context:
         """Resolve organization and project IDs from CLI args or local config.
 
         Note: Organization and project IDs are NOT loaded from global config.
-        They must come from CLI flags, env vars, or local .tensorlake.toml only.
+        They must come from CLI flags, env vars, or local .tensorlake/config.toml only.
 
         Returns:
             tuple of (org_id, org_source, project_id, project_source)
