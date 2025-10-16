@@ -124,3 +124,6 @@ jobs:
         env:
           TENSORLAKE_API_URL: http://127.0.0.1:8900
         run: make test
+
+      - name: Run CLI tests
+        run: poetry run python -m unittest discover -s tests/cli -v
