@@ -235,7 +235,7 @@ class _ParseMixin(_BaseClient):
             while retry_count < 5:
                 try:
                     async with aconnect_sse(
-                        client=self._client,
+                        client=self._aclient,
                         method="GET",
                         url=f"parse/{parse_id}",
                         headers=self._headers(),
