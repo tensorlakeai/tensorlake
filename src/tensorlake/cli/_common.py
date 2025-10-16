@@ -215,13 +215,11 @@ class Context:
         # Priority: CLI/env > local config > None
         # Note: Organization and project IDs are NOT loaded from global config
         # They must come from CLI flags, env vars, or local .tensorlake.toml only
-        final_default_project = (
-            project_id
-            or get_nested_value(local_config_data, "project")
+        final_default_project = project_id or get_nested_value(
+            local_config_data, "project"
         )
-        final_default_organization = (
-            organization_id
-            or get_nested_value(local_config_data, "organization")
+        final_default_organization = organization_id or get_nested_value(
+            local_config_data, "organization"
         )
 
         return cls(
@@ -324,8 +322,8 @@ def require_auth_and_project(f):
         click.echo("Running initialization flow to set up your project...\n")
 
         # Import here to avoid circular dependency
-        from tensorlake.cli.init import run_init_flow
         from tensorlake.cli._project_detection import find_project_root
+        from tensorlake.cli.init import run_init_flow
 
         # Detect project root automatically
         project_root = find_project_root()
@@ -388,8 +386,7 @@ class AliasedGroup(click.Group):
 
         # Try prefix matching
         matches = [
-            x for x in self.list_commands(ctx)
-            if x.lower().startswith(cmd_name.lower())
+            x for x in self.list_commands(ctx) if x.lower().startswith(cmd_name.lower())
         ]
 
         if not matches:
@@ -399,9 +396,13 @@ class AliasedGroup(click.Group):
             return super().get_command(ctx, matches[0])
 
         # Multiple matches - ambiguous
-        ctx.fail(f"Ambiguous command '{cmd_name}'. Could be: {', '.join(sorted(matches))}")
+        ctx.fail(
+            f"Ambiguous command '{cmd_name}'. Could be: {', '.join(sorted(matches))}"
+        )
 
-    def resolve_command(self, ctx: click.Context, args: list[str]) -> tuple[str, click.Command, list[str]]:
+    def resolve_command(
+        self, ctx: click.Context, args: list[str]
+    ) -> tuple[str, click.Command, list[str]]:
         """
         Resolve command name to always return the full command name, not the alias.
 

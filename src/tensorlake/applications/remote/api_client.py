@@ -205,7 +205,7 @@ class APIClient:
             if "headers" not in kwargs:
                 kwargs["headers"] = {}
             kwargs["headers"]["Authorization"] = f"Bearer {self._api_key}"
-        
+
         # Add X-Forwarded-Organization-Id and X-Forwarded-Project-Id headers when using PAT
         # We know it's PAT (not API key) when org/project IDs are explicitly provided
         if "headers" not in kwargs:

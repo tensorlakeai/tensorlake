@@ -13,7 +13,15 @@ class TestCommandAliases(unittest.TestCase):
         runner = CliRunner()
 
         # Test all main commands with exact names
-        test_cases = ["application", "request", "secrets", "deploy", "parse", "login", "whoami"]
+        test_cases = [
+            "application",
+            "request",
+            "secrets",
+            "deploy",
+            "parse",
+            "login",
+            "whoami",
+        ]
 
         for cmd in test_cases:
             with self.subTest(command=cmd):
@@ -282,10 +290,10 @@ class TestAliasesNotInHelpList(unittest.TestCase):
 
         # Should NOT show aliases like 'app', 'req', 'sec' in the command list
         # (They might appear in descriptions but not as separate commands)
-        lines = result.output.lower().split('\n')
+        lines = result.output.lower().split("\n")
         command_section = False
         for line in lines:
-            if 'commands:' in line:
+            if "commands:" in line:
                 command_section = True
             if command_section and line.strip():
                 # These aliases shouldn't appear as standalone command entries

@@ -117,8 +117,7 @@ class TestTokenPriority(unittest.TestCase):
 
         # Create context with both API key and PAT
         ctx = Context.default(
-            api_key="test_api_key_123",
-            personal_access_token="test_pat_456"
+            api_key="test_api_key_123", personal_access_token="test_pat_456"
         )
 
         # Verify both are set

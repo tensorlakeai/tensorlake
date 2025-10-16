@@ -19,9 +19,7 @@ class TestOrganizationIDConfiguration(unittest.TestCase):
 
     def test_organization_id_from_environment_variable(self):
         """Test organization ID override via TENSORLAKE_ORGANIZATION_ID environment variable"""
-        runner = CliRunner(
-            env={"TENSORLAKE_ORGANIZATION_ID": "env_org_456"}
-        )
+        runner = CliRunner(env={"TENSORLAKE_ORGANIZATION_ID": "env_org_456"})
 
         result = runner.invoke(
             cli,
@@ -112,9 +110,7 @@ class TestProjectIDConfiguration(unittest.TestCase):
 
     def test_project_id_from_environment_variable(self):
         """Test project ID override via TENSORLAKE_PROJECT_ID environment variable"""
-        runner = CliRunner(
-            env={"TENSORLAKE_PROJECT_ID": "env_proj_456"}
-        )
+        runner = CliRunner(env={"TENSORLAKE_PROJECT_ID": "env_proj_456"})
 
         result = runner.invoke(
             cli,
@@ -199,10 +195,7 @@ class TestOrganizationAndProjectIDTogether(unittest.TestCase):
 
     def test_both_ids_from_cli_options(self):
         """Test both organization and project IDs via CLI options"""
-        ctx = Context.default(
-            organization_id="org_123",
-            project_id="proj_456"
-        )
+        ctx = Context.default(organization_id="org_123", project_id="proj_456")
         self.assertEqual(ctx.organization_id, "org_123")
         self.assertEqual(ctx.project_id, "proj_456")
 
@@ -222,7 +215,7 @@ class TestOrganizationAndProjectIDTogether(unittest.TestCase):
                 # Save local config with both IDs
                 config_data = {
                     "organization": "local_org_111",
-                    "project": "local_proj_222"
+                    "project": "local_proj_222",
                 }
                 save_local_config(config_data, local_config_path.parent)
 
@@ -262,11 +255,7 @@ class TestOrganizationAndProjectIDTogether(unittest.TestCase):
         runner = CliRunner()
         result = runner.invoke(
             cli,
-            [
-                "--organization", "org_test",
-                "--project", "proj_test",
-                "--help"
-            ],
+            ["--organization", "org_test", "--project", "proj_test", "--help"],
             prog_name="tensorlake",
         )
 
@@ -280,9 +269,7 @@ class TestOrganizationProjectEnvironmentVariables(unittest.TestCase):
 
     def test_organization_env_var_name(self):
         """Test that TENSORLAKE_ORGANIZATION_ID environment variable works"""
-        runner = CliRunner(
-            env={"TENSORLAKE_ORGANIZATION_ID": "env_org_test"}
-        )
+        runner = CliRunner(env={"TENSORLAKE_ORGANIZATION_ID": "env_org_test"})
 
         # Just verify the CLI accepts it
         result = runner.invoke(cli, ["--help"], prog_name="tensorlake")
@@ -290,9 +277,7 @@ class TestOrganizationProjectEnvironmentVariables(unittest.TestCase):
 
     def test_project_env_var_name(self):
         """Test that TENSORLAKE_PROJECT_ID environment variable works"""
-        runner = CliRunner(
-            env={"TENSORLAKE_PROJECT_ID": "env_proj_test"}
-        )
+        runner = CliRunner(env={"TENSORLAKE_PROJECT_ID": "env_proj_test"})
 
         # Just verify the CLI accepts it
         result = runner.invoke(cli, ["--help"], prog_name="tensorlake")
@@ -303,7 +288,7 @@ class TestOrganizationProjectEnvironmentVariables(unittest.TestCase):
         runner = CliRunner(
             env={
                 "TENSORLAKE_ORGANIZATION_ID": "env_org_test",
-                "TENSORLAKE_PROJECT_ID": "env_proj_test"
+                "TENSORLAKE_PROJECT_ID": "env_proj_test",
             }
         )
 

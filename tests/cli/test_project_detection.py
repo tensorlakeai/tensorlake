@@ -1,4 +1,5 @@
 """Tests for project root detection functionality."""
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -192,7 +193,9 @@ class TestGetDetectionReason(unittest.TestCase):
             project_dir = Path(tmpdir).resolve()
 
             reason = get_detection_reason(project_dir)
-            self.assertEqual(reason, "Using current directory (no project markers found)")
+            self.assertEqual(
+                reason, "Using current directory (no project markers found)"
+            )
 
 
 class TestFindProjectRootInteractive(unittest.TestCase):
@@ -214,7 +217,7 @@ class TestFindProjectRootInteractive(unittest.TestCase):
             detected_dir = Path(tmpdir).resolve()
             (detected_dir / ".git").mkdir()
 
-            custom_dir = (detected_dir / "custom")
+            custom_dir = detected_dir / "custom"
             custom_dir.mkdir()
 
             with patch("click.echo"), patch("click.confirm", return_value=False), patch(
@@ -234,6 +237,7 @@ class TestCheckForNestedConfigs(unittest.TestCase):
 
             # Change to temp directory so check doesn't find parent configs
             import os
+
             original_cwd = os.getcwd()
             try:
                 os.chdir(project_dir)

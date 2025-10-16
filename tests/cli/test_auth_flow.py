@@ -1,4 +1,5 @@
 """Tests for automatic authentication and configuration flow"""
+
 import tempfile
 import unittest
 from pathlib import Path

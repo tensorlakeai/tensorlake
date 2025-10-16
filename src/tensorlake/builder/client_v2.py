@@ -130,7 +130,7 @@ class ImageBuilderV2Client:
         The API key is retrieved from the TENSORLAKE_API_KEY environment variable.
         If no API key is set, PAT authentication is assumed and organization/project IDs
         are retrieved from TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID.
-        
+
         The build service URL is retrieved from the TENSORLAKE_API_URL environment variable
         (or INDEXIFY_URL for backward compatibility), defaulting to "https://api.tensorlake.ai" if not set.
 
@@ -144,10 +144,10 @@ class ImageBuilderV2Client:
         # For PAT authentication, get auth token and org/project IDs
         if not api_key:
             api_key = os.getenv("TENSORLAKE_PAT")
-        
+
         organization_id = os.getenv("TENSORLAKE_ORGANIZATION_ID")
         project_id = os.getenv("TENSORLAKE_PROJECT_ID")
-        
+
         # Check TENSORLAKE_API_URL first, then fall back to INDEXIFY_URL for backward compatibility
         server_url = os.getenv("TENSORLAKE_API_URL") or os.getenv(
             "INDEXIFY_URL", "https://api.tensorlake.ai"

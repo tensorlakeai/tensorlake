@@ -80,9 +80,7 @@ def find_project_root_interactive(start_path: Optional[Path] = None) -> Path:
     # Allow user to specify different directory
     custom_path = click.prompt(
         "Enter project root directory",
-        type=click.Path(
-            exists=True, file_okay=False, dir_okay=True, path_type=Path
-        ),
+        type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
         default=str(detected),
     )
     return Path(custom_path).resolve()

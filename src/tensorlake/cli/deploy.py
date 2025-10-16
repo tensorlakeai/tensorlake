@@ -46,13 +46,14 @@ def deploy(
 ):
     """Deploys applications to Tensorlake Cloud."""
     click.echo(f"Preparing deployment for applications from {application_file_path}")
-    
+
     # Create builder client with proper authentication
     # If using API key, don't pass org/project IDs (they come from introspection)
     # If using PAT, pass org/project IDs for X-Forwarded headers
     bearer_token = auth.api_key or auth.personal_access_token
     builder_v2 = ImageBuilderV2Client(
-        build_service=os.getenv("TENSORLAKE_BUILD_SERVICE") or f"{auth.base_url}/images/v2",
+        build_service=os.getenv("TENSORLAKE_BUILD_SERVICE")
+        or f"{auth.base_url}/images/v2",
         api_key=bearer_token,
         organization_id=auth.organization_id if not auth.api_key else None,
         project_id=auth.project_id if not auth.api_key else None,

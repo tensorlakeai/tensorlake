@@ -97,7 +97,7 @@ def info(
 ):
     """
     Info about a request.
-    
+
     Arguments:
       tensorlake request info <request-id>              # Uses default application
       tensorlake request info <application-name> <request-id> # Explicit application name
@@ -164,7 +164,7 @@ def info(
 def logs(ctx: Context, format: str, args: tuple):
     """
     View logs for a remote request.
-    
+
     Arguments:
       tensorlake request logs <request-id>              # Uses default application
       tensorlake request logs <application-name> <request-id> # Explicit application name

@@ -85,7 +85,9 @@ def run_init_flow(
         organization = organizations[0]
         organization_id = organization["id"]
         if interactive:
-            click.echo(f"Found organization: {organization['name']} ({organization_id})")
+            click.echo(
+                f"Found organization: {organization['name']} ({organization_id})"
+            )
     else:
         if interactive:
             click.echo("Multiple organizations found:")

@@ -20,7 +20,7 @@ Authentication:
   Use --api-key or TENSORLAKE_API_KEY for API key authentication
   Use --pat or TENSORLAKE_PAT for Personal Access Token authentication
   Use 'tensorlake login' to obtain a PAT interactively
-"""
+""",
 )
 @click.version_option(
     version=_common.VERSION, package_name="tensorlake", prog_name="tensorlake"

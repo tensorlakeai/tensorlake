@@ -99,6 +99,7 @@ class TestLocalConfigFile(unittest.TestCase):
                 # Check permissions (0600 = owner read/write only)
                 import os
                 import stat
+
                 file_stat = os.stat(local_config_path)
                 permissions = stat.filemode(file_stat.st_mode)
                 # Should be -rw------- on Unix-like systems
@@ -167,9 +168,7 @@ class TestLocalConfigPriority(unittest.TestCase):
                 config_module.LOCAL_CONFIG_FILE = local_config_path
 
                 # CLI args should override local config
-                ctx = Context.default(
-                    organization_id="cli_org", project_id="cli_proj"
-                )
+                ctx = Context.default(organization_id="cli_org", project_id="cli_proj")
                 self.assertEqual(ctx.organization_id, "cli_org")
                 self.assertEqual(ctx.project_id, "cli_proj")
             finally:
@@ -262,28 +261,29 @@ class TestInitCommand(unittest.TestCase):
                     return_value=httpx.Response(
                         200,
                         json={
-                            "items": [
-                                {"id": "org_123", "name": "Test Organization"}
-                            ]
+                            "items": [{"id": "org_123", "name": "Test Organization"}]
                         },
                     )
                 )
 
-                respx.get("https://api.tensorlake.ai/platform/v1/organizations/org_123/projects").mock(
+                respx.get(
+                    "https://api.tensorlake.ai/platform/v1/organizations/org_123/projects"
+                ).mock(
                     return_value=httpx.Response(
                         200,
-                        json={
-                            "items": [
-                                {"id": "proj_456", "name": "Test Project"}
-                            ]
-                        },
+                        json={"items": [{"id": "proj_456", "name": "Test Project"}]},
                     )
                 )
 
                 # Run init command
                 result = runner.invoke(
                     cli,
-                    ["init", "--no-confirm", "--directory", str(local_config_path.parent)],
+                    [
+                        "init",
+                        "--no-confirm",
+                        "--directory",
+                        str(local_config_path.parent),
+                    ],
                     prog_name="tensorlake",
                 )
 
@@ -346,7 +346,9 @@ class TestInitCommand(unittest.TestCase):
                     )
                 )
 
-                respx.get("https://api.tensorlake.ai/platform/v1/organizations/org_2/projects").mock(
+                respx.get(
+                    "https://api.tensorlake.ai/platform/v1/organizations/org_2/projects"
+                ).mock(
                     return_value=httpx.Response(
                         200,
                         json={
@@ -362,7 +364,12 @@ class TestInitCommand(unittest.TestCase):
                 # User selects: 2 (Organization Two), then 1 (Project Alpha)
                 result = runner.invoke(
                     cli,
-                    ["init", "--no-confirm", "--directory", str(local_config_path.parent)],
+                    [
+                        "init",
+                        "--no-confirm",
+                        "--directory",
+                        str(local_config_path.parent),
+                    ],
                     prog_name="tensorlake",
                     input="2\n1\n",  # Select org 2, then project 1
                 )
@@ -406,7 +413,12 @@ class TestInitCommand(unittest.TestCase):
                 # Run init command without credentials
                 result = runner.invoke(
                     cli,
-                    ["init", "--no-confirm", "--directory", str(local_config_path.parent)],
+                    [
+                        "init",
+                        "--no-confirm",
+                        "--directory",
+                        str(local_config_path.parent),
+                    ],
                     prog_name="tensorlake",
                 )
 
@@ -447,13 +459,20 @@ class TestInitCommand(unittest.TestCase):
 
                 # Mock API error
                 respx.get("https://api.tensorlake.ai/platform/v1/organizations").mock(
-                    return_value=httpx.Response(500, json={"error": "Internal Server Error"})
+                    return_value=httpx.Response(
+                        500, json={"error": "Internal Server Error"}
+                    )
                 )
 
                 # Run init command
                 result = runner.invoke(
                     cli,
-                    ["init", "--no-confirm", "--directory", str(local_config_path.parent)],
+                    [
+                        "init",
+                        "--no-confirm",
+                        "--directory",
+                        str(local_config_path.parent),
+                    ],
                     prog_name="tensorlake",
                 )
 
@@ -516,7 +535,12 @@ class TestInitWithIncompleteConfig(unittest.TestCase):
 
                 result = runner.invoke(
                     cli,
-                    ["init", "--no-confirm", "--directory", str(local_config_path.parent)],
+                    [
+                        "init",
+                        "--no-confirm",
+                        "--directory",
+                        str(local_config_path.parent),
+                    ],
                     prog_name="tensorlake",
                 )
 
@@ -583,7 +607,12 @@ class TestInitWithIncompleteConfig(unittest.TestCase):
 
                 result = runner.invoke(
                     cli,
-                    ["init", "--no-confirm", "--directory", str(local_config_path.parent)],
+                    [
+                        "init",
+                        "--no-confirm",
+                        "--directory",
+                        str(local_config_path.parent),
+                    ],
                     prog_name="tensorlake",
                 )
 
@@ -650,7 +679,12 @@ class TestInitWithIncompleteConfig(unittest.TestCase):
 
                 result = runner.invoke(
                     cli,
-                    ["init", "--no-confirm", "--directory", str(local_config_path.parent)],
+                    [
+                        "init",
+                        "--no-confirm",
+                        "--directory",
+                        str(local_config_path.parent),
+                    ],
                     prog_name="tensorlake",
                 )
 
@@ -689,7 +723,9 @@ class TestInitCommandInHelp(unittest.TestCase):
         result = runner.invoke(cli, ["init", "--help"], prog_name="tensorlake")
 
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("Initialize TensorLake configuration for this project", result.output)
+        self.assertIn(
+            "Initialize TensorLake configuration for this project", result.output
+        )
 
 
 if __name__ == "__main__":

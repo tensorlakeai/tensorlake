@@ -304,9 +304,7 @@ class TestCloudURLWithLogin(unittest.TestCase):
 
     @respx.mock
     @patch("webbrowser.open")
-    def test_login_shows_custom_cloud_url_on_browser_error(
-        self, mock_browser_open
-    ):
+    def test_login_shows_custom_cloud_url_on_browser_error(self, mock_browser_open):
         """Test that custom cloud URL is shown in error message when browser fails"""
         mock_browser_open.side_effect = webbrowser.Error("Browser open failed")
         custom_cloud_url = "https://custom-cloud.example.com"
