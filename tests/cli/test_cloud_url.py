@@ -328,10 +328,11 @@ class TestCloudURLWithLogin(unittest.TestCase):
             self.assertEqual(
                 result.exit_code, 0, f"Failed with output: {result.output}"
             )
-            # Verify the custom URL is displayed in output for manual opening
-            self.assertIn(custom_cloud_url, result.output)
-            self.assertIn("/cli/login", result.output)
+            # Verify the custom URL is displayed in output before browser open attempt
+            self.assertIn(f"URL: {custom_cloud_url}/cli/login", result.output)
+            # Verify error message references the URL above
             self.assertIn("Failed to open web browser", result.output)
+            self.assertIn("please open the url above manually", result.output.lower())
 
 
 if __name__ == "__main__":

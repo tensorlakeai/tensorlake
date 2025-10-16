@@ -98,6 +98,9 @@ class TestLoginSuccessFlow(unittest.TestCase):
 
         # Verify output messages
         self.assertIn("ABCD-1234", result.output)  # User code displayed
+        self.assertIn(
+            "URL: https://cloud.tensorlake.ai/cli/login", result.output
+        )  # URL displayed
         self.assertIn("Login successful", result.output)
 
         # Verify browser was opened
@@ -396,9 +399,11 @@ class TestLoginBrowserHandling(unittest.TestCase):
                 result = runner.invoke(cli, ["login"], prog_name="tensorlake")
 
         self.assertEqual(result.exit_code, 0)
+        # URL should be displayed before browser open attempt
+        self.assertIn("URL: https://cloud.tensorlake.ai/cli/login", result.output)
+        # Error message should reference the URL above
         self.assertIn("Failed to open web browser", result.output)
-        self.assertIn("please open the following url manually", result.output.lower())
-        self.assertIn("https://cloud.tensorlake.ai/cli/login", result.output)
+        self.assertIn("please open the url above manually", result.output.lower())
         self.assertIn("MANUAL-CODE", result.output)
 
     @respx.mock
@@ -425,6 +430,9 @@ class TestLoginBrowserHandling(unittest.TestCase):
             result = runner.invoke(cli, ["login"], prog_name="tensorlake")
 
         self.assertEqual(result.exit_code, 0)
+        # Verify URL is displayed in output
+        self.assertIn("URL: https://cloud.tensorlake.ai/cli/login", result.output)
+        # Verify browser was opened with correct URL
         mock_browser.assert_called_once_with("https://cloud.tensorlake.ai/cli/login")
 
 

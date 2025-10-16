@@ -96,20 +96,21 @@ def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
 
     click.echo("We're going to open a web browser for you to enter a one-time code.")
     click.echo(f"Your code is: {user_code}")
+
+    verification_uri = f"{ctx.cloud_url}/cli/login"
+    click.echo(f"URL: {verification_uri}")
     click.echo("Opening web browser...")
 
     # Give people time to read the messages above
     time.sleep(5)
 
-    verification_uri = f"{ctx.cloud_url}/cli/login"
-
     try:
         webbrowser.open(verification_uri)
     except webbrowser.Error:
         click.echo(
-            "Failed to open web browser. Please open the following URL manually and enter the code:"
+            "Failed to open web browser. Please open the URL above manually and enter the code.",
+            err=True,
         )
-        click.echo(verification_uri)
 
     click.echo("Waiting for the code to be processed...")
 
