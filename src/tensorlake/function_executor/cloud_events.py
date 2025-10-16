@@ -15,15 +15,6 @@ def print_cloud_event(event: dict[str, Any]) -> None:
     print(json.dumps(new_cloud_event(event)), flush=True)
 
 
-def render_cloud_event(_logger, _method_name, event: dict[str, Any]) -> dict[str, Any]:
-    """
-    Structlog processor to render executor logs as CloudEvents.
-    This processor can be added to the structlog pipeline to ensure that all logs are formatted as CloudEvents.
-    """
-
-    return new_cloud_event(event)
-
-
 def new_cloud_event(event: dict[str, Any]) -> dict[str, Any]:
     """
     Creates a new CloudEvent from the given event dictionary.
@@ -31,7 +22,7 @@ def new_cloud_event(event: dict[str, Any]) -> dict[str, Any]:
     event_dict = {
         "specversion": "1.0",
         "id": str(uuid.uuid4()),
-        "time": current_time(),
+        "timestamp": current_time(),
         "type": "ai.tensorlake.event",
         "source": "/tensorlake/function_executor",
         "data": event,
