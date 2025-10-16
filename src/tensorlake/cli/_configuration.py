@@ -1,9 +1,11 @@
-import json
 import os
 from pathlib import Path
 from typing import Any
 
+import click
 from tomlkit import document, dumps, parse, table
+
+from tensorlake.cli._project_detection import add_to_gitignore, find_gitignore_path
 
 CONFIG_DIR = Path.home() / ".config" / "tensorlake"
 
@@ -11,8 +13,8 @@ CONFIG_FILE = CONFIG_DIR / ".tensorlake_config"
 
 CREDENTIALS_PATH = CONFIG_DIR / "credentials.toml"
 
-# Legacy credentials file (pre-endpoint-scoping)
-LEGACY_CREDENTIALS_PATH = CONFIG_DIR / "credentials.json"
+# Local project configuration file
+LOCAL_CONFIG_FILE = Path.cwd() / ".tensorlake" / "config.toml"
 
 
 def load_config() -> dict[str, Any]:
@@ -33,13 +35,84 @@ def save_config(config: dict[str, Any]) -> None:
     os.chmod(CONFIG_FILE, 0o600)
 
 
+def load_local_config() -> dict[str, Any]:
+    """
+    Load configuration from the local project .tensorlake/config.toml file.
+    Searches current directory and parent directories for .tensorlake/config.toml.
+
+    If LOCAL_CONFIG_FILE is set (e.g., in tests), uses that path directly.
+    Otherwise, searches upward from current directory.
+    """
+    # If LOCAL_CONFIG_FILE is set to a specific path (e.g., by tests), use it directly
+    if LOCAL_CONFIG_FILE != Path.cwd() / ".tensorlake" / "config.toml":
+        if LOCAL_CONFIG_FILE.exists():
+            with open(LOCAL_CONFIG_FILE, "r", encoding="utf-8") as f:
+                return parse(f.read())
+        return {}
+
+    # Normal operation: search upward from current directory
+    current = Path.cwd()
+
+    for parent in [current] + list(current.parents):
+        config_file = parent / ".tensorlake" / "config.toml"
+        if config_file.exists():
+            with open(config_file, "r", encoding="utf-8") as f:
+                return parse(f.read())
+
+    return {}
+
+
+def save_local_config(config: dict[str, Any], project_root: Path) -> None:
+    """
+    Save configuration to the local project .tensorlake/config.toml file.
+
+    Args:
+        config: Configuration dictionary to save
+        project_root: Project root directory where .tensorlake/ directory will be created
+
+    Raises:
+        click.ClickException: If .tensorlake exists as a file (not a directory)
+    """
+    config_dir = project_root / ".tensorlake"
+    config_path = config_dir / "config.toml"
+
+    # Check if .tensorlake exists as a file (not a directory)
+    if config_dir.exists() and not config_dir.is_dir():
+        raise click.ClickException(
+            f"Cannot create configuration directory: '{config_dir}' exists as a file.\n"
+            f"Please rename or remove this file and try again."
+        )
+
+    # Create .tensorlake directory if it doesn't exist
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write configuration file
+    with open(config_path, "w", encoding="utf-8") as f:
+        f.write(dumps(config))
+
+    # Set restrictive permissions (0600) to protect sensitive data
+    os.chmod(config_path, 0o600)
+
+    # Add .tensorlake/ to .gitignore
+    try:
+        # Try to find .gitignore at git root
+        gitignore_path = find_gitignore_path(project_root)
+
+        # If no git repository found, create .gitignore next to .tensorlake/
+        if gitignore_path is None:
+            gitignore_path = project_root / ".gitignore"
+
+        # Add the directory entry
+        add_to_gitignore(gitignore_path, ".tensorlake/")
+    except Exception:
+        # Silently ignore any errors - this is a non-critical operation
+        pass
+
+
 def load_credentials(base_url: str) -> str | None:
     """
     Load the personal access token from the credentials file if it exists and is valid.
-
-    Performs one-time migration from legacy credentials.json to credentials.toml format.
     """
-    # Check if new TOML format exists
     if CREDENTIALS_PATH.exists():
         try:
             with open(CREDENTIALS_PATH, "r", encoding="utf-8") as f:
@@ -52,25 +125,6 @@ def load_credentials(base_url: str) -> str | None:
                 return scoped.get("token")
         except Exception:
             return None
-
-    # One-time migration: If old JSON format exists, migrate to new TOML format
-    if LEGACY_CREDENTIALS_PATH.exists():
-        try:
-            with open(LEGACY_CREDENTIALS_PATH, "r", encoding="utf-8") as f:
-                old_credentials = json.load(f)
-
-            token = old_credentials.get("token")
-            if token:
-                # Migrate to new endpoint-scoped format
-                save_credentials(base_url, token)
-
-                # Delete the old credentials file
-                LEGACY_CREDENTIALS_PATH.unlink()
-
-                return token
-        except Exception:
-            # If migration fails, don't delete the old file
-            pass
 
     return None
 

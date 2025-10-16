@@ -303,7 +303,6 @@ class TestCredentialSaving(unittest.TestCase):
         # Create a temporary directory for test config files
         self.temp_dir = tempfile.mkdtemp()
         self.credentials_path = Path(self.temp_dir) / "credentials.toml"
-        self.legacy_credentials_path = Path(self.temp_dir) / "credentials.json"
 
     def tearDown(self):
         # Clean up temporary directory
@@ -454,117 +453,6 @@ class TestCredentialSaving(unittest.TestCase):
 
         finally:
             config_module.CREDENTIALS_PATH = original_creds_path
-            config_module.CONFIG_DIR = original_config_dir
-
-    @patch("tensorlake.cli._configuration.LEGACY_CREDENTIALS_PATH")
-    @patch("tensorlake.cli._configuration.CREDENTIALS_PATH")
-    @patch("tensorlake.cli._configuration.CONFIG_DIR")
-    def test_migration_from_legacy_json_to_toml(
-        self, mock_config_dir, mock_credentials_path, mock_legacy_path
-    ):
-        """Test that credentials.json is automatically migrated to credentials.toml"""
-        import json
-
-        mock_config_dir.return_value = Path(self.temp_dir)
-        mock_credentials_path.return_value = self.credentials_path
-        mock_legacy_path.return_value = self.legacy_credentials_path
-
-        import tensorlake.cli._configuration as config_module
-
-        original_creds_path = config_module.CREDENTIALS_PATH
-        original_legacy_path = config_module.LEGACY_CREDENTIALS_PATH
-        original_config_dir = config_module.CONFIG_DIR
-
-        config_module.CREDENTIALS_PATH = self.credentials_path
-        config_module.LEGACY_CREDENTIALS_PATH = self.legacy_credentials_path
-        config_module.CONFIG_DIR = Path(self.temp_dir)
-
-        try:
-            # Create old-style credentials.json file
-            legacy_token = "legacy_token_12345"
-            with open(self.legacy_credentials_path, "w") as f:
-                json.dump({"token": legacy_token}, f)
-
-            # Verify legacy file exists and new file doesn't
-            self.assertTrue(self.legacy_credentials_path.exists())
-            self.assertFalse(self.credentials_path.exists())
-
-            # Load credentials (should trigger migration)
-            endpoint = "https://api.tensorlake.ai"
-            loaded_token = load_credentials(endpoint)
-
-            # Verify token was loaded correctly
-            self.assertEqual(loaded_token, legacy_token)
-
-            # Verify new TOML file was created
-            self.assertTrue(self.credentials_path.exists())
-
-            # Verify old JSON file was deleted
-            self.assertFalse(self.legacy_credentials_path.exists())
-
-            # Verify the TOML file has correct format
-            with open(self.credentials_path, "r") as f:
-                toml_data = parse(f.read())
-                self.assertIn(endpoint, toml_data)
-                self.assertEqual(toml_data[endpoint]["token"], legacy_token)
-
-            # Verify subsequent loads work from TOML file
-            loaded_token_again = load_credentials(endpoint)
-            self.assertEqual(loaded_token_again, legacy_token)
-
-        finally:
-            config_module.CREDENTIALS_PATH = original_creds_path
-            config_module.LEGACY_CREDENTIALS_PATH = original_legacy_path
-            config_module.CONFIG_DIR = original_config_dir
-
-    @patch("tensorlake.cli._configuration.LEGACY_CREDENTIALS_PATH")
-    @patch("tensorlake.cli._configuration.CREDENTIALS_PATH")
-    @patch("tensorlake.cli._configuration.CONFIG_DIR")
-    def test_no_migration_when_toml_already_exists(
-        self, mock_config_dir, mock_credentials_path, mock_legacy_path
-    ):
-        """Test that migration doesn't happen if credentials.toml already exists"""
-        import json
-
-        mock_config_dir.return_value = Path(self.temp_dir)
-        mock_credentials_path.return_value = self.credentials_path
-        mock_legacy_path.return_value = self.legacy_credentials_path
-
-        import tensorlake.cli._configuration as config_module
-
-        original_creds_path = config_module.CREDENTIALS_PATH
-        original_legacy_path = config_module.LEGACY_CREDENTIALS_PATH
-        original_config_dir = config_module.CONFIG_DIR
-
-        config_module.CREDENTIALS_PATH = self.credentials_path
-        config_module.LEGACY_CREDENTIALS_PATH = self.legacy_credentials_path
-        config_module.CONFIG_DIR = Path(self.temp_dir)
-
-        try:
-            # Create both old and new credential files
-            legacy_token = "legacy_token_old"
-            toml_token = "toml_token_new"
-            endpoint = "https://api.tensorlake.ai"
-
-            # Create legacy file
-            with open(self.legacy_credentials_path, "w") as f:
-                json.dump({"token": legacy_token}, f)
-
-            # Create new TOML file
-            save_credentials(endpoint, toml_token)
-
-            # Load credentials (should NOT trigger migration since TOML exists)
-            loaded_token = load_credentials(endpoint)
-
-            # Should use the TOML token, not the legacy one
-            self.assertEqual(loaded_token, toml_token)
-
-            # Legacy file should still exist (not deleted)
-            self.assertTrue(self.legacy_credentials_path.exists())
-
-        finally:
-            config_module.CREDENTIALS_PATH = original_creds_path
-            config_module.LEGACY_CREDENTIALS_PATH = original_legacy_path
             config_module.CONFIG_DIR = original_config_dir
 
 

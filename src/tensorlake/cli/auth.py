@@ -11,15 +11,7 @@ from tensorlake.cli._common import Context, pass_auth
 from tensorlake.cli._configuration import save_credentials
 
 
-@click.group()
-def auth():
-    """
-    Authentication commands
-    """
-    pass
-
-
-@auth.command(help="Print authentication status")
+@click.command(help="Print authentication status")
 @click.option(
     "--output",
     "-o",
@@ -28,7 +20,25 @@ def auth():
     help="Output format",
 )
 @pass_auth
-def status(ctx: Context, output: str):
+def whoami(ctx: Context, output: str):
+    # Check if user is authenticated
+    if not ctx.has_authentication():
+        if output == "json":
+            print(
+                json.dumps(
+                    {
+                        "authenticated": False,
+                        "message": "Not logged in and no API key provided",
+                    }
+                )
+            )
+        else:
+            click.echo("You are not logged in and have not provided an API key.")
+            click.echo(
+                "Run 'tensorlake login' to authenticate, or see 'tensorlake --help' for API key options."
+            )
+        return
+
     data = {
         "endpoint": ctx.base_url,
         "organizationId": ctx.organization_id,
@@ -56,9 +66,21 @@ def status(ctx: Context, output: str):
         click.echo(f"Personal Access Token : {data['personalAccessToken']}")
 
 
-@auth.command(help="Login to TensorLake")
-@pass_auth
-def login(ctx: Context):
+def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
+    """
+    Run the interactive login flow.
+
+    Args:
+        ctx: Context object with configuration
+        auto_init: If True, automatically run init flow after login if org/project are missing
+
+    Returns:
+        The access token obtained from successful login
+
+    Raises:
+        click.ClickException: If login fails at any step
+        click.Abort: If user cancels the login process
+    """
     login_start_url = f"{ctx.base_url}/platform/cli/login/start"
 
     start_response = httpx.post(login_start_url)
@@ -74,20 +96,21 @@ def login(ctx: Context):
 
     click.echo("We're going to open a web browser for you to enter a one-time code.")
     click.echo(f"Your code is: {user_code}")
+
+    verification_uri = f"{ctx.cloud_url}/cli/login"
+    click.echo(f"URL: {verification_uri}")
     click.echo("Opening web browser...")
 
     # Give people time to read the messages above
     time.sleep(5)
 
-    verification_uri = f"{ctx.cloud_url}/cli/login"
-
     try:
         webbrowser.open(verification_uri)
     except webbrowser.Error:
         click.echo(
-            "Failed to open web browser. Please open the following URL manually and enter the code:"
+            "Failed to open web browser. Please open the URL above manually and enter the code.",
+            err=True,
         )
-        click.echo(verification_uri)
 
     click.echo("Waiting for the code to be processed...")
 
@@ -144,6 +167,51 @@ def login(ctx: Context):
     access_token = exchange_response_body["access_token"]
     save_credentials(ctx.base_url, access_token)
     click.echo("Login successful!")
-    click.echo(
-        "Next, run `tensorlake config init` if you want to configure your CLI experience."
-    )
+
+    if auto_init:
+        # After successful login, check if we need to run init
+        # Recreate context with the new PAT to check if org/project are available
+        updated_ctx = Context.default(
+            base_url=ctx.base_url,
+            cloud_url=ctx.cloud_url,
+            personal_access_token=access_token,
+            # Preserve CLI flags and env vars if they were provided
+            organization_id=ctx.organization_id_from_cli,
+            project_id=ctx.project_id_from_cli,
+        )
+
+        # Check if org/project are available from ANY source (CLI, env, local config)
+        if not updated_ctx.has_org_and_project():
+            click.echo(
+                "\nNo organization and project configuration found. Let's set up your project.\n"
+            )
+
+            # Import here to avoid circular dependency
+            from tensorlake.cli._project_detection import find_project_root
+            from tensorlake.cli.init import run_init_flow
+
+            # Detect project root automatically for login flow
+            project_root = find_project_root()
+
+            try:
+                run_init_flow(
+                    updated_ctx,
+                    interactive=True,
+                    create_local_config=True,
+                    skip_if_provided=False,
+                    project_root=project_root,
+                )
+            except click.Abort:
+                click.echo(
+                    "\nYou can run 'tensorlake init' later to complete the setup.",
+                    err=True,
+                )
+
+    return access_token
+
+
+@click.command(help="Login to TensorLake")
+@pass_auth
+def login(ctx: Context):
+    """Login to TensorLake using device code flow."""
+    run_login_flow(ctx, auto_init=True)

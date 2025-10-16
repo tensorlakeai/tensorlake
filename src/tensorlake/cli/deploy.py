@@ -17,7 +17,7 @@ from tensorlake.applications.remote.code.loader import load_code
 from tensorlake.applications.remote.deploy import deploy_applications
 from tensorlake.applications.secrets import list_secret_names
 from tensorlake.builder.client_v2 import BuildContext, ImageBuilderV2Client
-from tensorlake.cli._common import Context, pass_auth
+from tensorlake.cli._common import Context, require_auth_and_project
 from tensorlake.cli.secrets import warning_missing_secrets
 
 
@@ -36,7 +36,7 @@ from tensorlake.cli.secrets import warning_missing_secrets
     "application-file-path",
     type=click.Path(exists=True, file_okay=True, dir_okay=False),
 )
-@pass_auth
+@require_auth_and_project
 def deploy(
     auth: Context,
     application_file_path: str,
@@ -46,7 +46,18 @@ def deploy(
 ):
     """Deploys applications to Tensorlake Cloud."""
     click.echo(f"Preparing deployment for applications from {application_file_path}")
-    builder_v2 = ImageBuilderV2Client.from_env()
+
+    # Create builder client with proper authentication
+    # If using API key, don't pass org/project IDs (they come from introspection)
+    # If using PAT, pass org/project IDs for X-Forwarded headers
+    bearer_token = auth.api_key or auth.personal_access_token
+    builder_v2 = ImageBuilderV2Client(
+        build_service=os.getenv("TENSORLAKE_BUILD_SERVICE")
+        or f"{auth.base_url}/images/v2",
+        api_key=bearer_token,
+        organization_id=auth.organization_id if not auth.api_key else None,
+        project_id=auth.project_id if not auth.api_key else None,
+    )
 
     try:
         application_file_path: str = os.path.abspath(application_file_path)
@@ -117,6 +128,7 @@ def _deploy_applications(
             applications_file_path=application_file_path,
             upgrade_running_requests=upgrade_running_requests,
             load_source_dir_modules=False,  # Already loaded
+            api_client=auth.api_client,  # Use the authenticated API client from context
         )
     except Exception as e:
         click.echo(

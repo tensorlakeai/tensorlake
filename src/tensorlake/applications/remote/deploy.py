@@ -18,6 +18,7 @@ def deploy_applications(
     applications_file_path: str,
     upgrade_running_requests: bool = True,
     load_source_dir_modules: bool = False,
+    api_client: APIClient | None = None,
 ) -> None:
     """Deploys all applications in the supplied .py file so they are runnable in remote mode (i.e. on Tensorlake Cloud).
 
@@ -45,14 +46,21 @@ def deploy_applications(
         all_functions=functions,
     )
 
-    for application in filter_applications(functions):
-        app_manifest: ApplicationManifest = create_application_manifest(
-            application_function=application, all_functions=functions
-        )
+    # Use provided API client or create a new one from environment
+    should_close_client = api_client is None
+    client = api_client if api_client is not None else APIClient()
 
-        with APIClient() as api_client:
-            api_client.upsert_application(
+    try:
+        for application in filter_applications(functions):
+            app_manifest: ApplicationManifest = create_application_manifest(
+                application_function=application, all_functions=functions
+            )
+            client.upsert_application(
                 manifest_json=app_manifest.model_dump_json(),
                 code_zip=app_code,
                 upgrade_running_requests=upgrade_running_requests,
             )
+    finally:
+        # Only close the client if we created it (not if it was provided)
+        if should_close_client:
+            client._close()

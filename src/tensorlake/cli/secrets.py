@@ -2,10 +2,12 @@ from datetime import datetime, timezone
 from typing import Dict, List, Tuple
 
 import click
+import httpx
 from rich.console import Console
 from rich.table import Table
 
-from tensorlake.cli._common import Context, pass_auth
+from tensorlake.cli._common import Context, require_auth_and_project
+from tensorlake.cli._errors import handle_http_error
 
 
 @click.group()
@@ -19,21 +21,11 @@ def secrets():
 
 
 @secrets.command()
-@pass_auth
+@require_auth_and_project
 def list(ctx: Context):
     """
     List all secrets in the current project.
     """
-
-    if not ctx.organization_id:
-        raise click.UsageError(
-            "No organization provided or default organization configured. Please configure a default organization with 'tensorlake config init'.",
-        )
-
-    if not ctx.project_id:
-        raise click.UsageError(
-            "No project provided or default project configured. Please configure a default project with 'tensorlake config init'."
-        )
 
     secrets = _get_all_existing_secrets(ctx)
     if len(secrets) == 0:
@@ -66,7 +58,7 @@ def list(ctx: Context):
 
 @secrets.command()
 @click.argument("secrets", nargs=-1)
-@pass_auth
+@require_auth_and_project
 def set(ctx: Context, secrets: str):
     """
     Set one of many secrets in the current project.
@@ -115,7 +107,7 @@ def set(ctx: Context, secrets: str):
 
 @secrets.command()
 @click.argument("secret_names", nargs=-1)
-@pass_auth
+@require_auth_and_project
 def unset(ctx: Context, secret_names: str):
     """
     Unset one or many secrets in the current project.
@@ -143,11 +135,15 @@ def unset(ctx: Context, secret_names: str):
 
 
 def _get_all_existing_secrets(ctx: Context) -> List[dict]:
-    resp = ctx.client.get(
-        f"/platform/v1/organizations/{ctx.organization_id}/projects/{ctx.project_id}/secrets?pageSize=100"
-    )
-    resp.raise_for_status()
-    return resp.json()["items"]
+    try:
+        resp = ctx.client.get(
+            f"/platform/v1/organizations/{ctx.organization_id}/projects/{ctx.project_id}/secrets?pageSize=100"
+        )
+        resp.raise_for_status()
+        return resp.json()["items"]
+    except httpx.HTTPStatusError as e:
+        handle_http_error(e, ctx, "fetching secrets")
+        return []  # Unreachable, but satisfies type checker
 
 
 def warning_missing_secrets(

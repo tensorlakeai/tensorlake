@@ -103,12 +103,24 @@ class ImageBuilderV2Client:
     and stream logs from the image builder service.
     """
 
-    def __init__(self, build_service: str, api_key):
+    def __init__(
+        self,
+        build_service: str,
+        api_key,
+        organization_id: str | None = None,
+        project_id: str | None = None,
+    ):
         self._client = httpx.AsyncClient()
         self._build_service = build_service
         self._headers = {}
         if api_key:
             self._headers["Authorization"] = f"Bearer {api_key}"
+            # Add X-Forwarded headers when not using an API key (i.e., using PAT)
+            # API keys already contain org/project info via introspection
+            if organization_id:
+                self._headers["X-Forwarded-Organization-Id"] = organization_id
+            if project_id:
+                self._headers["X-Forwarded-Project-Id"] = project_id
 
     @classmethod
     def from_env(cls):
@@ -116,7 +128,10 @@ class ImageBuilderV2Client:
         Create an instance of the ImageBuilderV2Client using environment variables.
 
         The API key is retrieved from the TENSORLAKE_API_KEY environment variable.
-        The build service URL is retrieved from the INDEXIFY_URL environment variable,
+        If no API key is set, PAT authentication is assumed and organization/project IDs
+        are retrieved from TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID.
+
+        The build service URL is retrieved from the TENSORLAKE_API_URL environment variable,
         defaulting to "https://api.tensorlake.ai" if not set.
 
         The TENSORLAKE_BUILD_SERVICE environment variable can be used to specify
@@ -126,9 +141,16 @@ class ImageBuilderV2Client:
             ImageBuilderV2Client: An instance of the ImageBuilderV2Client.
         """
         api_key = os.getenv("TENSORLAKE_API_KEY")
-        server_url = os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")
+        # For PAT authentication, get auth token and org/project IDs
+        if not api_key:
+            api_key = os.getenv("TENSORLAKE_PAT")
+
+        organization_id = os.getenv("TENSORLAKE_ORGANIZATION_ID")
+        project_id = os.getenv("TENSORLAKE_PROJECT_ID")
+
+        server_url = os.getenv("TENSORLAKE_API_URL", "https://api.tensorlake.ai")
         build_url = os.getenv("TENSORLAKE_BUILD_SERVICE", f"{server_url}/images/v2")
-        return cls(build_url, api_key)
+        return cls(build_url, api_key, organization_id, project_id)
 
     async def build_collection(
         self, context_collection: Dict[Image, BuildContext]

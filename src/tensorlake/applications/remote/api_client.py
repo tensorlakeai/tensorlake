@@ -25,11 +25,22 @@ from tensorlake.utils.http_client import (
 )
 from tensorlake.utils.retries import exponential_backoff
 
+
+# Model for applications returned by the list endpoint
+class ApplicationListItem(BaseModel):
+    name: str
+    description: str
+    tags: dict[str, str]
+    version: str
+    tombstoned: bool = False
+    created_at: int | None = None
+
+
 logger = logging.getLogger("tensorlake")
 
 
 _API_NAMESPACE_FROM_ENV: str = os.getenv("INDEXIFY_NAMESPACE", "default")
-_API_URL_FROM_ENV: str = os.getenv("INDEXIFY_URL", "https://api.tensorlake.ai")
+_API_URL_FROM_ENV: str = os.getenv("TENSORLAKE_API_URL", "https://api.tensorlake.ai")
 _API_KEY_FROM_ENV: str = os.getenv("TENSORLAKE_API_KEY")
 
 
@@ -43,17 +54,6 @@ class DataPayload(BaseModel):
 class RequestError(BaseModel):
     function_name: str
     message: str
-
-
-class ShallowRequestMetadata(BaseModel):
-    id: str
-    created_at: int
-    # dict when failure outcome
-    # str when success outcome
-    # None when not finished
-    outcome: dict | str | None = None
-    function_runs_count: int
-    application_version: str
 
 
 class Allocation(BaseModel):
@@ -132,21 +132,6 @@ class WorkflowEvent(BaseModel):
         return f"{stdout}{stderr}[bold green]{self.event_name}[/bold green]: {self.payload}"
 
 
-class LogEntry(BaseModel):
-    timestamp: int
-    uuid: str
-    namespace: str
-    application: str
-    body: str
-    log_attributes: str = Field(alias="logAttributes")
-    resource_attributes: list[tuple[str, str]] = Field(alias="resourceAttributes")
-
-
-class LogsPayload(BaseModel):
-    logs: list[LogEntry]
-    next_token: str | None = Field(default=None, alias="nextToken")
-
-
 def log_retries(e: BaseException, sleep_time: float, retries: int):
     print(
         f"Retrying after {sleep_time:.2f} seconds. Retry count: {retries}. Retryable exception: {e.__repr__()}"
@@ -159,6 +144,8 @@ class APIClient:
         namespace: str = _API_NAMESPACE_FROM_ENV,
         api_url: str = _API_URL_FROM_ENV,
         api_key: str | None = _API_KEY_FROM_ENV,
+        organization_id: str | None = None,
+        project_id: str | None = None,
     ):
         self._client: httpx.Client = get_httpx_client(
             config_path=None, make_async=False
@@ -166,6 +153,8 @@ class APIClient:
         self._namespace: str = namespace
         self._api_url: str = api_url
         self._api_key: str | None = api_key
+        self._organization_id: str | None = organization_id
+        self._project_id: str | None = project_id
 
     def __enter__(self) -> "APIClient":
         return self
@@ -198,6 +187,15 @@ class APIClient:
             if "headers" not in kwargs:
                 kwargs["headers"] = {}
             kwargs["headers"]["Authorization"] = f"Bearer {self._api_key}"
+
+        # Add X-Forwarded-Organization-Id and X-Forwarded-Project-Id headers when org/project IDs are provided
+        # These are needed when using PAT (API keys get org/project via introspection)
+        if "headers" not in kwargs:
+            kwargs["headers"] = {}
+        if self._organization_id:
+            kwargs["headers"]["X-Forwarded-Organization-Id"] = self._organization_id
+        if self._project_id:
+            kwargs["headers"]["X-Forwarded-Project-Id"] = self._project_id
 
     @exponential_backoff(
         max_retries=5,
@@ -261,21 +259,10 @@ class APIClient:
         )
         response.raise_for_status()
 
-    def function_runs(
-        self, application_name: str, request_id: str
-    ) -> List[FunctionRun]:
-        response = self._get(
-            f"v1/namespaces/{self._namespace}/applications/{application_name}/requests/{request_id}/function-runs"
-        )
+    def applications(self) -> List[ApplicationListItem]:
+        """Returns list of all existing applications."""
         return [
-            FunctionRun(**function_run)
-            for function_run in response.json()["function_runs"]
-        ]
-
-    def applications(self) -> List[ApplicationManifest]:
-        """Returns manifest json dicts for all existing applications."""
-        return [
-            ApplicationManifest(**app)
+            ApplicationListItem(**app)
             for app in self._get(
                 f"v1/namespaces/{self._namespace}/applications"
             ).json()["applications"]
@@ -289,43 +276,6 @@ class APIClient:
             ).json()
         )
 
-    def application_logs(
-        self,
-        application: str,
-        function: str | None,
-        request: str | None,
-        container: str | None,
-    ) -> LogsPayload | None:
-        query_params = {}
-        if function:
-            query_params["function"] = function
-        if request:
-            query_params["requestId"] = request
-        if container:
-            query_params["containerId"] = container
-
-        if query_params:
-            query_params_str = "&".join(
-                [f"{key}={value}" for key, value in query_params.items()]
-            )
-            query_params_str = f"?{query_params_str}"
-        else:
-            query_params_str = ""
-
-        try:
-            response = self._get(
-                f"v1/namespaces/{self._namespace}/applications/{application}/logs{query_params_str}"
-            )
-            response.raise_for_status()
-            payload = LogsPayload(**response.json())
-            # Logs default ordering is descending, having the most recent logs first.
-            # Reverse the logs to have the oldest logs first to print on the console.
-            payload.logs.reverse()
-            return payload
-        except RemoteAPIError as e:
-            print(f"failed to fetch logs: {e}")
-            return None
-
     def logs(
         self, application_name: str, invocation_id: str, allocation_id: str, file: str
     ) -> str | None:
@@ -338,22 +288,6 @@ class APIClient:
         except RemoteAPIError as e:
             print(f"failed to fetch logs: {e}")
             return None
-
-    def requests(self, application_name: str) -> List[ShallowRequestMetadata]:
-        response = self._get(
-            f"v1/namespaces/{self._namespace}/applications/{application_name}/requests"
-        )
-        requests: List[ShallowRequestMetadata] = []
-        for request in response.json()["requests"]:
-            requests.append(ShallowRequestMetadata(**request))
-
-        return requests
-
-    def request(self, application_name: str, request_id: str) -> RequestMetadata:
-        response = self._get(
-            f"v1/namespaces/{self._namespace}/applications/{application_name}/requests/{request_id}"
-        )
-        return RequestMetadata(**response.json())
 
     def call(
         self,
