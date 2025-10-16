@@ -37,7 +37,7 @@ class TestFunctionProcessCrash(unittest.TestCase):
             try:
                 request.output()
             except RequestFailureException as e:
-                self.assertEqual(e.message, "functionerror")
+                self.assertEqual(e.message, "function_error")
 
         # FIXME: we're only doing periodic Function Executor health checks right now,
         # so we need to wait for the crash to be detected.

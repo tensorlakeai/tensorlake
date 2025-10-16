@@ -77,6 +77,7 @@ class FunctionRun(BaseModel):
     namespace: str
     status: str
     outcome: str
+    failure_reason: str | None = None
     created_at: int
     application_version: str
     allocations: List[Allocation]
