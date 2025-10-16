@@ -162,6 +162,8 @@ class APIClient:
         namespace: str = _API_NAMESPACE_FROM_ENV,
         api_url: str = _API_URL_FROM_ENV,
         api_key: str | None = _API_KEY_FROM_ENV,
+        organization_id: str | None = None,
+        project_id: str | None = None,
     ):
         self._client: httpx.Client = get_httpx_client(
             config_path=None, make_async=False
@@ -169,6 +171,8 @@ class APIClient:
         self._namespace: str = namespace
         self._api_url: str = api_url
         self._api_key: str | None = api_key
+        self._organization_id: str | None = organization_id
+        self._project_id: str | None = project_id
 
     def __enter__(self) -> "APIClient":
         return self
@@ -201,6 +205,15 @@ class APIClient:
             if "headers" not in kwargs:
                 kwargs["headers"] = {}
             kwargs["headers"]["Authorization"] = f"Bearer {self._api_key}"
+        
+        # Add X-Forwarded-Organization-Id and X-Forwarded-Project-Id headers when using PAT
+        # We know it's PAT (not API key) when org/project IDs are explicitly provided
+        if "headers" not in kwargs:
+            kwargs["headers"] = {}
+        if self._organization_id:
+            kwargs["headers"]["X-Forwarded-Organization-Id"] = self._organization_id
+        if self._project_id:
+            kwargs["headers"]["X-Forwarded-Project-Id"] = self._project_id
 
     @exponential_backoff(
         max_retries=5,

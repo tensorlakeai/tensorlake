@@ -54,6 +54,11 @@ class Context:
                 headers["Authorization"] = f"Bearer {self.api_key}"
             elif self.personal_access_token:
                 headers["Authorization"] = f"Bearer {self.personal_access_token}"
+                # Add X-Forwarded headers when using PAT (not needed for API keys)
+                if self.organization_id:
+                    headers["X-Forwarded-Organization-Id"] = self.organization_id
+                if self.project_id:
+                    headers["X-Forwarded-Project-Id"] = self.project_id
             else:
                 raise click.UsageError(
                     "Missing API key or personal access token. Please run `tensorlake login` to authenticate."
@@ -69,10 +74,13 @@ class Context:
             if not bearer_token:
                 bearer_token = self.personal_access_token
 
+            # Pass organization and project IDs to API client for X-Forwarded headers
             self._api_client = APIClient(
                 namespace=self.namespace,
                 api_url=self.base_url,
                 api_key=bearer_token,
+                organization_id=self.organization_id if not self.api_key else None,
+                project_id=self.project_id if not self.api_key else None,
             )
 
         return self._api_client
