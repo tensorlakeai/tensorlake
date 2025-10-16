@@ -34,8 +34,8 @@ from ..registry import get_function
 from ..request_context.request_context_base import RequestContextBase
 from ..request_context.request_metrics_recorder import RequestMetricsRecorder
 from ..runtime_hooks import (
+    set_run_function_calls_hook,
     set_start_and_wait_function_calls_hook,
-    set_start_function_calls_hook,
     set_wait_futures_hook,
 )
 from ..user_data_serializer import UserDataSerializer, serializer_by_name
@@ -94,7 +94,7 @@ class LocalRunner:
                 future=app_function_call,
             )
 
-            set_start_function_calls_hook(self._runtime_hook_start_function_calls)
+            set_run_function_calls_hook(self._runtime_hook_start_function_calls)
             set_start_and_wait_function_calls_hook(
                 self._runtime_hook_start_and_wait_function_calls
             )
