@@ -1,4 +1,3 @@
-import json
 import os
 from pathlib import Path
 from typing import Any
@@ -13,9 +12,6 @@ CONFIG_DIR = Path.home() / ".config" / "tensorlake"
 CONFIG_FILE = CONFIG_DIR / ".tensorlake_config"
 
 CREDENTIALS_PATH = CONFIG_DIR / "credentials.toml"
-
-# Legacy credentials file (pre-endpoint-scoping)
-LEGACY_CREDENTIALS_PATH = CONFIG_DIR / "credentials.json"
 
 # Local project configuration file
 LOCAL_CONFIG_FILE = Path.cwd() / ".tensorlake" / "config.toml"
@@ -116,10 +112,7 @@ def save_local_config(config: dict[str, Any], project_root: Path) -> None:
 def load_credentials(base_url: str) -> str | None:
     """
     Load the personal access token from the credentials file if it exists and is valid.
-
-    Performs one-time migration from legacy credentials.json to credentials.toml format.
     """
-    # Check if new TOML format exists
     if CREDENTIALS_PATH.exists():
         try:
             with open(CREDENTIALS_PATH, "r", encoding="utf-8") as f:
@@ -132,25 +125,6 @@ def load_credentials(base_url: str) -> str | None:
                 return scoped.get("token")
         except Exception:
             return None
-
-    # One-time migration: If old JSON format exists, migrate to new TOML format
-    if LEGACY_CREDENTIALS_PATH.exists():
-        try:
-            with open(LEGACY_CREDENTIALS_PATH, "r", encoding="utf-8") as f:
-                old_credentials = json.load(f)
-
-            token = old_credentials.get("token")
-            if token:
-                # Migrate to new endpoint-scoped format
-                save_credentials(base_url, token)
-
-                # Delete the old credentials file
-                LEGACY_CREDENTIALS_PATH.unlink()
-
-                return token
-        except Exception:
-            # If migration fails, don't delete the old file
-            pass
 
     return None
 
