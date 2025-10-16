@@ -178,13 +178,14 @@ class APIClient:
             kwargs["headers"]["Authorization"] = f"Bearer {self._api_key}"
 
         # Add X-Forwarded-Organization-Id and X-Forwarded-Project-Id headers when using PAT
-        # We know it's PAT (not API key) when org/project IDs are explicitly provided
-        if "headers" not in kwargs:
-            kwargs["headers"] = {}
-        if self._organization_id:
-            kwargs["headers"]["X-Forwarded-Organization-Id"] = self._organization_id
-        if self._project_id:
-            kwargs["headers"]["X-Forwarded-Project-Id"] = self._project_id
+        # Only needed when NOT using API key (API keys have org/project via introspection)
+        if not self._api_key:
+            if "headers" not in kwargs:
+                kwargs["headers"] = {}
+            if self._organization_id:
+                kwargs["headers"]["X-Forwarded-Organization-Id"] = self._organization_id
+            if self._project_id:
+                kwargs["headers"]["X-Forwarded-Project-Id"] = self._project_id
 
     @exponential_backoff(
         max_retries=5,
