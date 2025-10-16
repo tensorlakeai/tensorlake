@@ -1,7 +1,8 @@
 import sys
-from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List
+
+from pydantic import BaseModel, Field
 
 _LOCAL_PYTHON_VERSION = f"{sys.version_info.major}.{sys.version_info.minor}"
 _DEFAULT_BASE_IMAGE_NAME = f"python:{_LOCAL_PYTHON_VERSION}-slim-bookworm"
@@ -14,14 +15,24 @@ class _ImageBuildOperationType(Enum):
     RUN = 4
 
 
-@dataclass
-class _ImageBuildOperation:
+class _ImageBuildOperation(BaseModel):
+    """Image build operation with validation."""
+
     type: _ImageBuildOperationType
     args: List[str]
-    options: Dict[str, str]
+    options: Dict[str, str] = Field(default_factory=dict)
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
 class Image:
+    """Container image configuration.
+
+    Note: This class maintains compatibility with existing code by not directly
+    inheriting from BaseModel, but its internal data is structured for easy conversion.
+    """
+
     def __init__(
         self,
         name: str = "default",

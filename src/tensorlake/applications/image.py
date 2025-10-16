@@ -6,10 +6,11 @@ import logging
 import os
 import pathlib
 import tarfile
-from dataclasses import dataclass
 from io import BytesIO
 from typing import Any, Dict, List
 from urllib.parse import urlparse
+
+from pydantic import BaseModel, Field
 
 from .interface.function import Function
 from .interface.image import Image, _ImageBuildOperation, _ImageBuildOperationType
@@ -19,11 +20,15 @@ _HASH_BUFF_SIZE: int = 1024**2
 _SDK_VERSION: str = importlib.metadata.version("tensorlake")
 
 
-@dataclass
-class ImageInformation:
+class ImageInformation(BaseModel):
+    """Information about an image and its associated functions."""
+
     image: Image
     # Functions that are using the image.
-    functions: List[Function]
+    functions: List[Function] = Field(default_factory=list)
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
 def image_infos() -> Dict[Image, ImageInformation]:
