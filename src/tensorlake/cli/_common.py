@@ -34,7 +34,6 @@ class Context:
     namespace: str
     api_key: str | None = None
     personal_access_token: str | None = None
-    default_application: str | None = None
     default_project: str | None = None
     default_organization: str | None = None
     version: str = VERSION
@@ -202,9 +201,6 @@ class Context:
             or get_nested_value(global_config_data, "indexify.namespace")
             or "default"
         )
-        final_default_app = get_nested_value(
-            local_config_data, "default.application"
-        ) or get_nested_value(global_config_data, "default.application")
 
         # Priority: CLI/env > local config > None
         # Note: Organization and project IDs are NOT loaded from global config
@@ -222,7 +218,6 @@ class Context:
             api_key=final_api_key,
             personal_access_token=final_personal_access_token,
             namespace=final_namespace,
-            default_application=final_default_app,
             default_project=final_default_project,
             default_organization=final_default_organization,
         )
@@ -357,12 +352,12 @@ class AliasedGroup(click.Group):
     A Click Group that supports command aliases through prefix matching.
 
     This allows users to type abbreviated commands as long as they are unambiguous.
-    For example, 'application' can be invoked as 'app', 'request' as 'req', etc.
+    For example, 'secrets' can be invoked as 'sec', 'deploy' as 'dep', etc.
 
     Example:
-        tensorlake app list  -> tensorlake application list
-        tensorlake req info  -> tensorlake request info
         tensorlake sec set   -> tensorlake secrets set
+        tensorlake dep       -> tensorlake deploy
+        tensorlake par       -> tensorlake parse
     """
 
     def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
