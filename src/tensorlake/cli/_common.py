@@ -34,15 +34,15 @@ class Context:
     namespace: str
     api_key: str | None = None
     personal_access_token: str | None = None
-    configured_project_id: str | None = None
-    configured_organization_id: str | None = None
+    project_id_from_config: str | None = None
+    organization_id_from_config: str | None = None
     version: str = VERSION
     debug: bool = False
     _client: httpx.Client | None = None
     _introspect_response: httpx.Response | None = None
     _api_client: APIClient | None = None
-    _cli_organization_id: str | None = None
-    _cli_project_id: str | None = None
+    organization_id_from_cli: str | None = None
+    project_id_from_cli: str | None = None
 
     @property
     def client(self) -> httpx.Client:
@@ -101,7 +101,7 @@ class Context:
         if self.api_key:
             return self._introspect().json().get("projectId")
 
-        return self.configured_project_id
+        return self.project_id_from_config
 
     @property
     def organization_id(self):
@@ -111,7 +111,7 @@ class Context:
         if self.api_key:
             return self._introspect().json().get("organizationId")
 
-        return self.configured_organization_id
+        return self.organization_id_from_config
 
     def _introspect(self) -> httpx.Response:
         if self._introspect_response is None:
@@ -126,7 +126,7 @@ class Context:
                         "Please supply a valid API key with the `--api-key` flag, or run `tensorlake login` to authenticate.",
                         err=True,
                     )
-                    sys.exit(1)
+                    raise click.ClickException("Invalid API key")
                 if introspect_response.status_code == 404:
                     click.echo(
                         f"The server at {self.base_url} doesn't support TensorLake API introspection.",
@@ -136,14 +136,29 @@ class Context:
                         "Please check your API URL or contact support.",
                         err=True,
                     )
-                    sys.exit(1)
+                    raise click.ClickException("API introspection not supported")
                 introspect_response.raise_for_status()
                 self._introspect_response = introspect_response
             except httpx.HTTPStatusError as e:
-                # Import here to avoid circular dependency
-                from tensorlake.cli._errors import handle_http_error
+                # Handle other HTTP errors inline to avoid circular import
+                status_code = e.response.status_code
+                click.echo(f"Error validating API key: HTTP {status_code}", err=True)
 
-                handle_http_error(e, self, "validating API key")
+                if self.debug:
+                    click.echo("", err=True)
+                    click.echo("Technical details:", err=True)
+                    click.echo(f"  Status: {status_code} {e.response.reason_phrase}", err=True)
+                    click.echo(f"  URL: {e.request.url}", err=True)
+                    if e.response.text:
+                        click.echo(f"  Response: {e.response.text}", err=True)
+                else:
+                    click.echo("", err=True)
+                    click.echo(
+                        "For technical details, run with --debug or set TENSORLAKE_DEBUG=1",
+                        err=True,
+                    )
+
+                raise click.ClickException(f"API key validation failed with status {status_code}")
         return self._introspect_response
 
     def has_authentication(self) -> bool:
@@ -181,10 +196,10 @@ class Context:
         if self.api_key:
             return "API key introspection"
 
-        if self._cli_organization_id:
+        if self.organization_id_from_cli:
             return "CLI flag or environment variable"
 
-        if self.configured_organization_id:
+        if self.organization_id_from_config:
             return "local config (.tensorlake.toml)"
 
         return "not configured"
@@ -199,13 +214,90 @@ class Context:
         if self.api_key:
             return "API key introspection"
 
-        if self._cli_project_id:
+        if self.project_id_from_cli:
             return "CLI flag or environment variable"
 
-        if self.configured_project_id:
+        if self.project_id_from_config:
             return "local config (.tensorlake.toml)"
 
         return "not configured"
+
+    @classmethod
+    def _resolve_base_url(
+        cls, base_url: str | None, local_config: dict, global_config: dict
+    ) -> str:
+        """Resolve base URL from CLI args, config, or default."""
+        return (
+            base_url
+            or get_nested_value(local_config, "tensorlake.api_url")
+            or get_nested_value(global_config, "tensorlake.api_url")
+            or "https://api.tensorlake.ai"
+        )
+
+    @classmethod
+    def _resolve_cloud_url(
+        cls, cloud_url: str | None, local_config: dict, global_config: dict
+    ) -> str:
+        """Resolve cloud URL from CLI args, config, or default."""
+        return (
+            cloud_url
+            or get_nested_value(local_config, "tensorlake.cloud_url")
+            or get_nested_value(global_config, "tensorlake.cloud_url")
+            or "https://cloud.tensorlake.ai"
+        )
+
+    @classmethod
+    def _resolve_authentication(
+        cls,
+        api_key: str | None,
+        personal_access_token: str | None,
+        local_config: dict,
+        global_config: dict,
+        base_url: str,
+    ) -> tuple[str | None, str | None]:
+        """Resolve API key and PAT from CLI args, config, or credentials file."""
+        final_api_key = (
+            api_key
+            or get_nested_value(local_config, "tensorlake.apikey")
+            or get_nested_value(global_config, "tensorlake.apikey")
+        )
+
+        # Load PAT from credentials file (endpoint-scoped) if not provided via CLI/env
+        file_personal_access_token = load_credentials(base_url)
+
+        # Priority: CLI/env PAT > credentials file PAT
+        final_personal_access_token = (
+            personal_access_token or file_personal_access_token
+        )
+
+        return final_api_key, final_personal_access_token
+
+    @classmethod
+    def _resolve_namespace(
+        cls, namespace: str | None, local_config: dict, global_config: dict
+    ) -> str:
+        """Resolve namespace from CLI args, config, or default."""
+        return (
+            namespace
+            or get_nested_value(local_config, "indexify.namespace")
+            or get_nested_value(global_config, "indexify.namespace")
+            or "default"
+        )
+
+    @classmethod
+    def _resolve_project_config(
+        cls, organization_id: str | None, project_id: str | None, local_config: dict
+    ) -> tuple[str | None, str | None]:
+        """Resolve organization and project IDs from CLI args or local config.
+
+        Note: Organization and project IDs are NOT loaded from global config.
+        They must come from CLI flags, env vars, or local .tensorlake.toml only.
+        """
+        final_organization_id = organization_id or get_nested_value(
+            local_config, "organization"
+        )
+        final_project_id = project_id or get_nested_value(local_config, "project")
+        return final_organization_id, final_project_id
 
     @classmethod
     def default(
@@ -224,50 +316,25 @@ class Context:
         local_config_data = load_local_config()
         global_config_data = load_config()
 
-        # Use CLI/env values first, then local config, then global config, then hardcoded defaults
-        final_base_url = (
-            base_url
-            or get_nested_value(local_config_data, "tensorlake.api_url")
-            or get_nested_value(global_config_data, "tensorlake.api_url")
-            or "https://api.tensorlake.ai"
+        # Resolve all configuration values using helper methods
+        final_base_url = cls._resolve_base_url(
+            base_url, local_config_data, global_config_data
         )
-
-        final_cloud_url = (
-            cloud_url
-            or get_nested_value(local_config_data, "tensorlake.cloud_url")
-            or get_nested_value(global_config_data, "tensorlake.cloud_url")
-            or "https://cloud.tensorlake.ai"
+        final_cloud_url = cls._resolve_cloud_url(
+            cloud_url, local_config_data, global_config_data
         )
-
-        final_api_key = (
-            api_key
-            or get_nested_value(local_config_data, "tensorlake.apikey")
-            or get_nested_value(global_config_data, "tensorlake.apikey")
+        final_api_key, final_personal_access_token = cls._resolve_authentication(
+            api_key,
+            personal_access_token,
+            local_config_data,
+            global_config_data,
+            final_base_url,
         )
-
-        # Load PAT from credentials file (endpoint-scoped) if not provided via CLI/env
-        file_personal_access_token = load_credentials(final_base_url)
-
-        # Priority: CLI/env PAT > credentials file PAT
-        final_personal_access_token = (
-            personal_access_token or file_personal_access_token
+        final_namespace = cls._resolve_namespace(
+            namespace, local_config_data, global_config_data
         )
-
-        final_namespace = (
-            namespace
-            or get_nested_value(local_config_data, "indexify.namespace")
-            or get_nested_value(global_config_data, "indexify.namespace")
-            or "default"
-        )
-
-        # Priority: CLI/env > local config > None
-        # Note: Organization and project IDs are NOT loaded from global config
-        # They must come from CLI flags, env vars, or local .tensorlake.toml only
-        final_configured_project_id = project_id or get_nested_value(
-            local_config_data, "project"
-        )
-        final_configured_organization_id = organization_id or get_nested_value(
-            local_config_data, "organization"
+        final_organization_id, final_project_id = cls._resolve_project_config(
+            organization_id, project_id, local_config_data
         )
 
         return cls(
@@ -276,11 +343,11 @@ class Context:
             api_key=final_api_key,
             personal_access_token=final_personal_access_token,
             namespace=final_namespace,
-            configured_project_id=final_configured_project_id,
-            configured_organization_id=final_configured_organization_id,
+            project_id_from_config=final_project_id,
+            organization_id_from_config=final_organization_id,
             debug=debug,
-            _cli_organization_id=organization_id,
-            _cli_project_id=project_id,
+            organization_id_from_cli=organization_id,
+            project_id_from_cli=project_id,
         )
 
 

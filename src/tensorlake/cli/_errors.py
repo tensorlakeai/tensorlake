@@ -1,5 +1,7 @@
 """Error handling utilities for the CLI."""
 
+from __future__ import annotations
+
 import sys
 import traceback
 
@@ -8,7 +10,7 @@ import httpx
 
 
 def handle_http_error(
-    e: httpx.HTTPStatusError, ctx: "Context", operation: str = "request"
+    e: httpx.HTTPStatusError, ctx: Context, operation: str = "request"
 ) -> None:
     """
     Handle HTTP errors with user-friendly messages.
@@ -50,10 +52,10 @@ def handle_http_error(
             err=True,
         )
 
-    sys.exit(1)
+    raise click.ClickException(f"{operation} failed with status {status_code}")
 
 
-def _handle_unauthorized_error(ctx: "Context") -> None:
+def _handle_unauthorized_error(ctx: Context) -> None:
     """Handle 401 Unauthorized errors."""
     click.echo(
         "Authentication failed: Your credentials are invalid or expired.", err=True
@@ -69,7 +71,7 @@ def _handle_unauthorized_error(ctx: "Context") -> None:
         click.echo("Please run 'tensorlake login' to re-authenticate.", err=True)
 
 
-def _handle_forbidden_error(ctx: "Context", operation: str) -> None:
+def _handle_forbidden_error(ctx: Context, operation: str) -> None:
     """Handle 403 Forbidden errors."""
     click.echo(f"Permission denied while {operation}.", err=True)
     click.echo("", err=True)
@@ -130,7 +132,7 @@ def _handle_generic_error(e: httpx.HTTPStatusError, operation: str) -> None:
         pass
 
 
-def show_current_config(ctx: "Context") -> None:
+def show_current_config(ctx: Context) -> None:
     """
     Display current configuration with sources.
 
