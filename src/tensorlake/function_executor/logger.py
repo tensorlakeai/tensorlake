@@ -5,6 +5,8 @@ import sys
 import traceback
 from typing import Any, Dict
 
+from .cloud_events import new_cloud_event
+
 # Logger with interface similar to structlog library.
 # We need a separate logging library to make sure that no customer code is using it so
 # we don't leak customer data into FE logs. The FE logs are currently logged to stdout
@@ -52,13 +54,12 @@ class FunctionExecutorLogger:
         context: Dict[str, Any] = self._context.copy()
         context.update(kwargs)
         context["level"] = level
-        context["timestamp"] = (
-            datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
-        )
         context["event"] = message
+
         if "exc_info" in context:
             context["exception"] = "".join(
                 traceback.format_exception(context["exc_info"])
             )
             del context["exc_info"]
-        return json.dumps(context)
+
+        return json.dumps(new_cloud_event(context))
