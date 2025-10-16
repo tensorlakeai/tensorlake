@@ -2,7 +2,6 @@ import click
 
 from . import (
     _common,
-    applications,
     auth,
     deploy,
     init,
@@ -86,7 +85,6 @@ cli.add_command(auth.login)
 cli.add_command(auth.whoami)
 cli.add_command(init.init)
 cli.add_command(deploy.deploy)
-cli.add_command(applications.application)
 cli.add_command(requests.request)
 cli.add_command(secrets.secrets)
 cli.add_command(parse.parse)

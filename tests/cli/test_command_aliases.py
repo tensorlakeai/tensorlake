@@ -14,7 +14,6 @@ class TestCommandAliases(unittest.TestCase):
 
         # Test all main commands with exact names
         test_cases = [
-            "application",
             "request",
             "secrets",
             "deploy",
@@ -31,15 +30,6 @@ class TestCommandAliases(unittest.TestCase):
                     0,
                     f"Command '{cmd}' failed: {result.output}",
                 )
-
-    def test_application_alias_app(self):
-        """Test that 'app' works as alias for 'application'"""
-        runner = CliRunner()
-        result = runner.invoke(cli, ["app", "--help"], prog_name="tensorlake")
-
-        self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
-        # Should show the full command name in help
-        self.assertIn("application", result.output.lower())
 
     def test_request_alias_req(self):
         """Test that 'req' works as alias for 'request'"""
@@ -92,30 +82,6 @@ class TestCommandAliases(unittest.TestCase):
 
 class TestSubcommandsWithAliases(unittest.TestCase):
     """Test that subcommands work correctly when parent command is aliased"""
-
-    def test_app_list_subcommand(self):
-        """Test that 'app list' works (application list via alias)"""
-        runner = CliRunner()
-        result = runner.invoke(cli, ["app", "list", "--help"], prog_name="tensorlake")
-
-        self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
-        self.assertIn("list", result.output.lower())
-
-    def test_app_info_subcommand(self):
-        """Test that 'app info' works (application info via alias)"""
-        runner = CliRunner()
-        result = runner.invoke(cli, ["app", "info", "--help"], prog_name="tensorlake")
-
-        self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
-        self.assertIn("info", result.output.lower())
-
-    def test_app_logs_subcommand(self):
-        """Test that 'app logs' works (application logs via alias)"""
-        runner = CliRunner()
-        result = runner.invoke(cli, ["app", "logs", "--help"], prog_name="tensorlake")
-
-        self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
-        self.assertIn("logs", result.output.lower())
 
     def test_req_list_subcommand(self):
         """Test that 'req list' works (request list via alias)"""
@@ -182,7 +148,6 @@ class TestVariousAliasPrefixes(unittest.TestCase):
         runner = CliRunner()
 
         test_cases = [
-            ("ap", "application"),
             ("re", "request"),
             ("se", "secrets"),
             ("de", "deploy"),
@@ -205,7 +170,6 @@ class TestVariousAliasPrefixes(unittest.TestCase):
         runner = CliRunner()
 
         test_cases = [
-            ("applic", "application"),
             ("reque", "request"),
             ("secre", "secrets"),
             ("deplo", "deploy"),
@@ -254,21 +218,21 @@ class TestCaseInsensitivity(unittest.TestCase):
     def test_uppercase_alias(self):
         """Test that uppercase aliases work"""
         runner = CliRunner()
-        result = runner.invoke(cli, ["APP", "--help"], prog_name="tensorlake")
+        result = runner.invoke(cli, ["REQ", "--help"], prog_name="tensorlake")
 
         self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
 
     def test_mixed_case_alias(self):
         """Test that mixed case aliases work"""
         runner = CliRunner()
-        result = runner.invoke(cli, ["ApP", "--help"], prog_name="tensorlake")
+        result = runner.invoke(cli, ["ReQ", "--help"], prog_name="tensorlake")
 
         self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
 
     def test_lowercase_alias(self):
         """Test that lowercase aliases work (should be default)"""
         runner = CliRunner()
-        result = runner.invoke(cli, ["app", "--help"], prog_name="tensorlake")
+        result = runner.invoke(cli, ["req", "--help"], prog_name="tensorlake")
 
         self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
 
@@ -284,7 +248,6 @@ class TestAliasesNotInHelpList(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
 
         # Should show full command names
-        self.assertIn("application", result.output.lower())
         self.assertIn("request", result.output.lower())
         self.assertIn("secrets", result.output.lower())
 
