@@ -41,7 +41,9 @@ class TestWhoamiNotAuthenticated(unittest.TestCase):
         result = runner.invoke(cli, ["whoami"], prog_name="tensorlake")
 
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("You are not logged in and have not provided an API key", result.output)
+        self.assertIn(
+            "You are not logged in and have not provided an API key", result.output
+        )
         self.assertIn("tensorlake login", result.output)
         self.assertIn("tensorlake --help", result.output)
 
@@ -223,7 +225,8 @@ class TestWhoamiWithAPIKey(unittest.TestCase):
 
         runner = CliRunner()
         result = runner.invoke(
-            cli, ["--api-key", "test_api_key", "whoami", "-o", "json"],
+            cli,
+            ["--api-key", "test_api_key", "whoami", "-o", "json"],
             prog_name="tensorlake",
         )
 
