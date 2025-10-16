@@ -91,9 +91,7 @@ class TestLoginSuccessFlow(unittest.TestCase):
         self.assertIn("Login successful", result.output)
 
         # Verify browser was opened
-        mock_browser.assert_called_once_with(
-            "https://cloud.tensorlake.ai/cli/login"
-        )
+        mock_browser.assert_called_once_with("https://cloud.tensorlake.ai/cli/login")
 
         # Verify credentials were saved
         self.assertTrue(self.credentials_path.exists())
@@ -381,9 +379,7 @@ class TestLoginBrowserHandling(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0)
         self.assertIn("Failed to open web browser", result.output)
-        self.assertIn(
-            "please open the following url manually", result.output.lower()
-        )
+        self.assertIn("please open the following url manually", result.output.lower())
         self.assertIn("https://cloud.tensorlake.ai/cli/login", result.output)
         self.assertIn("MANUAL-CODE", result.output)
 
@@ -411,9 +407,7 @@ class TestLoginBrowserHandling(unittest.TestCase):
             result = runner.invoke(cli, ["login"], prog_name="tensorlake")
 
         self.assertEqual(result.exit_code, 0)
-        mock_browser.assert_called_once_with(
-            "https://cloud.tensorlake.ai/cli/login"
-        )
+        mock_browser.assert_called_once_with("https://cloud.tensorlake.ai/cli/login")
 
 
 class TestLoginCredentialStorage(unittest.TestCase):
@@ -480,9 +474,7 @@ class TestLoginCredentialStorage(unittest.TestCase):
 
         # Check endpoint-scoped format
         self.assertIn("https://api.tensorlake.ai", credentials)
-        self.assertEqual(
-            credentials["https://api.tensorlake.ai"]["token"], test_token
-        )
+        self.assertEqual(credentials["https://api.tensorlake.ai"]["token"], test_token)
 
     @respx.mock
     def test_credentials_file_has_secure_permissions(self):

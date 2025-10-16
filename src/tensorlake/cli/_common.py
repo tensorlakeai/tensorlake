@@ -157,7 +157,9 @@ class Context:
                 if self.debug:
                     click.echo("", err=True)
                     click.echo("Technical details:", err=True)
-                    click.echo(f"  Status: {status_code} {e.response.reason_phrase}", err=True)
+                    click.echo(
+                        f"  Status: {status_code} {e.response.reason_phrase}", err=True
+                    )
                     click.echo(f"  URL: {e.request.url}", err=True)
                     if e.response.text:
                         click.echo(f"  Response: {e.response.text}", err=True)
@@ -168,7 +170,9 @@ class Context:
                         err=True,
                     )
 
-                raise click.ClickException(f"API key validation failed with status {status_code}")
+                raise click.ClickException(
+                    f"API key validation failed with status {status_code}"
+                )
         return self._introspect_response
 
     def has_authentication(self) -> bool:
@@ -311,7 +315,12 @@ class Context:
     @classmethod
     def _resolve_project_config(
         cls, organization_id: str | None, project_id: str | None, local_config: dict
-    ) -> tuple[str | None, Literal["cli", "config"] | None, str | None, Literal["cli", "config"] | None]:
+    ) -> tuple[
+        str | None,
+        Literal["cli", "config"] | None,
+        str | None,
+        Literal["cli", "config"] | None,
+    ]:
         """Resolve organization and project IDs from CLI args or local config.
 
         Note: Organization and project IDs are NOT loaded from global config.

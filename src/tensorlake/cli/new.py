@@ -26,7 +26,7 @@ def {function_name}(name: str) -> str:
 '''
 
 # Template for the generated README file
-README_TEMPLATE = '''# {app_name}
+README_TEMPLATE = """# {app_name}
 
 A Tensorlake application created with `tensorlake new`.
 
@@ -73,7 +73,7 @@ print(output)
 - [Dependency Management](https://docs.tensorlake.ai/applications/images) - Add packages
 - [Parallel Processing](https://docs.tensorlake.ai/applications/map-reduce) - Scale with map-reduce
 - [Complete Documentation](https://docs.tensorlake.ai)
-'''
+"""
 
 
 def to_snake_case(name: str) -> str:
@@ -118,19 +118,29 @@ def validate_app_name(name: str) -> tuple[bool, str]:
 
     # Check for invalid characters (before conversion)
     if not re.match(r"^[a-zA-Z0-9_\-\s]+$", name):
-        return False, "Application name can only contain letters, numbers, hyphens, underscores, and spaces"
+        return (
+            False,
+            "Application name can only contain letters, numbers, hyphens, underscores, and spaces",
+        )
 
     # Convert to snake_case for validation
     snake_name = to_snake_case(name)
 
     # Check if it's a valid Python identifier
     if not snake_name.isidentifier():
-        return False, f"'{snake_name}' is not a valid Python identifier. Names must start with a letter or underscore."
+        return (
+            False,
+            f"'{snake_name}' is not a valid Python identifier. Names must start with a letter or underscore.",
+        )
 
     # Check if it's a Python keyword
     import keyword
+
     if keyword.iskeyword(snake_name):
-        return False, f"'{snake_name}' is a Python keyword and cannot be used as an application name"
+        return (
+            False,
+            f"'{snake_name}' is a Python keyword and cannot be used as an application name",
+        )
 
     return True, ""
 

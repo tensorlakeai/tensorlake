@@ -35,6 +35,7 @@ class ApplicationListItem(BaseModel):
     tombstoned: bool = False
     created_at: int | None = None
 
+
 logger = logging.getLogger("tensorlake")
 
 

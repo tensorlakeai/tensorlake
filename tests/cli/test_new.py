@@ -70,9 +70,7 @@ class TestNewCommandSuccess(unittest.TestCase):
     def test_success_message_format(self):
         """Test that success message includes next steps"""
         runner = CliRunner()
-        result = runner.invoke(
-            cli, ["new", "test-app", "--path", str(self.test_dir)]
-        )
+        result = runner.invoke(cli, ["new", "test-app", "--path", str(self.test_dir)])
 
         self.assertIn("Next steps:", result.output)
         self.assertIn("Deploy:", result.output)
@@ -104,9 +102,7 @@ class TestNameConversion(unittest.TestCase):
     def test_camel_case_conversion(self):
         """Test camelCase is converted to snake_case"""
         runner = CliRunner()
-        result = runner.invoke(
-            cli, ["new", "myCoolApp", "--path", str(self.test_dir)]
-        )
+        result = runner.invoke(cli, ["new", "myCoolApp", "--path", str(self.test_dir)])
 
         self.assertEqual(result.exit_code, 0)
         self.assertTrue((self.test_dir / "my_cool_app.py").exists())
@@ -114,9 +110,7 @@ class TestNameConversion(unittest.TestCase):
     def test_pascal_case_conversion(self):
         """Test PascalCase is converted to snake_case"""
         runner = CliRunner()
-        result = runner.invoke(
-            cli, ["new", "MyCoolApp", "--path", str(self.test_dir)]
-        )
+        result = runner.invoke(cli, ["new", "MyCoolApp", "--path", str(self.test_dir)])
 
         self.assertEqual(result.exit_code, 0)
         self.assertTrue((self.test_dir / "my_cool_app.py").exists())

@@ -82,7 +82,9 @@ class TestApplicationsList(unittest.TestCase):
             ),
         ]
 
-        with patch("tensorlake.applications.remote.api_client.APIClient.applications") as mock_apps:
+        with patch(
+            "tensorlake.applications.remote.api_client.APIClient.applications"
+        ) as mock_apps:
             mock_apps.return_value = applications
             result = runner.invoke(cli, ["ls"])
 
@@ -108,7 +110,9 @@ class TestApplicationsList(unittest.TestCase):
             ),
         ]
 
-        with patch("tensorlake.applications.remote.api_client.APIClient.applications") as mock_apps:
+        with patch(
+            "tensorlake.applications.remote.api_client.APIClient.applications"
+        ) as mock_apps:
             mock_apps.return_value = applications
             result = runner.invoke(cli, ["ls"])
 
@@ -121,7 +125,9 @@ class TestApplicationsList(unittest.TestCase):
         """Test listing when no applications exist"""
         runner = CliRunner()
 
-        with patch("tensorlake.applications.remote.api_client.APIClient.applications") as mock_apps:
+        with patch(
+            "tensorlake.applications.remote.api_client.APIClient.applications"
+        ) as mock_apps:
             mock_apps.return_value = []
             result = runner.invoke(cli, ["ls"])
 
@@ -151,7 +157,9 @@ class TestApplicationsList(unittest.TestCase):
             ),
         ]
 
-        with patch("tensorlake.applications.remote.api_client.APIClient.applications") as mock_apps:
+        with patch(
+            "tensorlake.applications.remote.api_client.APIClient.applications"
+        ) as mock_apps:
             mock_apps.return_value = applications
             result = runner.invoke(cli, ["ls"])
 
@@ -175,7 +183,9 @@ class TestApplicationsList(unittest.TestCase):
             ),
         ]
 
-        with patch("tensorlake.applications.remote.api_client.APIClient.applications") as mock_apps:
+        with patch(
+            "tensorlake.applications.remote.api_client.APIClient.applications"
+        ) as mock_apps:
             mock_apps.return_value = applications
             result = runner.invoke(cli, ["ls"])
 
@@ -201,7 +211,9 @@ class TestApplicationsList(unittest.TestCase):
             ),
         ]
 
-        with patch("tensorlake.applications.remote.api_client.APIClient.applications") as mock_apps:
+        with patch(
+            "tensorlake.applications.remote.api_client.APIClient.applications"
+        ) as mock_apps:
             mock_apps.return_value = applications
             result = runner.invoke(cli, ["ls"])
 
@@ -227,7 +239,9 @@ class TestApplicationsList(unittest.TestCase):
             ),
         ]
 
-        with patch("tensorlake.applications.remote.api_client.APIClient.applications") as mock_apps:
+        with patch(
+            "tensorlake.applications.remote.api_client.APIClient.applications"
+        ) as mock_apps:
             mock_apps.return_value = applications
             result = runner.invoke(cli, ["ls"])
 
@@ -249,7 +263,9 @@ class TestApplicationsList(unittest.TestCase):
             ),
         ]
 
-        with patch("tensorlake.applications.remote.api_client.APIClient.applications") as mock_apps:
+        with patch(
+            "tensorlake.applications.remote.api_client.APIClient.applications"
+        ) as mock_apps:
             mock_apps.return_value = applications
             result = runner.invoke(cli, ["ls"])
 
@@ -271,7 +287,9 @@ class TestApplicationsList(unittest.TestCase):
             ),
         ]
 
-        with patch("tensorlake.applications.remote.api_client.APIClient.applications") as mock_apps:
+        with patch(
+            "tensorlake.applications.remote.api_client.APIClient.applications"
+        ) as mock_apps:
             mock_apps.return_value = applications
             result = runner.invoke(cli, ["ls"])
 
