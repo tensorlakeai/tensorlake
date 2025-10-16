@@ -24,6 +24,12 @@ Authentication:
     version=_common.VERSION, package_name="tensorlake", prog_name="tensorlake"
 )
 @click.option(
+    "--debug",
+    is_flag=True,
+    envvar="TENSORLAKE_DEBUG",
+    help="Show detailed error information and stack traces",
+)
+@click.option(
     "--api-url",
     "base_url",
     envvar="TENSORLAKE_API_URL",
@@ -66,6 +72,7 @@ Authentication:
 @click.pass_context
 def cli(
     ctx: click.Context,
+    debug: bool,
     base_url: str | None,
     cloud_url: str | None,
     api_key: str | None,
@@ -85,6 +92,7 @@ def cli(
         namespace=namespace,
         organization_id=organization_id,
         project_id=project_id,
+        debug=debug,
     )
 
 

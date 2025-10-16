@@ -2,10 +2,12 @@ from datetime import datetime, timezone
 from typing import Dict, List, Tuple
 
 import click
+import httpx
 from rich.console import Console
 from rich.table import Table
 
 from tensorlake.cli._common import Context, require_auth_and_project
+from tensorlake.cli._errors import handle_http_error
 
 
 @click.group()
@@ -133,11 +135,15 @@ def unset(ctx: Context, secret_names: str):
 
 
 def _get_all_existing_secrets(ctx: Context) -> List[dict]:
-    resp = ctx.client.get(
-        f"/platform/v1/organizations/{ctx.organization_id}/projects/{ctx.project_id}/secrets?pageSize=100"
-    )
-    resp.raise_for_status()
-    return resp.json()["items"]
+    try:
+        resp = ctx.client.get(
+            f"/platform/v1/organizations/{ctx.organization_id}/projects/{ctx.project_id}/secrets?pageSize=100"
+        )
+        resp.raise_for_status()
+        return resp.json()["items"]
+    except httpx.HTTPStatusError as e:
+        handle_http_error(e, ctx, "fetching secrets")
+        return []  # Unreachable, but satisfies type checker
 
 
 def warning_missing_secrets(

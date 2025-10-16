@@ -24,10 +24,19 @@ def whoami(ctx: Context, output: str):
     # Check if user is authenticated
     if not ctx.has_authentication():
         if output == "json":
-            print(json.dumps({"authenticated": False, "message": "Not logged in and no API key provided"}))
+            print(
+                json.dumps(
+                    {
+                        "authenticated": False,
+                        "message": "Not logged in and no API key provided",
+                    }
+                )
+            )
         else:
             click.echo("You are not logged in and have not provided an API key.")
-            click.echo("Run 'tensorlake login' to authenticate, or see 'tensorlake --help' for API key options.")
+            click.echo(
+                "Run 'tensorlake login' to authenticate, or see 'tensorlake --help' for API key options."
+            )
         return
 
     data = {

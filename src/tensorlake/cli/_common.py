@@ -37,9 +37,12 @@ class Context:
     configured_project_id: str | None = None
     configured_organization_id: str | None = None
     version: str = VERSION
+    debug: bool = False
     _client: httpx.Client | None = None
     _introspect_response: httpx.Response | None = None
     _api_client: APIClient | None = None
+    _cli_organization_id: str | None = None
+    _cli_project_id: str | None = None
 
     @property
     def client(self) -> httpx.Client:
@@ -112,17 +115,35 @@ class Context:
 
     def _introspect(self) -> httpx.Response:
         if self._introspect_response is None:
-            introspect_response = self.client.post("/platform/v1/keys/introspect")
-            if introspect_response.status_code == 401:
-                raise click.UsageError(
-                    "The Tensorlake API key is not valid. Please supply the API key with the `--api-key` flag, or run `tensorlake login` to authenticate you."
-                )
-            if introspect_response.status_code == 404:
-                raise click.ClickException(
-                    f"The server at {self.base_url} doesn't support Tensorlake API introspection"
-                )
-            introspect_response.raise_for_status()
-            self._introspect_response = introspect_response
+            try:
+                introspect_response = self.client.post("/platform/v1/keys/introspect")
+                if introspect_response.status_code == 401:
+                    click.echo(
+                        "The TensorLake API key is not valid.",
+                        err=True,
+                    )
+                    click.echo(
+                        "Please supply a valid API key with the `--api-key` flag, or run `tensorlake login` to authenticate.",
+                        err=True,
+                    )
+                    sys.exit(1)
+                if introspect_response.status_code == 404:
+                    click.echo(
+                        f"The server at {self.base_url} doesn't support TensorLake API introspection.",
+                        err=True,
+                    )
+                    click.echo(
+                        "Please check your API URL or contact support.",
+                        err=True,
+                    )
+                    sys.exit(1)
+                introspect_response.raise_for_status()
+                self._introspect_response = introspect_response
+            except httpx.HTTPStatusError as e:
+                # Import here to avoid circular dependency
+                from tensorlake.cli._errors import handle_http_error
+
+                handle_http_error(e, self, "validating API key")
         return self._introspect_response
 
     def has_authentication(self) -> bool:
@@ -150,6 +171,42 @@ class Context:
         # Have PAT but missing org/project
         return not self.has_org_and_project()
 
+    def get_organization_source(self) -> str:
+        """
+        Get the source of the organization ID.
+
+        Returns:
+            Description of where the organization ID came from
+        """
+        if self.api_key:
+            return "API key introspection"
+
+        if self._cli_organization_id:
+            return "CLI flag or environment variable"
+
+        if self.configured_organization_id:
+            return "local config (.tensorlake.toml)"
+
+        return "not configured"
+
+    def get_project_source(self) -> str:
+        """
+        Get the source of the project ID.
+
+        Returns:
+            Description of where the project ID came from
+        """
+        if self.api_key:
+            return "API key introspection"
+
+        if self._cli_project_id:
+            return "CLI flag or environment variable"
+
+        if self.configured_project_id:
+            return "local config (.tensorlake.toml)"
+
+        return "not configured"
+
     @classmethod
     def default(
         cls,
@@ -160,6 +217,7 @@ class Context:
         namespace: str | None = None,
         organization_id: str | None = None,
         project_id: str | None = None,
+        debug: bool = False,
     ) -> "Context":
         """Create a Context with values from CLI args, environment, saved config, or defaults."""
         # Load both local and global config
@@ -220,6 +278,9 @@ class Context:
             namespace=final_namespace,
             configured_project_id=final_configured_project_id,
             configured_organization_id=final_configured_organization_id,
+            debug=debug,
+            _cli_organization_id=organization_id,
+            _cli_project_id=project_id,
         )
 
 
