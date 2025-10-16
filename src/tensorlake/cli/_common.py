@@ -399,5 +399,3 @@ class AliasedGroup(click.Group):
         """
         _, cmd, args = super().resolve_command(ctx, args)
         return cmd.name, cmd, args
-
-
