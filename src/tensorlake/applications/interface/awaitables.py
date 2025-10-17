@@ -416,3 +416,8 @@ class ReduceOperationFuture(Future):
     @property
     def awaitable(self) -> ReduceOperationAwaitable:
         return self._awaitable
+
+
+# ListFuture and AwaitableList are not yet supported by runtime (and server).
+RuntimeFutureTypes = FunctionCallFuture | ReduceOperationFuture
+RuntimeAwaitableTypes = FunctionCallAwaitable | ReduceOperationAwaitable

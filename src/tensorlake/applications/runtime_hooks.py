@@ -9,7 +9,11 @@ Future = TypeVar("Future")
 
 # (Futures, timeout: float | None, return_when: int) -> List[Any]
 __wait_futures: (
-    Callable[[List[Future], float | None, int], tuple[List[Any], List[Future]]] | None
+    Callable[
+        [List[Future], float | None, int],
+        tuple[List[Any], tuple[List[Future], List[Future]]],
+    ]
+    | None
 ) = None
 
 
