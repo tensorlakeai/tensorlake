@@ -5,12 +5,12 @@ from typing import Any, Callable, List, TypeVar
 # Type vars to make it clear what we expect without importing the corresponding SDK classes.
 # This avoids circular dependencies.
 Future = TypeVar("Future")
-# Either a FunctionCallFuture or a ReduceOperationFuture
-FunctionCall = TypeVar("FunctionCall")
 
 
 # (Futures, timeout: float | None, return_when: int) -> List[Any]
-__wait_futures: Callable[[List[Future], float | None, int], List[Any]] | None = None
+__wait_futures: (
+    Callable[[List[Future], float | None, int], tuple[List[Any], List[Future]]] | None
+) = None
 
 
 def wait_futures(
@@ -20,6 +20,7 @@ def wait_futures(
 
     The future's results (value or exception) are set on return.
     Returns a tuple of two lists: (done_futures, not_done_futures).
+    This is similar to https://docs.python.org/3/library/concurrent.futures.html#concurrent.futures.wait.
     """
     global __wait_futures
     if __wait_futures is None:
@@ -40,25 +41,26 @@ def set_wait_futures_hook(hook: Any) -> None:
     __wait_futures = hook
 
 
-__run_function_calls: Callable[[List[FunctionCall]], List[Future]] = None
+__run_futures: Callable[[List[Future], float | None], None] = None
 
 
-def run_function_calls(function_calls: List[FunctionCall]) -> List[Future]:
-    """Starts running the given function calls and returns their Futures."""
-    global __run_function_calls
-    if __run_function_calls is None:
+def run_futures(futures: List[Future], start_delay: float | None) -> None:
+    """Starts running the given futures in background with the given delay.
+
+    Future results are set when the futures complete.
+    """
+    global __run_futures
+    if __run_futures is None:
+        raise RuntimeError("Internal error: __run_futures runtime hook not initialized")
+
+    return __run_futures(futures, start_delay)
+
+
+def set_run_futures_hook(hook: Any) -> None:
+    global __run_futures
+    if __run_futures is not None:
         raise RuntimeError(
-            "Internal error: __run_function_calls runtime hook not initialized"
+            "Internal error: __run_futures runtime hook already initialized"
         )
 
-    return __run_function_calls(function_calls)
-
-
-def set_run_function_calls_hook(hook: Any) -> None:
-    global __run_function_calls
-    if __run_function_calls is not None:
-        raise RuntimeError(
-            "Internal error: __run_function_calls runtime hook already initialized"
-        )
-
-    __run_function_calls = hook
+    __run_futures = hook
