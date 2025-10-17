@@ -1,10 +1,5 @@
 import inspect
-from typing import (
-    Any,
-    Dict,
-    List,
-    Union,
-)
+from typing import Any, Dict, List, Union
 
 from pydantic import BaseModel
 from typing_extensions import get_args, get_origin, get_type_hints
@@ -143,6 +138,11 @@ def _type_hint_json_schema(type_hint) -> Dict[str, str]:
         return {"type": "number"}
     elif type_hint is bool:
         return {"type": "boolean"}
+    elif inspect.isclass(type_hint) and issubclass(type_hint, BaseModel):
+        if hasattr(type_hint, "model_json_schema"):
+            return type_hint.model_json_schema()
+        else:
+            return {"type": "object", "description": f"{type_hint.__name__} object"}
     elif hasattr(type_hint, "__name__"):
         # For custom classes, assume object type
         return {"type": "object", "description": f"{type_hint.__name__} object"}
