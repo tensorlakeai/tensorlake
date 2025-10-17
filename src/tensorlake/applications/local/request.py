@@ -5,18 +5,22 @@ from ..interface.request import Request
 
 
 class LocalRequest(Request):
-    def __init__(self, id: str, output: Any | None, exception: BaseException | None):
+    def __init__(
+        self,
+        id: str,
+        output: Any | None,
+        exception: RequestFailureException | RequestError | None,
+    ):
+        """A local request that has completed running.
+
+        Either `output` or `exception` must be set, but not both.
+        """
         super().__init__(id)
         self._output: Any | None = output
-        self._exception: BaseException | None = exception
+        self._exception: RequestFailureException | RequestError | None = exception
 
     def output(self) -> Any:
-        if isinstance(self._exception, RequestError):
-            raise self._exception
-
         if self._exception is not None:
-            raise RequestFailureException(
-                "Request failed due to exception"
-            ) from self._exception
-
-        return self._output
+            raise self._exception
+        else:
+            return self._output

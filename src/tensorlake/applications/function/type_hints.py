@@ -51,7 +51,7 @@ def deserialize_type_hints(serialized_type_hints: bytes) -> List[Any]:
 def _function_signature(function: Function) -> inspect.Signature:
     # Common approach to getting the function signatures.
     return inspect.signature(
-        function.original_function,
+        function._original_function,
         follow_wrapped=False,
         eval_str=False,
     )

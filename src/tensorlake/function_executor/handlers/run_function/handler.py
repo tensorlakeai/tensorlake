@@ -15,8 +15,8 @@ from tensorlake.applications.function.function_call import (
     set_self_arg,
 )
 from tensorlake.applications.function.reducer_call import reducer_function_call
+from tensorlake.applications.interface.call_tree import RegularFunctionCall
 from tensorlake.applications.interface.function import Function
-from tensorlake.applications.interface.function_call import RegularFunctionCall
 from tensorlake.applications.request_context.contextvar import (
     set_current_request_context,
 )
@@ -97,6 +97,7 @@ class Handler:
             log_user_event_allocations_finished(event_details)
 
     def _run(self) -> AllocationResult:
+        # TODO: input deserialization should be treated as customer code execution.
         function_call: RegularFunctionCall = self._reconstruct_function_call()
         if self._function_instance_arg is not None:
             set_self_arg(function_call, self._function_instance_arg)
@@ -107,6 +108,7 @@ class Handler:
         except BaseException as e:
             return self._response_helper.from_function_exception(e)
 
+        # TODO: output serialization should be treated as customer code execution.
         return self._response_helper.from_function_output(
             output=output,
             output_serializer_override=self._function_output_serializer_override,
@@ -128,7 +130,6 @@ class Handler:
                 )
                 self._function_output_serializer_override = call_metadata.oso
                 return RegularFunctionCallNode.from_serialized(
-                    node_metadata.nid,
                     self._function_ref.function_name,
                     node_metadata.metadata,
                     downloaded_args,
@@ -150,7 +151,7 @@ class Handler:
                     f"Received function call with unexpected function call node metadata type: {node_metadata.type}"
                 )
         else:
-            if self._function.application_config is None:
+            if self._function._application_config is None:
                 raise ValueError(
                     "Non-application function was called without SDK metadata"
                 )
@@ -172,8 +173,8 @@ class Handler:
         start_time = time.monotonic()
 
         try:
-            return self._function.original_function(
-                *function_call.args, **function_call.kwargs
+            return self._function._original_function(
+                *function_call._args, **function_call._kwargs
             )
         finally:
             self._logger.info(

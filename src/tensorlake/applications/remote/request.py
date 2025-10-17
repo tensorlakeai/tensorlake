@@ -2,9 +2,9 @@ import base64
 from typing import Any, List
 
 from ..function.type_hints import deserialize_type_hints
-from ..interface.file import File
+from ..function.user_data_serializer import deserialize_value
 from ..interface.request import Request
-from ..user_data_serializer import UserDataSerializer, serializer_by_name
+from ..user_data_serializer import serializer_by_name
 from .api_client import APIClient
 from .manifests.application import ApplicationManifest
 
@@ -46,25 +46,19 @@ class RemoteRequest(Request):
             output_type_hints_base64.encode("utf-8")
         )
         try:
-            output_type_hints: List[Any] = deserialize_type_hints(
+            return_type_hints: List[Any] = deserialize_type_hints(
                 serialized_output_type_hints
             )
         except Exception:
             # If we can't deserialize type hints, we just assume no type hints.
             # This usually happens when the application function return types are not loaded into current process.
-            output_type_hints: List[Any] = []
+            return_type_hints: List[Any] = []
 
-        is_file_output: bool = False
-        for type_hint in output_type_hints:
-            if type_hint is File:
-                is_file_output = True
-
-        if is_file_output:
-            return File(content=serialized_output, content_type=output_content_type)
-        else:
-            api_output_serializer: UserDataSerializer = serializer_by_name(
+        return deserialize_value(
+            serialized_value=serialized_output,
+            serialized_value_content_type=output_content_type,
+            serializer=serializer_by_name(
                 self._application_manifest.entrypoint.output_serializer
-            )
-            return api_output_serializer.deserialize(
-                serialized_output, output_type_hints
-            )
+            ),
+            type_hints=return_type_hints,
+        )
