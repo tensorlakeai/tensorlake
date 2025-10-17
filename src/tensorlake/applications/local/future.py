@@ -1,16 +1,13 @@
 import time
 
-from ..interface.awaitables import FunctionCallFuture
+from ..interface.awaitables import Future
 
 
 class LocalFuture:
-    """Represents an SDK Future with additional metadata used by LocalRunner.
+    """Represents an SDK Future with additional metadata used by LocalRunner."""
 
-    Currently only stored as FunctionCallFuture.
-    """
-
-    def __init__(self, future: FunctionCallFuture, start_delay: float | None):
-        self._future: FunctionCallFuture = future
+    def __init__(self, user_future: Future, start_delay: float | None):
+        self._user_future: Future = user_future
         self._start_time: float | None = (
             None if start_delay is None else (time.time() + start_delay)
         )
@@ -25,11 +22,11 @@ class LocalFuture:
 
     @property
     def id(self) -> str:
-        return self._future.id
+        return self._user_future.id
 
     @property
-    def future(self) -> FunctionCallFuture:
-        return self._future
+    def user_future(self) -> Future:
+        return self._user_future
 
     @property
     def start_time_elapsed(self) -> bool:
