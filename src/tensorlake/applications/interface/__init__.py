@@ -1,6 +1,7 @@
 # Import here all public Applications SDK interfaces.
 # No imports outside of the interface Applications SDK package are allowed here.
 
+from .awaitables import Awaitable, Future
 from .decorators import application, cls, function
 from .exceptions import (
     ApplicationValidationError,
@@ -11,7 +12,6 @@ from .exceptions import (
 )
 from .file import File
 from .function import Function
-from .futures import Future
 from .image import Image
 from .request import Request
 from .request_context import (
@@ -34,6 +34,7 @@ __all__ = [
     "run_remote_application",
     "function",
     "ApplicationValidationError",
+    "Awaitable",
     "File",
     "Function",
     "Future",

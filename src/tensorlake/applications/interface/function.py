@@ -1,9 +1,8 @@
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List
 
-from .awaitable import (
+from .awaitables import (
     Awaitable,
-    AwaitableList,
     FunctionCallAwaitable,
     _InitialMissing,
     _InitialMissingType,
@@ -58,8 +57,8 @@ class Function:
         self._original_function: Callable = original_function
         self._function_config: _FunctionConfiguration | None = None
         self._application_config: _ApplicationConfiguration | None = None
-        self._awaitables_factory: _FunctionAwaitablesFactory = (
-            _FunctionAwaitablesFactory(self)
+        self._awaitables_factory: FunctionAwaitablesFactory = FunctionAwaitablesFactory(
+            self
         )
 
     def __call__(self, *args, **kwargs) -> Any:
@@ -114,7 +113,7 @@ class Function:
         )
 
     @property
-    def awaitable(self) -> "_FunctionAwaitablesFactory":
+    def awaitable(self) -> "FunctionAwaitablesFactory":
         """Returns function factory for creating awaitables."""
         return self._awaitables_factory
 
@@ -146,7 +145,7 @@ class Function:
         )
 
 
-class _FunctionAwaitablesFactory:
+class FunctionAwaitablesFactory:
     """Factory for creating awaitables for a specific Tensorlake Function.
 
     This class is returned by Function.awaitable property.
