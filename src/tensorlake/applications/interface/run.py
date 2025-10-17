@@ -1,11 +1,9 @@
 from typing import Any
 
-from ..function.user_data_serializer import function_input_serializer
 from ..local.runner import LocalRunner
 from ..registry import get_function
 
 # from ..remote.runner import RemoteRunner
-from ..user_data_serializer import UserDataSerializer
 from .function import Function
 from .request import Request
 
@@ -20,13 +18,14 @@ def run_application():
 
 def run_local_application(application: Function | str, payload: Any) -> Request:
     """Runs the application function locally with the given payload and returns the request."""
-    # TODO: validate the graph.
+    # TODO: validate the application.
     # TODO: validate that the supplied function is an API function.
 
     if isinstance(application, str):
         application: Function = get_function(application)
 
-    return LocalRunner(app=application, app_payload=payload).run()
+    with LocalRunner(app=application, app_payload=payload) as runner:
+        return runner.run()
 
 
 # Commented out while reimplementing remote runners.
