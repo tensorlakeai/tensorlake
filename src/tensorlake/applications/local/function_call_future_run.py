@@ -24,52 +24,44 @@ from .future_run import (
 )
 
 
-class LocalFunctionCallFutureRun(LocalFutureRun):
-    """Runs a function call in a separate thread and returns its results in a queue.
-
-    The function call must has all its data dependecies resolved.
-    """
+class FunctionCallFutureRun(LocalFutureRun):
+    """LocalFutureRun that runs a function call and returns its result."""
 
     def __init__(
         self,
-        application: Function,
-        function: Function,
         local_future: LocalFuture,
-        class_instance: Any | None,
-        request_context: RequestContext,
         result_queue: SimpleQueue,
         thread_pool: ThreadPoolExecutor,
+        application: Function,
+        function: Function,
+        class_instance: Any | None,
+        request_context: RequestContext,
     ):
         super().__init__(
-            application=application,
             local_future=local_future,
-            request_context=request_context,
             result_queue=result_queue,
             thread_pool=thread_pool,
         )
-        if not isinstance(local_future.future, FunctionCallFuture):
+        if not isinstance(local_future.user_future, FunctionCallFuture):
             raise ValueError("local_future must be a LocalFuture of FunctionCallFuture")
+        self._application: Function = application
         self._function: Function = function
         self._class_instance: Any | None = class_instance
+        self._request_context: RequestContext = request_context
 
-    def _run_future(self) -> None:
+    def _run_future(self) -> LocalFutureRunResult:
         context: contextvars.Context = contextvars.Context()
-        result: LocalFutureRunResult = context.run(
-            run_function_call,
+        return context.run(
+            _run_function_call,
             application=self._application,
             function=self._function,
-            awaitable=self._local_future.future.awaitable,
+            awaitable=self._local_future.user_future.awaitable,
             class_instance=self._class_instance,
             request_context=self._request_context,
         )
-        if result.exception is None:
-            self._std_future.set_result(result.output)
-        else:
-            self._std_future.set_exception(result.exception)
-        self._result_queue.put(result)
 
 
-def run_function_call(
+def _run_function_call(
     application: Function,
     function: Function,
     awaitable: FunctionCallAwaitable,
