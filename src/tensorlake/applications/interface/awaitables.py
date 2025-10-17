@@ -418,6 +418,6 @@ class ReduceOperationFuture(Future):
         return self._awaitable
 
 
-# ListFuture and AwaitableList are not yet supported by runtime (and server).
+# ListFuture is not yet supported by runtime (and server).
 RuntimeFutureTypes = FunctionCallFuture | ReduceOperationFuture
-RuntimeAwaitableTypes = FunctionCallAwaitable | ReduceOperationAwaitable
+RuntimeAwaitableTypes = FunctionCallAwaitable | ReduceOperationAwaitable | AwaitableList

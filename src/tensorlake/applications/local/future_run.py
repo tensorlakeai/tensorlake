@@ -7,8 +7,6 @@ from typing import Any
 
 from ..interface.awaitables import Awaitable
 from ..interface.exceptions import RequestError, RequestFailureException
-from ..interface.function import Function
-from ..interface.request_context import RequestContext
 from .future import LocalFuture
 
 
@@ -38,20 +36,22 @@ class LocalFutureRun:
 
     def __init__(
         self,
-        application: Function,
         local_future: LocalFuture,
-        request_context: RequestContext,
         result_queue: SimpleQueue,
         thread_pool: ThreadPoolExecutor,
     ):
-        self._application: Function = application
         self._local_future = local_future
-        self._request_context: RequestContext = request_context
         # Queue to put LocalFutureRunResult into when finished.
         self._result_queue: SimpleQueue = result_queue
         self._thread_pool: ThreadPoolExecutor = thread_pool
-        self._std_future: StdFuture = self._thread_pool.submit(self._wait_run_signal)
-        self._run_event: Event = Event()
+        # Std future that tracks the execution of the user future run in thread pool.
+        # Std future runs as long as the user future is running.
+        # Std future result is always None because user future result is stored in user future itself.
+        self._std_future: StdFuture = self._thread_pool.submit(self._future_entry_point)
+        # Future run waits on this event until all data dependencies in its Awaitable are resolved.
+        self._start_event: Event = Event()
+        # Future run waits on this event until it can exit.
+        self._finish_event: Event = Event()
         # Used to cancel the future run before entering the _run_future method.
         self._cancelled: bool = False
 
@@ -63,23 +63,36 @@ class LocalFutureRun:
     def std_future(self) -> StdFuture:
         return self._std_future
 
-    def run(self) -> None:
-        self._run_event.set()
+    def start(self) -> None:
+        self._start_event.set()
+
+    def finish(self) -> None:
+        self._finish_event.set()
 
     def cancel(self) -> None:
         self._cancelled = True
-        self._run_event.set()
+        self._start_event.set()
+        self._finish_event.set()
 
-    def _wait_run_signal(self) -> None:
-        while not self._run_event.is_set():
-            self._run_event.wait()
+    def _future_entry_point(self) -> None:
+        # Wait until all data dependencies are resolved.
+        while not self._start_event.is_set():
+            self._start_event.wait()
 
         if self._cancelled:
             return
-        else:
-            self._run_future()
 
-    def _run_future(self) -> None:
+        result: LocalFutureRunResult = self._run_future()
+        self._result_queue.put(result)
+
+        # Wait until the user future is considered finished.
+        while not self._finish_event.is_set():
+            self._finish_event.wait()
+
+        # Std future result is always None.
+        return None
+
+    def _run_future(self) -> LocalFutureRunResult:
         raise NotImplementedError(
             "_run_future must be implemented by LocalFutureRun subclasses"
         )
