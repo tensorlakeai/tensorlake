@@ -1,29 +1,23 @@
-import threading
+from concurrent.futures import Future as StdFuture
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from enum import Enum
 from queue import SimpleQueue
+from threading import Event
 from typing import Any
 
+from ..interface.awaitables import Awaitable
 from ..interface.exceptions import RequestError, RequestFailureException
 from ..interface.function import Function
-from ..interface.futures import Future
 from ..interface.request_context import RequestContext
-from .future import FutureType
+from .future import LocalFuture
 
 
 @dataclass
 class LocalFutureRunResult:
     id: str
     # Either output or exception are set.
-    output: Any | Future | None
+    output: Any | Awaitable | None
     exception: RequestError | RequestFailureException | None
-
-
-class LocalFutureRunState(Enum):
-    STOPPED = 0
-    RUNNING = 1
-    SUCCESS = 2
-    FAILED = 3
 
 
 class StopLocalFutureRun(BaseException):
@@ -45,39 +39,47 @@ class LocalFutureRun:
     def __init__(
         self,
         application: Function,
-        future: FutureType,
+        local_future: LocalFuture,
         request_context: RequestContext,
         result_queue: SimpleQueue,
+        thread_pool: ThreadPoolExecutor,
     ):
         self._application: Function = application
-        self._future = future
+        self._local_future = local_future
         self._request_context: RequestContext = request_context
         # Queue to put LocalFutureRunResult into when finished.
         self._result_queue: SimpleQueue = result_queue
-        self._state: LocalFutureRunState = LocalFutureRunState.STOPPED
-        # daemon = True doesn't block the program from exiting if the thread is still running.
-        self._thread: threading.Thread = threading.Thread(
-            target=self._run_in_thread, daemon=True
-        )
+        self._thread_pool: ThreadPoolExecutor = thread_pool
+        self._std_future: StdFuture = self._thread_pool.submit(self._wait_run_signal)
+        self._run_event: Event = Event()
+        # Used to cancel the future run before entering the _run_future method.
+        self._cancelled: bool = False
 
     @property
-    def future(self) -> FutureType:
-        return self._future
+    def local_future(self) -> LocalFuture:
+        return self._local_future
 
     @property
-    def finished(self) -> bool:
-        return (
-            self._state == LocalFutureRunState.SUCCESS
-            or self._state == LocalFutureRunState.FAILED
+    def std_future(self) -> StdFuture:
+        return self._std_future
+
+    def run(self) -> None:
+        self._run_event.set()
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        self._run_event.set()
+
+    def _wait_run_signal(self) -> None:
+        while not self._run_event.is_set():
+            self._run_event.wait()
+
+        if self._cancelled:
+            return
+        else:
+            self._run_future()
+
+    def _run_future(self) -> None:
+        raise NotImplementedError(
+            "_run_future must be implemented by LocalFutureRun subclasses"
         )
-
-    def wait(self) -> None:
-        if self._thread.is_alive():
-            self._thread.join()
-
-    def start(self) -> None:
-        self._state = LocalFutureRunState.RUNNING
-        self._thread.start()
-
-    def _run_in_thread(self) -> None:
-        raise NotImplementedError("_run_in_thread must be implemented by subclasses")
