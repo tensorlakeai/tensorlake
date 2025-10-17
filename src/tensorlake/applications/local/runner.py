@@ -91,8 +91,8 @@ class LocalRunner:
             metrics=RequestMetricsRecorder(),
         )
         # SimpleQueue[LocalFutureRunResult]
-        self._feature_run_result_queue: SimpleQueue = SimpleQueue()
-        self._feature_run_thread_pool: ThreadPoolExecutor = ThreadPoolExecutor(
+        self._future_run_result_queue: SimpleQueue = SimpleQueue()
+        self._future_run_thread_pool: ThreadPoolExecutor = ThreadPoolExecutor(
             # We need to allow lots of threads at a time because user code blocks
             # on waiting for another function to complete and the chain of blocked
             # user function threads can grow indefinitely.
@@ -151,13 +151,13 @@ class LocalRunner:
 
         Cancels all running functions and waits for them to finish.
         """
-        if self._request_exception is None:
+        if self._request_exception is None and not self._finished():
             self._request_exception = RequestFailureException(
                 "Request cancelled by user"
             )
         for fr in self._future_runs.values():
             fr.cancel()
-        self._feature_run_thread_pool.shutdown(wait=True, cancel_futures=True)
+        self._future_run_thread_pool.shutdown(wait=True, cancel_futures=True)
 
     def __enter__(self) -> "LocalRunner":
         return self
@@ -176,10 +176,9 @@ class LocalRunner:
 
         for user_future in futures:
             if user_future.id in self._future_runs:
-                raise TensorlakeException(
-                    "Internal error: future with ID {} is already running".format(
-                        user_future.id
-                    )
+                raise ApplicationValidationError(
+                    f"Awaitable {repr(user_future.awaitable)} is already running, \n"
+                    f"the same awaitable cannot run multiple times"
                 )
 
             if isinstance(user_future, ReduceOperationFuture):
@@ -188,9 +187,7 @@ class LocalRunner:
                 self._create_function_call_future_run(user_future, start_delay)
             else:
                 raise TensorlakeException(
-                    "Internal error: unexpected future type: {}".format(
-                        type(user_future)
-                    )
+                    f"Internal error: unexpected future type: {type(user_future)}"
                 )
 
     def _runtime_hook_wait_futures(
@@ -285,7 +282,7 @@ class LocalRunner:
     def _wait_and_process_future_run_result(self) -> None:
         try:
             # Wait at most 100ms. This is the precision of function call timers.
-            result: LocalFutureRunResult = self._feature_run_result_queue.get(
+            result: LocalFutureRunResult = self._future_run_result_queue.get(
                 timeout=_SLEEP_POLL_INTERVAL_SECONDS
             )
         except QueueEmptyError:
@@ -430,11 +427,13 @@ class LocalRunner:
                     if not self._blob_store.has(arg.id):
                         return False
             return True
-        if isinstance(future_run, ReturnOutputFutureRun):
+
+        elif isinstance(future_run, ReturnOutputFutureRun):
             if isinstance(future_run.output, Awaitable):
                 if not self._blob_store.has(future_run.output.id):
                     return False
             return True
+
         else:
             self._request_exception = TensorlakeException(
                 "Internal error: unexpected future run type: {}".format(
@@ -579,8 +578,8 @@ class LocalRunner:
                 user_future=user_future,
                 start_delay=start_delay,
             ),
-            result_queue=self._feature_run_result_queue,
-            thread_pool=self._feature_run_thread_pool,
+            result_queue=self._future_run_result_queue,
+            thread_pool=self._future_run_thread_pool,
             application=self._app,
             function=function,
             class_instance=self._function_self_arg(function),
@@ -605,8 +604,8 @@ class LocalRunner:
                     user_future=user_future,
                     start_delay=start_delay,
                 ),
-                result_queue=self._feature_run_result_queue,
-                thread_pool=self._feature_run_thread_pool,
+                result_queue=self._future_run_result_queue,
+                thread_pool=self._future_run_thread_pool,
                 output=awaitable.inputs[0],
             )
         else:
