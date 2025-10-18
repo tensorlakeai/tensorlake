@@ -1,11 +1,7 @@
 import inspect
-from typing import (
-    Any,
-    Dict,
-    List,
-    Union,
-)
+from typing import Any, Dict, List, Union
 
+import click
 from pydantic import BaseModel
 from typing_extensions import get_args, get_origin, get_type_hints
 
@@ -32,6 +28,21 @@ class FunctionManifest(BaseModel):
     return_type: Dict[str, Any] | None  # JSON Schema object
     placement_constraints: PlacementConstraintsManifest
     max_concurrency: int
+
+
+def get_function_input_types(
+    function: Function
+) -> Dict[str, Any] | str:
+    type_hints = get_type_hints(function.original_function, include_extras=True)
+    items = [(k, v) for k, v in type_hints.items() if k != "return"]
+
+    # TODO: format this
+    for _, t in items:
+        if inspect.isclass(t) and issubclass(t, BaseModel):
+            if hasattr(t, "model_json_schema"):
+                return t.model_json_schema()
+
+    return f"<{t.__name__}>"
 
 
 def _parse_docstring_parameters(docstring: str) -> Dict[str, str]:
@@ -143,6 +154,11 @@ def _type_hint_json_schema(type_hint) -> Dict[str, str]:
         return {"type": "number"}
     elif type_hint is bool:
         return {"type": "boolean"}
+    elif inspect.isclass(type_hint) and issubclass(type_hint, BaseModel):
+        if hasattr(type_hint, "model_json_schema"):
+            return type_hint.model_json_schema()
+        else:
+            return {"type": "object", "description": f"{type_hint.__name__} object"}
     elif hasattr(type_hint, "__name__"):
         # For custom classes, assume object type
         return {"type": "object", "description": f"{type_hint.__name__} object"}
