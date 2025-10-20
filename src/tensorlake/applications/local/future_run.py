@@ -45,10 +45,6 @@ class LocalFutureRun:
         # Queue to put LocalFutureRunResult into when finished.
         self._result_queue: SimpleQueue = result_queue
         self._thread_pool: ThreadPoolExecutor = thread_pool
-        # Std future that tracks the execution of the user future run in thread pool.
-        # Std future runs as long as the user future is running.
-        # Std future result is always None because user future result is stored in user future itself.
-        self._std_future: StdFuture = self._thread_pool.submit(self._future_entry_point)
         # Future run waits on this event until all data dependencies in its Awaitable are resolved.
         self._start_event: Event = Event()
         # Future run waits on this event until it can exit.
@@ -56,6 +52,11 @@ class LocalFutureRun:
         self._finish_with_exception: bool = False
         # Used to cancel the future run before entering the _run_future method.
         self._cancelled: bool = False
+        # Starts the future run in thread pool. Must be the last operation in __init__.
+        # Std future that tracks the execution of the user future run in thread pool.
+        # Std future runs as long as the user future is running.
+        # Std future result is always None because user future result is stored in user future itself.
+        self._std_future: StdFuture = self._thread_pool.submit(self._future_entry_point)
 
     @property
     def local_future(self) -> LocalFuture:
