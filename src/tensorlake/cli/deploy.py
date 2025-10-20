@@ -73,7 +73,8 @@ def deploy(
     warning_missing_secrets(auth, list(list_secret_names()))
 
     functions: List[Function] = get_functions()
-    asyncio.run(_prepare_images_v2(builder_v2, functions))
+    build_ids = asyncio.run(_prepare_images_v2(builder_v2, functions))
+    asyncio.run(_check_image(builder_v2, build_ids))
 
     click.echo("Everything looks good, deploying now\n")
 
@@ -85,8 +86,11 @@ def deploy(
     )
 
 
-async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: List[Function]):
+async def _prepare_images_v2(
+    builder: ImageBuilderV2Client, functions: List[Function]
+) -> List[str]:
     images: Dict[Image, ImageInformation] = image_infos()
+    build_ids: List[str] = []
     for application in filter_applications(functions):
         fn_config: _FunctionConfiguration = application.function_config
         app_config: _ApplicationConfiguration = application.application_config
@@ -98,7 +102,7 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: List[Func
                     f"Building image {image_info.image.name} for application {fn_config.function_name} ...",
                 )
                 try:
-                    await builder.build(
+                    build = await builder.build(
                         BuildContext(
                             application_name=fn_config.function_name,
                             application_version=app_config.version,
@@ -106,6 +110,7 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: List[Func
                         ),
                         image_info.image,
                     )
+                    build_ids.append(build.id)
                 except Exception as e:
                     click.echo(
                         f"Failed to build image {image_info.image.name}, please check the error message: {e}",
@@ -115,6 +120,19 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: List[Func
                     raise click.Abort
 
     click.secho("\nBuilt all images")
+    return build_ids
+
+
+async def _check_image(builder: ImageBuilderV2Client, build_ids: List[str]):
+    for build_id in build_ids:
+        try:
+            await builder.build_info(build_id=build_id)
+        except Exception as e:
+            click.echo(
+                f"Build {build_id} didn't succeed: {e}",
+                err=True,
+            )
+            raise click.Abort
 
 
 def _deploy_applications(
