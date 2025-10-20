@@ -1,18 +1,19 @@
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable
 
 import httpx
 import yaml
-from httpx import AsyncClient, Client
 
-_TRANSIENT_HTTPX_ERRORS = (httpx.NetworkError, httpx.RemoteProtocolError)
+TRANSIENT_HTTPX_ERRORS = (httpx.NetworkError, httpx.RemoteProtocolError)
 
 
 type EventHook = Callable[..., Any]
 
 
 def get_httpx_client(
-    config_path: Optional[str] = None, make_async: Optional[bool] = False
-) -> Union[AsyncClient, Client]:
+    config_path: str | None = None,
+    make_async: bool = False,
+    event_hooks: dict[str, list[EventHook]] | None = None,
+) -> httpx.AsyncClient | httpx.Client:
     """
     Creates and returns an httpx.Client instance, optionally configured with TLS settings from a YAML config file.
 
@@ -50,16 +51,17 @@ def get_httpx_client(
         if config.get("use_tls", False):
             print(f"Configuring client with TLS config: {config}")
             tls_config = config["tls_config"]
-            return get_sync_or_async_client(make_async, **tls_config)
-    return get_sync_or_async_client(make_async)
+            return get_sync_or_async_client(make_async, event_hooks, **tls_config)
+    return get_sync_or_async_client(make_async, event_hooks)
 
 
 def get_sync_or_async_client(
-    make_async: Optional[bool] = False,
-    cert_path: Optional[str] = None,
-    key_path: Optional[str] = None,
-    ca_bundle_path: Optional[str] = None,
-) -> Union[AsyncClient, Client]:
+    make_async: bool = False,
+    event_hooks: dict[str, list[EventHook]] | None = None,
+    cert_path: str | None = None,
+    key_path: str | None = None,
+    ca_bundle_path: str | None = None,
+) -> httpx.AsyncClient | httpx.Client:
     """
     Creates and returns either a synchronous or asynchronous httpx client with optional TLS configuration.
 
@@ -81,13 +83,14 @@ def get_sync_or_async_client(
                 verify=ca_bundle_path if ca_bundle_path else True,
             )
         else:
-            return httpx.AsyncClient()
+            return httpx.AsyncClient(event_hooks=event_hooks)
     else:
         if cert_path and key_path:
             return httpx.Client(
                 http2=True,
                 cert=(cert_path, key_path),
                 verify=ca_bundle_path if ca_bundle_path else True,
+                event_hooks=event_hooks,
             )
         else:
-            return httpx.Client()
+            return httpx.Client(event_hooks=event_hooks)

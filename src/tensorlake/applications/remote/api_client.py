@@ -20,9 +20,8 @@ from tensorlake.applications.interface.exceptions import (
 )
 from tensorlake.applications.remote.manifests.application import ApplicationManifest
 from tensorlake.utils.http_client import (
-    _TRANSIENT_HTTPX_ERRORS,
+    TRANSIENT_HTTPX_ERRORS,
     EventHook,
-    get_httpx_client,
 )
 from tensorlake.utils.retries import exponential_backoff
 
@@ -149,11 +148,7 @@ class APIClient:
         project_id: str | None = None,
         event_hooks: dict[str, list[EventHook]] | None = None,
     ):
-        self._client: httpx.Client = get_httpx_client(
-            config_path=None, make_async=False
-        )
-        if event_hooks:
-            self._client.event_hooks = event_hooks
+        self._client: httpx.Client = httpx.Client(event_hooks=event_hooks)
 
         self._namespace: str = namespace
         self._api_url: str = api_url
@@ -343,7 +338,7 @@ class APIClient:
 
     @exponential_backoff(
         max_retries=10,
-        retryable_exceptions=_TRANSIENT_HTTPX_ERRORS,
+        retryable_exceptions=TRANSIENT_HTTPX_ERRORS,
         on_retry=log_retries,
     )
     def wait_on_request_completion(
