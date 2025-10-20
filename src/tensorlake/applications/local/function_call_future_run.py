@@ -20,7 +20,7 @@ from .future_run import (
     LocalFutureRunResult,
     StopLocalFutureRun,
 )
-from .utils import print_user_exception
+from .utils import print_exception
 
 
 class FunctionCallFutureRun(LocalFutureRun):
@@ -91,7 +91,7 @@ class FunctionCallFutureRun(LocalFutureRun):
             except BaseException as e:
                 runs_left -= 1
                 if runs_left == 0:
-                    print_user_exception(e)
+                    print_exception(e)
                     return LocalFutureRunResult(
                         id=awaitable.id,
                         output=None,
