@@ -9,10 +9,6 @@ from tensorlake.applications import (
     RequestFailureException,
     application,
     function,
-)
-from tensorlake.applications import map as tl_map
-from tensorlake.applications import reduce as tl_reduce
-from tensorlake.applications import (
     run_application,
 )
 from tensorlake.applications.remote.deploy import deploy_applications
@@ -24,16 +20,16 @@ class AccumulatedState(BaseModel):
 
 @application()
 @function()
-def success_api_function_function_call_collection(x: int) -> AccumulatedState:
-    seq = tl_map(transform_int_to_accumulated_state, generate_seq(x))
-    return tl_reduce(accumulate_reduce, seq, AccumulatedState(sum=0))
+def success_api_function_awaitable_collection(x: int) -> AccumulatedState:
+    seq = transform_int_to_accumulated_state.map(generate_seq(x))
+    return accumulate_reduce.reduce(seq, AccumulatedState(sum=0))
 
 
 @application()
 @function()
 def success_api_function_value_collection(x: int) -> AccumulatedState:
     seq = [transform_int_to_accumulated_state(i) for i in generate_seq(x)]
-    return tl_reduce(accumulate_reduce, seq, AccumulatedState(sum=0))
+    return accumulate_reduce.reduce(seq, AccumulatedState(sum=0))
 
 
 # TODO: We need to allow a future as reducer input so tensorlake functions can generate sequences.
@@ -61,7 +57,7 @@ def store_result(acc: AccumulatedState) -> int:
 @function()
 def fail_api_function(x: int) -> AccumulatedState:
     seq = [transform_int_to_accumulated_state(i) for i in generate_seq(x)]
-    return tl_reduce(accumulate_reduce_fail_at_3, seq, AccumulatedState(sum=0))
+    return accumulate_reduce_fail_at_3.awaitable.reduce(seq, AccumulatedState(sum=0))
 
 
 @function()
@@ -77,25 +73,25 @@ def accumulate_reduce_fail_at_3(
 @application()
 @function()
 def api_reduce_no_items_no_initial(_: Any) -> AccumulatedState:
-    return tl_reduce(accumulate_reduce, [])
+    return accumulate_reduce.awaitable.reduce([])
 
 
 @application()
 @function()
 def api_reduce_no_items_with_initial(_: Any) -> AccumulatedState:
-    return tl_reduce(accumulate_reduce, [], AccumulatedState(sum=10))
+    return accumulate_reduce.awaitable.reduce([], AccumulatedState(sum=10))
 
 
 @application()
 @function()
 def api_reduce_one_value_item(_: Any) -> AccumulatedState:
-    return tl_reduce(accumulate_reduce, [AccumulatedState(sum=10)])
+    return accumulate_reduce.awaitable.reduce([AccumulatedState(sum=10)])
 
 
 @application()
 @function()
-def api_reduce_one_function_call_item(_: Any) -> AccumulatedState:
-    return tl_reduce(accumulate_reduce, [generate_single_value()])
+def api_reduce_one_awaitable_item(_: Any) -> AccumulatedState:
+    return accumulate_reduce.awaitable.reduce([generate_single_value.awaitable()])
 
 
 @function()
@@ -110,7 +106,7 @@ class TestReduce(unittest.TestCase):
             deploy_applications(__file__)
 
         request: Request = run_application(
-            success_api_function_function_call_collection, 6, remote=is_remote
+            success_api_function_awaitable_collection, 6, remote=is_remote
         )
         result: AccumulatedState = request.output()
         self.assertEqual(result.sum, 15)  # 0 + 1 + 2 + 3 + 4 + 5
@@ -176,7 +172,7 @@ class TestReduce(unittest.TestCase):
             deploy_applications(__file__)
 
         request: Request = run_application(
-            api_reduce_one_function_call_item,
+            api_reduce_one_awaitable_item,
             None,
             remote=is_remote,
         )

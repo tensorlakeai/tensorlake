@@ -394,9 +394,13 @@ class LocalRunner:
                     output_serializer=output_blob_serializer,
                 )
                 self._blob_store.put(blob)
-            self._handle_future_run_final_output(
-                future_run=future_run, blob=blob, exception=result.exception
-            )
+                self._handle_future_run_final_output(
+                    future_run=future_run, blob=blob, exception=result.exception
+                )
+            else:
+                self._handle_future_run_failure(
+                    future_run=future_run, exception=result.exception
+                )
 
     def _handle_future_run_failure(
         self,
