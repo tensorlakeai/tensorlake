@@ -52,6 +52,7 @@ class LocalFutureRun:
         self._start_event: Event = Event()
         # Future run waits on this event until it can exit.
         self._finish_event: Event = Event()
+        self._finish_with_exception: bool = False
         # Used to cancel the future run before entering the _run_future method.
         self._cancelled: bool = False
 
@@ -66,7 +67,8 @@ class LocalFutureRun:
     def start(self) -> None:
         self._start_event.set()
 
-    def finish(self) -> None:
+    def finish(self, is_exception: bool) -> None:
+        self._finish_with_exception = is_exception
         self._finish_event.set()
 
     def cancel(self) -> None:
@@ -89,8 +91,12 @@ class LocalFutureRun:
         while not self._finish_event.is_set():
             self._finish_event.wait()
 
-        # Std future result is always None.
-        return None
+        if self._finish_with_exception:
+            # sets self._std_future.exception to propagate the failure to waiters.
+            raise Exception("Future run finished with exception")
+        else:
+            # sets self._std_future.result to propagate the success to waiters.
+            return None
 
     def _run_future(self) -> LocalFutureRunResult:
         raise NotImplementedError(
