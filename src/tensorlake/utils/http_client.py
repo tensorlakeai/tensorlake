@@ -1,10 +1,13 @@
-from typing import Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import httpx
 import yaml
 from httpx import AsyncClient, Client
 
 _TRANSIENT_HTTPX_ERRORS = (httpx.NetworkError, httpx.RemoteProtocolError)
+
+
+type EventHook = Callable[..., Any]
 
 
 def get_httpx_client(

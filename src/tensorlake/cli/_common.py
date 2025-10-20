@@ -10,12 +10,6 @@ import click
 import httpx
 from rich import print, print_json
 
-try:
-    VERSION = importlib.metadata.version("tensorlake")
-except importlib.metadata.PackageNotFoundError:
-    VERSION = "unknown"
-
-
 from tensorlake.applications.remote.api_client import APIClient
 from tensorlake.cli._configuration import (
     get_nested_value,
@@ -23,6 +17,30 @@ from tensorlake.cli._configuration import (
     load_credentials,
     load_local_config,
 )
+from tensorlake.utils.http_client import (
+    EventHook,
+)
+
+try:
+    VERSION = importlib.metadata.version("tensorlake")
+except importlib.metadata.PackageNotFoundError:
+    VERSION = "unknown"
+
+
+def raise_on_authn_authz(response: httpx.Response):
+    if response.status_code == 401:
+        raise click.UsageError(
+            "The credentials to access Tensorlake's API are not valid"
+        )
+    elif response.status_code == 403:
+        raise click.UsageError(
+            "The credentials to access Tensorlake's API are not authorized for this operation"
+        )
+
+
+HTTP_EVENT_HOOKS = {
+    "response": [raise_on_authn_authz],
+}
 
 
 @dataclass
@@ -66,7 +84,9 @@ class Context:
                     "Missing API key or personal access token. Please run `tensorlake login` to authenticate."
                 )
 
-            self._client = httpx.Client(base_url=self.base_url, headers=headers)
+            self._client = httpx.Client(
+                base_url=self.base_url, headers=headers, event_hooks=HTTP_EVENT_HOOKS
+            )
         return self._client
 
     @property
@@ -92,6 +112,7 @@ class Context:
                 api_key=bearer_token,
                 organization_id=org_id,
                 project_id=proj_id,
+                event_hooks=HTTP_EVENT_HOOKS,
             )
 
         return self._api_client

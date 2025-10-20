@@ -106,9 +106,14 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: List[Func
                         ),
                         image_info.image,
                     )
-                except (asyncio.CancelledError, KeyboardInterrupt, click.Abort):
-                    # Ignore cancellation errors. Return early to skip printing the success message
-                    return
+                except (
+                    asyncio.CancelledError,
+                    KeyboardInterrupt,
+                    click.Abort,
+                    click.UsageError,
+                ) as error:
+                    # Re-raise cancellation errors. Return early to skip printing the success message
+                    raise error
                 except Exception as error:
                     click.echo(error, err=True)
                     raise click.Abort
@@ -129,6 +134,8 @@ def _deploy_applications(
             load_source_dir_modules=False,  # Already loaded
             api_client=auth.api_client,  # Use the authenticated API client from context
         )
+    except click.UsageError as error:
+        raise error
     except Exception as e:
         click.echo(
             f"Applications could not be deployed, please check the error message: {e}",
