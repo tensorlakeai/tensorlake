@@ -326,36 +326,37 @@ class TestGraphMetadataParameterExtraction(unittest.TestCase):
         self.assertFalse(mapping_param.required)
 
 
-@function()
-def function_with_default_concurrency(x: int) -> str:
-    return "success"
+# This test is commented out because right now we don't provide max_concurrency feature in SDK interface.
+# @function()
+# def function_with_default_concurrency(x: int) -> str:
+#     return "success"
 
 
-@function(max_concurrency=5)
-def function_with_custom_concurrency(x: int) -> str:
-    return "success"
+# @function(max_concurrency=5)
+# def function_with_custom_concurrency(x: int) -> str:
+#     return "success"
 
 
-class TestGraphMetadataFunctionConcurrency(unittest.TestCase):
-    def test_function_with_default_concurrency(self):
-        app_manifest: ApplicationManifest = create_application_manifest(
-            application_function=default_application_function,
-            all_functions=get_functions(),
-        )
-        self.assertEqual(
-            app_manifest.functions["function_with_default_concurrency"].max_concurrency,
-            1,
-        )
+# class TestGraphMetadataFunctionConcurrency(unittest.TestCase):
+#     def test_function_with_default_concurrency(self):
+#         app_manifest: ApplicationManifest = create_application_manifest(
+#             application_function=default_application_function,
+#             all_functions=get_functions(),
+#         )
+#         self.assertEqual(
+#             app_manifest.functions["function_with_default_concurrency"].max_concurrency,
+#             1,
+#         )
 
-    def test_function_with_custom_concurrency(self):
-        app_manifest: ApplicationManifest = create_application_manifest(
-            application_function=default_application_function,
-            all_functions=get_functions(),
-        )
-        self.assertEqual(
-            app_manifest.functions["function_with_custom_concurrency"].max_concurrency,
-            5,
-        )
+#     def test_function_with_custom_concurrency(self):
+#         app_manifest: ApplicationManifest = create_application_manifest(
+#             application_function=default_application_function,
+#             all_functions=get_functions(),
+#         )
+#         self.assertEqual(
+#             app_manifest.functions["function_with_custom_concurrency"].max_concurrency,
+#             5,
+#         )
 
 
 if __name__ == "__main__":
