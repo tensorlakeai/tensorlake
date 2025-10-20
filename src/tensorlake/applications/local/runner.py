@@ -72,12 +72,12 @@ from .request import LocalRequest
 from .request_progress import LocalRequestProgress
 from .request_state import LocalRequestState
 from .return_output_future_run import ReturnOutputFutureRun
-from .utils import print_user_exception
+from .utils import print_exception
 
 _LOCAL_REQUEST_ID = "local-request"
-# 100 ms  interval for code paths that do polling.
+# 1 ms  interval for code paths that do polling.
 # This keeps our timers accurate enough and doesn't add too much latency and CPU overhead.
-_SLEEP_POLL_INTERVAL_SECONDS = 0.1
+_SLEEP_POLL_INTERVAL_SECONDS = 0.001
 
 
 class LocalRunner:
@@ -136,6 +136,8 @@ class LocalRunner:
                 awaitable=app_function_call_awaitable,
                 existing_awaitable_future=None,
                 start_delay=None,
+                output_consumer_future_id=None,
+                output_serializer_name_override=None,
             )
 
             self._control_loop()
@@ -156,7 +158,7 @@ class LocalRunner:
         except BaseException as e:
             # This is an unexpected exception in LocalRunner code itself.
             # The function run exception is stored in self._exception and handled above.
-            print_user_exception(e)
+            print_exception(e)
             return LocalRequest(
                 id=_LOCAL_REQUEST_ID,
                 output=None,
@@ -172,10 +174,6 @@ class LocalRunner:
 
         Cancels all running functions and waits for them to finish.
         """
-        if self._request_exception is None and not self._finished():
-            self._request_exception = RequestFailureException(
-                "Request cancelled by user"
-            )
         for fr in self._future_runs.values():
             fr.cancel()
         self._future_run_thread_pool.shutdown(wait=True, cancel_futures=True)
@@ -202,6 +200,8 @@ class LocalRunner:
                 awaitable=user_future.awaitable,
                 existing_awaitable_future=user_future,
                 start_delay=start_delay,
+                output_consumer_future_id=None,
+                output_serializer_name_override=None,
             )
 
     def _runtime_hook_wait_futures(
@@ -292,8 +292,7 @@ class LocalRunner:
                 # We have to wait because otherwise future runs will keep printing
                 # arbitrary logs to stdout/stderr and hold resources after request
                 # should be finished running.
-                print("Request failed, waiting for existing future runs to finish...")
-                self._wait_all_future_runs()
+                print_exception(self._request_exception)
                 break
 
     def _control_loop_start_runnable_futures(self) -> None:
@@ -371,10 +370,14 @@ class LocalRunner:
                 return
 
             try:
-                self._create_function_run_for_user_object(
-                    object=result.output, start_delay=None
+                self._create_future_run_for_user_object(
+                    object=result.output,
+                    start_delay=None,
+                    output_consumer_future_id=future.user_future.id,
+                    output_serializer_name_override=output_blob_serializer.name,
                 )
             except BaseException as e:
+                print_exception(e)
                 self._handle_future_run_failure(
                     future_run=future_run,
                     exception=TensorlakeException(
@@ -406,11 +409,6 @@ class LocalRunner:
             blob=None,
             exception=self._request_exception,
         )
-
-    def _wait_all_future_runs(self) -> None:
-        for fr in self._future_runs.values():
-            if not fr.std_future.done():
-                std_wait([fr.std_future])
 
     def _has_all_data_dependencies(self, future_run: LocalFutureRun) -> bool:
         if isinstance(future_run, FunctionCallFutureRun):
@@ -579,8 +577,12 @@ class LocalRunner:
 
             return self._class_instances[fn_class_name]
 
-    def _create_function_run_for_user_object(
-        self, object: Any | Future | Awaitable, start_delay: float | None
+    def _create_future_run_for_user_object(
+        self,
+        object: Any | Future | Awaitable,
+        start_delay: float | None,
+        output_consumer_future_id: str | None,
+        output_serializer_name_override: str | None,
     ) -> None:
         """Creates future run for the supplied user object if it's an Awaitable.
 
@@ -597,6 +599,8 @@ class LocalRunner:
                 awaitable=object,
                 existing_awaitable_future=None,
                 start_delay=start_delay,
+                output_consumer_future_id=output_consumer_future_id,
+                output_serializer_name_override=output_serializer_name_override,
             )
 
     def _create_future_run_for_awaitable(
@@ -604,11 +608,18 @@ class LocalRunner:
         awaitable: Awaitable,
         existing_awaitable_future: Future | None,
         start_delay: float | None,
+        output_consumer_future_id: str | None,
+        output_serializer_name_override: str | None,
     ) -> None:
         """Creates future run for the supplied Awaitable.
 
         Doesn't create a user Future if existing_awaitable_future is supplied.
-        Raises TensorlakeException on error."""
+        Raises TensorlakeException on error.
+        output_consumer_future_id is the ID of the Future that will consume the output of the future run.
+        output_serializer_name_override is the name of the serializer to use for serializing
+        the output of the future run. This is used when propagating output to consumer future when the
+        consumer future expects a specific serialization format.
+        """
         if awaitable.id in self._future_runs:
             raise ApplicationValidationError(
                 f"Invalid argument: {repr(awaitable)} is an Awaitable with already running Future, "
@@ -620,18 +631,24 @@ class LocalRunner:
                 awaitable=awaitable,
                 existing_awaitable_future=existing_awaitable_future,
                 start_delay=start_delay,
+                output_consumer_future_id=output_consumer_future_id,
+                output_serializer_name_override=output_serializer_name_override,
             )
         elif isinstance(awaitable, ReduceOperationAwaitable):
             self._create_future_run_for_reduce_operation_awaitable(
                 awaitable=awaitable,
                 existing_awaitable_future=existing_awaitable_future,
                 start_delay=start_delay,
+                output_consumer_future_id=output_consumer_future_id,
+                output_serializer_name_override=output_serializer_name_override,
             )
         elif isinstance(awaitable, FunctionCallAwaitable):
             self._create_future_run_for_function_call_awaitable(
                 awaitable=awaitable,
                 existing_awaitable_future=existing_awaitable_future,
                 start_delay=start_delay,
+                output_consumer_future_id=output_consumer_future_id,
+                output_serializer_name_override=output_serializer_name_override,
             )
         else:
             raise ApplicationValidationError(
@@ -643,11 +660,22 @@ class LocalRunner:
         awaitable: AwaitableList,
         existing_awaitable_future: ListFuture | None,
         start_delay: float | None,
+        output_consumer_future_id: str | None,
+        output_serializer_name_override: str | None,
     ) -> None:
         """Creates ListFutureRun for the supplied awaitable.
 
         Raises TensorlakeException on error.
         """
+        if output_consumer_future_id is not None:
+            raise TensorlakeException(
+                "Internal error: cannot set output consumer future ID on AwaitableList because it can't be returned from a function."
+            )
+        if output_serializer_name_override is not None:
+            raise TensorlakeException(
+                "Internal error: cannot set output serializer name override on AwaitableList because it can't be returned from a function."
+            )
+
         user_future: ListFuture = (
             ListFuture(awaitable)
             if existing_awaitable_future is None
@@ -655,12 +683,19 @@ class LocalRunner:
         )
 
         for item in awaitable.awaitables:
-            self._create_function_run_for_user_object(item, start_delay)
+            self._create_future_run_for_user_object(
+                item,
+                start_delay,
+                output_consumer_future_id=None,
+                output_serializer_name_override=None,
+            )
 
         self._future_runs[awaitable.id] = ListFutureRun(
             local_future=LocalFuture(
                 user_future=user_future,
                 start_delay=start_delay,
+                output_consumer_future_id=None,
+                output_serializer_name_override=None,
             ),
             result_queue=self._future_run_result_queue,
             thread_pool=self._future_run_thread_pool,
@@ -671,6 +706,8 @@ class LocalRunner:
         awaitable: FunctionCallAwaitable,
         existing_awaitable_future: FunctionCallFuture | None,
         start_delay: float | None,
+        output_consumer_future_id: str | None,
+        output_serializer_name_override: str | None,
     ) -> None:
         """Creates LocalFunctionCallFutureRun for the supplied awaitable.
 
@@ -683,15 +720,27 @@ class LocalRunner:
         )
 
         for arg in awaitable.args:
-            self._create_function_run_for_user_object(arg, start_delay)
+            self._create_future_run_for_user_object(
+                arg,
+                start_delay,
+                output_consumer_future_id=None,
+                output_serializer_name_override=None,
+            )
         for arg in awaitable.kwargs.values():
-            self._create_function_run_for_user_object(arg, start_delay)
+            self._create_future_run_for_user_object(
+                arg,
+                start_delay,
+                output_consumer_future_id=None,
+                output_serializer_name_override=None,
+            )
 
         function: Function = get_function(awaitable.function_name)
         self._future_runs[awaitable.id] = FunctionCallFutureRun(
             local_future=LocalFuture(
                 user_future=user_future,
                 start_delay=start_delay,
+                output_consumer_future_id=output_consumer_future_id,
+                output_serializer_name_override=output_serializer_name_override,
             ),
             result_queue=self._future_run_result_queue,
             thread_pool=self._future_run_thread_pool,
@@ -706,21 +755,18 @@ class LocalRunner:
         awaitable: ReduceOperationAwaitable,
         existing_awaitable_future: ReduceOperationFuture | None,
         start_delay: float | None,
+        output_consumer_future_id: str | None,
+        output_serializer_name_override: str | None,
     ) -> None:
         """Creates LocalReduceOperationFutureRun for the supplied awaitable.
 
         Raises TensorlakeException on error.
         """
-        user_future: ReduceOperationFuture = (
-            ReduceOperationFuture(awaitable)
-            if existing_awaitable_future is None
-            else existing_awaitable_future
-        )
         reduce_operation_result_awaitable: Awaitable = awaitable.inputs[0]
-        function: Function = get_function(awaitable.function_name)
 
         # There's no user visible interface to ReturnOutputFutureRun so we have to do everything manually here.
         if len(awaitable.inputs) >= 2:
+            function: Function = get_function(awaitable.function_name)
             # Create a chain of function calls to reduce all inputs one by one.
             # Ordering of calls is important here. We should reduce ["a", "b", "c", "d"]
             # using string concat function into "abcd".
@@ -733,15 +779,19 @@ class LocalRunner:
                 )
             reduce_operation_result_awaitable = previous_function_call_awaitable
 
-        self._create_future_run_for_awaitable(
-            awaitable=reduce_operation_result_awaitable,
-            existing_awaitable_future=None,
-            start_delay=start_delay,
+        # Don't create future runs for the function call chain because we're
+        # going to return it from ReturnOutputFutureRun.
+        user_future: ReduceOperationFuture = (
+            ReduceOperationFuture(awaitable)
+            if existing_awaitable_future is None
+            else existing_awaitable_future
         )
         self._future_runs[awaitable.id] = ReturnOutputFutureRun(
             local_future=LocalFuture(
                 user_future=user_future,
                 start_delay=start_delay,
+                output_consumer_future_id=output_consumer_future_id,
+                output_serializer_name_override=output_serializer_name_override,
             ),
             result_queue=self._future_run_result_queue,
             thread_pool=self._future_run_thread_pool,
