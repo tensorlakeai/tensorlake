@@ -1,3 +1,4 @@
+import contextvars
 from concurrent.futures import Future as StdFuture
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -76,6 +77,10 @@ class LocalFutureRun:
         self._start_event.set()
         self._finish_event.set()
 
+    @property
+    def is_cancelled(self) -> bool:
+        return self._cancelled
+
     def _future_entry_point(self) -> None:
         # Wait until all data dependencies are resolved.
         while not self._start_event.is_set():
@@ -84,7 +89,8 @@ class LocalFutureRun:
         if self._cancelled:
             return
 
-        result: LocalFutureRunResult = self._run_future()
+        context: contextvars.Context = contextvars.Context()
+        result: LocalFutureRunResult = context.run(self._run_future_in_context)
         self._result_queue.put(result)
 
         # Wait until the user future is considered finished.
@@ -98,7 +104,27 @@ class LocalFutureRun:
             # sets self._std_future.result to propagate the success to waiters.
             return None
 
+    def _run_future_in_context(self) -> LocalFutureRunResult:
+        _set_current_future_run(self)
+        return self._run_future()
+
     def _run_future(self) -> LocalFutureRunResult:
+        """Runs the user future and returns its result.
+
+        A new contextvars.Context is created for running the user future.
+        """
         raise NotImplementedError(
             "_run_future must be implemented by LocalFutureRun subclasses"
         )
+
+
+_current_future_run_context_var = contextvars.ContextVar("CURRENT_FUTURE_RUN")
+
+
+def get_current_future_run() -> LocalFutureRun:
+    """Raises LookupError if no current future run is set."""
+    return _current_future_run_context_var.get()
+
+
+def _set_current_future_run(future_run: LocalFutureRun) -> None:
+    _current_future_run_context_var.set(future_run)

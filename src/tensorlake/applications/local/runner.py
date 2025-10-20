@@ -57,11 +57,17 @@ from ..user_data_serializer import UserDataSerializer, serializer_by_name
 from .blob_store import BLOB, BLOBStore
 from .function_call_future_run import FunctionCallFutureRun
 from .future import LocalFuture
-from .future_run import LocalFutureRun, LocalFutureRunResult, StopLocalFutureRun
+from .future_run import (
+    LocalFutureRun,
+    LocalFutureRunResult,
+    StopLocalFutureRun,
+    get_current_future_run,
+)
 from .request import LocalRequest
 from .request_progress import LocalRequestProgress
 from .request_state import LocalRequestState
 from .return_output_future_run import ReturnOutputFutureRun
+from .utils import print_user_exception
 
 _LOCAL_REQUEST_ID = "local-request"
 # 100 ms  interval for code paths that do polling.
@@ -85,7 +91,7 @@ class LocalRunner:
         self._class_instances: Dict[str, Any] = {}
         # Class instance constructor can run for minutes,
         # so we need to ensure that we create at most one instance at a time.
-        self._class_instances_lock: threading.Lock = threading.Lock()
+        self._class_instances_locks: Dict[str, threading.Lock] = {}
         self._request_context: RequestContext = RequestContextBase(
             request_id=_LOCAL_REQUEST_ID,
             state=LocalRequestState(),
@@ -104,6 +110,8 @@ class LocalRunner:
 
     def run(self) -> Request:
         try:
+            set_run_futures_hook(self._runtime_hook_run_futures)
+            set_wait_futures_hook(self._runtime_hook_wait_futures)
             input_serializer: UserDataSerializer = function_input_serializer(self._app)
             serialized_payload, content_type = serialize_value(
                 self._app_payload, input_serializer
@@ -115,10 +123,20 @@ class LocalRunner:
                     payload_content_type=content_type,
                 )
             )
-            set_run_futures_hook(self._runtime_hook_run_futures)
-            set_wait_futures_hook(self._runtime_hook_wait_futures)
-            # This will call our runtime hooks to register the future created by .run() call.
-            app_function_call.run()
+            # We can't use awaitable.run() here because we are not running in a LocalFutureRun yet.
+            # So we have to create the future run manually.
+            self._future_runs[app_function_call.id] = FunctionCallFutureRun(
+                local_future=LocalFuture(
+                    user_future=FunctionCallFuture(app_function_call),
+                    start_delay=None,
+                ),
+                result_queue=self._future_run_result_queue,
+                thread_pool=self._future_run_thread_pool,
+                application=self._app,
+                function=self._app,
+                class_instance=self._function_self_arg(self._app),
+                request_context=self._request_context,
+            )
 
             self._control_loop()
 
@@ -138,10 +156,7 @@ class LocalRunner:
         except BaseException as e:
             # This is an unexpected exception in LocalRunner code itself.
             # The function run exception is stored in self._exception and handled above.
-            #
-            # We only print exceptions in remote mode but don't propagate them to SDK
-            # and return a generic RequestFailureException instead. Do the same here.
-            traceback.print_exception(e)
+            print_user_exception(e)
             return LocalRequest(
                 id=_LOCAL_REQUEST_ID,
                 output=None,
@@ -252,10 +267,20 @@ class LocalRunner:
         # Every runtime hook call is a cancellation point for user code.
         # Raise StopFunctionRun to stop executing all futures so LocalRunner.close()
         # can finish asap.
-        if self._finished():
-            raise StopLocalFutureRun()
-        # TODO: get LocalFutureRun object that runs this user code from contextvars and
-        # then check if its cancelled. If yes then raise StopLocalFutureRun().
+        no_current_future_run = False
+        try:
+            if get_current_future_run().is_cancelled:
+                raise StopLocalFutureRun()
+        except LookupError:
+            no_current_future_run = True
+
+        # Raise this exception outside of "except" to not have LookupError in
+        # "during handling of the above exception, another exception occurred" message.
+        if no_current_future_run:
+            raise ApplicationValidationError(
+                "Tensorlake SDK was called outside of a Tensorlake Function thread."
+                "Please only call Tensorlake SDK functions from inside Tensorlake Functions."
+            )
 
     def _finished(self) -> bool:
         if self._request_exception is not None:
@@ -519,16 +544,23 @@ class LocalRunner:
         future_run.start()
 
     def _function_self_arg(self, function: Function) -> Any | None:
-        if function._function_config.class_name is None:
+        fn_class_name: str | None = function._function_config.class_name
+        if fn_class_name is None:
             return None
 
-        with self._class_instances_lock:
-            if function._function_config.class_name not in self._class_instances:
-                self._class_instances[function._function_config.class_name] = (
-                    create_self_instance(function._function_config.class_name)
+        # No need to lock self._class_instances_lock here because
+        # we don't do any IO here so we don't release GIL.
+        if fn_class_name not in self._class_instances_locks:
+            self._class_instances_locks[fn_class_name] = threading.Lock()
+
+        with self._class_instances_locks[fn_class_name]:
+            if fn_class_name not in self._class_instances:
+                # NB: This call can take minutes if i.e. a model gets loaded in a GPU.
+                self._class_instances[fn_class_name] = create_self_instance(
+                    fn_class_name
                 )
 
-        return self._class_instances[function._function_config.class_name]
+            return self._class_instances[fn_class_name]
 
     def _create_future_run_if_awaitable(
         self, arg: Any | Future | Awaitable, start_delay: float | None
