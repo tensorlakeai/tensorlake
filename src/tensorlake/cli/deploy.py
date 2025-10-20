@@ -106,15 +106,14 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: List[Func
                         ),
                         image_info.image,
                     )
-                except Exception as e:
-                    click.echo(
-                        f"Failed to build image {image_info.image.name}, please check the error message: {e}",
-                        err=True,
-                    )
-                    traceback.print_exception(e)
+                except (asyncio.CancelledError, KeyboardInterrupt, click.Abort):
+                    # Ignore cancellation errors. Return early to skip printing the success message
+                    return
+                except Exception as error:
+                    click.echo(error, err=True)
                     raise click.Abort
 
-    click.secho("\nBuilt all images")
+    click.secho("\nAll images built successfully")
 
 
 def _deploy_applications(

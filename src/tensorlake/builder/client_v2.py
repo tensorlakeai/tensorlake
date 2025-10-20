@@ -185,15 +185,11 @@ class ImageBuilderV2Client:
         Returns:
             dict: The response from the image builder service.
         """
-        click.echo(
-            f"Building {context.application_name} version {context.application_version} for {context.function_name}"
-        )
-
         _fd, context_file_path = tempfile.mkstemp()
         create_image_context_file(image, context_file_path)
 
         click.echo(
-            f"{context.application_name}: Posting {os.path.getsize(context_file_path)} bytes of context to build service...."
+            f"{image.name}: Posting {os.path.getsize(context_file_path)} bytes of context to build service...."
         )
 
         files = {}
@@ -219,13 +215,11 @@ class ImageBuilderV2Client:
 
         if not res.is_success:
             error_message = res.text
-            click.echo(f"Error building image {image.name}: {error_message}", err=True)
             raise RuntimeError(f"Error building image {image.name}: {error_message}")
 
         build = BuildInfo.model_validate(res.json())
 
-        click.echo(f"Starting build for image {image.name} ...")
-        click.echo(f"Build ID: {build.id}")
+        click.echo(f"Waiting for build {build.id} of {image.name} to complete...")
 
         try:
             return await self.stream_logs(build)
@@ -322,15 +316,8 @@ class ImageBuilderV2Client:
             )
 
             if response.status_code == 202:
-                click.secho(
-                    f"Build for image {image.name} cancelled successfully",
-                    fg="green",
-                )
+                click.secho(f"Build for image {image.name} cancelled successfully")
             else:
-                click.secho(f"Failed to cancel build {build.id}", fg="red")
-            click.secho(f"Cancelled build for image {image.name}", fg="yellow")
+                click.secho(f"Failed to cancel build {build.id}: {response.text}")
         except Exception as e:
-            click.secho(
-                f"Failed to cancel build for image {image.name}: {e}",
-                fg="red",
-            )
+            click.secho(f"Failed to cancel build {build.id}: {e}")
