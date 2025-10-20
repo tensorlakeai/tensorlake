@@ -350,19 +350,19 @@ class ReduceOperationAwaitable(Awaitable):
         self,
         id: str,
         function_name: str,
-        inputs: List[Any | Future],
+        inputs: List[Any | Awaitable],
     ):
         super().__init__(id=id)
         self._function_name: str = function_name
         # Contains at least one item due to prior inputs validation.
-        self._inputs: List[Any | Future] = inputs
+        self._inputs: List[Any | Awaitable] = inputs
 
     @property
     def function_name(self) -> str:
         return self._function_name
 
     @property
-    def inputs(self) -> List[Any | Future]:
+    def inputs(self) -> List[Any | Awaitable]:
         return self._inputs
 
     def _create_future(self) -> "ReduceOperationFuture":
@@ -388,7 +388,7 @@ _InitialMissing = _InitialMissingType()
 def make_reduce_operation_awaitable(
     function_name: str,
     iterable: List[Any | Awaitable],
-    initial: Any | _InitialMissingType,
+    initial: Any | Awaitable | _InitialMissingType,
 ) -> ReduceOperationAwaitable:
     inputs: List[Any] = list(iterable)
     if len(inputs) == 0 and initial is _InitialMissing:
@@ -420,4 +420,6 @@ class ReduceOperationFuture(Future):
 
 # ListFuture is not yet supported by runtime (and server).
 RuntimeFutureTypes = FunctionCallFuture | ReduceOperationFuture
+# AwaitableList is supported by the runtime because it can be a function argument but
+# can't be returned from a function call.
 RuntimeAwaitableTypes = FunctionCallAwaitable | ReduceOperationAwaitable | AwaitableList

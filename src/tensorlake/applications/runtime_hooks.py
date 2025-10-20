@@ -45,6 +45,11 @@ def set_wait_futures_hook(hook: Any) -> None:
     __wait_futures = hook
 
 
+def clear_wait_futures_hook() -> None:
+    global __wait_futures
+    __wait_futures = None
+
+
 __run_futures: Callable[[List[Future], float | None], None] = None
 
 
@@ -68,3 +73,8 @@ def set_run_futures_hook(hook: Any) -> None:
         )
 
     __run_futures = hook
+
+
+def clear_run_futures_hook() -> None:
+    global __run_futures
+    __run_futures = None

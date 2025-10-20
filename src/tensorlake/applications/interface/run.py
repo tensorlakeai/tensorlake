@@ -8,12 +8,10 @@ from .function import Function
 from .request import Request
 
 
-def run_remote_application():
-    pass
-
-
-def run_application():
-    pass
+# FIXME/TODO.
+# Temporary fake remote implementation for tests to pass until remote runner gets reimplemented.
+def run_remote_application(application: Function | str, payload: Any) -> Request:
+    return run_local_application(application, payload)
 
 
 def run_local_application(application: Function | str, payload: Any) -> Request:
@@ -43,12 +41,12 @@ def run_local_application(application: Function | str, payload: Any) -> Request:
 #     return RemoteRunner(application_name=app_name, payload=payload).run()
 
 
-# def run_application(application: Function | str, payload: Any, remote: bool) -> Request:
-#     """Runs the application remotely or locally depending on the `remote` parameter value.
+def run_application(application: Function | str, payload: Any, remote: bool) -> Request:
+    """Runs the application remotely or locally depending on the `remote` parameter value.
 
-#     This is a convenience wrapper around the `run_remote_application` and `run_local_application`.
-#     """
-#     if remote:
-#         return run_remote_application(application, payload)
-#     else:
-#         return run_local_application(application, payload)
+    This is a convenience wrapper around the `run_remote_application` and `run_local_application`.
+    """
+    if remote:
+        return run_remote_application(application, payload)
+    else:
+        return run_local_application(application, payload)

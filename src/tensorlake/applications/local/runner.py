@@ -48,6 +48,8 @@ from ..registry import get_function
 from ..request_context.request_context_base import RequestContextBase
 from ..request_context.request_metrics_recorder import RequestMetricsRecorder
 from ..runtime_hooks import (
+    clear_run_futures_hook,
+    clear_wait_futures_hook,
     set_run_futures_hook,
     set_wait_futures_hook,
 )
@@ -151,6 +153,8 @@ class LocalRunner:
 
         Cancels all running functions and waits for them to finish.
         """
+        clear_run_futures_hook()
+        clear_wait_futures_hook()
         if self._request_exception is None and not self._finished():
             self._request_exception = RequestFailureException(
                 "Request cancelled by user"
@@ -172,7 +176,7 @@ class LocalRunner:
         Raises TensorlakeException on error (because called from runtime hook).
         """
         # Warning: this is called from user code.
-        self._user_code_cancellation_point()
+        self._runtime_hook_user_code_cancellation_point()
 
         for user_future in futures:
             if user_future.id in self._future_runs:
@@ -182,9 +186,13 @@ class LocalRunner:
                 )
 
             if isinstance(user_future, ReduceOperationFuture):
-                self._create_reduce_operation_future_run(user_future, start_delay)
+                self._create_future_run_for_reduce_operation_future(
+                    user_future, start_delay
+                )
             elif isinstance(user_future, FunctionCallFuture):
-                self._create_function_call_future_run(user_future, start_delay)
+                self._create_future_run_for_function_call_future(
+                    user_future, start_delay
+                )
             else:
                 raise TensorlakeException(
                     f"Internal error: unexpected future type: {type(user_future)}"
@@ -197,7 +205,7 @@ class LocalRunner:
         Raises TensorlakeException on error (because called from runtime hook).
         """
         # Warning: this is called from user code.
-        self._user_code_cancellation_point()
+        self._runtime_hook_user_code_cancellation_point()
 
         if return_when == RETURN_WHEN.FIRST_COMPLETED:
             std_return_when = STD_FIRST_COMPLETED
@@ -221,6 +229,7 @@ class LocalRunner:
             std_futures.append(self._future_runs[future.id].std_future)
 
         # Std futures are always running as long as their user futures are considered running.
+        # Their outcomes (if failed or succeeded) are also synchronized.
         done_std_futures, _ = std_wait(
             std_futures, timeout=timeout, return_when=std_return_when
         )
@@ -235,7 +244,7 @@ class LocalRunner:
 
         return done_user_futures, not_done_user_futures
 
-    def _user_code_cancellation_point(self) -> None:
+    def _runtime_hook_user_code_cancellation_point(self) -> None:
         """Called from user code to check for cancellation.
 
         Raises StopLocalFutureRun handled by our LocalFutureRun.
@@ -245,6 +254,8 @@ class LocalRunner:
         # can finish asap.
         if self._finished():
             raise StopLocalFutureRun()
+        # TODO: get LocalFutureRun object that runs this user code from contextvars and
+        # then check if its cancelled. If yes then raise StopLocalFutureRun().
 
     def _finished(self) -> bool:
         if self._request_exception is not None:
@@ -293,111 +304,85 @@ class LocalRunner:
 
     def _process_future_run_result(self, result: LocalFutureRunResult) -> None:
         future_run: LocalFutureRun = self._future_runs[result.id]
-        user_future: RuntimeFutureTypes = future_run.local_future.user_future
-        if isinstance(future_run, FunctionCallFutureRun):
-            self._process_function_call_future_run_result(
-                future_run=future_run, result=result
-            )
-        elif isinstance(future_run, ReturnOutputFutureRun):
-            self._process_return_output_future_run_result(
-                future_run=future_run, result=result
-            )
-        else:
-            self._request_exception = TensorlakeException(
-                "Internal error: unexpected future type: {}".format(type(user_future))
-            )
-            self._handle_future_run_final_output(
-                completed_future_run=future_run,
-                blob=None,
-                exception=self._request_exception,
-            )
-
-    def _process_return_output_future_run_result(
-        self, future_run: LocalFutureRun, result: LocalFutureRunResult
-    ) -> None:
         future: LocalFuture = future_run.local_future
         user_future: RuntimeFutureTypes = future.user_future
-        # TODO: Extract common logic from _process_function_call_future_run_result
-        # and reuse. All errors and even blob store upload are handled the same way.
-        self._handle_future_run_final_output(
-            completed_future_run=future_run, blob=blob, exception=result.exception
-        )
-
-    def _process_function_call_future_run_result(
-        self, future_run: LocalFutureRun, result: LocalFutureRunResult
-    ) -> None:
-        future: LocalFuture = future_run.local_future
-        user_future: FunctionCallFuture = future.user_future
-        if not isinstance(user_future, FunctionCallFuture):
-            self._request_exception = TensorlakeException(
-                "Internal error: unexpected future type: {}".format(type(user_future))
-            )
-            self._handle_future_run_final_output(
-                completed_future_run=future_run,
-                blob=None,
-                exception=self._request_exception,
+        function_name: str = ""
+        if isinstance(future_run, FunctionCallFutureRun):
+            if not isinstance(user_future, FunctionCallFuture):
+                self._handle_future_run_failure(
+                    future_run=future_run,
+                    exception=TensorlakeException(
+                        f"Internal error: unexpected user future type: {type(user_future)} "
+                    ),
+                )
+                return
+            function_name = user_future.awaitable.function_name
+        elif isinstance(future_run, ReturnOutputFutureRun):
+            if not isinstance(user_future, ReduceOperationFuture):
+                self._handle_future_run_failure(
+                    future_run=future_run,
+                    exception=TensorlakeException(
+                        f"Internal error: unexpected user future type: {type(user_future)} "
+                    ),
+                )
+                return
+            function_name = user_future.awaitable.function_name
+        else:
+            self._handle_future_run_failure(
+                future_run=future_run,
+                exception=TensorlakeException(
+                    f"Internal error: unexpected future run type: {repr(future_run)} "
+                ),
             )
             return
 
-        function: Function = get_function(user_future.awaitable.function_name)
         if isinstance(result.output, Future):
-            self._request_exception = ApplicationValidationError(
-                f"Function {function._function_config.function_name} returned a "
-                f"Future {repr(result.output)}, "
-                "please return an Awaitable or a concrete value instead."
-            )
-            self._handle_future_run_final_output(
-                completed_future_run=future_run,
-                blob=None,
-                exception=self._request_exception,
+            self._handle_future_run_failure(
+                future_run=future_run,
+                exception=ApplicationValidationError(
+                    f"Function '{function_name}' returned a Future {repr(result.output)}, "
+                    "please return an Awaitable or a concrete value instead."
+                ),
             )
             return
 
         elif isinstance(result.output, Awaitable):
             if result.output.id in self._future_runs:
-                self._request_exception = ApplicationValidationError(
-                    f"Function {function._function_config.function_name} returned an "
-                    f"Awaitable {repr(result.output)} which Future is already running, "
-                    "only not running Awaitable can be returned from a function."
-                )
-                self._handle_future_run_final_output(
-                    completed_future_run=future_run,
-                    blob=None,
-                    exception=self._request_exception,
+                self._handle_future_run_failure(
+                    future_run=future_run,
+                    exception=ApplicationValidationError(
+                        f"Function '{function_name}' returned an "
+                        f"Awaitable {repr(result.output)} which Future is already running. "
+                        "Only not running Awaitables can be returned from a function."
+                    ),
                 )
                 return
 
             if isinstance(result.output, AwaitableList):
-                self._request_exception = ApplicationValidationError(
-                    f"Function {function._function_config.function_name} returned an "
-                    f"AwaitableList {repr(result.output)}, "
-                    "an AwaitableList can only be used as a function argument, not returned from it."
-                )
-                self._handle_future_run_final_output(
-                    completed_future_run=future_run,
-                    blob=None,
-                    exception=self._request_exception,
+                self._handle_future_run_failure(
+                    future_run=future_run,
+                    exception=ApplicationValidationError(
+                        f"Function '{function_name}' returned an AwaitableList {repr(result.output)}. "
+                        "An AwaitableList can only be used as a function argument, not returned from it."
+                    ),
                 )
                 return
 
             try:
-                # This will call us recursively to create future runs.
+                # Recursively call run on the Awaitable. This will create future runs for the Awaitable.
                 result.output.run()
             except BaseException as e:
-                self._request_exception = TensorlakeException(
-                    "Internal error: failed to run Awaitable returned from function: {}".format(
-                        str(e)
-                    )
-                )
-                self._handle_future_run_final_output(
-                    completed_future_run=future_run,
-                    blob=None,
-                    exception=self._request_exception,
+                self._handle_future_run_failure(
+                    future_run=future_run,
+                    exception=TensorlakeException(
+                        f"Failed to run Awaitable returned from function '{function_name}': {str(e)}",
+                    ),
                 )
                 return
         else:
+            blob: BLOB | None = None
             if result.exception is None:
-                blob: BLOB = _future_output_value_to_blob(
+                blob = _future_output_value_to_blob(
                     function=function,
                     future_id=future.user_future.id,
                     output=result.output,
@@ -407,6 +392,18 @@ class LocalRunner:
             self._handle_future_run_final_output(
                 completed_future_run=future_run, blob=blob, exception=result.exception
             )
+
+    def _handle_future_run_failure(
+        self,
+        future_run: LocalFutureRun,
+        exception: TensorlakeException,
+    ) -> None:
+        self._request_exception = exception
+        self._handle_future_run_final_output(
+            completed_future_run=future_run,
+            blob=None,
+            exception=self._request_exception,
+        )
 
     def _wait_all_future_runs(self) -> None:
         for fr in self._future_runs.values():
@@ -429,9 +426,8 @@ class LocalRunner:
             return True
 
         elif isinstance(future_run, ReturnOutputFutureRun):
-            if isinstance(future_run.output, Awaitable):
-                if not self._blob_store.has(future_run.output.id):
-                    return False
+            # There are not prerequisites for ReturnOutputFutureRun.
+            # It just returns an awaitable as a tail call or a value.
             return True
 
         else:
@@ -461,8 +457,10 @@ class LocalRunner:
         else:
             # Intentionally do serialize -> deserialize cycle to ensure the same UX as in remote mode.
             completed_future.user_future.set_result(_deserialize_blob_value(blob))
+
         # Finish std future so wait hooks waiting on it unblock.
-        completed_future_run.finish()
+        # Success/failure needs to be propagated to std future as well so std wait calls work correctly.
+        completed_future_run.finish(is_exception=exception is not None)
 
         # Propagate output to consumer future if any.
         if completed_future.output_consumer_future_id is None:
@@ -532,8 +530,8 @@ class LocalRunner:
 
         return self._class_instances[function._function_config.class_name]
 
-    def _create_future_run_for_awaitable_argument(
-        self, arg: Any | Awaitable | Future, start_delay: float | None
+    def _create_future_run_if_awaitable(
+        self, arg: Any | Future | Awaitable, start_delay: float | None
     ) -> None:
         """Creates future run for the supplied argument if its a not running Awaitable.
 
@@ -541,24 +539,24 @@ class LocalRunner:
         if isinstance(arg, Future):
             raise ApplicationValidationError(
                 f"Invalid argument: {repr(arg)} is a Future, "
-                "please pass an Awaitable or a concrete value instead."
+                "please pass an Awaitable or a concrete value as a function argument."
             )
         elif isinstance(arg, AwaitableList):
             for awaitable in arg.awaitables:
-                self._create_future_run_for_awaitable_argument(awaitable, start_delay)
+                self._create_future_run_if_awaitable(awaitable, start_delay)
         elif isinstance(arg, Awaitable):
             if arg.id in self._future_runs:
                 raise ApplicationValidationError(
                     f"Invalid argument: {repr(arg)} is an Awaitable with already running Future, "
                     "only not running Awaitable can be passed as argument."
                 )
-            # This will call us recursively to create future runs.
+            # This will call us recursively to create the future run.
             if start_delay is None:
                 arg.run()
             else:
                 arg.run_later(start_delay=start_delay)
 
-    def _create_function_call_future_run(
+    def _create_future_run_for_function_call_future(
         self, user_future: FunctionCallFuture, start_delay: float | None
     ) -> None:
         """Called from runtime hook to create LocalFunctionCallFutureRun.
@@ -568,9 +566,9 @@ class LocalRunner:
         awaitable: FunctionCallAwaitable = user_future.awaitable
 
         for arg in awaitable.args:
-            self._create_future_run_for_awaitable_argument(arg, start_delay)
+            self._create_future_run_if_awaitable(arg, start_delay)
         for arg in awaitable.kwargs.values():
-            self._create_future_run_for_awaitable_argument(arg, start_delay)
+            self._create_future_run_if_awaitable(arg, start_delay)
 
         function: Function = get_function(awaitable.function_name)
         self._future_runs[awaitable.id] = FunctionCallFutureRun(
@@ -586,7 +584,7 @@ class LocalRunner:
             request_context=self._request_context,
         )
 
-    def _create_reduce_operation_future_run(
+    def _create_future_run_for_reduce_operation_future(
         self, user_future: ReduceOperationFuture, start_delay: float | None
     ) -> None:
         """Called from runtime hook to create ReduceOperationFuture run.
@@ -594,51 +592,35 @@ class LocalRunner:
         Raises TensorlakeException on error (because called from runtime hook).
         """
         awaitable: ReduceOperationAwaitable = user_future.awaitable
+        reduce_operation_result_awaitable: Awaitable = awaitable.inputs[0]
+        function: Function = get_function(awaitable.function_name)
 
-        if len(awaitable.inputs) == 1:
-            # Don't create future runs for single awaitable because we're just going
-            # to return it from function run and it will fail validation if the awaitable
-            # is already running.
-            self._future_runs[awaitable.id] = ReturnOutputFutureRun(
-                local_future=LocalFuture(
-                    user_future=user_future,
-                    start_delay=start_delay,
-                ),
-                result_queue=self._future_run_result_queue,
-                thread_pool=self._future_run_thread_pool,
-                output=awaitable.inputs[0],
-            )
-        else:
-            for input_item in awaitable.inputs:
-                self._create_future_run_for_awaitable_argument(input_item, start_delay)
-
+        # There's no user visible interface to ReturnOutputFutureRun so we have to do everything manually here.
+        if len(awaitable.inputs) >= 2:
             # Create a chain of function calls to reduce all inputs one by one.
             # Ordering of calls is important here. We should reduce ["a", "b", "c", "d"]
             # using string concat function into "abcd".
-            # TODO: Finish this!
-            # Create Awaitable function call for each reduce step.
-            # Consume the last awaitable function call as the ReduceOperationFuture's output.
-            function_calls: List[FunctionCallFuture] = [
-                FunctionCallFuture(
-                    id=request_scoped_id(),
-                    function_name=user_call.function_name,
-                    args=[user_call.inputs[0], user_call.inputs[1]],
-                    kwargs={},
-                    start_delay=user_call.start_delay,
+            previous_function_call_awaitable: FunctionCallAwaitable = (
+                function.awaitable(awaitable.inputs[0], awaitable.inputs[1])
+            )
+            for input_item in awaitable.inputs[2:]:
+                previous_function_call_awaitable = function.awaitable(
+                    previous_function_call_awaitable, input_item
                 )
-            ]
-            for input_item in user_call.inputs[2:]:
-                function_calls.append(
-                    FunctionCallFuture(
-                        id=request_scoped_id(),
-                        function_name=user_call.function_name,
-                        args=[function_calls[-1], input_item],
-                        kwargs={},
-                        start_delay=user_call.start_delay,
-                    )
-                )
-            # The last function call's output is the ReduceOperationFuture's output.
-            function_calls[-1].id = user_call.id
+            reduce_operation_result_awaitable = previous_function_call_awaitable
+
+        self._create_future_run_if_awaitable(
+            reduce_operation_result_awaitable, start_delay
+        )
+        self._future_runs[awaitable.id] = ReturnOutputFutureRun(
+            local_future=LocalFuture(
+                user_future=user_future,
+                start_delay=start_delay,
+            ),
+            result_queue=self._future_run_result_queue,
+            thread_pool=self._future_run_thread_pool,
+            output=reduce_operation_result_awaitable,
+        )
 
 
 def _deserialize_blob_value(blob: BLOB) -> Any | File:
