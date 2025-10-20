@@ -6,7 +6,7 @@ import yaml
 TRANSIENT_HTTPX_ERRORS = (httpx.NetworkError, httpx.RemoteProtocolError)
 
 
-type EventHook = Callable[..., Any]
+EventHook = Callable[..., Any]
 
 
 def get_httpx_client(

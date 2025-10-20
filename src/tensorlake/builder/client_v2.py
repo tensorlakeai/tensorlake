@@ -153,13 +153,13 @@ class ImageBuilderV2Client:
         return cls(build_url, api_key, organization_id, project_id)
 
     async def build_collection(
-        self, context_collection: Dict[Image, BuildContext]
-    ) -> Dict[str, str]:
+        self, context_collection: dict[Image, BuildContext]
+    ) -> dict[str, str]:
         """
         Build a collection of images using the provided build context.
 
         Args:
-            context_collection (Dict[Image, BuildContext]): A dictionary mapping images to their build contexts.
+            context_collection (dict[Image, BuildContext]): A dictionary mapping images to their build contexts.
         Returns:
             dict: A dictionary mapping image hashes to their corresponding build IDs.
         """
