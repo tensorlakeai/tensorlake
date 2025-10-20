@@ -250,32 +250,10 @@ class ListFuture(Future):
 
     def __init__(self, awaitable: AwaitableList):
         super().__init__(awaitable)
-        self._futures: List[Future] = [
-            awaitable.run() for awaitable in awaitable.awaitables
-        ]
 
     @property
     def awaitable(self) -> AwaitableList:
         return self._awaitable
-
-    def _wait(self, timeout: float | None) -> None:
-        # We use a custom wait implementation for ListFuture because runtime
-        # doesn't support waiting for it currently.
-        _, not_done = Future.wait(
-            futures=self._futures,
-            timeout=timeout,
-            return_when=RETURN_WHEN.ALL_COMPLETED,
-        )
-        if len(not_done) == 0:
-            # All futures completed successfully.
-            self.set_result([future.result() for future in self._futures])
-        else:
-            self.set_exception(
-                RequestFailureException(
-                    "Some futures from ListFuture did not complete: "
-                    + ", ".join(str(f.result()) for f in not_done)
-                )
-            )
 
 
 class FunctionCallAwaitable(Awaitable):

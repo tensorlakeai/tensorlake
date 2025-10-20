@@ -57,7 +57,7 @@ def parse_pdf_api(payload: RequestPayload) -> ResponsePayload:
         page_range=payload.page_range,
     )
     # Use map operation running in background as argument to other function calls.
-    chunk_embeddings: Future = chunk_and_embed.function_call.map(
+    chunk_embeddings: Future = chunk_and_embed.awaitable.map(
         [chunk.content for chunk in response.chunks]
     ).run()
 
@@ -69,9 +69,9 @@ def parse_pdf_api(payload: RequestPayload) -> ResponsePayload:
     chunks: List[ChunkEmbeddings] = chunk_embeddings.result()
 
     # Spawn a recurring background function to watch for the PDF file updates.
-    watch_pdf_updates.function_call(
-        url=payload.url, page_range=payload.page_range
-    ).run_later(start_delay=60)
+    watch_pdf_updates.awaitable(
+        url=payload.url, page_range=payload.page_range, iteration=0
+    ).run_later(start_delay=0.5)
     return ResponsePayload(chunks=chunks)
 
 
@@ -101,7 +101,7 @@ def chunk_and_embed(page: str) -> ChunkEmbeddings:
     output = ChunkEmbeddings(chunk_embeddings=chunk_embeddings)
     # Spawn IndexEmbedding function call in background to save the embeddings.
     # We're not interested in waiting for it to complete or value the function returned.
-    IndexEmbedding().index.function_call(output).run()
+    IndexEmbedding().index.awaitable(output).run()
 
     return output
 
@@ -130,14 +130,16 @@ class IndexEmbedding:
 
 
 @function()
-def watch_pdf_updates(url: str, page_range: str) -> None:
+def watch_pdf_updates(url: str, page_range: str, iteration: int) -> None:
     # Simulate fetching of the PDF file and checking for updates.
     time.sleep(0.1)
     print(f"Checked {url} for updates, no updates found.")
-    # Schedule next check in 60 seconds.
-    watch_pdf_updates.function_call(url=url, page_range=page_range).run_later(
-        start_delay=60
-    )
+    # Don't loop forever in tests.
+    if iteration < 5:
+        # Schedule next check in 0.1 seconds.
+        watch_pdf_updates.awaitable(
+            url=url, page_range=page_range, iteration=iteration + 1
+        ).run_later(start_delay=0.1)
 
 
 class TestPDFParseDataWorkflow(unittest.TestCase):

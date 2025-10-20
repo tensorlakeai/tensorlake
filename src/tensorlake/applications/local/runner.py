@@ -30,6 +30,7 @@ from ..interface.awaitables import (
     FunctionCallAwaitable,
     FunctionCallFuture,
     Future,
+    ListFuture,
     ReduceOperationAwaitable,
     ReduceOperationFuture,
     RuntimeFutureTypes,
@@ -52,7 +53,11 @@ from ..runtime_hooks import (
     set_run_futures_hook,
     set_wait_futures_hook,
 )
-from ..user_data_serializer import UserDataSerializer, serializer_by_name
+from ..user_data_serializer import (
+    PickleUserDataSerializer,
+    UserDataSerializer,
+    serializer_by_name,
+)
 from .blob_store import BLOB, BLOBStore
 from .function_call_future_run import FunctionCallFutureRun
 from .future import LocalFuture
@@ -62,6 +67,7 @@ from .future_run import (
     StopLocalFutureRun,
     get_current_future_run,
 )
+from .list_future_run import ListFutureRun
 from .request import LocalRequest
 from .request_progress import LocalRequestProgress
 from .request_state import LocalRequestState
@@ -154,7 +160,11 @@ class LocalRunner:
             return LocalRequest(
                 id=_LOCAL_REQUEST_ID,
                 output=None,
-                exception=RequestFailureException("Request failed"),
+                exception=(
+                    RequestFailureException("Request failed")
+                    if not isinstance(e, KeyboardInterrupt)
+                    else RequestFailureException("Request cancelled by user")
+                ),
             )
 
     def close(self) -> None:
@@ -162,8 +172,6 @@ class LocalRunner:
 
         Cancels all running functions and waits for them to finish.
         """
-        clear_run_futures_hook()
-        clear_wait_futures_hook()
         if self._request_exception is None and not self._finished():
             self._request_exception = RequestFailureException(
                 "Request cancelled by user"
@@ -171,6 +179,9 @@ class LocalRunner:
         for fr in self._future_runs.values():
             fr.cancel()
         self._future_run_thread_pool.shutdown(wait=True, cancel_futures=True)
+        # Only clear runtime hooks at the very end when nothing can use them.
+        clear_run_futures_hook()
+        clear_wait_futures_hook()
 
     def __enter__(self) -> "LocalRunner":
         return self
@@ -315,11 +326,27 @@ class LocalRunner:
         future_run: LocalFutureRun = self._future_runs[result.id]
         future: LocalFuture = future_run.local_future
         user_future: RuntimeFutureTypes = future.user_future
-        function: Function | None = None
+
+        function_name: str = "<unknown>"
+        output_blob_serializer: UserDataSerializer | None = None
         if isinstance(future_run, FunctionCallFutureRun):
-            function = user_future.awaitable.function
+            function_name = user_future.awaitable.function_name
+            output_blob_serializer = function_output_serializer(
+                get_function(function_name),
+                future.output_serializer_name_override,
+            )
         elif isinstance(future_run, ReturnOutputFutureRun):
-            function = user_future.awaitable.function
+            function_name = user_future.awaitable.function_name
+            output_blob_serializer = function_output_serializer(
+                get_function(function_name),
+                future.output_serializer_name_override,
+            )
+        elif isinstance(future_run, ListFutureRun):
+            function_name = "Assembly awaitable list"
+            # In remote mode we assemble the list locally and never store it in BLOB store.
+            # As we store everything in local mode then we just use the most flexible serializer
+            # here that always works.
+            output_blob_serializer = PickleUserDataSerializer()
         else:
             self._handle_future_run_failure(
                 future_run=future_run,
@@ -329,9 +356,10 @@ class LocalRunner:
             )
             return
 
-        function_name: str = function._function_config.function_name
-
         if isinstance(result.output, (Awaitable, Future)):
+            # This is a very important check for our UX. We can await for AwaitableList
+            # but we cannot return it from a function because there's no Python code to
+            # reassemble the list from individual resolved awaitables.
             if isinstance(result.output, AwaitableList):
                 self._handle_future_run_failure(
                     future_run=future_run,
@@ -358,10 +386,9 @@ class LocalRunner:
             blob: BLOB | None = None
             if result.exception is None:
                 blob = _future_output_value_to_blob(
-                    function=function,
                     future_id=future.user_future.id,
                     output=result.output,
-                    output_serializer_name_override=future.output_serializer_name_override,
+                    output_serializer=output_blob_serializer,
                 )
                 self._blob_store.put(blob)
             self._handle_future_run_final_output(
@@ -402,6 +429,12 @@ class LocalRunner:
             # There are no prerequisites for ReturnOutputFutureRun.
             # It just returns an awaitable as a tail call or a value.
             return True
+
+        elif isinstance(future_run, ListFutureRun):
+            awaitable_list: AwaitableList = (
+                future_run.local_future.user_future.awaitable
+            )
+            return self._value_is_available(awaitable_list)
 
         else:
             self._handle_future_run_failure(
@@ -479,6 +512,8 @@ class LocalRunner:
             self._start_function_call_future_run(future_run)
         elif isinstance(future_run, ReturnOutputFutureRun):
             future_run.start()
+        elif isinstance(future_run, ListFutureRun):
+            self._start_list_future_run(future_run)
         else:
             self._request_exception = TensorlakeException(
                 "Internal error: unexpected future type: {}".format(
@@ -486,7 +521,9 @@ class LocalRunner:
                 )
             )
 
-    def _start_function_call_future_run(self, future_run: LocalFutureRun) -> None:
+    def _start_function_call_future_run(
+        self, future_run: FunctionCallFutureRun
+    ) -> None:
         local_future: LocalFuture = future_run.local_future
         user_future: FunctionCallFuture = local_future.user_future
         awaitable: FunctionCallAwaitable = user_future.awaitable
@@ -499,6 +536,18 @@ class LocalRunner:
         for kwarg_key, kwarg in awaitable.kwargs.items():
             awaitable.kwargs[kwarg_key] = self._reconstruct_value(kwarg)
 
+        future_run.start()
+
+    def _start_list_future_run(self, future_run: ListFutureRun) -> None:
+        local_future: LocalFuture = future_run.local_future
+        user_future: ListFuture = local_future.user_future
+        awaitable_list: AwaitableList = user_future.awaitable
+
+        values: List[Any] = []
+        for awaitable in awaitable_list.awaitables:
+            values.append(self._reconstruct_value(awaitable))
+
+        future_run.set_resolved_values(values)
         future_run.start()
 
     def _reconstruct_value(self, user_object: Any | Awaitable) -> Any:
@@ -567,8 +616,11 @@ class LocalRunner:
             )
 
         if isinstance(awaitable, AwaitableList):
-            for awaitable in awaitable.awaitables:
-                self._create_future_run_for_awaitable(awaitable, None, start_delay)
+            self._create_future_run_for_awaitable_list(
+                awaitable=awaitable,
+                existing_awaitable_future=existing_awaitable_future,
+                start_delay=start_delay,
+            )
         elif isinstance(awaitable, ReduceOperationAwaitable):
             self._create_future_run_for_reduce_operation_awaitable(
                 awaitable=awaitable,
@@ -585,6 +637,34 @@ class LocalRunner:
             raise ApplicationValidationError(
                 f"Unexpected type of awaitable: {type(awaitable)}"
             )
+
+    def _create_future_run_for_awaitable_list(
+        self,
+        awaitable: AwaitableList,
+        existing_awaitable_future: ListFuture | None,
+        start_delay: float | None,
+    ) -> None:
+        """Creates ListFutureRun for the supplied awaitable.
+
+        Raises TensorlakeException on error.
+        """
+        user_future: ListFuture = (
+            ListFuture(awaitable)
+            if existing_awaitable_future is None
+            else existing_awaitable_future
+        )
+
+        for item in awaitable.awaitables:
+            self._create_function_run_for_user_object(item, start_delay)
+
+        self._future_runs[awaitable.id] = ListFutureRun(
+            local_future=LocalFuture(
+                user_future=user_future,
+                start_delay=start_delay,
+            ),
+            result_queue=self._future_run_result_queue,
+            thread_pool=self._future_run_thread_pool,
+        )
 
     def _create_future_run_for_function_call_awaitable(
         self,
@@ -679,21 +759,15 @@ def _deserialize_blob_value(blob: BLOB) -> Any | File:
 
 
 def _future_output_value_to_blob(
-    function: Function,
-    future_id: str,
-    output: Any,
-    output_serializer_name_override: str | None,
+    future_id: str, output: Any, output_serializer: UserDataSerializer
 ) -> BLOB:
-    function_os: UserDataSerializer = function_output_serializer(
-        function, output_serializer_name_override
-    )
     serialized_output, serialized_output_content_type = serialize_value(
-        output, function_os
+        output, output_serializer
     )
     return BLOB(
         id=future_id,
         data=serialized_output,
-        serializer_name=function_os.name,
+        serializer_name=output_serializer.name,
         content_type=serialized_output_content_type,
         cls=type(output),
     )
