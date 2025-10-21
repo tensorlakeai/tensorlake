@@ -197,19 +197,19 @@ class Future:
 
 
 class AwaitableList(Awaitable):
-    """Combines a list of awaitables into a single object.
+    """Combines a list of awaitables and user objects into a single awaitable.
 
     Allows to pass a list of awaitables as a single list argument to a Tensorlake Function.
     Cannot be returned from a Tensorlake Function.
     """
 
-    def __init__(self, id: str, awaitables: Iterable[Awaitable]):
+    def __init__(self, id: str, items: Iterable[Awaitable | Any]):
         super().__init__(id=id)
-        self._awaitables: List[Awaitable] = list(awaitables)
+        self._items: List[Awaitable | Any] = list(items)
 
     @property
-    def awaitables(self) -> List[Awaitable]:
-        return self._awaitables
+    def items(self) -> List[Awaitable | Any]:
+        return self._items
 
     def _create_future(self) -> "ListFuture":
         return ListFuture(self)
@@ -218,26 +218,28 @@ class AwaitableList(Awaitable):
         return (
             f"<Tensorlake AwaitableList(\n"
             f"  id={self.id!r},\n"
-            f"  awaitables=[\n    "
-            + ",\n    ".join(repr(awaitable) for awaitable in self.awaitables)
+            f"  items=[\n    "
+            + ",\n    ".join(repr(awaitable) for awaitable in self.items)
             + "\n  ]\n"
             f")>"
         )
 
 
 def make_map_operation_awaitable(
-    function_name: str, iterable: List[Any | Awaitable]
+    function_name: str, items: List[Any | Awaitable] | AwaitableList
 ) -> AwaitableList:
+    if isinstance(items, AwaitableList):
+        items = items.items
     return AwaitableList(
         id=request_scoped_id(),
-        awaitables=[
+        items=[
             FunctionCallAwaitable(
                 id=request_scoped_id(),
                 function_name=function_name,
                 args=[item],
                 kwargs={},
             )
-            for item in iterable
+            for item in items
         ],
     )
 
@@ -365,10 +367,15 @@ _InitialMissing = _InitialMissingType()
 
 def make_reduce_operation_awaitable(
     function_name: str,
-    iterable: List[Any | Awaitable],
+    items: List[Any | Awaitable] | AwaitableList,
     initial: Any | Awaitable | _InitialMissingType,
 ) -> ReduceOperationAwaitable:
-    inputs: List[Any] = list(iterable)
+    inputs: List[Any | Awaitable] = None
+    if isinstance(items, AwaitableList):
+        inputs = list(items.items)
+    else:
+        inputs = list(items)
+
     if len(inputs) == 0 and initial is _InitialMissing:
         raise TypeError("reduce of empty iterable with no initial value")
 

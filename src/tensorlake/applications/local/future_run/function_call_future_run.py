@@ -1,6 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue
-from typing import Any
+from typing import Any, Dict, List
 
 from ...function.function_call import (
     set_self_arg,
@@ -47,6 +47,17 @@ class FunctionCallFutureRun(LocalFutureRun):
         self._function: Function = function
         self._class_instance: Any | None = class_instance
         self._request_context: RequestContext = request_context
+        self._arg_values: List[Any] | None = None
+        self._kwarg_values: Dict[str, Any] | None = None
+
+    def start(self, arg_values: List[Any], kwarg_values: Dict[str, Any]) -> None:
+        """Starts the function call future run with resolved argument values.
+
+        The argument values must be fully resolved (no awaitables or futures among them).
+        """
+        self._arg_values = arg_values
+        self._kwarg_values = kwarg_values
+        super().start()
 
     def _run_future(self) -> LocalFutureRunResult:
         """Runs the function call awaitable and returns its result.
@@ -62,7 +73,7 @@ class FunctionCallFutureRun(LocalFutureRun):
 
         awaitable: FunctionCallAwaitable = self._local_future.user_future.awaitable
         if self._class_instance is not None:
-            set_self_arg(args=awaitable.args, self_instance=self._class_instance)
+            set_self_arg(args=self._arg_values, self_instance=self._class_instance)
 
         # Application retries are used if function retries are not set.
         retries: Retries = (
@@ -74,7 +85,7 @@ class FunctionCallFutureRun(LocalFutureRun):
         while True:
             try:
                 result: Any = self._function._original_function(
-                    *awaitable.args, **awaitable.kwargs
+                    *self._arg_values, **self._kwarg_values
                 )
                 return LocalFutureRunResult(
                     id=awaitable.id, output=result, exception=None

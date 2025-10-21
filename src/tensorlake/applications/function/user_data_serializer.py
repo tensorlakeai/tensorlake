@@ -1,7 +1,8 @@
-from typing import Any, List
+from typing import Any
 
 from ..interface.file import File
 from ..interface.function import Function
+from ..metadata import ValueMetadata
 from ..user_data_serializer import (
     NON_API_FUNCTION_SERIALIZER_NAME,
     UserDataSerializer,
@@ -29,43 +30,46 @@ def function_output_serializer(
 
 def serialize_value(
     value: Any, serializer: UserDataSerializer
-) -> tuple[bytes, str | None]:
+) -> tuple[bytes, ValueMetadata]:
     """Serializes the given value using the provided serializer.
 
-    Returns a tuple of (serialized_value, content_type).
-    The content type is not None only for custom content types set by user
-    in File object if the value is File.
+    The returned ValueMetadata has a fake id.
     """
+    metadata: ValueMetadata = ValueMetadata(
+        id="fake_id",
+        cls=type(value),
+        serializer_name=None,
+        content_type=None,
+    )
+    data: bytes = None
     if isinstance(value, File):
-        return value.content, value.content_type
+        data = value.content
+        metadata.content_type = value.content_type
     else:
-        return (
-            serializer.serialize(value),
-            None,
-        )
+        data = serializer.serialize(value)
+        metadata.serializer_name = serializer.name
+
+    return data, metadata
 
 
 def deserialize_value(
     serialized_value: bytes,
-    content_type: str | None,
-    serializer: UserDataSerializer | None,
-    type_hints: List[Any],
+    metadata: ValueMetadata,
 ) -> Any | File:
     """Deserializes the given value using the provided serializer and type hints."""
-    is_file_output: bool = False
-    for type_hint in type_hints:
-        if type_hint is File:
-            is_file_output = True
+    is_file_output: bool = metadata.cls is File
 
     if is_file_output:
-        if content_type is None:
+        if metadata.content_type is None:
             raise ValueError(
                 "Deserializing to File requires a content type, but None was provided."
             )
-        return File(content=serialized_value, content_type=content_type)
+        return File(content=serialized_value, content_type=metadata.content_type)
     else:
-        if serializer is None:
+        if metadata.serializer_name is None:
             raise ValueError(
-                "Deserializer is None for non-File value. Cannot deserialize value."
+                "Serializer name is None for non-File value. Cannot deserialize value."
             )
-        return serializer.deserialize(serialized_value, type_hints)
+        return serializer_by_name(metadata.serializer_name).deserialize(
+            serialized_value, [metadata.cls]
+        )
