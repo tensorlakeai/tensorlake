@@ -26,8 +26,8 @@ from tensorlake.applications.request_context.request_metrics_recorder import (
 )
 
 from .blob_store.blob_store import BLOBStore
-from .handlers.check_health.handler import Handler as CheckHealthHandler
 from .handlers.run_function.handler import Handler as RunAllocationHandler
+from .health_check import HealthCheckHandler
 from .info import info_response_kv_args
 from .initialize_request_validator import InitializeRequestValidator
 from .logger import FunctionExecutorLogger
@@ -114,7 +114,7 @@ class Service(FunctionExecutorServicer):
         self._function_instance_arg: Any | None = None
         self._blob_store: BLOBStore | None = None
         self._request_state_proxy_server: RequestStateProxyServer | None = None
-        self._check_health_handler: CheckHealthHandler | None = None
+        self._check_health_handler: HealthCheckHandler | None = None
         # Allocation management for create_allocation/await_allocation/delete_allocation
         self._allocations: Dict[str, _AllocationInfo] = {}
         self._allocations_lock = threading.Lock()
@@ -210,7 +210,7 @@ class Service(FunctionExecutorServicer):
             available_cpu_count=available_cpu_count, logger=self._logger
         )
         # Only pass health checks if FE was initialized successfully.
-        self._check_health_handler = CheckHealthHandler(self._logger)
+        self._check_health_handler = HealthCheckHandler(self._logger)
         self._logger.info(
             "initialized function executor service",
             duration_sec=f"{time.monotonic() - start_time:.3f}",

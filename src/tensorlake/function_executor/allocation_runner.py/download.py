@@ -2,22 +2,22 @@ import hashlib
 import time
 from typing import List
 
-from tensorlake.applications.metadata.value_node import ValueNode
+from tensorlake.applications.metadata import ValueMetadata, deserialize_metadata
 
-from ...blob_store.blob_store import BLOBStore
-from ...logger import FunctionExecutorLogger
-from ...proto.function_executor_pb2 import (
+from ..blob_store.blob_store import BLOBStore
+from ..logger import FunctionExecutorLogger
+from ..proto.function_executor_pb2 import (
     BLOB,
     Allocation,
     SerializedObjectInsideBLOB,
     SerializedObjectManifest,
 )
-from .value_node_metadata import ValueNodeMetadata
+from .value import SerializedValue
 
 
 def download_function_arguments(
     allocation: Allocation, blob_store: BLOBStore, logger: FunctionExecutorLogger
-) -> List[ValueNode]:
+) -> List[SerializedValue]:
     start_time = time.monotonic()
     logger = logger.bind(module=__name__)
     logger.info("downloading function arguments")
@@ -31,20 +31,14 @@ def download_function_arguments(
             f"{len(allocation.inputs.args)} != {len(allocation.inputs.arg_blobs)}"
         )
 
-    args: List[ValueNode] = []
+    args: List[SerializedValue] = []
     for i, arg in enumerate(allocation.inputs.args):
         arg: SerializedObjectInsideBLOB
         arg_blob: BLOB = allocation.inputs.arg_blobs[i]
-        serialized_arg_metadata, serialized_arg_data = _download_serialized_object(
+        serialized_value: SerializedValue = _download_serialized_value(
             arg_blob, arg, blob_store, logger
         )
-        serialized_arg_metadata: bytes
-        serialized_arg_data: bytes
-        args.append(
-            _deserialize_to_value_node(
-                arg.manifest, serialized_arg_metadata, serialized_arg_data
-            )
-        )
+        args.append(serialized_value)
 
     logger.info(
         "function arguments downloaded",
@@ -54,9 +48,9 @@ def download_function_arguments(
     return args
 
 
-def download_application_function_payload_bytes(
+def download_application_function_payload(
     allocation: Allocation, blob_store: BLOBStore, logger: FunctionExecutorLogger
-) -> bytes:
+) -> SerializedValue:
     start_time = time.monotonic()
     logger = logger.bind(module=__name__)
     logger.info("downloading function arguments")
@@ -70,7 +64,7 @@ def download_application_function_payload_bytes(
     app_payload_blob: BLOB = allocation.inputs.arg_blobs[0]
     app_payload_so: SerializedObjectInsideBLOB = allocation.inputs.args[0]
 
-    _, payload = _download_serialized_object(
+    serialized_value: SerializedValue = _download_serialized_value(
         blob=app_payload_blob,
         so=app_payload_so,
         blob_store=blob_store,
@@ -82,33 +76,37 @@ def download_application_function_payload_bytes(
         duration_sec=time.monotonic() - start_time,
     )
 
-    return payload
+    return serialized_value
 
 
-def _download_serialized_object(
+def _download_serialized_value(
     blob: BLOB,
     so: SerializedObjectInsideBLOB,
     blob_store: BLOBStore,
     logger: FunctionExecutorLogger,
-) -> tuple[bytes, bytes]:
+) -> SerializedValue:
     """Returns the raw bytes of the serialized object metadata and data from blob store."""
     if not so.manifest.HasField("metadata_size"):
         raise ValueError("SerializedObjectManifest is missing metadata_size.")
 
     # Download each part separately to avoid splitting the downloaded data and consuming extra memory.
-    so_metadata: bytes = blob_store.get(
-        blob=blob,
-        offset=so.offset,
-        size=so.manifest.metadata_size,
-        logger=logger,
-    )
-    so_data: bytes = blob_store.get(
+    serialized_metadata: bytes | None = None
+    if so.manifest.metadata_size > 0:
+        serialized_metadata = blob_store.get(
+            blob=blob,
+            offset=so.offset,
+            size=so.manifest.metadata_size,
+            logger=logger,
+        )
+
+    serialized_data: bytes = blob_store.get(
         blob=blob,
         offset=so.offset + so.manifest.metadata_size,
         size=so.manifest.size - so.manifest.metadata_size,
         logger=logger,
     )
-    so_hash: str = _sha256_hexdigest(so_metadata, so_data)
+
+    so_hash: str = _sha256_hexdigest(serialized_metadata, serialized_data)
     if so_hash != so.manifest.sha256_hash:
         logger.error(
             "serialized object data hash mismatch",
@@ -119,31 +117,44 @@ def _download_serialized_object(
             f"Serialized object hash {so_hash} does not match expected hash {so.manifest.sha256_hash}."
         )
 
-    return so_metadata, so_data
+    metadata: ValueMetadata | None = None
+    if serialized_metadata is not None:
+        metadata = _deserialize_value_metadata(
+            manifest=so.manifest,
+            serialized_metadata=serialized_metadata,
+        )
+
+    return SerializedValue(
+        metadata=metadata,
+        data=serialized_data,
+    )
 
 
-def _deserialize_to_value_node(
-    manifest: SerializedObjectManifest, metadata: bytes, data: bytes
-) -> ValueNode:
-    """Deserialized Serialized Object created by Python SDK into its original ValueNode."""
-    value_node_metadata: ValueNodeMetadata = ValueNodeMetadata.deserialize(metadata)
-    # The Data Payload is produced by one of the nodes in a call tree. The this data payload gets assigned as
+def _deserialize_value_metadata(
+    manifest: SerializedObjectManifest,
+    serialized_metadata: bytes,
+) -> ValueMetadata:
+    """Deserializes Serialized Object created by Python SDK into original value with sdk metadata."""
+    value_metadata: ValueMetadata = deserialize_metadata(serialized_metadata)
+    if not isinstance(value_metadata, ValueMetadata):
+        raise ValueError(
+            "Deserialized sdk value metadata is not of type ValueMetadata."
+        )
+
+    # The Data Payload is produced by one of the nodes in a call tree. This data payload gets assigned as
     # a value output of the root of the call tree. The parent of the root node expect to find a ValueNode with
     # id of the root node but the Data Payload metadata contains the id of the node that produced it.
     #
     # To get the id of the root node we need to use source_function_call_id from the manifest. If it's not set
     # then it means that the Data Payload was produced in the same function call where it's consumed so the node
     # id in the metadata is correct.
-    node_id: str = (
+    value_metadata.id = (
         manifest.source_function_call_id
         if manifest.HasField("source_function_call_id")
-        else value_node_metadata.nid
+        else value_metadata.id
     )
-    return ValueNode.from_serialized(
-        node_id=node_id,
-        value=data,
-        metadata=value_node_metadata.metadata,
-    )
+
+    return value_metadata
 
 
 def _sha256_hexdigest(metadata: bytes, data: bytes) -> str:
