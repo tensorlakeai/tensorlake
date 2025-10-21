@@ -1,5 +1,7 @@
 syntax = "proto3";
 
+import "google/protobuf/timestamp.proto";
+
 package function_executor_service;
 
 // The messages should not use any Python SDK objects. Only Function Executor implemented
@@ -167,16 +169,27 @@ enum AllocationFailureReason {
     ALLOCATION_FAILURE_REASON_REQUEST_ERROR = 3;
 }
 
-message ProgressUpdate {
+message AllocationProgress {
     float current = 1;
     float total = 2;
 }
 
-message AwaitAllocationProgress {
-    oneof response {
-        ProgressUpdate progress = 1;
-        AllocationResult allocation_result = 2;
-    }
+message AllocationFunctionCalls {
+    // New function calls are detected by client when it sees a new
+    // ExecutionPlanUpdates.root_function_call_id.
+    // If a function call gets removed from this list then it doesn't
+    // get cancelled. Already added ExecutionPlanUpdates are immutable.
+    repeated ExecutionPlanUpdates function_calls = 1;
+}
+
+message AllocationState {
+    // Optional current allocation progress.
+    AllocationProgress progress = 1;
+    // Optional pending function calls to be executed.
+    // FE removes pending function calls when it gets their results.
+    AllocationFunctionCalls pending_function_calls = 2;
+    // Optional allocation result. Set when allocation finishes.
+    AllocationResult result = 3;
 }
 
 // FunctionInputs contains the input data for allocation execution
@@ -225,6 +238,8 @@ message ExecutionPlanUpdate {
 message ExecutionPlanUpdates {
   repeated ExecutionPlanUpdate updates = 1;
   optional string root_function_call_id = 2;
+  // Optional timestamp for when to start the plan execution.
+  optional google.protobuf.Timestamp start_at = 3;
 }
 
 // AllocationResult contains the execution outcome and outputs of an allocation.
@@ -268,6 +283,17 @@ message DeleteAllocationRequest {
     optional string allocation_id = 1;
 }
 
+message AllocationFunctionCallResult {
+    optional string caller_allocation_id = 1;
+    // From ExecutionPlanUpdates.root_function_call_id.
+    optional string function_call_id = 2;
+    optional AllocationOutcomeCode outcome_code = 3;
+    optional SerializedObjectInsideBLOB value_output = 4;
+    optional BLOB value_blob = 5;
+    optional SerializedObjectInsideBLOB request_error_output = 6;
+    optional BLOB request_error_blob = 7;
+}
+
 message HealthCheckRequest {}
 
 message HealthCheckResponse {
@@ -305,11 +331,11 @@ service FunctionExecutor {
     rpc list_allocations(ListAllocationsRequest) returns (ListAllocationsResponse);
     // Creates and starts the allocation specified in the request.
     rpc create_allocation(CreateAllocationRequest) returns (Allocation);
-    // Sends progress updates for the allocation.
-    // Sends its result once it's complete.
-    rpc await_allocation(AwaitAllocationRequest) returns (stream AwaitAllocationProgress);
+    // Getting updates stream for the allocation state until it finishes.
+    rpc watch_allocation_state(AwaitAllocationRequest) returns (stream AllocationState);
     // Deletes the allocation.
     rpc delete_allocation(DeleteAllocationRequest) returns (Empty);
+    rpc deliver_allocation_function_call_result(AllocationFunctionCallResult) returns (Empty);
     // Health check method to check if the FE is able to run allocations.
     // The FE should be initialized before calling this method.
     rpc check_health(HealthCheckRequest) returns (HealthCheckResponse);

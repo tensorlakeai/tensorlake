@@ -10,7 +10,7 @@ from typing import Any, Dict, Generator, Iterator, List
 
 import grpc
 
-from tensorlake.applications import Function, RequestProgress
+from tensorlake.applications import Function, FunctionProgress
 from tensorlake.applications.function.function_call import create_self_instance
 from tensorlake.applications.registry import get_function, get_functions, has_function
 from tensorlake.applications.remote.code.zip import (
@@ -85,7 +85,7 @@ class _AllocationInfo:
         )
 
 
-class AllocationRequestProgress(RequestProgress):
+class AllocationRequestProgress(FunctionProgress):
     def __init__(self, alloc_info: _AllocationInfo):
         self._alloc_info: _AllocationInfo = alloc_info
 

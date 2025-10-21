@@ -15,8 +15,8 @@ from .function import Function
 from .image import Image
 from .request import Request
 from .request_context import (
+    FunctionProgress,
     RequestContext,
-    RequestProgress,
     RequestState,
 )
 from .retries import Retries
@@ -43,7 +43,7 @@ __all__ = [
     "Request",
     "RequestContext",
     "RequestFailureException",
-    "RequestProgress",
+    "FunctionProgress",
     "RequestState",
     "RequestError",
     "RequestNotFinished",
