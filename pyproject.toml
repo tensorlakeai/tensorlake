@@ -29,6 +29,7 @@ tomlkit = "^0.13.3"
 
 [tool.poetry.scripts]
 tensorlake = "tensorlake.cli:cli"
+tensorlake-python-analyzer = "tensorlake.analyzer.main:main"
 function-executor = "tensorlake.function_executor.main:main"
 
 [build-system]
