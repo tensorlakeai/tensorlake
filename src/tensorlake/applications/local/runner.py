@@ -76,7 +76,7 @@ from .future_run.future_run import (
 from .future_run.list_future_run import ListFutureRun
 from .future_run.return_output_future_run import ReturnOutputFutureRun
 from .request import LocalRequest
-from .request_progress import LocalRequestProgress
+from .request_progress import LocalFunctionProgress
 from .request_state import LocalRequestState
 from .utils import print_exception
 
@@ -101,7 +101,7 @@ class LocalRunner:
         self._request_context: RequestContext = RequestContextBase(
             request_id=_LOCAL_REQUEST_ID,
             state=LocalRequestState(),
-            progress=LocalRequestProgress(),
+            progress=LocalFunctionProgress(),
             metrics=RequestMetricsRecorder(),
         )
         # Share class instances between all functions. If we don't do this then there's

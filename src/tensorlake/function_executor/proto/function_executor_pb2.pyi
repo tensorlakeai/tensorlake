@@ -1,3 +1,4 @@
+import datetime
 from collections.abc import Iterable as _Iterable
 from collections.abc import Mapping as _Mapping
 from typing import ClassVar as _ClassVar
@@ -6,6 +7,7 @@ from typing import Union as _Union
 
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
+from google.protobuf import timestamp_pb2 as _timestamp_pb2
 from google.protobuf.internal import containers as _containers
 from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 
@@ -313,7 +315,7 @@ class Metrics(_message.Message):
         counters: _Optional[_Mapping[str, int]] = ...,
     ) -> None: ...
 
-class ProgressUpdate(_message.Message):
+class AllocationProgress(_message.Message):
     __slots__ = ("current", "total")
     CURRENT_FIELD_NUMBER: _ClassVar[int]
     TOTAL_FIELD_NUMBER: _ClassVar[int]
@@ -323,16 +325,32 @@ class ProgressUpdate(_message.Message):
         self, current: _Optional[float] = ..., total: _Optional[float] = ...
     ) -> None: ...
 
-class AwaitAllocationProgress(_message.Message):
-    __slots__ = ("progress", "allocation_result")
-    PROGRESS_FIELD_NUMBER: _ClassVar[int]
-    ALLOCATION_RESULT_FIELD_NUMBER: _ClassVar[int]
-    progress: ProgressUpdate
-    allocation_result: AllocationResult
+class AllocationFunctionCalls(_message.Message):
+    __slots__ = ("function_calls",)
+    FUNCTION_CALLS_FIELD_NUMBER: _ClassVar[int]
+    function_calls: _containers.RepeatedCompositeFieldContainer[ExecutionPlanUpdates]
     def __init__(
         self,
-        progress: _Optional[_Union[ProgressUpdate, _Mapping]] = ...,
-        allocation_result: _Optional[_Union[AllocationResult, _Mapping]] = ...,
+        function_calls: _Optional[
+            _Iterable[_Union[ExecutionPlanUpdates, _Mapping]]
+        ] = ...,
+    ) -> None: ...
+
+class AllocationState(_message.Message):
+    __slots__ = ("progress", "pending_function_calls", "result")
+    PROGRESS_FIELD_NUMBER: _ClassVar[int]
+    PENDING_FUNCTION_CALLS_FIELD_NUMBER: _ClassVar[int]
+    RESULT_FIELD_NUMBER: _ClassVar[int]
+    progress: AllocationProgress
+    pending_function_calls: AllocationFunctionCalls
+    result: AllocationResult
+    def __init__(
+        self,
+        progress: _Optional[_Union[AllocationProgress, _Mapping]] = ...,
+        pending_function_calls: _Optional[
+            _Union[AllocationFunctionCalls, _Mapping]
+        ] = ...,
+        result: _Optional[_Union[AllocationResult, _Mapping]] = ...,
     ) -> None: ...
 
 class FunctionInputs(_message.Message):
@@ -423,15 +441,20 @@ class ExecutionPlanUpdate(_message.Message):
     ) -> None: ...
 
 class ExecutionPlanUpdates(_message.Message):
-    __slots__ = ("updates", "root_function_call_id")
+    __slots__ = ("updates", "root_function_call_id", "start_at")
     UPDATES_FIELD_NUMBER: _ClassVar[int]
     ROOT_FUNCTION_CALL_ID_FIELD_NUMBER: _ClassVar[int]
+    START_AT_FIELD_NUMBER: _ClassVar[int]
     updates: _containers.RepeatedCompositeFieldContainer[ExecutionPlanUpdate]
     root_function_call_id: str
+    start_at: _timestamp_pb2.Timestamp
     def __init__(
         self,
         updates: _Optional[_Iterable[_Union[ExecutionPlanUpdate, _Mapping]]] = ...,
         root_function_call_id: _Optional[str] = ...,
+        start_at: _Optional[
+            _Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]
+        ] = ...,
     ) -> None: ...
 
 class AllocationResult(_message.Message):
@@ -515,6 +538,43 @@ class DeleteAllocationRequest(_message.Message):
     ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
     allocation_id: str
     def __init__(self, allocation_id: _Optional[str] = ...) -> None: ...
+
+class AllocationFunctionCallResult(_message.Message):
+    __slots__ = (
+        "caller_allocation_id",
+        "function_call_id",
+        "outcome_code",
+        "value_output",
+        "value_blob",
+        "request_error_output",
+        "request_error_blob",
+    )
+    CALLER_ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_CALL_ID_FIELD_NUMBER: _ClassVar[int]
+    OUTCOME_CODE_FIELD_NUMBER: _ClassVar[int]
+    VALUE_OUTPUT_FIELD_NUMBER: _ClassVar[int]
+    VALUE_BLOB_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_ERROR_OUTPUT_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_ERROR_BLOB_FIELD_NUMBER: _ClassVar[int]
+    caller_allocation_id: str
+    function_call_id: str
+    outcome_code: AllocationOutcomeCode
+    value_output: SerializedObjectInsideBLOB
+    value_blob: BLOB
+    request_error_output: SerializedObjectInsideBLOB
+    request_error_blob: BLOB
+    def __init__(
+        self,
+        caller_allocation_id: _Optional[str] = ...,
+        function_call_id: _Optional[str] = ...,
+        outcome_code: _Optional[_Union[AllocationOutcomeCode, str]] = ...,
+        value_output: _Optional[_Union[SerializedObjectInsideBLOB, _Mapping]] = ...,
+        value_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
+        request_error_output: _Optional[
+            _Union[SerializedObjectInsideBLOB, _Mapping]
+        ] = ...,
+        request_error_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
+    ) -> None: ...
 
 class HealthCheckRequest(_message.Message):
     __slots__ = ()

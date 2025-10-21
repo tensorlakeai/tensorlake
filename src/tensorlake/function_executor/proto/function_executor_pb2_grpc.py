@@ -64,15 +64,21 @@ class FunctionExecutorStub(object):
             response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Allocation.FromString,
             _registered_method=True,
         )
-        self.await_allocation = channel.unary_stream(
-            "/function_executor_service.FunctionExecutor/await_allocation",
+        self.watch_allocation_state = channel.unary_stream(
+            "/function_executor_service.FunctionExecutor/watch_allocation_state",
             request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitAllocationRequest.SerializeToString,
-            response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitAllocationProgress.FromString,
+            response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AllocationState.FromString,
             _registered_method=True,
         )
         self.delete_allocation = channel.unary_unary(
             "/function_executor_service.FunctionExecutor/delete_allocation",
             request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.DeleteAllocationRequest.SerializeToString,
+            response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Empty.FromString,
+            _registered_method=True,
+        )
+        self.deliver_allocation_function_call_result = channel.unary_unary(
+            "/function_executor_service.FunctionExecutor/deliver_allocation_function_call_result",
+            request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AllocationFunctionCallResult.SerializeToString,
             response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Empty.FromString,
             _registered_method=True,
         )
@@ -124,16 +130,20 @@ class FunctionExecutorServicer(object):
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def await_allocation(self, request, context):
-        """Sends progress updates for the allocation.
-        Sends its result once it's complete.
-        """
+    def watch_allocation_state(self, request, context):
+        """Getting updates stream for the allocation state until it finishes."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
     def delete_allocation(self, request, context):
         """Deletes the allocation."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def deliver_allocation_function_call_result(self, request, context):
+        """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
@@ -175,14 +185,19 @@ def add_FunctionExecutorServicer_to_server(servicer, server):
             request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.CreateAllocationRequest.FromString,
             response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Allocation.SerializeToString,
         ),
-        "await_allocation": grpc.unary_stream_rpc_method_handler(
-            servicer.await_allocation,
+        "watch_allocation_state": grpc.unary_stream_rpc_method_handler(
+            servicer.watch_allocation_state,
             request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitAllocationRequest.FromString,
-            response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitAllocationProgress.SerializeToString,
+            response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AllocationState.SerializeToString,
         ),
         "delete_allocation": grpc.unary_unary_rpc_method_handler(
             servicer.delete_allocation,
             request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.DeleteAllocationRequest.FromString,
+            response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Empty.SerializeToString,
+        ),
+        "deliver_allocation_function_call_result": grpc.unary_unary_rpc_method_handler(
+            servicer.deliver_allocation_function_call_result,
+            request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AllocationFunctionCallResult.FromString,
             response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Empty.SerializeToString,
         ),
         "check_health": grpc.unary_unary_rpc_method_handler(
@@ -330,7 +345,7 @@ class FunctionExecutor(object):
         )
 
     @staticmethod
-    def await_allocation(
+    def watch_allocation_state(
         request,
         target,
         options=(),
@@ -345,9 +360,9 @@ class FunctionExecutor(object):
         return grpc.experimental.unary_stream(
             request,
             target,
-            "/function_executor_service.FunctionExecutor/await_allocation",
+            "/function_executor_service.FunctionExecutor/watch_allocation_state",
             tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitAllocationRequest.SerializeToString,
-            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AwaitAllocationProgress.FromString,
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AllocationState.FromString,
             options,
             channel_credentials,
             insecure,
@@ -377,6 +392,36 @@ class FunctionExecutor(object):
             target,
             "/function_executor_service.FunctionExecutor/delete_allocation",
             tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.DeleteAllocationRequest.SerializeToString,
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Empty.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True,
+        )
+
+    @staticmethod
+    def deliver_allocation_function_call_result(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/function_executor_service.FunctionExecutor/deliver_allocation_function_call_result",
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AllocationFunctionCallResult.SerializeToString,
             tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Empty.FromString,
             options,
             channel_credentials,

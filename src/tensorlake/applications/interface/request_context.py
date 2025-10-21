@@ -7,7 +7,7 @@ class RequestState:
     """Abstract interface for request state key-value API.
 
     The API allows to set and get key-value pairs from Indexify functions.
-    The key-value pairs are scoped per Graph request.
+    The key-value pairs are scoped per application request.
     Each new request starts with an empty state (empty set of key-value pairs).
     A value can be any serializable object, the serializer of the current function
     is used to serialize and deserialize values."""
@@ -26,7 +26,7 @@ class RequestState:
 
 
 class RequestMetrics:
-    """Abstract interface for reporting graph request metrics."""
+    """Abstract interface for reporting application request metrics."""
 
     def timer(self, name: str, value: float):
         """Records a duration metric with the supplied name and value."""
@@ -39,15 +39,15 @@ class RequestMetrics:
         raise NotImplementedError()
 
 
-class RequestProgress:
-    """Abstract interface for reporting graph request progress."""
+class FunctionProgress:
+    """Abstract interface for reporting Tensorlake Function call progress."""
 
     def update(self, current: float, total: float) -> None:
-        """Update the progress of the current task execution.
+        """Update the progress of the current Tensorlake Function call execution.
 
         Args:
-            current: Current progress value
-            total: Total progress value
+            current: Current request progress value
+            total: Total request progress value
         """
         raise NotImplementedError()
 
@@ -73,7 +73,7 @@ class RequestContext:
         raise NotImplementedError()
 
     @property
-    def progress(self) -> RequestProgress:
+    def progress(self) -> FunctionProgress:
         raise NotImplementedError()
 
     @property
