@@ -3,7 +3,12 @@ import time
 import traceback
 from typing import Any, Dict, List, Tuple
 
-from tensorlake.applications.ast import (
+from tensorlake.applications.function.user_data_serializer import (
+    function_output_serializer,
+)
+from tensorlake.applications.interface.exceptions import RequestError
+from tensorlake.applications.interface.function import Function
+from tensorlake.applications.metadata import (
     ASTNode,
     ValueMetadata,
     ast_from_user_object,
@@ -11,16 +16,11 @@ from tensorlake.applications.ast import (
     override_output_serializer_at_child_call_tree_root,
     traverse_ast,
 )
-from tensorlake.applications.ast.function_call_node import (
+from tensorlake.applications.metadata.function_call_node import (
     RegularFunctionCallNode,
 )
-from tensorlake.applications.ast.reducer_call_node import ReducerFunctionCallNode
-from tensorlake.applications.ast.value_node import ValueNode
-from tensorlake.applications.function.user_data_serializer import (
-    function_output_serializer,
-)
-from tensorlake.applications.interface.exceptions import RequestError
-from tensorlake.applications.interface.function import Function
+from tensorlake.applications.metadata.reducer_call_node import ReducerFunctionCallNode
+from tensorlake.applications.metadata.value_node import ValueNode
 from tensorlake.applications.request_context.request_metrics_recorder import (
     RequestMetricsRecorder,
 )

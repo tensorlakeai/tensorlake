@@ -2,10 +2,10 @@ from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue
 from typing import Any
 
-from ..interface.awaitables import (
+from ...interface.awaitables import (
     Awaitable,
 )
-from .future import LocalFuture
+from ..future import LocalFuture
 from .future_run import (
     LocalFutureRun,
     LocalFutureRunResult,

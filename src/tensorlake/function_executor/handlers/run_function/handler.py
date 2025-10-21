@@ -2,12 +2,6 @@ import contextvars
 import time
 from typing import Any, List
 
-from tensorlake.applications.ast import (
-    ReducerFunctionCallMetadata,
-    RegularFunctionCallMetadata,
-    RegularFunctionCallNode,
-    ValueNode,
-)
 from tensorlake.applications.function.application_call import (
     application_function_call_with_serialized_payload,
 )
@@ -17,6 +11,12 @@ from tensorlake.applications.function.function_call import (
 from tensorlake.applications.function.reducer_call import reducer_function_call
 from tensorlake.applications.interface.call_tree import RegularFunctionCall
 from tensorlake.applications.interface.function import Function
+from tensorlake.applications.metadata import (
+    ReducerFunctionCallMetadata,
+    RegularFunctionCallMetadata,
+    RegularFunctionCallNode,
+    ValueNode,
+)
 from tensorlake.applications.request_context.contextvar import (
     set_current_request_context,
 )
