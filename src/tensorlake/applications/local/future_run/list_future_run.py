@@ -2,11 +2,11 @@ from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue
 from typing import Any, List
 
-from ..interface.awaitables import (
+from ...interface.awaitables import (
     ListFuture,
 )
-from ..interface.exceptions import TensorlakeException
-from .future import LocalFuture
+from ...interface.exceptions import TensorlakeException
+from ..future import LocalFuture
 from .future_run import (
     LocalFutureRun,
     LocalFutureRunResult,

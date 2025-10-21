@@ -1,4 +1,3 @@
-import threading
 from concurrent.futures import ALL_COMPLETED as STD_ALL_COMPLETED
 from concurrent.futures import FIRST_COMPLETED as STD_FIRST_COMPLETED
 from concurrent.futures import FIRST_EXCEPTION as STD_FIRST_EXCEPTION
@@ -13,9 +12,6 @@ from typing import Any, Dict, List
 
 from ..function.application_call import (
     application_function_call_with_serialized_payload,
-)
-from ..function.function_call import (
-    create_self_instance,
 )
 from ..function.user_data_serializer import (
     deserialize_value,
@@ -44,6 +40,7 @@ from ..interface.file import File
 from ..interface.function import Function
 from ..interface.request import Request
 from ..interface.request_context import RequestContext
+from ..metadata.value import ValueMetadata
 from ..registry import get_function
 from ..request_context.request_context_base import RequestContextBase
 from ..request_context.request_metrics_recorder import RequestMetricsRecorder
@@ -59,34 +56,33 @@ from ..user_data_serializer import (
     serializer_by_name,
 )
 from .blob_store import BLOB, BLOBStore
-from .function_call_future_run import FunctionCallFutureRun
+from .class_instance_store import ClassInstanceStore
 from .future import LocalFuture
-from .future_run import (
+from .future_run.function_call_future_run import FunctionCallFutureRun
+from .future_run.future_run import (
     LocalFutureRun,
     LocalFutureRunResult,
     StopLocalFutureRun,
     get_current_future_run,
 )
-from .list_future_run import ListFutureRun
+from .future_run.list_future_run import ListFutureRun
+from .future_run.return_output_future_run import ReturnOutputFutureRun
 from .request import LocalRequest
 from .request_progress import LocalRequestProgress
 from .request_state import LocalRequestState
-from .return_output_future_run import ReturnOutputFutureRun
 from .utils import print_exception
 
 _LOCAL_REQUEST_ID = "local-request"
-# 1 ms  interval for code paths that do polling.
-# This keeps our timers accurate enough and doesn't add too much latency and CPU overhead.
-_SLEEP_POLL_INTERVAL_SECONDS = 0.001
+# 2 ms  interval for code paths that do polling.
+# This keeps our timers very accurate and doesn't add too much latency and CPU overhead.
+_SLEEP_POLL_INTERVAL_SECONDS = 0.002
 
 
 class LocalRunner:
     def __init__(self, app: Function, app_payload: Any):
         self._app: Function = app
         self._app_payload: Any = app_payload
-        # Future ID -> BLOB if future run succeeded.
-        # TODO: Also serialize all values and store them in BLOBStore
-        # to simulate remote mode better.
+        # Value ID/Future ID -> BLOB.
         self._blob_store: BLOBStore = BLOBStore()
         # Future runs that currently exist.
         # Future ID -> LocalFutureRun
@@ -94,17 +90,15 @@ class LocalRunner:
         # Exception that caused the request to fail.
         # None when request finished successfully.
         self._request_exception: TensorlakeException | None = None
-        # Class name => instance.
-        self._class_instances: Dict[str, Any] = {}
-        # Class instance constructor can run for minutes,
-        # so we need to ensure that we create at most one instance at a time.
-        self._class_instances_locks: Dict[str, threading.Lock] = {}
         self._request_context: RequestContext = RequestContextBase(
             request_id=_LOCAL_REQUEST_ID,
             state=LocalRequestState(),
             progress=LocalRequestProgress(),
             metrics=RequestMetricsRecorder(),
         )
+        # Share class instances between all functions. If we don't do this then there's
+        # going to be >1 instance of the same class per process.
+        self._class_instance_store: ClassInstanceStore = ClassInstanceStore.singleton()
         # SimpleQueue[LocalFutureRunResult]
         self._future_run_result_queue: SimpleQueue = SimpleQueue()
         self._future_run_thread_pool: ThreadPoolExecutor = ThreadPoolExecutor(
@@ -147,6 +141,16 @@ class LocalRunner:
                     id=_LOCAL_REQUEST_ID,
                     output=None,
                     exception=self._request_exception,
+                )
+
+            if not self._blob_store.has(app_function_call_awaitable.id):
+                # FIXME: This should not happen, it means that we didn't set self._request_exception.
+                return LocalRequest(
+                    id=_LOCAL_REQUEST_ID,
+                    output=None,
+                    exception=RequestFailureException(
+                        "Application didn't return an output."
+                    ),
                 )
 
             app_output_blob: BLOB = self._blob_store.get(app_function_call_awaitable.id)
@@ -495,7 +499,7 @@ class LocalRunner:
         consumer_future_output: BLOB | None = None
         if exception is None:
             consumer_future_output = blob.copy()
-            consumer_future_output.id = consumer_future.user_future.id
+            consumer_future_output.metadata.id = consumer_future.user_future.id
             self._blob_store.put(consumer_future_output)
         self._handle_future_run_final_output(
             future_run=consumer_future_run,
@@ -561,25 +565,6 @@ class LocalRunner:
             return _deserialize_blob_value(blob)
         else:
             return user_object
-
-    def _function_self_arg(self, function: Function) -> Any | None:
-        fn_class_name: str | None = function._function_config.class_name
-        if fn_class_name is None:
-            return None
-
-        # No need to lock self._class_instances_lock here because
-        # we don't do any IO here so we don't release GIL.
-        if fn_class_name not in self._class_instances_locks:
-            self._class_instances_locks[fn_class_name] = threading.Lock()
-
-        with self._class_instances_locks[fn_class_name]:
-            if fn_class_name not in self._class_instances:
-                # NB: This call can take minutes if i.e. a model gets loaded in a GPU.
-                self._class_instances[fn_class_name] = create_self_instance(
-                    fn_class_name
-                )
-
-            return self._class_instances[fn_class_name]
 
     def _create_future_run_for_user_object(
         self,
@@ -723,6 +708,9 @@ class LocalRunner:
             else existing_awaitable_future
         )
 
+        # Arguments don't inherit serializer overrides because only the
+        # root of the call tree needs to have its output serialized in a
+        # specific way so its output consumer gets value in expected format.
         for arg in awaitable.args:
             self._create_future_run_for_user_object(
                 arg,
@@ -750,7 +738,7 @@ class LocalRunner:
             thread_pool=self._future_run_thread_pool,
             application=self._app,
             function=function,
-            class_instance=self._function_self_arg(function),
+            class_instance=self._class_instance_store.get(function),
             request_context=self._request_context,
         )
 
@@ -795,6 +783,8 @@ class LocalRunner:
                 user_future=user_future,
                 start_delay=start_delay,
                 output_consumer_future_id=output_consumer_future_id,
+                # This will override the output serializer for the last reduce
+                # function call which is reduce_operation_result_awaitable.
                 output_serializer_name_override=output_serializer_name_override,
             ),
             result_queue=self._future_run_result_queue,
@@ -806,22 +796,26 @@ class LocalRunner:
 def _deserialize_blob_value(blob: BLOB) -> Any | File:
     return deserialize_value(
         serialized_value=blob.data,
-        serialized_value_content_type=blob.content_type,
-        serializer=serializer_by_name(blob.serializer_name),
-        type_hints=[blob.cls],
+        content_type=blob.metadata.content_type,
+        serializer=(
+            None
+            if blob.metadata.serializer_name is None
+            else serializer_by_name(blob.metadata.serializer_name)
+        ),
+        type_hints=[blob.metadata.cls],
     )
 
 
 def _future_output_value_to_blob(
     future_id: str, output: Any, output_serializer: UserDataSerializer
 ) -> BLOB:
-    serialized_output, serialized_output_content_type = serialize_value(
-        output, output_serializer
-    )
+    serialized_output, content_type = serialize_value(output, output_serializer)
     return BLOB(
-        id=future_id,
         data=serialized_output,
-        serializer_name=output_serializer.name,
-        content_type=serialized_output_content_type,
-        cls=type(output),
+        metadata=ValueMetadata(
+            id=future_id,
+            cls=type(output),
+            serializer_name=output_serializer.name if content_type is None else None,
+            content_type=content_type,
+        ),
     )

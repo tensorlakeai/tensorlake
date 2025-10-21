@@ -27,21 +27,28 @@ def function_output_serializer(
     return serializer_by_name(NON_API_FUNCTION_SERIALIZER_NAME)
 
 
-def serialize_value(value: Any, serializer: UserDataSerializer) -> tuple[bytes, str]:
-    """Serializes the given value using the provided serializer."""
+def serialize_value(
+    value: Any, serializer: UserDataSerializer
+) -> tuple[bytes, str | None]:
+    """Serializes the given value using the provided serializer.
+
+    Returns a tuple of (serialized_value, content_type).
+    The content type is not None only for custom content types set by user
+    in File object if the value is File.
+    """
     if isinstance(value, File):
         return value.content, value.content_type
     else:
         return (
             serializer.serialize(value),
-            serializer.content_type,
+            None,
         )
 
 
 def deserialize_value(
     serialized_value: bytes,
-    serialized_value_content_type: str,
-    serializer: UserDataSerializer,
+    content_type: str | None,
+    serializer: UserDataSerializer | None,
     type_hints: List[Any],
 ) -> Any | File:
     """Deserializes the given value using the provided serializer and type hints."""
@@ -51,8 +58,14 @@ def deserialize_value(
             is_file_output = True
 
     if is_file_output:
-        return File(
-            content=serialized_value, content_type=serialized_value_content_type
-        )
+        if content_type is None:
+            raise ValueError(
+                "Deserializing to File requires a content type, but None was provided."
+            )
+        return File(content=serialized_value, content_type=content_type)
     else:
+        if serializer is None:
+            raise ValueError(
+                "Deserializer is None for non-File value. Cannot deserialize value."
+            )
         return serializer.deserialize(serialized_value, type_hints)

@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 
 import grpc
 
-from tensorlake.applications.ast.value_node import ValueMetadata
+from tensorlake.applications.metadata.value_node import ValueMetadata
 from tensorlake.applications.registry import get_functions
 from tensorlake.applications.remote.code.zip import zip_code
 from tensorlake.applications.user_data_serializer import (

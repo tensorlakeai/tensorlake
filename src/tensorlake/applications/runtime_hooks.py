@@ -46,6 +46,10 @@ def set_wait_futures_hook(hook: Any) -> None:
 
 
 def clear_wait_futures_hook() -> None:
+    """Clears the __wait_futures runtime hook if set.
+
+    Never raises.
+    """
     global __wait_futures
     __wait_futures = None
 
@@ -76,5 +80,9 @@ def set_run_futures_hook(hook: Any) -> None:
 
 
 def clear_run_futures_hook() -> None:
+    """Clears the __run_futures runtime hook if set.
+
+    Never raises.
+    """
     global __run_futures
     __run_futures = None

@@ -56,7 +56,7 @@ class RemoteRequest(Request):
 
         return deserialize_value(
             serialized_value=serialized_output,
-            serialized_value_content_type=output_content_type,
+            content_type=output_content_type,
             serializer=serializer_by_name(
                 self._application_manifest.entrypoint.output_serializer
             ),

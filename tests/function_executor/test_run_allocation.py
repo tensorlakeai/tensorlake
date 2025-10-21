@@ -23,11 +23,11 @@ from tensorlake.applications import (
     cls,
     function,
 )
-from tensorlake.applications.ast.function_call_node import (
+from tensorlake.applications.metadata.function_call_node import (
     ArgumentMetadata,
     RegularFunctionCallMetadata,
 )
-from tensorlake.applications.ast.value_node import ValueMetadata
+from tensorlake.applications.metadata.value_node import ValueMetadata
 from tensorlake.applications.user_data_serializer import (
     JSONUserDataSerializer,
     PickleUserDataSerializer,

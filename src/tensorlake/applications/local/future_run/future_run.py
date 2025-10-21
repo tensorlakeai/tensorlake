@@ -6,9 +6,9 @@ from queue import SimpleQueue
 from threading import Event
 from typing import Any
 
-from ..interface.awaitables import Awaitable
-from ..interface.exceptions import RequestError, RequestFailureException
-from .future import LocalFuture
+from ...interface.awaitables import Awaitable
+from ...interface.exceptions import RequestError, RequestFailureException
+from ..future import LocalFuture
 
 
 @dataclass

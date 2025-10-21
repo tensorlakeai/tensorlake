@@ -2,25 +2,25 @@ from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue
 from typing import Any
 
-from ..function.function_call import (
+from ...function.function_call import (
     set_self_arg,
 )
-from ..interface.awaitables import (
+from ...interface.awaitables import (
     FunctionCallAwaitable,
     FunctionCallFuture,
 )
-from ..interface.exceptions import RequestError, RequestFailureException
-from ..interface.function import Function
-from ..interface.request_context import RequestContext
-from ..interface.retries import Retries
-from ..request_context.contextvar import set_current_request_context
-from .future import LocalFuture
+from ...interface.exceptions import RequestError, RequestFailureException
+from ...interface.function import Function
+from ...interface.request_context import RequestContext
+from ...interface.retries import Retries
+from ...request_context.contextvar import set_current_request_context
+from ..future import LocalFuture
+from ..utils import print_exception
 from .future_run import (
     LocalFutureRun,
     LocalFutureRunResult,
     StopLocalFutureRun,
 )
-from .utils import print_exception
 
 
 class FunctionCallFutureRun(LocalFutureRun):

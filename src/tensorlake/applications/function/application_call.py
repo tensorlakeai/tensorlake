@@ -41,7 +41,7 @@ def application_function_call_with_serialized_payload(
     payload_type_hints: List[Any] = function_arg_type_hint(application, -1)
     deserialized_payload: Any | File = deserialize_value(
         serialized_value=payload,
-        serialized_value_content_type=payload_content_type,
+        content_type=payload_content_type,
         serializer=function_input_serializer(application),
         type_hints=payload_type_hints,
     )
