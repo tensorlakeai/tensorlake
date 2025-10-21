@@ -4,7 +4,7 @@ from typing import Any, List
 from ..function.type_hints import deserialize_type_hints
 from ..function.user_data_serializer import deserialize_value
 from ..interface.request import Request
-from ..user_data_serializer import serializer_by_name
+from ..metadata import ValueMetadata
 from .api_client import APIClient
 from .manifests.application import ApplicationManifest
 
@@ -54,11 +54,20 @@ class RemoteRequest(Request):
             # This usually happens when the application function return types are not loaded into current process.
             return_type_hints: List[Any] = []
 
-        return deserialize_value(
-            serialized_value=serialized_output,
-            content_type=output_content_type,
-            serializer=serializer_by_name(
-                self._application_manifest.entrypoint.output_serializer
-            ),
-            type_hints=return_type_hints,
-        )
+        last_exception: BaseException | None = None
+
+        for type_hint in return_type_hints:
+            try:
+                return deserialize_value(
+                    serialized_value=serialized_output,
+                    metadata=ValueMetadata(
+                        id="fake_id",
+                        cls=type_hint,
+                        serializer_name=self._application_manifest.entrypoint.output_serializer,
+                        content_type=output_content_type,
+                    ),
+                )
+            except BaseException as e:
+                last_exception = e
+
+        raise last_exception

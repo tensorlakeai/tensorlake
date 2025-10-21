@@ -1,7 +1,7 @@
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Dict
 
-from ..metadata.value import ValueMetadata
+from ..metadata import ValueMetadata
 
 # A fake blob store that mimics storing and retrieving blobs locally.
 

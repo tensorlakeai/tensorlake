@@ -1,7 +1,5 @@
 from pydantic import BaseModel
 
-from .collection import CollectionMetadata
-
 
 class ReduceOperationMetadata(BaseModel):
     # Request scoped unique identifier of the reduce operation.
@@ -9,5 +7,3 @@ class ReduceOperationMetadata(BaseModel):
     # Not None if output serialization format is overridden
     # for reduce function calls.
     output_serializer_name_override: str | None
-    # Reduced collection.
-    collection: CollectionMetadata

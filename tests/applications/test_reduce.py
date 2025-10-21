@@ -99,6 +99,20 @@ def generate_single_value() -> AccumulatedState:
     return AccumulatedState(sum=7)
 
 
+@application()
+@function()
+def api_reduce_mapped_collection_nonblocking(_: Any) -> AccumulatedState:
+    mapped_collection = transform_int_to_accumulated_state.awaitable.map([1, 2, 4])
+    return accumulate_reduce.awaitable.reduce(mapped_collection).run().result()
+
+
+@application()
+@function()
+def api_reduce_mapped_collection_tailcall(_: Any) -> AccumulatedState:
+    mapped_collection = transform_int_to_accumulated_state.awaitable.map([1, 2, 4])
+    return accumulate_reduce.awaitable.reduce(mapped_collection)
+
+
 class TestReduce(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success_function_call_collection(self, _: str, is_remote: bool):
@@ -173,6 +187,32 @@ class TestReduce(unittest.TestCase):
 
         request: Request = run_application(
             api_reduce_one_awaitable_item,
+            None,
+            remote=is_remote,
+        )
+        result: AccumulatedState = request.output()
+        self.assertEqual(result.sum, 7)
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_reduce_mapped_collection_nonblocking(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+
+        request: Request = run_application(
+            api_reduce_mapped_collection_nonblocking,
+            None,
+            remote=is_remote,
+        )
+        result: AccumulatedState = request.output()
+        self.assertEqual(result.sum, 7)
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_reduce_mapped_collection_tailcall(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+
+        request: Request = run_application(
+            api_reduce_mapped_collection_tailcall,
             None,
             remote=is_remote,
         )

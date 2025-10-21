@@ -3,6 +3,7 @@ from typing import Any, Callable, Dict, Iterable, List
 
 from .awaitables import (
     Awaitable,
+    AwaitableList,
     FunctionCallAwaitable,
     _InitialMissing,
     _InitialMissingType,
@@ -75,7 +76,7 @@ class Function:
             .result()
         )
 
-    def map(self, iterable: Iterable[Any | Awaitable]) -> List[Any]:
+    def map(self, items: Iterable[Any | Awaitable] | AwaitableList) -> List[Any]:
         """Returns a list with every item transformed using the function.
 
         Blocks until the result is ready.
@@ -85,7 +86,7 @@ class Function:
         return (
             make_map_operation_awaitable(
                 function_name=self._function_config.function_name,
-                iterable=iterable,
+                items=items,
             )
             .run()
             .result()
@@ -93,7 +94,7 @@ class Function:
 
     def reduce(
         self,
-        iterable: Iterable[Any | Awaitable],
+        items: Iterable[Any | Awaitable] | AwaitableList,
         initial: Any | _InitialMissingType = _InitialMissing,
         /,
     ) -> Any:
@@ -105,7 +106,7 @@ class Function:
         return (
             make_reduce_operation_awaitable(
                 function_name=self._function_config.function_name,
-                iterable=iterable,
+                items=items,
                 initial=initial,
             )
             .run()
@@ -167,7 +168,7 @@ class FunctionAwaitablesFactory:
         """Returns an awaitable that represents mapping the function over the iterable."""
         return make_map_operation_awaitable(
             function_name=self._function._function_config.function_name,
-            iterable=iterable,
+            items=iterable,
         )
 
     def reduce(
@@ -179,6 +180,6 @@ class FunctionAwaitablesFactory:
         """Returns an awaitable that represents reducing the iterable using the function."""
         return make_reduce_operation_awaitable(
             function_name=self._function._function_config.function_name,
-            iterable=iterable,
+            items=iterable,
             initial=initial,
         )
