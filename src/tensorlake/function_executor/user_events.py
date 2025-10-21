@@ -7,6 +7,7 @@
 # The events have strict structured json format because they are used for
 # automatic Function Executor log stream processing in the future.
 # The event attribute names are human readable because they are visible to users.
+import traceback
 from dataclasses import dataclass
 
 from tensorlake.function_executor.cloud_events import print_cloud_event
@@ -34,21 +35,61 @@ def log_user_event_initialization_started(details: InitializationEventDetails) -
     )
 
 
-def log_user_event_initialization_finished(
-    details: InitializationEventDetails, success: bool
-) -> None:
+def log_user_event_initialization_finished(details: InitializationEventDetails) -> None:
     # Using standardized tags, see https://github.com/tensorlakeai/indexify/blob/main/docs/tags.md.
     print_cloud_event(
         {
             "event": "function_executor_initialization_finished",
             "message": "Function executor initialization completed",
-            "success": success,
             "namespace": details.namespace,
             "application": details.application_name,
             "application_version": details.application_version,
             "function": details.function_name,
         }
     )
+
+
+def log_user_event_initialization_failed(
+    details: InitializationEventDetails, error: BaseException
+) -> None:
+    # Using standardized tags, see https://github.com/tensorlakeai/indexify/blob/main/docs/tags.md.
+    print_cloud_event(
+        {
+            "level": "error",
+            "event": "function_executor_initialization_failed",
+            "message": "Function executor initialization failed",
+            "namespace": details.namespace,
+            "application": details.application_name,
+            "application_version": details.application_version,
+            "function": details.function_name,
+            "error": clean_stack_trace(error),
+        }
+    )
+
+
+def clean_stack_trace(error: BaseException) -> list[str]:
+    """
+    Store only the lines of the stack relevant to the user's code.
+    Everything before the last line containing "importlib._bootstrap" is removed.
+    """
+    content: str = "".join(traceback.format_exception(error))
+
+    lines = content.split("\n")
+
+    # Find the last line containing 'frozen importlib._bootstrap'
+    last_bootstrap_index = -1
+    for i in range(len(lines) - 1, -1, -1):
+        if "frozen importlib._bootstrap" in lines[i]:
+            last_bootstrap_index = i
+            break
+
+    if last_bootstrap_index == -1:
+        return []
+
+    # Take everything after the last bootstrap line
+    filtered_lines = lines[last_bootstrap_index + 1 :]
+
+    return filtered_lines
 
 
 @dataclass

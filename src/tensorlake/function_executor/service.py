@@ -61,6 +61,7 @@ from .request_state.proxied_request_state import ProxiedRequestState
 from .request_state.request_state_proxy_server import RequestStateProxyServer
 from .user_events import (
     InitializationEventDetails,
+    log_user_event_initialization_failed,
     log_user_event_initialization_finished,
     log_user_event_initialization_started,
 )
@@ -198,7 +199,7 @@ class Service(FunctionExecutorServicer):
                 duration_sec=f"{time.monotonic() - start_time:.3f}",
                 # Don't log the exception to FE log as it contains customer data
             )
-            log_user_event_initialization_finished(event_details, success=False)
+            log_user_event_initialization_failed(event_details, error=e)
             # Print the exception to stderr so customer can see it there.
             traceback.print_exception(e)
             return InitializeResponse(
@@ -216,7 +217,7 @@ class Service(FunctionExecutorServicer):
             "initialized function executor service",
             duration_sec=f"{time.monotonic() - start_time:.3f}",
         )
-        log_user_event_initialization_finished(event_details, success=True)
+        log_user_event_initialization_finished(event_details)
         return InitializeResponse(
             outcome_code=InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
         )
