@@ -14,15 +14,15 @@ from .function_manifests import (
 from .function_resources import resources_for_function
 
 TYPE_TO_JSON_SCHEMA = {
-    str: "string",
-    int: "integer",
-    float: "number",
-    bool: "boolean",
-    list: "array",
-    dict: "object",
-    tuple: "array",
-    set: "array",
-    type(None): "null",
+    "str": "string",
+    "int": "integer",
+    "float": "number",
+    "bool": "boolean",
+    "list": "array",
+    "dict": "object",
+    "tuple": "array",
+    "set": "array",
+    "NoneType": "null",
 }
 
 class FunctionManifest(BaseModel):
@@ -105,7 +105,7 @@ def _parse_docstring_parameters(docstring: str) -> Dict[str, str]:
 
 
 def _type_hint_json_schema(type_hint: dict[str, Any]) -> Dict[str, Any]:
-    # def _type_hint_json_schema(type_hints: dict[str, any]) -> Dict[str, Any]:
+    """Format type hint as JSON Schema for MCP compatibility."""
     if type_hint == Any:
         return {"type": "string", "description": "Any type"}
 
@@ -113,7 +113,7 @@ def _type_hint_json_schema(type_hint: dict[str, Any]) -> Dict[str, Any]:
         if hasattr(type_hint, "model_json_schema"):
             return type_hint.model_json_schema()
 
-    return {"type": TYPE_TO_JSON_SCHEMA.get(type_hint.__name__, "string")}
+    return {"type": TYPE_TO_JSON_SCHEMA.get(type_hint.__name__)}
 
 
 def _function_signature_info(
@@ -225,4 +225,3 @@ def create_function_manifest(
         placement_constraints=placement_constraints,
         max_concurrency=function.function_config.max_concurrency,
     )
-
