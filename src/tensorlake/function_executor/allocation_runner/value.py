@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Any
 
 from tensorlake.applications.metadata import ValueMetadata
 
@@ -7,3 +8,11 @@ from tensorlake.applications.metadata import ValueMetadata
 class SerializedValue:
     metadata: ValueMetadata | None
     data: bytes
+    # Not None if the data is using raw serialization format.
+    content_type: str | None = None
+
+
+@dataclass
+class Value:
+    metadata: ValueMetadata | None
+    object: Any
