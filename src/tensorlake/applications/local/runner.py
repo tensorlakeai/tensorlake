@@ -11,7 +11,8 @@ from queue import SimpleQueue
 from typing import Any, Dict, List
 
 from ..function.application_call import (
-    application_function_call_with_serialized_payload,
+    application_function_call,
+    deserialize_application_function_call_payload,
 )
 from ..function.user_data_serializer import (
     deserialize_value,
@@ -47,7 +48,6 @@ from ..metadata import (
     FunctionCallArgumentMetadata,
     FunctionCallMetadata,
     ReduceOperationMetadata,
-    ValueMetadata,
 )
 from ..registry import get_function
 from ..request_context.request_context_base import RequestContextBase
@@ -61,7 +61,6 @@ from ..runtime_hooks import (
 from ..user_data_serializer import (
     PickleUserDataSerializer,
     UserDataSerializer,
-    serializer_by_name,
 )
 from .blob_store import BLOB, BLOBStore
 from .class_instance_store import ClassInstanceStore
@@ -128,11 +127,15 @@ class LocalRunner:
                 self._app_payload, input_serializer
             )
 
+            payload: Any = deserialize_application_function_call_payload(
+                application=self._app,
+                payload=serialized_payload,
+                payload_content_type=payload_metadata.content_type,
+            )
             app_function_call_awaitable: FunctionCallAwaitable = (
-                application_function_call_with_serialized_payload(
+                application_function_call(
                     application=self._app,
-                    payload=serialized_payload,
-                    payload_content_type=payload_metadata.content_type,
+                    payload=payload,
                 )
             )
             self._create_future_run_for_awaitable(

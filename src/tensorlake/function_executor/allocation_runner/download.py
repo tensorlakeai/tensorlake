@@ -48,37 +48,6 @@ def download_function_arguments(
     return args
 
 
-def download_application_function_payload(
-    allocation: Allocation, blob_store: BLOBStore, logger: FunctionExecutorLogger
-) -> SerializedValue:
-    start_time = time.monotonic()
-    logger = logger.bind(module=__name__)
-    logger.info("downloading function arguments")
-
-    if len(allocation.inputs.args) != 1 or len(allocation.inputs.arg_blobs) != 1:
-        raise ValueError(
-            "Application function calls must have exactly one argument and one argument blob, "
-            f"got {len(allocation.inputs.args)} args and {len(allocation.inputs.arg_blobs)} arg blobs"
-        )
-
-    app_payload_blob: BLOB = allocation.inputs.arg_blobs[0]
-    app_payload_so: SerializedObjectInsideBLOB = allocation.inputs.args[0]
-
-    serialized_value: SerializedValue = _download_serialized_value(
-        blob=app_payload_blob,
-        so=app_payload_so,
-        blob_store=blob_store,
-        logger=logger,
-    )
-
-    logger.info(
-        "function arguments downloaded",
-        duration_sec=time.monotonic() - start_time,
-    )
-
-    return serialized_value
-
-
 def _download_serialized_value(
     blob: BLOB,
     so: SerializedObjectInsideBLOB,
@@ -127,6 +96,9 @@ def _download_serialized_value(
     return SerializedValue(
         metadata=metadata,
         data=serialized_data,
+        content_type=(
+            so.manifest.content_type if so.manifest.HasField("content_type") else None
+        ),
     )
 
 

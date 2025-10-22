@@ -113,6 +113,44 @@ def api_reduce_mapped_collection_tailcall(_: Any) -> AccumulatedState:
     return accumulate_reduce.awaitable.reduce(mapped_collection)
 
 
+@application()
+@function()
+def api_reduce_of_reduced_list(_: Any) -> str:
+    reduced_str_1 = concat_strs.awaitable.reduce(["1", "2", "4"], "")
+    reduced_str_2 = concat_strs.awaitable.reduce(["1", "3", "5"], "")
+    reduced_str_3 = concat_strs.awaitable.reduce(["1", "4", "6"])
+    list_of_reduced_strs = [
+        reduced_str_1,
+        reduced_str_2,
+        reduced_str_3,
+    ]
+    return concat_strs.awaitable.reduce(list_of_reduced_strs)
+
+
+@function()
+def concat_strs(acc: str, y: str) -> str:
+    return acc + y
+
+
+@application()
+@function()
+def api_reduce_of_mapped_collections(_: Any) -> str:
+    mapped_collection_1 = int_to_str.awaitable.map([1, 2, 4])
+    mapped_collection_2 = int_to_str.awaitable.map([1, 3, 5])
+    mapped_collection_3 = int_to_str.awaitable.map([1, 4, 6])
+    list_of_reduced_strs = [
+        concat_strs.awaitable.reduce(mapped_collection_1),
+        concat_strs.awaitable.reduce(mapped_collection_2),
+        concat_strs.awaitable.reduce(mapped_collection_3),
+    ]
+    return concat_strs.awaitable.reduce(list_of_reduced_strs)
+
+
+@function()
+def int_to_str(x: int) -> str:
+    return str(x)
+
+
 class TestReduce(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success_function_call_collection(self, _: str, is_remote: bool):
@@ -218,6 +256,36 @@ class TestReduce(unittest.TestCase):
         )
         result: AccumulatedState = request.output()
         self.assertEqual(result.sum, 7)
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_reduce_of_reduced_list(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+
+        request: Request = run_application(
+            api_reduce_of_reduced_list,
+            None,
+            remote=is_remote,
+        )
+        self.assertEqual(
+            request.output(),
+            "124135146",
+        )
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_reduce_of_mapped_collections(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+
+        request: Request = run_application(
+            api_reduce_of_mapped_collections,
+            None,
+            remote=is_remote,
+        )
+        self.assertEqual(
+            request.output(),
+            "124135146",
+        )
 
 
 if __name__ == "__main__":

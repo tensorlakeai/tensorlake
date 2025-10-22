@@ -293,7 +293,7 @@ class Service(FunctionExecutorServicer):
             )
             last_seen_hash = allocation_state.sha256_hash
             yield allocation_state
-            if allocation_state.HasField("result"):
+            if allocation_info.runner.finished:
                 break
 
     def deliver_allocation_function_call_result(
@@ -310,6 +310,12 @@ class Service(FunctionExecutorServicer):
         allocation_info: _AllocationInfo = self._allocation_infos[
             request.caller_allocation_id
         ]
+        if allocation_info.runner.finished:
+            context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                f"Allocation {request.caller_allocation_id} is already finished",
+            )
+
         allocation_info.runner.deliver_function_call_result(request)
         return Empty()
 
