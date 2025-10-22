@@ -11,7 +11,6 @@ from queue import SimpleQueue
 from typing import Any, Dict, List
 
 from ..function.application_call import (
-    application_function_call,
     deserialize_application_function_call_payload,
 )
 from ..function.user_data_serializer import (
@@ -132,11 +131,8 @@ class LocalRunner:
                 payload=serialized_payload,
                 payload_content_type=payload_metadata.content_type,
             )
-            app_function_call_awaitable: FunctionCallAwaitable = (
-                application_function_call(
-                    application=self._app,
-                    payload=payload,
-                )
+            app_function_call_awaitable: FunctionCallAwaitable = self._app.awaitable(
+                payload
             )
             self._create_future_run_for_awaitable(
                 awaitable=app_function_call_awaitable,
@@ -637,7 +633,7 @@ class LocalRunner:
         if awaitable.id in self._future_runs:
             raise ApplicationValidationError(
                 f"Invalid argument: {repr(awaitable)} is an Awaitable with already running Future, "
-                "only not running Awaitable can be passed as function argument or returned from function."
+                "only not running Awaitable can be passed as function argument or returned from a function."
             )
 
         if isinstance(awaitable, AwaitableList):

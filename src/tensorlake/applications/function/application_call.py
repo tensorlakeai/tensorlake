@@ -1,31 +1,10 @@
 from typing import Any, List
 
-from ..interface.awaitables import FunctionCallAwaitable
 from ..interface.file import File
 from ..interface.function import Function
 from ..metadata import ValueMetadata
-from ..registry import get_class
 from .type_hints import function_arg_type_hint
 from .user_data_serializer import deserialize_value, function_input_serializer
-
-
-def application_function_call(
-    application: Function, payload: Any
-) -> FunctionCallAwaitable:
-    """Creates a FunctionCallAwaitable for the application function with the provided payload.
-
-    The FunctionCallAwaitable is compliant with application function calling convention.
-    """
-    # Application function calling convention:
-    # [payload: Optional type hint]
-    if application._function_config.class_name is None:
-        return application.awaitable(payload)
-    else:
-        # Warning: don't create class instance here as it must be reused by SDK if created once.
-        cls: Any = get_class(application._function_config.class_name)
-        return getattr(cls, application._function_config.class_method_name).awaitable(
-            payload
-        )
 
 
 def deserialize_application_function_call_payload(

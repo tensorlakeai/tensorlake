@@ -2,11 +2,15 @@ import contextvars
 import hashlib
 import threading
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 
-from tensorlake.applications import Function, FunctionProgress
+from tensorlake.applications import (
+    ApplicationValidationError,
+    Function,
+    FunctionProgress,
+    RequestError,
+)
 from tensorlake.applications.function.application_call import (
-    application_function_call,
     deserialize_application_function_call_payload,
 )
 from tensorlake.applications.function.function_call import (
@@ -18,11 +22,22 @@ from tensorlake.applications.function.user_data_serializer import (
     function_output_serializer,
     serialize_value,
 )
-from tensorlake.applications.interface.awaitables import FunctionCallAwaitable
+from tensorlake.applications.interface.awaitables import (
+    Awaitable,
+    AwaitableList,
+    FunctionCallAwaitable,
+    Future,
+    ReduceOperationAwaitable,
+)
 from tensorlake.applications.metadata import (
+    CollectionMetadata,
+    FunctionCallArgumentMetadata,
     FunctionCallMetadata,
     ReduceOperationMetadata,
     deserialize_metadata,
+)
+from tensorlake.applications.request_context.contextvar import (
+    set_current_request_context,
 )
 from tensorlake.applications.request_context.request_context_base import (
     RequestContextBase,
@@ -30,16 +45,21 @@ from tensorlake.applications.request_context.request_context_base import (
 from tensorlake.applications.request_context.request_metrics_recorder import (
     RequestMetricsRecorder,
 )
+from tensorlake.applications.user_data_serializer import (
+    UserDataSerializer,
+)
 
 from ..blob_store.blob_store import BLOBStore
 from ..logger import FunctionExecutorLogger
 from ..proto.function_executor_pb2 import (
+    BLOB,
     Allocation,
     AllocationFunctionCallResult,
     AllocationProgress,
     AllocationResult,
     AllocationState,
     FunctionRef,
+    SerializedObjectInsideBLOB,
 )
 from ..request_state.proxied_request_state import ProxiedRequestState
 from ..request_state.request_state_proxy_server import RequestStateProxyServer
@@ -50,6 +70,7 @@ from ..user_events import (
 )
 from .download import download_function_arguments
 from .result_helper import ResultHelper
+from .upload import upload_request_error, upload_serialized_values
 from .value import SerializedValue, Value
 
 
@@ -89,8 +110,6 @@ class AllocationRunner:
             allocation_id=self._allocation.allocation_id,
         )
 
-        # Extracted from function call metadata later.
-        self._function_output_serializer_override: str | None = None
         self._finished: bool = False
         self._request_context: RequestContextBase = RequestContextBase(
             request_id=self._allocation.request_id,
@@ -111,6 +130,8 @@ class AllocationRunner:
             target=self._run_allocation_thread,
             daemon=True,
         )
+        # TODO: Add function call IDs created by this allocation here.
+        self._function_call_ids: Set[str] = set()
 
     def wait_allocation_state_update(
         self, last_seen_hash: str | None
@@ -193,11 +214,25 @@ class AllocationRunner:
         )
         function_call_metadata: (
             FunctionCallMetadata | ReduceOperationMetadata | None
-        ) = self._fetch_validated_function_call_metadata(serialized_args)
+        ) = _validate_and_deserialize_function_call_metadata(
+            serialized_function_call_metadata=self._allocation.inputs.function_call_metadata,
+            serialized_args=serialized_args,
+            function=self._function,
+            logger=self._logger,
+        )
+        output_serializer_override: str | None = None
+        if function_call_metadata is not None:
+            output_serializer_override = (
+                function_call_metadata.output_serializer_name_override
+            )
+        output_serializer: UserDataSerializer = function_output_serializer(
+            self._function,
+            output_serializer_override=output_serializer_override,
+        )
 
         # This is user code.
         try:
-            args: Dict[str, Value] = _deserialize_function_arguments(
+            arg_values: Dict[str, Value] = _deserialize_function_arguments(
                 self._function, serialized_args
             )
         except BaseException as e:
@@ -205,124 +240,186 @@ class AllocationRunner:
             #
             # TODO: Implement serialization of function exception as customer code execution.
             # Handle any exceptions raised in customer code and convert them into proper AllocationResult.
-            return self._response_helper.from_function_exception(e)
+            return self._response_helper.from_generic_function_exception(e)
 
         # This is internal FE code.
-        function_call: FunctionCallAwaitable = self._reconstruct_function_call(
+        args, kwargs = self._reconstruct_function_call_args(
             function_call_metadata=function_call_metadata,
-            args=args,
+            arg_values=arg_values,
         )
 
-        # This is user code
+        # This is user code.
         try:
-            self._run_user_function(
-                function_call_metadata=function_call_metadata,
-                serialized_args=serialized_args,
+            output: Any = self._call_user_function(args, kwargs)
+            serialized_values: Dict[str, SerializedValue] = {}
+            output: SerializedValue | Awaitable = _process_function_output(
+                output=output,
+                function_name=self._function_ref.function_name,
+                function_output_serializer=output_serializer,
+                function_call_ids=self._function_call_ids,
+                serialized_values=serialized_values,
             )
-        except BaseException as e:
+        except RequestError as e:
+            # This is internal FE code.
             # TODO: Log this using print exception to show the error to user.
             #
             # TODO: Implement serialization of function exception as customer code execution.
             # Handle any exceptions raised in customer code and convert them into proper AllocationResult.
-            return self._response_helper.from_function_exception(e)
-
-        return self._handle_allocation_output(output)
-
-    def _fetch_validated_function_call_metadata(
-        self, serialized_args: List[SerializedValue]
-    ) -> FunctionCallMetadata | ReduceOperationMetadata | None:
-        if len(self._allocation.inputs.function_call_metadata) > 0:
-            # Function call created by SDK.
-            for serialized_arg in serialized_args:
-                if serialized_arg.metadata is None:
-                    self._logger.error(
-                        "function argument is missing metadata",
-                    )
-                    raise ValueError("Function argument is missing metadata.")
-
-            function_call_metadata = deserialize_metadata(
-                self._allocation.inputs.function_call_metadata
+            request_error_so, uploaded_blob = upload_request_error(
+                message=e.message,
+                destination_blob=self._allocation.inputs.request_error_blob,
+                blob_store=self._blob_store,
+                logger=self._logger,
             )
-            if not isinstance(
-                function_call_metadata, (FunctionCallMetadata, ReduceOperationMetadata)
-            ):
-                self._logger.error(
-                    "unsupported function call metadata type",
-                    metadata_type=type(function_call_metadata).__name__,
-                )
-                raise ValueError(
-                    f"Unsupported function call metadata type: {type(function_call_metadata).__name__}"
-                )
-
-            if (
-                isinstance(function_call_metadata, ReduceOperationMetadata)
-                and len(serialized_args) != 2
-            ):
-                raise ValueError(
-                    f"Expected 2 arguments for reducer function call, got {len(serialized_args)}"
-                )
-
-            self._function_output_serializer_override = (
-                function_call_metadata.output_serializer_name_override
+            request_error_so: SerializedObjectInsideBLOB
+            uploaded_blob: BLOB
+            return self._response_helper.from_request_error(
+                request_error_so, uploaded_blob
             )
-        else:
-            # Application function call created by Server.
-            if len(serialized_args) != 1:
-                self._logger.error(
-                    "expected exactly one function argument for server-created application function call",
-                    num_args=len(serialized_args),
-                )
-                raise ValueError(
-                    f"Expected exactly one function argument for server-created application "
-                    f"function call, got {len(serialized_args)}."
-                )
+        except BaseException as e:
+            # This is internal FE code.
+            # TODO: Log this using print exception to show the error to user.
+            #
+            # TODO: Implement serialization of function exception as customer code execution.
+            # Handle any exceptions raised in customer code and convert them into proper AllocationResult.
+            return self._response_helper.from_generic_function_exception(e)
 
-            if self._function._application_config is None:
-                raise ValueError(
-                    "Non-application function was called without SDK metadata"
-                )
+        # This is internal FE code.
+        uploaded_serialized_objects, uploaded_blob = upload_serialized_values(
+            serialized_values=serialized_values,
+            destination_blob=self._allocation.inputs.function_outputs_blob,
+            blob_store=self._blob_store,
+            logger=self._logger,
+        )
+        uploaded_serialized_objects: Dict[str, SerializedObjectInsideBLOB]
+        uploaded_blob: BLOB
 
-    def _reconstruct_function_call(
+        return self._response_helper.from_function_output(
+            output=output, uploaded_serialized_objects=uploaded_serialized_objects
+        )
+
+    def _reconstruct_function_call_args(
         self,
         function_call_metadata: FunctionCallMetadata | ReduceOperationMetadata | None,
-        args: Dict[str, Value],
-    ) -> FunctionCallAwaitable:
+        arg_values: Dict[str, Value],
+    ) -> tuple[List[Any], Dict[str, Any]]:
         if function_call_metadata is None:
             # Application function call created by Server.
-            function_call: FunctionCallAwaitable = (
-                _reconstruct_application_function_call(
-                    function=self._function,
-                    args=args,
-                )
-            )
+            args: List[Any] = [arg_values["application_payload"]]
+            kwargs: Dict[str, Any] = {}
         else:
             # SDK-created function call.
-            function_call: FunctionCallAwaitable = _reconstruct_sdk_function_call(
-                function=self._function,
+            args, kwargs = _reconstruct_sdk_function_call_args(
                 function_call_metadata=function_call_metadata,
-                args=args,
+                arg_values=arg_values,
             )
 
         if self._function_instance_arg is not None:
-            set_self_arg(function_call.args, self._function_instance_arg)
+            set_self_arg(args, self._function_instance_arg)
 
-    def _run_user_function(self, function_call: FunctionCallAwaitable) -> Any:
+        return args, kwargs
+
+    def _call_user_function(self, args: List[Any], kwargs: Dict[str, Any]) -> Any:
         """Runs user function and returns its output."""
-
         context: contextvars.Context = contextvars.Context()
-        # TODO: Serialize output in customer code context.
-        # TODO: Figure out what to return.
-        output: Any = context.run(self._run_user_function_in_new_context, function_call)
+        return context.run(self._call_user_function_in_new_context, args, kwargs)
 
-    def _run_user_function_in_new_context(
-        self, function_call: FunctionCallAwaitable
+    def _call_user_function_in_new_context(
+        self, args: List[Any], kwargs: Dict[str, Any]
     ) -> Any:
-        pass
+        # This function is executed in contextvars.Context of the Tensorlake Function call.
+        set_current_request_context(self._request_context)
 
-    def _handle_allocation_output(self, output: Any) -> AllocationResult:
-        # This is internal FE code.
-        # TODO: upload the output and etc.
-        pass
+        self._logger.info("running function")
+        start_time = time.monotonic()
+
+        try:
+            return self._function._original_function(*args, **kwargs)
+        finally:
+            self._logger.info(
+                "function finished",
+                duration_sec=f"{time.monotonic() - start_time:.3f}",
+            )
+
+
+def _process_function_output(
+    output: Any,
+    function_name: str,
+    serializer: UserDataSerializer,
+    function_call_ids: Set[str],
+    serialized_values: Dict[str, SerializedValue],
+) -> SerializedValue | Awaitable:
+    """Validates the function output and replaces each value with a SerializedValue.
+
+    This results in Awaitables tree being returned with each value being SerializedValue.
+    Updates serialized_values with each SerializedValue created from concrete values.
+    serialized_values is mapping from value ID to SerializedValue.
+    """
+    # NB: This code needs to be in sync with LocalRunner where it's doing a similar thing.
+    if not isinstance(output, (Awaitable, Future)):
+        data, metadata = serialize_value(output, serializer=serializer)
+        serialized_values[metadata.id] = SerializedValue(
+            metadata=metadata,
+            data=data,
+            content_type=metadata.content_type,
+        )
+        return serialized_values[metadata.id]
+
+    if isinstance(output, Future):
+        raise ApplicationValidationError(
+            f"Invalid argument: cannot run Future {repr(output)}, "
+            "please pass an Awaitable or a concrete value."
+        )
+
+    awaitable: Awaitable
+    if awaitable.id in function_call_ids:
+        raise ApplicationValidationError(
+            f"Invalid argument: {repr(awaitable)} is an Awaitable with already running Future, "
+            "only not running Awaitable can be passed as function argument or returned from a function."
+        )
+
+    # This is a very important check for our UX. We can await for AwaitableList
+    # in user code but we cannot return it from a function as a tail call because
+    # there's no Python code to reassemble the list from individual resolved awaitables.
+    if isinstance(output, AwaitableList):
+        raise ApplicationValidationError(
+            f"Function '{function_name}' returned an AwaitableList {repr(output)}. "
+            "An AwaitableList can only be used as a function argument, not returned from it."
+        )
+    elif isinstance(awaitable, ReduceOperationAwaitable):
+        awaitable: ReduceOperationAwaitable
+        for index, item in enumerate(list(awaitable.inputs)):
+            # Iterating over list copy to allow modifying the original list.
+            awaitable.inputs[index] = _process_function_output(
+                output=item,
+                function_name=function_name,
+                serializer=serializer,
+                function_call_ids=function_call_ids,
+            )
+        return awaitable
+    elif isinstance(awaitable, FunctionCallAwaitable):
+        awaitable: FunctionCallAwaitable
+        for index, arg in enumerate(list(awaitable.args)):
+            # Iterating over list copy to allow modifying the original list.
+            awaitable.args[index] = _process_function_output(
+                output=arg,
+                function_name=function_name,
+                serializer=serializer,
+                function_call_ids=function_call_ids,
+            )
+        for kwarg_name, kwarg_value in dict(awaitable.kwargs).items():
+            # Iterating over dict copy to allow modifying the original list.
+            awaitable.kwargs[kwarg_name] = _process_function_output(
+                output=kwarg_value,
+                function_name=function_name,
+                serializer=serializer,
+                function_call_ids=function_call_ids,
+            )
+        return awaitable
+    else:
+        raise ApplicationValidationError(
+            f"Unexpected type of awaitable returned from function: {type(awaitable)}"
+        )
 
 
 def _update_allocation_state_hash(allocation_state: AllocationState) -> None:
@@ -351,68 +448,123 @@ def _deserialize_function_arguments(
     function: Function, serialized_args: List[SerializedValue]
 ) -> Dict[str, Value]:
     args: Dict[str, Value] = {}
-    for serialized_arg in serialized_args:
+    for ix, serialized_arg in enumerate(serialized_args):
         if serialized_arg.metadata is None:
             # Application payload argument. It's allready validated to be only one argument.
-            args["application_payload"] = deserialize_application_function_call_payload(
-                application=function,
-                payload=serialized_arg.data,
-                payload_content_type=serialized_arg.content_type,
+            args["application_payload"] = Value(
+                metadata=None,
+                object=deserialize_application_function_call_payload(
+                    application=function,
+                    payload=serialized_arg.data,
+                    payload_content_type=serialized_arg.content_type,
+                ),
+                input_ix=ix,
             )
         else:
-            args[serialized_arg.metadata.id] = deserialize_value(
-                serialized_arg.data, serialized_arg.metadata
+            args[serialized_arg.metadata.id] = Value(
+                metadata=serialized_arg.metadata,
+                object=deserialize_value(
+                    serialized_value=serialized_arg.data,
+                    metadata=serialized_arg.metadata,
+                ),
+                input_ix=ix,
             )
 
     return args
 
 
-def _reconstruct_application_function_call(
-    application: Function, args: Dict[str, Value]
-) -> FunctionCallAwaitable:
-    return application_function_call(
-        application=application,
-        payload=args["application_payload"],
-    )
-
-
-def _reconstruct_sdk_function_call(
+def _validate_and_deserialize_function_call_metadata(
+    serialized_function_call_metadata: bytes,
+    serialized_args: List[SerializedValue],
     function: Function,
+    logger: FunctionExecutorLogger,
+) -> FunctionCallMetadata | ReduceOperationMetadata | None:
+    if len(serialized_function_call_metadata) > 0:
+        # Function call created by SDK.
+        for serialized_arg in serialized_args:
+            if serialized_arg.metadata is None:
+                logger.error(
+                    "function argument is missing metadata",
+                )
+                raise ValueError("Function argument is missing metadata.")
+
+        function_call_metadata = deserialize_metadata(serialized_function_call_metadata)
+        if not isinstance(
+            function_call_metadata, (FunctionCallMetadata, ReduceOperationMetadata)
+        ):
+            logger.error(
+                "unsupported function call metadata type",
+                metadata_type=type(function_call_metadata).__name__,
+            )
+            raise ValueError(
+                f"Unsupported function call metadata type: {type(function_call_metadata).__name__}"
+            )
+
+        if (
+            isinstance(function_call_metadata, ReduceOperationMetadata)
+            and len(serialized_args) != 2
+        ):
+            raise ValueError(
+                f"Expected 2 arguments for reducer function call, got {len(serialized_args)}"
+            )
+    else:
+        # Application function call created by Server.
+        if len(serialized_args) != 1:
+            logger.error(
+                "expected exactly one function argument for server-created application function call",
+                num_args=len(serialized_args),
+            )
+            raise ValueError(
+                f"Expected exactly one function argument for server-created application "
+                f"function call, got {len(serialized_args)}."
+            )
+
+        if function._application_config is None:
+            raise ValueError("Non-application function was called without SDK metadata")
+
+
+def _reconstruct_sdk_function_call_args(
     function_call_metadata: FunctionCallMetadata | ReduceOperationMetadata,
-    args: Dict[str, Value],
-) -> FunctionCallAwaitable:
+    arg_values: Dict[str, Value],
+) -> tuple[List[Any], Dict[str, Any]]:
     if isinstance(function_call_metadata, FunctionCallMetadata):
-        return RegularFunctionCallNode.from_serialized(
-            self._function_ref.function_name,
-            node_metadata.metadata,
-            downloaded_args,
-        ).to_regular_function_call()
+        args: List[Any] = []
+        kwargs: Dict[str, Any] = {}
+
+        for arg_metadata in function_call_metadata.args:
+            args.append(_reconstruct_function_arg_value(arg_metadata, arg_values))
+        for kwarg_key, kwarg_metadata in function_call_metadata.kwargs.items():
+            kwargs[kwarg_key] = _reconstruct_function_arg_value(
+                kwarg_metadata, arg_values
+            )
+        return args, kwargs
     elif isinstance(function_call_metadata, ReduceOperationMetadata):
-        accumulator: Any = serialized_args[0].to_value()
-        item: Any = serialized_args[1].to_value()
-        return function.awaitable(accumulator, item)
+        args: List[Value] = list(arg_values.values())
+        # Server provides accumulator first, item second
+        args.sort(key=lambda arg: arg.input_ix)
+        return args, {}
 
 
 def _reconstruct_function_arg_value(
-    self, arg_metadata: FunctionCallArgumentMetadata
+    arg_metadata: FunctionCallArgumentMetadata, arg_values: Dict[str, Value]
 ) -> Any:
     """Reconstructs the original value from function arg metadata."""
     # NB: This code needs to be in sync with LocalRunner where it's doing a similar thing.
     if arg_metadata.collection is None:
-        return _deserialize_blob_value(self._blob_store.get(arg_metadata.value_id))
+        return arg_values[arg_metadata.value_id].object
     else:
-        return self._reconstruct_collection_value(arg_metadata.collection)
+        return _reconstruct_collection_value(arg_metadata.collection, arg_values)
 
 
 def _reconstruct_collection_value(
-    self, collection_metadata: CollectionMetadata
+    collection_metadata: CollectionMetadata, arg_values: Dict[str, Value]
 ) -> List[Any]:
     """Reconstructs the original values from the supplied collection metadata."""
     # NB: This code needs to be in sync with LocalRunner where it's doing a similar thing.
     values: List[Any] = []
     for item in collection_metadata.items:
         if item.collection is None:
-            values.append(_deserialize_blob_value(self._blob_store.get(item.value_id)))
+            values.append(arg_values[item.value_id].object)
         else:
-            values.append(self._reconstruct_collection_value(item.collection))
+            values.append(_reconstruct_collection_value(item.collection, arg_values))
     return values
