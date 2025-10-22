@@ -16,3 +16,5 @@ class SerializedValue:
 class Value:
     metadata: ValueMetadata | None
     object: Any
+    # Index in the input argument list provided by Server.
+    input_ix: int
