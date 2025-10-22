@@ -25,6 +25,7 @@ TYPE_TO_JSON_SCHEMA = {
     "NoneType": "null",
 }
 
+
 class FunctionManifest(BaseModel):
     name: str
     description: str
@@ -274,6 +275,6 @@ def get_function_input_types(function: Function) -> str:
     type_hints = get_type_hints(function.original_function)
     # Filter out the "return" type hint
     items = [(k, v) for k, v in type_hints.items() if k != "return"]
-    
+
     for _, type_hint in items:
         return _type_hint_json_schema(type_hint)

@@ -353,7 +353,7 @@ class TestGraphMetadataParameterExtraction(unittest.TestCase):
 
         # Check Pydantic model parameter
         payload_param = next(p for p in parameters if p.name == "payload")
-        
+
         # The parameter should contain the full Pydantic schema
         expected_schema = {
             "type": "object",
@@ -361,12 +361,12 @@ class TestGraphMetadataParameterExtraction(unittest.TestCase):
                 "name": {"type": "string", "title": "Name"},
                 "age": {"type": "integer", "title": "Age"},
                 "email": {"title": "Email", "type": "string"},
-                "is_active": {"default": True, "title": "Is Active", "type": "boolean"}
+                "is_active": {"default": True, "title": "Is Active", "type": "boolean"},
             },
             "required": ["name", "age", "email"],
-            "title": "RequestPayload"
+            "title": "RequestPayload",
         }
-        
+
         self.assertEqual(payload_param.data_type, expected_schema)
         self.assertTrue(payload_param.required)
 
