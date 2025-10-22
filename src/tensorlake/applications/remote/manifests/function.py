@@ -121,7 +121,7 @@ def _function_signature_info(
 ) -> tuple[List[ParameterManifest], Dict[str, str]]:
     """Extract parameter names, types, and return type from TensorlakeCompute function."""
     signature = inspect.signature(function.original_function)
-    type_hints = get_type_hints(function.original_function, include_extras=True)
+    type_hints = get_type_hints(function.original_function)
 
     # Extract parameter descriptions from docstring
     docstring = inspect.getdoc(function.original_function) or ""
@@ -225,3 +225,15 @@ def create_function_manifest(
         placement_constraints=placement_constraints,
         max_concurrency=function.function_config.max_concurrency,
     )
+
+
+def get_function_input_types(function: Function) -> str:
+    """Generate a string representation of function input types for documentation."""
+    signature = inspect.signature(function.original_function)
+    type_hints = get_type_hints(function.original_function)
+    for param_name in signature.parameters.items():
+        if param_name == "self":
+            continue
+        param_type = type_hints.get(param_name, Any)
+        schema = _type_hint_json_schema(param_type)
+    return schema
