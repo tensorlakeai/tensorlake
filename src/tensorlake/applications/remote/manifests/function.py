@@ -1,8 +1,8 @@
 import inspect
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Union
 
 from pydantic import BaseModel
-from typing_extensions import get_type_hints
+from typing_extensions import get_args, get_origin, get_type_hints
 
 from ...interface.function import Function, _ApplicationConfiguration
 from .function_manifests import (
@@ -104,16 +104,58 @@ def _parse_docstring_parameters(docstring: str) -> Dict[str, str]:
     return param_descriptions
 
 
-def _type_hint_json_schema(type_hint: dict[str, Any]) -> Dict[str, str]:
+def _type_hint_json_schema(type_hint) -> Dict[str, str]:
     """Format type hint as JSON Schema for MCP compatibility."""
     if type_hint == Any:
         return {"type": "string", "description": "Any type"}
 
+    # Handle Pydantic BaseModel first
     if inspect.isclass(type_hint) and issubclass(type_hint, BaseModel):
         if hasattr(type_hint, "model_json_schema"):
             return type_hint.model_json_schema()
 
-    return {"type": TYPE_TO_JSON_SCHEMA.get(type_hint.__name__)}
+    # Handle typing generics like List, Dict, etc.
+    origin = get_origin(type_hint)
+    args = get_args(type_hint)
+    if origin:
+        if origin is list:
+            if args:
+                return {"type": "array", "items": _type_hint_json_schema(args[0])}
+            else:
+                return {"type": "array", "items": {"type": "string"}}
+        elif origin is dict:
+            if len(args) >= 2:
+                return {
+                    "type": "object",
+                    "additionalProperties": _type_hint_json_schema(args[1]),
+                }
+            else:
+                return {"type": "object"}
+        elif origin is Union:
+            # Handle Union types like Union[str, int]
+            non_none_types = [arg for arg in args if arg is not type(None)]
+            if len(non_none_types) == 1:
+                # Optional type (Union[T, None])
+                return _type_hint_json_schema(non_none_types[0])
+            else:
+                # Multiple types - use anyOf
+                return {
+                    "anyOf": [_type_hint_json_schema(arg) for arg in non_none_types]
+                }
+
+    # Handle simple types
+    type_name = getattr(type_hint, "__name__", None)
+    if type_name and type_name in TYPE_TO_JSON_SCHEMA:
+        schema = {"type": TYPE_TO_JSON_SCHEMA[type_name]}
+        if type_name == "dict":
+            schema["description"] = "dict object"
+        return schema
+    elif hasattr(type_hint, "__name__"):
+        # For custom classes, assume object type
+        return {"type": "object", "description": f"{type_hint.__name__} object"}
+    else:
+        # Fallback for complex types without __name__
+        return {"type": "string", "description": str(type_hint)}
 
 
 def _function_signature_info(
