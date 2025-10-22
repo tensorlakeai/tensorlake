@@ -1,13 +1,8 @@
 import inspect
-from typing import (
-    Any,
-    Dict,
-    List,
-    Union,
-)
+from typing import Any, Dict, List
 
 from pydantic import BaseModel
-from typing_extensions import get_args, get_origin, get_type_hints
+from typing_extensions import get_type_hints
 
 from ...interface.function import Function, _ApplicationConfiguration
 from .function_manifests import (
@@ -18,6 +13,17 @@ from .function_manifests import (
 )
 from .function_resources import resources_for_function
 
+TYPE_TO_JSON_SCHEMA = {
+    str: "string",
+    int: "integer",
+    float: "number",
+    bool: "boolean",
+    list: "array",
+    dict: "object",
+    tuple: "array",
+    set: "array",
+    type(None): "null",
+}
 
 class FunctionManifest(BaseModel):
     name: str
@@ -98,56 +104,16 @@ def _parse_docstring_parameters(docstring: str) -> Dict[str, str]:
     return param_descriptions
 
 
-def _type_hint_json_schema(type_hint) -> Dict[str, str]:
-    """Format type hint as JSON Schema for MCP compatibility."""
+def _type_hint_json_schema(type_hint: dict[str, Any]) -> Dict[str, Any]:
+    # def _type_hint_json_schema(type_hints: dict[str, any]) -> Dict[str, Any]:
     if type_hint == Any:
         return {"type": "string", "description": "Any type"}
 
-    # Handle typing generics like List, Dict, etc. first
-    origin = get_origin(type_hint)
-    args = get_args(type_hint)
+    if inspect.isclass(type_hint) and issubclass(type_hint, BaseModel):
+        if hasattr(type_hint, "model_json_schema"):
+            return type_hint.model_json_schema()
 
-    if origin:
-        if origin is list:
-            if args:
-                return {"type": "array", "items": _type_hint_json_schema(args[0])}
-            else:
-                return {"type": "array", "items": {"type": "string"}}
-        elif origin is dict:
-            if len(args) >= 2:
-                return {
-                    "type": "object",
-                    "additionalProperties": _type_hint_json_schema(args[1]),
-                }
-            else:
-                return {"type": "object"}
-        elif origin is Union:
-            # Handle Union types like Union[str, int]
-            non_none_types = [arg for arg in args if arg is not type(None)]
-            if len(non_none_types) == 1:
-                # Optional type (Union[T, None])
-                schema = _type_hint_json_schema(non_none_types[0])
-                return schema
-            else:
-                # Multiple types - use anyOf
-                return {
-                    "anyOf": [_type_hint_json_schema(arg) for arg in non_none_types]
-                }
-
-    # Handle simple types
-    if type_hint is str:
-        return {"type": "string"}
-    elif type_hint is int:
-        return {"type": "integer"}
-    elif type_hint is float:
-        return {"type": "number"}
-    elif type_hint is bool:
-        return {"type": "boolean"}
-    elif hasattr(type_hint, "__name__"):
-        # For custom classes, assume object type
-        return {"type": "object", "description": f"{type_hint.__name__} object"}
-    else:
-        return {"type": "string", "description": str(type_hint)}
+    return {"type": TYPE_TO_JSON_SCHEMA.get(type_hint.__name__, "string")}
 
 
 def _function_signature_info(
@@ -155,7 +121,7 @@ def _function_signature_info(
 ) -> tuple[List[ParameterManifest], Dict[str, str]]:
     """Extract parameter names, types, and return type from TensorlakeCompute function."""
     signature = inspect.signature(function.original_function)
-    type_hints = get_type_hints(function.original_function)
+    type_hints = get_type_hints(function.original_function, include_extras=True)
 
     # Extract parameter descriptions from docstring
     docstring = inspect.getdoc(function.original_function) or ""
@@ -259,3 +225,4 @@ def create_function_manifest(
         placement_constraints=placement_constraints,
         max_concurrency=function.function_config.max_concurrency,
     )
+
