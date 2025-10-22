@@ -104,7 +104,7 @@ def _parse_docstring_parameters(docstring: str) -> Dict[str, str]:
     return param_descriptions
 
 
-def _type_hint_json_schema(type_hint: dict[str, Any]) -> Dict[str, Any]:
+def _type_hint_json_schema(type_hint: dict[str, Any]) -> Dict[str, str]:
     """Format type hint as JSON Schema for MCP compatibility."""
     if type_hint == Any:
         return {"type": "string", "description": "Any type"}
@@ -229,11 +229,9 @@ def create_function_manifest(
 
 def get_function_input_types(function: Function) -> str:
     """Generate a string representation of function input types for documentation."""
-    signature = inspect.signature(function.original_function)
     type_hints = get_type_hints(function.original_function)
-    for param_name in signature.parameters.items():
-        if param_name == "self":
-            continue
-        param_type = type_hints.get(param_name, Any)
-        schema = _type_hint_json_schema(param_type)
-    return schema
+    # Filter out the "return" type hint
+    items = [(k, v) for k, v in type_hints.items() if k != "return"]
+    
+    for _, type_hint in items:
+        return _type_hint_json_schema(type_hint)
