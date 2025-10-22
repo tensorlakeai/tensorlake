@@ -174,22 +174,24 @@ message AllocationProgress {
     float total = 2;
 }
 
-message AllocationFunctionCalls {
-    // New function calls are detected by client when it sees a new
-    // ExecutionPlanUpdates.root_function_call_id.
-    // If a function call gets removed from this list then it doesn't
-    // get cancelled. Already added ExecutionPlanUpdates are immutable.
-    repeated ExecutionPlanUpdates function_calls = 1;
-}
-
 message AllocationState {
     // Optional current allocation progress.
     AllocationProgress progress = 1;
-    // Optional pending function calls to be executed.
-    // FE removes pending function calls when it gets their results.
-    AllocationFunctionCalls pending_function_calls = 2;
+    // Function calls started by the allocation.
+    //
+    // New function calls are detected by client when it sees a new
+    // ExecutionPlanUpdates.root_function_call_id.
+    //
+    // If a not finished function call gets removed from this list then
+    // it doesn't get cancelled by the client. ExecutionPlanUpdates are immutable.
+    //
+    // Every function call gets a deliver_allocation_function_call_result
+    // RPC call when it finishes.
+    repeated ExecutionPlanUpdates function_calls = 2;
     // Optional allocation result. Set when allocation finishes.
     AllocationResult result = 3;
+    // Required state hash.
+    optional string sha256_hash = 4;
 }
 
 // FunctionInputs contains the input data for allocation execution
@@ -265,9 +267,7 @@ message Allocation {
     optional string request_id = 1;
     optional string function_call_id = 2;
     optional string allocation_id = 3;
-    // Input data for allocation execution (not returned when getting/listing allocations)
     optional FunctionInputs inputs = 4;
-    // Result of allocation execution (not returned when getting/listing allocations)
     optional AllocationResult result = 5;
 }
 
@@ -275,7 +275,7 @@ message CreateAllocationRequest {
     optional Allocation allocation = 1;
 }
 
-message AwaitAllocationRequest {
+message WatchAllocationStateRequest {
     optional string allocation_id = 1;
 }
 
@@ -330,11 +330,13 @@ service FunctionExecutor {
     // Lists the currently-running allocations.
     rpc list_allocations(ListAllocationsRequest) returns (ListAllocationsResponse);
     // Creates and starts the allocation specified in the request.
-    rpc create_allocation(CreateAllocationRequest) returns (Allocation);
-    // Getting updates stream for the allocation state until it finishes.
-    rpc watch_allocation_state(AwaitAllocationRequest) returns (stream AllocationState);
-    // Deletes the allocation.
+    rpc create_allocation(CreateAllocationRequest) returns (Empty);
+    // Streams updates of the allocation state until allocation finishes.
+    // If allocation is finished, streams the final state and closes the stream.
+    rpc watch_allocation_state(WatchAllocationStateRequest) returns (stream AllocationState);
+    // Deletes the allocation. The allocation must be finished before calling this method.
     rpc delete_allocation(DeleteAllocationRequest) returns (Empty);
+    // Delivers the result of a finished function call started by an allocation.
     rpc deliver_allocation_function_call_result(AllocationFunctionCallResult) returns (Empty);
     // Health check method to check if the FE is able to run allocations.
     // The FE should be initialized before calling this method.

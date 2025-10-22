@@ -2,15 +2,15 @@ import importlib
 import json
 import sys
 import tempfile
-import threading
 import time
 import traceback
 import zipfile
-from typing import Any, Dict, Generator, Iterator, List
+from dataclasses import dataclass
+from typing import Any, Dict, Generator, Iterator
 
 import grpc
 
-from tensorlake.applications import Function, FunctionProgress
+from tensorlake.applications import Function
 from tensorlake.applications.function.function_call import create_self_instance
 from tensorlake.applications.registry import get_function, get_functions, has_function
 from tensorlake.applications.remote.code.zip import (
@@ -18,24 +18,17 @@ from tensorlake.applications.remote.code.zip import (
     CodeZIPManifest,
     FunctionZIPManifest,
 )
-from tensorlake.applications.request_context.request_context_base import (
-    RequestContextBase,
-)
-from tensorlake.applications.request_context.request_metrics_recorder import (
-    RequestMetricsRecorder,
-)
 
+from .allocation_runner.allocation_runner import AllocationRunner
 from .blob_store.blob_store import BLOBStore
-from .handlers.run_function.handler import Handler as RunAllocationHandler
 from .health_check import HealthCheckHandler
 from .info import info_response_kv_args
-from .initialize_request_validator import InitializeRequestValidator
 from .logger import FunctionExecutorLogger
+from .message_validators import InitializeRequestValidator, validate_new_allocation
 from .proto.function_executor_pb2 import (
     Allocation,
-    AllocationResult,
-    AwaitAllocationProgress,
-    AwaitAllocationRequest,
+    AllocationFunctionCallResult,
+    AllocationState,
     CreateAllocationRequest,
     DeleteAllocationRequest,
     Empty,
@@ -50,14 +43,12 @@ from .proto.function_executor_pb2 import (
     InitializeResponse,
     ListAllocationsRequest,
     ListAllocationsResponse,
-    ProgressUpdate,
     RequestStateRequest,
     RequestStateResponse,
     SerializedObjectEncoding,
+    WatchAllocationStateRequest,
 )
 from .proto.function_executor_pb2_grpc import FunctionExecutorServicer
-from .proto.message_validator import MessageValidator
-from .request_state.proxied_request_state import ProxiedRequestState
 from .request_state.request_state_proxy_server import RequestStateProxyServer
 from .user_events import (
     InitializationEventDetails,
@@ -67,40 +58,10 @@ from .user_events import (
 )
 
 
-class _AllocationExecution:
-    def __init__(self):
-        self.complete: bool = False
-        self.thread: threading.Thread | None = None
-        self.updated: threading.Condition = threading.Condition()
-        self.progress: ProgressUpdate = ProgressUpdate(current=0.0, total=1.0)
-
-
+@dataclass
 class _AllocationInfo:
-    def __init__(self, allocation: Allocation, logger: FunctionExecutorLogger):
-        self.allocation: Allocation = allocation
-        self.execution: _AllocationExecution = _AllocationExecution()
-        self.logger: FunctionExecutorLogger = logger.bind(
-            request_id=allocation.request_id,
-            fn_call_id=allocation.function_call_id,
-            allocation_id=allocation.allocation_id,
-        )
-
-
-class AllocationRequestProgress(FunctionProgress):
-    def __init__(self, alloc_info: _AllocationInfo):
-        self._alloc_info: _AllocationInfo = alloc_info
-
-    def update(self, current: float, total: float) -> None:
-        with self._alloc_info.execution.updated:
-            self._alloc_info.execution.progress = ProgressUpdate(
-                current=current, total=total
-            )
-            self._alloc_info.execution.updated.notify_all()
-        # sleep(0) here momentarily releases the GIL, giving other
-        # threads a chance to run - e.g. allowing the FE to handle
-        # incoming RPCs, to report back await_allocation() progress
-        # messages, &c.
-        time.sleep(0)
+    allocation: Allocation
+    runner: AllocationRunner
 
 
 class Service(FunctionExecutorServicer):
@@ -114,10 +75,8 @@ class Service(FunctionExecutorServicer):
         self._function_instance_arg: Any | None = None
         self._blob_store: BLOBStore | None = None
         self._request_state_proxy_server: RequestStateProxyServer | None = None
-        self._check_health_handler: HealthCheckHandler | None = None
-        # Allocation management for create_allocation/await_allocation/delete_allocation
-        self._allocations: Dict[str, _AllocationInfo] = {}
-        self._allocations_lock = threading.Lock()
+        self._health_check_handler: HealthCheckHandler | None = None
+        self._allocation_infos: Dict[str, _AllocationInfo] = {}
 
     def initialize(
         self, request: InitializeRequest, context: grpc.ServicerContext
@@ -210,7 +169,7 @@ class Service(FunctionExecutorServicer):
             available_cpu_count=available_cpu_count, logger=self._logger
         )
         # Only pass health checks if FE was initialized successfully.
-        self._check_health_handler = HealthCheckHandler(self._logger)
+        self._health_check_handler = HealthCheckHandler(self._logger)
         self._logger.info(
             "initialized function executor service",
             duration_sec=f"{time.monotonic() - start_time:.3f}",
@@ -251,197 +210,127 @@ class Service(FunctionExecutorServicer):
         yield from self._request_state_proxy_server.run()
         self._request_state_proxy_server = None
 
-    def _validate_new_allocation(self, allocation: Allocation):
-        """Validates the allocation before creating it.
-
-        Raises ValueError if the allocation is invalid or is not for this FE.
-        This is internal error due to wrong use of FE protocol.
-        """
-        # Validate required fields
-        (
-            MessageValidator(allocation)
-            .required_field("request_id")
-            .required_field("function_call_id")
-            .required_field("allocation_id")
-            .required_field("inputs")
-            .not_set_field("result")
-        )
-
-        # Validate allocation inputs
-        (
-            MessageValidator(allocation.inputs)
-            .optional_serialized_objects_inside_blob("args")
-            .optional_blobs("arg_blobs")
-            .required_blob("function_outputs_blob")
-            .required_blob("request_error_blob")
-        )
-        if len(allocation.inputs.args) != len(allocation.inputs.arg_blobs):
-            raise ValueError(
-                "Mismatched function arguments and functions argument blobs lengths, "
-                f"{len(allocation.inputs.args)} != {len(allocation.inputs.arg_blobs)}"
-            )
-
     def check_health(
         self, request: HealthCheckRequest, context: grpc.ServicerContext
     ) -> HealthCheckResponse:
-        if self._check_health_handler is None:
+        if self._health_check_handler is None:
             context.abort(
                 grpc.StatusCode.UNAVAILABLE,
                 "Function Executor is not initialized, please initialize it first",
             )
-        return self._check_health_handler.run(request)
+        return self._health_check_handler.run(request)
 
     def get_info(
         self, request: InfoRequest, context: grpc.ServicerContext
     ) -> InfoResponse:
         return InfoResponse(**info_response_kv_args())
 
-    def _execute_allocation_in_thread(self, alloc_info: _AllocationInfo):
-        request_context: RequestContextBase = RequestContextBase(
-            alloc_info.allocation.request_id,
-            state=ProxiedRequestState(
-                allocation_id=alloc_info.allocation.allocation_id,
-                proxy_server=self._request_state_proxy_server,
-            ),
-            progress=AllocationRequestProgress(alloc_info),
-            metrics=RequestMetricsRecorder(),
-        )
-
-        try:
-            result: AllocationResult = RunAllocationHandler(
-                allocation=alloc_info.allocation,
-                function_ref=self._function_ref,
-                request_context=request_context,
-                function=self._function,
-                function_instance_arg=self._function_instance_arg,
-                blob_store=self._blob_store,
-                logger=alloc_info.logger,
-            ).run()
-            # We don't store any large objects in the result so it's okay to copy it.
-            alloc_info.allocation.result.CopyFrom(result)
-        except BaseException as e:
-            # Only exceptions in our code can be raised here so we have to log them.
-            alloc_info.logger.error(
-                "allocation execution failed in background thread",
-                exc_info=e,
-            )
-        finally:
-            with alloc_info.execution.updated:
-                alloc_info.execution.complete = True
-                alloc_info.execution.updated.notify_all()
-
     def list_allocations(
         self, request: ListAllocationsRequest, context: grpc.ServicerContext
     ) -> ListAllocationsResponse:
-        allocations: List[Allocation] = []
-        with self._allocations_lock:
-            for allocation_info in self._allocations.values():
-                with allocation_info.execution.updated:
-                    allocations.append(_trimmed_allocation(allocation_info.allocation))
-        return ListAllocationsResponse(allocations=allocations)
+        # No need to lock self._allocation_infos because we're not blocking here so we
+        # hold GIL non stop.
+        return ListAllocationsResponse(
+            allocations=[
+                alloc_info.allocation for alloc_info in self._allocation_infos.values()
+            ]
+        )
 
     def create_allocation(
         self, request: CreateAllocationRequest, context: grpc.ServicerContext
-    ) -> Allocation:
-        alloc: Allocation = request.allocation
-        self._validate_new_allocation(alloc)
+    ) -> Empty:
+        # No need to lock self._allocation_infos because we're not blocking here so we
+        # hold GIL non stop.
+        allocation: Allocation = request.allocation
+        validate_new_allocation(allocation)
 
-        with self._allocations_lock:
-            if alloc.allocation_id in self._allocations:
-                context.abort(
-                    grpc.StatusCode.ALREADY_EXISTS,
-                    f"Allocation {alloc.allocation_id} already exists",
-                )
-
-            alloc_info: _AllocationInfo = _AllocationInfo(alloc, self._logger)
-            self._allocations[alloc.allocation_id] = alloc_info
-
-            alloc_info.execution.thread = threading.Thread(
-                target=self._execute_allocation_in_thread,
-                args=(alloc_info,),
-                daemon=True,
+        if allocation.allocation_id in self._allocation_infos:
+            context.abort(
+                grpc.StatusCode.ALREADY_EXISTS,
+                f"Allocation {allocation.allocation_id} already exists",
             )
-            alloc_info.execution.thread.start()
 
-        return _trimmed_allocation(alloc)
+        allocation_logger: FunctionExecutorLogger = self._logger.bind(
+            request_id=allocation.request_id,
+            fn_call_id=allocation.function_call_id,
+            allocation_id=allocation.allocation_id,
+        )
+        allocation_runner: AllocationRunner = AllocationRunner(
+            allocation=allocation,
+            request_state_proxy_server=self._request_state_proxy_server,
+            function_ref=self._function_ref,
+            function=self._function,
+            function_instance_arg=self._function_instance_arg,
+            blob_store=self._blob_store,
+            logger=allocation_logger,
+        )
+        self._allocation_infos[allocation.allocation_id] = _AllocationInfo(
+            allocation=allocation,
+            runner=allocation_runner,
+        )
+        allocation_runner.run()
 
-    def await_allocation(
-        self, request: AwaitAllocationRequest, context: grpc.ServicerContext
-    ) -> Generator[AwaitAllocationProgress, None, None]:
-        """Wait for allocation completion and stream progress updates."""
-        alloc_info: _AllocationInfo | None = None
+        return Empty()
 
-        with self._allocations_lock:
-            alloc_info = self._allocations.get(request.allocation_id)
-            if alloc_info is None:
-                context.abort(
-                    grpc.StatusCode.NOT_FOUND,
-                    f"Allocation {request.allocation_id} not found",
-                )
+    def watch_allocation_state(
+        self, request: WatchAllocationStateRequest, context: grpc.ServicerContext
+    ) -> Generator[AllocationState, None, None]:
+        # No need to lock self._allocation_infos because we're not blocking here so we
+        # hold GIL non stop.
+        if request.allocation_id not in self._allocation_infos:
+            context.abort(
+                grpc.StatusCode.NOT_FOUND,
+                f"Allocation {request.allocation_id} not found",
+            )
 
-        # Stream progress updates until allocation completes
-        final_result: AllocationResult | None = None
-        sent_first_progress: bool = False
+        allocation_info: _AllocationInfo = self._allocation_infos[request.allocation_id]
+
+        # Stream allocation state updates until the allocation completes.
+        last_seen_hash: str | None = None
         while True:
-            with alloc_info.execution.updated:
-                if alloc_info.execution.complete:
-                    # Don't send default AllocationResult() with all fields not set as its meaning is undefined.
-                    # This happens when the function thread finishes with an unexpected error.
-                    final_result = (
-                        alloc_info.allocation.result
-                        if alloc_info.allocation.HasField("result")
-                        else None
-                    )
-                    break
+            allocation_state: AllocationState = (
+                allocation_info.runner.wait_allocation_state_update(last_seen_hash)
+            )
+            last_seen_hash = allocation_state.sha256_hash
+            yield allocation_state
+            if allocation_state.HasField("result"):
+                break
 
-                if sent_first_progress:
-                    alloc_info.execution.updated.wait()
-                else:
-                    sent_first_progress = True
+    def deliver_allocation_function_call_result(
+        self, request: AllocationFunctionCallResult, context: grpc.ServicerContext
+    ) -> Empty:
+        # No need to lock self._allocation_infos because we're not blocking here so we
+        # hold GIL non stop.
+        if request.caller_allocation_id not in self._allocation_infos:
+            context.abort(
+                grpc.StatusCode.NOT_FOUND,
+                f"Allocation {request.caller_allocation_id} not found",
+            )
 
-                progress = alloc_info.execution.progress
-
-            # Do all blocking calls outside of the lock.
-            if progress:
-                yield AwaitAllocationProgress(progress=progress)
-
-        # If the final result doesn't get sent before the stream is closed by FE
-        # then client treats this as a grey failure with unknown exact cause.
-        if final_result is not None:
-            yield AwaitAllocationProgress(allocation_result=final_result)
+        allocation_info: _AllocationInfo = self._allocation_infos[
+            request.caller_allocation_id
+        ]
+        allocation_info.runner.deliver_function_call_result(request)
+        return Empty()
 
     def delete_allocation(
         self, request: DeleteAllocationRequest, context: grpc.ServicerContext
     ) -> Empty:
-        """Delete an allocation and clean up resources."""
-        allocation_id: str = request.allocation_id
+        # No need to lock self._allocation_infos because we're not blocking here so we
+        # hold GIL non stop.
+        if request.allocation_id not in self._allocation_infos:
+            context.abort(
+                grpc.StatusCode.NOT_FOUND,
+                f"Allocation {request.allocation_id} not found",
+            )
 
-        with self._allocations_lock:
-            alloc_info = self._allocations.get(allocation_id)
+        allocation_info: _AllocationInfo = self._allocation_infos[request.allocation_id]
+        if not allocation_info.runner.finished:
+            context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                f"Allocation {request.allocation_id} is still running and cannot be deleted",
+            )
 
-            if alloc_info is None:
-                context.abort(
-                    grpc.StatusCode.NOT_FOUND,
-                    f"Allocation {allocation_id} not found",
-                )
-
-            with alloc_info.execution.updated:
-                if not alloc_info.execution.complete:
-                    context.abort(
-                        grpc.StatusCode.FAILED_PRECONDITION,
-                        f"Allocation {allocation_id} is still running",
-                    )
-
-            self._allocations.pop(allocation_id, None)
+        del self._allocation_infos[request.allocation_id]
 
         return Empty()
-
-
-def _trimmed_allocation(alloc: Allocation) -> Allocation:
-    """Returns metadata fields of the allocation without any large fields like inputs and result."""
-    alloc_copy = Allocation()
-    # We don't store any large objects in the inputs and result so it's okay to copy it.
-    alloc_copy.CopyFrom(alloc)
-    alloc_copy.ClearField("inputs")
-    alloc_copy.ClearField("result")
-    return alloc_copy

@@ -325,32 +325,24 @@ class AllocationProgress(_message.Message):
         self, current: _Optional[float] = ..., total: _Optional[float] = ...
     ) -> None: ...
 
-class AllocationFunctionCalls(_message.Message):
-    __slots__ = ("function_calls",)
-    FUNCTION_CALLS_FIELD_NUMBER: _ClassVar[int]
-    function_calls: _containers.RepeatedCompositeFieldContainer[ExecutionPlanUpdates]
-    def __init__(
-        self,
-        function_calls: _Optional[
-            _Iterable[_Union[ExecutionPlanUpdates, _Mapping]]
-        ] = ...,
-    ) -> None: ...
-
 class AllocationState(_message.Message):
-    __slots__ = ("progress", "pending_function_calls", "result")
+    __slots__ = ("progress", "function_calls", "result", "sha256_hash")
     PROGRESS_FIELD_NUMBER: _ClassVar[int]
-    PENDING_FUNCTION_CALLS_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_CALLS_FIELD_NUMBER: _ClassVar[int]
     RESULT_FIELD_NUMBER: _ClassVar[int]
+    SHA256_HASH_FIELD_NUMBER: _ClassVar[int]
     progress: AllocationProgress
-    pending_function_calls: AllocationFunctionCalls
+    function_calls: _containers.RepeatedCompositeFieldContainer[ExecutionPlanUpdates]
     result: AllocationResult
+    sha256_hash: str
     def __init__(
         self,
         progress: _Optional[_Union[AllocationProgress, _Mapping]] = ...,
-        pending_function_calls: _Optional[
-            _Union[AllocationFunctionCalls, _Mapping]
+        function_calls: _Optional[
+            _Iterable[_Union[ExecutionPlanUpdates, _Mapping]]
         ] = ...,
         result: _Optional[_Union[AllocationResult, _Mapping]] = ...,
+        sha256_hash: _Optional[str] = ...,
     ) -> None: ...
 
 class FunctionInputs(_message.Message):
@@ -527,7 +519,7 @@ class CreateAllocationRequest(_message.Message):
         self, allocation: _Optional[_Union[Allocation, _Mapping]] = ...
     ) -> None: ...
 
-class AwaitAllocationRequest(_message.Message):
+class WatchAllocationStateRequest(_message.Message):
     __slots__ = ("allocation_id",)
     ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
     allocation_id: str

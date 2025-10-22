@@ -1,10 +1,41 @@
 from .proto.function_executor_pb2 import (
+    Allocation,
     FunctionRef,
     InitializeRequest,
     SerializedObject,
     SerializedObjectEncoding,
 )
 from .proto.message_validator import MessageValidator
+
+
+def validate_new_allocation(allocation: Allocation):
+    """Validates the incoming allocation before creating it.
+
+    Raises ValueError if the allocation is invalid.
+    """
+    # Validate required fields
+    (
+        MessageValidator(allocation)
+        .required_field("request_id")
+        .required_field("function_call_id")
+        .required_field("allocation_id")
+        .required_field("inputs")
+        .not_set_field("result")
+    )
+
+    # Validate allocation inputs
+    (
+        MessageValidator(allocation.inputs)
+        .optional_serialized_objects_inside_blob("args")
+        .optional_blobs("arg_blobs")
+        .required_blob("function_outputs_blob")
+        .required_blob("request_error_blob")
+    )
+    if len(allocation.inputs.args) != len(allocation.inputs.arg_blobs):
+        raise ValueError(
+            "Mismatched function arguments and functions argument blobs lengths, "
+            f"{len(allocation.inputs.args)} != {len(allocation.inputs.arg_blobs)}"
+        )
 
 
 class InitializeRequestValidator:
