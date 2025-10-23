@@ -84,26 +84,25 @@ def upload_serialized_values(
 
 
 def upload_request_error(
-    message: str,
+    utf8_message: bytes,
     destination_blob: BLOB,
     blob_store: BLOBStore,
     logger: FunctionExecutorLogger,
 ) -> Tuple[SerializedObjectInsideBLOB, BLOB]:
-    data: bytes = message.encode("utf-8")
     start_time = time.monotonic()
     logger.info(
         "uploading request error output",
-        size=len(data),
+        size=len(utf8_message),
     )
     uploaded_blob: BLOB = _put_data_to_blob(
-        [data],
+        [utf8_message],
         destination_blob,
         blob_store,
         logger,
     )
     logger.info(
         "invocation error output uploaded",
-        size=len(data),
+        size=len(utf8_message),
         duration_sec=f"{time.monotonic() - start_time:.3f}",
     )
 
@@ -112,9 +111,9 @@ def upload_request_error(
             manifest=SerializedObjectManifest(
                 encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_TEXT,
                 encoding_version=0,
-                size=len(data),
+                size=len(utf8_message),
                 metadata_size=0,
-                sha256_hash=_sha256_hexdigest(b"", data),
+                sha256_hash=_sha256_hexdigest(b"", utf8_message),
             ),
             offset=0,
         ),

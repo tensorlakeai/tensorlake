@@ -30,11 +30,13 @@ from tensorlake.applications.interface.awaitables import (
     ReduceOperationAwaitable,
 )
 from tensorlake.applications.metadata import (
+    CollectionItemMetadata,
     CollectionMetadata,
     FunctionCallArgumentMetadata,
     FunctionCallMetadata,
     ReduceOperationMetadata,
     deserialize_metadata,
+    serialize_metadata,
 )
 from tensorlake.applications.request_context.contextvar import (
     set_current_request_context,
@@ -58,7 +60,13 @@ from ..proto.function_executor_pb2 import (
     AllocationProgress,
     AllocationResult,
     AllocationState,
+    ExecutionPlanUpdate,
+    ExecutionPlanUpdates,
+    FunctionArg,
+    FunctionCall,
+    FunctionInputs,
     FunctionRef,
+    ReduceOp,
     SerializedObjectInsideBLOB,
 )
 from ..request_state.proxied_request_state import ProxiedRequestState
@@ -120,7 +128,12 @@ class AllocationRunner:
             progress=ProxiedAllocationProgress(self),
             metrics=RequestMetricsRecorder(),
         )
-        self._result_helper: ResultHelper = ResultHelper(self._request_context.metrics)
+        self._result_helper: ResultHelper = ResultHelper(
+            function_ref=function_ref,
+            function=function,
+            metrics=self._request_context.metrics,
+            logger=self._logger,
+        )
         self._allocation_state: AllocationState = AllocationState(
             function_calls=[],
         )
@@ -196,9 +209,7 @@ class AllocationRunner:
                 "allocation failed due to exception in function executor code",
                 exc_info=e,
             )
-            self._update_allocation_state_result(
-                self._result_helper.internal_error_result()
-            )
+            self._update_allocation_state_result(self._result_helper.internal_error())
         finally:
             log_user_event_allocations_finished([self._allocation_event_details])
             self._finished = True
@@ -236,11 +247,8 @@ class AllocationRunner:
                 self._function, serialized_args
             )
         except BaseException as e:
-            # TODO: Log this using print exception to show the error to user.
-            #
-            # TODO: Implement serialization of function exception as customer code execution.
-            # Handle any exceptions raised in customer code and convert them into proper AllocationResult.
-            return self._response_helper.from_generic_function_exception(e)
+            # This is internal FE code.
+            return self._result_helper.from_user_exception(e)
 
         # This is internal FE code.
         args, kwargs = self._reconstruct_function_call_args(
@@ -251,38 +259,43 @@ class AllocationRunner:
         # This is user code.
         try:
             output: Any = self._call_user_function(args, kwargs)
+            # This is a very important check for our UX. We can await for AwaitableList
+            # in user code but we cannot return it from a function as a tail call because
+            # there's no Python code to reassemble the list from individual resolved awaitables.
+            if isinstance(output, AwaitableList):
+                raise ApplicationValidationError(
+                    f"Function '{self._function_ref.function_name}' returned an AwaitableList {repr(output)}. "
+                    "An AwaitableList can only be used as a function argument, not returned from it."
+                )
             serialized_values: Dict[str, SerializedValue] = {}
             output: SerializedValue | Awaitable = _process_function_output(
                 output=output,
-                function_name=self._function_ref.function_name,
-                function_output_serializer=output_serializer,
+                serializer=output_serializer,
                 function_call_ids=self._function_call_ids,
                 serialized_values=serialized_values,
             )
         except RequestError as e:
+            # This is user code.
+            try:
+                utf8_message: bytes = e.message.encode("utf-8")
+            except BaseException:
+                return self._result_helper.from_user_exception(e)
+
             # This is internal FE code.
-            # TODO: Log this using print exception to show the error to user.
-            #
-            # TODO: Implement serialization of function exception as customer code execution.
-            # Handle any exceptions raised in customer code and convert them into proper AllocationResult.
             request_error_so, uploaded_blob = upload_request_error(
-                message=e.message,
+                utf8_message=utf8_message,
                 destination_blob=self._allocation.inputs.request_error_blob,
                 blob_store=self._blob_store,
                 logger=self._logger,
             )
-            request_error_so: SerializedObjectInsideBLOB
-            uploaded_blob: BLOB
-            return self._response_helper.from_request_error(
-                request_error_so, uploaded_blob
+            return self._result_helper.from_request_error(
+                request_error=e,
+                request_error_output=request_error_so,
+                uploaded_request_error_blob=uploaded_blob,
             )
         except BaseException as e:
             # This is internal FE code.
-            # TODO: Log this using print exception to show the error to user.
-            #
-            # TODO: Implement serialization of function exception as customer code execution.
-            # Handle any exceptions raised in customer code and convert them into proper AllocationResult.
-            return self._response_helper.from_generic_function_exception(e)
+            return self._result_helper.from_user_exception(e)
 
         # This is internal FE code.
         uploaded_serialized_objects, uploaded_blob = upload_serialized_values(
@@ -291,11 +304,25 @@ class AllocationRunner:
             blob_store=self._blob_store,
             logger=self._logger,
         )
-        uploaded_serialized_objects: Dict[str, SerializedObjectInsideBLOB]
-        uploaded_blob: BLOB
 
-        return self._response_helper.from_function_output(
-            output=output, uploaded_serialized_objects=uploaded_serialized_objects
+        output_pb: SerializedObjectInsideBLOB | ExecutionPlanUpdates
+        # This is user code.
+        try:
+            if isinstance(output, Awaitable):
+                output_pb = _awaitable_to_execution_plan_updates(
+                    awaitable=output,
+                    uploaded_serialized_objects=uploaded_serialized_objects,
+                    output_serializer_name_override=output_serializer.name,
+                    function_ref=self._function_ref,
+                    logger=self._logger,
+                )
+            else:
+                output_pb = uploaded_serialized_objects[output.metadata.id]
+        except BaseException as e:
+            return self._result_helper.from_user_exception(e)
+
+        return self._result_helper.from_function_output(
+            output=output_pb, uploaded_function_outputs_blob=uploaded_blob
         )
 
     def _reconstruct_function_call_args(
@@ -344,16 +371,16 @@ class AllocationRunner:
 
 def _process_function_output(
     output: Any,
-    function_name: str,
     serializer: UserDataSerializer,
     function_call_ids: Set[str],
     serialized_values: Dict[str, SerializedValue],
 ) -> SerializedValue | Awaitable:
     """Validates the function output and replaces each value with a SerializedValue.
 
-    This results in Awaitables tree being returned with each value being SerializedValue.
-    Updates serialized_values with each SerializedValue created from concrete values.
-    serialized_values is mapping from value ID to SerializedValue.
+    This results in the original Awaitable tree being returned with each value being
+    SerializedValue instead of the original user object. Updates serialized_values with
+    each SerializedValue created from concrete values. serialized_values is mapping from
+    value ID to SerializedValue.
     """
     # NB: This code needs to be in sync with LocalRunner where it's doing a similar thing.
     if not isinstance(output, (Awaitable, Future)):
@@ -378,21 +405,22 @@ def _process_function_output(
             "only not running Awaitable can be passed as function argument or returned from a function."
         )
 
-    # This is a very important check for our UX. We can await for AwaitableList
-    # in user code but we cannot return it from a function as a tail call because
-    # there's no Python code to reassemble the list from individual resolved awaitables.
     if isinstance(output, AwaitableList):
-        raise ApplicationValidationError(
-            f"Function '{function_name}' returned an AwaitableList {repr(output)}. "
-            "An AwaitableList can only be used as a function argument, not returned from it."
-        )
+        awaitable: AwaitableList
+        for index, item in enumerate(list(awaitable.items)):
+            # Iterating over list copy to allow modifying the original list.
+            awaitable.items[index] = _process_function_output(
+                output=item,
+                serializer=serializer,
+                function_call_ids=function_call_ids,
+            )
+        return awaitable
     elif isinstance(awaitable, ReduceOperationAwaitable):
         awaitable: ReduceOperationAwaitable
         for index, item in enumerate(list(awaitable.inputs)):
             # Iterating over list copy to allow modifying the original list.
             awaitable.inputs[index] = _process_function_output(
                 output=item,
-                function_name=function_name,
                 serializer=serializer,
                 function_call_ids=function_call_ids,
             )
@@ -403,7 +431,6 @@ def _process_function_output(
             # Iterating over list copy to allow modifying the original list.
             awaitable.args[index] = _process_function_output(
                 output=arg,
-                function_name=function_name,
                 serializer=serializer,
                 function_call_ids=function_call_ids,
             )
@@ -411,7 +438,6 @@ def _process_function_output(
             # Iterating over dict copy to allow modifying the original list.
             awaitable.kwargs[kwarg_name] = _process_function_output(
                 output=kwarg_value,
-                function_name=function_name,
                 serializer=serializer,
                 function_call_ids=function_call_ids,
             )
@@ -420,6 +446,253 @@ def _process_function_output(
         raise ApplicationValidationError(
             f"Unexpected type of awaitable returned from function: {type(awaitable)}"
         )
+
+
+def _awaitable_to_execution_plan_updates(
+    awaitable: Awaitable,
+    uploaded_serialized_objects: Dict[str, SerializedObjectInsideBLOB],
+    output_serializer_name_override: str,
+    function_ref: FunctionRef,
+    logger: FunctionExecutorLogger,
+) -> ExecutionPlanUpdates:
+    """Traverses the awaitable tree and constructs ExecutionPlanUpdates proto.
+
+    The awaitable must be validated already. The root awaitable must not be an AwaitableList.
+    Caller must call this function for each item in the AwaitableList separately instead.
+    Each value in the awaitable tree must be a SerializedValue present in uploaded_serialized_objects.
+    """
+    updates: List[ExecutionPlanUpdate] = []
+    _fill_execution_plan_updates(
+        awaitable=awaitable,
+        uploaded_serialized_objects=uploaded_serialized_objects,
+        output_serializer_name_override=output_serializer_name_override,
+        destination=updates,
+        function_ref=function_ref,
+        logger=logger,
+    )
+    return ExecutionPlanUpdates(
+        updates=updates,
+        root_function_call_id=awaitable.id,
+    )
+
+
+def _fill_execution_plan_updates(
+    awaitable: Awaitable,
+    uploaded_serialized_objects: Dict[str, SerializedObjectInsideBLOB],
+    output_serializer_name_override: str | None,
+    destination: List[ExecutionPlanUpdate],
+    function_ref: FunctionRef,
+    logger: FunctionExecutorLogger,
+) -> None:
+    if isinstance(awaitable, FunctionCallAwaitable):
+        metadata: FunctionCallMetadata = FunctionCallMetadata(
+            id=awaitable.id,
+            output_serializer_name_override=output_serializer_name_override,
+            args=[],
+            kwargs={},
+        )
+        function_pb_args: List[FunctionArg] = []
+
+        def process_function_call_argument(arg: Any) -> FunctionCallArgumentMetadata:
+            if isinstance(arg, SerializedValue):
+                function_pb_args.append(
+                    FunctionArg(
+                        value=uploaded_serialized_objects[arg.metadata.id],
+                    )
+                )
+                return FunctionCallArgumentMetadata(
+                    value_id=arg.metadata.id,
+                    collection=None,
+                )
+            elif isinstance(arg, AwaitableList):
+                _embed_collection_into_function_pb_args(
+                    awaitable=arg,
+                    uploaded_serialized_objects=uploaded_serialized_objects,
+                    function_pb_args=function_pb_args,
+                    logger=logger,
+                )
+                # Collection is fully embedded now into function call args but its function
+                # calls are not in the execution plan yet.
+                for item in arg.items:
+                    if isinstance(
+                        item, (FunctionCallAwaitable, ReduceOperationAwaitable)
+                    ):
+                        _fill_execution_plan_updates(
+                            awaitable=item,
+                            uploaded_serialized_objects=uploaded_serialized_objects,
+                            output_serializer_name_override=None,  # Only override at root function call.
+                            destination=destination,
+                            function_ref=function_ref,
+                            logger=logger,
+                        )
+                return FunctionCallArgumentMetadata(
+                    value_id=None,
+                    collection=_to_collection_metadata(arg, logger),
+                )
+            elif isinstance(arg, (FunctionCallAwaitable, ReduceOperationAwaitable)):
+                _fill_execution_plan_updates(
+                    awaitable=arg,
+                    uploaded_serialized_objects=uploaded_serialized_objects,
+                    output_serializer_name_override=None,  # Only override at root function call.
+                    destination=destination,
+                    function_ref=function_ref,
+                    logger=logger,
+                )
+                function_pb_args.append(
+                    FunctionArg(
+                        function_call_id=arg.id,
+                    )
+                )
+                return FunctionCallArgumentMetadata(
+                    value_id=arg.id,
+                    collection=None,
+                )
+            else:
+                raise ApplicationValidationError(
+                    f"Unexpected type of function call argument: {type(arg)}"
+                )
+
+        for arg in awaitable.args:
+            metadata.args.append(process_function_call_argument(arg))
+
+        for kwarg_name, kwarg_value in awaitable.kwargs.items():
+            metadata.kwargs[kwarg_name] = process_function_call_argument(kwarg_value)
+
+        update = ExecutionPlanUpdate(
+            function_call=FunctionCall(
+                id=awaitable.id,
+                target=FunctionRef(
+                    namespace=function_ref.namespace,
+                    application_name=function_ref.application_name,
+                    function_name=awaitable.function_name,
+                    application_version=function_ref.application_version,
+                ),
+                args=function_pb_args,
+                call_metadata=serialize_metadata(metadata),
+            )
+        )
+        destination.append(update)
+
+    elif isinstance(awaitable, ReduceOperationAwaitable):
+        metadata: ReduceOperationMetadata = ReduceOperationMetadata(
+            id=awaitable.id,
+            output_serializer_name_override=output_serializer_name_override,
+        )
+        collection: List[FunctionArg] = []
+
+        for item in awaitable.inputs:
+            if isinstance(item, SerializedValue):
+                collection.append(
+                    FunctionArg(
+                        value=uploaded_serialized_objects[item.metadata.id],
+                    )
+                )
+            elif isinstance(item, AwaitableList):
+                raise ApplicationValidationError(
+                    "AwaitableList cannot be used as an input item for ReduceOperationAwaitable, "
+                    "please use individual Awaitable items instead."
+                )
+            elif isinstance(item, (FunctionCallAwaitable, ReduceOperationAwaitable)):
+                _fill_execution_plan_updates(
+                    awaitable=item,
+                    uploaded_serialized_objects=uploaded_serialized_objects,
+                    output_serializer_name_override=None,  # Only override at root function call.
+                    destination=destination,
+                    function_ref=function_ref,
+                    logger=logger,
+                )
+                collection.append(
+                    FunctionArg(
+                        function_call_id=item.id,
+                    )
+                )
+            else:
+                raise ApplicationValidationError(
+                    f"Unexpected type of reduce operation input item: {type(item)}"
+                )
+
+        update = ExecutionPlanUpdate(
+            reduce=ReduceOp(
+                id=awaitable.id,
+                reducer=FunctionRef(
+                    namespace=function_ref.namespace,
+                    application_name=function_ref.application_name,
+                    function_name=awaitable.function_name,
+                    application_version=function_ref.application_version,
+                ),
+                collection=collection,
+                call_metadata=serialize_metadata(metadata),
+            )
+        )
+        destination.append(update)
+    else:
+        raise ApplicationValidationError(
+            f"Unexpected type of awaitable: {type(awaitable)}"
+        )
+
+
+def _to_collection_metadata(
+    awaitable: AwaitableList, logger: FunctionExecutorLogger
+) -> CollectionMetadata:
+    collection_metadata: CollectionMetadata = CollectionMetadata(
+        items=[],
+    )
+    for item in awaitable.items:
+        if isinstance(item, SerializedValue):
+            collection_metadata.items.append(
+                CollectionItemMetadata(
+                    value_id=item.metadata.id,
+                    collection=None,
+                )
+            )
+        elif isinstance(item, AwaitableList):
+            collection_metadata.items.append(
+                CollectionItemMetadata(
+                    value_id=None,
+                    collection=_to_collection_metadata(item, logger),
+                )
+            )
+        elif isinstance(item, (FunctionCallAwaitable, ReduceOperationAwaitable)):
+            collection_metadata.items.append(
+                CollectionItemMetadata(
+                    value_id=item.id,
+                    collection=None,
+                )
+            )
+        else:
+            raise ApplicationValidationError(
+                f"Unexpected type of awaitable list item: {type(item)}"
+            )
+    return collection_metadata
+
+
+def _embed_collection_into_function_pb_args(
+    awaitable: AwaitableList,
+    uploaded_serialized_objects: Dict[str, SerializedObjectInsideBLOB],
+    function_pb_args: List[FunctionArg],
+    logger: FunctionExecutorLogger,
+) -> None:
+    for item in awaitable.items:
+        if isinstance(item, SerializedValue):
+            function_pb_args.append(
+                FunctionArg(
+                    value=uploaded_serialized_objects[item.metadata.id],
+                )
+            )
+        elif isinstance(item, AwaitableList):
+            _embed_collection_into_function_pb_args(
+                item, uploaded_serialized_objects, function_pb_args, logger
+            )
+        elif isinstance(item, (FunctionCallAwaitable, ReduceOperationAwaitable)):
+            function_pb_args.append(
+                FunctionArg(
+                    function_call_id=item.id,
+                )
+            )
+        else:
+            raise ApplicationValidationError(
+                f"Unexpected type of AwaitableList item: {type(item)}"
+            )
 
 
 def _update_allocation_state_hash(allocation_state: AllocationState) -> None:
