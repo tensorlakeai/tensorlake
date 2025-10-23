@@ -22,23 +22,12 @@ def download_function_arguments(
     logger = logger.bind(module=__name__)
     logger.info("downloading function arguments")
 
-    # TODO: Do this in parallel. Keep in mind that the underlying BLOB store
-    # chunks and parallelizes large downloads and performance degrades with
-    # too much parallelization.
-    if len(allocation.inputs.args) != len(allocation.inputs.arg_blobs):
-        raise ValueError(
-            "Mismatched function arguments and functions argument blobs lengths, "
-            f"{len(allocation.inputs.args)} != {len(allocation.inputs.arg_blobs)}"
-        )
-
-    args: List[SerializedValue] = []
-    for i, arg in enumerate(allocation.inputs.args):
-        arg: SerializedObjectInsideBLOB
-        arg_blob: BLOB = allocation.inputs.arg_blobs[i]
-        serialized_value: SerializedValue = _download_serialized_value(
-            arg_blob, arg, blob_store, logger
-        )
-        args.append(serialized_value)
+    args: List[SerializedValue] = download_serialized_objects(
+        serialized_objects=allocation.inputs.args,
+        serialized_object_blobs=allocation.inputs.arg_blobs,
+        blob_store=blob_store,
+        logger=logger,
+    )
 
     logger.info(
         "function arguments downloaded",
@@ -46,6 +35,27 @@ def download_function_arguments(
     )
 
     return args
+
+
+def download_serialized_objects(
+    serialized_objects: List[SerializedObjectInsideBLOB],
+    serialized_object_blobs: List[BLOB],
+    blob_store: BLOBStore,
+    logger: FunctionExecutorLogger,
+) -> List[SerializedValue]:
+    # TODO: Do this in parallel. Keep in mind that the underlying BLOB store
+    # chunks and parallelizes large downloads and performance degrades with
+    # too much parallelization.
+    if len(serialized_objects) != len(serialized_object_blobs):
+        raise ValueError(
+            "Mismatched serialized objects and serialized object blobs lengths, "
+            f"{len(serialized_objects)} != {len(serialized_object_blobs)}"
+        )
+
+    return [
+        _download_serialized_value(blob, so, blob_store, logger)
+        for blob, so in zip(serialized_object_blobs, serialized_objects)
+    ]
 
 
 def _download_serialized_value(
