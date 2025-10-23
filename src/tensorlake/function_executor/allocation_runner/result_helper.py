@@ -87,11 +87,11 @@ class ResultHelper:
     def from_function_output(
         self,
         output: SerializedObjectInsideBLOB | ExecutionPlanUpdates,
-        uploaded_function_outputs_blob: BLOB,
+        uploaded_outputs_blob: BLOB,
     ) -> AllocationResult:
         result = AllocationResult(
             outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
-            uploaded_function_outputs_blob=uploaded_function_outputs_blob,
+            uploaded_function_outputs_blob=uploaded_outputs_blob,
             metrics=self._generate_metrics_proto(),
         )
 

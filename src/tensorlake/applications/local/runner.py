@@ -354,7 +354,7 @@ class LocalRunner:
             )
         elif isinstance(future_run, ListFutureRun):
             function_name = "Assembly awaitable list"
-            # In remote mode we assemble the list locally and never store it in BLOB store.
+            # In remote mode we assemble the list locally and only store its individual items in BLOB store.
             # As we store everything in local mode then we just use the most flexible serializer
             # here that always works.
             output_blob_serializer = PickleUserDataSerializer()
