@@ -5,9 +5,11 @@ import time
 from typing import Any, Dict, List, Set
 
 from tensorlake.applications import (
+    RETURN_WHEN,
     ApplicationValidationError,
     Function,
     FunctionProgress,
+    Future,
     RequestError,
 )
 from tensorlake.applications.function.user_data_serializer import (
@@ -37,6 +39,7 @@ from tensorlake.applications.user_data_serializer import (
 from ..blob_store.blob_store import BLOBStore
 from ..logger import FunctionExecutorLogger
 from ..proto.function_executor_pb2 import (
+    BLOB,
     Allocation,
     AllocationFunctionCallResult,
     AllocationProgress,
@@ -53,16 +56,22 @@ from ..user_events import (
     log_user_event_allocations_finished,
     log_user_event_allocations_started,
 )
+from .contextvars import set_allocation_id_context_variable
 from .download import download_function_arguments
 from .result_helper import ResultHelper
 from .sdk_algorithms import (
     awaitable_to_execution_plan_updates,
     deserialize_function_arguments,
-    process_function_output,
     reconstruct_function_call_args,
+    serialize_values_in_awaitable_tree,
     validate_and_deserialize_function_call_metadata,
+    validate_user_object,
 )
-from .upload import upload_request_error, upload_serialized_values
+from .upload import (
+    serialized_values_to_serialized_objects,
+    upload_request_error,
+    upload_serialized_objects_to_blob,
+)
 from .value import SerializedValue, Value
 
 
@@ -167,6 +176,33 @@ class AllocationRunner:
         # TODO: Implement.
         pass
 
+    def run_futures_runtime_hook(
+        self, futures: List[Future], start_delay: float | None
+    ) -> None:
+        # NB: Log all exceptions in our code for future inspection.
+        for future in futures:
+            validate_user_object(
+                user_object=future.awaitable,
+                function_call_ids=self._function_call_ids,
+            )
+            serialized_values: Dict[str, SerializedValue] = {}
+            output: SerializedValue | Awaitable = serialize_values_in_awaitable_tree(
+                user_object=future.awaitable,
+                value_serializer=output_serializer,
+                serialized_values=serialized_values,
+            )
+
+    def wait_futures_runtime_hook(
+        self, futures: List[Future], timeout: float | None, return_when: RETURN_WHEN
+    ) -> None:
+        # NB: Log all exceptions in our code for future inspection.
+        pass
+
+    def _get_new_output_blob(self, size: int) -> BLOB:
+        """Returns new BLOB to upload function outputs to."""
+        # TODO: Implement.
+        pass
+
     def _update_allocation_state_progress(self, current: float, total: float) -> None:
         with self._allocation_state_update_lock:
             self._allocation_state.progress = AllocationProgress(
@@ -252,13 +288,6 @@ class AllocationRunner:
                     f"Function '{self._function_ref.function_name}' returned an AwaitableList {repr(output)}. "
                     "An AwaitableList can only be used as a function argument, not returned from it."
                 )
-            serialized_values: Dict[str, SerializedValue] = {}
-            output: SerializedValue | Awaitable = process_function_output(
-                output=output,
-                serializer=output_serializer,
-                function_call_ids=self._function_call_ids,
-                serialized_values=serialized_values,
-            )
         except RequestError as e:
             # This is user code.
             try:
@@ -267,7 +296,7 @@ class AllocationRunner:
                 return self._result_helper.from_user_exception(e)
 
             # This is internal FE code.
-            request_error_so, uploaded_blob = upload_request_error(
+            request_error_so, uploaded_outputs_blob = upload_request_error(
                 utf8_message=utf8_message,
                 destination_blob=self._allocation.inputs.request_error_blob,
                 blob_store=self._blob_store,
@@ -276,18 +305,43 @@ class AllocationRunner:
             return self._result_helper.from_request_error(
                 request_error=e,
                 request_error_output=request_error_so,
-                uploaded_request_error_blob=uploaded_blob,
+                uploaded_request_error_blob=uploaded_outputs_blob,
+            )
+        except BaseException as e:
+            # This is internal FE code.
+            return self._result_helper.from_user_exception(e)
+
+        # This is user code.
+        try:
+            validate_user_object(
+                user_object=output,
+                function_call_ids=self._function_call_ids,
+            )
+            serialized_values: Dict[str, SerializedValue] = {}
+            output: SerializedValue | Awaitable = serialize_values_in_awaitable_tree(
+                user_object=output,
+                value_serializer=output_serializer,
+                serialized_values=serialized_values,
             )
         except BaseException as e:
             # This is internal FE code.
             return self._result_helper.from_user_exception(e)
 
         # This is internal FE code.
-        uploaded_serialized_objects, uploaded_blob = upload_serialized_values(
-            serialized_values=serialized_values,
-            destination_blob=self._allocation.inputs.function_outputs_blob,
-            blob_store=self._blob_store,
-            logger=self._logger,
+        serialized_objects, blob_data = serialized_values_to_serialized_objects(
+            serialized_values=serialized_values
+        )
+        outputs_blob: BLOB = self._get_new_output_blob(
+            size=sum(len(data) for data in blob_data)
+        )
+        uploaded_serialized_objects, uploaded_outputs_blob = (
+            upload_serialized_objects_to_blob(
+                serialized_objects=serialized_objects,
+                blob_data=blob_data,
+                destination_blob=outputs_blob,
+                blob_store=self._blob_store,
+                logger=self._logger,
+            )
         )
 
         output_pb: SerializedObjectInsideBLOB | ExecutionPlanUpdates
@@ -307,7 +361,7 @@ class AllocationRunner:
             return self._result_helper.from_user_exception(e)
 
         return self._result_helper.from_function_output(
-            output=output_pb, uploaded_function_outputs_blob=uploaded_blob
+            output=output_pb, uploaded_outputs_blob=uploaded_outputs_blob
         )
 
     def _call_user_function(self, args: List[Any], kwargs: Dict[str, Any]) -> Any:
@@ -320,6 +374,7 @@ class AllocationRunner:
     ) -> Any:
         # This function is executed in contextvars.Context of the Tensorlake Function call.
         set_current_request_context(self._request_context)
+        set_allocation_id_context_variable(self._allocation.allocation_id)
 
         self._logger.info("running function")
         start_time = time.monotonic()

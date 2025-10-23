@@ -1,7 +1,7 @@
 # Import here all public Applications SDK interfaces.
 # No imports outside of the interface Applications SDK package are allowed here.
 
-from .awaitables import Awaitable, Future
+from .awaitables import RETURN_WHEN, Awaitable, Future
 from .decorators import application, cls, function
 from .exceptions import (
     ApplicationValidationError,
@@ -48,4 +48,5 @@ __all__ = [
     "RequestError",
     "RequestNotFinished",
     "Retries",
+    "RETURN_WHEN",
 ]

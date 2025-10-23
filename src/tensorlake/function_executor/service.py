@@ -6,17 +6,28 @@ import time
 import traceback
 import zipfile
 from dataclasses import dataclass
-from typing import Any, Dict, Generator, Iterator
+from typing import Any, Dict, Generator, Iterator, List
 
 import grpc
+from allocation_runner.contextvars import get_allocation_id_context_variable
 
-from tensorlake.applications import Function
+from tensorlake.applications import (
+    RETURN_WHEN,
+    ApplicationValidationError,
+    Function,
+    Future,
+    RequestFailureException,
+)
 from tensorlake.applications.function.function_call import create_self_instance
 from tensorlake.applications.registry import get_function, get_functions, has_function
 from tensorlake.applications.remote.code.zip import (
     CODE_ZIP_MANIFEST_FILE_NAME,
     CodeZIPManifest,
     FunctionZIPManifest,
+)
+from tensorlake.applications.runtime_hooks import (
+    set_run_futures_hook,
+    set_wait_futures_hook,
 )
 
 from .allocation_runner.allocation_runner import AllocationRunner
@@ -101,6 +112,8 @@ class Service(FunctionExecutorServicer):
             app_version=request.function.application_version,
             fn=request.function.function_name,
         )
+        set_run_futures_hook(self._run_futures_runtime_hook)
+        set_wait_futures_hook(self._wait_futures_runtime_hook)
 
         app_modules_zip_fd, app_modules_zip_path = tempfile.mkstemp(suffix=".zip")
         with open(app_modules_zip_fd, "wb") as graph_modules_zip_file:
@@ -340,3 +353,53 @@ class Service(FunctionExecutorServicer):
         del self._allocation_infos[request.allocation_id]
 
         return Empty()
+
+    def _run_futures_runtime_hook(
+        self, futures: List[Future], start_delay: float | None
+    ) -> None:
+        # NB: This function is called by user code in user function thread.
+        try:
+            allocation_id: str = get_allocation_id_context_variable()
+        except LookupError:
+            raise ApplicationValidationError(
+                "Tensorlake SDK was called outside of a Tensorlake Function thread."
+                "Please only call Tensorlake SDK functions from inside Tensorlake Functions."
+            )
+
+        # No need to lock self._allocation_infos because we're not blocking here so we
+        # hold GIL non stop.
+        if not allocation_id in self._allocation_infos:
+            raise RequestFailureException(
+                f"Internal error: allocation id '{allocation_id}' not found in Function Executor."
+            )
+
+        # Blocks the user function thread until done.
+        # Any exception raised here goes to the calling user function.
+        self._allocation_infos[allocation_id].runner.run_futures_runtime_hook(
+            futures, start_delay
+        )
+
+    def _wait_futures_runtime_hook(
+        self, futures: List[Future], timeout: float | None, return_when: RETURN_WHEN
+    ) -> None:
+        # NB: This function is called by user code in user function thread.
+        try:
+            allocation_id: str = get_allocation_id_context_variable()
+        except LookupError:
+            raise ApplicationValidationError(
+                "Tensorlake SDK was called outside of a Tensorlake Function thread."
+                "Please only call Tensorlake SDK functions from inside Tensorlake Functions."
+            )
+
+        # No need to lock self._allocation_infos because we're not blocking here so we
+        # hold GIL non stop.
+        if not allocation_id in self._allocation_infos:
+            raise RequestFailureException(
+                f"Internal error: allocation id '{allocation_id}' not found in Function Executor."
+            )
+
+        # Blocks the user function thread until done.
+        # Any exception raised here goes to the calling user function.
+        self._allocation_infos[allocation_id].runner.wait_futures_runtime_hook(
+            futures, timeout, return_when
+        )

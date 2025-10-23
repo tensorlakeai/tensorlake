@@ -16,15 +16,12 @@ from ..proto.function_executor_pb2 import (
 from .value import SerializedValue
 
 
-def upload_serialized_values(
+def serialized_values_to_serialized_objects(
     serialized_values: Dict[str, SerializedValue],
-    destination_blob: BLOB,
-    blob_store: BLOBStore,
-    logger: FunctionExecutorLogger,
-) -> Tuple[Dict[str, SerializedObjectInsideBLOB], BLOB]:
-    """Uploads serialized values to the destination blob and returns the mapping from value IDs to their SerializedObjectInsideBLOB and the uploaded BLOB."""
+) -> Tuple[Dict[str, SerializedObjectInsideBLOB], List[bytes]]:
+    """Converts SerializedValues to SerializedObjectInsideBLOB and returns (SOs keyed by value IDs, SOs blob_data)."""
     serialized_objects: Dict[str, SerializedObjectInsideBLOB] = {}
-    blob_datas: List[bytes] = []
+    blob_data: List[bytes] = []
     blob_offset: int = 0
     encoding_version: int = 0
 
@@ -57,30 +54,43 @@ def upload_serialized_values(
             offset=blob_offset,
         )
         serialized_objects[serialized_value.metadata.id] = value_node_so
-        blob_datas.append(serialized_metadata)
-        blob_datas.append(serialized_value.data)
+        blob_data.append(serialized_metadata)
+        blob_data.append(serialized_value.data)
         blob_offset += value_node_so.manifest.size
 
+    return serialized_objects, blob_data
+
+
+def upload_serialized_objects_to_blob(
+    serialized_objects: Dict[str, SerializedObjectInsideBLOB],
+    blob_data: List[bytes],
+    destination_blob: BLOB,
+    blob_store: BLOBStore,
+    logger: FunctionExecutorLogger,
+) -> BLOB:
+    """Uploads serialized values to the destination blob and returns uploaded BLOB with all chunks used."""
+
+    total_size: int = sum(len(data) for data in blob_data)
     start_time = time.monotonic()
     logger.info(
-        "uploading function output values",
-        outputs_count=len(serialized_objects),
-        total_size=blob_offset,
+        "uploading serialized objects to blob",
+        objects_count=len(serialized_objects),
+        total_size=total_size,
     )
     uploaded_blob: BLOB = _put_data_to_blob(
-        datas=blob_datas,
+        blob_data=blob_data,
         destination=destination_blob,
         blob_store=blob_store,
         logger=logger,
     )
     logger.info(
-        "function output values uploaded",
-        outputs_count=len(serialized_objects),
-        total_size=blob_offset,
+        "uploaded serialized objects to blob",
+        objects_count=len(serialized_objects),
+        total_size=total_size,
         duration_sec=f"{time.monotonic() - start_time:.3f}",
     )
 
-    return serialized_objects, uploaded_blob
+    return uploaded_blob
 
 
 def upload_request_error(
@@ -122,13 +132,13 @@ def upload_request_error(
 
 
 def _put_data_to_blob(
-    datas: List[bytes],
+    blob_data: List[bytes],
     destination: BLOB,
     blob_store: BLOBStore,
     logger: FunctionExecutorLogger,
 ) -> BLOB:
     """Uploads outputs to the blob and returns it with the updated chunks."""
-    outputs_size: int = sum(len(output) for output in datas)
+    outputs_size: int = sum(len(output) for output in blob_data)
     blob_size: int = sum(chunk.size for chunk in destination.chunks)
     if outputs_size > blob_size:
         # Let customers know why the function failed while still treating it as internal error
@@ -144,7 +154,7 @@ def _put_data_to_blob(
 
     return blob_store.put(
         blob=destination,
-        data=datas,
+        data=blob_data,
         logger=logger,
     )
 

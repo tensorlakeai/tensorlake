@@ -12,6 +12,7 @@ from tensorlake.applications.function.function_call import (
 )
 from tensorlake.applications.function.user_data_serializer import (
     deserialize_value,
+    function_input_serializer,
     serialize_value,
 )
 from tensorlake.applications.interface.awaitables import (
@@ -30,6 +31,7 @@ from tensorlake.applications.metadata import (
     deserialize_metadata,
     serialize_metadata,
 )
+from tensorlake.applications.registry import get_function
 from tensorlake.applications.user_data_serializer import (
     UserDataSerializer,
 )
@@ -47,13 +49,56 @@ from ..proto.function_executor_pb2 import (
 from .value import SerializedValue, Value
 
 
-def process_function_output(
-    output: Any,
-    serializer: UserDataSerializer,
-    function_call_ids: Set[str],
+def validate_user_object(
+    user_object: Awaitable | Future | Any, function_call_ids: Set[str]
+) -> None:
+    """Validates the object produced by user function.
+
+    Raises ApplicationValidationError if the object is invalid.
+    """
+    # NB: This code needs to be in sync with LocalRunner where it's doing a similar thing.
+    if not isinstance(user_object, (Awaitable, Future)):
+        return
+
+    if isinstance(user_object, Future):
+        raise ApplicationValidationError(
+            f"Invalid argument: cannot run Future {repr(user_object)}, "
+            "please pass an Awaitable or a concrete value."
+        )
+
+    awaitable: Awaitable = user_object
+    if awaitable.id in function_call_ids:
+        raise ApplicationValidationError(
+            f"Invalid argument: {repr(awaitable)} is an Awaitable with already running Future, "
+            "only not running Awaitable can be passed as function argument or returned from a function."
+        )
+
+    if isinstance(awaitable, AwaitableList):
+        awaitable: AwaitableList
+        for item in awaitable.items:
+            validate_user_object(user_object=item, function_call_ids=function_call_ids)
+    elif isinstance(awaitable, ReduceOperationAwaitable):
+        awaitable: ReduceOperationAwaitable
+        for item in awaitable.inputs:
+            validate_user_object(user_object=item, function_call_ids=function_call_ids)
+    elif isinstance(awaitable, FunctionCallAwaitable):
+        awaitable: FunctionCallAwaitable
+        for arg in awaitable.args:
+            validate_user_object(user_object=arg, function_call_ids=function_call_ids)
+        for arg in awaitable.kwargs.values():
+            validate_user_object(user_object=arg, function_call_ids=function_call_ids)
+    else:
+        raise ApplicationValidationError(
+            f"Unexpected type of awaitable returned from function: {type(awaitable)}"
+        )
+
+
+def serialize_values_in_awaitable_tree(
+    user_object: Awaitable | Any,
+    value_serializer: UserDataSerializer,
     serialized_values: Dict[str, SerializedValue],
 ) -> SerializedValue | Awaitable:
-    """Validates the function output and replaces each value with a SerializedValue.
+    """Converts values in the given user generated Awaitable tree into SerializedValues.
 
     This results in the original Awaitable tree being returned with each value being
     SerializedValue instead of the original user object. Updates serialized_values with
@@ -61,8 +106,8 @@ def process_function_output(
     value ID to SerializedValue.
     """
     # NB: This code needs to be in sync with LocalRunner where it's doing a similar thing.
-    if not isinstance(output, (Awaitable, Future)):
-        data, metadata = serialize_value(output, serializer=serializer)
+    if not isinstance(user_object, Awaitable):
+        data, metadata = serialize_value(user_object, serializer=value_serializer)
         serialized_values[metadata.id] = SerializedValue(
             metadata=metadata,
             data=data,
@@ -70,60 +115,50 @@ def process_function_output(
         )
         return serialized_values[metadata.id]
 
-    if isinstance(output, Future):
-        raise ApplicationValidationError(
-            f"Invalid argument: cannot run Future {repr(output)}, "
-            "please pass an Awaitable or a concrete value."
-        )
-
-    awaitable: Awaitable
-    if awaitable.id in function_call_ids:
-        raise ApplicationValidationError(
-            f"Invalid argument: {repr(awaitable)} is an Awaitable with already running Future, "
-            "only not running Awaitable can be passed as function argument or returned from a function."
-        )
-
-    if isinstance(output, AwaitableList):
+    awaitable: Awaitable = user_object
+    if isinstance(awaitable, AwaitableList):
         awaitable: AwaitableList
         for index, item in enumerate(list(awaitable.items)):
             # Iterating over list copy to allow modifying the original list.
-            awaitable.items[index] = process_function_output(
-                output=item,
-                serializer=serializer,
-                function_call_ids=function_call_ids,
+            awaitable.items[index] = serialize_values_in_awaitable_tree(
+                user_object=item,
+                value_serializer=value_serializer,
+                serialized_values=serialized_values,
             )
         return awaitable
     elif isinstance(awaitable, ReduceOperationAwaitable):
         awaitable: ReduceOperationAwaitable
+        args_serializer: UserDataSerializer = function_input_serializer(
+            get_function(awaitable.function_name)
+        )
         for index, item in enumerate(list(awaitable.inputs)):
             # Iterating over list copy to allow modifying the original list.
-            awaitable.inputs[index] = process_function_output(
-                output=item,
-                serializer=serializer,
-                function_call_ids=function_call_ids,
+            awaitable.inputs[index] = serialize_values_in_awaitable_tree(
+                user_object=item,
+                value_serializer=args_serializer,
+                serialized_values=serialized_values,
             )
         return awaitable
     elif isinstance(awaitable, FunctionCallAwaitable):
         awaitable: FunctionCallAwaitable
+        args_serializer: UserDataSerializer = function_input_serializer(
+            get_function(awaitable.function_name)
+        )
         for index, arg in enumerate(list(awaitable.args)):
             # Iterating over list copy to allow modifying the original list.
-            awaitable.args[index] = process_function_output(
-                output=arg,
-                serializer=serializer,
-                function_call_ids=function_call_ids,
+            awaitable.args[index] = serialize_values_in_awaitable_tree(
+                user_object=arg,
+                value_serializer=args_serializer,
+                serialized_values=serialized_values,
             )
         for kwarg_name, kwarg_value in dict(awaitable.kwargs).items():
             # Iterating over dict copy to allow modifying the original list.
-            awaitable.kwargs[kwarg_name] = process_function_output(
-                output=kwarg_value,
-                serializer=serializer,
-                function_call_ids=function_call_ids,
+            awaitable.kwargs[kwarg_name] = serialize_values_in_awaitable_tree(
+                user_object=kwarg_value,
+                value_serializer=args_serializer,
+                serialized_values=serialized_values,
             )
         return awaitable
-    else:
-        raise ApplicationValidationError(
-            f"Unexpected type of awaitable returned from function: {type(awaitable)}"
-        )
 
 
 def awaitable_to_execution_plan_updates(
