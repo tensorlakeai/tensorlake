@@ -1,14 +1,10 @@
 import importlib.metadata
-import json
 import sys
 from dataclasses import dataclass
-from datetime import datetime
-from enum import Enum
-from typing import Any, Literal
+from typing import Literal
 
 import click
 import httpx
-from rich import print, print_json
 
 from tensorlake.applications.remote.api_client import APIClient
 from tensorlake.cli._configuration import (
@@ -38,8 +34,16 @@ def raise_on_authn_authz(response: httpx.Response):
         )
 
 
+async def raise_on_authn_authz_async(response: httpx.Response):
+    raise_on_authn_authz(response)
+
+
 HTTP_EVENT_HOOKS = {
     "response": [raise_on_authn_authz],
+}
+
+ASYNC_HTTP_EVENT_HOOKS = {
+    "response": [raise_on_authn_authz_async],
 }
 
 

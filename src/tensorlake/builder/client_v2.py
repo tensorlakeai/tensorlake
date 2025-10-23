@@ -27,7 +27,7 @@ from pydantic import BaseModel
 
 from tensorlake.applications import Image
 from tensorlake.applications.image import create_image_context_file, image_hash
-from tensorlake.cli._common import HTTP_EVENT_HOOKS
+from tensorlake.cli._common import ASYNC_HTTP_EVENT_HOOKS
 
 
 @dataclass
@@ -110,7 +110,7 @@ class ImageBuilderV2Client:
         organization_id: str | None = None,
         project_id: str | None = None,
     ):
-        self._client = httpx.AsyncClient(event_hooks=HTTP_EVENT_HOOKS)
+        self._client = httpx.AsyncClient(event_hooks=ASYNC_HTTP_EVENT_HOOKS)
         self._build_service = build_service
         self._headers = {}
         if api_key:
