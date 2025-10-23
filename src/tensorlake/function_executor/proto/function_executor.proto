@@ -174,11 +174,18 @@ message AllocationProgress {
     float total = 2;
 }
 
+message AllocationFunctionCall {
+    // Call ID is the same as root_function_call_id in ExecutionPlanUpdates.
+    optional ExecutionPlanUpdates execution_plan_updates = 1;
+    // SerializedObjectInsideBLOB arguments from the execution
+    // plan are stored inside this BLOB.
+    optional BLOB args_blob = 2;
+}
+
 message AllocationState {
     // Optional current allocation progress.
     AllocationProgress progress = 1;
     // Function calls started by the allocation.
-    //
     // New function calls are detected by client when it sees a new
     // ExecutionPlanUpdates.root_function_call_id.
     //
@@ -187,7 +194,7 @@ message AllocationState {
     //
     // Every function call gets a deliver_allocation_function_call_result
     // RPC call when it finishes.
-    repeated ExecutionPlanUpdates function_calls = 2;
+    repeated AllocationFunctionCall function_calls = 2;
     // Optional allocation result. Set when allocation finishes.
     AllocationResult result = 3;
     // Required state hash.
