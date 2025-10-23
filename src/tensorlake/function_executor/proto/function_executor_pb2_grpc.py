@@ -76,9 +76,9 @@ class FunctionExecutorStub(object):
             response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Empty.FromString,
             _registered_method=True,
         )
-        self.deliver_allocation_function_call_result = channel.unary_unary(
-            "/function_executor_service.FunctionExecutor/deliver_allocation_function_call_result",
-            request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AllocationFunctionCallResult.SerializeToString,
+        self.deliver_allocation_update = channel.unary_unary(
+            "/function_executor_service.FunctionExecutor/deliver_allocation_update",
+            request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AllocationUpdate.SerializeToString,
             response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Empty.FromString,
             _registered_method=True,
         )
@@ -144,8 +144,8 @@ class FunctionExecutorServicer(object):
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def deliver_allocation_function_call_result(self, request, context):
-        """Delivers the result of a finished function call started by an allocation."""
+    def deliver_allocation_update(self, request, context):
+        """Delivers an update to an allocation."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
@@ -197,9 +197,9 @@ def add_FunctionExecutorServicer_to_server(servicer, server):
             request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.DeleteAllocationRequest.FromString,
             response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Empty.SerializeToString,
         ),
-        "deliver_allocation_function_call_result": grpc.unary_unary_rpc_method_handler(
-            servicer.deliver_allocation_function_call_result,
-            request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AllocationFunctionCallResult.FromString,
+        "deliver_allocation_update": grpc.unary_unary_rpc_method_handler(
+            servicer.deliver_allocation_update,
+            request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AllocationUpdate.FromString,
             response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Empty.SerializeToString,
         ),
         "check_health": grpc.unary_unary_rpc_method_handler(
@@ -407,7 +407,7 @@ class FunctionExecutor(object):
         )
 
     @staticmethod
-    def deliver_allocation_function_call_result(
+    def deliver_allocation_update(
         request,
         target,
         options=(),
@@ -422,8 +422,8 @@ class FunctionExecutor(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/function_executor_service.FunctionExecutor/deliver_allocation_function_call_result",
-            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AllocationFunctionCallResult.SerializeToString,
+            "/function_executor_service.FunctionExecutor/deliver_allocation_update",
+            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.AllocationUpdate.SerializeToString,
             tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.Empty.FromString,
             options,
             channel_credentials,

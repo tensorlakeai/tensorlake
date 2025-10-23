@@ -5,7 +5,6 @@ from tensorlake.vendor.nanoid.nanoid import generate as nanoid_generate
 
 from ..runtime_hooks import run_futures as runtime_hook_run_futures
 from ..runtime_hooks import wait_futures as runtime_hook_wait_futures
-from .exceptions import RequestFailureException
 
 
 def request_scoped_id() -> str:
@@ -118,6 +117,11 @@ class Future:
         """Mark the Future as failed and set its exception."""
         self._exception = exception
 
+    @property
+    def exception(self) -> BaseException | None:
+        """Returns the exception representing the failure of the future, or None if it is not completed yet or succeeded."""
+        return self._exception
+
     def __await__(self):
         """Returns the result of the future when awaited, blocking until it is available.
 
@@ -160,7 +164,16 @@ class Future:
         timeout: float | None = None,
         return_when=RETURN_WHEN.ALL_COMPLETED,
     ) -> tuple[List["Future"], List["Future"]]:
-        """Returns when all the supplied futures are done running.
+        """Returns when return_when condition is met for the futures.
+
+        return_when can be one of:
+        # The futures wait will return when any future finishes.
+        RETURN_WHEN.FIRST_COMPLETED = 0
+        # The futures wait will return when any future fails.
+        # If no failures then it is equivalent to ALL_COMPLETED.
+        RETURN_WHEN.FIRST_FAILURE = 1
+        # The futures wait will return when all the futures finish.
+        RETURN_WHEN.ALL_COMPLETED = 2
 
         timeout can be used to control the maximum number of seconds to wait before returning.
         Returns a tuple of two lists: (done, not_done) depending on return_when.
@@ -170,7 +183,6 @@ class Future:
         """
         return runtime_hook_wait_futures(
             futures=list(futures),
-            is_async=False,
             timeout=timeout,
             return_when=return_when,
         )

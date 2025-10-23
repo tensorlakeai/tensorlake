@@ -38,8 +38,8 @@ from .logger import FunctionExecutorLogger
 from .message_validators import InitializeRequestValidator, validate_new_allocation
 from .proto.function_executor_pb2 import (
     Allocation,
-    AllocationFunctionCallResult,
     AllocationState,
+    AllocationUpdate,
     CreateAllocationRequest,
     DeleteAllocationRequest,
     Empty,
@@ -310,27 +310,25 @@ class Service(FunctionExecutorServicer):
             if allocation_info.runner.finished:
                 break
 
-    def deliver_allocation_function_call_result(
-        self, request: AllocationFunctionCallResult, context: grpc.ServicerContext
+    def deliver_allocation_update(
+        self, request: AllocationUpdate, context: grpc.ServicerContext
     ) -> Empty:
         # No need to lock self._allocation_infos because we're not blocking here so we
         # hold GIL non stop.
-        if request.caller_allocation_id not in self._allocation_infos:
+        if request.allocation_id not in self._allocation_infos:
             context.abort(
                 grpc.StatusCode.NOT_FOUND,
-                f"Allocation {request.caller_allocation_id} not found",
+                f"Allocation {request.allocation_id} not found",
             )
 
-        allocation_info: _AllocationInfo = self._allocation_infos[
-            request.caller_allocation_id
-        ]
+        allocation_info: _AllocationInfo = self._allocation_infos[request.allocation_id]
         if allocation_info.runner.finished:
             context.abort(
                 grpc.StatusCode.FAILED_PRECONDITION,
-                f"Allocation {request.caller_allocation_id} is already finished",
+                f"Allocation {request.allocation_id} is already finished",
             )
 
-        allocation_info.runner.deliver_function_call_result(request)
+        allocation_info.runner.deliver_allocation_update(request)
         return Empty()
 
     def delete_allocation(
@@ -382,7 +380,7 @@ class Service(FunctionExecutorServicer):
 
     def _wait_futures_runtime_hook(
         self, futures: List[Future], timeout: float | None, return_when: RETURN_WHEN
-    ) -> None:
+    ) -> tuple[List[Future], List[Future]]:
         # NB: This function is called by user code in user function thread.
         try:
             allocation_id: str = get_allocation_id_context_variable()
@@ -401,6 +399,6 @@ class Service(FunctionExecutorServicer):
 
         # Blocks the user function thread until done.
         # Any exception raised here goes to the calling user function.
-        self._allocation_infos[allocation_id].runner.wait_futures_runtime_hook(
+        return self._allocation_infos[allocation_id].runner.wait_futures_runtime_hook(
             futures, timeout, return_when
         )

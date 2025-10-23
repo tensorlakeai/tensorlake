@@ -1,9 +1,11 @@
 import contextvars
-import hashlib
+import datetime
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List
+
+from google.protobuf.timestamp_pb2 import Timestamp
 
 from tensorlake.applications import (
     RETURN_WHEN,
@@ -19,6 +21,7 @@ from tensorlake.applications.function.user_data_serializer import (
 from tensorlake.applications.interface.awaitables import (
     Awaitable,
     AwaitableList,
+    request_scoped_id,
 )
 from tensorlake.applications.metadata import (
     FunctionCallMetadata,
@@ -43,11 +46,10 @@ from ..logger import FunctionExecutorLogger
 from ..proto.function_executor_pb2 import (
     BLOB,
     Allocation,
-    AllocationFunctionCall,
     AllocationFunctionCallResult,
-    AllocationProgress,
     AllocationResult,
     AllocationState,
+    AllocationUpdate,
     ExecutionPlanUpdates,
     FunctionRef,
     SerializedObjectInsideBLOB,
@@ -59,6 +61,7 @@ from ..user_events import (
     log_user_event_allocations_finished,
     log_user_event_allocations_started,
 )
+from .allocation_state_wrapper import AllocationStateWrapper
 from .contextvars import set_allocation_id_context_variable
 from .download import download_function_arguments
 from .result_helper import ResultHelper
@@ -83,7 +86,19 @@ class _UserFutureInfo:
     # Original Future created by user code.
     user_future: Future
     # Not None if this user future is for an AwaitableList.
-    collection: List[Future | Any] | None
+    collection: List[Future | Any] | None = None
+    # Not None when the future is completed.
+    # Requires a watcher setup.
+    result: AllocationFunctionCallResult | None = None
+    # Set only once after the result is set.
+    result_set_event: threading.Event = threading.Event()
+
+
+@dataclass
+class _OutputBLOBRequestInfo:
+    blob_set_event: threading.Event = threading.Event()
+    # Not None once the BLOB is ready to be used.
+    blob: BLOB | None = None
 
 
 class AllocationRunner:
@@ -138,11 +153,7 @@ class AllocationRunner:
             metrics=self._request_context.metrics,
             logger=self._logger,
         )
-        self._allocation_state: AllocationState = AllocationState(
-            function_calls=[],
-        )
-        _update_allocation_state_hash(self._allocation_state)
-        self._allocation_state_update_lock: threading.Condition = threading.Condition()
+        self._allocation_state: AllocationStateWrapper = AllocationStateWrapper()
         self._allocation_thread: threading.Thread = threading.Thread(
             target=self._run_allocation_thread,
             daemon=True,
@@ -150,24 +161,14 @@ class AllocationRunner:
         # Futures that were created by user code during this allocation.
         # Future ID -> _UserFutureInfo.
         self._user_futures: Dict[str, _UserFutureInfo] = {}
-        # TODO: Figure out when to remove entries from _user_futures and function call entries
-        # from allocation state. They should not take much memory cause they don't contain
-        # actual values, just metadata, but still we don't want this to grow unboundedly.
+        # BLOB ID -> _OutputBLOBRequestInfo.
+        self._output_blob_requests: Dict[str, _OutputBLOBRequestInfo] = {}
 
     def wait_allocation_state_update(
         self, last_seen_hash: str | None
     ) -> AllocationState:
         """Returns copy of the current allocation state when it's updated."""
-        with self._allocation_state_update_lock:
-            # No more state updates will happen if the result field is set.
-            # Return to avoid deadlock here.
-            if self._allocation_state.HasField("result"):
-                return AllocationState().CopyFrom(self._allocation_state)
-
-            while True:
-                if last_seen_hash != self._allocation_state.sha256_hash:
-                    return AllocationState().CopyFrom(self._allocation_state)
-                self._allocation_state_update_lock.wait()
+        return self._allocation_state.wait_for_update(last_seen_hash)
 
     def run(self) -> None:
         """Runs the allocation in a separate thread.
@@ -179,17 +180,6 @@ class AllocationRunner:
     @property
     def finished(self) -> bool:
         return self._finished
-
-    def deliver_function_call_result(
-        self, result: AllocationFunctionCallResult
-    ) -> None:
-        """Delivers function call result to the allocation.
-
-        Caller should ensure that the function call belongs to this allocation
-        and that the allocation is not finished.
-        """
-        # TODO: Implement.
-        pass
 
     def run_futures_runtime_hook(
         self, futures: List[Future], start_delay: float | None
@@ -212,6 +202,7 @@ class AllocationRunner:
                     )
                     if isinstance(item, Awaitable):
                         # Calls our hook recursively.
+                        # Also creates _FutureInfo entries for nested futures.
                         if start_delay is None:
                             future_info.collection.append(item.run())
                         else:
@@ -225,11 +216,11 @@ class AllocationRunner:
                     user_object=future.awaitable,
                     function_call_ids=self._user_futures.keys(),
                 )
-                self._run_user_future(future)
+                self._run_user_future(future, start_delay)
 
             self._user_futures[future.awaitable.id] = future_info
 
-    def _run_user_future(self, future: Future) -> None:
+    def _run_user_future(self, future: Future, start_delay: float | None) -> None:
         serialized_values: Dict[str, SerializedValue] = {}
         awaitable_with_serialized_values: Awaitable = (
             serialize_values_in_awaitable_tree(
@@ -263,67 +254,143 @@ class AllocationRunner:
             function_ref=self._function_ref,
             logger=self._logger,
         )
+        if start_delay is not None:
+            start_at: Timestamp = Timestamp()
+            start_at.FromDatetime(
+                datetime.datetime.now(datetime.timezone.utc)
+                + datetime.timedelta(seconds=start_delay)
+            )
+            awaitable_execution_plan_pb.start_at.CopyFrom(start_at)
 
-        self._add_function_call_to_allocation_state(
+        self._allocation_state.add_function_call(
             execution_plan_updates=awaitable_execution_plan_pb,
             args_blob=uploaded_args_blob,
         )
 
     def wait_futures_runtime_hook(
         self, futures: List[Future], timeout: float | None, return_when: RETURN_WHEN
-    ) -> None:
+    ) -> tuple[List[Future], List[Future]]:
         # NB: This code is called from user function thread. User function code is blocked.
         # Right now we can only be called from the function thread, not any child threads that user
         # code might have created because contextvars are not propagated to child threads.
         # All exceptions raise here will be propagated to user code by design.
-        # TODO: Implement.
-        pass
+        deadline: float | None = (
+            time.monotonic() + timeout if timeout is not None else None
+        )
+        # NB: The futures order in these lists should be the original order (like stable sort).
+        done: List[Future] = []
+        not_done: List[Future] = []
+
+        for future in futures:
+            remaining_timeout: float | None = (
+                deadline - time.monotonic() if deadline is not None else None
+            )
+            if remaining_timeout is not None and remaining_timeout <= 0:
+                break
+
+            self._wait_future_completion(future, remaining_timeout)
+
+            if future.done():
+                done.append(future)
+            else:
+                not_done.append(future)
+
+            if return_when == RETURN_WHEN.FIRST_COMPLETED:
+                if len(done) > 0:
+                    break
+            elif return_when == RETURN_WHEN.FIRST_FAILURE:
+                if future.exception is not None:
+                    break
+            # else ALL_COMPLETED
+
+        for future in futures:
+            if future not in done and future not in not_done:
+                not_done.append(future)
+
+        return done, not_done
+
+    def _wait_future_completion(self, future: Future, timeout: float | None) -> None:
+        """Wait for the completion of the future and sets its result or exception if didn't timeout."""
+        deadline: float | None = (
+            time.monotonic() + timeout if timeout is not None else None
+        )
+        future_info: _UserFutureInfo = self._user_futures[future.awaitable.id]
+        if future_info.collection is not None:
+            self._wait_future_list_completion(future_info, deadline)
+            return
+
+        function_call_id: str = future_info.user_future.awaitable.id
+        self._allocation_state.add_function_call_watcher(
+            function_call_id=function_call_id
+        )
+
+        result_wait_timeout: float | None = (
+            deadline - time.monotonic() if deadline is not None else None
+        )
+        if future_info.result_set_event.wait(timeout=result_wait_timeout):
+            pass  # TODO: Parse the response.
+        # else timeout
+
+        self._allocation_state.delete_function_call_watcher(
+            function_call_id=function_call_id
+        )
+        self._allocation_state.delete_function_call(function_call_id=function_call_id)
+
+    def _wait_future_list_completion(
+        self, future_info: _UserFutureInfo, deadline: float | None
+    ) -> None:
+        """Wait for the completion of the future representing an AwaitableList and sets its result or exception if didn't timeout."""
+        # Reconstruct the original collection out of individual futures.
+        future: Future = future_info.user_future
+        collection: List[Any] = []
+        exception: BaseException | None = None
+        for item in future_info.collection:
+            item_timeout: float | None = (
+                deadline - time.monotonic() if deadline is not None else None
+            )
+            if item_timeout is not None and item_timeout <= 0:
+                break
+            self._wait_future_completion(item, timeout=item_timeout)
+            if item.exception is None:
+                collection.append(item.result())
+            else:
+                exception = item.exception
+                break
+
+        if exception is None:
+            future.set_result(collection)
+        else:
+            future.set_exception(exception)
 
     def _get_new_output_blob(self, size: int) -> BLOB:
         """Returns new BLOB to upload function outputs to."""
+        blob_id: str = request_scoped_id()
+        blob_request_info: _OutputBLOBRequestInfo = _OutputBLOBRequestInfo()
+        self._output_blob_requests[blob_id] = blob_request_info
+        self._allocation_state.add_output_blob_request(id=blob_id, size=size)
+
+        blob_request_info.blob_set_event.wait()
+        self._allocation_state.remove_output_blob_request(id=blob_id)
+        del self._output_blob_requests[blob_id]
+        return blob_request_info.blob
+
+    def deliver_allocation_update(self, update: AllocationUpdate) -> None:
         # TODO: Implement.
         pass
-
-    def _update_allocation_state_progress(self, current: float, total: float) -> None:
-        with self._allocation_state_update_lock:
-            self._allocation_state.progress = AllocationProgress(
-                current=current, total=total
-            )
-            _update_allocation_state_hash(self._allocation_state)
-            self._allocation_state_update_lock.notify_all()
-
-    def _update_allocation_state_result(self, result: AllocationResult) -> None:
-        # This method is expected to be called only once.
-        self._allocation.result = result
-        with self._allocation_state_update_lock:
-            self._allocation_state.result = result
-            _update_allocation_state_hash(self._allocation_state)
-            self._allocation_state_update_lock.notify_all()
-
-    def _add_function_call_to_allocation_state(
-        self, execution_plan_updates: ExecutionPlanUpdates, args_blob: BLOB
-    ) -> None:
-        with self._allocation_state_update_lock:
-            self._allocation_state.function_calls.append(
-                AllocationFunctionCall(
-                    execution_plan_updates=execution_plan_updates,
-                    args_blob=args_blob,
-                )
-            )
-            _update_allocation_state_hash(self._allocation_state)
-            self._allocation_state_update_lock.notify_all()
 
     def _run_allocation_thread(self) -> None:
         try:
             log_user_event_allocations_started([self._allocation_event_details])
             result: AllocationResult = self._run_allocation()
-            self._update_allocation_state_result(result)
+            self._allocation.result = result
+            self._allocation_state.set_result(result)
         except BaseException as e:
             self._logger.error(
                 "allocation failed due to exception in function executor code",
                 exc_info=e,
             )
-            self._update_allocation_state_result(self._result_helper.internal_error())
+            self._allocation.result = self._result_helper.internal_error()
+            self._allocation_state.set_result(self._allocation.result)
         finally:
             log_user_event_allocations_finished([self._allocation_event_details])
             self._finished = True
@@ -482,19 +549,12 @@ class AllocationRunner:
             )
 
 
-def _update_allocation_state_hash(allocation_state: AllocationState) -> None:
-    allocation_state.ClearField("sha256_hash")
-    allocation_state.sha256_hash = hashlib.sha256(
-        allocation_state.SerializeToString(deterministic=True)
-    ).hexdigest()
-
-
 class ProxiedAllocationProgress(FunctionProgress):
     def __init__(self, allocation_runner: AllocationRunner):
         self._allocation_runner: AllocationRunner = allocation_runner
 
     def update(self, current: float, total: float) -> None:
-        self._allocation_runner._update_allocation_state_progress(current, total)
+        self._allocation_runner._allocation_state.update_progress(current, total)
         # sleep(0) here momentarily releases the GIL, giving other
         # FE threads a chance to run before returning back to customer code that
         # might never return GIL. i.e. allowing the FE to handle incoming RPCs,
