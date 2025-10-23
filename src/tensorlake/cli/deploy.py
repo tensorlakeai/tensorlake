@@ -15,6 +15,10 @@ from tensorlake.applications.interface.function import (
 from tensorlake.applications.registry import get_functions
 from tensorlake.applications.remote.code.loader import load_code
 from tensorlake.applications.remote.deploy import deploy_applications
+from tensorlake.applications.remote.manifests.function import (
+    FunctionManifest,
+    create_function_manifest,
+)
 from tensorlake.applications.secrets import list_secret_names
 from tensorlake.builder.client_v2 import BuildContext, ImageBuilderV2Client
 from tensorlake.cli._common import Context, require_auth_and_project
@@ -134,6 +138,28 @@ def _deploy_applications(
             load_source_dir_modules=False,  # Already loaded
             api_client=auth.api_client,  # Use the authenticated API client from context
         )
+
+        for application_function in filter_applications(functions):
+            app_func_manifest: FunctionManifest = create_function_manifest(
+                application_function,
+                application_function.application_config.version,
+                application_function,
+            )
+            func_name = app_func_manifest.name
+            click.echo(f"Deployed application: {func_name}\n")
+            # TODO: update after parameterless function support
+            if len(app_func_manifest.parameters) > 0:
+                param_type = app_func_manifest.parameters[0].data_type
+                click.echo(
+                    f"""To invoke the application, use the following curl command:
+curl -X POST {auth.base_url}/v1/namespaces/{auth.namespace}/applications/{func_name} \\
+-H "Authorization: Bearer $TENSORLAKE_API_KEY" \\
+-H "accept: application/json" \\
+-H "Content-Type: application/json" \\
+-d '{param_type}'
+""",
+                )
+        return
     except click.UsageError as error:
         raise error
     except Exception as e:
@@ -143,64 +169,3 @@ def _deploy_applications(
         )
         traceback.print_exception(e)
         raise click.Abort
-
-    deployed_apps = filter_applications(functions)
-    try:
-        application = next(deployed_apps)
-        fn_config: _FunctionConfiguration = application.function_config
-
-        # Get parameter type from function signature
-        import inspect
-
-        sig = inspect.signature(application.original_function)
-        first_param = next(iter(sig.parameters.values()), None)
-
-        if first_param and first_param.annotation != inspect.Parameter.empty:
-            param_annotation = first_param.annotation
-
-            if hasattr(param_annotation, "model_json_schema") or hasattr(
-                param_annotation, "schema"
-            ):
-                schema = (
-                    getattr(param_annotation, "model_json_schema", lambda: None)()
-                    or getattr(param_annotation, "schema", lambda: {})()
-                )
-                properties = schema.get("properties", {})
-                field_examples = []
-
-                for field_name, field_schema in properties.items():
-                    # Handle different schema formats
-                    if "type" in field_schema:
-                        field_type_name = field_schema["type"]
-                    elif "anyOf" in field_schema:
-                        # Show all types in the union
-                        types = [
-                            item.get("type")
-                            for item in field_schema["anyOf"]
-                            if item.get("type")
-                        ]
-                        field_type_name = " | ".join(types) if types else "value"
-                    else:
-                        field_type_name = "value"
-                    field_examples.append(f'"{field_name}": <{field_type_name}>')
-
-                param_type = "{" + ", ".join(field_examples) + "}"
-            else:
-                type_name = getattr(param_annotation, "__name__", str(param_annotation))
-                param_type = f"<{type_name}>"
-        else:
-            param_type = "<value>"
-
-        click.echo(f"Deployed application: {fn_config.function_name}\n")
-        click.echo(
-            f"""To invoke the application, use the following curl command:
-curl -X POST {auth.base_url}/v1/namespaces/{auth.namespace}/applications/{fn_config.function_name} \\
-  -H "Authorization: Bearer $TENSORLAKE_API_KEY" \\
-  -H "accept: application/json" \\
-  -H "Content-Type: application/json" \\
-  -d '{param_type}'
-""",
-        )
-    except StopIteration:
-        click.echo("Successfully deployed application")
-        click.echo("Error generating curl command\n", err=True)

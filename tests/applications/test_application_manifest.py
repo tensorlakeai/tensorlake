@@ -1,6 +1,8 @@
 import unittest
 from typing import List
 
+from pydantic import BaseModel
+
 from tensorlake.applications import Retries, application, cls, function
 from tensorlake.applications.registry import get_functions
 from tensorlake.applications.remote.manifests.application import (
@@ -260,6 +262,18 @@ def function_with_complex_types(items: List[str], mapping: dict = None) -> str |
     return len(items)
 
 
+class RequestPayload(BaseModel):
+    name: str
+    age: int
+    email: str
+    is_active: bool = True
+
+
+@function()
+def function_with_pydantic_model(payload: RequestPayload) -> str:
+    return f"Processing {payload.name}"
+
+
 class TestGraphMetadataParameterExtraction(unittest.TestCase):
     def test_parameter_extraction_basic_types(self):
         app_manifest: ApplicationManifest = create_application_manifest(
@@ -324,6 +338,37 @@ class TestGraphMetadataParameterExtraction(unittest.TestCase):
             {"type": "object", "description": "dict object", "default": None},
         )
         self.assertFalse(mapping_param.required)
+
+    def test_parameter_extraction_pydantic_model(self):
+        app_manifest: ApplicationManifest = create_application_manifest(
+            application_function=default_application_function,
+            all_functions=get_functions(),
+        )
+        parameters: List[ParameterManifest] | None = app_manifest.functions[
+            "function_with_pydantic_model"
+        ].parameters
+
+        self.assertIsNotNone(parameters)
+        self.assertEqual(len(parameters), 1)
+
+        # Check Pydantic model parameter
+        payload_param = next(p for p in parameters if p.name == "payload")
+
+        # The parameter should contain the full Pydantic schema
+        expected_schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "title": "Name"},
+                "age": {"type": "integer", "title": "Age"},
+                "email": {"title": "Email", "type": "string"},
+                "is_active": {"default": True, "title": "Is Active", "type": "boolean"},
+            },
+            "required": ["name", "age", "email"],
+            "title": "RequestPayload",
+        }
+
+        self.assertEqual(payload_param.data_type, expected_schema)
+        self.assertTrue(payload_param.required)
 
 
 @function()

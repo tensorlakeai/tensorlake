@@ -1,10 +1,5 @@
 import inspect
-from typing import (
-    Any,
-    Dict,
-    List,
-    Union,
-)
+from typing import Any, Dict, List, Union
 
 from pydantic import BaseModel
 from typing_extensions import get_args, get_origin, get_type_hints
@@ -17,6 +12,20 @@ from .function_manifests import (
     RetryPolicyManifest,
 )
 from .function_resources import resources_for_function
+
+# JSON Schema Validation specification (RFC 8928, §6.1.1)
+# https://json-schema.org/draft/2020-12/json-schema-validation?#name-validation-keywords-for-any
+PYTHON_TYPE_TO_JSON_SCHEMA = {
+    "str": "string",
+    "int": "integer",
+    "float": "number",
+    "bool": "boolean",
+    "list": "array",
+    "dict": "object",
+    "tuple": "array",
+    "set": "array",
+    "NoneType": "null",
+}
 
 
 class FunctionManifest(BaseModel):
@@ -103,10 +112,14 @@ def _type_hint_json_schema(type_hint) -> Dict[str, str]:
     if type_hint == Any:
         return {"type": "string", "description": "Any type"}
 
-    # Handle typing generics like List, Dict, etc. first
+    # Handle Pydantic BaseModel first
+    if inspect.isclass(type_hint) and issubclass(type_hint, BaseModel):
+        if hasattr(type_hint, "model_json_schema"):
+            return type_hint.model_json_schema()
+
+    # Handle typing generics like List, Dict, etc.
     origin = get_origin(type_hint)
     args = get_args(type_hint)
-
     if origin:
         if origin is list:
             if args:
@@ -126,8 +139,7 @@ def _type_hint_json_schema(type_hint) -> Dict[str, str]:
             non_none_types = [arg for arg in args if arg is not type(None)]
             if len(non_none_types) == 1:
                 # Optional type (Union[T, None])
-                schema = _type_hint_json_schema(non_none_types[0])
-                return schema
+                return _type_hint_json_schema(non_none_types[0])
             else:
                 # Multiple types - use anyOf
                 return {
@@ -135,18 +147,17 @@ def _type_hint_json_schema(type_hint) -> Dict[str, str]:
                 }
 
     # Handle simple types
-    if type_hint is str:
-        return {"type": "string"}
-    elif type_hint is int:
-        return {"type": "integer"}
-    elif type_hint is float:
-        return {"type": "number"}
-    elif type_hint is bool:
-        return {"type": "boolean"}
+    type_name = getattr(type_hint, "__name__", None)
+    if type_name and type_name in PYTHON_TYPE_TO_JSON_SCHEMA:
+        schema = {"type": PYTHON_TYPE_TO_JSON_SCHEMA[type_name]}
+        if type_name == "dict":
+            schema["description"] = "dict object"
+        return schema
     elif hasattr(type_hint, "__name__"):
         # For custom classes, assume object type
         return {"type": "object", "description": f"{type_hint.__name__} object"}
     else:
+        # Fallback for complex types without __name__
         return {"type": "string", "description": str(type_hint)}
 
 
