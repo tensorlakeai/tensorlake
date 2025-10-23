@@ -134,11 +134,15 @@ class BLOBChunk(_message.Message):
     ) -> None: ...
 
 class BLOB(_message.Message):
-    __slots__ = ("chunks",)
+    __slots__ = ("id", "chunks")
+    ID_FIELD_NUMBER: _ClassVar[int]
     CHUNKS_FIELD_NUMBER: _ClassVar[int]
+    id: str
     chunks: _containers.RepeatedCompositeFieldContainer[BLOBChunk]
     def __init__(
-        self, chunks: _Optional[_Iterable[_Union[BLOBChunk, _Mapping]]] = ...
+        self,
+        id: _Optional[str] = ...,
+        chunks: _Optional[_Iterable[_Union[BLOBChunk, _Mapping]]] = ...,
     ) -> None: ...
 
 class SerializedObjectInsideBLOB(_message.Message):
@@ -325,6 +329,16 @@ class AllocationProgress(_message.Message):
         self, current: _Optional[float] = ..., total: _Optional[float] = ...
     ) -> None: ...
 
+class AllocationOutputBLOBRequest(_message.Message):
+    __slots__ = ("id", "size")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    SIZE_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    size: int
+    def __init__(
+        self, id: _Optional[str] = ..., size: _Optional[int] = ...
+    ) -> None: ...
+
 class AllocationFunctionCall(_message.Message):
     __slots__ = ("execution_plan_updates", "args_blob")
     EXECUTION_PLAN_UPDATES_FIELD_NUMBER: _ClassVar[int]
@@ -337,49 +351,67 @@ class AllocationFunctionCall(_message.Message):
         args_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
     ) -> None: ...
 
+class AllocationFunctionCallWatcher(_message.Message):
+    __slots__ = ("function_call_id",)
+    FUNCTION_CALL_ID_FIELD_NUMBER: _ClassVar[int]
+    function_call_id: str
+    def __init__(self, function_call_id: _Optional[str] = ...) -> None: ...
+
 class AllocationState(_message.Message):
-    __slots__ = ("progress", "function_calls", "result", "sha256_hash")
+    __slots__ = (
+        "progress",
+        "output_blob_requests",
+        "function_calls",
+        "function_call_watchers",
+        "result",
+        "sha256_hash",
+    )
     PROGRESS_FIELD_NUMBER: _ClassVar[int]
+    OUTPUT_BLOB_REQUESTS_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_CALLS_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_CALL_WATCHERS_FIELD_NUMBER: _ClassVar[int]
     RESULT_FIELD_NUMBER: _ClassVar[int]
     SHA256_HASH_FIELD_NUMBER: _ClassVar[int]
     progress: AllocationProgress
+    output_blob_requests: _containers.RepeatedCompositeFieldContainer[
+        AllocationOutputBLOBRequest
+    ]
     function_calls: _containers.RepeatedCompositeFieldContainer[AllocationFunctionCall]
+    function_call_watchers: _containers.RepeatedCompositeFieldContainer[
+        AllocationFunctionCallWatcher
+    ]
     result: AllocationResult
     sha256_hash: str
     def __init__(
         self,
         progress: _Optional[_Union[AllocationProgress, _Mapping]] = ...,
+        output_blob_requests: _Optional[
+            _Iterable[_Union[AllocationOutputBLOBRequest, _Mapping]]
+        ] = ...,
         function_calls: _Optional[
             _Iterable[_Union[AllocationFunctionCall, _Mapping]]
+        ] = ...,
+        function_call_watchers: _Optional[
+            _Iterable[_Union[AllocationFunctionCallWatcher, _Mapping]]
         ] = ...,
         result: _Optional[_Union[AllocationResult, _Mapping]] = ...,
         sha256_hash: _Optional[str] = ...,
     ) -> None: ...
 
 class FunctionInputs(_message.Message):
-    __slots__ = (
-        "args",
-        "arg_blobs",
-        "function_outputs_blob",
-        "request_error_blob",
-        "function_call_metadata",
-    )
+    __slots__ = ("args", "arg_blobs", "request_error_blob", "function_call_metadata")
     ARGS_FIELD_NUMBER: _ClassVar[int]
     ARG_BLOBS_FIELD_NUMBER: _ClassVar[int]
-    FUNCTION_OUTPUTS_BLOB_FIELD_NUMBER: _ClassVar[int]
     REQUEST_ERROR_BLOB_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_CALL_METADATA_FIELD_NUMBER: _ClassVar[int]
     args: _containers.RepeatedCompositeFieldContainer[SerializedObjectInsideBLOB]
     arg_blobs: _containers.RepeatedCompositeFieldContainer[BLOB]
-    function_outputs_blob: BLOB
     request_error_blob: BLOB
     function_call_metadata: bytes
     def __init__(
         self,
         args: _Optional[_Iterable[_Union[SerializedObjectInsideBLOB, _Mapping]]] = ...,
         arg_blobs: _Optional[_Iterable[_Union[BLOB, _Mapping]]] = ...,
-        function_outputs_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
         request_error_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
         function_call_metadata: _Optional[bytes] = ...,
     ) -> None: ...
@@ -578,6 +610,23 @@ class AllocationFunctionCallResult(_message.Message):
             _Union[SerializedObjectInsideBLOB, _Mapping]
         ] = ...,
         request_error_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
+    ) -> None: ...
+
+class AllocationUpdate(_message.Message):
+    __slots__ = ("allocation_id", "function_call_result", "output_blob")
+    ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_CALL_RESULT_FIELD_NUMBER: _ClassVar[int]
+    OUTPUT_BLOB_FIELD_NUMBER: _ClassVar[int]
+    allocation_id: str
+    function_call_result: AllocationFunctionCallResult
+    output_blob: BLOB
+    def __init__(
+        self,
+        allocation_id: _Optional[str] = ...,
+        function_call_result: _Optional[
+            _Union[AllocationFunctionCallResult, _Mapping]
+        ] = ...,
+        output_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
     ) -> None: ...
 
 class HealthCheckRequest(_message.Message):

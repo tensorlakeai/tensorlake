@@ -58,9 +58,11 @@ message BLOBChunk {
 
 // A BLOB in a BLOB store.
 message BLOB {
+    // ID of the BLOB, unique per allocation.
+    optional string id = 1;
     // Ordered chunks of the BLOB if the BLOB has data.
     // Ordered chunks of the BLOB that can be used to upload data if the BLOB has no data yet.
-    repeated BLOBChunk chunks = 1;
+    repeated BLOBChunk chunks = 2;
 }
 
 // Serialized object stored inside a BLOB.
@@ -174,6 +176,12 @@ message AllocationProgress {
     float total = 2;
 }
 
+message AllocationOutputBLOBRequest {
+    // ID of the BLOB, unique per allocation.
+    optional string id = 1;
+    optional uint64 size = 2;
+}
+
 message AllocationFunctionCall {
     // Call ID is the same as root_function_call_id in ExecutionPlanUpdates.
     optional ExecutionPlanUpdates execution_plan_updates = 1;
@@ -182,23 +190,29 @@ message AllocationFunctionCall {
     optional BLOB args_blob = 2;
 }
 
+message AllocationFunctionCallWatcher {
+    // Only root_function_call_id of ExecutionPlanUpdates can be watched.
+    optional string function_call_id = 1;
+}
+
 message AllocationState {
     // Optional current allocation progress.
-    AllocationProgress progress = 1;
+    optional AllocationProgress progress = 1;
+    // Requests for writable BLOBs so allocation can upload data there.
+    repeated AllocationOutputBLOBRequest output_blob_requests = 2;
     // Function calls started by the allocation.
     // New function calls are detected by client when it sees a new
     // ExecutionPlanUpdates.root_function_call_id.
     //
     // If a not finished function call gets removed from this list then
     // it doesn't get cancelled by the client. ExecutionPlanUpdates are immutable.
-    //
-    // Every function call gets a deliver_allocation_function_call_result
-    // RPC call when it finishes.
-    repeated AllocationFunctionCall function_calls = 2;
+    repeated AllocationFunctionCall function_calls = 3;
+    // Watchers for function calls started by the allocation.
+    repeated AllocationFunctionCallWatcher function_call_watchers = 4;
     // Optional allocation result. Set when allocation finishes.
-    AllocationResult result = 3;
+    AllocationResult result = 5;
     // Required state hash.
-    optional string sha256_hash = 4;
+    optional string sha256_hash = 6;
 }
 
 // FunctionInputs contains the input data for allocation execution
@@ -206,10 +220,10 @@ message FunctionInputs {
     repeated SerializedObjectInsideBLOB args = 1;
     // Each arg has a matching BLOB.
     repeated BLOB arg_blobs = 2;
-    optional BLOB function_outputs_blob = 3;
-    optional BLOB request_error_blob = 4;
+    // BLOB where to upload request error message if allocation fails with request error.
+    optional BLOB request_error_blob = 3;
     // Always set. An empty bytes array if no metadata, e.g. for API function call.
-    optional bytes function_call_metadata = 18;
+    optional bytes function_call_metadata = 4;
 }
 
 message FunctionArg {
@@ -274,7 +288,9 @@ message Allocation {
     optional string request_id = 1;
     optional string function_call_id = 2;
     optional string allocation_id = 3;
+    // Original allocation inputs.
     optional FunctionInputs inputs = 4;
+    // Set when allocation finishes.
     optional AllocationResult result = 5;
 }
 
@@ -299,6 +315,17 @@ message AllocationFunctionCallResult {
     optional BLOB value_blob = 5;
     optional SerializedObjectInsideBLOB request_error_output = 6;
     optional BLOB request_error_blob = 7;
+}
+
+message AllocationUpdate {
+    // Target allocation ID.
+    optional string allocation_id = 1;
+    oneof update {
+        // Function call result if the function call is watched by allocation.
+        AllocationFunctionCallResult function_call_result = 2;
+        // Output BLOB if requested by allocation.
+        BLOB output_blob = 3;
+    }
 }
 
 message HealthCheckRequest {}
@@ -343,8 +370,8 @@ service FunctionExecutor {
     rpc watch_allocation_state(WatchAllocationStateRequest) returns (stream AllocationState);
     // Deletes the allocation. The allocation must be finished before calling this method.
     rpc delete_allocation(DeleteAllocationRequest) returns (Empty);
-    // Delivers the result of a finished function call started by an allocation.
-    rpc deliver_allocation_function_call_result(AllocationFunctionCallResult) returns (Empty);
+    // Delivers an update to an allocation.
+    rpc deliver_allocation_update(AllocationUpdate) returns (Empty);
     // Health check method to check if the FE is able to run allocations.
     // The FE should be initialized before calling this method.
     rpc check_health(HealthCheckRequest) returns (HealthCheckResponse);
