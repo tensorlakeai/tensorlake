@@ -15,7 +15,10 @@ from tensorlake.applications.interface.function import (
 from tensorlake.applications.registry import get_functions
 from tensorlake.applications.remote.code.loader import load_code
 from tensorlake.applications.remote.deploy import deploy_applications
-from tensorlake.applications.remote.manifests.function import get_function_input_types
+from tensorlake.applications.remote.manifests.function import (
+    FunctionManifest,
+    create_function_manifest,
+)
 from tensorlake.applications.secrets import list_secret_names
 from tensorlake.builder.client_v2 import BuildContext, ImageBuilderV2Client
 from tensorlake.cli._common import Context, require_auth_and_project
@@ -132,18 +135,26 @@ def _deploy_applications(
             api_client=auth.api_client,  # Use the authenticated API client from context
         )
 
-        for function in filter_applications(functions):
-            func_name = function.function_config.function_name
+        for application_function in filter_applications(functions):
+            app_func_manifest: FunctionManifest = create_function_manifest(
+                application_function,
+                application_function.application_config.version,
+                application_function,
+            )
+            func_name = app_func_manifest.name
             click.echo(f"Deployed application: {func_name}\n")
-            click.echo(
-                f"""To invoke the application, use the following curl command:
+            # TODO: update after parameterless function support
+            if len(app_func_manifest.parameters) > 0:
+                param_type = app_func_manifest.parameters[0].data_type
+                click.echo(
+                    f"""To invoke the application, use the following curl command:
 curl -X POST {auth.base_url}/v1/namespaces/{auth.namespace}/applications/{func_name} \\
 -H "Authorization: Bearer $TENSORLAKE_API_KEY" \\
 -H "accept: application/json" \\
 -H "Content-Type: application/json" \\
--d '{get_function_input_types(function)}'
+-d '{param_type}'
 """,
-            )
+                )
         return
     except Exception as e:
         click.echo(

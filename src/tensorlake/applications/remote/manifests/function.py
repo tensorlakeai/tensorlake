@@ -270,13 +270,3 @@ def create_function_manifest(
         placement_constraints=placement_constraints,
         max_concurrency=function.function_config.max_concurrency,
     )
-
-
-def get_function_input_types(function: Function) -> str:
-    """Generate a string representation of function input types for documentation."""
-    type_hints = get_type_hints(function.original_function)
-    # Filter out the "return" type hint
-    items = [(k, v) for k, v in type_hints.items() if k != "return"]
-
-    for _, type_hint in items:
-        return _type_hint_json_schema(type_hint)
