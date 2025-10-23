@@ -27,7 +27,7 @@ except importlib.metadata.PackageNotFoundError:
     VERSION = "unknown"
 
 
-def raise_on_authn_authz(response: httpx.Response):
+async def raise_on_authn_authz(response: httpx.Response):
     if response.status_code == 401:
         raise click.UsageError(
             "The credentials to access Tensorlake's API are not valid"
