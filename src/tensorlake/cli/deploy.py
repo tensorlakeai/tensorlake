@@ -131,6 +131,20 @@ def _deploy_applications(
             load_source_dir_modules=False,  # Already loaded
             api_client=auth.api_client,  # Use the authenticated API client from context
         )
+
+        for function in filter_applications(functions):
+            func_name = function.function_config.function_name
+            click.echo(f"Deployed application: {func_name}\n")
+            click.echo(
+                f"""To invoke the application, use the following curl command:
+curl -X POST {auth.base_url}/v1/namespaces/{auth.namespace}/applications/{func_name} \\
+-H "Authorization: Bearer $TENSORLAKE_API_KEY" \\
+-H "accept: application/json" \\
+-H "Content-Type: application/json" \\
+-d '{get_function_input_types(function)}'
+""",
+            )
+        return
     except Exception as e:
         click.echo(
             f"Applications could not be deployed, please check the error message: {e}",
@@ -138,19 +152,3 @@ def _deploy_applications(
         )
         traceback.print_exception(e)
         raise click.Abort
-
-    for function in functions:
-        if function.application_config is not None:
-            func_name = function.function_config.function_name
-            click.echo(f"Deployed application: {func_name}\n")
-            click.echo(
-                f"""To invoke the application, use the following curl command:
-curl -X POST {auth.base_url}/v1/namespaces/{auth.namespace}/applications/{func_name} \\
-  -H "Authorization: Bearer $TENSORLAKE_API_KEY" \\
-  -H "accept: application/json" \\
-  -H "Content-Type: application/json" \\
-  -d '{get_function_input_types(function)}'
-""",
-            )
-            break
-    return

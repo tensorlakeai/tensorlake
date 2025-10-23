@@ -13,7 +13,9 @@ from .function_manifests import (
 )
 from .function_resources import resources_for_function
 
-TYPE_TO_JSON_SCHEMA = {
+# JSON Schema Validation specification (RFC 8928, §6.1.1)
+# https://json-schema.org/draft/2020-12/json-schema-validation?#name-validation-keywords-for-any
+PYTHON_TYPE_TO_JSON_SCHEMA = {
     "str": "string",
     "int": "integer",
     "float": "number",
@@ -146,8 +148,8 @@ def _type_hint_json_schema(type_hint) -> Dict[str, str]:
 
     # Handle simple types
     type_name = getattr(type_hint, "__name__", None)
-    if type_name and type_name in TYPE_TO_JSON_SCHEMA:
-        schema = {"type": TYPE_TO_JSON_SCHEMA[type_name]}
+    if type_name and type_name in PYTHON_TYPE_TO_JSON_SCHEMA:
+        schema = {"type": PYTHON_TYPE_TO_JSON_SCHEMA[type_name]}
         if type_name == "dict":
             schema["description"] = "dict object"
         return schema
