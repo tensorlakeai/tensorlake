@@ -110,15 +110,19 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: List[Func
                         ),
                         image_info.image,
                     )
-                except Exception as e:
-                    click.echo(
-                        f"Failed to build image {image_info.image.name}, please check the error message: {e}",
-                        err=True,
-                    )
-                    traceback.print_exception(e)
+                except (
+                    asyncio.CancelledError,
+                    KeyboardInterrupt,
+                    click.Abort,
+                    click.UsageError,
+                ) as error:
+                    # Re-raise cancellation errors. Return early to skip printing the success message
+                    raise error
+                except Exception as error:
+                    click.echo(error, err=True)
                     raise click.Abort
 
-    click.secho("\nBuilt all images")
+    click.secho("\nAll images built successfully")
 
 
 def _deploy_applications(
@@ -156,6 +160,8 @@ curl -X POST {auth.base_url}/v1/namespaces/{auth.namespace}/applications/{func_n
 """,
                 )
         return
+    except click.UsageError as error:
+        raise error
     except Exception as e:
         click.echo(
             f"Applications could not be deployed, please check the error message: {e}",
