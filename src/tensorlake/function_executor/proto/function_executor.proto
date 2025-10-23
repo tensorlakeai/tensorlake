@@ -307,14 +307,13 @@ message DeleteAllocationRequest {
 }
 
 message AllocationFunctionCallResult {
-    optional string caller_allocation_id = 1;
     // From ExecutionPlanUpdates.root_function_call_id.
-    optional string function_call_id = 2;
-    optional AllocationOutcomeCode outcome_code = 3;
-    optional SerializedObjectInsideBLOB value_output = 4;
-    optional BLOB value_blob = 5;
-    optional SerializedObjectInsideBLOB request_error_output = 6;
-    optional BLOB request_error_blob = 7;
+    optional string function_call_id = 1;
+    optional AllocationOutcomeCode outcome_code = 2;
+    optional SerializedObjectInsideBLOB value_output = 3;
+    optional BLOB value_blob = 4;
+    optional SerializedObjectInsideBLOB request_error_output = 5;
+    optional BLOB request_error_blob = 6;
 }
 
 message AllocationUpdate {

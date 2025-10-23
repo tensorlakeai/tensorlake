@@ -14,8 +14,10 @@ from tensorlake.applications import (
     FunctionProgress,
     Future,
     RequestError,
+    RequestFailureException,
 )
 from tensorlake.applications.function.user_data_serializer import (
+    deserialize_value,
     function_output_serializer,
 )
 from tensorlake.applications.interface.awaitables import (
@@ -47,6 +49,7 @@ from ..proto.function_executor_pb2 import (
     BLOB,
     Allocation,
     AllocationFunctionCallResult,
+    AllocationOutcomeCode,
     AllocationResult,
     AllocationState,
     AllocationUpdate,
@@ -63,7 +66,7 @@ from ..user_events import (
 )
 from .allocation_state_wrapper import AllocationStateWrapper
 from .contextvars import set_allocation_id_context_variable
-from .download import download_function_arguments
+from .download import download_function_arguments, download_serialized_objects
 from .result_helper import ResultHelper
 from .sdk_algorithms import (
     awaitable_to_execution_plan_updates,
@@ -91,14 +94,15 @@ class _UserFutureInfo:
     # Requires a watcher setup.
     result: AllocationFunctionCallResult | None = None
     # Set only once after the result is set.
-    result_set_event: threading.Event = threading.Event()
+    result_available: threading.Event = threading.Event()
 
 
 @dataclass
 class _OutputBLOBRequestInfo:
-    blob_set_event: threading.Event = threading.Event()
     # Not None once the BLOB is ready to be used.
     blob: BLOB | None = None
+    # Set only once after the BLOB is set.
+    blob_available: threading.Event = threading.Event()
 
 
 class AllocationRunner:
@@ -187,7 +191,7 @@ class AllocationRunner:
         # NB: This code is called from user function thread. User function code is blocked.
         # Right now we can only be called from the function thread, not any child threads that user
         # code might have created because contextvars are not propagated to child threads.
-        # All exceptions raise here will be propagated to user code by design.
+        # All exceptions raised here will be propagated to user code by design.
         for future in futures:
             future_info: _UserFutureInfo = _UserFutureInfo(
                 user_future=future,
@@ -270,6 +274,7 @@ class AllocationRunner:
     def wait_futures_runtime_hook(
         self, futures: List[Future], timeout: float | None, return_when: RETURN_WHEN
     ) -> tuple[List[Future], List[Future]]:
+        """Doesn't raise any exceptions. All exceptions are set on individual futures."""
         # NB: This code is called from user function thread. User function code is blocked.
         # Right now we can only be called from the function thread, not any child threads that user
         # code might have created because contextvars are not propagated to child threads.
@@ -288,7 +293,16 @@ class AllocationRunner:
             if remaining_timeout is not None and remaining_timeout <= 0:
                 break
 
-            self._wait_future_completion(future, remaining_timeout)
+            try:
+                self._wait_future_completion(future, remaining_timeout)
+            except BaseException as e:
+                # Something went wrong while waiting for the future.
+                self._logger.error(
+                    "Unexpected error while waiting for future completion",
+                    function_call_id=future.awaitable.id,
+                    exc_info=e,
+                )
+                future.set_exception(e)
 
             if future.done():
                 done.append(future)
@@ -310,7 +324,11 @@ class AllocationRunner:
         return done, not_done
 
     def _wait_future_completion(self, future: Future, timeout: float | None) -> None:
-        """Wait for the completion of the future and sets its result or exception if didn't timeout."""
+        """Wait for the completion of the future and sets its result or exception if didn't timeout.
+
+        Raises Exception if something unexpected went wrong while waiting for the future.
+        Normally all exceptions are set on the future itself.
+        """
         deadline: float | None = (
             time.monotonic() + timeout if timeout is not None else None
         )
@@ -327,9 +345,48 @@ class AllocationRunner:
         result_wait_timeout: float | None = (
             deadline - time.monotonic() if deadline is not None else None
         )
-        if future_info.result_set_event.wait(timeout=result_wait_timeout):
-            pass  # TODO: Parse the response.
-        # else timeout
+        if future_info.result_available.wait(timeout=result_wait_timeout):
+            result: AllocationFunctionCallResult = future_info.result
+            if (
+                result.outcome_code
+                == AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS
+            ):
+                serialized_output: SerializedValue = download_serialized_objects(
+                    serialized_objects=[result.value_output],
+                    serialized_object_blobs=[result.value_blob],
+                    blob_store=self._blob_store,
+                    logger=self._logger,
+                )[0]
+                if serialized_output.metadata is None:
+                    raise ValueError(
+                        "Function Call output SerializedValue is missing metadata."
+                    )
+                output: Any = deserialize_value(
+                    serialized_output.data, serialized_output.metadata
+                )
+                future.set_result(output)
+            else:
+                if result.request_error_output is None:
+                    future.set_exception(
+                        RequestFailureException(
+                            f"Function call {repr(future.awaitable)} failed"
+                        )
+                    )
+                else:
+                    serialized_request_error: SerializedValue = (
+                        download_serialized_objects(
+                            serialized_objects=[result.request_error_output],
+                            serialized_object_blobs=[result.request_error_blob],
+                            blob_store=self._blob_store,
+                            logger=self._logger,
+                        )[0]
+                    )
+                    future.set_exception(
+                        RequestError(
+                            message=serialized_request_error.data.decode("utf-8")
+                        )
+                    )
+        # else timeout, no result or error
 
         self._allocation_state.delete_function_call_watcher(
             function_call_id=function_call_id
@@ -369,14 +426,43 @@ class AllocationRunner:
         self._output_blob_requests[blob_id] = blob_request_info
         self._allocation_state.add_output_blob_request(id=blob_id, size=size)
 
-        blob_request_info.blob_set_event.wait()
+        blob_request_info.blob_available.wait()
         self._allocation_state.remove_output_blob_request(id=blob_id)
         del self._output_blob_requests[blob_id]
         return blob_request_info.blob
 
     def deliver_allocation_update(self, update: AllocationUpdate) -> None:
-        # TODO: Implement.
-        pass
+        # No need for any locks because we never block here so we hold GIL non stop.
+        if update.HasField("function_call_result"):
+            function_call_id: str = update.function_call_result.function_call_id
+            if function_call_id not in self._user_futures:
+                self._logger.error(
+                    "received function call result for unknown future",
+                    function_call_id=function_call_id,
+                )
+                return
+            future_info: _UserFutureInfo = self._user_futures[function_call_id]
+            future_info.result = update.function_call_result
+            future_info.result_available.set()
+        elif update.HasField("output_blob"):
+            blob_id: str = update.output_blob.id
+            if blob_id not in self._output_blob_requests:
+                self._logger.error(
+                    "received output blob update for unknown blob request",
+                    blob_id=blob_id,
+                )
+                return
+
+            blob_request_info: _OutputBLOBRequestInfo = self._output_blob_requests[
+                blob_id
+            ]
+            blob_request_info.blob = update.output_blob
+            blob_request_info.blob_available.set()
+        else:
+            self._logger.error(
+                "received empty allocation update",
+                update=str(update),
+            )
 
     def _run_allocation_thread(self) -> None:
         try:
