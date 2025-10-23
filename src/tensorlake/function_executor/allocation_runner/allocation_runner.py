@@ -2,7 +2,8 @@ import contextvars
 import hashlib
 import threading
 import time
-from typing import Any, Dict, List, Set
+from dataclasses import dataclass
+from typing import Any, Dict, List
 
 from tensorlake.applications import (
     RETURN_WHEN,
@@ -33,6 +34,7 @@ from tensorlake.applications.request_context.request_metrics_recorder import (
     RequestMetricsRecorder,
 )
 from tensorlake.applications.user_data_serializer import (
+    PickleUserDataSerializer,
     UserDataSerializer,
 )
 
@@ -41,6 +43,7 @@ from ..logger import FunctionExecutorLogger
 from ..proto.function_executor_pb2 import (
     BLOB,
     Allocation,
+    AllocationFunctionCall,
     AllocationFunctionCallResult,
     AllocationProgress,
     AllocationResult,
@@ -73,6 +76,14 @@ from .upload import (
     upload_serialized_objects_to_blob,
 )
 from .value import SerializedValue, Value
+
+
+@dataclass
+class _UserFutureInfo:
+    # Original Future created by user code.
+    user_future: Future
+    # Not None if this user future is for an AwaitableList.
+    collection: List[Future | Any] | None
 
 
 class AllocationRunner:
@@ -136,8 +147,12 @@ class AllocationRunner:
             target=self._run_allocation_thread,
             daemon=True,
         )
-        # TODO: Add function call IDs created by this allocation here.
-        self._function_call_ids: Set[str] = set()
+        # Futures that were created by user code during this allocation.
+        # Future ID -> _UserFutureInfo.
+        self._user_futures: Dict[str, _UserFutureInfo] = {}
+        # TODO: Figure out when to remove entries from _user_futures and function call entries
+        # from allocation state. They should not take much memory cause they don't contain
+        # actual values, just metadata, but still we don't want this to grow unboundedly.
 
     def wait_allocation_state_update(
         self, last_seen_hash: str | None
@@ -179,23 +194,89 @@ class AllocationRunner:
     def run_futures_runtime_hook(
         self, futures: List[Future], start_delay: float | None
     ) -> None:
-        # NB: Log all exceptions in our code for future inspection.
+        # NB: This code is called from user function thread. User function code is blocked.
+        # Right now we can only be called from the function thread, not any child threads that user
+        # code might have created because contextvars are not propagated to child threads.
+        # All exceptions raise here will be propagated to user code by design.
         for future in futures:
-            validate_user_object(
-                user_object=future.awaitable,
-                function_call_ids=self._function_call_ids,
+            future_info: _UserFutureInfo = _UserFutureInfo(
+                user_future=future,
+                collection=None,
             )
-            serialized_values: Dict[str, SerializedValue] = {}
-            output: SerializedValue | Awaitable = serialize_values_in_awaitable_tree(
+            if isinstance(future.awaitable, AwaitableList):
+                future_info.collection = []
+                for item in future.awaitable.items:
+                    validate_user_object(
+                        user_object=future.awaitable,
+                        function_call_ids=self._user_futures.keys(),
+                    )
+                    if isinstance(item, Awaitable):
+                        # Calls our hook recursively.
+                        if start_delay is None:
+                            future_info.collection.append(item.run())
+                        else:
+                            future_info.collection.append(
+                                item.run_later(start_delay=start_delay)
+                            )
+                    else:
+                        future_info.collection.append(item)
+            else:
+                validate_user_object(
+                    user_object=future.awaitable,
+                    function_call_ids=self._user_futures.keys(),
+                )
+                self._run_user_future(future)
+
+            self._user_futures[future.awaitable.id] = future_info
+
+    def _run_user_future(self, future: Future) -> None:
+        serialized_values: Dict[str, SerializedValue] = {}
+        awaitable_with_serialized_values: Awaitable = (
+            serialize_values_in_awaitable_tree(
                 user_object=future.awaitable,
-                value_serializer=output_serializer,
+                # value serializer is not going to be used because we're serializing a call tree here, not a value.
+                value_serializer=PickleUserDataSerializer(),
                 serialized_values=serialized_values,
             )
+        )
+        serialized_objects, blob_data = serialized_values_to_serialized_objects(
+            serialized_values=serialized_values
+        )
+        args_blob: BLOB = self._get_new_output_blob(
+            size=sum(len(data) for data in blob_data)
+        )
+        uploaded_serialized_objects, uploaded_args_blob = (
+            upload_serialized_objects_to_blob(
+                serialized_objects=serialized_objects,
+                blob_data=blob_data,
+                destination_blob=args_blob,
+                blob_store=self._blob_store,
+                logger=self._logger,
+            )
+        )
+        awaitable_execution_plan_pb: ExecutionPlanUpdates
+        awaitable_execution_plan_pb = awaitable_to_execution_plan_updates(
+            awaitable=awaitable_with_serialized_values,
+            uploaded_serialized_objects=uploaded_serialized_objects,
+            # Output serializer name override is only applicable to tail calls.
+            output_serializer_name_override=None,
+            function_ref=self._function_ref,
+            logger=self._logger,
+        )
+
+        self._add_function_call_to_allocation_state(
+            execution_plan_updates=awaitable_execution_plan_pb,
+            args_blob=uploaded_args_blob,
+        )
 
     def wait_futures_runtime_hook(
         self, futures: List[Future], timeout: float | None, return_when: RETURN_WHEN
     ) -> None:
-        # NB: Log all exceptions in our code for future inspection.
+        # NB: This code is called from user function thread. User function code is blocked.
+        # Right now we can only be called from the function thread, not any child threads that user
+        # code might have created because contextvars are not propagated to child threads.
+        # All exceptions raise here will be propagated to user code by design.
+        # TODO: Implement.
         pass
 
     def _get_new_output_blob(self, size: int) -> BLOB:
@@ -216,6 +297,19 @@ class AllocationRunner:
         self._allocation.result = result
         with self._allocation_state_update_lock:
             self._allocation_state.result = result
+            _update_allocation_state_hash(self._allocation_state)
+            self._allocation_state_update_lock.notify_all()
+
+    def _add_function_call_to_allocation_state(
+        self, execution_plan_updates: ExecutionPlanUpdates, args_blob: BLOB
+    ) -> None:
+        with self._allocation_state_update_lock:
+            self._allocation_state.function_calls.append(
+                AllocationFunctionCall(
+                    execution_plan_updates=execution_plan_updates,
+                    args_blob=args_blob,
+                )
+            )
             _update_allocation_state_hash(self._allocation_state)
             self._allocation_state_update_lock.notify_all()
 
@@ -315,7 +409,7 @@ class AllocationRunner:
         try:
             validate_user_object(
                 user_object=output,
-                function_call_ids=self._function_call_ids,
+                function_call_ids=self._user_futures.keys(),
             )
             serialized_values: Dict[str, SerializedValue] = {}
             output: SerializedValue | Awaitable = serialize_values_in_awaitable_tree(

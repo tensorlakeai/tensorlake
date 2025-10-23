@@ -325,6 +325,18 @@ class AllocationProgress(_message.Message):
         self, current: _Optional[float] = ..., total: _Optional[float] = ...
     ) -> None: ...
 
+class AllocationFunctionCall(_message.Message):
+    __slots__ = ("execution_plan_updates", "args_blob")
+    EXECUTION_PLAN_UPDATES_FIELD_NUMBER: _ClassVar[int]
+    ARGS_BLOB_FIELD_NUMBER: _ClassVar[int]
+    execution_plan_updates: ExecutionPlanUpdates
+    args_blob: BLOB
+    def __init__(
+        self,
+        execution_plan_updates: _Optional[_Union[ExecutionPlanUpdates, _Mapping]] = ...,
+        args_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
+    ) -> None: ...
+
 class AllocationState(_message.Message):
     __slots__ = ("progress", "function_calls", "result", "sha256_hash")
     PROGRESS_FIELD_NUMBER: _ClassVar[int]
@@ -332,14 +344,14 @@ class AllocationState(_message.Message):
     RESULT_FIELD_NUMBER: _ClassVar[int]
     SHA256_HASH_FIELD_NUMBER: _ClassVar[int]
     progress: AllocationProgress
-    function_calls: _containers.RepeatedCompositeFieldContainer[ExecutionPlanUpdates]
+    function_calls: _containers.RepeatedCompositeFieldContainer[AllocationFunctionCall]
     result: AllocationResult
     sha256_hash: str
     def __init__(
         self,
         progress: _Optional[_Union[AllocationProgress, _Mapping]] = ...,
         function_calls: _Optional[
-            _Iterable[_Union[ExecutionPlanUpdates, _Mapping]]
+            _Iterable[_Union[AllocationFunctionCall, _Mapping]]
         ] = ...,
         result: _Optional[_Union[AllocationResult, _Mapping]] = ...,
         sha256_hash: _Optional[str] = ...,
