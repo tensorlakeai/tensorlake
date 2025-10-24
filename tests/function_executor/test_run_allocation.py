@@ -601,9 +601,7 @@ class TestRunAllocation(unittest.TestCase):
         # Check FE events in stdout
         self.assertIn("function_executor_initialization_started", fe_stdout)
         self.assertIn("function_executor_initialization_failed", fe_stdout)
-
-        # Check function output to stderr
-        self.assertIn("This function fails on initialization", process.read_stderr())
+        self.assertIn("This function fails on initialization", fe_stdout)
 
 
 if __name__ == "__main__":
