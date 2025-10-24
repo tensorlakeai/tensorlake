@@ -89,20 +89,20 @@ class _UserFutureInfo:
     # Original Future created by user code.
     user_future: Future
     # Not None if this user future is for an AwaitableList.
-    collection: List[Future | Any] | None = None
+    collection: List[Future | Any] | None
     # Not None when the future is completed.
     # Requires a watcher setup.
-    result: AllocationFunctionCallResult | None = None
+    result: AllocationFunctionCallResult | None
     # Set only once after the result is set.
-    result_available: threading.Event = threading.Event()
+    result_available: threading.Event
 
 
 @dataclass
 class _OutputBLOBRequestInfo:
     # Not None once the BLOB is ready to be used.
-    blob: BLOB | None = None
+    blob: BLOB | None
     # Set only once after the BLOB is set.
-    blob_available: threading.Event = threading.Event()
+    blob_available: threading.Event
 
 
 class AllocationRunner:
@@ -196,6 +196,8 @@ class AllocationRunner:
             future_info: _UserFutureInfo = _UserFutureInfo(
                 user_future=future,
                 collection=None,
+                result=None,
+                result_available=threading.Event(),
             )
             if isinstance(future.awaitable, AwaitableList):
                 future_info.collection = []
@@ -225,6 +227,10 @@ class AllocationRunner:
             self._user_futures[future.awaitable.id] = future_info
 
     def _run_user_future(self, future: Future, start_delay: float | None) -> None:
+        self._logger.info(
+            "starting child future",
+            child_future_id=future.awaitable.id,
+        )
         serialized_values: Dict[str, SerializedValue] = {}
         awaitable_with_serialized_values: Awaitable = (
             serialize_values_in_awaitable_tree(
@@ -296,8 +302,8 @@ class AllocationRunner:
             except BaseException as e:
                 # Something went wrong while waiting for the future.
                 self._logger.error(
-                    "Unexpected error while waiting for future completion",
-                    function_call_id=future.awaitable.id,
+                    "Unexpected error while waiting for child future completion",
+                    child_future_id=future.awaitable.id,
                     exc_info=e,
                 )
                 future.set_exception(e)
@@ -327,6 +333,12 @@ class AllocationRunner:
         Raises Exception if something unexpected went wrong while waiting for the future.
         Normally all exceptions are set on the future itself.
         """
+        start_time: float = time.monotonic()
+        self._logger.info(
+            "waiting for child future completion",
+            child_future_id=future.awaitable.id,
+        )
+
         deadline: float | None = (
             time.monotonic() + timeout if timeout is not None else None
         )
@@ -390,6 +402,12 @@ class AllocationRunner:
             function_call_id=function_call_id
         )
         self._allocation_state.delete_function_call(function_call_id=function_call_id)
+        self._logger.info(
+            "child future completed",
+            child_future_id=future.awaitable.id,
+            duration_sec=f"{time.monotonic() - start_time:.3f}",
+            success=future.exception is None,
+        )
 
     def _wait_future_list_completion(
         self, future_info: _UserFutureInfo, deadline: float | None
@@ -420,7 +438,10 @@ class AllocationRunner:
     def _get_new_output_blob(self, size: int) -> BLOB:
         """Returns new BLOB to upload function outputs to."""
         blob_id: str = request_scoped_id()
-        blob_request_info: _OutputBLOBRequestInfo = _OutputBLOBRequestInfo()
+        blob_request_info: _OutputBLOBRequestInfo = _OutputBLOBRequestInfo(
+            blob=None,
+            blob_available=threading.Event(),
+        )
         self._output_blob_requests[blob_id] = blob_request_info
         self._allocation_state.add_output_blob_request(id=blob_id, size=size)
 
