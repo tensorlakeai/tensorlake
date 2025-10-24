@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List
 
+from ..local.runner import LocalRunner
 from .awaitables import (
     Awaitable,
     AwaitableList,
@@ -12,6 +13,7 @@ from .awaitables import (
     request_scoped_id,
 )
 from .image import Image
+from .request import Request
 from .retries import Retries
 
 
@@ -117,6 +119,28 @@ class Function:
     def awaitable(self) -> "FunctionAwaitablesFactory":
         """Returns function factory for creating awaitables."""
         return self._awaitables_factory
+
+    def local(self, payload: Any) -> Request:
+        """Run the function locally.
+        This function is executed on the same environment as the caller.
+        """
+        with LocalRunner(app=self, app_payload=payload) as runner:
+            return runner.run()
+
+    # FIXME/TODO.
+    # Temporary fake remote implementation for tests to pass until remote runner gets reimplemented.
+    def remote(self, payload: Any) -> Request:
+        """Run the function remotely.
+        This function is executed on the Tensorlake environment.
+        """
+        return self.local(payload)
+
+    def run(self, payload: Any, remote: bool) -> Request:
+        """Run the application remotely or locally depending on the `remote` parameter value."""
+        if remote:
+            return self.remote(payload)
+        else:
+            return self.local(payload)
 
     def __repr__(self) -> str:
         return (

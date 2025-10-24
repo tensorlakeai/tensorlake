@@ -13,9 +13,6 @@ from tensorlake.applications import (
 )
 from tensorlake.applications import map as tl_map
 from tensorlake.applications import reduce as tl_reduce
-from tensorlake.applications import (
-    run_remote_application,
-)
 
 mapper_image = Image(name="generator").run("pip install httpx")
 process_image = Image(name="process").run("pip install numpy")
@@ -44,6 +41,6 @@ def reducer(total: Total, new: Total) -> Total:
 
 
 if __name__ == "__main__":
-    request: Request = run_remote_application(sequence_summer, 10)
+    request: Request = sequence_summer.remote(10)
     assert request.output().val == sum(x**2 for x in range(10))
     print("Request completed successfully with output:", request.output())

@@ -2,7 +2,7 @@ import importlib
 import os
 import unittest
 
-from tensorlake.applications import Function, Request, run_remote_application
+from tensorlake.applications import Function, Request
 from tensorlake.applications.remote.deploy import deploy_applications
 from tensorlake.vendor.nanoid import generate as nanoid
 
@@ -58,9 +58,8 @@ class TestApplicationUpdate(unittest.TestCase):
         deploy_applications(__file__, upgrade_running_requests=False)
 
         # The request is sleeping in start_func.
-        request_v1: Request = run_remote_application(
-            generated_code.code_update_start_func, 10
-        )
+        func: Function = generated_code.code_update_start_func
+        request_v1: Request = func.remote(10)
 
         v2 = nanoid()
         update_generated_code(v2)
@@ -77,9 +76,8 @@ class TestApplicationUpdate(unittest.TestCase):
         deploy_applications(__file__, upgrade_running_requests=False)
 
         # The request is sleeping in start_func.
-        request_v1: Request = run_remote_application(
-            generated_code.code_update_start_func, 10
-        )
+        func: Function = generated_code.code_update_start_func
+        request_v1: Request = func.remote(10)
 
         v2 = nanoid()
         update_generated_code(v2)

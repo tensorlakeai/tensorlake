@@ -6,7 +6,6 @@ from tensorlake.applications import (
     application,
     cls,
     function,
-    run_remote_application,
 )
 from tensorlake.applications.remote.deploy import deploy_applications
 
@@ -43,21 +42,21 @@ class TestFileDescriptorCaching(unittest.TestCase):
         deploy_applications(__file__)
 
     def test_second_write_goes_to_cached_file_descriptor_if_same_func(self):
-        request: Request = run_remote_application(fd_caching_function, "create_fd")
+        request: Request = fd_caching_function.remote("create_fd")
         output: str = request.output()
         self.assertEqual(output, "success")
 
         # Fails if the file descriptor is not cached between different invocations of
         # the same function version. File descriptor caching is required to e.g. not
         # load a model into GPU on each invocation.
-        request = run_remote_application(fd_caching_function, "write_fd")
+        request: Request = fd_caching_function.remote("write_fd")
         output: str = request.output()
         self.assertEqual(output, "success")
 
         # Fail if the write to the cached file descriptor didn's happen for any reason.
         # This verifies that the file descriptor state is not altered between invocations
         # of the same function version.
-        request = run_remote_application(fd_caching_function, "read_fd")
+        request: Request = fd_caching_function.remote("read_fd")
         output: str = request.output()
         self.assertEqual(output, "write_to_cacheable_fd\n")
 
@@ -106,12 +105,12 @@ class TestFunctionClassInstanceCaching(unittest.TestCase):
         # Run many times to ensure that the behavior is repeatable over many invocations.
         for i in range(5):
             # The object is created once and cached in memory.
-            request: Request = run_remote_application(FunctionClass.run, "check")
+            request: Request = FunctionClass.run.remote("check")
             output: str = request.output()
             self.assertEqual(output, "success")
 
             # Every new request will reuse the cached compute object.
-            request = run_remote_application(FunctionClass.run, "check")
+            request: Request = FunctionClass.run.remote("check")
             output = request.output()
             self.assertEqual(output, "success")
 
