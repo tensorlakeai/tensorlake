@@ -38,12 +38,12 @@ def resources_for_function(
     function: Function,
 ) -> FunctionResourcesManifest:
     return FunctionResourcesManifest(
-        cpus=function.function_config.cpu,
+        cpus=function._function_config.cpu,
         memory_mb=math.ceil(
-            function.function_config.memory * 1024
+            function._function_config.memory * 1024
         ),  # float GB to int MB
         ephemeral_disk_mb=math.ceil(
-            function.function_config.ephemeral_disk * 1024
+            function._function_config.ephemeral_disk * 1024
         ),  # float GB to int MB
-        gpus=_parse_gpu_resources(function.function_config.gpu),
+        gpus=_parse_gpu_resources(function._function_config.gpu),
     )

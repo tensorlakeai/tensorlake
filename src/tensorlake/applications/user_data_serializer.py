@@ -79,6 +79,9 @@ class JSONUserDataSerializer(UserDataSerializer):
 
     def serialize(self, object: Any) -> bytes:
         try:
+            # FIXME: This heuristic doesn't cover natural cases like
+            # List[BaseModel], Dict[str, BaseModel], etc.
+            # These are easy to serialize to json too.
             if isinstance(object, pydantic.BaseModel):
                 return object.model_dump_json().encode("utf-8")
             else:

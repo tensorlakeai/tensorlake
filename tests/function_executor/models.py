@@ -18,3 +18,9 @@ class StructuredState(BaseModel):
     string: str
     integer: int
     structured: StructuredField
+
+
+class FileChunk(BaseModel):
+    data: bytes
+    start: int
+    end: int

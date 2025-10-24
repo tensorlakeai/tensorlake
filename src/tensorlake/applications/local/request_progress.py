@@ -1,8 +1,8 @@
-from ..interface.request_context import RequestProgress
+from ..interface.request_context import FunctionProgress
 
 
-class LocalRequestProgress(RequestProgress):
-    """RequestProgress that tracks the progress of a local request."""
+class LocalFunctionProgress(FunctionProgress):
+    """FunctionProgress that tracks the progress of a local function call."""
 
     def __init__(self):
         super().__init__()

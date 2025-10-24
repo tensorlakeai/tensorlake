@@ -1,19 +1,22 @@
 import hashlib
 import os
 import unittest
-from typing import List
+from typing import Iterator, List
 
-from pydantic import BaseModel
+from models import FileChunk
 from testing import (
     FunctionExecutorProcessContextManager,
     application_function_inputs,
+    create_request_error_blob,
     create_tmp_blob,
     download_and_deserialize_so,
     initialize,
     read_so_metadata,
-    read_tmp_blob_bytes,
     rpc_channel,
     run_allocation,
+    run_allocation_that_fails,
+    run_allocation_that_returns_output,
+    write_new_application_payload_blob,
     write_tmp_blob_bytes,
 )
 
@@ -23,29 +26,34 @@ from tensorlake.applications import (
     cls,
     function,
 )
-from tensorlake.applications.ast.function_call_node import (
-    ArgumentMetadata,
-    RegularFunctionCallMetadata,
+from tensorlake.applications.metadata import (
+    FunctionCallArgumentMetadata,
+    FunctionCallMetadata,
+    ValueMetadata,
+    deserialize_metadata,
+    serialize_metadata,
 )
-from tensorlake.applications.ast.value_node import ValueMetadata
 from tensorlake.applications.user_data_serializer import (
     JSONUserDataSerializer,
     PickleUserDataSerializer,
 )
-from tensorlake.function_executor.handlers.run_function.function_call_node_metadata import (
-    FunctionCallNodeMetadata,
-    FunctionCallType,
-)
-from tensorlake.function_executor.handlers.run_function.value_node_metadata import (
-    ValueNodeMetadata,
-)
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     BLOB,
+    Allocation,
     AllocationFailureReason,
+    AllocationFunctionCall,
+    AllocationFunctionCallResult,
+    AllocationFunctionCallWatcher,
     AllocationOutcomeCode,
+    AllocationOutputBLOBRequest,
     AllocationResult,
+    AllocationState,
+    AllocationUpdate,
     BLOBChunk,
+    CreateAllocationRequest,
+    DeleteAllocationRequest,
     ExecutionPlanUpdate,
+    ExecutionPlanUpdates,
     FunctionCall,
     FunctionInputs,
     FunctionRef,
@@ -55,6 +63,7 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     SerializedObjectEncoding,
     SerializedObjectInsideBLOB,
     SerializedObjectManifest,
+    WatchAllocationStateRequest,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
@@ -63,22 +72,28 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
 APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
 
 
-class FileChunk(BaseModel):
-    data: bytes
-    start: int
-    end: int
+@application()
+@function()
+def api_function_tail_call(url: str) -> List[FileChunk]:
+    print(f"api_function_tail_call called with url: {url}")
+    assert url == "https://example.com"
+    assert isinstance(url, str)
+    return file_chunker.awaitable(
+        File(content=bytes(b"hello"), content_type="text/plain"),
+        num_chunks=3,
+    )
 
 
 @application()
 @function()
-def api_function(url: str) -> List[FileChunk]:
-    print(f"api_function called with url: {url}")
-    assert url == "https://example.com"
+def api_function_blocking_call(url: str) -> FileChunk:
+    print(f"api_function_blocking_call called with url: {url}")
+    assert url == "https://blocking-example.com"
     assert isinstance(url, str)
     return file_chunker(
-        File(content=bytes(b"hello"), content_type="text/plain"),
+        File(content=bytes(b"hello-blocking"), content_type="text/blocking-plain"),
         num_chunks=3,
-    )
+    )[1]
 
 
 @function()
@@ -114,7 +129,7 @@ class FunctionFailingOnInit:
 
 
 class TestRunAllocation(unittest.TestCase):
-    def test_api_function_success(self):
+    def test_api_function_tail_call(self):
         with FunctionExecutorProcessContextManager(
             capture_std_outputs=True,
         ) as process:
@@ -122,10 +137,10 @@ class TestRunAllocation(unittest.TestCase):
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 initialize_response: InitializeResponse = initialize(
                     stub,
-                    app_name="api_function",
+                    app_name="api_function_tail_call",
                     app_version="0.1",
                     app_code_dir_path=APPLICATION_CODE_DIR_PATH,
-                    function_name="api_function",
+                    function_name="api_function_tail_call",
                 )
                 self.assertEqual(
                     initialize_response.outcome_code,
@@ -136,33 +151,39 @@ class TestRunAllocation(unittest.TestCase):
                 serialized_api_payload: bytes = user_serializer.serialize(
                     "https://example.com"
                 )
-                api_payload_blob: BLOB = create_tmp_blob()
-                write_tmp_blob_bytes(
-                    api_payload_blob,
-                    serialized_api_payload,
+                api_payload_blob: BLOB = write_new_application_payload_blob(
+                    serialized_api_payload
                 )
-                function_outputs_blob: BLOB = create_tmp_blob()
-                alloc_result: AllocationResult = run_allocation(
+
+                allocation_id: str = "test-allocation-id"
+                alloc_result: AllocationResult = run_allocation_that_returns_output(
+                    self,
                     stub,
-                    inputs=FunctionInputs(
-                        args=[
-                            SerializedObjectInsideBLOB(
-                                manifest=SerializedObjectManifest(
-                                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON,
-                                    encoding_version=0,
-                                    size=len(serialized_api_payload),
-                                    metadata_size=0,  # No metadata for API function calls.
-                                    sha256_hash=hashlib.sha256(
-                                        serialized_api_payload
-                                    ).hexdigest(),
-                                ),
-                                offset=0,
-                            )
-                        ],
-                        arg_blobs=[api_payload_blob],
-                        function_outputs_blob=function_outputs_blob,
-                        request_error_blob=create_tmp_blob(),
-                        function_call_metadata=b"",
+                    request=CreateAllocationRequest(
+                        allocation=Allocation(
+                            request_id="123",
+                            function_call_id="test-function-call",
+                            allocation_id=allocation_id,
+                            inputs=FunctionInputs(
+                                args=[
+                                    SerializedObjectInsideBLOB(
+                                        manifest=SerializedObjectManifest(
+                                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON,
+                                            encoding_version=0,
+                                            size=len(serialized_api_payload),
+                                            metadata_size=0,  # No metadata for API function calls.
+                                            sha256_hash=hashlib.sha256(
+                                                serialized_api_payload
+                                            ).hexdigest(),
+                                        ),
+                                        offset=0,
+                                    )
+                                ],
+                                arg_blobs=[api_payload_blob],
+                                request_error_blob=create_request_error_blob(),
+                                function_call_metadata=b"",
+                            ),
+                        ),
                     ),
                 )
 
@@ -172,9 +193,13 @@ class TestRunAllocation(unittest.TestCase):
                 )
                 self.assertFalse(alloc_result.HasField("request_error_output"))
 
-                updates: List[ExecutionPlanUpdate] = list(alloc_result.updates.updates)
-                self.assertEqual(len(updates), 1)
-                function_call: FunctionCall = updates[0].function_call
+                updates: ExecutionPlanUpdates = alloc_result.updates
+                self.assertTrue(updates.HasField("root_function_call_id"))
+                self.assertFalse(updates.HasField("start_at"))
+                self.assertEqual(len(updates.updates), 1)
+                update: ExecutionPlanUpdate = updates.updates[0]
+
+                function_call: FunctionCall = update.function_call
                 self.assertEqual(
                     alloc_result.updates.root_function_call_id, function_call.id
                 )
@@ -184,7 +209,195 @@ class TestRunAllocation(unittest.TestCase):
                     function_call.target,
                     FunctionRef(
                         namespace="test",
-                        application_name="api_function",
+                        application_name="api_function_tail_call",
+                        application_version="0.1",
+                        function_name="file_chunker",
+                    ),
+                )
+
+                self.assertEqual(len(function_call.args), 2)
+                self.assertTrue(function_call.args[0].HasField("value"))
+                self.assertTrue(function_call.args[1].HasField("value"))
+                tail_call_args_blob: BLOB = alloc_result.uploaded_function_outputs_blob
+                arg_0: File = download_and_deserialize_so(
+                    self,
+                    function_call.args[0].value,
+                    tail_call_args_blob,
+                )
+                self.assertEqual(arg_0.content, b"hello")
+                self.assertEqual(arg_0.content_type, "text/plain")
+                arg_0_metadata: ValueMetadata = read_so_metadata(
+                    self, function_call.args[0].value, tail_call_args_blob
+                )
+                arg_1: int = download_and_deserialize_so(
+                    self,
+                    function_call.args[1].value,
+                    tail_call_args_blob,
+                )
+                self.assertEqual(arg_1, 3)
+                arg_1_metadata: ValueMetadata = read_so_metadata(
+                    self, function_call.args[1].value, tail_call_args_blob
+                )
+
+                function_call_metadata: FunctionCallMetadata = deserialize_metadata(
+                    function_call.call_metadata
+                )
+                self.assertIsInstance(function_call_metadata, FunctionCallMetadata)
+
+                self.assertEqual(len(function_call_metadata.args), 1)
+                self.assertEqual(
+                    function_call_metadata.args[0].value_id, arg_0_metadata.id
+                )
+                self.assertEqual(function_call_metadata.args[0].collection, None)
+                self.assertEqual(len(function_call_metadata.kwargs), 1)
+                self.assertEqual(
+                    function_call_metadata.kwargs["num_chunks"].value_id,
+                    arg_1_metadata.id,
+                )
+                self.assertEqual(
+                    function_call_metadata.kwargs["num_chunks"].collection, None
+                )
+                # Cleanup.
+                stub.delete_allocation(
+                    DeleteAllocationRequest(
+                        allocation_id=allocation_id,
+                    )
+                )
+
+        fe_stdout = process.read_stdout()
+        # Check FE events in stdout
+        self.assertIn("function_executor_initialization_started", fe_stdout)
+        self.assertIn("function_executor_initialization_finished", fe_stdout)
+        self.assertIn("allocations_started", fe_stdout)
+        self.assertIn("allocations_finished", fe_stdout)
+        # Check function output to stdout
+        self.assertIn(
+            "api_function_tail_call called with url: https://example.com", fe_stdout
+        )
+
+    def test_api_function_blocking_call(self):
+        with FunctionExecutorProcessContextManager(
+            capture_std_outputs=True,
+        ) as process:
+            with rpc_channel(process) as channel:
+                stub: FunctionExecutorStub = FunctionExecutorStub(channel)
+                initialize_response: InitializeResponse = initialize(
+                    stub,
+                    app_name="api_function_blocking_call",
+                    app_version="0.1",
+                    app_code_dir_path=APPLICATION_CODE_DIR_PATH,
+                    function_name="api_function_blocking_call",
+                )
+                self.assertEqual(
+                    initialize_response.outcome_code,
+                    InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
+                )
+
+                user_serializer: JSONUserDataSerializer = JSONUserDataSerializer()
+                serialized_api_payload: bytes = user_serializer.serialize(
+                    "https://blocking-example.com"
+                )
+                api_payload_blob: BLOB = write_new_application_payload_blob(
+                    serialized_api_payload
+                )
+
+                allocation_id: str = "test-allocation-id"
+                allocation_states: Iterator[AllocationState] = run_allocation(
+                    stub,
+                    request=CreateAllocationRequest(
+                        allocation=Allocation(
+                            request_id="123",
+                            function_call_id="test-function-call",
+                            allocation_id=allocation_id,
+                            inputs=FunctionInputs(
+                                args=[
+                                    SerializedObjectInsideBLOB(
+                                        manifest=SerializedObjectManifest(
+                                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON,
+                                            encoding_version=0,
+                                            size=len(serialized_api_payload),
+                                            metadata_size=0,  # No metadata for API function calls.
+                                            sha256_hash=hashlib.sha256(
+                                                serialized_api_payload
+                                            ).hexdigest(),
+                                        ),
+                                        offset=0,
+                                    )
+                                ],
+                                arg_blobs=[api_payload_blob],
+                                request_error_blob=create_request_error_blob(),
+                                function_call_metadata=b"",
+                            ),
+                        ),
+                    ),
+                )
+                current_allocation_state = "wait_blob_request"
+                for allocation_state in allocation_states:
+                    allocation_state: AllocationState
+
+                    if current_allocation_state == "wait_blob_request":
+                        if len(allocation_state.output_blob_requests) == 0:
+                            continue  # Received empty initial AllocationState, keep waiting.
+
+                        self.assertEqual(len(allocation_state.output_blob_requests), 1)
+                        blocking_call_args_blob_request: AllocationOutputBLOBRequest = (
+                            allocation_state.output_blob_requests[0]
+                        )
+                        blocking_call_args_blob: BLOB = create_tmp_blob(
+                            id=blocking_call_args_blob_request.id,
+                            chunks_count=1,
+                            chunk_size=blocking_call_args_blob_request.size,
+                        )
+                        stub.send_allocation_update(
+                            AllocationUpdate(
+                                allocation_id=allocation_id,
+                                output_blob=blocking_call_args_blob,
+                            )
+                        )
+                        current_allocation_state = "wait_blob_deletion"
+
+                    if current_allocation_state == "wait_blob_deletion":
+                        if len(allocation_state.output_blob_requests) == 0:
+                            current_allocation_state = "wait_function_call_and_watcher"
+
+                    if current_allocation_state == "wait_function_call_and_watcher":
+                        if (
+                            len(allocation_state.function_calls) > 0
+                            and len(allocation_state.function_call_watchers) > 0
+                        ):
+                            self.assertEqual(len(allocation_state.function_calls), 1)
+                            allocation_function_call: AllocationFunctionCall = (
+                                allocation_state.function_calls[0]
+                            )
+                            self.assertEqual(
+                                len(allocation_state.function_call_watchers), 1
+                            )
+                            allocation_function_call_watcher: (
+                                AllocationFunctionCallWatcher
+                            ) = allocation_state.function_call_watchers[0]
+                            break
+
+                self.assertTrue(allocation_function_call.HasField("updates"))
+                self.assertTrue(allocation_function_call.HasField("args_blob"))
+                self.assertEqual(
+                    allocation_function_call.args_blob.id, blocking_call_args_blob.id
+                )
+
+                updates: ExecutionPlanUpdates = allocation_function_call.updates
+                self.assertTrue(updates.HasField("root_function_call_id"))
+                self.assertFalse(updates.HasField("start_at"))
+                self.assertEqual(len(updates.updates), 1)
+                update: ExecutionPlanUpdate = updates.updates[0]
+
+                function_call: FunctionCall = update.function_call
+                self.assertEqual(updates.root_function_call_id, function_call.id)
+                self.assertIsNotNone(function_call)
+                self.assertIsNotNone(function_call.id)
+                self.assertEqual(
+                    function_call.target,
+                    FunctionRef(
+                        namespace="test",
+                        application_name="api_function_blocking_call",
                         application_version="0.1",
                         function_name="file_chunker",
                     ),
@@ -196,41 +409,169 @@ class TestRunAllocation(unittest.TestCase):
                 arg_0: File = download_and_deserialize_so(
                     self,
                     function_call.args[0].value,
-                    function_outputs_blob,
+                    blocking_call_args_blob,
                 )
-                self.assertEqual(arg_0.content, b"hello")
-                self.assertEqual(arg_0.content_type, "text/plain")
-                arg_0_metadata = read_so_metadata(
-                    self, function_call.args[0].value, function_outputs_blob
+                self.assertEqual(arg_0.content, b"hello-blocking")
+                self.assertEqual(arg_0.content_type, "text/blocking-plain")
+                arg_0_metadata: ValueMetadata = read_so_metadata(
+                    self, function_call.args[0].value, blocking_call_args_blob
                 )
                 arg_1: int = download_and_deserialize_so(
                     self,
                     function_call.args[1].value,
-                    function_outputs_blob,
+                    blocking_call_args_blob,
                 )
                 self.assertEqual(arg_1, 3)
-                arg_1_metadata = read_so_metadata(
-                    self, function_call.args[1].value, function_outputs_blob
+                arg_1_metadata: ValueMetadata = read_so_metadata(
+                    self, function_call.args[1].value, blocking_call_args_blob
                 )
 
-                function_call_node_metadata = FunctionCallNodeMetadata.deserialize(
+                function_call_metadata: FunctionCallMetadata = deserialize_metadata(
                     function_call.call_metadata
                 )
-                self.assertEqual(
-                    function_call_node_metadata.type, FunctionCallType.REGULAR
-                )
-                function_call_metadata = RegularFunctionCallMetadata.deserialize(
-                    function_call_node_metadata.metadata
-                )
+                self.assertIsInstance(function_call_metadata, FunctionCallMetadata)
+
                 self.assertEqual(len(function_call_metadata.args), 1)
-                self.assertEqual(function_call_metadata.args[0].nid, arg_0_metadata.nid)
-                self.assertEqual(function_call_metadata.args[0].flist, None)
+                self.assertEqual(
+                    function_call_metadata.args[0].value_id, arg_0_metadata.id
+                )
+                self.assertEqual(function_call_metadata.args[0].collection, None)
                 self.assertEqual(len(function_call_metadata.kwargs), 1)
                 self.assertEqual(
-                    function_call_metadata.kwargs["num_chunks"].nid, arg_1_metadata.nid
+                    function_call_metadata.kwargs["num_chunks"].value_id,
+                    arg_1_metadata.id,
                 )
                 self.assertEqual(
-                    function_call_metadata.kwargs["num_chunks"].flist, None
+                    function_call_metadata.kwargs["num_chunks"].collection, None
+                )
+
+                self.assertEqual(
+                    allocation_function_call_watcher.function_call_id, function_call.id
+                )
+
+                # All good - the function call from FE is valid.
+                # Send function call result back to FE.
+
+                user_serializer: PickleUserDataSerializer = PickleUserDataSerializer()
+                serialized_function_call_output_metadata: bytes = serialize_metadata(
+                    ValueMetadata(
+                        id="function-call-output-id",
+                        cls=list,
+                        serializer_name=user_serializer.name,
+                        content_type=None,
+                    )
+                )
+                serialized_function_call_output: bytes = user_serializer.serialize(
+                    [
+                        FileChunk(
+                            data=b"h",
+                            start=0,
+                            end=1,
+                        ),
+                        FileChunk(
+                            data=b"e",
+                            start=1,
+                            end=2,
+                        ),
+                        FileChunk(
+                            data=b"l",
+                            start=2,
+                            end=3,
+                        ),
+                    ]
+                )
+
+                function_call_output_blob_data: bytes = b"".join(
+                    [
+                        serialized_function_call_output_metadata,
+                        serialized_function_call_output,
+                    ]
+                )
+                function_call_output_blob: BLOB = create_tmp_blob(
+                    id="function-call-output-blob",
+                )
+                write_tmp_blob_bytes(
+                    function_call_output_blob,
+                    function_call_output_blob_data,
+                )
+
+                stub.send_allocation_update(
+                    AllocationUpdate(
+                        allocation_id=allocation_id,
+                        function_call_result=AllocationFunctionCallResult(
+                            function_call_id=function_call.id,
+                            outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
+                            value_output=SerializedObjectInsideBLOB(
+                                manifest=SerializedObjectManifest(
+                                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
+                                    encoding_version=0,
+                                    size=len(serialized_function_call_output_metadata)
+                                    + len(serialized_function_call_output),
+                                    metadata_size=len(
+                                        serialized_function_call_output_metadata
+                                    ),
+                                    sha256_hash=hashlib.sha256(
+                                        serialized_function_call_output_metadata
+                                        + serialized_function_call_output
+                                    ).hexdigest(),
+                                ),
+                                offset=0,
+                            ),
+                            value_blob=function_call_output_blob,
+                        ),
+                    )
+                )
+
+                stub.watch_allocation_state(WatchAllocationStateRequest())
+                current_allocation_state = "wait_blob_request"
+                for allocation_state in allocation_states:
+                    allocation_state: AllocationState
+
+                    if current_allocation_state == "wait_blob_request":
+                        if len(allocation_state.output_blob_requests) == 0:
+                            continue  # Received empty initial AllocationState, keep waiting.
+
+                        self.assertEqual(len(allocation_state.output_blob_requests), 1)
+                        function_output_blob_request: AllocationOutputBLOBRequest = (
+                            allocation_state.output_blob_requests[0]
+                        )
+                        function_output_blob: BLOB = create_tmp_blob(
+                            id=function_output_blob_request.id,
+                            chunks_count=1,
+                            chunk_size=function_output_blob_request.size,
+                        )
+                        stub.send_allocation_update(
+                            AllocationUpdate(
+                                allocation_id=allocation_id,
+                                output_blob=function_output_blob,
+                            )
+                        )
+                        current_allocation_state = "wait_blob_deletion"
+
+                    if current_allocation_state == "wait_blob_deletion":
+                        if len(allocation_state.output_blob_requests) == 0:
+                            current_allocation_state = "wait_result"
+
+                    if current_allocation_state == "wait_result":
+                        if allocation_state.HasField("result"):
+                            alloc_result: AllocationResult = allocation_state.result
+                            break
+
+                self.assertEqual(
+                    alloc_result.outcome_code,
+                    AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
+                )
+                self.assertFalse(alloc_result.HasField("request_error_output"))
+                output: FileChunk = download_and_deserialize_so(
+                    self, alloc_result.value, function_output_blob
+                )
+                self.assertEqual(output, FileChunk(data=b"e", start=1, end=2))
+
+                # Cleanup.
+                stub.delete_allocation(
+                    DeleteAllocationRequest(
+                        allocation_id=allocation_id,
+                    )
                 )
 
         fe_stdout = process.read_stdout()
@@ -240,9 +581,12 @@ class TestRunAllocation(unittest.TestCase):
         self.assertIn("allocations_started", fe_stdout)
         self.assertIn("allocations_finished", fe_stdout)
         # Check function output to stdout
-        self.assertIn("api_function called with url: https://example.com", fe_stdout)
+        self.assertIn(
+            "api_function_blocking_call called with url: https://blocking-example.com",
+            fe_stdout,
+        )
 
-    def test_regular_function_success(self):
+    def test_regular_function_call_with_multiple_chunks(self):
         with FunctionExecutorProcessContextManager(
             capture_std_outputs=True,
         ) as process:
@@ -261,19 +605,25 @@ class TestRunAllocation(unittest.TestCase):
                 )
 
                 user_serializer: PickleUserDataSerializer = PickleUserDataSerializer()
-                serialized_file_arg_metadata: bytes = ValueNodeMetadata(
-                    nid="file_arg_id",
-                    metadata=ValueMetadata(cls=File, extra="text/plain").serialize(),
-                ).serialize()
+                serialized_file_arg_metadata: bytes = serialize_metadata(
+                    ValueMetadata(
+                        id="file_arg_id",
+                        cls=File,
+                        serializer_name=None,
+                        content_type="text/plain; charset=utf-8",
+                    )
+                )
                 serialized_file_arg: bytes = (
                     "hello".encode()
                 )  # File content is stored directly in the BLOB so users can read it over HTTP.
-                serialized_num_chunks_arg_metadata: bytes = ValueNodeMetadata(
-                    nid="num_chunks_arg_id",
-                    metadata=ValueMetadata(
-                        cls=int, extra=user_serializer.name
-                    ).serialize(),
-                ).serialize()
+                serialized_num_chunks_arg_metadata: bytes = serialize_metadata(
+                    ValueMetadata(
+                        id="num_chunks_arg_id",
+                        cls=int,
+                        serializer_name=user_serializer.name,
+                        content_type=None,
+                    )
+                )
                 serialized_num_chunks_arg: bytes = user_serializer.serialize(5)
 
                 serialized_args: bytes = b"".join(
@@ -284,66 +634,116 @@ class TestRunAllocation(unittest.TestCase):
                         serialized_num_chunks_arg,
                     ]
                 )
-                args_blob: BLOB = create_tmp_blob()
+                args_blob: BLOB = create_tmp_blob(id="args-blob-id")
                 write_tmp_blob_bytes(
                     args_blob,
                     serialized_args,
                 )
-                function_outputs_blob: BLOB = create_tmp_blob()
-                alloc_result: AllocationResult = run_allocation(
+
+                allocation_id: str = "test-allocation-id"
+                allocation_states: Iterator[AllocationState] = run_allocation(
                     stub,
-                    inputs=FunctionInputs(
-                        args=[
-                            SerializedObjectInsideBLOB(
-                                manifest=SerializedObjectManifest(
-                                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-                                    encoding_version=0,
-                                    size=len(serialized_file_arg_metadata)
-                                    + len(serialized_file_arg),
-                                    metadata_size=len(serialized_file_arg_metadata),
-                                    sha256_hash=hashlib.sha256(
-                                        serialized_file_arg_metadata
-                                        + serialized_file_arg
-                                    ).hexdigest(),
-                                ),
-                                offset=0,
-                            ),
-                            SerializedObjectInsideBLOB(
-                                manifest=SerializedObjectManifest(
-                                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-                                    encoding_version=0,
-                                    size=len(serialized_num_chunks_arg_metadata)
-                                    + len(serialized_num_chunks_arg),
-                                    metadata_size=len(
-                                        serialized_num_chunks_arg_metadata
+                    request=CreateAllocationRequest(
+                        allocation=Allocation(
+                            request_id="123",
+                            function_call_id="test-function-call",
+                            allocation_id=allocation_id,
+                            inputs=FunctionInputs(
+                                args=[
+                                    SerializedObjectInsideBLOB(
+                                        manifest=SerializedObjectManifest(
+                                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
+                                            encoding_version=0,
+                                            size=len(serialized_file_arg_metadata)
+                                            + len(serialized_file_arg),
+                                            metadata_size=len(
+                                                serialized_file_arg_metadata
+                                            ),
+                                            sha256_hash=hashlib.sha256(
+                                                serialized_file_arg_metadata
+                                                + serialized_file_arg
+                                            ).hexdigest(),
+                                        ),
+                                        offset=0,
                                     ),
-                                    sha256_hash=hashlib.sha256(
-                                        serialized_num_chunks_arg_metadata
-                                        + serialized_num_chunks_arg
-                                    ).hexdigest(),
-                                ),
-                                offset=len(serialized_file_arg_metadata)
-                                + len(serialized_file_arg),
-                            ),
-                        ],
-                        arg_blobs=[args_blob, args_blob],
-                        function_outputs_blob=function_outputs_blob,
-                        request_error_blob=create_tmp_blob(),
-                        function_call_metadata=FunctionCallNodeMetadata(
-                            nid="file_chunker_call",
-                            type=FunctionCallType.REGULAR,
-                            metadata=RegularFunctionCallMetadata(
-                                args=[ArgumentMetadata(nid="file_arg_id", flist=None)],
-                                kwargs={
-                                    "num_chunks": ArgumentMetadata(
-                                        nid="num_chunks_arg_id", flist=None
+                                    SerializedObjectInsideBLOB(
+                                        manifest=SerializedObjectManifest(
+                                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
+                                            encoding_version=0,
+                                            size=len(serialized_num_chunks_arg_metadata)
+                                            + len(serialized_num_chunks_arg),
+                                            metadata_size=len(
+                                                serialized_num_chunks_arg_metadata
+                                            ),
+                                            sha256_hash=hashlib.sha256(
+                                                serialized_num_chunks_arg_metadata
+                                                + serialized_num_chunks_arg
+                                            ).hexdigest(),
+                                        ),
+                                        offset=len(serialized_file_arg_metadata)
+                                        + len(serialized_file_arg),
                                     ),
-                                },
-                                oso=None,
-                            ).serialize(),
-                        ).serialize(),
+                                ],
+                                arg_blobs=[args_blob, args_blob],
+                                request_error_blob=create_tmp_blob(
+                                    id="request-error-blob"
+                                ),
+                                function_call_metadata=serialize_metadata(
+                                    FunctionCallMetadata(
+                                        id="file_chunker_call",
+                                        output_serializer_name_override=None,
+                                        args=[
+                                            FunctionCallArgumentMetadata(
+                                                value_id="file_arg_id", collection=None
+                                            )
+                                        ],
+                                        kwargs={
+                                            "num_chunks": FunctionCallArgumentMetadata(
+                                                value_id="num_chunks_arg_id",
+                                                collection=None,
+                                            ),
+                                        },
+                                        oso=None,
+                                    )
+                                ),
+                            ),
+                        ),
                     ),
                 )
+                current_allocation_state = "wait_blob_request"
+                for allocation_state in allocation_states:
+                    allocation_state: AllocationState
+
+                    if current_allocation_state == "wait_blob_request":
+                        if len(allocation_state.output_blob_requests) == 0:
+                            continue  # Received empty initial AllocationState, keep waiting.
+
+                        self.assertEqual(len(allocation_state.output_blob_requests), 1)
+                        function_output_blob_request: AllocationOutputBLOBRequest = (
+                            allocation_state.output_blob_requests[0]
+                        )
+                        # Simulate function output BLOB with 10 chunks.
+                        function_output_blob: BLOB = create_tmp_blob(
+                            id=function_output_blob_request.id,
+                            chunks_count=10 + 1,  # +1 to account for possible remainder
+                            chunk_size=function_output_blob_request.size // 10,
+                        )
+                        stub.send_allocation_update(
+                            AllocationUpdate(
+                                allocation_id=allocation_id,
+                                output_blob=function_output_blob,
+                            )
+                        )
+                        current_allocation_state = "wait_blob_deletion"
+
+                    if current_allocation_state == "wait_blob_deletion":
+                        if len(allocation_state.output_blob_requests) == 0:
+                            current_allocation_state = "wait_result"
+
+                    if current_allocation_state == "wait_result":
+                        if allocation_state.HasField("result"):
+                            alloc_result: AllocationResult = allocation_state.result
+                            break
 
                 self.assertEqual(
                     alloc_result.outcome_code,
@@ -353,7 +753,7 @@ class TestRunAllocation(unittest.TestCase):
                 self.assertTrue(alloc_result.HasField("value"))
 
                 output = download_and_deserialize_so(
-                    self, alloc_result.value, function_outputs_blob
+                    self, alloc_result.value, function_output_blob
                 )
                 self.assertEqual(len(output), 5)
                 self.assertEqual(
@@ -408,12 +808,14 @@ class TestRunAllocation(unittest.TestCase):
                 # 5 full chunks + 1 byte of output data out of 10 chunks
                 arg: bytes = os.urandom(5 * 1024 + 1)
                 serialized_arg: bytes = user_serializer.serialize(arg)
-                serialized_arg_metadata: bytes = ValueNodeMetadata(
-                    nid="arg_id",
-                    metadata=ValueMetadata(
-                        cls=bytes, extra=user_serializer.name
-                    ).serialize(),
-                ).serialize()
+                serialized_arg_metadata: bytes = serialize_metadata(
+                    ValueMetadata(
+                        id="arg_id",
+                        cls=bytes,
+                        serializer_name=user_serializer.name,
+                        content_type=None,
+                    )
+                )
 
                 serialized_args: bytes = b"".join(
                     [
@@ -421,59 +823,98 @@ class TestRunAllocation(unittest.TestCase):
                         serialized_arg,
                     ]
                 )
-                input_blob: BLOB = create_tmp_blob()
+                input_blob: BLOB = create_tmp_blob(id="input-blob-id")
                 write_tmp_blob_bytes(
                     input_blob,
                     serialized_args,
                 )
-                function_outputs_blob: BLOB = create_tmp_blob(
-                    chunks_count=10, chunk_size=1024
-                )
-                alloc_result: AllocationResult = run_allocation(
+
+                allocation_id: str = "test-allocation-id"
+                allocation_states: Iterator[AllocationState] = run_allocation(
                     stub,
-                    inputs=FunctionInputs(
-                        args=[
-                            SerializedObjectInsideBLOB(
-                                manifest=SerializedObjectManifest(
-                                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-                                    encoding_version=0,
-                                    size=len(serialized_arg_metadata)
-                                    + len(serialized_arg),
-                                    metadata_size=len(serialized_arg_metadata),
-                                    sha256_hash=hashlib.sha256(
-                                        serialized_arg_metadata + serialized_arg
-                                    ).hexdigest(),
+                    request=CreateAllocationRequest(
+                        allocation=Allocation(
+                            request_id="123",
+                            function_call_id="test-function-call",
+                            allocation_id=allocation_id,
+                            inputs=FunctionInputs(
+                                args=[
+                                    SerializedObjectInsideBLOB(
+                                        manifest=SerializedObjectManifest(
+                                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
+                                            encoding_version=0,
+                                            size=len(serialized_arg_metadata)
+                                            + len(serialized_arg),
+                                            metadata_size=len(serialized_arg_metadata),
+                                            sha256_hash=hashlib.sha256(
+                                                serialized_arg_metadata + serialized_arg
+                                            ).hexdigest(),
+                                        ),
+                                        offset=0,
+                                    )
+                                ],
+                                arg_blobs=[input_blob],
+                                function_call_metadata=serialize_metadata(
+                                    FunctionCallMetadata(
+                                        id="returns_argument_call",
+                                        output_serializer_name_override=None,
+                                        args=[
+                                            FunctionCallArgumentMetadata(
+                                                value_id="arg_id", collection=None
+                                            ),
+                                        ],
+                                        kwargs={},
+                                    )
                                 ),
-                                offset=0,
-                            )
-                        ],
-                        arg_blobs=[input_blob],
-                        function_outputs_blob=function_outputs_blob,
-                        request_error_blob=create_tmp_blob(),
-                        function_call_metadata=FunctionCallNodeMetadata(
-                            nid="returns_argument_call",
-                            type=FunctionCallType.REGULAR,
-                            metadata=RegularFunctionCallMetadata(
-                                args=[ArgumentMetadata(nid="arg_id", flist=None)],
-                                kwargs={},
-                                oso=None,
-                            ).serialize(),
-                        ).serialize(),
+                                request_error_blob=create_request_error_blob(),
+                            ),
+                        ),
                     ),
                 )
+                current_allocation_state = "wait_blob_request"
+                for allocation_state in allocation_states:
+                    allocation_state: AllocationState
+
+                    if current_allocation_state == "wait_blob_request":
+                        if len(allocation_state.output_blob_requests) == 0:
+                            continue  # Received empty initial AllocationState, keep waiting.
+
+                        self.assertEqual(len(allocation_state.output_blob_requests), 1)
+                        function_output_blob_request: AllocationOutputBLOBRequest = (
+                            allocation_state.output_blob_requests[0]
+                        )
+                        # Simulate function output BLOB with 10 chunks.
+                        function_output_blob: BLOB = create_tmp_blob(
+                            id=function_output_blob_request.id,
+                            chunks_count=10,
+                            chunk_size=1024,
+                        )
+                        stub.send_allocation_update(
+                            AllocationUpdate(
+                                allocation_id=allocation_id,
+                                output_blob=function_output_blob,
+                            )
+                        )
+                        current_allocation_state = "wait_blob_deletion"
+
+                    if current_allocation_state == "wait_blob_deletion":
+                        if len(allocation_state.output_blob_requests) == 0:
+                            current_allocation_state = "wait_result"
+
+                    if current_allocation_state == "wait_result":
+                        if allocation_state.HasField("result"):
+                            alloc_result: AllocationResult = allocation_state.result
+                            break
 
                 self.assertEqual(
                     alloc_result.outcome_code,
                     AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
                 )
+                self.assertFalse(alloc_result.HasField("request_error_output"))
+                self.assertTrue(alloc_result.HasField("value"))
 
-                serialized_output_metadata: bytes = read_tmp_blob_bytes(
-                    function_outputs_blob,
-                    alloc_result.value.offset,
-                    alloc_result.value.manifest.metadata_size,
-                )
                 output: bytes = download_and_deserialize_so(
-                    self, alloc_result.value, function_outputs_blob
+                    self, alloc_result.value, function_output_blob
                 )
                 self.assertEqual(arg, output)
 
@@ -485,12 +926,6 @@ class TestRunAllocation(unittest.TestCase):
                     output_serialized_object.manifest.size
                     - output_serialized_object.manifest.metadata_size,
                     len(serialized_arg),
-                )
-                self.assertEqual(
-                    output_serialized_object.manifest.sha256_hash,
-                    hashlib.sha256(
-                        serialized_output_metadata + serialized_arg
-                    ).hexdigest(),
                 )
 
                 # Verify that output BLOB chunks exactly match the output data and the original BLOB chunks.
@@ -517,7 +952,7 @@ class TestRunAllocation(unittest.TestCase):
                     self.assertNotIn(uploaded_chunk.etag, etags)
                     etags.append(uploaded_chunk.etag)
                     self.assertEqual(
-                        uploaded_chunk.uri, function_outputs_blob.chunks[ix].uri
+                        uploaded_chunk.uri, function_output_blob.chunks[ix].uri
                     )
 
     def test_function_raises_error(self):
@@ -536,10 +971,19 @@ class TestRunAllocation(unittest.TestCase):
                     InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
                 )
 
-                alloc_result: AllocationResult = run_allocation(
+                allocation_id: str = "test-allocation-id"
+                alloc_result: AllocationResult = run_allocation_that_fails(
                     stub,
-                    inputs=application_function_inputs(10),
+                    request=CreateAllocationRequest(
+                        allocation=Allocation(
+                            request_id="123",
+                            function_call_id="test-function-call",
+                            allocation_id=allocation_id,
+                            inputs=application_function_inputs(10),
+                        ),
+                    ),
                 )
+
                 self.assertEqual(
                     alloc_result.outcome_code,
                     AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,

@@ -18,3 +18,9 @@ class Request:
         Raises RemoteAPIError on error communicating with the remote API.
         """
         raise NotImplementedError("output is implemented in subclasses.")
+
+    def __repr__(self) -> str:
+        return f"Tensorlake Application Request(id={self._id})"
+
+    def __str__(self) -> str:
+        return self.__repr__()

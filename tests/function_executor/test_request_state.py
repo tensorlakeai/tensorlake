@@ -13,7 +13,8 @@ from testing import (
     download_and_deserialize_so,
     initialize,
     rpc_channel,
-    run_allocation,
+    run_allocation_that_fails,
+    run_allocation_that_returns_output,
 )
 
 from tensorlake.applications import (
@@ -25,8 +26,10 @@ from tensorlake.applications.user_data_serializer import (
     PickleUserDataSerializer,
 )
 from tensorlake.function_executor.proto.function_executor_pb2 import (
+    Allocation,
     AllocationOutcomeCode,
     AllocationResult,
+    CreateAllocationRequest,
     GetRequestStateRequest,
     GetRequestStateResponse,
     InitializationOutcomeCode,
@@ -159,9 +162,17 @@ class TestSetRequestState(unittest.TestCase):
                 client_thread = request_state_client_stub(
                     self, stub, expected_requests, responses
                 )
-                alloc_result: AllocationResult = run_allocation(
+                alloc_result: AllocationResult = run_allocation_that_returns_output(
+                    self,
                     stub,
-                    inputs=application_function_inputs(42),
+                    request=CreateAllocationRequest(
+                        allocation=Allocation(
+                            request_id="123",
+                            function_call_id="test-function-call",
+                            allocation_id="test-allocation",
+                            inputs=application_function_inputs(42),
+                        ),
+                    ),
                 )
                 self.assertEqual(
                     alloc_result.outcome_code,
@@ -221,9 +232,16 @@ class TestSetRequestState(unittest.TestCase):
                 client_thread = request_state_client_stub(
                     self, stub, expected_requests, responses
                 )
-                alloc_result: AllocationResult = run_allocation(
+                alloc_result: AllocationResult = run_allocation_that_fails(
                     stub,
-                    inputs=application_function_inputs(42),
+                    request=CreateAllocationRequest(
+                        allocation=Allocation(
+                            request_id="123",
+                            function_call_id="test-function-call",
+                            allocation_id="test-allocation",
+                            inputs=application_function_inputs(42),
+                        ),
+                    ),
                 )
                 self.assertEqual(
                     alloc_result.outcome_code,
@@ -322,9 +340,17 @@ class TestGetInvocationState(unittest.TestCase):
                 client_thread = request_state_client_stub(
                     self, stub, expected_requests, responses
                 )
-                alloc_result: AllocationResult = run_allocation(
+                alloc_result: AllocationResult = run_allocation_that_returns_output(
+                    self,
                     stub,
-                    inputs=application_function_inputs(33),
+                    request=CreateAllocationRequest(
+                        allocation=Allocation(
+                            request_id="123",
+                            function_call_id="test-function-call",
+                            allocation_id="test-allocation",
+                            inputs=application_function_inputs(33),
+                        ),
+                    ),
                 )
                 self.assertEqual(
                     alloc_result.outcome_code,
@@ -379,9 +405,17 @@ class TestGetInvocationState(unittest.TestCase):
                 client_thread = request_state_client_stub(
                     self, stub, expected_requests, responses
                 )
-                alloc_result: AllocationResult = run_allocation(
+                alloc_result: AllocationResult = run_allocation_that_returns_output(
+                    self,
                     stub,
-                    inputs=application_function_inputs(33),
+                    request=CreateAllocationRequest(
+                        allocation=Allocation(
+                            request_id="123",
+                            function_call_id="test-function-call",
+                            allocation_id="test-allocation",
+                            inputs=application_function_inputs(33),
+                        ),
+                    ),
                 )
                 self.assertEqual(
                     alloc_result.outcome_code,
@@ -433,9 +467,16 @@ class TestGetInvocationState(unittest.TestCase):
                 client_thread = request_state_client_stub(
                     self, stub, expected_requests, responses
                 )
-                alloc_result: AllocationResult = run_allocation(
+                alloc_result: AllocationResult = run_allocation_that_fails(
                     stub,
-                    inputs=application_function_inputs(14),
+                    request=CreateAllocationRequest(
+                        allocation=Allocation(
+                            request_id="123",
+                            function_call_id="test-function-call",
+                            allocation_id="test-allocation",
+                            inputs=application_function_inputs(14),
+                        )
+                    ),
                 )
                 self.assertEqual(
                     alloc_result.outcome_code,

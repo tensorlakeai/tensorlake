@@ -8,7 +8,7 @@ from testing import (
     initialize,
     read_tmp_blob_bytes,
     rpc_channel,
-    run_allocation,
+    run_allocation_that_fails,
 )
 
 from tensorlake.applications import (
@@ -17,9 +17,10 @@ from tensorlake.applications import (
     function,
 )
 from tensorlake.function_executor.proto.function_executor_pb2 import (
+    Allocation,
     AllocationFailureReason,
     AllocationOutcomeCode,
-    AllocationResult,
+    CreateAllocationRequest,
     InitializationOutcomeCode,
     InitializeResponse,
     SerializedObjectEncoding,
@@ -57,11 +58,17 @@ class TestRequestError(unittest.TestCase):
                     InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
                 )
 
-                alloc_result: AllocationResult = run_allocation(
+                alloc_result = run_allocation_that_fails(
                     stub,
-                    inputs=application_function_inputs(10),
+                    request=CreateAllocationRequest(
+                        allocation=Allocation(
+                            request_id="123",
+                            function_call_id="test-function-call",
+                            allocation_id="test-allocation-id",
+                            inputs=application_function_inputs(10),
+                        ),
+                    ),
                 )
-
                 self.assertEqual(
                     alloc_result.outcome_code,
                     AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,

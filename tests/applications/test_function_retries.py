@@ -35,6 +35,10 @@ def function_that_always_fails(x: int) -> str:
 
 
 class TestFunctionRetries(unittest.TestCase):
+    def setUp(self) -> None:
+        global function_with_retry_policy_call_number
+        function_with_retry_policy_call_number = 0
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_function_retries(self, _: str, is_remote: bool):
         if is_remote:

@@ -10,14 +10,15 @@ from testing import (
     application_function_inputs,
     initialize,
     rpc_channel,
-    run_allocation,
+    run_allocation_that_fails,
 )
 
 from tensorlake.applications import application, function
 from tensorlake.function_executor.proto.function_executor_pb2 import (
+    Allocation,
     AllocationOutcomeCode,
     AllocationResult,
-    FunctionInputs,
+    CreateAllocationRequest,
     HealthCheckRequest,
     HealthCheckResponse,
     InitializationOutcomeCode,
@@ -104,16 +105,23 @@ class TestHealthCheck(unittest.TestCase):
                     InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
                 )
 
-                inputs: FunctionInputs = application_function_inputs("deadlock")
-
                 def run_task_in_thread():
                     try:
-                        run_allocation(
+                        allocation_id: str = "test-allocation-id"
+                        run_allocation_that_fails(
                             stub,
-                            inputs=inputs,
+                            request=CreateAllocationRequest(
+                                allocation=Allocation(
+                                    request_id="123",
+                                    function_call_id="test-function-call",
+                                    allocation_id=allocation_id,
+                                    inputs=application_function_inputs("deadlock"),
+                                ),
+                            ),
                             timeout_sec=HEALTH_CHECK_TIMEOUT_SEC,
                         )
-                        self.fail("Run task should have timed out.")
+
+                        self.fail("Waiting for task result should have timed out.")
                     except RpcError:
                         pass
 
@@ -145,12 +153,20 @@ class TestHealthCheck(unittest.TestCase):
                 )
 
                 def run_task_in_thread():
-                    alloc_result: AllocationResult = run_allocation(
+                    allocation_result: AllocationResult = run_allocation_that_fails(
                         stub,
-                        inputs=application_function_inputs("raise_exception"),
+                        request=CreateAllocationRequest(
+                            allocation=Allocation(
+                                request_id="123",
+                                function_call_id="test-function-call",
+                                allocation_id="test-allocation-id",
+                                inputs=application_function_inputs("raise_exception"),
+                            ),
+                        ),
                     )
+
                     self.assertEqual(
-                        alloc_result.outcome_code,
+                        allocation_result.outcome_code,
                         AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,
                     )
 
@@ -183,12 +199,21 @@ class TestHealthCheck(unittest.TestCase):
 
                 def run_task_in_thread():
                     try:
-                        # Due to "tcp keep-alive" property of the health checks the task should unblock with RpcError.
-                        run_allocation(
+                        run_allocation_that_fails(
                             stub,
-                            inputs=application_function_inputs("crash_process"),
+                            request=CreateAllocationRequest(
+                                allocation=Allocation(
+                                    request_id="123",
+                                    function_call_id="test-function-call",
+                                    allocation_id="test-allocation-id",
+                                    inputs=application_function_inputs("crash_process"),
+                                ),
+                            ),
                         )
-                        self.fail("Run task should have failed.")
+                        # Due to "tcp keep-alive" property of the health checks the allocation
+                        # watch state iterator read should unblock with RpcError.
+
+                        self.fail("Waiting for task result should have failed.")
                     except RpcError:
                         pass
 
@@ -216,12 +241,24 @@ class TestHealthCheck(unittest.TestCase):
 
                 def run_task_in_thread():
                     try:
-                        # Due to "tcp keep-alive" property of the health checks the task should unblock with RpcError.
-                        run_allocation(
+                        run_allocation_that_fails(
                             stub,
-                            inputs=application_function_inputs("close_connections"),
+                            request=CreateAllocationRequest(
+                                allocation=Allocation(
+                                    request_id="123",
+                                    function_call_id="test-function-call",
+                                    allocation_id="test-allocation-id",
+                                    inputs=application_function_inputs(
+                                        "close_connections"
+                                    ),
+                                ),
+                            ),
                         )
-                        self.fail("Run task should have failed.")
+
+                        # Due to "tcp keep-alive" property of the health checks the allocation
+                        # watch state iterator read should unblock with RpcError.
+
+                        self.fail("Waiting for task result should have failed.")
                     except RpcError:
                         pass
 

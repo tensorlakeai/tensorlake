@@ -10,10 +10,6 @@ from tensorlake.applications import (
     application,
     cls,
     function,
-)
-from tensorlake.applications import map as tl_map
-from tensorlake.applications import reduce as tl_reduce
-from tensorlake.applications import (
     run_local_application,
     run_remote_application,
 )
@@ -30,9 +26,9 @@ def test_graph_api_fan_in(payload: TestGraphRequestPayload) -> File:
     print(f"Received request with numbers: {payload.numbers}")
     ctx: RequestContext = RequestContext.get()
     ctx.state.set("numbers_count", len(payload.numbers))
-    numbers = tl_map(parse_and_multiply_number, payload.numbers)
+    numbers = parse_and_multiply_number.awaitable.map(payload.numbers)
     sum = sum_numbers_fan_in(numbers, initial=0)
-    return store_sum_as_file(sum)
+    return store_sum_as_file.awaitable(sum)
 
 
 @application()
@@ -42,8 +38,8 @@ def test_graph_api_reduce(payload: TestGraphRequestPayload) -> File:
     ctx: RequestContext = RequestContext.get()
     ctx.state.set("numbers_count", len(payload.numbers))
     numbers = [parse_and_multiply_number(number) for number in payload.numbers]
-    sum = tl_reduce(sum_numbers_reducer, numbers, 0)
-    return store_sum_as_file(sum)
+    sum = sum_numbers_reducer.awaitable.reduce(numbers, 0)
+    return store_sum_as_file.awaitable(sum)
 
 
 @function()

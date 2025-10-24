@@ -92,8 +92,8 @@ def deploy(
 async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: List[Function]):
     images: Dict[Image, ImageInformation] = image_infos()
     for application in filter_applications(functions):
-        fn_config: _FunctionConfiguration = application.function_config
-        app_config: _ApplicationConfiguration = application.application_config
+        fn_config: _FunctionConfiguration = application._function_config
+        app_config: _ApplicationConfiguration = application._application_config
 
         for image_info in images.values():
             image_info: ImageInformation
@@ -106,7 +106,7 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: List[Func
                         BuildContext(
                             application_name=fn_config.function_name,
                             application_version=app_config.version,
-                            function_name=function.function_config.function_name,
+                            function_name=function._function_config.function_name,
                         ),
                         image_info.image,
                     )

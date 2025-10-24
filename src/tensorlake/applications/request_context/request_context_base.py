@@ -1,7 +1,7 @@
 from ..interface.request_context import (
+    FunctionProgress,
     RequestContext,
     RequestMetrics,
-    RequestProgress,
     RequestState,
 )
 
@@ -11,7 +11,7 @@ class RequestContextBase(RequestContext):
         self,
         request_id: str,
         state: RequestState,
-        progress: RequestProgress,
+        progress: FunctionProgress,
         metrics: RequestMetrics,
     ):
         self._request_id = request_id
@@ -28,7 +28,7 @@ class RequestContextBase(RequestContext):
         return self._state
 
     @property
-    def progress(self) -> RequestProgress:
+    def progress(self) -> FunctionProgress:
         return self._progress
 
     @property

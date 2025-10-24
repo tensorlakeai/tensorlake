@@ -30,7 +30,9 @@ class TestBLOBStore(unittest.TestCase):
 
     @parameterized.expand(TESTED_CHUNKS)
     def test_get_full_blob(self, case_name: str, chunks_count: int, chunk_size: int):
-        blob: BLOB = create_tmp_blob(chunks_count=chunks_count, chunk_size=chunk_size)
+        blob: BLOB = create_tmp_blob(
+            id="test-blob", chunks_count=chunks_count, chunk_size=chunk_size
+        )
         blob_size: int = chunks_count * chunk_size
         expect_blob_data: bytes = self.generate_data(blob_size)
         write_tmp_blob_bytes(
@@ -46,7 +48,9 @@ class TestBLOBStore(unittest.TestCase):
     def test_get_half_data_from_blob_start(
         self, case_name: str, chunks_count: int, chunk_size: int
     ):
-        blob: BLOB = create_tmp_blob(chunks_count=chunks_count, chunk_size=chunk_size)
+        blob: BLOB = create_tmp_blob(
+            id="test-blob", chunks_count=chunks_count, chunk_size=chunk_size
+        )
         blob_size: int = chunks_count * chunk_size
         expect_blob_data: bytes = self.generate_data(blob_size)
         write_tmp_blob_bytes(
@@ -62,7 +66,9 @@ class TestBLOBStore(unittest.TestCase):
     def test_get_half_data_before_blob_end(
         self, case_name: str, chunks_count: int, chunk_size: int
     ):
-        blob: BLOB = create_tmp_blob(chunks_count=chunks_count, chunk_size=chunk_size)
+        blob: BLOB = create_tmp_blob(
+            id="test-blob", chunks_count=chunks_count, chunk_size=chunk_size
+        )
         blob_size: int = chunks_count * chunk_size
         expect_blob_data: bytes = self.generate_data(blob_size)
         write_tmp_blob_bytes(
@@ -81,7 +87,9 @@ class TestBLOBStore(unittest.TestCase):
     def test_get_half_data_from_blob_middle(
         self, case_name: str, chunks_count: int, chunk_size: int
     ):
-        blob: BLOB = create_tmp_blob(chunks_count=chunks_count, chunk_size=chunk_size)
+        blob: BLOB = create_tmp_blob(
+            id="test-blob", chunks_count=chunks_count, chunk_size=chunk_size
+        )
         blob_size: int = chunks_count * chunk_size
         expect_blob_data: bytes = self.generate_data(blob_size)
         write_tmp_blob_bytes(
@@ -99,7 +107,9 @@ class TestBLOBStore(unittest.TestCase):
     def test_get_with_offset_past_blob_size(
         self, case_name: str, chunks_count: int, chunk_size: int
     ):
-        blob: BLOB = create_tmp_blob(chunks_count=chunks_count, chunk_size=chunk_size)
+        blob: BLOB = create_tmp_blob(
+            id="test-blob", chunks_count=chunks_count, chunk_size=chunk_size
+        )
         blob_size: int = chunks_count * chunk_size
         with self.assertRaises(IndexError):
             self.blob_store.get(
@@ -110,7 +120,9 @@ class TestBLOBStore(unittest.TestCase):
     def test_get_with_size_past_blob_size(
         self, case_name: str, chunks_count: int, chunk_size: int
     ):
-        blob: BLOB = create_tmp_blob(chunks_count=chunks_count, chunk_size=chunk_size)
+        blob: BLOB = create_tmp_blob(
+            id="test-blob", chunks_count=chunks_count, chunk_size=chunk_size
+        )
         blob_size: int = chunks_count * chunk_size
         with self.assertRaises(IndexError):
             self.blob_store.get(
@@ -119,7 +131,9 @@ class TestBLOBStore(unittest.TestCase):
 
     @parameterized.expand(TESTED_CHUNKS)
     def test_put_full_blob(self, case_name: str, chunks_count: int, chunk_size: int):
-        blob: BLOB = create_tmp_blob(chunks_count=chunks_count, chunk_size=chunk_size)
+        blob: BLOB = create_tmp_blob(
+            id="test-blob", chunks_count=chunks_count, chunk_size=chunk_size
+        )
         blob_size: int = chunks_count * chunk_size
         expect_blob_data: List[bytes] = [
             self.generate_data(chunk_size) for _ in range(chunks_count)
@@ -146,7 +160,9 @@ class TestBLOBStore(unittest.TestCase):
     def test_put_full_blob_from_single_bytes(
         self, case_name: str, chunks_count: int, chunk_size: int
     ):
-        blob: BLOB = create_tmp_blob(chunks_count=chunks_count, chunk_size=chunk_size)
+        blob: BLOB = create_tmp_blob(
+            id="test-blob", chunks_count=chunks_count, chunk_size=chunk_size
+        )
         blob_size: int = chunks_count * chunk_size
         expect_blob_data: List[bytes] = [
             self.generate_data(1) for _ in range(chunks_count * chunk_size)
@@ -171,7 +187,9 @@ class TestBLOBStore(unittest.TestCase):
 
     @parameterized.expand(TESTED_CHUNKS)
     def test_put_first_chunk(self, case_name: str, chunks_count: int, chunk_size: int):
-        blob: BLOB = create_tmp_blob(chunks_count=chunks_count, chunk_size=chunk_size)
+        blob: BLOB = create_tmp_blob(
+            id="test-blob", chunks_count=chunks_count, chunk_size=chunk_size
+        )
         expect_blob_data: List[bytes] = [self.generate_data(chunk_size)]
         uploaded_blob: BLOB = self.blob_store.put(
             blob=blob,
@@ -195,7 +213,9 @@ class TestBLOBStore(unittest.TestCase):
     def test_put_half_first_chunk(
         self, case_name: str, chunks_count: int, chunk_size: int
     ):
-        blob: BLOB = create_tmp_blob(chunks_count=chunks_count, chunk_size=chunk_size)
+        blob: BLOB = create_tmp_blob(
+            id="test-blob", chunks_count=chunks_count, chunk_size=chunk_size
+        )
         expect_blob_data: List[bytes] = [self.generate_data(chunk_size // 2)]
         uploaded_blob: BLOB = self.blob_store.put(
             blob=blob,
@@ -219,7 +239,9 @@ class TestBLOBStore(unittest.TestCase):
     def test_put_half_blob_data(
         self, case_name: str, chunks_count: int, chunk_size: int
     ):
-        blob: BLOB = create_tmp_blob(chunks_count=chunks_count, chunk_size=chunk_size)
+        blob: BLOB = create_tmp_blob(
+            id="test-blob", chunks_count=chunks_count, chunk_size=chunk_size
+        )
         expect_blob_data: List[bytes] = [
             self.generate_data(chunk_size * chunks_count // 2)
         ]
@@ -252,7 +274,9 @@ class TestBLOBStore(unittest.TestCase):
     def test_put_data_bigger_than_blob(
         self, case_name: str, chunks_count: int, chunk_size: int
     ):
-        blob: BLOB = create_tmp_blob(chunks_count=chunks_count, chunk_size=chunk_size)
+        blob: BLOB = create_tmp_blob(
+            id="test-blob", chunks_count=chunks_count, chunk_size=chunk_size
+        )
         with self.assertRaises(ValueError):
             self.blob_store.put(
                 blob=blob,

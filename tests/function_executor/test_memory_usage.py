@@ -9,7 +9,7 @@ from testing import (
     download_and_deserialize_so,
     initialize,
     rpc_channel,
-    run_allocation,
+    run_allocation_that_returns_output,
 )
 
 from tensorlake.applications import (
@@ -17,8 +17,9 @@ from tensorlake.applications import (
     function,
 )
 from tensorlake.function_executor.proto.function_executor_pb2 import (
+    Allocation,
     AllocationOutcomeCode,
-    AllocationResult,
+    CreateAllocationRequest,
     InitializationOutcomeCode,
     InitializeResponse,
 )
@@ -62,9 +63,17 @@ class TestMemoryUsage(unittest.TestCase):
                     InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
                 )
 
-                alloc_result: AllocationResult = run_allocation(
+                alloc_result = run_allocation_that_returns_output(
+                    self,
                     stub,
-                    inputs=application_function_inputs(0),
+                    CreateAllocationRequest(
+                        allocation=Allocation(
+                            request_id="123",
+                            function_call_id="test-function-call",
+                            allocation_id="test-allocation-id",
+                            inputs=application_function_inputs(0),
+                        ),
+                    ),
                 )
 
                 self.assertEqual(
