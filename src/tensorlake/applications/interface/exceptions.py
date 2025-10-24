@@ -24,6 +24,13 @@ class RemoteAPIError(TensorlakeException):
         return f"{super().__str__()} (Status Code: {self.status_code})"
 
 
+class FutureError(TensorlakeException):
+    """Raised when a Future failed."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
 class RequestNotFinished(TensorlakeException):
     """Raised when trying to access the output of a request that is not yet finished."""
 
