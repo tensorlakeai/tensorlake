@@ -16,9 +16,10 @@ from tensorlake.applications.user_data_serializer import (
 )
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     BLOB,
-    Allocation,
+    AllocationOutputBLOBRequest,
     AllocationResult,
     AllocationState,
+    AllocationUpdate,
     BLOBChunk,
     CreateAllocationRequest,
     DeleteAllocationRequest,
@@ -145,11 +146,78 @@ def initialize(
 def run_allocation(
     stub: FunctionExecutorStub,
     request: CreateAllocationRequest,
+    timeout_sec: float | None = None,
 ) -> Iterator[AllocationState]:
     stub.create_allocation(request)
     return stub.watch_allocation_state(
-        WatchAllocationStateRequest(allocation_id=request.allocation.allocation_id)
+        WatchAllocationStateRequest(allocation_id=request.allocation.allocation_id),
+        timeout=timeout_sec,
     )
+
+
+def run_allocation_that_returns_output(
+    test_case: unittest.TestCase,
+    stub: FunctionExecutorStub,
+    request: CreateAllocationRequest,
+    timeout_sec: float | None = None,
+) -> tuple[AllocationResult, BLOB]:
+    allocation_id: str = request.allocation.allocation_id
+    current_allocation_state = "wait_blob_request"
+
+    allocation_states: Iterator[AllocationState] = run_allocation(
+        stub,
+        request=request,
+        timeout_sec=timeout_sec,
+    )
+
+    for allocation_state in allocation_states:
+        allocation_state: AllocationState
+
+        if current_allocation_state == "wait_blob_request":
+            if len(allocation_state.output_blob_requests) == 0:
+                continue  # Received empty initial AllocationState, keep waiting.
+
+            test_case.assertEqual(len(allocation_state.output_blob_requests), 1)
+            function_output_blob_request: AllocationOutputBLOBRequest = (
+                allocation_state.output_blob_requests[0]
+            )
+            function_output_blob: BLOB = create_tmp_blob(
+                id=function_output_blob_request.id,
+                chunks_count=1,
+                chunk_size=function_output_blob_request.size,
+            )
+            stub.send_allocation_update(
+                AllocationUpdate(
+                    allocation_id=allocation_id,
+                    output_blob=function_output_blob,
+                )
+            )
+            current_allocation_state = "wait_blob_deletion"
+
+        if current_allocation_state == "wait_blob_deletion":
+            if len(allocation_state.output_blob_requests) == 0:
+                current_allocation_state = "wait_result"
+
+        if current_allocation_state == "wait_result":
+            if allocation_state.HasField("result"):
+                return allocation_state.result
+
+
+def run_allocation_that_fails(
+    stub: FunctionExecutorStub,
+    request: CreateAllocationRequest,
+    timeout_sec: float | None = None,
+) -> AllocationResult:
+    allocation_states: Iterator[AllocationState] = run_allocation(
+        stub,
+        request=request,
+        timeout_sec=timeout_sec,
+    )
+    for allocation_state in allocation_states:
+        allocation_state: AllocationState
+
+        if allocation_state.HasField("result"):
+            return allocation_state.result
 
 
 def delete_allocation(

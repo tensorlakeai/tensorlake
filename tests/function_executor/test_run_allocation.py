@@ -14,6 +14,8 @@ from testing import (
     read_so_metadata,
     rpc_channel,
     run_allocation,
+    run_allocation_that_fails,
+    run_allocation_that_returns_output,
     write_new_application_payload_blob,
     write_tmp_blob_bytes,
 )
@@ -154,7 +156,8 @@ class TestRunAllocation(unittest.TestCase):
                 )
 
                 allocation_id: str = "test-allocation-id"
-                allocation_states: Iterator[AllocationState] = run_allocation(
+                alloc_result: AllocationResult = run_allocation_that_returns_output(
+                    self,
                     stub,
                     request=CreateAllocationRequest(
                         allocation=Allocation(
@@ -183,39 +186,6 @@ class TestRunAllocation(unittest.TestCase):
                         ),
                     ),
                 )
-                current_allocation_state = "wait_blob_request"
-                for allocation_state in allocation_states:
-                    allocation_state: AllocationState
-
-                    if current_allocation_state == "wait_blob_request":
-                        if len(allocation_state.output_blob_requests) == 0:
-                            continue  # Received empty initial AllocationState, keep waiting.
-
-                        self.assertEqual(len(allocation_state.output_blob_requests), 1)
-                        tail_call_args_blob_request: AllocationOutputBLOBRequest = (
-                            allocation_state.output_blob_requests[0]
-                        )
-                        tail_call_args_blob: BLOB = create_tmp_blob(
-                            id=tail_call_args_blob_request.id,
-                            chunks_count=1,
-                            chunk_size=tail_call_args_blob_request.size,
-                        )
-                        stub.send_allocation_update(
-                            AllocationUpdate(
-                                allocation_id=allocation_id,
-                                output_blob=tail_call_args_blob,
-                            )
-                        )
-                        current_allocation_state = "wait_blob_deletion"
-
-                    if current_allocation_state == "wait_blob_deletion":
-                        if len(allocation_state.output_blob_requests) == 0:
-                            current_allocation_state = "wait_result"
-
-                    if current_allocation_state == "wait_result":
-                        if allocation_state.HasField("result"):
-                            alloc_result: AllocationResult = allocation_state.result
-                            break
 
                 self.assertEqual(
                     alloc_result.outcome_code,
@@ -248,6 +218,7 @@ class TestRunAllocation(unittest.TestCase):
                 self.assertEqual(len(function_call.args), 2)
                 self.assertTrue(function_call.args[0].HasField("value"))
                 self.assertTrue(function_call.args[1].HasField("value"))
+                tail_call_args_blob: BLOB = alloc_result.uploaded_function_outputs_blob
                 arg_0: File = download_and_deserialize_so(
                     self,
                     function_call.args[0].value,
@@ -1001,7 +972,7 @@ class TestRunAllocation(unittest.TestCase):
                 )
 
                 allocation_id: str = "test-allocation-id"
-                allocation_states: Iterator[AllocationState] = run_allocation(
+                alloc_result: AllocationResult = run_allocation_that_fails(
                     stub,
                     request=CreateAllocationRequest(
                         allocation=Allocation(
@@ -1012,12 +983,6 @@ class TestRunAllocation(unittest.TestCase):
                         ),
                     ),
                 )
-                for allocation_state in allocation_states:
-                    allocation_state: AllocationState
-
-                    if allocation_state.HasField("result"):
-                        alloc_result: AllocationResult = allocation_state.result
-                        break
 
                 self.assertEqual(
                     alloc_result.outcome_code,

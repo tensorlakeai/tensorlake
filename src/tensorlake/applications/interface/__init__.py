@@ -5,6 +5,7 @@ from .awaitables import RETURN_WHEN, Awaitable, Future
 from .decorators import application, cls, function
 from .exceptions import (
     ApplicationValidationError,
+    FutureError,
     RemoteAPIError,
     RequestError,
     RequestFailureException,
@@ -38,6 +39,7 @@ __all__ = [
     "File",
     "Function",
     "Future",
+    "FutureError",
     "Image",
     "RemoteAPIError",
     "Request",

@@ -13,8 +13,8 @@ from tensorlake.applications import (
     Function,
     FunctionProgress,
     Future,
+    FutureError,
     RequestError,
-    RequestFailureException,
 )
 from tensorlake.applications.function.user_data_serializer import (
     deserialize_value,
@@ -378,9 +378,7 @@ class AllocationRunner:
             else:
                 if result.request_error_output is None:
                     future.set_exception(
-                        RequestFailureException(
-                            f"Function call {repr(future.awaitable)} failed"
-                        )
+                        FutureError(f"Function call {repr(future.awaitable)} failed")
                     )
                 else:
                     serialized_request_error: SerializedValue = (
