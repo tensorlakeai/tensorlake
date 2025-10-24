@@ -480,6 +480,8 @@ def validate_and_deserialize_function_call_metadata(
             raise ValueError(
                 f"Expected 2 arguments for reducer function call, got {len(serialized_args)}"
             )
+
+        return function_call_metadata
     else:
         # Application function call created by Server.
         if len(serialized_args) != 1:
@@ -494,6 +496,8 @@ def validate_and_deserialize_function_call_metadata(
 
         if function._application_config is None:
             raise ValueError("Non-application function was called without SDK metadata")
+
+        return None
 
 
 def reconstruct_function_call_args(
