@@ -1,3 +1,4 @@
+import sys
 import traceback
 
 from tensorlake.applications import Function, RequestError
@@ -44,11 +45,11 @@ class ResultHelper:
         """Creates an AllocationResult representing a user exception raised during function execution."""
         try:
             # This is user code.
-            # Give the full traceback to the user for debugging. Flush to make sure user sees it.
-            print("".join(traceback.format_exception(exception)), flush=True)
+            # Give the full traceback to the user for debugging.
+            traceback.print_exception(exception)
         except BaseException as e:
-            print("Failed to print exception traceback: ", str(e), flush=True)
-            print("Original exception: ", str(exception), flush=True)
+            # Don't log the exception as it might contain customer data.
+            self._logger.info("Failed to print user exception traceback")
 
         # This is FE internal code.
         # Don't log the user exception as it might contain customer data.
@@ -69,11 +70,11 @@ class ResultHelper:
         """Creates an AllocationResult representing a request error."""
         try:
             # This is user code.
-            # Give the full traceback to the user for debugging. Flush to make sure user sees it.
-            print("".join(traceback.format_exception(request_error)), flush=True)
+            # Give the full traceback to the user for debugging.
+            traceback.print_exception(request_error)
         except BaseException as e:
-            print("Failed to print request error traceback: ", str(e))
-            print("Original request error: ", str(request_error))
+            # Don't log the exception as it might contain customer data.
+            self._logger.info("Failed to print request error traceback")
 
         # This is FE internal code.
         # Don't log the user exception as it might contain customer data.
