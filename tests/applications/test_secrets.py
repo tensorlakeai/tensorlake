@@ -4,7 +4,6 @@ from tensorlake.applications import (
     Request,
     application,
     function,
-    run_local_application,
 )
 
 
@@ -31,10 +30,7 @@ class TestSecrets(unittest.TestCase):
     def test_api_func_secrets_settable(self):
         # Only test local graph mode here because behavior of secrets in remote graph depends
         # on Executor flavor.
-        request: Request = run_local_application(
-            api_router_func,
-            2,
-        )
+        request: Request = api_router_func.local(2)
         self.assertEqual(request.output(), 5)
 
 

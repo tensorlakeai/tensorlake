@@ -5,14 +5,14 @@ from pydantic import BaseModel
 
 from tensorlake.applications import (
     File,
+    Function,
     Request,
     RequestContext,
     application,
     cls,
     function,
-    run_local_application,
-    run_remote_application,
 )
+from tensorlake.applications.registry import get_function
 from tensorlake.applications.remote.deploy import deploy_applications
 
 
@@ -94,8 +94,8 @@ def store_sum_as_file(total: int) -> File:
 class TestComplexGraph(unittest.TestCase):
     def test_local_api_call_of_complex_graph_produces_expected_outputs(self):
         for function in ["test_graph_api_reduce", "test_graph_api_fan_in"]:
-            request = run_local_application(
-                function,
+            func: Function = get_function(function)
+            request: Request = func.remote(
                 TestGraphRequestPayload(numbers=[str(i) for i in range(10, 20)]),
             )
 
@@ -106,8 +106,8 @@ class TestComplexGraph(unittest.TestCase):
     def test_remote_api_call_of_complex_graph_produces_expected_outputs(self):
         deploy_applications(__file__)
         for function in ["test_graph_api_reduce", "test_graph_api_fan_in"]:
-            request: Request = run_remote_application(
-                function,
+            func: Function = get_function(function)
+            request: Request = func.remote(
                 TestGraphRequestPayload(numbers=[str(i) for i in range(10, 20)]),
             )
 

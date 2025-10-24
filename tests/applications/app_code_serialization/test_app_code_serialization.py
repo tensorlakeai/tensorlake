@@ -19,7 +19,6 @@ from tensorlake.applications import (
     Request,
     application,
     function,
-    run_remote_application,
 )
 from tensorlake.applications.remote.deploy import deploy_applications
 
@@ -72,23 +71,19 @@ class TestApplicationCodeSerialization(unittest.TestCase):
         deploy_applications(__file__)
 
     def test_call_hello_world(self):
-        request: Request = run_remote_application(call_hello_world, "test")
+        request: Request = call_hello_world.remote("test")
         self.assertEqual(request.output(), hello_world())
 
     def test_call_repeat_hello_world(self):
-        request: Request = run_remote_application(call_repeat_hello_world, 3)
+        request: Request = call_repeat_hello_world.remote(3)
         self.assertEqual(request.output(), repeat_hello_world(3))
 
     def test_call_hello_world_from_subpackage(self):
-        request: Request = run_remote_application(
-            call_hello_world_from_subpackage, "test"
-        )
+        request: Request = call_hello_world_from_subpackage.remote("test")
         self.assertEqual(request.output(), subpackage_hello_world())
 
     def test_function_from_symlink_is_available(self):
-        request: Request = run_remote_application(
-            function_from_symlink_is_available, "test"
-        )
+        request: Request = function_from_symlink_is_available.remote("test")
         self.assertTrue(request.output())
 
     def test_import_from_subdir_fails(self):
@@ -101,21 +96,17 @@ class TestApplicationCodeSerialization(unittest.TestCase):
 
         # However when this file is imported as a module, the direct import fails.
         # Test that this happens indeed.
-        request: Request = run_remote_application(import_from_subdir_fails, "test")
+        request: Request = import_from_subdir_fails.remote("test")
         self.assertTrue(request.output())
 
     def test_imported_tensorlake_function(self):
         # Check that the function imported from the module works.
-        request: Request = run_remote_application(
-            tensorlake_function_subpackage_hello_world, "test"
-        )
+        request: Request = tensorlake_function_subpackage_hello_world.remote("test")
         self.assertEqual(request.output(), subpackage_hello_world())
 
     def test_imported_tensorlake_class(self):
         # Check that the function imported from the module works.
-        request: Request = run_remote_application(
-            TensorlakeFunctionSubpackageHelloWorld().run, "test"
-        )
+        request: Request = TensorlakeFunctionSubpackageHelloWorld().run.remote("test")
         self.assertEqual(request.output(), subpackage_hello_world())
 
 

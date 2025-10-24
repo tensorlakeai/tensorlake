@@ -7,7 +7,6 @@ from tensorlake.applications import (
     RequestFailureException,
     application,
     function,
-    run_remote_application,
 )
 from tensorlake.applications.remote.deploy import deploy_applications
 
@@ -30,10 +29,7 @@ class TestFunctionProcessCrash(unittest.TestCase):
 
         print("Running a function that will crash FunctionExecutor process...")
         for i in range(2):
-            request: Request = run_remote_application(
-                function,
-                True,
-            )
+            request: Request = function.remote(True)
             try:
                 request.output()
             except RequestFailureException as e:
@@ -45,10 +41,7 @@ class TestFunctionProcessCrash(unittest.TestCase):
         # FIXME: we're only doing periodic Function Executor health checks right now,
         # so we need to wait for the crash to be detected.
         time.sleep(10)
-        success_request: Request = run_remote_application(
-            function,
-            False,
-        )
+        success_request: Request = function.remote(False)
         success_output = success_request.output()
         self.assertEqual(success_output, "success")
 

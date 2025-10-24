@@ -10,8 +10,6 @@ from tensorlake.applications import (
     application,
     cls,
     function,
-    run_local_application,
-    run_remote_application,
 )
 from tensorlake.applications.remote.deploy import deploy_applications
 
@@ -144,8 +142,7 @@ def watch_pdf_updates(url: str, page_range: str, iteration: int) -> None:
 
 class TestPDFParseDataWorkflow(unittest.TestCase):
     def test_local_api_call(self):
-        request: Request = run_local_application(
-            parse_pdf_api,
+        request: Request = parse_pdf_api.remote(
             RequestPayload(url="http://example.com/sample.pdf", page_range="1-5"),
         )
         payload: ResponsePayload = request.output()
@@ -153,8 +150,7 @@ class TestPDFParseDataWorkflow(unittest.TestCase):
 
     def test_remote_api_call(self):
         deploy_applications(__file__)
-        request: Request = run_remote_application(
-            parse_pdf_api,
+        request: Request = parse_pdf_api.remote(
             RequestPayload(url="http://example.com/sample.pdf", page_range="1-5"),
         )
         payload: ResponsePayload = request.output()
