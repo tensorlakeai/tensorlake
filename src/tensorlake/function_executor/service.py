@@ -166,23 +166,13 @@ class Service(FunctionExecutorServicer):
                         f"Available functions: {list(code_zip_manifest.functions.keys())}"
                     )
                 )
-        except BaseException as e:
-            return self._handle_code_initialization_exception(
-                start_time, event_details, e, display_error=False
-            )
 
-        try:
             # Load the function module so that the function is available in the registry.
             function_zip_manifest: FunctionZIPManifest = code_zip_manifest.functions[
                 request.function.function_name
             ]
             importlib.import_module(function_zip_manifest.module_import_name)
-        except BaseException as e:
-            return self._handle_code_initialization_exception(
-                start_time, event_details, e, display_error=True
-            )
 
-        try:
             # Verify that the function exists in the registry now.
             if not has_function(request.function.function_name):
                 raise ValueError(
@@ -203,8 +193,16 @@ class Service(FunctionExecutorServicer):
                     self._function.function_config.class_name
                 )
         except BaseException as e:
-            return self._handle_code_initialization_exception(
-                start_time, event_details, e, display_error=False
+            self._logger.error(
+                "function executor service initialization failed",
+                reason="failed to load customer function",
+                duration_sec=f"{time.monotonic() - start_time:.3f}",
+                # Don't log the exception to FE log as it contains customer data
+            )
+            log_user_event_initialization_failed(event_details, error=e)
+            return InitializeResponse(
+                outcome_code=InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_FAILURE,
+                failure_reason=InitializationFailureReason.INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR,
             )
 
         available_cpu_count: int = int(self._function.function_config.cpu)
@@ -437,29 +435,6 @@ class Service(FunctionExecutorServicer):
             self._allocations.pop(allocation_id, None)
 
         return Empty()
-
-    def _handle_code_initialization_exception(
-        self,
-        start_time: float,
-        event_details: InitializationEventDetails,
-        error: BaseException,
-        display_error: bool = False,
-    ) -> InitializeResponse:
-        self._logger.error(
-            "function executor service initialization failed",
-            reason="failed to load customer function",
-            duration_sec=f"{time.monotonic() - start_time:.3f}",
-            # Don't log the exception to FE log as it contains customer data
-        )
-        log_user_event_initialization_failed(
-            event_details, error=error if display_error else None
-        )
-        # Print the exception to stderr so customer can see it there.
-        traceback.print_exception(error)
-        return InitializeResponse(
-            outcome_code=InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_FAILURE,
-            failure_reason=InitializationFailureReason.INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR,
-        )
 
 
 def _trimmed_allocation(alloc: Allocation) -> Allocation:

@@ -51,21 +51,21 @@ def log_user_event_initialization_finished(details: InitializationEventDetails) 
 
 
 def log_user_event_initialization_failed(
-    details: InitializationEventDetails, error: BaseException | None
+    details: InitializationEventDetails, error: BaseException
 ) -> None:
     # Using standardized tags, see https://github.com/tensorlakeai/indexify/blob/main/docs/tags.md.
-    event: dict[str, Any] = {
-        "level": "error",
-        "event": "function_executor_initialization_failed",
-        "message": "Function executor initialization failed",
-        "namespace": details.namespace,
-        "application": details.application_name,
-        "application_version": details.application_version,
-        "function": details.function_name,
-    }
-    if error:
-        event["error"] = traceback.format_exception(error)
-    print_cloud_event(event)
+    print_cloud_event(
+        {
+            "level": "error",
+            "event": "function_executor_initialization_failed",
+            "message": "Function executor initialization failed",
+            "namespace": details.namespace,
+            "application": details.application_name,
+            "application_version": details.application_version,
+            "function": details.function_name,
+            "error": traceback.format_exception(error),
+        }
+    )
 
 
 @dataclass
