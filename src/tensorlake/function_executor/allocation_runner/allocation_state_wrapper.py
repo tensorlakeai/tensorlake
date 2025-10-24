@@ -45,7 +45,7 @@ class AllocationStateWrapper:
         with self._allocation_state_update_lock:
             self._allocation_state.function_calls.append(
                 AllocationFunctionCall(
-                    execution_plan_updates=execution_plan_updates,
+                    updates=execution_plan_updates,
                     args_blob=args_blob,
                 )
             )
@@ -55,8 +55,7 @@ class AllocationStateWrapper:
     def delete_function_call(self, function_call_id: str) -> None:
         with self._allocation_state_update_lock:
             _remove_repeated_field_item(
-                lambda fc: fc.execution_plan_updates.root_function_call_id
-                == function_call_id,
+                lambda fc: fc.updates.root_function_call_id == function_call_id,
                 self._allocation_state.function_calls,
             )
             self._update_hash()

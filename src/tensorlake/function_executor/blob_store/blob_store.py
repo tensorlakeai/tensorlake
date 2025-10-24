@@ -190,7 +190,9 @@ class BLOBStore:
             uploaded_chunk_sizes.append(chunk_data_size)
 
         wait(write_chunk_futures, return_when=FIRST_EXCEPTION)
-        uploaded_blob: BLOB = BLOB()
+        uploaded_blob: BLOB = BLOB(
+            id=blob.id,
+        )
         for ix, future in enumerate(write_chunk_futures):
             if future.exception() is not None:
                 raise future.exception()

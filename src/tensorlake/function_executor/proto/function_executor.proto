@@ -184,7 +184,7 @@ message AllocationOutputBLOBRequest {
 
 message AllocationFunctionCall {
     // Call ID is the same as root_function_call_id in ExecutionPlanUpdates.
-    optional ExecutionPlanUpdates execution_plan_updates = 1;
+    optional ExecutionPlanUpdates updates = 1;
     // SerializedObjectInsideBLOB arguments from the execution
     // plan are stored inside this BLOB.
     optional BLOB args_blob = 2;

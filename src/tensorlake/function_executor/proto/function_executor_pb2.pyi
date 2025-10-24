@@ -340,14 +340,14 @@ class AllocationOutputBLOBRequest(_message.Message):
     ) -> None: ...
 
 class AllocationFunctionCall(_message.Message):
-    __slots__ = ("execution_plan_updates", "args_blob")
-    EXECUTION_PLAN_UPDATES_FIELD_NUMBER: _ClassVar[int]
+    __slots__ = ("updates", "args_blob")
+    UPDATES_FIELD_NUMBER: _ClassVar[int]
     ARGS_BLOB_FIELD_NUMBER: _ClassVar[int]
-    execution_plan_updates: ExecutionPlanUpdates
+    updates: ExecutionPlanUpdates
     args_blob: BLOB
     def __init__(
         self,
-        execution_plan_updates: _Optional[_Union[ExecutionPlanUpdates, _Mapping]] = ...,
+        updates: _Optional[_Union[ExecutionPlanUpdates, _Mapping]] = ...,
         args_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
     ) -> None: ...
 
