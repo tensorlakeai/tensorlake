@@ -28,7 +28,6 @@ def validate_new_allocation(allocation: Allocation):
         MessageValidator(allocation.inputs)
         .optional_serialized_objects_inside_blob("args")
         .optional_blobs("arg_blobs")
-        .required_blob("function_outputs_blob")
         .required_blob("request_error_blob")
     )
     if len(allocation.inputs.args) != len(allocation.inputs.arg_blobs):

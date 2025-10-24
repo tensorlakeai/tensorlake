@@ -369,8 +369,8 @@ service FunctionExecutor {
     rpc watch_allocation_state(WatchAllocationStateRequest) returns (stream AllocationState);
     // Deletes the allocation. The allocation must be finished before calling this method.
     rpc delete_allocation(DeleteAllocationRequest) returns (Empty);
-    // Delivers an update to an allocation.
-    rpc deliver_allocation_update(AllocationUpdate) returns (Empty);
+    // Send an update to an allocation.
+    rpc send_allocation_update(AllocationUpdate) returns (Empty);
     // Health check method to check if the FE is able to run allocations.
     // The FE should be initialized before calling this method.
     rpc check_health(HealthCheckRequest) returns (HealthCheckResponse);

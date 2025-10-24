@@ -3,25 +3,22 @@ import os
 import subprocess
 import tempfile
 import unittest
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterator, List
 
 import grpc
 
-from tensorlake.applications.metadata.value_node import ValueMetadata
+from tensorlake.applications.function.user_data_serializer import deserialize_value
+from tensorlake.applications.metadata import ValueMetadata, deserialize_metadata
 from tensorlake.applications.registry import get_functions
 from tensorlake.applications.remote.code.zip import zip_code
 from tensorlake.applications.user_data_serializer import (
     JSONUserDataSerializer,
 )
-from tensorlake.function_executor.handlers.run_function.value_node_metadata import (
-    ValueNodeMetadata,
-)
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     BLOB,
     Allocation,
     AllocationResult,
-    AwaitAllocationProgress,
-    AwaitAllocationRequest,
+    AllocationState,
     BLOBChunk,
     CreateAllocationRequest,
     DeleteAllocationRequest,
@@ -33,6 +30,7 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     SerializedObjectEncoding,
     SerializedObjectInsideBLOB,
     SerializedObjectManifest,
+    WatchAllocationStateRequest,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
@@ -146,48 +144,29 @@ def initialize(
 
 def run_allocation(
     stub: FunctionExecutorStub,
-    inputs: FunctionInputs,
-    timeout_sec: int | None = None,
-) -> AllocationResult:
-    allocation_id: str = "test-allocation"
-    stub.create_allocation(
-        CreateAllocationRequest(
-            allocation=Allocation(
-                request_id="123",
-                function_call_id="test-function-call",
-                allocation_id=allocation_id,
-                inputs=inputs,
-            ),
+    request: CreateAllocationRequest,
+) -> Iterator[AllocationState]:
+    stub.create_allocation(request)
+    return stub.watch_allocation_state(
+        WatchAllocationStateRequest(allocation_id=request.allocation.allocation_id)
+    )
+
+
+def delete_allocation(
+    stub: FunctionExecutorStub,
+    allocation_id: str,
+) -> None:
+    stub.delete_allocation(
+        DeleteAllocationRequest(
+            allocation_id=allocation_id,
         )
     )
-
-    await_allocation_stream_rpc = stub.await_allocation(
-        AwaitAllocationRequest(allocation_id=allocation_id), timeout=timeout_sec
-    )
-    result: AllocationResult | None = None
-    for progress in await_allocation_stream_rpc:
-        progress: AwaitAllocationProgress
-        if progress.WhichOneof("response") == "allocation_result":
-            result = progress.allocation_result
-            break
-
-    await_allocation_stream_rpc.cancel()
-    stub.delete_allocation(DeleteAllocationRequest(allocation_id=allocation_id))
-
-    if result is None:
-        # Check in case if stream finished by FE without allocation_result.
-        raise Exception("Allocation result was not received from the server.")
-
-    return result
 
 
 def application_function_inputs(payload: Any) -> FunctionInputs:
     user_serializer: JSONUserDataSerializer = JSONUserDataSerializer()
     serialized_payload: bytes = user_serializer.serialize(payload)
-    payload_blob: BLOB = create_tmp_blob(
-        chunks_count=1, chunk_size=len(serialized_payload)
-    )
-    write_tmp_blob_bytes(payload_blob, serialized_payload)
+    payload_blob: BLOB = write_new_application_payload_blob(serialized_payload)
 
     return FunctionInputs(
         args=[
@@ -203,10 +182,23 @@ def application_function_inputs(payload: Any) -> FunctionInputs:
             )
         ],
         arg_blobs=[payload_blob],
-        function_outputs_blob=create_tmp_blob(),
-        request_error_blob=create_tmp_blob(),
+        request_error_blob=create_request_error_blob(),
         function_call_metadata=b"",
     )
+
+
+def create_request_error_blob() -> BLOB:
+    return create_tmp_blob(id="request-error-blob")
+
+
+def write_new_application_payload_blob(serialized_payload: bytes) -> BLOB:
+    blob: BLOB = create_tmp_blob(
+        id="application-payload-blob",
+        chunks_count=1,
+        chunk_size=len(serialized_payload),
+    )
+    write_tmp_blob_bytes(blob, serialized_payload)
+    return blob
 
 
 def download_and_deserialize_so(
@@ -214,7 +206,7 @@ def download_and_deserialize_so(
     so: SerializedObjectInsideBLOB,
     so_blob: BLOB,
 ) -> Any:
-    serialized_node_metadata: bytes = read_tmp_blob_bytes(
+    serialized_value_metadata: bytes = read_tmp_blob_bytes(
         so_blob, so.offset, so.manifest.metadata_size
     )
     serialized_data: bytes = read_tmp_blob_bytes(
@@ -223,28 +215,28 @@ def download_and_deserialize_so(
         so.manifest.size - so.manifest.metadata_size,
     )
     test_case.assertEqual(
-        hashlib.sha256(serialized_node_metadata + serialized_data).hexdigest(),
+        hashlib.sha256(serialized_value_metadata + serialized_data).hexdigest(),
         so.manifest.sha256_hash,
     )
 
-    node_metadata: ValueNodeMetadata = ValueNodeMetadata.deserialize(
-        serialized_node_metadata
-    )
-    return ValueMetadata.deserialize(node_metadata.metadata).deserialize_value(
-        serialized_data
-    )
+    metadata: ValueMetadata = deserialize_metadata(serialized_value_metadata)
+    return deserialize_value(serialized_value=serialized_data, metadata=metadata)
 
 
 def read_so_metadata(
     test_case: unittest.TestCase, so: SerializedObjectInsideBLOB, so_blob: BLOB
-) -> ValueNodeMetadata:
-    serialized_node_metadata: bytes = read_tmp_blob_bytes(
+) -> ValueMetadata:
+    serialized_value_metadata: bytes = read_tmp_blob_bytes(
         so_blob, so.offset, so.manifest.metadata_size
     )
-    return ValueNodeMetadata.deserialize(serialized_node_metadata)
+    metadata: ValueMetadata = deserialize_metadata(serialized_value_metadata)
+    test_case.assertIsInstance(metadata, ValueMetadata)
+    return metadata
 
 
-def create_tmp_blob(chunks_count: int = 5, chunk_size: int = 1 * 1024 * 1024) -> BLOB:
+def create_tmp_blob(
+    id: str, chunks_count: int = 5, chunk_size: int = 1 * 1024 * 1024
+) -> BLOB:
     """Returns a temporary local file backed blob for writing."""
     with tempfile.NamedTemporaryFile(delete=False) as blob_file:
         # blob_file.write(b"0" * chunk_size)
@@ -257,7 +249,7 @@ def create_tmp_blob(chunks_count: int = 5, chunk_size: int = 1 * 1024 * 1024) ->
                     size=chunk_size,
                 )
             )
-        return BLOB(chunks=list(chunks))
+        return BLOB(id=id, chunks=list(chunks))
 
 
 def read_tmp_blob_bytes(blob: BLOB, offset: int, size: int) -> bytes:

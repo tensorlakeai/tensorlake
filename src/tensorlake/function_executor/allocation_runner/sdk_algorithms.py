@@ -21,6 +21,7 @@ from tensorlake.applications.interface.awaitables import (
     FunctionCallAwaitable,
     Future,
     ReduceOperationAwaitable,
+    request_scoped_id,
 )
 from tensorlake.applications.metadata import (
     CollectionItemMetadata,
@@ -60,6 +61,9 @@ def validate_user_object(
     if not isinstance(user_object, (Awaitable, Future)):
         return
 
+    # TODO: Allow passing Futures that are already running. This makes our implementation
+    # more complex because each running Future can be used as argument in multiple other
+    # trees of Awaitables.
     if isinstance(user_object, Future):
         raise ApplicationValidationError(
             f"Invalid argument: cannot run Future {repr(user_object)}, "
@@ -93,6 +97,9 @@ def validate_user_object(
         )
 
 
+# FIXME: We're modifying user's Awaitables here in place which is not ideal.
+# We might want to clone the Awaitables instead to avoid surprising the user.
+# Or create and AST intermediate representation of the Awaitable tree and work with it.
 def serialize_values_in_awaitable_tree(
     user_object: Awaitable | Any,
     value_serializer: UserDataSerializer,
@@ -107,7 +114,9 @@ def serialize_values_in_awaitable_tree(
     """
     # NB: This code needs to be in sync with LocalRunner where it's doing a similar thing.
     if not isinstance(user_object, Awaitable):
-        data, metadata = serialize_value(user_object, serializer=value_serializer)
+        data, metadata = serialize_value(
+            value=user_object, serializer=value_serializer, value_id=request_scoped_id()
+        )
         serialized_values[metadata.id] = SerializedValue(
             metadata=metadata,
             data=data,
@@ -495,7 +504,8 @@ def reconstruct_function_call_args(
     """Returns function call args and kwargs reconstructed from arg_values."""
     if function_call_metadata is None:
         # Application function call created by Server.
-        args: List[Any] = [arg_values["application_payload"]]
+        payload_arg: Value = arg_values["application_payload"]
+        args: List[Any] = [payload_arg.object]
         kwargs: Dict[str, Any] = {}
     else:
         # SDK-created function call.
@@ -529,7 +539,7 @@ def _reconstruct_sdk_function_call_args(
         args: List[Value] = list(arg_values.values())
         # Server provides accumulator first, item second
         args.sort(key=lambda arg: arg.input_ix)
-        return args, {}
+        return [arg.object for arg in args], {}
 
 
 def _reconstruct_function_arg_value(

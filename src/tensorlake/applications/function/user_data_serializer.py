@@ -29,14 +29,14 @@ def function_output_serializer(
 
 
 def serialize_value(
-    value: Any, serializer: UserDataSerializer
+    value: Any, serializer: UserDataSerializer, value_id: str
 ) -> tuple[bytes, ValueMetadata]:
     """Serializes the given value using the provided serializer.
 
-    The returned ValueMetadata has a fake id.
+    The returned ValueMetadata has the supplied value_id.
     """
     metadata: ValueMetadata = ValueMetadata(
-        id="fake_id",
+        id=value_id,
         cls=type(value),
         serializer_name=None,
         content_type=None,

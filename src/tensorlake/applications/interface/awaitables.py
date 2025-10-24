@@ -93,6 +93,11 @@ class Future:
     and provides access to its result.
     """
 
+    # Warning: a Future object cannot be copied by value because it'll result in
+    # multiple copies of the same Future object that go out of sync. Also we key
+    # all operations with Futures by their IDs and our internal data structures
+    # might become inconsistent because of this.
+
     def __init__(self, awaitable: Awaitable):
         self._awaitable = awaitable
         # Up to date result and exception, kept updated by runtime.
