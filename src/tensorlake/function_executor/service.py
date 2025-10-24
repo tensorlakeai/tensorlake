@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, Generator, Iterator, List
 
 import grpc
-from allocation_runner.contextvars import get_allocation_id_context_variable
 
 from tensorlake.applications import (
     RETURN_WHEN,
@@ -31,6 +30,7 @@ from tensorlake.applications.runtime_hooks import (
 )
 
 from .allocation_runner.allocation_runner import AllocationRunner
+from .allocation_runner.contextvars import get_allocation_id_context_variable
 from .blob_store.blob_store import BLOBStore
 from .health_check import HealthCheckHandler
 from .info import info_response_kv_args
@@ -309,7 +309,7 @@ class Service(FunctionExecutorServicer):
             if allocation_info.runner.finished:
                 break
 
-    def deliver_allocation_update(
+    def send_allocation_update(
         self, request: AllocationUpdate, context: grpc.ServicerContext
     ) -> Empty:
         # No need to lock self._allocation_infos because we're not blocking here so we

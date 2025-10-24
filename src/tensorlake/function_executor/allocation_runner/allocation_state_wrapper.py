@@ -1,5 +1,6 @@
 import hashlib
 import threading
+from typing import Any, Callable, Iterable
 
 from ..proto.function_executor_pb2 import (
     BLOB,
@@ -15,16 +16,18 @@ from ..proto.function_executor_pb2 import (
 
 class AllocationStateWrapper:
     def __init__(self) -> None:
+        self._allocation_state_update_lock: threading.Condition = threading.Condition()
         self._allocation_state: AllocationState = AllocationState(
             function_calls=[],
+            function_call_watchers=[],
+            output_blob_requests=[],
         )
-        self._allocation_state_update_lock: threading.Condition = threading.Condition()
         self._update_hash()
 
     def update_progress(self, current: float, total: float) -> None:
         with self._allocation_state_update_lock:
-            self._allocation_state.progress = AllocationProgress(
-                current=current, total=total
+            self._allocation_state.progress.CopyFrom(
+                AllocationProgress(current=current, total=total)
             )
             self._update_hash()
             self._allocation_state_update_lock.notify_all()
@@ -32,7 +35,7 @@ class AllocationStateWrapper:
     def set_result(self, result: AllocationResult) -> None:
         # This method is expected to be called only once.
         with self._allocation_state_update_lock:
-            self._allocation_state.result = result
+            self._allocation_state.result.CopyFrom(result)
             self._update_hash()
             self._allocation_state_update_lock.notify_all()
 
@@ -51,11 +54,11 @@ class AllocationStateWrapper:
 
     def delete_function_call(self, function_call_id: str) -> None:
         with self._allocation_state_update_lock:
-            self._allocation_state.function_calls[:] = [
-                fc
-                for fc in self._allocation_state.function_calls
-                if fc.execution_plan_updates.root_function_call_id != function_call_id
-            ]
+            _remove_repeated_field_item(
+                lambda fc: fc.execution_plan_updates.root_function_call_id
+                == function_call_id,
+                self._allocation_state.function_calls,
+            )
             self._update_hash()
             self._allocation_state_update_lock.notify_all()
 
@@ -71,11 +74,10 @@ class AllocationStateWrapper:
 
     def delete_function_call_watcher(self, function_call_id: str) -> None:
         with self._allocation_state_update_lock:
-            self._allocation_state.function_call_watchers[:] = [
-                watcher
-                for watcher in self._allocation_state.function_call_watchers
-                if watcher.function_call_id != function_call_id
-            ]
+            _remove_repeated_field_item(
+                lambda fcw: fcw.function_call_id == function_call_id,
+                self._allocation_state.function_call_watchers,
+            )
             self._update_hash()
             self._allocation_state_update_lock.notify_all()
 
@@ -92,29 +94,46 @@ class AllocationStateWrapper:
 
     def remove_output_blob_request(self, id: str) -> None:
         with self._allocation_state_update_lock:
-            self._allocation_state.output_blob_requests[:] = [
-                request
-                for request in self._allocation_state.output_blob_requests
-                if request.id != id
-            ]
+            _remove_repeated_field_item(
+                lambda req: req.id == id,
+                self._allocation_state.output_blob_requests,
+            )
             self._update_hash()
             self._allocation_state_update_lock.notify_all()
 
     def wait_for_update(self, last_seen_hash: str | None) -> AllocationState:
         """Returns copy of the current allocation state when it's updated."""
         with self._allocation_state_update_lock:
-            # No more state updates will happen if the result field is set.
-            # Return to avoid deadlock here.
-            if self._allocation_state.HasField("result"):
-                return AllocationState().CopyFrom(self._allocation_state)
-
             while True:
                 if last_seen_hash != self._allocation_state.sha256_hash:
-                    return AllocationState().CopyFrom(self._allocation_state)
+                    return self._copy_state_locked()
+                if self._allocation_state.HasField("result"):
+                    # No more state updates will happen if the result field is set.
+                    # Return to avoid deadlock in wait() below.
+                    return self._copy_state_locked()
                 self._allocation_state_update_lock.wait()
+
+    def _copy_state_locked(self) -> AllocationState:
+        allocation_state_copy = AllocationState()
+        allocation_state_copy.CopyFrom(self._allocation_state)
+        return allocation_state_copy
 
     def _update_hash(self) -> None:
         self._allocation_state.ClearField("sha256_hash")
         self._allocation_state.sha256_hash = hashlib.sha256(
             self._allocation_state.SerializeToString(deterministic=True)
         ).hexdigest()
+
+
+def _remove_repeated_field_item(
+    predicate: Callable[[Any], bool], repeated_field: Iterable[Any]
+) -> None:
+    """Removes the first item matching the predicate in the repeated proto field.
+
+    Raises ValueError if no item matches the predicate.
+    """
+    for index, item in enumerate(repeated_field):
+        if predicate(item):
+            del repeated_field[index]
+            return
+    raise ValueError("No item found matching the predicate.")

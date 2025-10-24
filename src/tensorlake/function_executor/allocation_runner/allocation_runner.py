@@ -240,19 +240,17 @@ class AllocationRunner:
         args_blob: BLOB = self._get_new_output_blob(
             size=sum(len(data) for data in blob_data)
         )
-        uploaded_serialized_objects, uploaded_args_blob = (
-            upload_serialized_objects_to_blob(
-                serialized_objects=serialized_objects,
-                blob_data=blob_data,
-                destination_blob=args_blob,
-                blob_store=self._blob_store,
-                logger=self._logger,
-            )
+        uploaded_args_blob: BLOB = upload_serialized_objects_to_blob(
+            serialized_objects=serialized_objects,
+            blob_data=blob_data,
+            destination_blob=args_blob,
+            blob_store=self._blob_store,
+            logger=self._logger,
         )
         awaitable_execution_plan_pb: ExecutionPlanUpdates
         awaitable_execution_plan_pb = awaitable_to_execution_plan_updates(
             awaitable=awaitable_with_serialized_values,
-            uploaded_serialized_objects=uploaded_serialized_objects,
+            uploaded_serialized_objects=serialized_objects,
             # Output serializer name override is only applicable to tail calls.
             output_serializer_name_override=None,
             function_ref=self._function_ref,
@@ -468,14 +466,14 @@ class AllocationRunner:
         try:
             log_user_event_allocations_started([self._allocation_event_details])
             result: AllocationResult = self._run_allocation()
-            self._allocation.result = result
+            self._allocation.result.CopyFrom(result)
             self._allocation_state.set_result(result)
         except BaseException as e:
             self._logger.error(
                 "allocation failed due to exception in function executor code",
                 exc_info=e,
             )
-            self._allocation.result = self._result_helper.internal_error()
+            self._allocation.result.CopyFrom(self._result_helper.internal_error())
             self._allocation_state.set_result(self._allocation.result)
         finally:
             log_user_event_allocations_finished([self._allocation_event_details])
@@ -581,14 +579,12 @@ class AllocationRunner:
         outputs_blob: BLOB = self._get_new_output_blob(
             size=sum(len(data) for data in blob_data)
         )
-        uploaded_serialized_objects, uploaded_outputs_blob = (
-            upload_serialized_objects_to_blob(
-                serialized_objects=serialized_objects,
-                blob_data=blob_data,
-                destination_blob=outputs_blob,
-                blob_store=self._blob_store,
-                logger=self._logger,
-            )
+        uploaded_outputs_blob: BLOB = upload_serialized_objects_to_blob(
+            serialized_objects=serialized_objects,
+            blob_data=blob_data,
+            destination_blob=outputs_blob,
+            blob_store=self._blob_store,
+            logger=self._logger,
         )
 
         output_pb: SerializedObjectInsideBLOB | ExecutionPlanUpdates
@@ -597,13 +593,13 @@ class AllocationRunner:
             if isinstance(output, Awaitable):
                 output_pb = awaitable_to_execution_plan_updates(
                     awaitable=output,
-                    uploaded_serialized_objects=uploaded_serialized_objects,
+                    uploaded_serialized_objects=serialized_objects,
                     output_serializer_name_override=output_serializer.name,
                     function_ref=self._function_ref,
                     logger=self._logger,
                 )
             else:
-                output_pb = uploaded_serialized_objects[output.metadata.id]
+                output_pb = serialized_objects[output.metadata.id]
         except BaseException as e:
             return self._result_helper.from_user_exception(e)
 

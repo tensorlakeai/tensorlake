@@ -123,7 +123,7 @@ class LocalRunner:
             # Serialize application payload the same way as in remote mode.
             input_serializer: UserDataSerializer = function_input_serializer(self._app)
             serialized_payload, payload_metadata = serialize_value(
-                self._app_payload, input_serializer
+                value=self._app_payload, serializer=input_serializer, value_id="fake_id"
             )
 
             payload: Any = deserialize_application_function_call_payload(
@@ -913,8 +913,9 @@ def _deserialize_blob_value(blob: BLOB) -> Any | File:
 def _value_to_blob(
     blob_id: str, value: Any, value_serializer: UserDataSerializer
 ) -> BLOB:
-    serialized_value, metadata = serialize_value(value, value_serializer)
-    metadata.id = blob_id
+    serialized_value, metadata = serialize_value(
+        value, value_serializer, value_id=blob_id
+    )
     return BLOB(
         data=serialized_value,
         metadata=metadata,

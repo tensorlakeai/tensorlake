@@ -577,7 +577,6 @@ class DeleteAllocationRequest(_message.Message):
 
 class AllocationFunctionCallResult(_message.Message):
     __slots__ = (
-        "caller_allocation_id",
         "function_call_id",
         "outcome_code",
         "value_output",
@@ -585,14 +584,12 @@ class AllocationFunctionCallResult(_message.Message):
         "request_error_output",
         "request_error_blob",
     )
-    CALLER_ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_CALL_ID_FIELD_NUMBER: _ClassVar[int]
     OUTCOME_CODE_FIELD_NUMBER: _ClassVar[int]
     VALUE_OUTPUT_FIELD_NUMBER: _ClassVar[int]
     VALUE_BLOB_FIELD_NUMBER: _ClassVar[int]
     REQUEST_ERROR_OUTPUT_FIELD_NUMBER: _ClassVar[int]
     REQUEST_ERROR_BLOB_FIELD_NUMBER: _ClassVar[int]
-    caller_allocation_id: str
     function_call_id: str
     outcome_code: AllocationOutcomeCode
     value_output: SerializedObjectInsideBLOB
@@ -601,7 +598,6 @@ class AllocationFunctionCallResult(_message.Message):
     request_error_blob: BLOB
     def __init__(
         self,
-        caller_allocation_id: _Optional[str] = ...,
         function_call_id: _Optional[str] = ...,
         outcome_code: _Optional[_Union[AllocationOutcomeCode, str]] = ...,
         value_output: _Optional[_Union[SerializedObjectInsideBLOB, _Mapping]] = ...,

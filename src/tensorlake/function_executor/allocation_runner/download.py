@@ -85,7 +85,9 @@ def _download_serialized_value(
         logger=logger,
     )
 
-    so_hash: str = _sha256_hexdigest(serialized_metadata, serialized_data)
+    so_hash: str = _sha256_hexdigest(
+        b"" if serialized_metadata is None else serialized_metadata, serialized_data
+    )
     if so_hash != so.manifest.sha256_hash:
         logger.error(
             "serialized object data hash mismatch",

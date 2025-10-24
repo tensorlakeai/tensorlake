@@ -33,6 +33,7 @@ class ResultHelper:
 
     def internal_error(self) -> AllocationResult:
         """Creates an AllocationResult representing an internal error in Function Executor code."""
+        # The error is logged outside of this method.
         return AllocationResult(
             outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,
             failure_reason=AllocationFailureReason.ALLOCATION_FAILURE_REASON_INTERNAL_ERROR,
@@ -43,14 +44,15 @@ class ResultHelper:
         """Creates an AllocationResult representing a user exception raised during function execution."""
         try:
             # This is user code.
-            # Give the full traceback to the user for debugging.
-            traceback.print_exception(exception)
-        except BaseException:
-            self._logger.error("Failed to print user exception traceback")
+            # Give the full traceback to the user for debugging. Flush to make sure user sees it.
+            print("".join(traceback.format_exception(exception)), flush=True)
+        except BaseException as e:
+            print("Failed to print exception traceback: ", str(e), flush=True)
+            print("Original exception: ", str(exception), flush=True)
 
         # This is FE internal code.
         # Don't log the user exception as it might contain customer data.
-        self._logger.error("User function raised an exception")
+        self._logger.info("function raised an exception")
 
         return AllocationResult(
             outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,
@@ -67,14 +69,15 @@ class ResultHelper:
         """Creates an AllocationResult representing a request error."""
         try:
             # This is user code.
-            # Give the full traceback to the user for debugging.
-            traceback.print_exception(request_error)
-        except BaseException:
-            self._logger.error("Failed to print request error traceback")
+            # Give the full traceback to the user for debugging. Flush to make sure user sees it.
+            print("".join(traceback.format_exception(request_error)), flush=True)
+        except BaseException as e:
+            print("Failed to print request error traceback: ", str(e))
+            print("Original request error: ", str(request_error))
 
         # This is FE internal code.
         # Don't log the user exception as it might contain customer data.
-        self._logger.error("User function raised a request error")
+        self._logger.info("function raised a request error")
 
         return AllocationResult(
             outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,

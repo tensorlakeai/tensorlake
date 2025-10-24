@@ -34,7 +34,9 @@ class RemoteRunner:
 
         serialized_payload: bytes
         metadata: ValueMetadata
-        serialized_payload, metadata = serialize_value(self._payload, input_serializer)
+        serialized_payload, metadata = serialize_value(
+            value=self._payload, serializer=input_serializer, value_id="fake_id"
+        )
         if metadata.content_type is None:
             metadata.content_type = input_serializer.content_type
 
