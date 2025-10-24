@@ -7,7 +7,9 @@
 # The events have strict structured json format because they are used for
 # automatic Function Executor log stream processing in the future.
 # The event attribute names are human readable because they are visible to users.
+import traceback
 from dataclasses import dataclass
+from typing import Any
 
 from tensorlake.function_executor.cloud_events import print_cloud_event
 
@@ -34,19 +36,34 @@ def log_user_event_initialization_started(details: InitializationEventDetails) -
     )
 
 
-def log_user_event_initialization_finished(
-    details: InitializationEventDetails, success: bool
-) -> None:
+def log_user_event_initialization_finished(details: InitializationEventDetails) -> None:
     # Using standardized tags, see https://github.com/tensorlakeai/indexify/blob/main/docs/tags.md.
     print_cloud_event(
         {
             "event": "function_executor_initialization_finished",
             "message": "Function executor initialization completed",
-            "success": success,
             "namespace": details.namespace,
             "application": details.application_name,
             "application_version": details.application_version,
             "function": details.function_name,
+        }
+    )
+
+
+def log_user_event_initialization_failed(
+    details: InitializationEventDetails, error: BaseException
+) -> None:
+    # Using standardized tags, see https://github.com/tensorlakeai/indexify/blob/main/docs/tags.md.
+    print_cloud_event(
+        {
+            "level": "error",
+            "event": "function_executor_initialization_failed",
+            "message": "Function executor initialization failed",
+            "namespace": details.namespace,
+            "application": details.application_name,
+            "application_version": details.application_version,
+            "function": details.function_name,
+            "error": traceback.format_exception(error),
         }
     )
 
