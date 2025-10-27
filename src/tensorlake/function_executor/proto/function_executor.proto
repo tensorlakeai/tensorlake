@@ -191,8 +191,9 @@ message AllocationFunctionCall {
 }
 
 message AllocationFunctionCallWatcher {
+    optional string watcher_id = 1;
     // Only root_function_call_id of ExecutionPlanUpdates can be watched.
-    optional string function_call_id = 1;
+    optional string function_call_id = 2;
 }
 
 message AllocationState {

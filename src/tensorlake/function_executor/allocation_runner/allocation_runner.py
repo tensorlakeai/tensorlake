@@ -348,8 +348,9 @@ class AllocationRunner:
             return
 
         function_call_id: str = future_info.user_future.awaitable.id
+        function_call_watcher_id: str = request_scoped_id()
         self._allocation_state.add_function_call_watcher(
-            function_call_id=function_call_id
+            watcher_id=function_call_watcher_id, function_call_id=function_call_id
         )
 
         result_wait_timeout: float | None = (
@@ -397,7 +398,7 @@ class AllocationRunner:
         # else timeout, no result or error
 
         self._allocation_state.delete_function_call_watcher(
-            function_call_id=function_call_id
+            watcher_id=function_call_watcher_id
         )
         self._allocation_state.delete_function_call(function_call_id=function_call_id)
         self._logger.info(

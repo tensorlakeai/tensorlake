@@ -352,10 +352,14 @@ class AllocationFunctionCall(_message.Message):
     ) -> None: ...
 
 class AllocationFunctionCallWatcher(_message.Message):
-    __slots__ = ("function_call_id",)
+    __slots__ = ("watcher_id", "function_call_id")
+    WATCHER_ID_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_CALL_ID_FIELD_NUMBER: _ClassVar[int]
+    watcher_id: str
     function_call_id: str
-    def __init__(self, function_call_id: _Optional[str] = ...) -> None: ...
+    def __init__(
+        self, watcher_id: _Optional[str] = ..., function_call_id: _Optional[str] = ...
+    ) -> None: ...
 
 class AllocationState(_message.Message):
     __slots__ = (

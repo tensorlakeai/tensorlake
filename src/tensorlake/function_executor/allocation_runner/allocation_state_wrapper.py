@@ -61,20 +61,21 @@ class AllocationStateWrapper:
             self._update_hash()
             self._allocation_state_update_lock.notify_all()
 
-    def add_function_call_watcher(self, function_call_id: str) -> None:
+    def add_function_call_watcher(self, watcher_id: str, function_call_id: str) -> None:
         with self._allocation_state_update_lock:
             self._allocation_state.function_call_watchers.append(
                 AllocationFunctionCallWatcher(
+                    watcher_id=watcher_id,
                     function_call_id=function_call_id,
                 )
             )
             self._update_hash()
             self._allocation_state_update_lock.notify_all()
 
-    def delete_function_call_watcher(self, function_call_id: str) -> None:
+    def delete_function_call_watcher(self, watcher_id: str) -> None:
         with self._allocation_state_update_lock:
             _remove_repeated_field_item(
-                lambda fcw: fcw.function_call_id == function_call_id,
+                lambda fcw: fcw.watcher_id == watcher_id,
                 self._allocation_state.function_call_watchers,
             )
             self._update_hash()

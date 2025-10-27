@@ -84,6 +84,12 @@ _LOCAL_REQUEST_ID = "local-request"
 _SLEEP_POLL_INTERVAL_SECONDS = 0.002
 
 
+# TODO: Implement Exception propagation from called function to its caller.
+# Only mark request as failed with an exception if Application function raised/didn't
+# catch the exception or if application function finished successfully but one of non-blocking
+# function calls failed later.
+
+
 class LocalRunner:
     def __init__(self, app: Function, app_payload: Any):
         self._app: Function = app
