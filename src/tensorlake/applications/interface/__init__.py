@@ -5,7 +5,7 @@ from .awaitables import RETURN_WHEN, Awaitable, Future
 from .decorators import application, cls, function
 from .exceptions import (
     ApplicationValidationError,
-    FutureError,
+    FunctionCallFailure,
     RemoteAPIError,
     RequestError,
     RequestFailureException,
@@ -22,7 +22,6 @@ from .request_context import (
 )
 from .retries import Retries
 from .run import (
-    run_application,
     run_local_application,
     run_remote_application,
 )
@@ -30,7 +29,6 @@ from .run import (
 __all__ = [
     "application",
     "cls",
-    "run_application",
     "run_local_application",
     "run_remote_application",
     "function",
@@ -39,7 +37,7 @@ __all__ = [
     "File",
     "Function",
     "Future",
-    "FutureError",
+    "FunctionCallFailure",
     "Image",
     "RemoteAPIError",
     "Request",

@@ -11,9 +11,9 @@ from tensorlake.applications import (
     RETURN_WHEN,
     ApplicationValidationError,
     Function,
+    FunctionCallFailure,
     FunctionProgress,
     Future,
-    FutureError,
     RequestError,
 )
 from tensorlake.applications.function.user_data_serializer import (
@@ -376,12 +376,11 @@ class AllocationRunner:
                     serialized_output.data, serialized_output.metadata
                 )
                 future.set_result(output)
-            else:
-                if result.request_error_output is None:
-                    future.set_exception(
-                        FutureError(f"Function call {repr(future.awaitable)} failed")
-                    )
-                else:
+            elif (
+                result.outcome_code
+                == AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE
+            ):
+                if result.HasField("request_error_output"):
                     serialized_request_error: SerializedValue = (
                         download_serialized_objects(
                             serialized_objects=[result.request_error_output],
@@ -395,6 +394,21 @@ class AllocationRunner:
                             message=serialized_request_error.data.decode("utf-8")
                         )
                     )
+                else:
+                    # FIXME: Function call arguments can be huge, we should limit the amount of characters here.
+                    future.set_exception(
+                        FunctionCallFailure(
+                            f"Function call {repr(future.awaitable)} failed"
+                        )
+                    )
+            else:
+                # Unknown outcome code.
+                # FIXME: Function call arguments can be huge, we should limit the amount of characters here.
+                future.set_exception(
+                    FunctionCallFailure(
+                        f"Function call {repr(future.awaitable)} failed"
+                    )
+                )
         # else timeout, no result or error
 
         self._allocation_state.delete_function_call_watcher(

@@ -27,6 +27,7 @@ def deploy_applications(
     `load_source_dir_modules` indicates whether to load the .py file so all applications from it get added to the registry.
                                Should be set to True when called from CLI, False when called programmatically from test code
                                because applications in test code are already loaded into registry.
+    `api_client` is an optional APIClient to use for deployment. If not supplied, a new client will be created from environment.
     """
     # TODO: Validate the graph.
 
@@ -47,8 +48,8 @@ def deploy_applications(
     )
 
     # Use provided API client or create a new one from environment
-    should_close_client = api_client is None
-    client = api_client if api_client is not None else APIClient()
+    should_close_client: bool = api_client is None
+    client: APIClient = api_client if api_client is not None else APIClient()
 
     try:
         for application in filter_applications(functions):
@@ -63,15 +64,4 @@ def deploy_applications(
     finally:
         # Only close the client if we created it (not if it was provided)
         if should_close_client:
-            client._close()
-
-
-# FIXME/TODO.
-# Temporary stub implementation to make tests pass while remote deployment is being reimplemented.
-def deploy_applications(
-    applications_file_path: str,
-    upgrade_running_requests: bool = True,
-    load_source_dir_modules: bool = False,
-    api_client: APIClient | None = None,
-) -> None:
-    pass
+            client.close()

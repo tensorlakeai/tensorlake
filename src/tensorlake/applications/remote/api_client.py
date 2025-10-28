@@ -160,6 +160,9 @@ class APIClient:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
+    def close(self):
         self._client.close()
 
     def _request(self, method: str, **kwargs) -> httpx.Response:
@@ -218,15 +221,6 @@ class APIClient:
     def _delete(self, endpoint: str, **kwargs) -> httpx.Response:
         self._add_api_key(kwargs)
         return self._request("DELETE", url=f"{self._api_url}/{endpoint}", **kwargs)
-
-    def _close(self):
-        self._client.close()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self._close()
 
     def upsert_application(
         self,
