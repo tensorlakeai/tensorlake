@@ -36,9 +36,6 @@ class ApplicationListItem(BaseModel):
     created_at: int | None = None
 
 
-logger = logging.getLogger("tensorlake")
-
-
 _API_NAMESPACE_FROM_ENV: str = os.getenv("INDEXIFY_NAMESPACE", "default")
 _API_URL_FROM_ENV: str = os.getenv("TENSORLAKE_API_URL", "https://api.tensorlake.ai")
 _API_KEY_FROM_ENV: str = os.getenv("TENSORLAKE_API_KEY")
@@ -141,11 +138,11 @@ def log_retries(e: BaseException, sleep_time: float, retries: int):
 class APIClient:
     def __init__(
         self,
-        namespace: str = _API_NAMESPACE_FROM_ENV,
         api_url: str = _API_URL_FROM_ENV,
         api_key: str | None = _API_KEY_FROM_ENV,
         organization_id: str | None = None,
         project_id: str | None = None,
+        namespace: str = _API_NAMESPACE_FROM_ENV,
         event_hooks: dict[str, list[EventHook]] | None = None,
     ):
         self._client: httpx.Client = httpx.Client(event_hooks=event_hooks)
@@ -171,12 +168,6 @@ class APIClient:
             # This is only correct for when we're waiting for application request completion.
             request = self._client.build_request(method, timeout=None, **kwargs)
             response = self._client.send(request)
-            logger.debug(
-                "Indexify: %r %r => %r",
-                request,
-                kwargs.get("data", {}),
-                response,
-            )
             status_code = response.status_code
             if status_code >= 400:
                 raise RemoteAPIError(status_code=status_code, message=response.text)
@@ -281,7 +272,7 @@ class APIClient:
                 "Content-Type": payload_content_type,
                 "Accept": "application/json",
             },
-            "data": payload,
+            "content": payload,
         }
         response = self._post(
             f"v1/namespaces/{self._namespace}/applications/{application_name}",

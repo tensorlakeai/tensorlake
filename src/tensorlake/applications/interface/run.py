@@ -2,6 +2,7 @@ from typing import Any
 
 from ..local.runner import LocalRunner
 from ..registry import get_function
+from ..remote.api_client_context_manager import APIClient
 from ..remote.runner import RemoteRunner
 from .function import Function
 from .request import Request
@@ -30,4 +31,16 @@ def run_remote_application(application: Function | str, payload: Any) -> Request
     )
 
     # We can't get Function object here because the user's client call might not load the function definitions.
-    return RemoteRunner(application_name=app_name, payload=payload).run()
+    return RemoteRunner(
+        application_name=app_name,
+        payload=payload,
+        api_client=_remote_api_client_singleton,
+    ).run()
+
+
+import atexit
+
+# Use a singleton API client for all remote application runs because we don't want to require users to manage API clients
+# or call close on every RemoteRunner or RemoteRequest.
+_remote_api_client_singleton: APIClient = APIClient()
+atexit.register(_remote_api_client_singleton.close)

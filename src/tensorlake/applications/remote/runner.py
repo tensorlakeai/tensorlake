@@ -15,10 +15,11 @@ class RemoteRunner:
         self,
         application_name: str,
         payload: Any,
+        api_client: APIClient,
     ):
         self._application_name: str = application_name
         self._payload: Any = payload
-        self._client: APIClient = APIClient()
+        self._client: APIClient = api_client
 
     def run(self) -> Request:
         if not has_app_manifest(self._application_name):
