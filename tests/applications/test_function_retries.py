@@ -9,8 +9,8 @@ from tensorlake.applications import (
     Retries,
     application,
     function,
-    run_application,
 )
+from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
 
 function_with_retry_policy_call_number = 0

@@ -306,7 +306,10 @@ class Service(FunctionExecutorServicer):
             )
             last_seen_hash = allocation_state.sha256_hash
             yield allocation_state
-            if allocation_info.runner.finished:
+            # NB: We have to check allocation_state.result here instead of
+            # allocation_info.runner.finished because the runner may have finished
+            # but there may still be pending allocation state update with the result to send.
+            if allocation_state.HasField("result"):
                 break
 
     def send_allocation_update(

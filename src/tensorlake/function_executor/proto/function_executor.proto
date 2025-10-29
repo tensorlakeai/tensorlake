@@ -187,6 +187,7 @@ message AllocationFunctionCall {
     optional ExecutionPlanUpdates updates = 1;
     // SerializedObjectInsideBLOB arguments from the execution
     // plan are stored inside this BLOB.
+    // Optional, not set if no function arguments in updates.
     optional BLOB args_blob = 2;
 }
 

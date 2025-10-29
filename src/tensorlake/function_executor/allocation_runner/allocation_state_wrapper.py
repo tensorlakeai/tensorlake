@@ -40,7 +40,7 @@ class AllocationStateWrapper:
             self._allocation_state_update_lock.notify_all()
 
     def add_function_call(
-        self, execution_plan_updates: ExecutionPlanUpdates, args_blob: BLOB
+        self, execution_plan_updates: ExecutionPlanUpdates, args_blob: BLOB | None
     ) -> None:
         with self._allocation_state_update_lock:
             self._allocation_state.function_calls.append(

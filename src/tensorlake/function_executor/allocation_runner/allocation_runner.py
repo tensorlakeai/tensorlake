@@ -185,6 +185,39 @@ class AllocationRunner:
     def finished(self) -> bool:
         return self._finished
 
+    def deliver_allocation_update(self, update: AllocationUpdate) -> None:
+        # No need for any locks because we never block here so we hold GIL non stop.
+        if update.HasField("function_call_result"):
+            function_call_id: str = update.function_call_result.function_call_id
+            if function_call_id not in self._user_futures:
+                self._logger.error(
+                    "received function call result for unknown future",
+                    function_call_id=function_call_id,
+                )
+                return
+            future_info: _UserFutureInfo = self._user_futures[function_call_id]
+            future_info.result = update.function_call_result
+            future_info.result_available.set()
+        elif update.HasField("output_blob"):
+            blob_id: str = update.output_blob.id
+            if blob_id not in self._output_blob_requests:
+                self._logger.error(
+                    "received output blob update for unknown blob request",
+                    blob_id=blob_id,
+                )
+                return
+
+            blob_request_info: _OutputBLOBRequestInfo = self._output_blob_requests[
+                blob_id
+            ]
+            blob_request_info.blob = update.output_blob
+            blob_request_info.blob_available.set()
+        else:
+            self._logger.error(
+                "received empty allocation update",
+                update=str(update),
+            )
+
     def run_futures_runtime_hook(
         self, futures: List[Future], start_delay: float | None
     ) -> None:
@@ -225,55 +258,6 @@ class AllocationRunner:
                 self._run_user_future(future, start_delay)
 
             self._user_futures[future.awaitable.id] = future_info
-
-    def _run_user_future(self, future: Future, start_delay: float | None) -> None:
-        self._logger.info(
-            "starting child future",
-            child_future_id=future.awaitable.id,
-        )
-        serialized_values: Dict[str, SerializedValue] = {}
-        awaitable_with_serialized_values: Awaitable = (
-            serialize_values_in_awaitable_tree(
-                user_object=future.awaitable,
-                # value serializer is not going to be used because we're serializing a call tree here, not a value.
-                value_serializer=PickleUserDataSerializer(),
-                serialized_values=serialized_values,
-            )
-        )
-        serialized_objects, blob_data = serialized_values_to_serialized_objects(
-            serialized_values=serialized_values
-        )
-        args_blob: BLOB = self._get_new_output_blob(
-            size=sum(len(data) for data in blob_data)
-        )
-        uploaded_args_blob: BLOB = upload_serialized_objects_to_blob(
-            serialized_objects=serialized_objects,
-            blob_data=blob_data,
-            destination_blob=args_blob,
-            blob_store=self._blob_store,
-            logger=self._logger,
-        )
-        awaitable_execution_plan_pb: ExecutionPlanUpdates
-        awaitable_execution_plan_pb = awaitable_to_execution_plan_updates(
-            awaitable=awaitable_with_serialized_values,
-            uploaded_serialized_objects=serialized_objects,
-            # Output serializer name override is only applicable to tail calls.
-            output_serializer_name_override=None,
-            function_ref=self._function_ref,
-            logger=self._logger,
-        )
-        if start_delay is not None:
-            start_at: Timestamp = Timestamp()
-            start_at.FromDatetime(
-                datetime.datetime.now(datetime.timezone.utc)
-                + datetime.timedelta(seconds=start_delay)
-            )
-            awaitable_execution_plan_pb.start_at.CopyFrom(start_at)
-
-        self._allocation_state.add_function_call(
-            execution_plan_updates=awaitable_execution_plan_pb,
-            args_blob=uploaded_args_blob,
-        )
 
     def wait_futures_runtime_hook(
         self, futures: List[Future], timeout: float | None, return_when: RETURN_WHEN
@@ -448,6 +432,61 @@ class AllocationRunner:
         else:
             future.set_exception(exception)
 
+    def _run_user_future(self, future: Future, start_delay: float | None) -> None:
+        self._logger.info(
+            "starting child future",
+            child_future_id=future.awaitable.id,
+        )
+        serialized_values: Dict[str, SerializedValue] = {}
+        awaitable_with_serialized_values: Awaitable = (
+            serialize_values_in_awaitable_tree(
+                user_object=future.awaitable,
+                # value serializer is not going to be used because we're serializing a call tree here, not a value.
+                value_serializer=PickleUserDataSerializer(),
+                serialized_values=serialized_values,
+            )
+        )
+
+        serialized_objects: Dict[str, SerializedObjectInsideBLOB] = {}
+        uploaded_args_blob: BLOB | None = None
+        # Only request args blob and upload to it if there are any actual function arguments in the call tree.
+        if len(serialized_values) > 0:
+            serialized_objects, blob_data = serialized_values_to_serialized_objects(
+                serialized_values=serialized_values
+            )
+            args_blob: BLOB | None = self._get_new_output_blob(
+                size=sum(len(data) for data in blob_data)
+            )
+            uploaded_args_blob = upload_serialized_objects_to_blob(
+                serialized_objects=serialized_objects,
+                blob_data=blob_data,
+                destination_blob=args_blob,
+                blob_store=self._blob_store,
+                logger=self._logger,
+            )
+
+        awaitable_execution_plan_pb: ExecutionPlanUpdates
+        awaitable_execution_plan_pb = awaitable_to_execution_plan_updates(
+            awaitable=awaitable_with_serialized_values,
+            uploaded_serialized_objects=serialized_objects,
+            # Output serializer name override is only applicable to tail calls.
+            output_serializer_name_override=None,
+            function_ref=self._function_ref,
+            logger=self._logger,
+        )
+        if start_delay is not None:
+            start_at: Timestamp = Timestamp()
+            start_at.FromDatetime(
+                datetime.datetime.now(datetime.timezone.utc)
+                + datetime.timedelta(seconds=start_delay)
+            )
+            awaitable_execution_plan_pb.start_at.CopyFrom(start_at)
+
+        self._allocation_state.add_function_call(
+            execution_plan_updates=awaitable_execution_plan_pb,
+            args_blob=uploaded_args_blob,
+        )
+
     def _get_new_output_blob(self, size: int) -> BLOB:
         """Returns new BLOB to upload function outputs to."""
         blob_id: str = request_scoped_id()
@@ -462,39 +501,6 @@ class AllocationRunner:
         self._allocation_state.remove_output_blob_request(id=blob_id)
         del self._output_blob_requests[blob_id]
         return blob_request_info.blob
-
-    def deliver_allocation_update(self, update: AllocationUpdate) -> None:
-        # No need for any locks because we never block here so we hold GIL non stop.
-        if update.HasField("function_call_result"):
-            function_call_id: str = update.function_call_result.function_call_id
-            if function_call_id not in self._user_futures:
-                self._logger.error(
-                    "received function call result for unknown future",
-                    function_call_id=function_call_id,
-                )
-                return
-            future_info: _UserFutureInfo = self._user_futures[function_call_id]
-            future_info.result = update.function_call_result
-            future_info.result_available.set()
-        elif update.HasField("output_blob"):
-            blob_id: str = update.output_blob.id
-            if blob_id not in self._output_blob_requests:
-                self._logger.error(
-                    "received output blob update for unknown blob request",
-                    blob_id=blob_id,
-                )
-                return
-
-            blob_request_info: _OutputBLOBRequestInfo = self._output_blob_requests[
-                blob_id
-            ]
-            blob_request_info.blob = update.output_blob
-            blob_request_info.blob_available.set()
-        else:
-            self._logger.error(
-                "received empty allocation update",
-                update=str(update),
-            )
 
     def _run_allocation_thread(self) -> None:
         try:
@@ -607,19 +613,23 @@ class AllocationRunner:
             return self._result_helper.from_user_exception(e)
 
         # This is internal FE code.
-        serialized_objects, blob_data = serialized_values_to_serialized_objects(
-            serialized_values=serialized_values
-        )
-        outputs_blob: BLOB = self._get_new_output_blob(
-            size=sum(len(data) for data in blob_data)
-        )
-        uploaded_outputs_blob: BLOB = upload_serialized_objects_to_blob(
-            serialized_objects=serialized_objects,
-            blob_data=blob_data,
-            destination_blob=outputs_blob,
-            blob_store=self._blob_store,
-            logger=self._logger,
-        )
+        serialized_objects: Dict[str, SerializedObjectInsideBLOB] = {}
+        uploaded_outputs_blob: BLOB | None = None
+        # Only request output blob and upload to it if there are any actual function arguments in the call tree.
+        if len(serialized_values) > 0:
+            serialized_objects, blob_data = serialized_values_to_serialized_objects(
+                serialized_values=serialized_values
+            )
+            outputs_blob: BLOB = self._get_new_output_blob(
+                size=sum(len(data) for data in blob_data)
+            )
+            uploaded_outputs_blob = upload_serialized_objects_to_blob(
+                serialized_objects=serialized_objects,
+                blob_data=blob_data,
+                destination_blob=outputs_blob,
+                blob_store=self._blob_store,
+                logger=self._logger,
+            )
 
         output_pb: SerializedObjectInsideBLOB | ExecutionPlanUpdates
         # This is user code.
