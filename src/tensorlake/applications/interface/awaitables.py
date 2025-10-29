@@ -386,7 +386,7 @@ def make_reduce_operation_awaitable(
     function_name: str,
     items: List[Any | Awaitable] | AwaitableList,
     initial: Any | Awaitable | _InitialMissingType,
-) -> ReduceOperationAwaitable:
+) -> ReduceOperationAwaitable | Awaitable | Any:
     inputs: List[Any | Awaitable] = None
     if isinstance(items, AwaitableList):
         inputs = list(items.items)
@@ -399,11 +399,16 @@ def make_reduce_operation_awaitable(
     if initial is not _InitialMissing:
         inputs.insert(0, initial)
 
-    return ReduceOperationAwaitable(
-        id=request_scoped_id(),
-        function_name=function_name,
-        inputs=inputs,
-    )
+    # Squash reduce operation into a single Awaitable if it's only one thing
+    # in collection. Server requires at least two items to perform reduce.
+    if len(inputs) == 1:
+        return inputs[0]
+    else:
+        return ReduceOperationAwaitable(
+            id=request_scoped_id(),
+            function_name=function_name,
+            inputs=inputs,
+        )
 
 
 class ReduceOperationFuture(Future):

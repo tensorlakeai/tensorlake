@@ -9,9 +9,9 @@ from tensorlake.applications import (
     RequestFailureException,
     application,
     function,
-    run_application,
 )
 from tensorlake.applications.remote.deploy import deploy_applications
+from tensorlake.applications.applications import run_application
 
 
 class AccumulatedState(BaseModel):
