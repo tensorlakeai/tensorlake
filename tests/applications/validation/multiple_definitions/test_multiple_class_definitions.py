@@ -8,8 +8,8 @@ from tensorlake.applications import (
     application,
     cls,
     function,
-    run_application,
 )
+from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
 
 

@@ -4,13 +4,13 @@ from typing import List
 import parameterized
 
 from tensorlake.applications import (
-    ApplicationValidationError,
     Future,
     Request,
+    RequestFailureException,
     application,
     function,
-    run_application,
 )
+from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
 
 
@@ -71,7 +71,7 @@ class TestRecursiveMaps(unittest.TestCase):
         )
         # Map tail calls are not working by design because Server can't convert individual
         # resolved items into a python list.
-        self.assertRaises(ApplicationValidationError, request.output)
+        self.assertRaises(RequestFailureException, request.output)
 
 
 if __name__ == "__main__":

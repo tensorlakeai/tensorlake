@@ -34,6 +34,7 @@ from ..interface.awaitables import (
 )
 from ..interface.exceptions import (
     ApplicationValidationError,
+    FunctionCallFailure,
     RequestFailureException,
     TensorlakeException,
 )
@@ -101,7 +102,7 @@ class LocalRunner:
         self._future_runs: Dict[str, LocalFutureRun] = {}
         # Exception that caused the request to fail.
         # None when request finished successfully.
-        self._request_exception: TensorlakeException | None = None
+        self._request_exception: RequestFailureException | None = None
         self._request_context: RequestContext = RequestContextBase(
             request_id=_LOCAL_REQUEST_ID,
             state=LocalRequestState(),
@@ -159,6 +160,7 @@ class LocalRunner:
 
             if not self._blob_store.has(app_function_call_awaitable.id):
                 # FIXME: This should not happen, it means that we didn't set self._request_exception.
+                # But this actually happens.
                 return LocalRequest(
                     id=_LOCAL_REQUEST_ID,
                     output=None,
@@ -306,10 +308,6 @@ class LocalRunner:
             # ~_SLEEP_POLL_INTERVAL_SECONDS at most. This keeps our timers accurate enough.
             self._control_loop_wait_and_process_future_run_result()
             if self._request_exception is not None:
-                # The request failed. Wait until future runs finish and then exit.
-                # We have to wait because otherwise future runs will keep printing
-                # arbitrary logs to stdout/stderr and hold resources after request
-                # should be finished running.
                 print_exception(self._request_exception)
                 break
 
@@ -413,7 +411,7 @@ class LocalRunner:
                 )
                 self._blob_store.put(blob)
                 self._handle_future_run_final_output(
-                    future_run=future_run, blob=blob, exception=result.exception
+                    future_run=future_run, blob=blob, exception=None
                 )
             else:
                 self._handle_future_run_failure(
@@ -425,11 +423,19 @@ class LocalRunner:
         future_run: LocalFutureRun,
         exception: TensorlakeException,
     ) -> None:
-        self._request_exception = exception
+        # All request failures must be subclasses of RequestFailureException.
+        if isinstance(exception, RequestFailureException):
+            self._request_exception = exception
+        else:
+            self._request_exception = RequestFailureException(
+                "Request failed: " + str(exception)
+            )
+
+        # A future failure is reported to user as FunctionCallFailure.
         self._handle_future_run_final_output(
             future_run=future_run,
             blob=None,
-            exception=self._request_exception,
+            exception=FunctionCallFailure("Function call failed: " + str(exception)),
         )
 
     def _collection_is_resolved(self, collection_metadata: CollectionMetadata) -> bool:
@@ -489,7 +495,7 @@ class LocalRunner:
         self,
         future_run: LocalFutureRun,
         blob: BLOB | None,
-        exception: TensorlakeException | None,
+        exception: RequestFailureException | None,
     ) -> None:
         """Handles final output of the supplied future run.
 
@@ -542,7 +548,7 @@ class LocalRunner:
         elif isinstance(future_run, ListFutureRun):
             self._start_list_future_run(future_run)
         else:
-            self._request_exception = TensorlakeException(
+            self._request_exception = RequestFailureException(
                 "Internal error: unexpected future type: {}".format(
                     type(future_run.local_future.user_future)
                 )

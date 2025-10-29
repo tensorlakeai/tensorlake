@@ -236,7 +236,7 @@ class AllocationRunner:
                 future_info.collection = []
                 for item in future.awaitable.items:
                     validate_user_object(
-                        user_object=future.awaitable,
+                        user_object=item,
                         function_call_ids=self._user_futures.keys(),
                     )
                     if isinstance(item, Awaitable):
@@ -274,6 +274,10 @@ class AllocationRunner:
         done: List[Future] = []
         not_done: List[Future] = []
 
+        # FIXME: When FIRST_COMPLETED or FIRST_FAILURE is used we have to wait for all the
+        # future in parallel instead of serially. Without this, if the first future takes
+        # a long time to complete, but the second one completes quickly, we still wait
+        # for the first one to complete before checking the second one. This is not what customers expect.
         for future in futures:
             remaining_timeout: float | None = (
                 deadline - time.monotonic() if deadline is not None else None

@@ -4,6 +4,8 @@ from .interface.function import Function
 from .interface.request import Request
 from .interface.run import run_local_application, run_remote_application
 
+# Internal utilities for working with applications.
+
 
 def filter_applications(
     functions: Iterator[Function],

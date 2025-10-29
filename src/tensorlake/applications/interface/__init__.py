@@ -10,6 +10,7 @@ from .exceptions import (
     RequestError,
     RequestFailureException,
     RequestNotFinished,
+    TensorlakeException,
 )
 from .file import File
 from .function import Function
@@ -49,4 +50,5 @@ __all__ = [
     "RequestNotFinished",
     "Retries",
     "RETURN_WHEN",
+    "TensorlakeException",
 ]
