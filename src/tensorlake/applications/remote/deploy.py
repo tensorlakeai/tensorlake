@@ -5,6 +5,7 @@ from ..applications import filter_applications
 from ..interface.function import Function
 from ..registry import get_functions
 from ..remote.api_client import APIClient
+from ..remote.api_client_context_manager import APIClientContextManager
 from ..remote.manifests.application import (
     ApplicationManifest,
     create_application_manifest,
@@ -27,6 +28,7 @@ def deploy_applications(
     `load_source_dir_modules` indicates whether to load the .py file so all applications from it get added to the registry.
                                Should be set to True when called from CLI, False when called programmatically from test code
                                because applications in test code are already loaded into registry.
+    `api_client` is an optional APIClient to use for deployment. If not supplied, a new client will be created from environment.
     """
     # TODO: Validate the graph.
 
@@ -46,21 +48,13 @@ def deploy_applications(
         all_functions=functions,
     )
 
-    # Use provided API client or create a new one from environment
-    should_close_client = api_client is None
-    client = api_client if api_client is not None else APIClient()
-
-    try:
+    with APIClientContextManager(api_client) as api_client:
         for application in filter_applications(functions):
             app_manifest: ApplicationManifest = create_application_manifest(
                 application_function=application, all_functions=functions
             )
-            client.upsert_application(
+            api_client.upsert_application(
                 manifest_json=app_manifest.model_dump_json(),
                 code_zip=app_code,
                 upgrade_running_requests=upgrade_running_requests,
             )
-    finally:
-        # Only close the client if we created it (not if it was provided)
-        if should_close_client:
-            client._close()

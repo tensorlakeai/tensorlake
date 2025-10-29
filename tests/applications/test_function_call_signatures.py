@@ -3,7 +3,8 @@ from typing import Any
 
 import parameterized
 
-from tensorlake.applications import Request, application, function, run_application
+from tensorlake.applications import Request, application, function
+from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
 
 

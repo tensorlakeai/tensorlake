@@ -3,13 +3,13 @@ import unittest
 import parameterized
 
 from tensorlake.applications import (
-    ApplicationValidateError,
+    ApplicationValidationError,
     Request,
     application,
     cls,
     function,
-    run_application,
 )
+from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
 
 
@@ -40,7 +40,7 @@ class TestMultipleClassDefinitions(unittest.TestCase):
         self.assertEqual(request.output(), "Class1.method_redefined")
 
     def test_redefine_same_class_in_different_files_fails(self):
-        with self.assertRaises(ApplicationValidateError):
+        with self.assertRaises(ApplicationValidationError):
             import class_1
 
 

@@ -3,13 +3,13 @@ import subprocess
 import time
 from typing import Any
 
-from ...proto.function_executor_pb2 import (
+from .proto.function_executor_pb2 import (
     HealthCheckRequest,
     HealthCheckResponse,
 )
 
 
-class Handler:
+class HealthCheckHandler:
     def __init__(self, logger: Any):
         self._logger: Any = logger.bind(module=__name__)
         self._enable_gpu_health_checks = _enable_gpu_health_checks()

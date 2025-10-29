@@ -1,17 +1,15 @@
 import time
 import unittest
-from typing import Any, List
+from typing import List
 
 from pydantic import BaseModel
 
 from tensorlake.applications import (
+    Future,
     Request,
     application,
     cls,
     function,
-)
-from tensorlake.applications import map as tl_map
-from tensorlake.applications import (
     run_local_application,
     run_remote_application,
 )
@@ -27,17 +25,6 @@ class FakePDFChunk(BaseModel):
 
 class FakePDFParseResult(BaseModel):
     chunks: List[FakePDFChunk]
-
-
-def fake_parse_pdf_service_call(file: str, page_range: str) -> FakePDFParseResult:
-    time.sleep(0.001)  # Simulate network call
-    start, end = map(int, page_range.split("-"))
-    return FakePDFParseResult(
-        chunks=[
-            FakePDFChunk(content=f"Parsed page {i} content")
-            for i in range(start, end + 1)
-        ]
-    )
 
 
 class ChunkEmbedding(BaseModel):
@@ -61,31 +48,47 @@ class ResponsePayload(BaseModel):
 @application()
 @function(description="Fake PDF parse workflow")
 def parse_pdf_api(payload: RequestPayload) -> ResponsePayload:
-    # Right now it's hard to understand which function call is a regular function call and which one is remote
-    # Tensorlake call.
+    # This is a blocking call of Tensorlake Function.
+    # All function calls are blocking by default. To make a non-blocking call
+    # users have to do .run() on the Function/anything else if they want
+    # to call in a non-blocking way.
     response: FakePDFParseResult = fake_parse_pdf_service_call(
         file=payload.url,
         page_range=payload.page_range,
     )
-    # To tell SDK to deconstruct the futures list and track the FunctionCalls inside of it we have
-    # to wrap it into something we can recognize when building AST, i.e. tl_map.
-    chunk_embeddings = tl_map(
-        chunk_and_embed, [chunk.content for chunk in response.chunks]
-    )
-    # We can't return tl_map here because there's no parent function call node to which we can
-    # attach map as a data dependency. Due to this limitation we have to use a separate response creation
-    # function which gets called once all the futures in map are resolved.
-    return chunk_embeddings_to_response_payload(chunk_embeddings)
+    # Use map operation running in background as argument to other function calls.
+    chunk_embeddings: Future = chunk_and_embed.awaitable.map(
+        [chunk.content for chunk in response.chunks]
+    ).run()
 
+    # We can't return chunk_embeddings future here because there's no function call ID associated with it.
+    # Due to this limitation we have to use a blocking call.
+    #
+    # NB: when we support async Tensorlake Functions we will be able to
+    # do `await chunk_embeddings` instead of calling result() here.
+    chunks: List[ChunkEmbeddings] = chunk_embeddings.result()
 
-@function()
-def chunk_embeddings_to_response_payload(
-    chunks: List[ChunkEmbeddings],
-) -> ResponsePayload:
+    # Spawn a recurring background function to watch for the PDF file updates.
+    watch_pdf_updates.awaitable(
+        url=payload.url, page_range=payload.page_range, iteration=0
+    ).run_later(start_delay=0.5)
     return ResponsePayload(chunks=chunks)
 
 
-@function()
+def fake_parse_pdf_service_call(file: str, page_range: str) -> FakePDFParseResult:
+    time.sleep(0.001)  # Simulate network call
+    start, end = map(int, page_range.split("-"))
+    return FakePDFParseResult(
+        chunks=[
+            FakePDFChunk(content=f"Parsed page {i} content")
+            for i in range(start, end + 1)
+        ]
+    )
+
+
+@function(
+    description="Chunks the supplied page and returns chunks and their embeddings"
+)
 def chunk_and_embed(page: str) -> ChunkEmbeddings:
     texts: List[str] = [page[i : i + 5] for i in range(0, len(page), 5)]
     embeddings: List[float] = [
@@ -96,15 +99,11 @@ def chunk_and_embed(page: str) -> ChunkEmbeddings:
         for text, embedding in zip(texts, embeddings)
     ]
     output = ChunkEmbeddings(chunk_embeddings=chunk_embeddings)
-    # Spawning subgraphs without returning their outputs will be implemented later.
-    # i.e. `tensorlake.spawn(IndexEmbedding().run(output))`
-    # So we have to workaround this by returning `IndexEmbedding().run(output)` here.
-    return first_argument(output, IndexEmbedding().run(output))
+    # Spawn IndexEmbedding function call in background to save the embeddings.
+    # We're not interested in waiting for it to complete or value the function returned.
+    IndexEmbedding().index.awaitable(output).run()
 
-
-@function()
-def first_argument(arg1: Any, arg2: Any) -> Any:
-    return arg1
+    return output
 
 
 @cls()
@@ -117,7 +116,7 @@ class IndexEmbedding:
         )
 
     @function()
-    def run(self, chunk_embeddings: ChunkEmbeddings) -> None:
+    def index(self, chunk_embeddings: ChunkEmbeddings) -> None:
         print(f"DB uri: {self.fake_embedding_db_uri}")
         print(chunk_embeddings)
         for chunk_embedding in chunk_embeddings.chunk_embeddings:
@@ -128,6 +127,19 @@ class IndexEmbedding:
                     "embeddings": chunk_embedding.embedding,
                 },
             )
+
+
+@function()
+def watch_pdf_updates(url: str, page_range: str, iteration: int) -> None:
+    # Simulate fetching of the PDF file and checking for updates.
+    time.sleep(0.1)
+    print(f"Checked {url} for updates, no updates found.")
+    # Don't loop forever in tests.
+    if iteration < 5:
+        # Schedule next check in 0.1 seconds.
+        watch_pdf_updates.awaitable(
+            url=url, page_range=page_range, iteration=iteration + 1
+        ).run_later(start_delay=0.1)
 
 
 class TestPDFParseDataWorkflow(unittest.TestCase):

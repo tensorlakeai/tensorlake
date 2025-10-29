@@ -1,5 +1,7 @@
 syntax = "proto3";
 
+import "google/protobuf/timestamp.proto";
+
 package function_executor_service;
 
 // The messages should not use any Python SDK objects. Only Function Executor implemented
@@ -27,7 +29,7 @@ message SerializedObjectManifest {
     optional uint64 metadata_size = 4;
     // Includes data and metadata.
     optional string sha256_hash = 5;
-    // MIME type. Important when raw encoding is used.
+    // MIME type. Only set when raw encoding is used.
     optional string content_type = 6;
     // ID of the function call that returned this SO as it's return value.
     // SOs which are not a function call return value, don't have this field set.
@@ -56,9 +58,11 @@ message BLOBChunk {
 
 // A BLOB in a BLOB store.
 message BLOB {
+    // ID of the BLOB, unique per allocation.
+    optional string id = 1;
     // Ordered chunks of the BLOB if the BLOB has data.
     // Ordered chunks of the BLOB that can be used to upload data if the BLOB has no data yet.
-    repeated BLOBChunk chunks = 1;
+    repeated BLOBChunk chunks = 2;
 }
 
 // Serialized object stored inside a BLOB.
@@ -167,16 +171,50 @@ enum AllocationFailureReason {
     ALLOCATION_FAILURE_REASON_REQUEST_ERROR = 3;
 }
 
-message ProgressUpdate {
+message AllocationProgress {
     float current = 1;
     float total = 2;
 }
 
-message AwaitAllocationProgress {
-    oneof response {
-        ProgressUpdate progress = 1;
-        AllocationResult allocation_result = 2;
-    }
+message AllocationOutputBLOBRequest {
+    // ID of the BLOB, unique per allocation.
+    optional string id = 1;
+    optional uint64 size = 2;
+}
+
+message AllocationFunctionCall {
+    // Call ID is the same as root_function_call_id in ExecutionPlanUpdates.
+    optional ExecutionPlanUpdates updates = 1;
+    // SerializedObjectInsideBLOB arguments from the execution
+    // plan are stored inside this BLOB.
+    // Optional, not set if no function arguments in updates.
+    optional BLOB args_blob = 2;
+}
+
+message AllocationFunctionCallWatcher {
+    optional string watcher_id = 1;
+    // Only root_function_call_id of ExecutionPlanUpdates can be watched.
+    optional string function_call_id = 2;
+}
+
+message AllocationState {
+    // Optional current allocation progress.
+    optional AllocationProgress progress = 1;
+    // Requests for writable BLOBs so allocation can upload data there.
+    repeated AllocationOutputBLOBRequest output_blob_requests = 2;
+    // Function calls started by the allocation.
+    // New function calls are detected by client when it sees a new
+    // ExecutionPlanUpdates.root_function_call_id.
+    //
+    // If a not finished function call gets removed from this list then
+    // it doesn't get cancelled by the client. ExecutionPlanUpdates are immutable.
+    repeated AllocationFunctionCall function_calls = 3;
+    // Watchers for function calls started by the allocation.
+    repeated AllocationFunctionCallWatcher function_call_watchers = 4;
+    // Optional allocation result. Set when allocation finishes.
+    AllocationResult result = 5;
+    // Required state hash.
+    optional string sha256_hash = 6;
 }
 
 // FunctionInputs contains the input data for allocation execution
@@ -184,10 +222,10 @@ message FunctionInputs {
     repeated SerializedObjectInsideBLOB args = 1;
     // Each arg has a matching BLOB.
     repeated BLOB arg_blobs = 2;
-    optional BLOB function_outputs_blob = 3;
-    optional BLOB request_error_blob = 4;
+    // BLOB where to upload request error message if allocation fails with request error.
+    optional BLOB request_error_blob = 3;
     // Always set. An empty bytes array if no metadata, e.g. for API function call.
-    optional bytes function_call_metadata = 18;
+    optional bytes function_call_metadata = 4;
 }
 
 message FunctionArg {
@@ -225,6 +263,8 @@ message ExecutionPlanUpdate {
 message ExecutionPlanUpdates {
   repeated ExecutionPlanUpdate updates = 1;
   optional string root_function_call_id = 2;
+  // Optional timestamp for when to start the plan execution.
+  optional google.protobuf.Timestamp start_at = 3;
 }
 
 // AllocationResult contains the execution outcome and outputs of an allocation.
@@ -250,9 +290,9 @@ message Allocation {
     optional string request_id = 1;
     optional string function_call_id = 2;
     optional string allocation_id = 3;
-    // Input data for allocation execution (not returned when getting/listing allocations)
+    // Original allocation inputs.
     optional FunctionInputs inputs = 4;
-    // Result of allocation execution (not returned when getting/listing allocations)
+    // Set when allocation finishes.
     optional AllocationResult result = 5;
 }
 
@@ -260,12 +300,33 @@ message CreateAllocationRequest {
     optional Allocation allocation = 1;
 }
 
-message AwaitAllocationRequest {
+message WatchAllocationStateRequest {
     optional string allocation_id = 1;
 }
 
 message DeleteAllocationRequest {
     optional string allocation_id = 1;
+}
+
+message AllocationFunctionCallResult {
+    // From ExecutionPlanUpdates.root_function_call_id.
+    optional string function_call_id = 1;
+    optional AllocationOutcomeCode outcome_code = 2;
+    optional SerializedObjectInsideBLOB value_output = 3;
+    optional BLOB value_blob = 4;
+    optional SerializedObjectInsideBLOB request_error_output = 5;
+    optional BLOB request_error_blob = 6;
+}
+
+message AllocationUpdate {
+    // Target allocation ID.
+    optional string allocation_id = 1;
+    oneof update {
+        // Function call result if the function call is watched by allocation.
+        AllocationFunctionCallResult function_call_result = 2;
+        // Output BLOB if requested by allocation.
+        BLOB output_blob = 3;
+    }
 }
 
 message HealthCheckRequest {}
@@ -304,12 +365,14 @@ service FunctionExecutor {
     // Lists the currently-running allocations.
     rpc list_allocations(ListAllocationsRequest) returns (ListAllocationsResponse);
     // Creates and starts the allocation specified in the request.
-    rpc create_allocation(CreateAllocationRequest) returns (Allocation);
-    // Sends progress updates for the allocation.
-    // Sends its result once it's complete.
-    rpc await_allocation(AwaitAllocationRequest) returns (stream AwaitAllocationProgress);
-    // Deletes the allocation.
+    rpc create_allocation(CreateAllocationRequest) returns (Empty);
+    // Streams updates of the allocation state until allocation finishes.
+    // If allocation is finished, streams the final state and closes the stream.
+    rpc watch_allocation_state(WatchAllocationStateRequest) returns (stream AllocationState);
+    // Deletes the allocation. The allocation must be finished before calling this method.
     rpc delete_allocation(DeleteAllocationRequest) returns (Empty);
+    // Send an update to an allocation.
+    rpc send_allocation_update(AllocationUpdate) returns (Empty);
     // Health check method to check if the FE is able to run allocations.
     // The FE should be initialized before calling this method.
     rpc check_health(HealthCheckRequest) returns (HealthCheckResponse);

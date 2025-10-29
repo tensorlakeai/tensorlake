@@ -5,8 +5,8 @@ class TensorlakeException(Exception):
         super().__init__(message)
 
 
-class ApplicationValidateError(TensorlakeException):
-    """Raised when an error is detected in application code."""
+class ApplicationValidationError(TensorlakeException):
+    """Raised when an error is detected in application configuration."""
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
@@ -22,6 +22,13 @@ class RemoteAPIError(TensorlakeException):
 
     def __str__(self):
         return f"{super().__str__()} (Status Code: {self.status_code})"
+
+
+class FunctionCallFailure(TensorlakeException):
+    """Raised when a function call failed."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
 
 
 class RequestNotFinished(TensorlakeException):

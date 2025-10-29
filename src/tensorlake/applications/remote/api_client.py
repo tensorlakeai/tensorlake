@@ -5,7 +5,7 @@ from typing import Iterator, List
 
 import httpx
 from httpx_sse import ServerSentEvent, connect_sse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from rich import print  # TODO: Migrate to use click.echo
 
 from tensorlake.applications.interface.exceptions import (
@@ -34,9 +34,6 @@ class ApplicationListItem(BaseModel):
     version: str
     tombstoned: bool = False
     created_at: int | None = None
-
-
-logger = logging.getLogger("tensorlake")
 
 
 _API_NAMESPACE_FROM_ENV: str = os.getenv("INDEXIFY_NAMESPACE", "default")
@@ -141,11 +138,11 @@ def log_retries(e: BaseException, sleep_time: float, retries: int):
 class APIClient:
     def __init__(
         self,
-        namespace: str = _API_NAMESPACE_FROM_ENV,
         api_url: str = _API_URL_FROM_ENV,
         api_key: str | None = _API_KEY_FROM_ENV,
         organization_id: str | None = None,
         project_id: str | None = None,
+        namespace: str = _API_NAMESPACE_FROM_ENV,
         event_hooks: dict[str, list[EventHook]] | None = None,
     ):
         self._client: httpx.Client = httpx.Client(event_hooks=event_hooks)
@@ -160,6 +157,9 @@ class APIClient:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
+    def close(self):
         self._client.close()
 
     def _request(self, method: str, **kwargs) -> httpx.Response:
@@ -168,12 +168,6 @@ class APIClient:
             # This is only correct for when we're waiting for application request completion.
             request = self._client.build_request(method, timeout=None, **kwargs)
             response = self._client.send(request)
-            logger.debug(
-                "Indexify: %r %r => %r",
-                request,
-                kwargs.get("data", {}),
-                response,
-            )
             status_code = response.status_code
             if status_code >= 400:
                 raise RemoteAPIError(status_code=status_code, message=response.text)
@@ -218,15 +212,6 @@ class APIClient:
     def _delete(self, endpoint: str, **kwargs) -> httpx.Response:
         self._add_api_key(kwargs)
         return self._request("DELETE", url=f"{self._api_url}/{endpoint}", **kwargs)
-
-    def _close(self):
-        self._client.close()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self._close()
 
     def upsert_application(
         self,
@@ -276,19 +261,6 @@ class APIClient:
             ).json()
         )
 
-    def logs(
-        self, application_name: str, invocation_id: str, allocation_id: str, file: str
-    ) -> str | None:
-        try:
-            response = self._get(
-                f"namespaces/{self._namespace}/applications/{application_name}/invocations/{invocation_id}/allocations/{allocation_id}/logs/{file}"
-            )
-            response.raise_for_status()
-            return response.content.decode("utf-8")
-        except RemoteAPIError as e:
-            print(f"failed to fetch logs: {e}")
-            return None
-
     def call(
         self,
         application_name: str,
@@ -300,7 +272,7 @@ class APIClient:
                 "Content-Type": payload_content_type,
                 "Accept": "application/json",
             },
-            "data": payload,
+            "content": payload,
         }
         response = self._post(
             f"v1/namespaces/{self._namespace}/applications/{application_name}",

@@ -133,7 +133,7 @@ def _create_code_zip_manifest(
     # Functions defined in ignored files are not available in the registry.
     for function in all_functions:
         function: Function
-        function_manifests[function.function_config.function_name] = (
+        function_manifests[function._function_config.function_name] = (
             _create_function_zip_manifest(
                 function=function,
                 code_dir_path=code_dir_path,
@@ -148,8 +148,8 @@ def _create_code_zip_manifest(
 def _create_function_zip_manifest(
     function: Function, code_dir_path: str
 ) -> FunctionZIPManifest:
-    function_name: str = function.function_config.function_name
-    import_file_path: str = inspect.getsourcefile(function.original_function)
+    function_name: str = function._function_config.function_name
+    import_file_path: str = inspect.getsourcefile(function._original_function)
     if import_file_path is None:
         raise ValueError(
             f"Function {function_name} is not defined in any file. "
@@ -173,6 +173,6 @@ def _create_function_zip_manifest(
     )
 
     return FunctionZIPManifest(
-        name=function.function_config.function_name,
+        name=function._function_config.function_name,
         module_import_name=module_import_name,
     )

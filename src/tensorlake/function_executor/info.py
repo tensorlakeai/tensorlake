@@ -9,7 +9,7 @@ def info_response_kv_args() -> Dict[str, Any]:
         f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     )
     return {
-        "version": "0.1.0",
+        "version": "0.1.1",
         "sdk_version": sdk_version,
         "sdk_language": "python",
         "sdk_language_version": python_version,

@@ -1,7 +1,8 @@
 from typing import Any
 
-from ..function.application_call import serialize_application_call_payload
+from ..function.user_data_serializer import serialize_value
 from ..interface.request import Request
+from ..metadata import ValueMetadata
 from ..user_data_serializer import UserDataSerializer, serializer_by_name
 from .api_client import APIClient
 from .app_manifest_cache import get_app_manifest, has_app_manifest, set_app_manifest
@@ -14,10 +15,11 @@ class RemoteRunner:
         self,
         application_name: str,
         payload: Any,
+        api_client: APIClient,
     ):
         self._application_name: str = application_name
         self._payload: Any = payload
-        self._client: APIClient = APIClient()
+        self._client: APIClient = api_client
 
     def run(self) -> Request:
         if not has_app_manifest(self._application_name):
@@ -32,15 +34,17 @@ class RemoteRunner:
         )
 
         serialized_payload: bytes
-        content_type: str
-        serialized_payload, content_type = serialize_application_call_payload(
-            input_serializer, self._payload
+        metadata: ValueMetadata
+        serialized_payload, metadata = serialize_value(
+            value=self._payload, serializer=input_serializer, value_id="fake_id"
         )
+        if metadata.content_type is None:
+            metadata.content_type = input_serializer.content_type
 
         request_id: str = self._client.call(
             application_name=self._application_name,
             payload=serialized_payload,
-            payload_content_type=content_type,
+            payload_content_type=metadata.content_type,
         )
         return RemoteRequest(
             application_name=self._application_name,

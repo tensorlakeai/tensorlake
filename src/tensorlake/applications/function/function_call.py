@@ -1,7 +1,5 @@
-from typing import Any
+from typing import Any, List
 
-from ..interface.function_call import RegularFunctionCall
-from ..interface.request_context import RequestContext
 from ..registry import get_class
 
 
@@ -14,5 +12,5 @@ def create_self_instance(class_name: str) -> Any:
     return instance
 
 
-def set_self_arg(function_call: RegularFunctionCall, self_instance: Any) -> None:
-    function_call.args.insert(0, self_instance)
+def set_self_arg(args: List[Any], self_instance: Any) -> None:
+    args.insert(0, self_instance)

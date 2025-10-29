@@ -111,11 +111,11 @@ class Context:
                 proj_id = self.project_id
 
             self._api_client = APIClient(
-                namespace=self.namespace,
                 api_url=self.base_url,
                 api_key=bearer_token,
                 organization_id=org_id,
                 project_id=proj_id,
+                namespace=self.namespace,
                 event_hooks=HTTP_EVENT_HOOKS,
             )
 
