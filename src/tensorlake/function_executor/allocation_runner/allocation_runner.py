@@ -537,8 +537,6 @@ class AllocationRunner:
         # code should be caught here and converted into proper AllocationResult indicating customer code failure.
         # Exceptions in our internal FE code are just raised here and handled by caller.
 
-        import time
-
         print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 1, flush=True)
 
         # This is internal FE code.
@@ -698,19 +696,36 @@ class AllocationRunner:
 
     def _call_user_function(self, args: List[Any], kwargs: Dict[str, Any]) -> Any:
         """Runs user function and returns its output."""
+        print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 101, flush=True)
         context: contextvars.Context = contextvars.Context()
         return context.run(self._call_user_function_in_new_context, args, kwargs)
 
     def _call_user_function_in_new_context(
         self, args: List[Any], kwargs: Dict[str, Any]
     ) -> Any:
+        print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 102, flush=True)
+        time.sleep(0.2)  # do all debug prints
         # This function is executed in contextvars.Context of the Tensorlake Function call.
         set_current_request_context(self._request_context)
+        print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 103, flush=True)
         set_allocation_id_context_variable(self._allocation.allocation_id)
+        print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 104, flush=True)
 
         self._logger.info("running function")
         start_time = time.monotonic()
 
+        print(
+            time.time(),
+            "RUN_ALLOC_DEBUG_PRINT: ",
+            105,
+            "args:",
+            args,
+            "kwargs:",
+            kwargs,
+            "function:",
+            self._function._original_function,
+            flush=True,
+        )
         try:
             return self._function._original_function(*args, **kwargs)
         finally:
