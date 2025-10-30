@@ -2,6 +2,7 @@ import sys
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List
+
 from tensorlake.vendor.nanoid.nanoid import generate as nanoid_generate
 
 _LOCAL_PYTHON_VERSION = f"{sys.version_info.major}.{sys.version_info.minor}"

@@ -10,8 +10,8 @@ from tensorlake.applications import (
     application,
     function,
 )
-from tensorlake.applications.remote.deploy import deploy_applications
 from tensorlake.applications.applications import run_application
+from tensorlake.applications.remote.deploy import deploy_applications
 
 
 class AccumulatedState(BaseModel):

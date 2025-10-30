@@ -39,6 +39,10 @@ class AllocationStateWrapper:
             self._update_hash()
             self._allocation_state_update_lock.notify_all()
 
+    def has_result(self) -> bool:
+        with self._allocation_state_update_lock:
+            return self._allocation_state.HasField("result")
+
     def add_function_call(
         self, execution_plan_updates: ExecutionPlanUpdates, args_blob: BLOB | None
     ) -> None:

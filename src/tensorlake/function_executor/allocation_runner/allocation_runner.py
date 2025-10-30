@@ -141,7 +141,6 @@ class AllocationRunner:
             allocation_id=self._allocation.allocation_id,
         )
 
-        self._finished: bool = False
         self._request_context: RequestContextBase = RequestContextBase(
             request_id=self._allocation.request_id,
             state=ProxiedRequestState(
@@ -181,9 +180,16 @@ class AllocationRunner:
         """
         self._allocation_thread.start()
 
+    # finished() and is_terminal_state() need to be consistent with each other.
+    # So once we return a terminal state to client and it calls delete_allocation,
+    # finished() must return True.
     @property
     def finished(self) -> bool:
-        return self._finished
+        return self._allocation_state.has_result()
+
+    @classmethod
+    def is_terminal_state(cls, state: AllocationState) -> bool:
+        return state.HasField("result")
 
     def deliver_allocation_update(self, update: AllocationUpdate) -> None:
         # No need for any locks because we never block here so we hold GIL non stop.
@@ -507,21 +513,24 @@ class AllocationRunner:
         return blob_request_info.blob
 
     def _run_allocation_thread(self) -> None:
+        alloc_result: AllocationResult | None = None
         try:
             log_user_event_allocations_started([self._allocation_event_details])
-            result: AllocationResult = self._run_allocation()
-            self._allocation.result.CopyFrom(result)
-            self._allocation_state.set_result(result)
+            alloc_result = self._run_allocation()
         except BaseException as e:
             self._logger.error(
                 "allocation failed due to exception in function executor code",
                 exc_info=e,
             )
-            self._allocation.result.CopyFrom(self._result_helper.internal_error())
-            self._allocation_state.set_result(self._allocation.result)
         finally:
             log_user_event_allocations_finished([self._allocation_event_details])
-            self._finished = True
+            if alloc_result is None:
+                # This can only happen if the exception was raised and logged above.
+                alloc_result = self._result_helper.internal_error()
+
+            self._allocation.result.CopyFrom(alloc_result)
+            # This must be the last thing we do. Immeditately after this the allocation can be deleted.
+            self._allocation_state.set_result(alloc_result)
 
     def _run_allocation(self) -> AllocationResult:
         # We need to be very careful who's code we're running here. Exceptions raised in customer
