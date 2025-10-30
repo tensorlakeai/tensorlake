@@ -3,7 +3,6 @@ import json
 import sys
 import tempfile
 import time
-import traceback
 import zipfile
 from dataclasses import dataclass
 from typing import Any, Dict, Generator, Iterator, List
@@ -306,10 +305,7 @@ class Service(FunctionExecutorServicer):
             )
             last_seen_hash = allocation_state.sha256_hash
             yield allocation_state
-            # NB: We have to check allocation_state.result here instead of
-            # allocation_info.runner.finished because the runner may have finished
-            # but there may still be pending allocation state update with the result to send.
-            if allocation_state.HasField("result"):
+            if AllocationRunner.is_terminal_state(allocation_state):
                 break
 
     def send_allocation_update(
