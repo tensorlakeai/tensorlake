@@ -537,10 +537,16 @@ class AllocationRunner:
         # code should be caught here and converted into proper AllocationResult indicating customer code failure.
         # Exceptions in our internal FE code are just raised here and handled by caller.
 
+        import time
+
+        print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 1, flush=True)
+
         # This is internal FE code.
         serialized_args: List[SerializedValue] = download_function_arguments(
             self._allocation, self._blob_store, self._logger
         )
+        print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 2, flush=True)
+
         function_call_metadata: (
             FunctionCallMetadata | ReduceOperationMetadata | None
         ) = validate_and_deserialize_function_call_metadata(
@@ -549,35 +555,43 @@ class AllocationRunner:
             function=self._function,
             logger=self._logger,
         )
+        print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 3, flush=True)
         output_serializer_override: str | None = None
         if function_call_metadata is not None:
             output_serializer_override = (
                 function_call_metadata.output_serializer_name_override
             )
+        print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 4, flush=True)
         output_serializer: UserDataSerializer = function_output_serializer(
             self._function,
             output_serializer_override=output_serializer_override,
         )
+        print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 5, flush=True)
 
         # This is user code.
         try:
             arg_values: Dict[str, Value] = deserialize_function_arguments(
                 self._function, serialized_args
             )
+            print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 6, flush=True)
         except BaseException as e:
+            print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 7, flush=True)
             # This is internal FE code.
             return self._result_helper.from_user_exception(e)
 
+        print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 8, flush=True)
         # This is internal FE code.
         args, kwargs = reconstruct_function_call_args(
             function_call_metadata=function_call_metadata,
             arg_values=arg_values,
             function_instance_arg=self._function_instance_arg,
         )
+        print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 9, flush=True)
 
         # This is user code.
         try:
             output: Any = self._call_user_function(args, kwargs)
+            print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 10, flush=True)
             # This is a very important check for our UX. We can await for AwaitableList
             # in user code but we cannot return it from a function as a tail call because
             # there's no Python code to reassemble the list from individual resolved awaitables.
@@ -586,6 +600,7 @@ class AllocationRunner:
                     f"Function '{self._function_ref.function_name}' returned an AwaitableList {repr(output)}. "
                     "An AwaitableList can only be used as a function argument, not returned from it."
                 )
+            print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 11, flush=True)
         except RequestError as e:
             # This is user code.
             try:
@@ -593,6 +608,7 @@ class AllocationRunner:
             except BaseException:
                 return self._result_helper.from_user_exception(e)
 
+            print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 12, flush=True)
             # This is internal FE code.
             request_error_so, uploaded_outputs_blob = upload_request_error(
                 utf8_message=utf8_message,
@@ -600,42 +616,52 @@ class AllocationRunner:
                 blob_store=self._blob_store,
                 logger=self._logger,
             )
+            print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 13, flush=True)
             return self._result_helper.from_request_error(
                 request_error=e,
                 request_error_output=request_error_so,
                 uploaded_request_error_blob=uploaded_outputs_blob,
             )
         except BaseException as e:
+            print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 14, flush=True)
             # This is internal FE code.
             return self._result_helper.from_user_exception(e)
 
+        print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 15, flush=True)
         # This is user code.
         try:
             validate_user_object(
                 user_object=output,
                 function_call_ids=self._user_futures.keys(),
             )
+            print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 16, flush=True)
             serialized_values: Dict[str, SerializedValue] = {}
             output: SerializedValue | Awaitable = serialize_values_in_awaitable_tree(
                 user_object=output,
                 value_serializer=output_serializer,
                 serialized_values=serialized_values,
             )
+            print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 17, flush=True)
         except BaseException as e:
+            print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 18, flush=True)
             # This is internal FE code.
             return self._result_helper.from_user_exception(e)
 
+        print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 19, flush=True)
         # This is internal FE code.
         serialized_objects: Dict[str, SerializedObjectInsideBLOB] = {}
         uploaded_outputs_blob: BLOB | None = None
         # Only request output blob and upload to it if there are any actual function arguments in the call tree.
         if len(serialized_values) > 0:
+            print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 20, flush=True)
             serialized_objects, blob_data = serialized_values_to_serialized_objects(
                 serialized_values=serialized_values
             )
+            print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 21, flush=True)
             outputs_blob: BLOB = self._get_new_output_blob(
                 size=sum(len(data) for data in blob_data)
             )
+            print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 22, flush=True)
             uploaded_outputs_blob = upload_serialized_objects_to_blob(
                 serialized_objects=serialized_objects,
                 blob_data=blob_data,
@@ -643,11 +669,14 @@ class AllocationRunner:
                 blob_store=self._blob_store,
                 logger=self._logger,
             )
+            print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 23, flush=True)
 
         output_pb: SerializedObjectInsideBLOB | ExecutionPlanUpdates
         # This is user code.
         try:
+            print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 24, flush=True)
             if isinstance(output, Awaitable):
+                print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 25, flush=True)
                 output_pb = awaitable_to_execution_plan_updates(
                     awaitable=output,
                     uploaded_serialized_objects=serialized_objects,
@@ -656,10 +685,13 @@ class AllocationRunner:
                     logger=self._logger,
                 )
             else:
+                print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 26, flush=True)
                 output_pb = serialized_objects[output.metadata.id]
         except BaseException as e:
+            print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 27, flush=True)
             return self._result_helper.from_user_exception(e)
 
+        print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 28, flush=True)
         return self._result_helper.from_function_output(
             output=output_pb, uploaded_outputs_blob=uploaded_outputs_blob
         )
