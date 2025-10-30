@@ -48,9 +48,9 @@ def parse_and_multiply_number(number: str) -> int:
     # Raises ValueError if not a number.
     parsed_number = int(number)
     if parsed_number % 2 == 0:
-        return MultiplierFunction().multiply(number=parsed_number)
+        return MultiplierFunction().multiply.awaitable(number=parsed_number)
     else:
-        return MultiplierFunction().multiply(number=parsed_number - 1)
+        return MultiplierFunction().multiply.awaitable(number=parsed_number - 1)
 
 
 @cls()
