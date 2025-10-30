@@ -697,6 +697,21 @@ class AllocationRunner:
     def _call_user_function(self, args: List[Any], kwargs: Dict[str, Any]) -> Any:
         """Runs user function and returns its output."""
         print(time.time(), "RUN_ALLOC_DEBUG_PRINT: ", 101, flush=True)
+        print(
+            time.time(),
+            "RUN_ALLOC_DEBUG_PRINT: ",
+            101,
+            "args:",
+            type(args),
+            args,
+            "kwargs:",
+            type(kwargs),
+            kwargs,
+            "function:",
+            self._function._original_function,
+            flush=True,
+        )
+        time.sleep(0.2)  # do all debug prints
         context: contextvars.Context = contextvars.Context()
         return context.run(self._call_user_function_in_new_context, args, kwargs)
 
