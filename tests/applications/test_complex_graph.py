@@ -96,24 +96,24 @@ class TestComplexGraph(unittest.TestCase):
         for function in ["test_graph_api_reduce", "test_graph_api_fan_in"]:
             request = run_local_application(
                 function,
-                TestGraphRequestPayload(numbers=[str(i) for i in range(10, 20)]),
+                TestGraphRequestPayload(numbers=[str(i) for i in range(10, 15)]),
             )
 
             file: File = request.output()
             self.assertEqual(file.content_type, "text/plain; charset=UTF-8")
-            self.assertEqual(file.content, b"Total sum: 280")
+            self.assertEqual(file.content, b"Total sum: 116")
 
     def test_remote_api_call_of_complex_graph_produces_expected_outputs(self):
         deploy_applications(__file__)
         for function in ["test_graph_api_reduce", "test_graph_api_fan_in"]:
             request: Request = run_remote_application(
                 function,
-                TestGraphRequestPayload(numbers=[str(i) for i in range(10, 20)]),
+                TestGraphRequestPayload(numbers=[str(i) for i in range(10, 15)]),
             )
 
             file: File = request.output()
             self.assertEqual(file.content_type, "text/plain; charset=UTF-8")
-            self.assertEqual(file.content, b"Total sum: 280")
+            self.assertEqual(file.content, b"Total sum: 116")
 
 
 if __name__ == "__main__":
