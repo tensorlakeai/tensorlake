@@ -14,6 +14,7 @@ from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
 
 
+# foo bar buzz trigger CI run please
 @application()
 @function()
 def api_function_recursive_blocking_map(numbers: List[int]) -> str:
