@@ -44,7 +44,10 @@ def test_graph_api_reduce(payload: TestGraphRequestPayload) -> File:
 
 @function()
 def parse_and_multiply_number(number: str) -> int:
-    print(f"parsing number '{number}'")
+    print(f"parsing number '{number}'", flush=True)
+    import time
+
+    time.sleep(0.1)
     # Raises ValueError if not a number.
     parsed_number = int(number)
     if parsed_number % 2 == 0:

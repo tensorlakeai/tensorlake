@@ -227,6 +227,7 @@ class AllocationRunner:
     def run_futures_runtime_hook(
         self, futures: List[Future], start_delay: float | None
     ) -> None:
+        print("RUN_FUTURES_RUNTIME_HOOK: ", futures, flush=True)
         # NB: This code is called from user function thread. User function code is blocked.
         # Right now we can only be called from the function thread, not any child threads that user
         # code might have created because contextvars are not propagated to child threads.
@@ -269,6 +270,7 @@ class AllocationRunner:
         self, futures: List[Future], timeout: float | None, return_when: RETURN_WHEN
     ) -> tuple[List[Future], List[Future]]:
         """Doesn't raise any exceptions. All exceptions are set on individual futures."""
+        print("WAIT_FUTURES_RUNTIME_HOOK: ", futures, timeout, flush=True)
         # NB: This code is called from user function thread. User function code is blocked.
         # Right now we can only be called from the function thread, not any child threads that user
         # code might have created because contextvars are not propagated to child threads.
