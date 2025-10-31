@@ -10,10 +10,6 @@ from tensorlake.applications import (
     Request,
     application,
     function,
-)
-from tensorlake.applications import map as tl_map
-from tensorlake.applications import reduce as tl_reduce
-from tensorlake.applications import (
     run_remote_application,
 )
 
@@ -29,7 +25,7 @@ class Total(BaseModel):
 @application()
 @function(image=mapper_image, description="Sums the squares of a sequence of numbers")
 def sequence_summer(a: int) -> Total:
-    return tl_reduce(reducer, tl_map(processor, range(a)))
+    return reducer.awaitable.reduce(processor.awaitable.map(range(a)))
 
 
 @function(image=process_image)

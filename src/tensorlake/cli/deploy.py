@@ -142,7 +142,7 @@ def _deploy_applications(
         for application_function in filter_applications(functions):
             app_func_manifest: FunctionManifest = create_function_manifest(
                 application_function,
-                application_function.application_config.version,
+                application_function._application_config.version,
                 application_function,
             )
             func_name = app_func_manifest.name
