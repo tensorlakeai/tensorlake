@@ -1,5 +1,6 @@
 import re
 import shutil
+import tempfile
 from pathlib import Path
 
 import click
@@ -77,7 +78,7 @@ print(output)
 """
 
 
-def sanitize(name: str, dash_to_snake: bool = False) -> str:
+def sanitize(name: str) -> str:
     """
     Convert a string to snake_case.
 
@@ -90,9 +91,7 @@ def sanitize(name: str, dash_to_snake: bool = False) -> str:
         my app -> my_app
     """
     # Replace hyphens and spaces with underscores
-    if dash_to_snake:
-        name = name.replace("-", "_")
-    name = name.replace(" ", "_")
+    name = name.replace("-", "_").replace(" ", "_")
 
     # Insert underscores before uppercase letters (for camelCase/PascalCase)
     name = re.sub(r"(?<!^)(?=[A-Z])", "_", name)
@@ -127,7 +126,7 @@ def validate_app_name(name: str) -> tuple[bool, str]:
         )
 
     # Convert to snake_case for validation
-    snake_name = sanitize(name, dash_to_snake=True)
+    snake_name = sanitize(name)
 
     # Check if it's a valid Python identifier
     if not snake_name.isidentifier():
@@ -172,15 +171,11 @@ def new(name: str, force: bool):
         raise click.Abort()
 
     # Convert name to snake_case for file/module name
-    module_name = sanitize(name, dash_to_snake=True)
+    module_name = sanitize(name)
     filename = f"{module_name}.py"
 
     # Determine target directory
-    dir_name = sanitize(name)
-    target_dir = Path(dir_name).resolve()
-    if force:
-        shutil.rmtree(target_dir, ignore_errors=True)
-    target_dir.mkdir(parents=True, exist_ok=True)
+    target_dir = Path(module_name).resolve()
 
     python_file = target_dir / filename
     readme_file = target_dir / "README.md"
@@ -214,8 +209,18 @@ def new(name: str, force: bool):
     )
 
     # Create the files
+    write_dir = target_dir
     try:
-        click.echo(f"\nCreating new Tensorlake application in '{dir_name}'...\n")
+        click.echo(f"\nCreating new Tensorlake application in '{module_name}'...\n")
+
+        if force:
+            tmp_dir = tempfile.mkdtemp(prefix="tl_")
+            tmp_dir = Path(tmp_dir).resolve()
+            python_file = tmp_dir / filename
+            readme_file = tmp_dir / "README.md"
+            write_dir = tmp_dir
+        else:
+            write_dir.mkdir(parents=True)
 
         # Write Python file
         with open(python_file, "w") as f:
@@ -227,6 +232,11 @@ def new(name: str, force: bool):
             f.write(readme_content)
         click.echo(f"  ✓ README.md")
 
+        if write_dir != target_dir:
+            if target_dir.exists():
+                _ = shutil.rmtree(target_dir)
+            _ = shutil.move(write_dir, target_dir)
+
         # Success message
         click.echo("\n" + "=" * 50)
         click.echo("Application created successfully!")
@@ -237,4 +247,6 @@ def new(name: str, force: bool):
 
     except Exception as e:
         click.echo(f"Error creating application: {e}", err=True)
+        if write_dir.exists():
+            click.echo(f"Application temporarily created in '{write_dir}'", err=True)
         raise click.Abort()
