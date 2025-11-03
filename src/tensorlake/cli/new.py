@@ -1,4 +1,5 @@
 import re
+import shutil
 from pathlib import Path
 
 import click
@@ -76,7 +77,7 @@ print(output)
 """
 
 
-def to_snake_case(name: str) -> str:
+def sanitize(name: str, dash_to_snake: bool = False) -> str:
     """
     Convert a string to snake_case.
 
@@ -89,7 +90,9 @@ def to_snake_case(name: str) -> str:
         my app -> my_app
     """
     # Replace hyphens and spaces with underscores
-    name = name.replace("-", "_").replace(" ", "_")
+    if dash_to_snake:
+        name = name.replace("-", "_")
+    name = name.replace(" ", "_")
 
     # Insert underscores before uppercase letters (for camelCase/PascalCase)
     name = re.sub(r"(?<!^)(?=[A-Z])", "_", name)
@@ -124,7 +127,7 @@ def validate_app_name(name: str) -> tuple[bool, str]:
         )
 
     # Convert to snake_case for validation
-    snake_name = to_snake_case(name)
+    snake_name = sanitize(name, dash_to_snake=True)
 
     # Check if it's a valid Python identifier
     if not snake_name.isidentifier():
@@ -148,17 +151,11 @@ def validate_app_name(name: str) -> tuple[bool, str]:
 @click.command()
 @click.argument("name")
 @click.option(
-    "--path",
-    type=click.Path(exists=True, file_okay=False, dir_okay=True, writable=True),
-    default=".",
-    help="Directory to create the application in (default: current directory)",
-)
-@click.option(
     "--force",
     is_flag=True,
     help="Overwrite existing files if they exist",
 )
-def new(name: str, path: str, force: bool):
+def new(name: str, force: bool):
     """
     Create a new Tensorlake application.
 
@@ -175,11 +172,16 @@ def new(name: str, path: str, force: bool):
         raise click.Abort()
 
     # Convert name to snake_case for file/module name
-    module_name = to_snake_case(name)
+    module_name = sanitize(name, dash_to_snake=True)
     filename = f"{module_name}.py"
 
     # Determine target directory
-    target_dir = Path(path).resolve()
+    dir_name = sanitize(name)
+    target_dir = Path(dir_name).resolve()
+    if force:
+        shutil.rmtree(target_dir, ignore_errors=True)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
     python_file = target_dir / filename
     readme_file = target_dir / "README.md"
 
@@ -213,7 +215,7 @@ def new(name: str, path: str, force: bool):
 
     # Create the files
     try:
-        click.echo(f"\nCreating new Tensorlake application '{name}'...\n")
+        click.echo(f"\nCreating new Tensorlake application in '{dir_name}'...\n")
 
         # Write Python file
         with open(python_file, "w") as f:
