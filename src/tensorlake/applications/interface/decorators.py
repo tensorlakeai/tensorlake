@@ -41,7 +41,10 @@ def application(
             input_serializer=input_serializer,
             output_serializer=output_serializer,
             # Use a unique random version. We don't provide user controlled versioning at the moment.
-            version=nanoid(),
+            # Use only alphanumeric characters so app version can be used as container tags.
+            version=nanoid(
+                alphabet="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            ),
         )
 
         return fn
