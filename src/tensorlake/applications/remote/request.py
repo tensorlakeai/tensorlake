@@ -3,7 +3,7 @@ from typing import Any, List
 
 from ..function.type_hints import deserialize_type_hints
 from ..function.user_data_serializer import deserialize_value
-from ..interface.request import Request
+from ..interface import ApplicationValidationError, Request
 from ..metadata import ValueMetadata
 from .api_client import APIClient
 from .manifests.application import ApplicationManifest
@@ -56,6 +56,12 @@ class RemoteRequest(Request):
 
         last_exception: BaseException | None = None
 
+        if len(return_type_hints) == 0:
+            raise ApplicationValidationError(
+                "Can't deserialize request output. Please add a return type hint to the application function "
+                f"{self._application_name} to enable deserialization of the request output."
+            )
+
         for type_hint in return_type_hints:
             try:
                 return deserialize_value(
@@ -70,4 +76,5 @@ class RemoteRequest(Request):
             except BaseException as e:
                 last_exception = e
 
+        # last_exception is Never None here if return_type_hints is not empty.
         raise last_exception
