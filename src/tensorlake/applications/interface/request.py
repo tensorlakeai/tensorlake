@@ -16,6 +16,7 @@ class Request:
         Raises RequestFailureException on error during the request execution.
         Raises RequestNotFinished if the request is not yet completed.
         Raises RemoteAPIError on error communicating with the remote API.
+        Raises ApplicationValidationError on application validation errors.
         """
         raise NotImplementedError("output is implemented in subclasses.")
 
