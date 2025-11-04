@@ -77,7 +77,7 @@ def function(
     image: Image = Image(),
     secrets: List[str] = [],
     retries: Retries | None = None,
-    region: str | None = None,
+    region: Literal["us-east-1", "eu-west-1"] | None = None,
 ) -> Callable:
     """Decorator to register a function with the Tensorlake framework.
 
