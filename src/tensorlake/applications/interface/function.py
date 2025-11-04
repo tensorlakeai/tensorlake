@@ -42,7 +42,7 @@ class _ApplicationConfiguration:
     tags: Dict[str, str]
     retries: Retries
     region: str | None
-    input_serializer: str
+    input_deserializer: str
     output_serializer: str
     version: str
 

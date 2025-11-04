@@ -13,7 +13,7 @@ from ..user_data_serializer import (
 def function_input_serializer(function: Function) -> UserDataSerializer:
     """Returns the appropriate user data serializer for the given function inputs."""
     if function._application_config is not None:
-        return serializer_by_name(function._application_config.input_serializer)
+        return serializer_by_name(function._application_config.input_deserializer)
     return serializer_by_name(NON_API_FUNCTION_SERIALIZER_NAME)
 
 

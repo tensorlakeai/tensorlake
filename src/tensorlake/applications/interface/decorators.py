@@ -25,8 +25,8 @@ from .retries import Retries
 def application(
     tags: Dict[str, str] = {},
     retries: Retries = Retries(),
-    region: str | None = None,
-    input_serializer: Literal["json", "pickle"] = "json",
+    region: Literal["us-east-1", "eu-west-1"] | None = None,
+    input_deserializer: Literal["json", "pickle"] = "json",
     output_serializer: Literal["json", "pickle"] = "json",
 ) -> Callable:
     def decorator(fn: Callable | Function) -> Function:
@@ -38,7 +38,7 @@ def application(
             tags=tags,
             retries=retries,
             region=region,
-            input_serializer=input_serializer,
+            input_deserializer=input_deserializer,
             output_serializer=output_serializer,
             # Use a unique random version. We don't provide user controlled versioning at the moment.
             # Use only alphanumeric characters so app version can be used as container tags.
