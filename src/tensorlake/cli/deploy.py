@@ -49,7 +49,7 @@ def deploy(
     upgrade_running_requests: bool,
 ):
     """Deploys applications to Tensorlake Cloud."""
-    click.echo(f"Preparing deployment for applications from {application_file_path}")
+    click.echo(f"⚙️  Preparing deployment for applications from {application_file_path}")
 
     # Create builder client with proper authentication
     # If using API key, don't pass org/project IDs (they come from introspection)
@@ -68,7 +68,7 @@ def deploy(
         load_code(application_file_path)
     except Exception as e:
         click.echo(
-            f"Failed to load the application file, please check the error message: {e}",
+            f"‼️  Failed to load the application file, please check the error message: {e}",
             err=True,
         )
         traceback.print_exception(e)
@@ -78,8 +78,6 @@ def deploy(
 
     functions: List[Function] = get_functions()
     asyncio.run(_prepare_images_v2(builder_v2, functions))
-
-    click.echo("Everything looks good, deploying now\n")
 
     _deploy_applications(
         auth=auth,
@@ -99,7 +97,7 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: List[Func
             image_info: ImageInformation
             for function in image_info.functions:
                 click.echo(
-                    f"Building image {image_info.image.name} for application {fn_config.function_name} ...",
+                    f"📦 Building `{image_info.image.name}` image...",
                 )
                 try:
                     await builder.build(
@@ -122,7 +120,7 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: List[Func
                     click.echo(error, err=True)
                     raise click.Abort
 
-    click.secho("\nAll images built successfully")
+    click.secho("\n✅ All images built successfully")
 
 
 def _deploy_applications(
@@ -131,6 +129,8 @@ def _deploy_applications(
     upgrade_running_requests: bool,
     functions: List[Function],
 ):
+    click.echo("⚙️  Deploying applications...\n")
+
     try:
         deploy_applications(
             applications_file_path=application_file_path,
@@ -146,17 +146,19 @@ def _deploy_applications(
                 application_function,
             )
             func_name = app_func_manifest.name
-            click.echo(f"Deployed application: {func_name}\n")
+            click.echo(f"🚀 Application `{func_name}` deployed successfully\n")
             # TODO: update after parameterless function support
             if len(app_func_manifest.parameters) > 0:
                 param_type = app_func_manifest.parameters[0].data_type
                 click.echo(
-                    f"""To invoke the application, use the following curl command:
-curl -X POST {auth.base_url}/v1/namespaces/{auth.namespace}/applications/{func_name} \\
+                    f"""💡 To invoke it, you can use the following cURL command:
+```
+curl {auth.base_url}/applications/{func_name} \\
 -H "Authorization: Bearer $TENSORLAKE_API_KEY" \\
--H "accept: application/json" \\
--H "Content-Type: application/json" \\
--d '{param_type}'
+--json '{param_type}'
+```
+
+📚 Visit or documentation if you need more information about invoking applications: https://docs.tensorlake.ai/applications/quickstart#calling-applications
 """,
                 )
         return
