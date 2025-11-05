@@ -62,4 +62,6 @@ class FunctionExecutorLogger:
             )
             del context["exc_info"]
 
-        return json.dumps(new_cloud_event(context))
+        return json.dumps(
+            new_cloud_event(context, source="/tensorlake/function_executor/logger")
+        )
