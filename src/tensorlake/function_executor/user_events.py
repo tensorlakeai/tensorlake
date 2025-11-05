@@ -125,3 +125,23 @@ def log_user_event_allocations_finished(
             ],
         }
     )
+
+
+def log_user_event_function_call_failed(
+    details: AllocationEventDetails, error: BaseException
+) -> None:
+    print_cloud_event(
+        {
+            "level": "error",
+            "event": "function_call_failed",
+            "message": str(error),
+            "namespace": details.namespace,
+            "application": details.application_name,
+            "application_version": details.application_version,
+            "function": details.function_name,
+            "request_id": details.request_id,
+            "function_call_id": details.function_call_id,
+            "allocation_id": details.allocation_id,
+            "error": traceback.format_exception(error),
+        }
+    )

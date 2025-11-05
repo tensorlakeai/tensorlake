@@ -1005,7 +1005,7 @@ class TestRunAllocation(unittest.TestCase):
         self.assertIn("allocations_finished", fe_stdout)
 
         # Check function output in stderr
-        self.assertIn("this extractor throws an exception.", process.read_stderr())
+        self.assertIn("this extractor throws an exception.", process.read_stdout())
 
     def test_function_initialization_raises_error(self):
         with FunctionExecutorProcessContextManager(capture_std_outputs=True) as process:

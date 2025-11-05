@@ -254,8 +254,8 @@ class TestSetRequestState(unittest.TestCase):
                 client_thread.join()
 
         self.assertIn(
-            'RuntimeError("failed to set the request state for key")',
-            fe.read_stderr(),
+            "failed to set the request state for key",
+            fe.read_stdout(),
         )
 
 
@@ -488,8 +488,8 @@ class TestGetInvocationState(unittest.TestCase):
                 client_thread.join()
 
         self.assertIn(
-            'RuntimeError("failed to get the request state for key")',
-            fe.read_stderr(),
+            "failed to get the request state for key",
+            fe.read_stdout(),
         )
 
 

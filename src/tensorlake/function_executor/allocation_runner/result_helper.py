@@ -4,6 +4,10 @@ from tensorlake.applications import Function, RequestError
 from tensorlake.applications.request_context.request_metrics_recorder import (
     RequestMetricsRecorder,
 )
+from tensorlake.function_executor.user_events import (
+    AllocationEventDetails,
+    log_user_event_function_call_failed,
+)
 
 from ..logger import FunctionExecutorLogger
 from ..proto.function_executor_pb2 import (
@@ -40,15 +44,13 @@ class ResultHelper:
             metrics=self._generate_metrics_proto(),
         )
 
-    def from_user_exception(self, exception: BaseException) -> AllocationResult:
+    def from_user_exception(
+        self, details: AllocationEventDetails, exception: BaseException
+    ) -> AllocationResult:
         """Creates an AllocationResult representing a user exception raised during function execution."""
-        try:
-            # This is user code.
-            # Give the full traceback to the user for debugging.
-            traceback.print_exception(exception)
-        except BaseException as e:
-            # Don't log the exception as it might contain customer data.
-            self._logger.info("Failed to print user exception traceback")
+        # This is user code.
+        # Give the full traceback to the user for debugging.
+        log_user_event_function_call_failed(details, exception)
 
         # This is FE internal code.
         # Don't log the user exception as it might contain customer data.
