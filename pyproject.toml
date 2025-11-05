@@ -26,6 +26,7 @@ tqdm = "^4.67.1"
 grpcio = "1.75.1"
 grpcio-tools = "1.75.1"
 tomlkit = "^0.13.3"
+structlog = "^25.5.0"
 
 [tool.poetry.scripts]
 tensorlake = "tensorlake.cli:cli"
