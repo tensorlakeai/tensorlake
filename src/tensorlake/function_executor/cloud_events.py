@@ -15,7 +15,9 @@ def print_cloud_event(event: dict[str, Any]) -> None:
     print(json.dumps(new_cloud_event(event)), flush=True)
 
 
-def new_cloud_event(event: dict[str, Any]) -> dict[str, Any]:
+def new_cloud_event(
+    event: dict[str, Any], source: str = "/tensorlake/function_executor/events"
+) -> dict[str, Any]:
     """
     Creates a new CloudEvent from the given event dictionary.
     """
@@ -24,7 +26,7 @@ def new_cloud_event(event: dict[str, Any]) -> dict[str, Any]:
         "id": str(uuid.uuid4()),
         "timestamp": current_time(),
         "type": "ai.tensorlake.event",
-        "source": "/tensorlake/function_executor",
+        "source": source,
         "data": event,
     }
     return event_dict
