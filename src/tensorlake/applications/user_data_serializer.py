@@ -88,7 +88,7 @@ class JSONUserDataSerializer(UserDataSerializer):
                 return json.dumps(object).encode("utf-8")
         except Exception as e:
             raise ValueError(
-                f"failed to serialize data with json serializer: {e}"
+                f"Failed to serialize data with json serializer: {e}"
             ) from e
 
     def deserialize(self, data: bytes, possible_types: List[Any]) -> Any:
@@ -118,7 +118,7 @@ class JSONUserDataSerializer(UserDataSerializer):
             return json.loads(decoded_data)
         except Exception as e:
             raise ValueError(
-                f"failed to deserialize data with json serializer: {e}"
+                f"Failed to deserialize data with json serializer: {e}"
             ) from e
 
 
@@ -153,7 +153,7 @@ class PickleUserDataSerializer(UserDataSerializer):
             return pickle.dumps(object, protocol=self._PROTOCOL_LEVEL)
         except Exception as e:
             raise ValueError(
-                f"failed to serialize data with pickle serializer: {e}"
+                f"Failed to serialize data with pickle serializer: {e}"
             ) from e
 
     def deserialize(self, data: bytes, possible_types: List[Any]) -> Any:
@@ -161,7 +161,7 @@ class PickleUserDataSerializer(UserDataSerializer):
             return pickle.loads(data)
         except Exception as e:
             raise ValueError(
-                f"failed to deserialize data with pickle serializer: {e}"
+                f"Failed to deserialize data with pickle serializer: {e}"
             ) from e
 
 

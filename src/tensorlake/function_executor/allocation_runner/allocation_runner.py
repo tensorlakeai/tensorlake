@@ -566,7 +566,9 @@ class AllocationRunner:
             )
         except BaseException as e:
             # This is internal FE code.
-            return self._result_helper.from_user_exception(e)
+            return self._result_helper.from_user_exception(
+                self._allocation_event_details, e
+            )
 
         # This is internal FE code.
         args, kwargs = reconstruct_function_call_args(
@@ -591,7 +593,9 @@ class AllocationRunner:
             try:
                 utf8_message: bytes = e.message.encode("utf-8")
             except BaseException:
-                return self._result_helper.from_user_exception(e)
+                return self._result_helper.from_user_exception(
+                    self._allocation_event_details, e
+                )
 
             # This is internal FE code.
             request_error_so, uploaded_outputs_blob = upload_request_error(
@@ -607,7 +611,9 @@ class AllocationRunner:
             )
         except BaseException as e:
             # This is internal FE code.
-            return self._result_helper.from_user_exception(e)
+            return self._result_helper.from_user_exception(
+                self._allocation_event_details, e
+            )
 
         # This is user code.
         try:
@@ -623,7 +629,9 @@ class AllocationRunner:
             )
         except BaseException as e:
             # This is internal FE code.
-            return self._result_helper.from_user_exception(e)
+            return self._result_helper.from_user_exception(
+                self._allocation_event_details, e
+            )
 
         # This is internal FE code.
         serialized_objects: Dict[str, SerializedObjectInsideBLOB] = {}
@@ -658,7 +666,9 @@ class AllocationRunner:
             else:
                 output_pb = serialized_objects[output.metadata.id]
         except BaseException as e:
-            return self._result_helper.from_user_exception(e)
+            return self._result_helper.from_user_exception(
+                self._allocation_event_details, e
+            )
 
         return self._result_helper.from_function_output(
             output=output_pb, uploaded_outputs_blob=uploaded_outputs_blob
