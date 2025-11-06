@@ -1084,21 +1084,6 @@ files = [
 ]
 
 [[package]]
-name = "structlog"
-version = "25.5.0"
-description = "Structured Logging for Python"
-optional = false
-python-versions = ">=3.8"
-groups = ["main"]
-files = [
-    {file = "structlog-25.5.0-py3-none-any.whl", hash = "sha256:a8453e9b9e636ec59bd9e79bbd4a72f025981b3ba0f5837aebf48f02f37a7f9f"},
-    {file = "structlog-25.5.0.tar.gz", hash = "sha256:098522a3bebed9153d4570c6d0288abf80a031dfdb2048d59a49e9dc2190fc98"},
-]
-
-[package.dependencies]
-typing-extensions = {version = "*", markers = "python_version < \"3.11\""}
-
-[[package]]
 name = "tomli"
 version = "2.3.0"
 description = "A lil' TOML parser"
@@ -1238,4 +1223,4 @@ test = ["covdefaults (>=2.3)", "coverage (>=7.2.7)", "coverage-enable-subprocess
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.10"
-content-hash = "fc850928eb10249af219e56dd8f1426fe6b211c2141ae71e98c88d1b9e90c0f4"
+content-hash = "39491382b5fe98747970b427c63db29c2cae84318aa22cd843f1fe1014f1417c"

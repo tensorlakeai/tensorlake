@@ -1,4 +1,4 @@
-import structlog
+import tensorlake.vendor.structlog.structlog as structlog
 
 
 def configure_logging():
