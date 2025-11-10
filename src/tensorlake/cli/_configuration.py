@@ -109,7 +109,7 @@ def save_local_config(config: dict[str, Any], project_root: Path) -> None:
         pass
 
 
-def load_credentials(base_url: str) -> str | None:
+def load_credentials(api_url: str) -> str | None:
     """
     Load the personal access token from the credentials file if it exists and is valid.
     """
@@ -118,7 +118,7 @@ def load_credentials(base_url: str) -> str | None:
             with open(CREDENTIALS_PATH, "r", encoding="utf-8") as f:
                 credentials = parse(f.read())
 
-                scoped = credentials.get(base_url)
+                scoped = credentials.get(api_url)
                 if scoped is None:
                     return None
 
@@ -129,7 +129,7 @@ def load_credentials(base_url: str) -> str | None:
     return None
 
 
-def save_credentials(base_url: str, token: str):
+def save_credentials(api_url: str, token: str):
     """
     Save the personal access token in the credentials file.
     """
@@ -145,7 +145,7 @@ def save_credentials(base_url: str, token: str):
     # Update config with new endpoint credentials
     section = table()
     section["token"] = token
-    config[base_url] = section
+    config[api_url] = section
 
     # Write updated config back to file
     with open(CREDENTIALS_PATH, "w", encoding="utf-8") as f:

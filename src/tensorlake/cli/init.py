@@ -48,7 +48,7 @@ def run_init_flow(
             click.echo("Local configuration already exists in .tensorlake/config.toml")
         return local_config["organization"], local_config["project"]
 
-    personal_access_token = load_credentials(ctx.base_url)
+    personal_access_token = load_credentials(ctx.api_url)
     if not personal_access_token:
         if interactive:
             click.echo(
@@ -62,7 +62,7 @@ def run_init_flow(
 
     # Step 1: Fetch and select organization
     organizations_response = httpx.get(
-        f"{ctx.base_url}/platform/v1/organizations",
+        f"{ctx.api_url}/platform/v1/organizations",
         headers={"Authorization": f"Bearer {personal_access_token}"},
     )
 
@@ -107,7 +107,7 @@ def run_init_flow(
     if interactive:
         click.echo()
     projects_response = httpx.get(
-        f"{ctx.base_url}/platform/v1/organizations/{organization_id}/projects",
+        f"{ctx.api_url}/platform/v1/organizations/{organization_id}/projects",
         headers={"Authorization": f"Bearer {personal_access_token}"},
     )
 

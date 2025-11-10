@@ -203,15 +203,15 @@ class TestCloudURLIntegration(unittest.TestCase):
                 self.assertEqual(ctx.cloud_url, url)
 
     def test_cloud_url_different_from_base_url(self):
-        """Test that cloud_url and base_url are independent"""
+        """Test that cloud_url and api_url are independent"""
         ctx = Context.default(
-            base_url="https://api.example.com",
+            api_url="https://api.example.com",
             cloud_url="https://cloud.example.com",
         )
 
-        self.assertEqual(ctx.base_url, "https://api.example.com")
+        self.assertEqual(ctx.api_url, "https://api.example.com")
         self.assertEqual(ctx.cloud_url, "https://cloud.example.com")
-        self.assertNotEqual(ctx.base_url, ctx.cloud_url)
+        self.assertNotEqual(ctx.api_url, ctx.cloud_url)
 
 
 class TestCloudURLWithLogin(unittest.TestCase):

@@ -40,7 +40,7 @@ def whoami(ctx: Context, output: str):
         return
 
     data = {
-        "endpoint": ctx.base_url,
+        "endpoint": ctx.api_url,
         "organizationId": ctx.organization_id,
         "projectId": ctx.project_id,
     }
@@ -81,7 +81,7 @@ def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
         click.ClickException: If login fails at any step
         click.Abort: If user cancels the login process
     """
-    login_start_url = f"{ctx.base_url}/platform/cli/login/start"
+    login_start_url = f"{ctx.api_url}/platform/cli/login/start"
 
     start_response = httpx.post(login_start_url)
 
@@ -114,7 +114,7 @@ def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
 
     click.echo("Waiting for the code to be processed...")
 
-    poll_url = f"{ctx.base_url}/platform/cli/login/poll?device_code={device_code}"
+    poll_url = f"{ctx.api_url}/platform/cli/login/poll?device_code={device_code}"
 
     while True:
         poll_response = httpx.get(poll_url)
@@ -151,7 +151,7 @@ def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
         if status == "approved":
             break
 
-    exchange_token_url = f"{ctx.base_url}/platform/cli/login/exchange"
+    exchange_token_url = f"{ctx.api_url}/platform/cli/login/exchange"
 
     exchange_response = httpx.post(
         exchange_token_url, json={"device_code": device_code}
@@ -165,14 +165,14 @@ def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
     exchange_response_body = exchange_response.json()
 
     access_token = exchange_response_body["access_token"]
-    save_credentials(ctx.base_url, access_token)
+    save_credentials(ctx.api_url, access_token)
     click.echo("Login successful!")
 
     if auto_init:
         # After successful login, check if we need to run init
         # Recreate context with the new PAT to check if org/project are available
         updated_ctx = Context.default(
-            base_url=ctx.base_url,
+            api_url=ctx.api_url,
             cloud_url=ctx.cloud_url,
             personal_access_token=access_token,
             # Preserve CLI flags and env vars if they were provided

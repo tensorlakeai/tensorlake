@@ -140,7 +140,7 @@ def show_current_config(ctx: Context) -> None:
         ctx: The CLI context
     """
     click.echo("Current configuration:", err=True)
-    click.echo(f"  Endpoint: {ctx.base_url}", err=True)
+    click.echo(f"  Endpoint: {ctx.api_url}", err=True)
 
     org_source = ctx.get_organization_source()
     proj_source = ctx.get_project_source()
