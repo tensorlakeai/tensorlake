@@ -86,7 +86,7 @@ class TestPATEnvironmentVariable(unittest.TestCase):
 
                 # Without env var, should use file PAT
                 # Need to pass base_url explicitly since Context.default() doesn't auto-read env vars
-                ctx = Context.default(base_url=get_base_url())
+                ctx = Context.default(api_url=get_base_url())
                 self.assertEqual(ctx.personal_access_token, file_pat)
             finally:
                 config_module.CREDENTIALS_PATH = original_credentials_path

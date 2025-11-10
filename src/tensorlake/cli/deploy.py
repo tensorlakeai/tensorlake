@@ -57,7 +57,7 @@ def deploy(
     bearer_token = auth.api_key or auth.personal_access_token
     builder_v2 = ImageBuilderV2Client(
         build_service=os.getenv("TENSORLAKE_BUILD_SERVICE")
-        or f"{auth.base_url}/images/v2",
+        or f"{auth.api_url}/images/v2",
         api_key=bearer_token,
         organization_id=auth.organization_id if not auth.api_key else None,
         project_id=auth.project_id if not auth.api_key else None,
@@ -158,7 +158,7 @@ def _deploy_applications(
                 click.echo(
                     f"""💡 To invoke it, you can use the following cURL command:
 ```
-curl {auth.base_url}/applications/{func_name} \\
+curl {auth.api_url}/applications/{func_name} \\
 -H "Authorization: Bearer $TENSORLAKE_API_KEY" \\
 --json '{type}'
 ```

@@ -30,7 +30,7 @@ def parse(ctx: Context, path_or_url: str, pages: Optional[str], ignore_cache: bo
     """
     Parse a local document path or HTTP URL and print markdown to stdout.
     """
-    client = DocumentAI(api_key=ctx.api_key, server_url=ctx.base_url)
+    client = DocumentAI(api_key=ctx.api_key, server_url=ctx.api_url)
 
     # Build cache key: file hash (for local files) or URL + page range
     page_key = pages.strip() if pages else "all"

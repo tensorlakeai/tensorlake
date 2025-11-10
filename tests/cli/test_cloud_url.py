@@ -205,7 +205,7 @@ class TestCloudURLIntegration(unittest.TestCase):
     def test_cloud_url_different_from_base_url(self):
         """Test that cloud_url and base_url are independent"""
         ctx = Context.default(
-            base_url="https://api.example.com",
+            api_url="https://api.example.com",
             cloud_url="https://cloud.example.com",
         )
 

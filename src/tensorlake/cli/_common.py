@@ -51,7 +51,7 @@ ASYNC_HTTP_EVENT_HOOKS = {
 class Context:
     """Class for CLI context."""
 
-    base_url: str
+    api_url: str
     cloud_url: str
     namespace: str
     api_key: str | None = None
@@ -89,7 +89,7 @@ class Context:
                 )
 
             self._client = httpx.Client(
-                base_url=self.base_url, headers=headers, event_hooks=HTTP_EVENT_HOOKS
+                base_url=self.api_url, headers=headers, event_hooks=HTTP_EVENT_HOOKS
             )
         return self._client
 
@@ -111,7 +111,7 @@ class Context:
                 proj_id = self.project_id
 
             self._api_client = APIClient(
-                api_url=self.base_url,
+                api_url=self.api_url,
                 api_key=bearer_token,
                 organization_id=org_id,
                 project_id=proj_id,
@@ -164,7 +164,7 @@ class Context:
                     raise click.ClickException("Invalid API key")
                 if introspect_response.status_code == 404:
                     click.echo(
-                        f"The server at {self.base_url} doesn't support TensorLake API introspection.",
+                        f"The server at {self.api_url} doesn't support TensorLake API introspection.",
                         err=True,
                     )
                     click.echo(
@@ -276,12 +276,12 @@ class Context:
         return "not configured"
 
     @classmethod
-    def _resolve_base_url(
-        cls, base_url: str | None, local_config: dict, global_config: dict
+    def _resolve_api_url(
+        cls, api_url: str | None, local_config: dict, global_config: dict
     ) -> str:
         """Resolve base URL from CLI args, config, or default."""
         return (
-            base_url
+            api_url
             or get_nested_value(local_config, "tensorlake.api_url")
             or get_nested_value(global_config, "tensorlake.api_url")
             or "https://api.tensorlake.ai"
@@ -289,14 +289,27 @@ class Context:
 
     @classmethod
     def _resolve_cloud_url(
-        cls, cloud_url: str | None, local_config: dict, global_config: dict
+        cls,
+        cloud_url: str | None,
+        api_url: str,
+        local_config: dict,
+        global_config: dict,
     ) -> str:
         """Resolve cloud URL from CLI args, config, or default."""
         return (
             cloud_url
             or get_nested_value(local_config, "tensorlake.cloud_url")
             or get_nested_value(global_config, "tensorlake.cloud_url")
-            or "https://cloud.tensorlake.ai"
+            or cls._resolve_cloud_url_from_api_url(api_url)
+        )
+
+    @classmethod
+    def _resolve_cloud_url_from_api_url(cls, api_url: str) -> str:
+        """Resolve cloud URL from API URL."""
+        return (
+            api_url.replace("https://api.tensorlake.", "https://cloud.tensorlake.")
+            if api_url.startswith("https://api.tensorlake.")
+            else "https://cloud.tensorlake.ai"
         )
 
     @classmethod
@@ -306,7 +319,7 @@ class Context:
         personal_access_token: str | None,
         local_config: dict,
         global_config: dict,
-        base_url: str,
+        api_url: str,
     ) -> tuple[str | None, str | None]:
         """Resolve API key and PAT from CLI args, config, or credentials file."""
         final_api_key = (
@@ -316,7 +329,7 @@ class Context:
         )
 
         # Load PAT from credentials file (endpoint-scoped) if not provided via CLI/env
-        file_personal_access_token = load_credentials(base_url)
+        file_personal_access_token = load_credentials(api_url)
 
         # Priority: CLI/env PAT > credentials file PAT
         final_personal_access_token = (
@@ -375,7 +388,7 @@ class Context:
     @classmethod
     def default(
         cls,
-        base_url: str | None = None,
+        api_url: str | None = None,
         cloud_url: str | None = None,
         api_key: str | None = None,
         personal_access_token: str | None = None,
@@ -390,18 +403,18 @@ class Context:
         global_config_data = load_config()
 
         # Resolve all configuration values using helper methods
-        final_base_url = cls._resolve_base_url(
-            base_url, local_config_data, global_config_data
+        final_api_url = cls._resolve_api_url(
+            api_url, local_config_data, global_config_data
         )
         final_cloud_url = cls._resolve_cloud_url(
-            cloud_url, local_config_data, global_config_data
+            cloud_url, final_api_url, local_config_data, global_config_data
         )
         final_api_key, final_personal_access_token = cls._resolve_authentication(
             api_key,
             personal_access_token,
             local_config_data,
             global_config_data,
-            final_base_url,
+            final_api_url,
         )
         final_namespace = cls._resolve_namespace(
             namespace, local_config_data, global_config_data
@@ -414,7 +427,7 @@ class Context:
         ) = cls._resolve_project_config(organization_id, project_id, local_config_data)
 
         return cls(
-            base_url=final_base_url,
+            api_url=final_api_url,
             cloud_url=final_cloud_url,
             api_key=final_api_key,
             personal_access_token=final_personal_access_token,
@@ -468,7 +481,7 @@ def require_auth_and_project(f):
                 # Reload context with new credentials
                 # The login flow will have saved credentials and potentially created local config
                 updated_ctx = Context.default(
-                    base_url=ctx.base_url,
+                    api_url=ctx.api_url,
                     cloud_url=ctx.cloud_url,
                     namespace=ctx.namespace,
                     # Let Context.default reload everything from saved credentials and config
@@ -531,7 +544,7 @@ def require_auth_and_project(f):
 
             # Create a new context with the org/project IDs
             updated_ctx = Context.default(
-                base_url=ctx.base_url,
+                api_url=ctx.api_url,
                 cloud_url=ctx.cloud_url,
                 api_key=ctx.api_key,
                 personal_access_token=ctx.personal_access_token,
