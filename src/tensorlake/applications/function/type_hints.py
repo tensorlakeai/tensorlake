@@ -11,9 +11,9 @@ def function_arg_type_hint(function: Function, arg_ix: int) -> List[Any]:
 
     arg_ix can be negative to indicate position from the end of the argument list.
     """
-    function_signature: inspect.Signature = _function_signature(function)
-    parameters: list[inspect.Parameter] = list(function_signature.parameters.values())
-    if arg_ix >= len(parameters):
+    signature: inspect.Signature = function_signature(function)
+    parameters: list[inspect.Parameter] = list(signature.parameters.values())
+    if arg_ix >= len(parameters) or arg_ix < -len(parameters):
         return []
     parameter: inspect.Parameter = parameters[arg_ix]
     if parameter.annotation is inspect.Parameter.empty:
@@ -23,21 +23,21 @@ def function_arg_type_hint(function: Function, arg_ix: int) -> List[Any]:
 
 def function_kwarg_type_hint(function: Function, key: str) -> List[Any]:
     """Returns the type hint for keyword function call argument with the specified key, or None if not found."""
-    function_signature: inspect.Signature = _function_signature(function)
-    if key not in function_signature.parameters:
+    signature: inspect.Signature = function_signature(function)
+    if key not in signature.parameters:
         return []
-    parameter: inspect.Parameter = function_signature.parameters[key]
+    parameter: inspect.Parameter = signature.parameters[key]
     if parameter.annotation is inspect.Parameter.empty:
         return []
     return _resolve_type_hint(parameter.annotation)
 
 
 def function_return_type_hint(function: Function) -> List[Any]:
-    function_signature: inspect.Signature = _function_signature(function)
-    if function_signature.return_annotation is inspect.Signature.empty:
+    signature: inspect.Signature = function_signature(function)
+    if signature.return_annotation is inspect.Signature.empty:
         return []
 
-    return _resolve_type_hint(function_signature.return_annotation)
+    return _resolve_type_hint(signature.return_annotation)
 
 
 def serialize_type_hints(type_hints: List[Any]) -> bytes:
@@ -48,7 +48,11 @@ def deserialize_type_hints(serialized_type_hints: bytes) -> List[Any]:
     return pickle.loads(serialized_type_hints)
 
 
-def _function_signature(function: Function) -> inspect.Signature:
+def function_signature(function: Function) -> inspect.Signature:
+    """Returns the function signature for the provided Tensorlake Function.
+
+    Raises Exception if the signature cannot be obtained.
+    """
     # Common approach to getting the function signatures.
     return inspect.signature(
         function._original_function,
