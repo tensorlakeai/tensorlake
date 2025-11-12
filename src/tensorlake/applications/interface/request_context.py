@@ -52,12 +52,16 @@ class RequestMetrics:
 class FunctionProgress:
     """Abstract interface for reporting Tensorlake Function call progress."""
 
-    def update(self, current: float, total: float) -> None:
+    def update(
+        self, current: float, total: float, message: str | None = None, **kwargs
+    ) -> None:
         """Update the progress of the current Tensorlake Function call execution.
 
         Args:
             current: Current request progress value
             total: Total request progress value
+            message: Optional message to display with the progress update
+            kwargs: Additional keyword arguments to pass to the progress update
 
         Raises TensorlakeError on error.
         """

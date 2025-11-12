@@ -46,6 +46,7 @@ from tensorlake.applications.user_data_serializer import (
     PickleUserDataSerializer,
     UserDataSerializer,
 )
+from tensorlake.function_executor.cloud_events import print_cloud_event
 
 from ..blob_store.blob_store import BLOBStore
 from ..logger import FunctionExecutorLogger
@@ -753,10 +754,13 @@ class ProxiedAllocationProgress(FunctionProgress):
         self._allocation_runner: AllocationRunner = allocation_runner
         self._logger: FunctionExecutorLogger = logger.bind(module=__name__)
 
-    def update(self, current: float, total: float) -> None:
+    def update(
+        self, current: float, total: float, message: str | None = None, **kwargs
+    ) -> None:
         # This method is called from user function code.
         try:
             self._allocation_runner._allocation_state.update_progress(current, total)
+            _print_progress_update(current, total, message, **kwargs)
             # sleep(0) here momentarily releases the GIL, giving other
             # FE threads a chance to run before returning back to customer code that
             # might never return GIL. i.e. allowing the FE to handle incoming RPCs,
@@ -772,3 +776,18 @@ class ProxiedAllocationProgress(FunctionProgress):
                 exc_info=e,
             )
             raise InternalError("Failed to update allocation progress.")
+
+
+def _print_progress_update(
+    current: float, total: float, message: str | None = None, **kwargs
+) -> None:
+    event: dict[str, Any] = kwargs or {}
+    event["message"] = message or f"Executing step {current} of {total}"
+    event["step"] = current
+    event["total"] = total
+
+    print_cloud_event(
+        event,
+        type="ai.tensorlake.progress-update",
+        source="/tensorlake/function_executor/runner",
+    )
