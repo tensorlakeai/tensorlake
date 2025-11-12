@@ -99,6 +99,7 @@ class Page(BaseModel):
     """
 
     dimensions: Optional[List[int]] = None
+    page_dimensions: Optional[Dict[str, int]] = None
     page_fragments: Optional[List[PageFragment]] = None
     page_number: int
     classification_reason: Optional[str] = None
