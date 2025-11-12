@@ -45,3 +45,9 @@ pre-commit = "^4.3.0"
 
 [tool.poetry.plugins."poetry.command"]
 postinstall = "scripts:install_deps"
+
+[tool.isort]
+extend_skip = ["vendor"]
+
+[tool.black]
+extend_exclude = "vendor"
