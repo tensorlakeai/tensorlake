@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tensorlake"
-version = "0.2.76"
+version = "0.2.77"
 description = "Tensorlake SDK for Document Ingestion API and Serverless Applications"
 readme = "README.md"
 authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
@@ -34,6 +34,18 @@ function-executor = "tensorlake.function_executor.main:main"
 [build-system]
 requires = ["poetry==2.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+exclude = '''
+(
+    (^|/)vendor(/|$)
+  | (\.venv)
+)
+'''
+
+[tool.isort]
+profile = "black"
+skip = ["vendor", ".venv"]
 
 [tool.poetry.group.dev.dependencies]
 black = "25.9.0"
