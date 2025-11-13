@@ -77,12 +77,25 @@ def dockerfile_content(img: Image) -> str:
         "WORKDIR /app",
     ]
 
+    cmd_op = None
+    entrypoint_op = None
     for op in img._build_operations:
+        if op.type == _ImageBuildOperationType.CMD:
+            cmd_op = op
+        elif op.type == _ImageBuildOperationType.ENTRYPOINT:
+            entrypoint_op = op
+
         dockerfile_lines.append(_render_build_op(op))
 
     # Run tensorlake install after all user commands. There's implicit dependency
     # of tensorlake install success on user commands right now.
     dockerfile_lines.append(f"RUN pip install tensorlake=={_SDK_VERSION}")
+
+    if entrypoint_op:
+        dockerfile_lines.append(_render_build_op(entrypoint_op))
+
+    if cmd_op:
+        dockerfile_lines.append(_render_build_op(cmd_op))
 
     return "\n".join(dockerfile_lines)
 
@@ -122,6 +135,8 @@ def _add_build_op_to_hasher(op: _ImageBuildOperation, hasher: Any) -> None:
         _ImageBuildOperationType.RUN,
         _ImageBuildOperationType.ADD,
         _ImageBuildOperationType.ENV,
+        _ImageBuildOperationType.CMD,
+        _ImageBuildOperationType.ENTRYPOINT,
     ):
         for arg in op.args:
             hasher.update(arg.encode())
@@ -143,6 +158,9 @@ def _render_build_op(op: _ImageBuildOperation) -> str:
     options: str = " " + " ".join([f"--{k}={v}" for k, v in op.options.items()])
     if op.type == _ImageBuildOperationType.ENV:
         body: str = f'{op.args[0]}="{op.args[1]}"'
+    elif op.type in (_ImageBuildOperationType.CMD, _ImageBuildOperationType.ENTRYPOINT):
+        args_escaped: List[str] = [f'"{arg}"' for arg in op.args]
+        body = f"[{', '.join(args_escaped)}]"
     else:
         body: str = " ".join(op.args)
 
