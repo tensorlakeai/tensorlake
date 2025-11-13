@@ -27,7 +27,7 @@ class _ImageBuildOperation:
 
 class Image:
     """
-    Represents a Docker image to be built for application functions.
+    Represents a Docker image to be used for application functions.
     """
 
     def __init__(
@@ -130,23 +130,11 @@ class Image:
             )
         )
 
-    def pip_install(self, packages: str | List[str]) -> "Image":
-        """
-        Install Python packages using pip in the image. Equivalent to running 'pip install' in a RUN command.
-
-        Args:
-            packages (str | List[str]): The package or list of packages to install.
-        """
-
-        pkgs = packages if isinstance(packages, list) else [packages]
-        install_cmd = f"pip install {' '.join(pkgs)}"
-        return self.run(install_cmd)
-
     def cmd(self, command: str | List[str]) -> "Image":
         """
         Set the default command for the image. Equivalent to the Dockerfile CMD command.
 
-        Setting the CMD in the image is not necessary when using TensorLake, as the application
+        Setting the CMD in the image is not necessary when using Tensorlake, as the application
         function will override it. However, it can be useful for local testing, or custom images.
 
         Args:
@@ -164,7 +152,7 @@ class Image:
         """
         Set the entrypoint for the image. Equivalent to the Dockerfile ENTRYPOINT command.
 
-        Setting the ENTRYPOINT in the image is not necessary when using TensorLake, as the application
+        Setting the ENTRYPOINT in the image is not necessary when using Tensorlake, as the application
         function will override it. However, it can be useful for local testing, or custom images
 
         Args:
