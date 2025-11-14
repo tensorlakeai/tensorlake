@@ -52,43 +52,48 @@ def validate_loaded_applications() -> list[ValidationMessage]:
     return messages
 
 
-def _function_details_for_function_decorator_chain(
-    object: _FunctionDecorator | _ApplicationDecorator | Function | Callable,
-) -> FunctionDetails:
-    """Returns FunctionDetails for an object that can be used in a function decorator chain.
+def _details_for_decorator_chain(
+    object: (
+        _FunctionDecorator
+        | _ApplicationDecorator
+        | _ClassDecorator
+        | Function
+        | Callable
+        | Any
+    ),
+) -> FunctionDetails | ClassDetails:
+    """Returns details for an object that can be used in a decorator chain.
 
     Works correctly when the decorator wasn't called by user with ().
     """
     if isinstance(object, _FunctionDecorator):
         if object.is_called:
-            return _function_details_for_function_decorator_chain(object.function)
+            return _details_for_decorator_chain(object.function)
         else:
             # If the decorator wasn't called by user with () then it's first constructor argument
             # is the decorated function itself.
-            return _function_details_for_function_decorator_chain(object._description)
+            return _details_for_decorator_chain(object._description)
     elif isinstance(object, _ApplicationDecorator):
         if object.is_called:
-            return _function_details_for_function_decorator_chain(object.function)
+            return _details_for_decorator_chain(object.function)
         else:
             # If the decorator wasn't called by user with () then it's first constructor argument
             # is the decorated function itself.
-            return _function_details_for_function_decorator_chain(object._tags)
+            return _details_for_decorator_chain(object._tags)
+    elif isinstance(object, _ClassDecorator):
+        if object.is_called:
+            return _details_for_decorator_chain(object.original_class)
+        else:
+            # If the decorator wasn't called by user with () then it's first constructor argument
+            # is the decorated class itself.
+            return _details_for_decorator_chain(object._init_timeout)
     elif isinstance(object, Function):
         return get_function_details(object._original_function)
+    elif inspect.isclass(object):
+        return get_class_details(object)
     else:
-        # Regular function aka Callable.
+        # Assuming regular function aka Callable.
         return get_function_details(object)
-
-
-def _class_details_for_class_decorator(
-    decorator: _ClassDecorator,
-) -> ClassDetails:
-    if decorator.is_called:
-        return get_class_details(decorator.original_class)
-    else:
-        # If the decorator wasn't called by user with () then it's first constructor argument is the
-        # decorated class itself.
-        return get_class_details(decorator._init_timeout)
 
 
 def _validate_decorator_calls() -> list[ValidationMessage]:
@@ -101,9 +106,7 @@ def _validate_decorator_calls() -> list[ValidationMessage]:
             continue
 
         if isinstance(decorator, _FunctionDecorator):
-            fn_details: FunctionDetails = (
-                _function_details_for_function_decorator_chain(decorator)
-            )
+            fn_details: FunctionDetails = _details_for_decorator_chain(decorator)
             messages.append(
                 ValidationMessage(
                     message=f"@function decorator is missing (). Please use @function() syntax.",
@@ -112,9 +115,7 @@ def _validate_decorator_calls() -> list[ValidationMessage]:
                 )
             )
         elif isinstance(decorator, _ApplicationDecorator):
-            fn_details: FunctionDetails = (
-                _function_details_for_function_decorator_chain(decorator)
-            )
+            fn_details: FunctionDetails = _details_for_decorator_chain(decorator)
             messages.append(
                 ValidationMessage(
                     message=f"@application decorator is missing (). Please use @application() syntax.",
@@ -123,7 +124,7 @@ def _validate_decorator_calls() -> list[ValidationMessage]:
                 )
             )
         elif isinstance(decorator, _ClassDecorator):
-            cls_details: ClassDetails = _class_details_for_class_decorator(decorator)
+            cls_details: ClassDetails = _details_for_decorator_chain(decorator)
             messages.append(
                 ValidationMessage(
                     message=f"Class is missing () after @cls decorator. Please use @cls() syntax.",
@@ -249,7 +250,8 @@ def _validate_class(cls: Any) -> list[ValidationMessage]:
 
     if not inspect.isclass(cls):
         # Python allows decorating classes, functions and methods only.
-        function_details: FunctionDetails = get_function_details(cls)
+        # cls could also be a Function object or not called Decorator.
+        function_details: FunctionDetails = _details_for_decorator_chain(cls)
         messages.append(
             ValidationMessage(
                 message="@cls() is applied to function. Please use @cls() only on classes.",
@@ -410,8 +412,8 @@ def _validate_application_function(
     function_decorator: _FunctionDecorator | None = None
     for decorator in get_decorators():
         if isinstance(decorator, _FunctionDecorator):
-            decorator_function_details: FunctionDetails = (
-                _function_details_for_function_decorator_chain(decorator)
+            decorator_function_details: FunctionDetails = _details_for_decorator_chain(
+                decorator
             )
             if decorator_function_details == function_details:
                 function_decorator = decorator
@@ -502,7 +504,7 @@ def _validate_method_function(
     has_cls_decorator: bool = has_class(function_details.class_name)
     for decorator in get_decorators():
         if isinstance(decorator, _ClassDecorator):
-            cls_details: ClassDetails = _class_details_for_class_decorator(decorator)
+            cls_details: ClassDetails = _details_for_decorator_chain(decorator)
             if cls_details.class_name == function_details.class_name:
                 has_cls_decorator = True
                 break

@@ -76,7 +76,8 @@ def class_name(cls: Any) -> str:
     """
     # NB: needs to produce the same result as function_class_name because we compare them.
     if inspect.isfunction(cls) or inspect.ismethod(cls):
-        return function_class_name(cls)
+        name: str | None = function_class_name(cls)
+        return "<unknown>" if name is None else name
     if inspect.isclass(cls):
         return getattr(cls, "__qualname__", "<unknown>")
     else:
