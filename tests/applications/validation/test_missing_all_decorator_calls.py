@@ -39,15 +39,15 @@ class TestMissingAllDecoratorCalls(unittest.TestCase):
             self.assertEqual(validation_message.details.source_file_line, 11)
 
         self.assertIn(
-            "@application decorator is missing (). Please use @application() syntax.",
+            "@application decorator is missing its parenthesis. Please replace it with @application().",
             messages,
         )
         self.assertIn(
-            "@function decorator is missing (). Please use @function() syntax.",
+            "@function decorator is missing its parenthesis. Please replace it with @function().",
             messages,
         )
         self.assertIn(
-            "Class is missing () after @cls decorator. Please use @cls() syntax.",
+            "@cls decorator is missing its parenthesis. Please replace it with @cls().",
             messages,
         )
 

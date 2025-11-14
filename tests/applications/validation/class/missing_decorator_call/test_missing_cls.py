@@ -30,7 +30,7 @@ class TestMissingDecoratorCall(unittest.TestCase):
         )
         self.assertEqual(
             validation_message.message,
-            "Class is missing () after @cls decorator. Please use @cls() syntax.",
+            "@cls decorator is missing its parenthesis. Please replace it with @cls().",
         )
 
         self.assertIsNotNone(validation_message.details)

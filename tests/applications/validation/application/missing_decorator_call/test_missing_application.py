@@ -25,7 +25,7 @@ class TestMissingApplicationFunctionDecoratorCall(unittest.TestCase):
             ValidationMessageSeverity.ERROR,
         )
         self.assertEqual(
-            "@application decorator is missing (). Please use @application() syntax.",
+            "@application decorator is missing its parenthesis. Please replace it with @application().",
             validation_message.message,
         )
         self.assertIsNotNone(validation_message.details)

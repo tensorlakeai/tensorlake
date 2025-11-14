@@ -109,7 +109,7 @@ def _validate_decorator_calls() -> list[ValidationMessage]:
             fn_details: FunctionDetails = _details_for_decorator_chain(decorator)
             messages.append(
                 ValidationMessage(
-                    message=f"@function decorator is missing (). Please use @function() syntax.",
+                    message="@function decorator is missing its parenthesis. Please replace it with @function().",
                     severity=ValidationMessageSeverity.ERROR,
                     details=fn_details,
                 )
@@ -118,7 +118,7 @@ def _validate_decorator_calls() -> list[ValidationMessage]:
             fn_details: FunctionDetails = _details_for_decorator_chain(decorator)
             messages.append(
                 ValidationMessage(
-                    message=f"@application decorator is missing (). Please use @application() syntax.",
+                    message="@application decorator is missing its parenthesis. Please replace it with @application().",
                     severity=ValidationMessageSeverity.ERROR,
                     details=fn_details,
                 )
@@ -127,7 +127,7 @@ def _validate_decorator_calls() -> list[ValidationMessage]:
             cls_details: ClassDetails = _details_for_decorator_chain(decorator)
             messages.append(
                 ValidationMessage(
-                    message=f"Class is missing () after @cls decorator. Please use @cls() syntax.",
+                    message="@cls decorator is missing its parenthesis. Please replace it with @cls().",
                     severity=ValidationMessageSeverity.ERROR,
                     details=cls_details,
                 )

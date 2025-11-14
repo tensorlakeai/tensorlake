@@ -33,7 +33,7 @@ class TestMissingDecoratorCall(unittest.TestCase):
             if "@cls" in validation_message.message:
                 self.assertEqual(
                     validation_message.message,
-                    "Class is missing () after @cls decorator. Please use @cls() syntax.",
+                    "@cls decorator is missing its parenthesis. Please replace it with @cls().",
                 )
                 self.assertIsNotNone(validation_message.details)
                 class_details: ClassDetails = validation_message.details
@@ -56,7 +56,7 @@ class TestMissingDecoratorCall(unittest.TestCase):
             elif "@application" in validation_message.message:
                 self.assertEqual(
                     validation_message.message,
-                    "@application decorator is missing (). Please use @application() syntax.",
+                    "@application decorator is missing its parenthesis. Please replace it with @application().",
                 )
                 self.assertIsNotNone(validation_message.details)
                 details: FunctionDetails = validation_message.details
@@ -87,7 +87,7 @@ class TestMissingDecoratorCall(unittest.TestCase):
             elif "@function" in validation_message.message:
                 self.assertEqual(
                     validation_message.message,
-                    "@function decorator is missing (). Please use @function() syntax.",
+                    "@function decorator is missing its parenthesis. Please replace it with @function().",
                 )
                 self.assertIsNotNone(validation_message.details)
                 details: FunctionDetails = validation_message.details

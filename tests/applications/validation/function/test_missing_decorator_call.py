@@ -30,7 +30,7 @@ class TestMissingRegularFunctionDecoratorCall(unittest.TestCase):
             ValidationMessageSeverity.ERROR,
         )
         self.assertEqual(
-            "@function decorator is missing (). Please use @function() syntax.",
+            "@function decorator is missing its parenthesis. Please replace it with @function().",
             validation_message.message,
         )
         self.assertIsNotNone(validation_message.details)
