@@ -15,6 +15,8 @@ enable_document_ai_test_suite=false
 
 if [[ "$1" == "--function-executor" ]]; then
   enable_fe_test_suite=true
+elif [ "$1" == "--applications" ]; then
+  enable_applications_test_suite=true
 elif [ "$1" == "--document-ai" ]; then
   enable_document_ai_test_suite=true
 else

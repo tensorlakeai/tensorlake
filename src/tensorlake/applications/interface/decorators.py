@@ -1,45 +1,84 @@
-import inspect
-import os.path
-from typing import Callable, Dict, List, Literal, TypeVar
+from typing import Any, Callable, Dict, List, Literal, TypeVar
 
 from tensorlake.vendor.nanoid import generate as nanoid
 
 from ..registry import (
-    get_class,
-    get_function,
-    has_class,
-    has_function,
     register_class,
+    register_decorator,
     register_function,
 )
-from .exceptions import ApplicationValidationError
 from .function import (
     Function,
     _ApplicationConfiguration,
+    _function_name,
     _FunctionConfiguration,
 )
 from .image import Image
 from .retries import Retries
 
 
-def application(
-    tags: Dict[str, str] = {},
-    retries: Retries = Retries(),
-    region: Literal["us-east-1", "eu-west-1"] | None = None,
-    input_deserializer: Literal["json", "pickle"] = "json",
-    output_serializer: Literal["json", "pickle"] = "json",
-) -> Callable:
-    def decorator(fn: Callable | Function) -> Function:
-        if not isinstance(fn, Function):
-            fn = Function(fn)
+class _Decorator:
+    def __init__(self):
+        self._is_called: bool = False
+        # None for class decorator.
+        self._function: Function | _Decorator | None = None
+        register_decorator(self)
 
-        fn: Function
+    @property
+    def is_called(self) -> bool:
+        return self._is_called
+
+    @property
+    def function(self) -> "Function | _Decorator | None":
+        return self._function
+
+    def create_function(
+        self, fn: "_Decorator" | Callable | Function
+    ) -> "Function | _Decorator":
+        self._is_called = True
+
+        if isinstance(fn, _Decorator):
+            # User code didn't add () to @decorator.
+            # Return the decorator itself so we can fail validation later.
+            self._function = fn
+        elif isinstance(fn, Function):
+            self._function = fn
+        else:
+            fn = Function(fn)
+            register_function(_function_name(fn._original_function), fn)
+            self._function = fn
+
+        return self._function
+
+
+class _ApplicationDecorator(_Decorator):
+    def __init__(
+        self,
+        tags: Dict[str, str],
+        retries: Retries,
+        region: str | None,
+        input_deserializer: str,
+        output_serializer: str,
+    ):
+        super().__init__()
+        self._tags: Dict[str, str] = tags
+        self._retries: Retries = retries
+        self._region: str | None = region
+        self._input_deserializer: str = input_deserializer
+        self._output_serializer: str = output_serializer
+
+    def __call__(self, fn: _Decorator | Callable | Function) -> Function | _Decorator:
+        fn: Function | _Decorator = self.create_function(fn)
+        if isinstance(fn, _Decorator):
+            # No () added to @decorator call, shortcut here, this simplifies validation code.
+            return fn
+
         fn._application_config = _ApplicationConfiguration(
-            tags=tags,
-            retries=retries,
-            region=region,
-            input_deserializer=input_deserializer,
-            output_serializer=output_serializer,
+            tags=self._tags,
+            retries=self._retries,
+            region=self._region,
+            input_deserializer=self._input_deserializer,
+            output_serializer=self._output_serializer,
             # Use a unique random version. We don't provide user controlled versioning at the moment.
             # Use only alphanumeric characters so app version can be used as container tags.
             version=nanoid(
@@ -49,7 +88,79 @@ def application(
 
         return fn
 
-    return decorator
+
+def application(
+    tags: Dict[str, str] = {},
+    retries: Retries = Retries(),
+    region: Literal["us-east-1", "eu-west-1"] | None = None,
+    input_deserializer: Literal["json", "pickle"] = "json",
+    output_serializer: Literal["json", "pickle"] = "json",
+) -> _ApplicationDecorator:
+    return _ApplicationDecorator(
+        # NB: the first argument here is used during pre-deployment validation.
+        tags=tags,
+        retries=retries,
+        region=region,
+        input_deserializer=input_deserializer,
+        output_serializer=output_serializer,
+    )
+
+
+class _FunctionDecorator(_Decorator):
+    def __init__(
+        self,
+        description: str,
+        cpu: float,
+        memory: float,
+        ephemeral_disk: float,
+        gpu: None | str | List[str],
+        timeout: int,
+        image: Image,
+        secrets: List[str],
+        retries: Retries | None,
+        region: str | None,
+    ):
+        super().__init__()
+        self._description: str = description
+        self._cpu: float = cpu
+        self._memory: float = memory
+        self._ephemeral_disk: float = ephemeral_disk
+        self._gpu: None | str | List[str] = gpu
+        self._timeout: int = timeout
+        self._image: Image = image
+        self._secrets: List[str] = secrets
+        self._retries: Retries | None = retries
+        self._region: str | None = region
+
+    def __call__(self, fn: _Decorator | Callable | Function) -> Function | _Decorator:
+        fn: Function | _Decorator = self.create_function(fn)
+        if isinstance(fn, _Decorator):
+            # No () added to @decorator call, shortcut here, this simplifies validation code.
+            return fn
+
+        fn._function_config = _FunctionConfiguration(
+            # set by cls() decorator if this is a class method
+            class_name=None,
+            class_method_name=None,
+            class_init_timeout=None,
+            function_name=_function_name(fn._original_function),
+            description=self._description,
+            image=self._image,
+            secrets=self._secrets,
+            retries=self._retries,
+            timeout=self._timeout,
+            cpu=self._cpu,
+            memory=self._memory,
+            ephemeral_disk=self._ephemeral_disk,
+            gpu=self._gpu,
+            region=self._region,
+            # Hidden from users because not implemented in Server yet.
+            cacheable=False,
+            # Hidden from users because not implemented in Telemetry yet.
+            max_concurrency=_DEFAULT_MAX_CONCURRENCY,
+        )
+
+        return fn
 
 
 _DEFAULT_TIMEOUT_SEC: int = 300  # 5 minutes
@@ -78,137 +189,77 @@ def function(
     secrets: List[str] = [],
     retries: Retries | None = None,
     region: Literal["us-east-1", "eu-west-1"] | None = None,
-) -> Callable:
+) -> _FunctionDecorator:
     """Decorator to register a function with the Tensorlake framework.
 
     When a function calls another function the called function input serializer is used.
     When a function produces a value its output serializer is used.
     """
-
-    def decorator(fn: Callable | Function) -> Function:
-        # If this function is a class method then the class does not exist yet.
-        if not isinstance(fn, Function):
-            fn = Function(fn)
-
-        fn: Function
-        fn._function_config = _FunctionConfiguration(
-            # set by cls() decorator if this is a class method
-            class_name=None,
-            class_method_name=None,
-            class_init_timeout=None,
-            # "{class}.{method}" for methods, otherwise just function name. Doesn't include module name.
-            # All functions and classes in the application share a single namespace.
-            function_name=fn._original_function.__qualname__,
-            description=description,
-            image=image,
-            secrets=secrets,
-            retries=retries,
-            timeout=timeout,
-            cpu=cpu,
-            memory=memory,
-            ephemeral_disk=ephemeral_disk,
-            gpu=gpu,
-            region=region,
-            # Hidden from users because not implemented in Server yet.
-            cacheable=False,
-            # Hidden from users because not implemented in Telemetry yet.
-            max_concurrency=_DEFAULT_MAX_CONCURRENCY,
-        )
-
-        if has_function(fn._function_config.function_name):
-            existing_fn: Function = get_function(fn._function_config.function_name)
-            existing_fn_file_path: str | None = inspect.getsourcefile(
-                existing_fn._original_function
-            )
-            fn_file_path: str | None = inspect.getsourcefile(fn._original_function)
-            if existing_fn_file_path is not None:
-                existing_fn_file_path = os.path.abspath(existing_fn_file_path)
-            if fn_file_path is not None:
-                fn_file_path = os.path.abspath(fn_file_path)
-            # Allow re-registering the same function from the same file.
-            # This is needed because pickle.loads imports __main__ module
-            # second time but with its real name (i.e. real_name.py) when unpickling
-            # classes stored in function call and application entrypoint metadata.
-            # So two modules exist for real_name.py in sys.modules:
-            # * __main__
-            # * real_name
-            # Another legitimate use case if when user redefines the function
-            # in the same file. This is a valid Python code.
-            if (
-                existing_fn_file_path != fn_file_path
-                or existing_fn_file_path is None
-                or fn_file_path is None
-            ):
-                raise ApplicationValidationError(
-                    f"Function '{fn._function_config.function_name}' already exists. "
-                    f"First defined in {existing_fn_file_path}, "
-                    f"redefined in {fn_file_path}. "
-                    "Please rename one of the functions."
-                )
-
-        register_function(fn._function_config.function_name, fn)
-
-        return fn
-
-    return decorator
+    return _FunctionDecorator(
+        # NB: the first argument here is used during pre-deployment validation.
+        description=description,
+        cpu=cpu,
+        memory=memory,
+        ephemeral_disk=ephemeral_disk,
+        gpu=gpu,
+        timeout=timeout,
+        image=image,
+        secrets=secrets,
+        retries=retries,
+        region=region,
+    )
 
 
-def cls(
-    init_timeout: int | None = None,
-) -> Callable:
+def _class_name(cls: Any) -> str:
+    # Doesn't include module name. This is good because all Tensorlake functions and classes share a single namespace.
+    # NB: this might not be a class if user passed something else to @cls decorator.
+    return getattr(cls, "__qualname__", "<unknown>")
+
+
+def __tensorlake_empty_class_instance_init__(self):
+    # Don't do anything in this constructor when the class methods are called using CLASS().method(...).
+    pass
+
+
+class _ClassDecorator(_Decorator):
     CLASS = TypeVar("CLASS")
 
-    def decorator(original_class: CLASS) -> CLASS:
-        # Doesn't include module name. This is good because all Tensorlake functions and classes share a single namespace.
-        class_name: str = original_class.__qualname__
+    def __init__(
+        self,
+        init_timeout: int | None,
+    ):
+        super().__init__()
+        self._init_timeout: int | None = init_timeout
+        self._original_class: Any | None = None
 
-        # TODO: Update the existing class in case new definition is loaded.
-        if has_class(class_name):
-            existing_cls: CLASS = get_class(class_name)
-            existing_cls_file_path: str | None = inspect.getsourcefile(existing_cls)
-            cls_file_path: str | None = inspect.getsourcefile(original_class)
-            if existing_cls_file_path is not None:
-                existing_cls_file_path = os.path.abspath(existing_cls_file_path)
-            if cls_file_path is not None:
-                cls_file_path = os.path.abspath(cls_file_path)
-            # Allow re-registering the same class from the same file.
-            # This is needed because pickle.loads imports __main__ module
-            # second time but with its real name (i.e. real_name.py) when unpickling
-            # classes stored in function call and application entrypoint metadata.
-            # So two modules exist for real_name.py in sys.modules:
-            # * __main__
-            # * real_name
-            # Another legitimate use case if when user redefines the class
-            # in the same file. This is a valid Python code.
-            if (
-                existing_cls_file_path != cls_file_path
-                or existing_cls_file_path is None
-                or cls_file_path is None
-            ):
-                raise ApplicationValidationError(
-                    f"Class '{class_name}' already exists. "
-                    f"First defined in {existing_cls_file_path}, "
-                    f"redefined in {cls_file_path}. "
-                    "Please rename one of the classes."
-                )
+    @property
+    def original_class(self) -> Any | None:
+        return self._original_class
 
-        def __tensorlake_empty_init__(self):
-            # Don't do anything in this constructor when the class methods are called CLASS().method(...).
-            pass
+    def __call__(self, original_class: CLASS) -> CLASS:
+        self._is_called = True
+        self._original_class = original_class
 
         original_class.__tensorlake_original_init__ = original_class.__init__
-        original_class.__tensorlake_name__ = class_name
-        original_class.__init__ = __tensorlake_empty_init__
+        original_class.__tensorlake_name__ = _class_name(original_class)
+        original_class.__init__ = __tensorlake_empty_class_instance_init__
 
-        register_class(class_name, original_class)
+        register_class(_class_name(original_class), original_class)
 
         for attr_name in dir(original_class):
             attr = getattr(original_class, attr_name)
             if isinstance(attr, Function):
-                attr._function_config.class_name = class_name
+                attr._function_config.class_name = _class_name(original_class)
                 attr._function_config.class_method_name = attr_name
-                attr._function_config.class_init_timeout = init_timeout
+                attr._function_config.class_init_timeout = self._init_timeout
 
         return original_class
 
-    return decorator
+
+def cls(
+    init_timeout: int | None = None,
+) -> _ClassDecorator:
+    return _ClassDecorator(
+        # NB: the first argument here is used during pre-deployment validation.
+        init_timeout=init_timeout,
+    )

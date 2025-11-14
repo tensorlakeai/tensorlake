@@ -12,6 +12,7 @@ from tensorlake.applications import (
 )
 from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
+from tensorlake.applications.validation import validate_loaded_applications
 
 
 @application()
@@ -44,6 +45,9 @@ def to_int(value: str) -> int:
 
 
 class TestRecursiveMaps(unittest.TestCase):
+    def test_applications_are_valid(self):
+        self.assertEqual(validate_loaded_applications(), [])
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_blocking(self, _: str, is_remote: bool):
         if is_remote:

@@ -14,6 +14,7 @@ from tensorlake.applications import (
     run_remote_application,
 )
 from tensorlake.applications.remote.deploy import deploy_applications
+from tensorlake.applications.validation import validate_loaded_applications
 
 
 class TestGraphRequestPayload(BaseModel):
@@ -92,6 +93,9 @@ def store_sum_as_file(total: int) -> File:
 
 
 class TestComplexGraph(unittest.TestCase):
+    def test_applications_are_valid(self):
+        self.assertEqual(validate_loaded_applications(), [])
+
     def test_local_api_call_of_complex_graph_produces_expected_outputs(self):
         for function in ["test_graph_api_reduce", "test_graph_api_fan_in"]:
             request = run_local_application(

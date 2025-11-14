@@ -62,6 +62,12 @@ from ..user_data_serializer import (
     PickleUserDataSerializer,
     UserDataSerializer,
 )
+from ..validation import (
+    ValidationMessage,
+    has_error_message,
+    print_validation_messages,
+    validate_loaded_applications,
+)
 from .blob_store import BLOB, BLOBStore
 from .class_instance_store import ClassInstanceStore
 from .future import LocalFuture, UserFutureMetadataType
@@ -124,57 +130,21 @@ class LocalRunner:
 
     def run(self) -> Request:
         try:
-            set_run_futures_hook(self._runtime_hook_run_futures)
-            set_wait_futures_hook(self._runtime_hook_wait_futures)
-
-            # Serialize application payload the same way as in remote mode.
-            input_serializer: UserDataSerializer = function_input_serializer(self._app)
-            serialized_payload, payload_metadata = serialize_value(
-                value=self._app_payload, serializer=input_serializer, value_id="fake_id"
+            validation_messages: list[ValidationMessage] = (
+                validate_loaded_applications()
             )
-
-            payload: Any = deserialize_application_function_call_payload(
-                application=self._app,
-                payload=serialized_payload,
-                payload_content_type=payload_metadata.content_type,
-            )
-            app_function_call_awaitable: FunctionCallAwaitable = self._app.awaitable(
-                payload
-            )
-            self._create_future_run_for_awaitable(
-                awaitable=app_function_call_awaitable,
-                existing_awaitable_future=None,
-                start_delay=None,
-                output_consumer_future_id=None,
-                output_serializer_name_override=None,
-            )
-
-            self._control_loop()
-
-            if self._request_exception is not None:
-                return LocalRequest(
-                    id=_LOCAL_REQUEST_ID,
-                    output=None,
-                    exception=self._request_exception,
-                )
-
-            if not self._blob_store.has(app_function_call_awaitable.id):
-                # FIXME: This should not happen, it means that we didn't set self._request_exception.
-                # But this actually happens.
+            print_validation_messages(validation_messages)
+            if has_error_message(validation_messages):
                 return LocalRequest(
                     id=_LOCAL_REQUEST_ID,
                     output=None,
                     exception=RequestFailureException(
-                        "Application didn't return an output."
+                        "Local application run aborted due to code validation errors, "
+                        "please address them before running the application."
                     ),
                 )
 
-            app_output_blob: BLOB = self._blob_store.get(app_function_call_awaitable.id)
-            return LocalRequest(
-                id=_LOCAL_REQUEST_ID,
-                output=_deserialize_blob_value(app_output_blob),
-                exception=None,
-            )
+            return self._run()
         except BaseException as e:
             # This is an unexpected exception in LocalRunner code itself.
             # The function run exception is stored in self._exception and handled above.
@@ -188,6 +158,59 @@ class LocalRunner:
                     else RequestFailureException("Request cancelled by user")
                 ),
             )
+
+    def _run(self) -> LocalRequest:
+        set_run_futures_hook(self._runtime_hook_run_futures)
+        set_wait_futures_hook(self._runtime_hook_wait_futures)
+
+        # Serialize application payload the same way as in remote mode.
+        input_serializer: UserDataSerializer = function_input_serializer(self._app)
+        serialized_payload, payload_metadata = serialize_value(
+            value=self._app_payload, serializer=input_serializer, value_id="fake_id"
+        )
+
+        payload: Any = deserialize_application_function_call_payload(
+            application=self._app,
+            payload=serialized_payload,
+            payload_content_type=payload_metadata.content_type,
+        )
+        app_function_call_awaitable: FunctionCallAwaitable = self._app.awaitable(
+            payload
+        )
+        self._create_future_run_for_awaitable(
+            awaitable=app_function_call_awaitable,
+            existing_awaitable_future=None,
+            start_delay=None,
+            output_consumer_future_id=None,
+            output_serializer_name_override=None,
+        )
+
+        self._control_loop()
+
+        if self._request_exception is not None:
+            return LocalRequest(
+                id=_LOCAL_REQUEST_ID,
+                output=None,
+                exception=self._request_exception,
+            )
+
+        if not self._blob_store.has(app_function_call_awaitable.id):
+            # FIXME: This should not happen, it means that we didn't set self._request_exception.
+            # But this actually happens.
+            return LocalRequest(
+                id=_LOCAL_REQUEST_ID,
+                output=None,
+                exception=RequestFailureException(
+                    "Application didn't return an output."
+                ),
+            )
+
+        app_output_blob: BLOB = self._blob_store.get(app_function_call_awaitable.id)
+        return LocalRequest(
+            id=_LOCAL_REQUEST_ID,
+            output=_deserialize_blob_value(app_output_blob),
+            exception=None,
+        )
 
     def close(self) -> None:
         """Closes the LocalRunner and releases all resources.

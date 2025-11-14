@@ -20,6 +20,12 @@ from tensorlake.applications.remote.manifests.function import (
     create_function_manifest,
 )
 from tensorlake.applications.secrets import list_secret_names
+from tensorlake.applications.validation import (
+    ValidationMessage,
+    has_error_message,
+    print_validation_messages,
+    validate_loaded_applications,
+)
 from tensorlake.builder.client_v2 import BuildContext, ImageBuilderV2Client
 from tensorlake.cli._common import Context, require_auth_and_project
 from tensorlake.cli.secrets import warning_missing_secrets
@@ -72,6 +78,15 @@ def deploy(
             err=True,
         )
         traceback.print_exception(e)
+        raise click.Abort
+
+    validation_messages: list[ValidationMessage] = validate_loaded_applications()
+    print_validation_messages(validation_messages)
+    if has_error_message(validation_messages):
+        click.echo(
+            "‼️  Deployment aborted due to code validation errors, please address them before deploying.",
+            err=True,
+        )
         raise click.Abort
 
     warning_missing_secrets(auth, list(list_secret_names()))
