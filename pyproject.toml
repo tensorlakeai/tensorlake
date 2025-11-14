@@ -35,16 +35,11 @@ requires = ["poetry==2.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.black]
-exclude = '''
-(
-    (^|/)vendor(/|$)
-  | (\.venv)
-)
-'''
+extend_exclude = "vendor"
 
 [tool.isort]
 profile = "black"
-skip = ["vendor", ".venv"]
+extend_skip = ["vendor"]
 
 [tool.poetry.group.dev.dependencies]
 black = "25.11.0"
