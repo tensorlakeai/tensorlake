@@ -93,12 +93,22 @@ class PageFragment(BaseModel):
     bbox: Optional[dict[str, float]] = None
 
 
+class PageDimensions(BaseModel):
+    """
+    Page dimensions containing width and height information.
+    """
+
+    width: int = Field(description="Width of the page")
+    height: int = Field(description="Height of the page")
+
+
 class Page(BaseModel):
     """
     Page in a document.
     """
 
     dimensions: Optional[List[int]] = None
+    page_dimensions: Optional[PageDimensions] = None
     page_fragments: Optional[List[PageFragment]] = None
     page_number: int
     classification_reason: Optional[str] = None
