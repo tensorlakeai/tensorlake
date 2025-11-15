@@ -295,7 +295,7 @@ python examples/readme_example.py
 
 ## Learn more about workflows 
 
-* [Serverless Workflows Documentation](https://docs.tensorlake.ai/workflows/quickstart)
-* [Key programming concepts in Tensorlake Workflows](https://docs.tensorlake.ai/workflows/compute)
-* [Dependencies and container images in Tensorlake Workflows](https://docs.tensorlake.ai/workflows/images)
+* [Serverless Workflows Documentation](https://docs.tensorlake.ai/applications/quickstart)
+* [Key programming concepts in Tensorlake Workflows](https://docs.tensorlake.ai/applications/compute)
+* [Dependencies and container images in Tensorlake Workflows](https://docs.tensorlake.ai/applications/images)
 * [Open Source Workflow Compute Engine](https://docs.tensorlake.ai/opensource/indexify)
