@@ -31,6 +31,10 @@ class ApplicationManifest(BaseModel):
 def create_application_manifest(
     application_function: Function, all_functions: List[Function]
 ) -> ApplicationManifest:
+    """Creates ApplicationManifest for the supplied application function.
+
+    Raises TensorlakeError on error.
+    """
     app_config: _ApplicationConfiguration = application_function._application_config
 
     function_manifests: Dict[str, FunctionManifest] = {
@@ -54,6 +58,7 @@ def create_application_manifest(
         entrypoint=EntryPointManifest(
             function_name=application_function._function_config.function_name,
             input_serializer=function_input_serializer(application_function).name,
+            # Application functions never have an output serializer override.
             output_serializer=function_output_serializer(
                 application_function, None
             ).name,

@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Union
 from pydantic import BaseModel
 from typing_extensions import get_args, get_origin, get_type_hints
 
+from ...interface import InternalError
 from ...interface.function import Function, _ApplicationConfiguration
 from .function_manifests import (
     FunctionResourcesManifest,
@@ -207,6 +208,10 @@ def _function_signature_info(
 def create_function_manifest(
     application_function: Function, application_version: str, function: Function
 ) -> FunctionManifest:
+    """Creates FunctionManifest for the supplied function.
+
+    Raises TensorlakeError on error.
+    """
     app_config: _ApplicationConfiguration = application_function._application_config
     retry_policy: RetryPolicyManifest = (
         RetryPolicyManifest(
@@ -224,9 +229,14 @@ def create_function_manifest(
         )
     )
 
-    parameters: List[ParameterManifest]
-    return_type_json_schema: Dict[str, str]
-    parameters, return_type_json_schema = _function_signature_info(function)
+    parameters: List[ParameterManifest] = []
+    return_type_json_schema: Dict[str, str] = {}
+    try:
+        parameters, return_type_json_schema = _function_signature_info(function)
+    except Exception as e:
+        raise InternalError(
+            f"Failed to extract function signature for {function}: {str(e)}"
+        )
 
     cache_key: str | None = (
         f"version_function={application_version}:{function._function_config.function_name}"

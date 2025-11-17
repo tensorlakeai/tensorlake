@@ -10,9 +10,11 @@ class LocalRequestState(RequestState):
         self._state: Dict[str, bytes] = {}
 
     def set(self, key: str, value: Any) -> None:
+        # Raises serialization errors directly to user code.
         self._state[key] = REQUEST_STATE_USER_DATA_SERIALIZER.serialize(value)
 
     def get(self, key: str, default: Any | None = None) -> Any | None:
+        # Raises deserialization errors directly to user code.
         serialized_value: bytes | None = self._state.get(key, None)
         # possible_types=[] because pickle deserializer knows the target type already.
         return (

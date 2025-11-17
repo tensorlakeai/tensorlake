@@ -7,7 +7,6 @@ from ..function.introspect import (
     FunctionDetails,
     get_class_details,
     get_function_details,
-    is_application_function,
     is_module_level_function_or_class,
 )
 from ..function.type_hints import (
@@ -15,7 +14,7 @@ from ..function.type_hints import (
     function_return_type_hint,
     function_signature,
 )
-from ..interface import Function
+from ..interface import Function, InternalError
 from ..interface.decorators import (
     _ApplicationDecorator,
     _class_name,
@@ -23,6 +22,7 @@ from ..interface.decorators import (
     _Decorator,
     _FunctionDecorator,
 )
+from ..interface.function import _is_application_function
 from ..registry import (
     get_classes,
     get_classes_with_duplicates,
@@ -133,7 +133,7 @@ def _validate_decorator_calls() -> list[ValidationMessage]:
                 )
             )
         else:
-            raise ValueError(
+            raise InternalError(
                 f"Unknown decorator type: {type(decorator)} for decorator: {decorator}"
             )
 
@@ -320,17 +320,16 @@ def _validate_applications() -> list[ValidationMessage]:
     Returns a list of validation messages.
     """
     messages: list[ValidationMessage] = []
+    applications: list[Function] = []
 
-    has_application: bool = any(
+    has_application_decorator: bool = any(
         isinstance(d, _ApplicationDecorator) for d in get_decorators()
     )
     for function in get_functions():
-        function: Function
-        if is_application_function(function):
-            has_application = True
-            break
+        if _is_application_function(function):
+            applications.append(function)
 
-    if not has_application:
+    if not has_application_decorator and len(applications) == 0:
         messages.append(
             ValidationMessage(
                 message="No application function is defined. Please add at least one application function by adding @application() decorator to it.",
@@ -338,6 +337,29 @@ def _validate_applications() -> list[ValidationMessage]:
                 details=None,
             )
         )
+
+    for application in applications:
+        application_details: FunctionDetails = get_function_details(
+            application._original_function
+        )
+        if application._application_config.output_serializer not in ("json", "pickle"):
+            messages.append(
+                ValidationMessage(
+                    message=f"Application function uses not supported output serializer '{application._application_config.output_serializer}'. "
+                    "Only 'json' and 'pickle' are supported. Please use a supported output serializer.",
+                    severity=ValidationMessageSeverity.ERROR,
+                    details=application_details,
+                )
+            )
+        if application._application_config.input_deserializer not in ("json", "pickle"):
+            messages.append(
+                ValidationMessage(
+                    message=f"Application function uses not supported input deserializer '{application._application_config.input_deserializer}'. "
+                    "Only 'json' and 'pickle' are supported. Please use a supported input deserializer.",
+                    severity=ValidationMessageSeverity.ERROR,
+                    details=application_details,
+                )
+            )
 
     return messages
 
@@ -361,7 +383,7 @@ def _validate_function(function: Function) -> list[ValidationMessage]:
         function._original_function
     )
     messages.extend(_validate_regular_function(function, function_details))
-    if is_application_function(function):
+    if _is_application_function(function):
         messages.extend(_validate_application_function(function, function_details))
     if function_details.class_name is not None:
         messages.extend(_validate_method_function(function, function_details))
@@ -519,7 +541,7 @@ def _validate_method_function(
         )
 
     # Application method signature is verified by application function validation.
-    if not is_application_function(function):
+    if not _is_application_function(function):
         signature: inspect.Signature = inspect.signature(function._original_function)
         parameters: list[inspect.Parameter] = list(signature.parameters.values())
         if len(parameters) < 1 or parameters[0].name != "self":

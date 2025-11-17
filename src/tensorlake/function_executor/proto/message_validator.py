@@ -14,6 +14,9 @@ class MessageValidator:
         self._message = message
 
     def required_field(self, field_name: str) -> "MessageValidator":
+        """Validates that the field is set.
+
+        Raises: ValueError: If the field is not set."""
         if not self._message.HasField(field_name):
             raise ValueError(
                 f"Field '{field_name}' is required in {type(self._message).__name__}"

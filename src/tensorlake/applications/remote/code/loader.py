@@ -3,6 +3,8 @@ import os
 import sys
 from typing import Generator, Set
 
+from ...interface import InternalError
+
 
 def load_code(application_file_path: str) -> None:
     """Loads the supplied python file with application.
@@ -11,7 +13,7 @@ def load_code(application_file_path: str) -> None:
     """
 
     if not os.path.isabs(application_file_path):
-        raise ValueError(
+        raise InternalError(
             f"The deployed application file path `{application_file_path}` must be absolute."
         )
 

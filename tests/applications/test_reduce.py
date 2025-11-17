@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from tensorlake.applications import (
     Request,
-    RequestFailureException,
+    RequestFailed,
     application,
     function,
 )
@@ -184,7 +184,7 @@ class TestReduce(unittest.TestCase):
             deploy_applications(__file__)
 
         request: Request = run_application(fail_api_function, 6, remote=is_remote)
-        self.assertRaises(RequestFailureException, request.output)
+        self.assertRaises(RequestFailed, request.output)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_reduce_nothing(self, _: str, is_remote: bool):
@@ -194,7 +194,7 @@ class TestReduce(unittest.TestCase):
         request: Request = run_application(
             api_reduce_no_items_no_initial, None, remote=is_remote
         )
-        self.assertRaises(RequestFailureException, request.output)
+        self.assertRaises(RequestFailed, request.output)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_reduce_initial(self, _: str, is_remote: bool):

@@ -5,6 +5,8 @@ from typing import Any, Iterator
 
 import grpc
 
+from tensorlake.applications import InternalError
+
 from ..proto.function_executor_pb2 import (
     GetRequestStateRequest,
     RequestStateRequest,
@@ -60,7 +62,7 @@ class RequestStateProxyServer:
                 validator = ResponseValidator(response)
                 try:
                     validator.check()
-                except ValueError as e:
+                except Exception as e:
                     self._logger.error("invalid response from the client", exc_info=e)
                     continue
 
@@ -121,7 +123,7 @@ class RequestStateProxyServer:
                     state_request_id=state_request_id,
                     response=response,
                 )
-                raise RuntimeError(
+                raise InternalError(
                     "response state_request_id doesn't match actual request_id"
                 )
             if not response.HasField("set"):
@@ -130,13 +132,13 @@ class RequestStateProxyServer:
                     state_request_id=state_request_id,
                     response=response,
                 )
-                raise RuntimeError("set response is missing in the client response")
+                raise InternalError("set response is missing in the client response")
             if not response.success:
                 self._logger.error(
                     "failed to set the request state for key",
                     key=key,
                 )
-                raise RuntimeError("failed to set the request state for key")
+                raise InternalError("failed to set the request state for key")
 
     def get(self, allocation_id: str, key: str) -> bytes | None:
         with self._lock:
@@ -161,7 +163,7 @@ class RequestStateProxyServer:
                     state_request_id=state_request_id,
                     response=response,
                 )
-                raise RuntimeError(
+                raise InternalError(
                     "response state_request_id doesn't match actual state_request_id"
                 )
             if not response.HasField("get"):
@@ -170,13 +172,13 @@ class RequestStateProxyServer:
                     state_request_id=state_request_id,
                     response=response,
                 )
-                raise RuntimeError("get response is missing in the client response")
+                raise InternalError("get response is missing in the client response")
             if not response.success:
                 self._logger.error(
                     "failed to get the request state for key",
                     key=key,
                 )
-                raise RuntimeError("failed to get the request state for key")
+                raise InternalError("failed to get the request state for key")
             if not response.get.HasField("value"):
                 return None
 
@@ -188,6 +190,6 @@ class RequestStateProxyServer:
                     encoding=SerializedObjectEncoding.Name(so_value.manifest.encoding),
                     expected_encoding=SerializedObjectEncoding.Name(self._encoding),
                 )
-                raise RuntimeError("unexpected encoding of the request state value")
+                raise InternalError("unexpected encoding of the request state value")
 
             return so_value.data

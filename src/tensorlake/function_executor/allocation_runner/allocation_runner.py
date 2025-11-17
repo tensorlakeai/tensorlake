@@ -9,13 +9,17 @@ from google.protobuf.timestamp_pb2 import Timestamp
 
 from tensorlake.applications import (
     RETURN_WHEN,
-    ApplicationValidationError,
     Function,
-    FunctionCallFailure,
     FunctionProgress,
     Future,
+    InternalError,
     RequestError,
+    SDKUsageError,
+    TensorlakeError,
+    TimeoutError,
 )
+from tensorlake.applications.algorithms.validate_user_object import validate_user_object
+from tensorlake.applications.function.function_call import create_function_error
 from tensorlake.applications.function.user_data_serializer import (
     deserialize_value,
     function_output_serializer,
@@ -23,7 +27,7 @@ from tensorlake.applications.function.user_data_serializer import (
 from tensorlake.applications.interface.awaitables import (
     Awaitable,
     AwaitableList,
-    request_scoped_id,
+    _request_scoped_id,
 )
 from tensorlake.applications.metadata import (
     FunctionCallMetadata,
@@ -74,7 +78,6 @@ from .sdk_algorithms import (
     reconstruct_function_call_args,
     serialize_values_in_awaitable_tree,
     validate_and_deserialize_function_call_metadata,
-    validate_user_object,
 )
 from .upload import (
     serialized_values_to_serialized_objects,
@@ -146,8 +149,9 @@ class AllocationRunner:
             state=ProxiedRequestState(
                 allocation_id=self._allocation.allocation_id,
                 proxy_server=self._request_state_proxy_server,
+                logger=logger,
             ),
-            progress=ProxiedAllocationProgress(self),
+            progress=ProxiedAllocationProgress(self, logger),
             metrics=RequestMetricsRecorder(),
         )
         self._result_helper: ResultHelper = ResultHelper(
@@ -231,6 +235,22 @@ class AllocationRunner:
         # Right now we can only be called from the function thread, not any child threads that user
         # code might have created because contextvars are not propagated to child threads.
         # All exceptions raised here will be propagated to user code by design.
+        #
+        # NB: all exceptions raised here must be derived from TensorlakeError.
+        try:
+            return self._run_futures_runtime_hook(futures, start_delay)
+        except TensorlakeError:
+            raise
+        except Exception as e:
+            self._logger.error(
+                "Unexpected exception in run_futures_runtime_hook",
+                exc_info=e,
+            )
+            raise InternalError(f"Unexpected error while running futures")
+
+    def _run_futures_runtime_hook(
+        self, futures: List[Future], start_delay: float | None
+    ) -> None:
         for future in futures:
             future_info: _UserFutureInfo = _UserFutureInfo(
                 user_future=future,
@@ -268,11 +288,33 @@ class AllocationRunner:
     def wait_futures_runtime_hook(
         self, futures: List[Future], timeout: float | None, return_when: RETURN_WHEN
     ) -> tuple[List[Future], List[Future]]:
-        """Doesn't raise any exceptions. All exceptions are set on individual futures."""
         # NB: This code is called from user function thread. User function code is blocked.
         # Right now we can only be called from the function thread, not any child threads that user
         # code might have created because contextvars are not propagated to child threads.
         # All exceptions raise here will be propagated to user code by design.
+        #
+        # NB: all exceptions raised here must be derived from TensorlakeError.
+        try:
+            return self._wait_futures_runtime_hook(futures, timeout, return_when)
+        except TensorlakeError:
+            raise
+        except Exception as e:
+            self._logger.error(
+                "Unexpected exception in wait_futures_runtime_hook",
+                exc_info=e,
+            )
+            raise InternalError(f"Unexpected error while waiting for futures")
+
+    def _wait_futures_runtime_hook(
+        self, futures: List[Future], timeout: float | None, return_when: RETURN_WHEN
+    ) -> tuple[List[Future], List[Future]]:
+        if return_when not in (
+            RETURN_WHEN.ALL_COMPLETED,
+            RETURN_WHEN.FIRST_COMPLETED,
+            RETURN_WHEN.FIRST_FAILURE,
+        ):
+            raise SDKUsageError(f"Not supported return_when value: '{return_when}'")
+
         deadline: float | None = (
             time.monotonic() + timeout if timeout is not None else None
         )
@@ -300,7 +342,11 @@ class AllocationRunner:
                     child_future_id=future.awaitable.id,
                     exc_info=e,
                 )
-                future.set_exception(e)
+                future.set_exception(
+                    InternalError(
+                        f"Unexpected error while waiting for child future completion: {e}"
+                    )
+                )
 
             if future.done():
                 done.append(future)
@@ -324,8 +370,7 @@ class AllocationRunner:
     def _wait_future_completion(self, future: Future, timeout: float | None) -> None:
         """Wait for the completion of the future and sets its result or exception if didn't timeout.
 
-        Raises Exception if something unexpected went wrong while waiting for the future.
-        Normally all exceptions are set on the future itself.
+        Raises Exception on unexpected internal error. Normally all exceptions are set on the future itself.
         """
         start_time: float = time.monotonic()
         self._logger.info(
@@ -342,7 +387,7 @@ class AllocationRunner:
             return
 
         function_call_id: str = future_info.user_future.awaitable.id
-        function_call_watcher_id: str = request_scoped_id()
+        function_call_watcher_id: str = _request_scoped_id()
         self._allocation_state.add_function_call_watcher(
             watcher_id=function_call_watcher_id, function_call_id=function_call_id
         )
@@ -363,7 +408,7 @@ class AllocationRunner:
                     logger=self._logger,
                 )[0]
                 if serialized_output.metadata is None:
-                    raise ValueError(
+                    raise InternalError(
                         "Function Call output SerializedValue is missing metadata."
                     )
                 output: Any = deserialize_value(
@@ -389,21 +434,15 @@ class AllocationRunner:
                         )
                     )
                 else:
-                    # FIXME: Function call arguments can be huge, we should limit the amount of characters here.
-                    future.set_exception(
-                        FunctionCallFailure(
-                            f"Function call {repr(future.awaitable)} failed"
-                        )
-                    )
+                    future.set_exception(create_function_error(future.awaitable))
             else:
-                # Unknown outcome code.
-                # FIXME: Function call arguments can be huge, we should limit the amount of characters here.
-                future.set_exception(
-                    FunctionCallFailure(
-                        f"Function call {repr(future.awaitable)} failed"
-                    )
+                self._logger.error(
+                    f"Unexpected outcome code in function call result: {result.outcome_code}"
                 )
-        # else timeout, no result or error
+                future.set_exception(create_function_error(future.awaitable))
+        else:
+            # timeout and no result or error are available.
+            future.set_exception(TimeoutError())
 
         self._allocation_state.delete_function_call_watcher(
             watcher_id=function_call_watcher_id
@@ -419,17 +458,23 @@ class AllocationRunner:
     def _wait_future_list_completion(
         self, future_info: _UserFutureInfo, deadline: float | None
     ) -> None:
-        """Wait for the completion of the future representing an AwaitableList and sets its result or exception if didn't timeout."""
+        """Wait for the completion of the future representing an AwaitableList and sets its result or exception.
+
+        Raises Exception on unexpected internal error. Normally all exceptions are set on the future itself.
+        """
         # Reconstruct the original collection out of individual futures.
         future: Future = future_info.user_future
         collection: List[Any] = []
-        exception: BaseException | None = None
+        exception: TensorlakeError | None = None
+        is_timeout: bool = False
         for item in future_info.collection:
             item_timeout: float | None = (
                 deadline - time.monotonic() if deadline is not None else None
             )
             if item_timeout is not None and item_timeout <= 0:
+                is_timeout = True
                 break
+
             self._wait_future_completion(item, timeout=item_timeout)
             if item.exception is None:
                 collection.append(item.result())
@@ -437,10 +482,12 @@ class AllocationRunner:
                 exception = item.exception
                 break
 
-        if exception is None:
-            future.set_result(collection)
-        else:
+        if is_timeout:
+            future.set_exception(TimeoutError())
+        elif exception is not None:
             future.set_exception(exception)
+        else:
+            future.set_result(collection)
 
     def _run_user_future(self, future: Future, start_delay: float | None) -> None:
         self._logger.info(
@@ -499,7 +546,7 @@ class AllocationRunner:
 
     def _get_new_output_blob(self, size: int) -> BLOB:
         """Returns new BLOB to upload function outputs to."""
-        blob_id: str = request_scoped_id()
+        blob_id: str = _request_scoped_id()
         blob_request_info: _OutputBLOBRequestInfo = _OutputBLOBRequestInfo(
             blob=None,
             blob_available=threading.Event(),
@@ -525,7 +572,7 @@ class AllocationRunner:
         finally:
             log_user_event_allocations_finished([self._allocation_event_details])
             if alloc_result is None:
-                # This can only happen if the exception was raised and logged above.
+                # alloc_result is None only if an exception was raised.
                 alloc_result = self._result_helper.internal_error()
 
             self._allocation.result.CopyFrom(alloc_result)
@@ -580,13 +627,13 @@ class AllocationRunner:
         # This is user code.
         try:
             output: Any = self._call_user_function(args, kwargs)
-            # This is a very important check for our UX. We can await for AwaitableList
+            # This is a very important check for our UX. We can await for map operation
             # in user code but we cannot return it from a function as a tail call because
             # there's no Python code to reassemble the list from individual resolved awaitables.
             if isinstance(output, AwaitableList):
-                raise ApplicationValidationError(
-                    f"Function '{self._function_ref.function_name}' returned an AwaitableList {repr(output)}. "
-                    "An AwaitableList can only be used as a function argument, not returned from it."
+                raise SDKUsageError(
+                    f"Function '{self._function_ref.function_name}' returned a map operation {output}. "
+                    f"A {output.kind_str} can only be used as a function argument, not returned from it."
                 )
         except RequestError as e:
             # This is user code.
@@ -605,6 +652,7 @@ class AllocationRunner:
                 logger=self._logger,
             )
             return self._result_helper.from_request_error(
+                details=self._allocation_event_details,
                 request_error=e,
                 request_error_output=request_error_so,
                 uploaded_request_error_blob=uploaded_outputs_blob,
@@ -636,7 +684,7 @@ class AllocationRunner:
         # This is internal FE code.
         serialized_objects: Dict[str, SerializedObjectInsideBLOB] = {}
         uploaded_outputs_blob: BLOB | None = None
-        # Only request output blob and upload to it if there are any actual function arguments in the call tree.
+        # Only request an output blob and upload to it if there are any actual function arguments in the call tree.
         if len(serialized_values) > 0:
             serialized_objects, blob_data = serialized_values_to_serialized_objects(
                 serialized_values=serialized_values
@@ -699,15 +747,28 @@ class AllocationRunner:
 
 
 class ProxiedAllocationProgress(FunctionProgress):
-    def __init__(self, allocation_runner: AllocationRunner):
+    def __init__(
+        self, allocation_runner: AllocationRunner, logger: FunctionExecutorLogger
+    ):
         self._allocation_runner: AllocationRunner = allocation_runner
+        self._logger: FunctionExecutorLogger = logger.bind(module=__name__)
 
     def update(self, current: float, total: float) -> None:
-        self._allocation_runner._allocation_state.update_progress(current, total)
-        # sleep(0) here momentarily releases the GIL, giving other
-        # FE threads a chance to run before returning back to customer code that
-        # might never return GIL. i.e. allowing the FE to handle incoming RPCs,
-        # report back allocation state updates, etc.
-        # NB: this was never tested to fix anything in practice but nice to have
-        # this just in case.
-        time.sleep(0)
+        # This method is called from user function code.
+        try:
+            self._allocation_runner._allocation_state.update_progress(current, total)
+            # sleep(0) here momentarily releases the GIL, giving other
+            # FE threads a chance to run before returning back to customer code that
+            # might never return GIL. i.e. allowing the FE to handle incoming RPCs,
+            # report back allocation state updates, etc.
+            # NB: this was never tested to fix anything in practice but nice to have
+            # this just in case.
+            time.sleep(0)
+        except TensorlakeError:
+            raise
+        except Exception as e:
+            self._logger.error(
+                "Failed to update allocation progress",
+                exc_info=e,
+            )
+            raise InternalError("Failed to update allocation progress.")

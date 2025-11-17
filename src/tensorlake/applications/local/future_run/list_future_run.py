@@ -2,7 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue
 from typing import Any, List
 
-from ...interface.exceptions import TensorlakeException
+from ...interface.exceptions import InternalError
 from ..future import LocalFuture
 from .future_run import (
     LocalFutureRun,
@@ -37,12 +37,12 @@ class ListFutureRun(LocalFutureRun):
 
     def _run_future(self) -> LocalFutureRunResult:
         if self._values is None:
-            raise TensorlakeException(
-                "Internal error: ListFutureRun has no resolved values set before running the future."
+            raise InternalError(
+                "ListFutureRun has no resolved values set before running the future."
             )
 
         return LocalFutureRunResult(
             id=self._local_future.user_future.id,
             output=self._values,
-            exception=None,
+            error=None,
         )

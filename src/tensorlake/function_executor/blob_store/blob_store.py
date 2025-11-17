@@ -2,6 +2,8 @@ from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import List
 
+from tensorlake.applications import InternalError
+
 from ..logger import FunctionExecutorLogger
 from ..proto.function_executor_pb2 import BLOB, BLOBChunk
 from .local_fs_blob_store import LocalFSBLOBStore
@@ -49,10 +51,10 @@ class BLOBStore:
     ) -> bytes:
         """Returns binary data stored in BLOB with the supplied URI at the supplied offset.
 
-        Raises Exception on error.
+        Raises InternalError on error.
         """
         if offset + size > _blob_size(blob):
-            raise IndexError(
+            raise InternalError(
                 f"Offset {offset} + size {size} is out of bounds for BLOB chunks of size {_blob_size(blob)}."
             )
 
@@ -97,7 +99,9 @@ class BLOBStore:
         wait(read_chunk_futures, return_when=FIRST_EXCEPTION)
         for future in read_chunk_futures:
             if future.exception() is not None:
-                raise future.exception()
+                raise InternalError(
+                    "Failed reading BLOB store chunk"
+                ) from future.exception()
 
         return destination
 
@@ -134,12 +138,14 @@ class BLOBStore:
         in the original BLOB. The original order of the chunks is preserved. Chunks that were not used for
         storing the data are not added to the returned BLOB. Each chunk in the returned BLOB has its size set to
         the actual size of the data that was written to it and its etag returned by the storage backend.
+
+        Raises InternalError on error.
         """
         blob_size: int = _blob_size(blob)
         data_size: int = sum(len(chunk) for chunk in data)
 
         if data_size > blob_size:
-            raise ValueError(f"Data size {data_size} exceeds BLOB size {blob_size}.")
+            raise InternalError(f"Data size {data_size} exceeds BLOB size {blob_size}.")
 
         # Write data to BLOB chunks in parallel until all data is written.
         # Minimize data copying by not creating any intermediate bytes/bytearray objects.
@@ -195,7 +201,9 @@ class BLOBStore:
         )
         for ix, future in enumerate(write_chunk_futures):
             if future.exception() is not None:
-                raise future.exception()
+                raise InternalError(
+                    "Failed writing BLOB store chunk"
+                ) from future.exception()
             # The futures list is ordered by the chunk index, so appending here preserves
             # the original chunks order.
             uploaded_chunk: BLOBChunk = BLOBChunk()
@@ -238,7 +246,7 @@ def _find_chunk(blob: BLOB, offset: int) -> _ChunkInfo:
             return _ChunkInfo(index=ix, offset=current_offset)
         current_offset += chunk.size
 
-    raise IndexError(
+    raise InternalError(
         f"Offset {offset} is out of bounds for BLOB chunks of size {current_offset}."
     )
 

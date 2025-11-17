@@ -105,8 +105,8 @@ class TestRequestError(unittest.TestCase):
                 self.assertFalse(alloc_result.HasField("value"))
                 self.assertFalse(alloc_result.HasField("updates"))
 
-        fe_stderr: str = process.read_stderr()
-        self.assertIn("RequestError: The request can't succeed: 10", fe_stderr)
+        fe_stdout: str = process.read_stdout()
+        self.assertIn("RequestError: The request can't succeed: 10", fe_stdout)
 
 
 if __name__ == "__main__":

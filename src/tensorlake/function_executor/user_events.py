@@ -9,7 +9,6 @@
 # The event attribute names are human readable because they are visible to users.
 import traceback
 from dataclasses import dataclass
-from typing import Any
 
 from tensorlake.function_executor.cloud_events import print_cloud_event
 

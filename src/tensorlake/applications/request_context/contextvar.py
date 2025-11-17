@@ -1,7 +1,7 @@
 import contextvars
 from typing import Any
 
-from ..interface.exceptions import RequestFailureException
+from ..interface.exceptions import SDKUsageError
 
 _VARIABLE_NAME = "request_context"
 # Don't import RequestContext here to avoid circular dependency.
@@ -12,9 +12,9 @@ def get_current_request_context() -> Any:
     try:
         return _current_request_context.get()
     except LookupError:
-        raise RequestFailureException(
-            "No request context is available. It's only available inside a Tensorlake Function call."
-            "It's not available in threads spawned by a Tensorlake Function."
+        raise SDKUsageError(
+            "Tensorlake SDK was called outside of a Tensorlake Function thread or process."
+            "Please only call Tensorlake SDK from Tensorlake Functions."
         )
 
 

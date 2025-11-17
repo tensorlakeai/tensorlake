@@ -48,8 +48,7 @@ class ResultHelper:
         self, details: AllocationEventDetails, exception: BaseException
     ) -> AllocationResult:
         """Creates an AllocationResult representing a user exception raised during function execution."""
-        # This is user code.
-        # Give the full traceback to the user for debugging.
+        # Give the full traceback + alloc metadata to the user for debugging.
         log_user_event_function_call_failed(details, exception)
 
         # This is FE internal code.
@@ -64,18 +63,14 @@ class ResultHelper:
 
     def from_request_error(
         self,
+        details: AllocationEventDetails,
         request_error: RequestError,
         request_error_output: SerializedObjectInsideBLOB,
         uploaded_request_error_blob: BLOB,
     ) -> AllocationResult:
         """Creates an AllocationResult representing a request error."""
-        try:
-            # This is user code.
-            # Give the full traceback to the user for debugging.
-            traceback.print_exception(request_error)
-        except BaseException as e:
-            # Don't log the exception as it might contain customer data.
-            self._logger.info("Failed to print request error traceback")
+        # Give the full traceback + alloc metadata to the user for debugging.
+        log_user_event_function_call_failed(details, request_error)
 
         # This is FE internal code.
         # Don't log the user exception as it might contain customer data.

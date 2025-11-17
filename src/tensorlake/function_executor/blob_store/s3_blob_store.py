@@ -2,6 +2,7 @@ from typing import List
 
 import httpx
 
+from tensorlake.applications import InternalError
 from tensorlake.utils.retries import exponential_backoff
 
 from ..logger import FunctionExecutorLogger
@@ -39,7 +40,7 @@ class S3BLOBStore:
         """Reads binary data stored in S3 object at the supplied URI and offset into the destination memoryview.
 
         The URI must be S3 URI (starts with "s3://"). If the URI is not public then
-        it must be presigned. Raises Exception on error.
+        it must be presigned. Raises InternalError on error.
         """
 
         def on_retry(
@@ -49,9 +50,18 @@ class S3BLOBStore:
         ) -> None:
             status_code: str = "None"
             response: str = "None"
-            if isinstance(e, httpx.HTTPStatusError):
-                status_code = e.response.status_code
-                response = e.response.text
+            try:
+                if isinstance(e, httpx.HTTPStatusError):
+                    status_code = e.response.status_code
+                    # .read() is required before accessing .text
+                    # because we're in streaming mode.
+                    e.response.read()
+                    response = e.response.text
+            except Exception as e:
+                logger.error(
+                    "failed to extract status code and response from failed S3 get response",
+                    exc_info=e,
+                )
 
             # The URI can be presigned, it should not be logged as it provides access to customer data.
             # Response text doesn't contain the URI, so it can be logged.
@@ -75,6 +85,7 @@ class S3BLOBStore:
             on_retry=on_retry,
         )
         def get_with_retries() -> bytes:
+            # Use streaming mode to avoid loading the whole object into memory.
             with self._client.stream(
                 "GET",
                 _to_https_uri_schema(uri),
@@ -101,7 +112,7 @@ class S3BLOBStore:
                 offset=offset,
                 size=len(destination),
             )
-            raise
+            raise InternalError("Failed to get S3 object")
         except (httpx.RequestError, Exception) as e:
             # The URI can be presigned, it should not be logged as it provides access to customer data.
             # RequestError message doesn't contain the URI, so it can be logged.
@@ -112,7 +123,7 @@ class S3BLOBStore:
                 offset=offset,
                 size=len(destination),
             )
-            raise
+            raise InternalError("Failed to get S3 object")
 
     def put(
         self,
@@ -123,7 +134,7 @@ class S3BLOBStore:
         """Stores the supplied memoryviews in a S3 object at the supplied URI.
 
         The URI must be S3 URI (starts with "s3://").
-        Overwrites existing object. Raises Exception on error.
+        Overwrites existing object. Raises InternalError on error.
         Returns the ETag of the stored object.
         """
         source_size: int = sum(len(data) for data in source)
@@ -137,9 +148,16 @@ class S3BLOBStore:
             # Response text doesn't contain the URI, so it can be logged.
             status_code: str = "None"
             response: str = "None"
-            if isinstance(e, httpx.HTTPStatusError):
-                status_code = e.response.status_code
-                response = e.response.text
+            try:
+                if isinstance(e, httpx.HTTPStatusError):
+                    status_code = e.response.status_code
+                    response = e.response.text
+            except Exception as e:
+                logger.error(
+                    "failed to extract status code and response from failed S3 put response",
+                    exc_info=e,
+                )
+
             logger.error(
                 "retrying S3 put",
                 status_code=status_code,
@@ -184,13 +202,13 @@ class S3BLOBStore:
                 response=e.response.text,
                 size=source_size,
             )
-            raise
+            raise InternalError("Failed to put S3 object")
         except (httpx.RequestError, Exception) as e:
             # The URI can be presigned, it should not be logged as it provides access to customer data.
             # RequestError message doesn't contain the URI, so it can be logged.
             # Generic Exception is not from httpx, should not contain the URI, can be logged.
             logger.error("failed to put S3 object", exc_info=e, size=source_size)
-            raise
+            raise InternalError("Failed to put S3 object")
 
 
 def _is_retriable_exception(e: Exception) -> bool:

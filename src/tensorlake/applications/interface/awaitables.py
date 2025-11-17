@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Iterable, List
 
@@ -5,9 +6,10 @@ from tensorlake.vendor.nanoid.nanoid import generate as nanoid_generate
 
 from ..runtime_hooks import run_futures as runtime_hook_run_futures
 from ..runtime_hooks import wait_futures as runtime_hook_wait_futures
+from .exceptions import InternalError, SDKUsageError, TensorlakeError
 
 
-def request_scoped_id() -> str:
+def _request_scoped_id() -> str:
     """Generates a unique ID scoped to a single request.
 
     This ID is used to identify function calls, futures and values (data payloads)
@@ -34,41 +36,64 @@ class Awaitable:
         return self._id
 
     def run(self) -> "Future":
+        """Runs this Awaitable as soon as possible and returns its Future.
+
+        Raises TensorlakeError on error.
+        """
         future: Future = self._create_future()
         runtime_hook_run_futures(futures=[future], start_delay=None)
         return future
 
     def run_later(self, start_delay: float) -> "Future":
+        """Runs this Awaitable after the given delay in seconds and returns its Future.
+
+        Raises TensorlakeError on error.
+        """
         future: Future = self._create_future()
         runtime_hook_run_futures(futures=[future], start_delay=start_delay)
         return future
 
     def _create_future(self) -> "Future":
-        raise NotImplementedError(
-            "Awaitable subclasses must implement _create_future()"
-        )
+        raise InternalError("Awaitable subclasses must implement _create_future()")
 
-    def __await__(self):
-        """Runs this Awaitable and returns its result."""
-        result = yield from self.run().__await__()
+    def __await__(self) -> Any:
+        """Runs the Awaitable and returns its result.
+
+        Raises RequestError if a function call represented by the Awaitable raised RequestError.
+        Raises FunctionError if a function call represented by the Awaitable failed.
+        Raises TensorlakeError on other errors.
+        """
+        result: Any = yield from self.run().__await__()
         return result
 
     def __reduce__(self):
         # This helps users to see that they made a coding mistake and used a Tensorlake Awaitable
         # embedded inside some other object like a list.
-        raise TypeError(
-            f"Attempt to pickle a Tensorlake Awaitable. "
-            "A Tensorlake Awaitable cannot be stored inside an object "
+        # Note: this exception will be converted into SerializationError when pickling is attempted.
+        #
+        # TODO: Provide a workaround to users by making it possible to manually create an AwaitableList
+        # using something like Awaitable.gather() static method.
+        raise SDKUsageError(
+            f"Attempt to pickle {self}. It cannot be stored inside an object "
             "which is a function argument or returned from a function."
-            "If you want to pass a list of awaitables as a single argument to a Tensorlake Function, "
-            "wrap them in a AwaitableList."
         )
 
     def __repr__(self) -> str:
-        raise NotImplementedError("Awaitable subclasses must implement __repr__()")
+        """Returns a prices string representation of the Awaitable.
+
+        Used for debugging.
+        """
+        raise InternalError("Tensorlake Awaitable subclasses must implement __repr__()")
 
     def __str__(self) -> str:
-        return repr(self)
+        """Returns a pretty printed human readable string representation of the Awaitable.
+
+        Used to show the structure of Awaitables in a concise way in error messages.
+        """
+        # Use local import to break circular dependency.
+        from ._pretty_print import pretty_print
+
+        return pretty_print(self)
 
 
 class _FutureResultMissingType:
@@ -103,7 +128,7 @@ class Future:
         # Up to date result and exception, kept updated by runtime.
         # Lock is not needed because we're not doing any blocking reads/writes here.
         self._result: Any | _FutureResultMissingType = _FutureResultMissing
-        self._exception: BaseException | None = None
+        self._exception: TensorlakeError | None = None
 
     @property
     def id(self) -> str:
@@ -118,44 +143,45 @@ class Future:
         """Mark the Future as done and set its result."""
         self._result = result
 
-    def set_exception(self, exception: BaseException):
+    def set_exception(self, exception: TensorlakeError):
         """Mark the Future as failed and set its exception."""
         self._exception = exception
 
     @property
-    def exception(self) -> BaseException | None:
+    def exception(self) -> TensorlakeError | None:
         """Returns the exception representing the failure of the future, or None if it is not completed yet or succeeded."""
         return self._exception
 
     def __await__(self):
         """Returns the result of the future when awaited, blocking until it is available.
 
-        Raises an Exception representing the failure if the future fails.
+        Raises FunctionError if the function call represented by the Future failed.
+        Raises TensorlakeError on other errors.
         """
-        raise NotImplementedError("Future __await__ is not implemented yet")
+        raise SDKUsageError(
+            "Future.__await__ is not implemented yet. Use Future.result() instead."
+        )
 
     def result(self, timeout: float | None = None) -> Any:
-        """Returns the result of the future, blocking until it is available.
+        """
+        Returns the result of the future, blocking until it is available.
 
-        Raises an Exception representing the failure if the future fails.
-        If timeout is not None and the result does not become available within timeout seconds,
-        a TimeoutError is raised.
+        Raises RequestError if a function call represented by the Future raised RequestError.
+        Raises FunctionError if a function call represented by the Future failed.
+        Raises TimeoutError if the timeout is not None and is expired.
+        Raises TensorlakeError on other errors.
         """
         if self._result is _FutureResultMissing and self._exception is None:
-            self._wait(timeout=timeout)
+            runtime_hook_wait_futures(
+                [self],
+                timeout=timeout,
+                return_when=RETURN_WHEN.ALL_COMPLETED,
+            )
 
         if self._exception is None:
             return self._result
         else:
             raise self._exception
-
-    def _wait(self, timeout: float | None) -> None:
-        # Default wait for future classes wait implemented by runtime.
-        runtime_hook_wait_futures(
-            [self],
-            timeout=timeout,
-            return_when=RETURN_WHEN.ALL_COMPLETED,
-        )
 
     def done(self) -> bool:
         """Returns True if the future is done running (either successfully or with failure)."""
@@ -185,6 +211,9 @@ class Future:
 
         This is similar to concurrent.futures.wait:
         https://docs.python.org/3/library/concurrent.futures.html#concurrent.futures.wait
+
+        Raises TensorlakeError on error running the wait operation. Errors of each individual Future are
+        accessible via their .exception property and they don't get raised by wait operation.
         """
         return runtime_hook_wait_futures(
             futures=list(futures),
@@ -195,22 +224,38 @@ class Future:
     def __reduce__(self):
         # This helps users to see that they made a coding mistake and used a Tensorlake Future
         # embedded inside some other object like a list.
-        raise TypeError(
-            f"Attempt to pickle a Tensorlake Future. "
-            "A Tensorlake Future cannot be stored inside an object "
+        # Note: this exception will be converted into SerializationError when pickling is attempted.
+        raise SDKUsageError(
+            f"Attempt to pickle {self}. It cannot be stored inside an object "
             "which is a function argument or returned from a function."
         )
 
     def __repr__(self) -> str:
+        # Shows exact structure of the Future. Used for debug logging.
         return (
-            f"Tensorlake {type(self)}(\n"
+            f"{type(self)}(\n"
             f"  awaitable={self.awaitable!r},\n"
             f"  done={self.done()!r}\n"
             f")"
         )
 
     def __str__(self) -> str:
-        return repr(self)
+        """Returns a pretty printed human readable string representation of the Future.
+
+        Used to show the structure of Futures in a concise way in error messages.
+        """
+        return f"Tensorlake Future of {self.awaitable}"
+
+
+class _AwaitableListKind(Enum):
+    MAP_OPERATION = 0
+
+
+@dataclass
+class _AwaitableListMetadata:
+    kind: _AwaitableListKind
+    # Not None for MAP_OPERATION kind.
+    function_name: str | None
 
 
 class AwaitableList(Awaitable):
@@ -220,20 +265,39 @@ class AwaitableList(Awaitable):
     Cannot be returned from a Tensorlake Function.
     """
 
-    def __init__(self, id: str, items: Iterable[Awaitable | Any]):
+    def __init__(
+        self,
+        id: str,
+        items: Iterable[Awaitable | Any],
+        metadata: _AwaitableListMetadata,
+    ):
         super().__init__(id=id)
         self._items: List[Awaitable | Any] = list(items)
+        self._metadata: _AwaitableListMetadata = metadata
 
     @property
     def items(self) -> List[Awaitable | Any]:
         return self._items
 
+    @property
+    def kind_str(self) -> str:
+        """Returns a human readable representation of the AwaitableList kind."""
+        if self._metadata.kind == _AwaitableListKind.MAP_OPERATION:
+            return "Tensorlake Map Operation"
+        else:
+            return "Tensorlake AwaitableList"
+
+    @property
+    def metadata(self) -> _AwaitableListMetadata:
+        return self._metadata
+
     def _create_future(self) -> "ListFuture":
         return ListFuture(self)
 
     def __repr__(self) -> str:
+        # Shows exact structure of the Awaitable. Used for debug logging.
         return (
-            f"<Tensorlake AwaitableList(\n"
+            f"<{type(self)}(\n"
             f"  id={self.id!r},\n"
             f"  items=[\n    "
             + ",\n    ".join(repr(awaitable) for awaitable in self.items)
@@ -248,16 +312,20 @@ def make_map_operation_awaitable(
     if isinstance(items, AwaitableList):
         items = items.items
     return AwaitableList(
-        id=request_scoped_id(),
+        id=_request_scoped_id(),
         items=[
             FunctionCallAwaitable(
-                id=request_scoped_id(),
+                id=_request_scoped_id(),
                 function_name=function_name,
                 args=[item],
                 kwargs={},
             )
             for item in items
         ],
+        metadata=_AwaitableListMetadata(
+            kind=_AwaitableListKind.MAP_OPERATION,
+            function_name=function_name,
+        ),
     )
 
 
@@ -309,8 +377,9 @@ class FunctionCallAwaitable(Awaitable):
         return FunctionCallFuture(self)
 
     def __repr__(self) -> str:
+        # Shows exact structure of the Awaitable. Used for debug logging.
         return (
-            f"<Tensorlake FunctionCallAwaitable(\n"
+            f"<{type(self)}(\n"
             f"  id={self.id!r},\n"
             f"  function_name={self.function_name!r},\n"
             f"  args=[\n    "
@@ -351,7 +420,7 @@ class ReduceOperationAwaitable(Awaitable):
     ):
         super().__init__(id=id)
         self._function_name: str = function_name
-        # Contains at least one item due to prior inputs validation.
+        # Contains at least two items due to prior validations.
         self._inputs: List[Any | Awaitable] = inputs
 
     @property
@@ -366,13 +435,34 @@ class ReduceOperationAwaitable(Awaitable):
         return ReduceOperationFuture(self)
 
     def __repr__(self) -> str:
+        # Shows exact structure of the Awaitable. Used for debug logging.
         return (
-            f"<Tensorlake ReduceOperationAwaitable(\n"
+            f"<{type(self)}(\n"
             f"  id={self.id!r},\n"
             f"  function_name={self.function_name!r},\n"
             f"  inputs={self.inputs!r},\n"
             f")>"
         )
+
+    def _validate_inputs(self) -> None:
+        """Performs reduce operation specific validation of its inputs.
+
+        Raises SDKUsageError on error.
+        """
+        for input_item in self.inputs:
+            # We don't support this right now because ReduceOp proto doesn't have have a field
+            # where we can embed awaitable list items as data dependencies without calling the
+            # reduce function on them.
+            if isinstance(input_item, AwaitableList):
+                error_message: str = (
+                    f"A {input_item.kind_str} cannot be used as an input item for {self}. "
+                )
+                if input_item.metadata.kind == _AwaitableListKind.MAP_OPERATION:
+                    error_message += (
+                        f"You can work this around by creating function call awaitables using `{input_item.metadata.function_name}.awaitable(...)` and then passing "
+                        f"them into `{self.function_name}.reduce(...)`."
+                    )
+                raise SDKUsageError(error_message)
 
 
 class _InitialMissingType:
@@ -393,22 +483,28 @@ def make_reduce_operation_awaitable(
     else:
         inputs = list(items)
 
-    if len(inputs) == 0 and initial is _InitialMissing:
-        raise TypeError("reduce of empty iterable with no initial value")
-
     if initial is not _InitialMissing:
         inputs.insert(0, initial)
 
+    if len(inputs) == 0:
+        raise SDKUsageError(
+            "reduce operation of an empty iterable with no initial value is not supported, "
+            "please pass an initial value or an iterable with at least one item."
+        )
+
+    reduce_op = ReduceOperationAwaitable(
+        id=_request_scoped_id(),
+        function_name=function_name,
+        inputs=inputs,
+    )
+    reduce_op._validate_inputs()
+
     # Squash reduce operation into a single Awaitable if it's only one thing
-    # in collection. Server requires at least two items to perform reduce.
+    # in collection. Server and Local Runner require at least two items to perform reduce.
     if len(inputs) == 1:
         return inputs[0]
     else:
-        return ReduceOperationAwaitable(
-            id=request_scoped_id(),
-            function_name=function_name,
-            inputs=inputs,
-        )
+        return reduce_op
 
 
 class ReduceOperationFuture(Future):
@@ -423,10 +519,3 @@ class ReduceOperationFuture(Future):
     @property
     def awaitable(self) -> ReduceOperationAwaitable:
         return self._awaitable
-
-
-# ListFuture is not yet supported by runtime (and server).
-RuntimeFutureTypes = FunctionCallFuture | ReduceOperationFuture
-# AwaitableList is supported by the runtime because it can be a function argument but
-# can't be returned from a function call.
-RuntimeAwaitableTypes = FunctionCallAwaitable | ReduceOperationAwaitable | AwaitableList

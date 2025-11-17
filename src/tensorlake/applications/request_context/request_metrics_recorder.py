@@ -15,6 +15,7 @@ class RequestMetricsRecorder(RequestMetrics):
         return self._timers
 
     def timer(self, name: str, value: float):
+        # Not catching any errors here because there's no way this can fail.
         self._timers[name] = value
 
     @property
@@ -22,4 +23,5 @@ class RequestMetricsRecorder(RequestMetrics):
         return self._counters
 
     def counter(self, name: str, value: int = 1):
+        # Not catching any errors here because there's no way this can fail.
         self._counters[name] = self._counters.get(name, 0) + value

@@ -11,10 +11,10 @@ import grpc
 
 from tensorlake.applications import (
     RETURN_WHEN,
-    ApplicationValidationError,
     Function,
     Future,
-    RequestFailureException,
+    RequestFailed,
+    SDKUsageError,
 )
 from tensorlake.applications.function.function_call import create_self_instance
 from tensorlake.applications.registry import get_function, get_functions, has_function
@@ -358,15 +358,15 @@ class Service(FunctionExecutorServicer):
         try:
             allocation_id: str = get_allocation_id_context_variable()
         except LookupError:
-            raise ApplicationValidationError(
-                "Tensorlake SDK was called outside of a Tensorlake Function thread."
-                "Please only call Tensorlake SDK functions from inside Tensorlake Functions."
+            raise SDKUsageError(
+                "Tensorlake SDK was called outside of a Tensorlake Function thread or process."
+                "Please only call Tensorlake SDK from Tensorlake Functions."
             )
 
         # No need to lock self._allocation_infos because we're not blocking here so we
         # hold GIL non stop.
         if not allocation_id in self._allocation_infos:
-            raise RequestFailureException(
+            raise RequestFailed(
                 f"Internal error: allocation id '{allocation_id}' not found in Function Executor."
             )
 
@@ -383,15 +383,15 @@ class Service(FunctionExecutorServicer):
         try:
             allocation_id: str = get_allocation_id_context_variable()
         except LookupError:
-            raise ApplicationValidationError(
-                "Tensorlake SDK was called outside of a Tensorlake Function thread."
-                "Please only call Tensorlake SDK functions from inside Tensorlake Functions."
+            raise SDKUsageError(
+                "Tensorlake SDK was called outside of a Tensorlake Function thread or process."
+                "Please only call Tensorlake SDK from Tensorlake Functions."
             )
 
         # No need to lock self._allocation_infos because we're not blocking here so we
         # hold GIL non stop.
         if not allocation_id in self._allocation_infos:
-            raise RequestFailureException(
+            raise RequestFailed(
                 f"Internal error: allocation id '{allocation_id}' not found in Function Executor."
             )
 

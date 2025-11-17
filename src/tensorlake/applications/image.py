@@ -11,8 +11,8 @@ from io import BytesIO
 from typing import Any, Dict, List
 from urllib.parse import urlparse
 
-from .interface.function import Function
-from .interface.image import Image, _ImageBuildOperation, _ImageBuildOperationType
+from .interface import Function, Image, InternalError
+from .interface.image import _ImageBuildOperation, _ImageBuildOperationType
 from .registry import get_functions
 
 _HASH_BUFF_SIZE: int = 1024**2
@@ -136,7 +136,9 @@ def _add_build_op_to_hasher(op: _ImageBuildOperation, hasher: Any) -> None:
                         hasher.update(data)
                         data = fp.read(_HASH_BUFF_SIZE)
     else:
-        raise ValueError(f"Unsupported build operation type {op.type}")
+        raise InternalError(
+            f"Unknown build operation type {_ImageBuildOperationType.name(op.type)}"
+        )
 
 
 def _render_build_op(op: _ImageBuildOperation) -> str:

@@ -5,7 +5,7 @@ import parameterized
 
 from tensorlake.applications import (
     Request,
-    RequestFailureException,
+    RequestFailed,
     Retries,
     application,
     function,
@@ -64,7 +64,7 @@ class TestFunctionRetries(unittest.TestCase):
         request: Request = run_application(
             function_that_always_fails, 1, remote=is_remote
         )
-        self.assertRaises(RequestFailureException, request.output)
+        self.assertRaises(RequestFailed, request.output)
         duration_sec: float = time.monotonic() - start_time
 
         self.assertLess(

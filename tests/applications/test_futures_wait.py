@@ -6,10 +6,10 @@ import parameterized
 
 from tensorlake.applications import (
     RETURN_WHEN,
-    FunctionCallFailure,
     Future,
     Request,
     RequestError,
+    TimeoutError,
     application,
     function,
 )
@@ -82,6 +82,20 @@ def api_function_return_when_first_completed(_: Any) -> str:
 
 @application()
 @function()
+def api_function_wait_timeout(_: Any) -> str:
+    future: Future = sleep_and_return_arg.awaitable(arg="foo", delay=5).run()
+    try:
+        future.result(timeout=1.0)
+    except TimeoutError:
+        pass
+    else:
+        raise Exception("Expected FunctionTimeoutError")
+
+    return "success"
+
+
+@application()
+@function()
 def api_function_return_when_first_failure(_: Any) -> str:
     futures: list[Future] = [
         sleep_and_return_arg.awaitable(arg="foo", delay=2).run(),
@@ -133,6 +147,16 @@ class TestFuturesWait(unittest.TestCase):
             deploy_applications(__file__)
         request: Request = run_application(
             api_function_return_when_first_completed, "foo", remote=is_remote
+        )
+        self.assertEqual(request.output(), "success")
+
+    # Timeouts are not implemented in local mode.
+    @parameterized.parameterized.expand([("remote", True)])
+    def test_wait_timeout(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+        request: Request = run_application(
+            api_function_wait_timeout, "foo", remote=is_remote
         )
         self.assertEqual(request.output(), "success")
 
