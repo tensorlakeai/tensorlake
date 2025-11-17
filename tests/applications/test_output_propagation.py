@@ -9,6 +9,7 @@ from tensorlake.applications import (
 )
 from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
+from tensorlake.applications.validation import validate_loaded_applications
 
 
 # The call chain starting from this API function goes through multiple functions
@@ -121,6 +122,9 @@ def concat_strings_actually(a: str, b: str) -> str:
 
 
 class TestReducerSubcallOutputPropagation(unittest.TestCase):
+    def test_applications_are_valid(self):
+        self.assertEqual(validate_loaded_applications(), [])
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success(self, _: str, is_remote: bool):
         if is_remote:

@@ -37,6 +37,14 @@ class _FunctionConfiguration:
     max_concurrency: int
 
 
+def _function_name(original_function: Callable) -> str:
+    """Returns function name of the given original (user) function."""
+    # "{class}.{method}" for methods, otherwise just function name. Doesn't include module name.
+    # All functions and classes in the application share a single namespace.
+    # NB: this might not be a class if user passed something else to @cls decorator.
+    return getattr(original_function, "__qualname__", "<unknown>")
+
+
 @dataclass
 class _ApplicationConfiguration:
     tags: Dict[str, str]

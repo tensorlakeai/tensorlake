@@ -14,6 +14,7 @@ from tensorlake.applications import (
     run_remote_application,
 )
 from tensorlake.applications.remote.deploy import deploy_applications
+from tensorlake.applications.validation import validate_loaded_applications
 
 # This test doesn't verify much but it's used to simulate primary use case of the SDK
 # and see how easy it is to express it using the current SDK UX.
@@ -143,6 +144,9 @@ def watch_pdf_updates(url: str, page_range: str, iteration: int) -> None:
 
 
 class TestPDFParseDataWorkflow(unittest.TestCase):
+    def test_applications_are_valid(self):
+        self.assertEqual(validate_loaded_applications(), [])
+
     def test_local_api_call(self):
         request: Request = run_local_application(
             parse_pdf_api,

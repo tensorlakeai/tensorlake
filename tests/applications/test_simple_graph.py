@@ -11,6 +11,7 @@ from tensorlake.applications import (
     run_remote_application,
 )
 from tensorlake.applications.remote.deploy import deploy_applications
+from tensorlake.applications.validation import validate_loaded_applications
 
 
 class TestGraphRequestPayload(BaseModel):
@@ -30,6 +31,9 @@ def print_and_return_value(value: str) -> str:
 
 
 class TestSimpleGraph(unittest.TestCase):
+    def test_applications_are_valid(self):
+        self.assertEqual(validate_loaded_applications(), [])
+
     def test_local_api_call(self):
         request: Request = run_local_application(
             test_simple_graph_api,
