@@ -92,7 +92,7 @@ class _BaseClient:
         if resp.is_success:
             return resp
 
-        if resp.status_code == 401:
+        if resp.status_code == 401 or resp.status_code == 403:
             raise DocumentAIError(
                 message="Invalid API key or unauthorized access.",
                 code="unauthorized",
