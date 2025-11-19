@@ -8,6 +8,7 @@ from tensorlake.documentai.models import (
     PageClassConfig,
     ParseStatus,
     StructuredExtractionOptions,
+    DocumentAIError
 )
 
 
@@ -427,6 +428,19 @@ class TestParse(unittest.TestCase):
             self.assertRaises(
                 Exception, self.doc_ai.get_parsed_result, parse_result.parse_id
             )
+
+    def test_invalid_api_key_raises_document_ai_error(self):
+        invalid_doc_ai = DocumentAI(
+            server_url=os.getenv("TENSORLAKE_API_URL"),
+            api_key="invalid_api_key",
+        )
+        self.addCleanup(invalid_doc_ai.close)
+        with self.assertRaises(DocumentAIError) as context:
+            invalid_doc_ai.parse(
+                file="https://pub-226479de18b2493f96b64c6674705dd8.r2.dev/real-estate-purchase-all-signed.pdf",
+                page_range="1-2",
+            )
+            self.assertEqual(context.exception.code, "unauthorized")
 
 
 if __name__ == "__main__":
