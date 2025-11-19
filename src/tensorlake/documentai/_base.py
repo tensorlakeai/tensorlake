@@ -5,6 +5,7 @@ import sys
 from typing import Any, Dict, Optional
 
 import httpx
+from pydantic import ValidationError
 
 from .common import get_doc_ai_base_url_v1, get_doc_ai_base_url_v2
 from .models import DocumentAIError, ErrorCode, ErrorResponse, MimeType, Region
@@ -91,6 +92,12 @@ class _BaseClient:
         if resp.is_success:
             return resp
 
+        if resp.status_code == 401 or resp.status_code == 403:
+            raise DocumentAIError(
+                message="Invalid API key or unauthorized access.",
+                code="unauthorized",
+            )
+
         error_response = _deserialize_error_response(resp)
         _print_error_line(
             error_response.code.value, error_response.message, error_response.trace_id
@@ -131,15 +138,14 @@ def _deserialize_error_response(resp: httpx.Response) -> ErrorResponse:
     try:
         error_response = ErrorResponse.model_validate(resp.json())
         return error_response
-    except Exception as e:
-        error_response = ErrorResponse(
-            message=str(e),
+    except ValidationError as e:
+        print(f"Failed to deserialize error response: {e}", file=sys.stderr)
+        return ErrorResponse(
+            message=str(resp.text),
             code=ErrorCode.INTERNAL_ERROR,
             trace_id=resp.headers.get("X-Trace-ID"),
             details=None,
         )
-
-        return error_response
 
 
 # --- simple color helpers ---
