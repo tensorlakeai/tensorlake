@@ -51,7 +51,6 @@ class ErrorResponse(BaseModel):
 
     message: str = Field(..., description="A human-readable error message")
     code: ErrorCode = Field(..., description="The error code for programmatic handling")
-    timestamp: int = Field(..., description="Millis since Unix epoch")
     trace_id: Optional[str] = Field(
         None, description="Optional correlation ID for distributed tracing"
     )
