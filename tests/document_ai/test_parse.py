@@ -5,10 +5,10 @@ from json_schemas.bank_statement import BankStatement
 
 from tensorlake.documentai import DocumentAI, Region
 from tensorlake.documentai.models import (
+    DocumentAIError,
     PageClassConfig,
     ParseStatus,
     StructuredExtractionOptions,
-    DocumentAIError
 )
 
 
