@@ -30,8 +30,6 @@ def deploy_applications(
                                because applications in test code are already loaded into registry.
     `api_client` is an optional APIClient to use for deployment. If not supplied, a new client will be created from environment.
     """
-    # TODO: Validate the graph.
-
     # Work with absolute paths to make sure that the path comparisons work correctly.
     applications_file_path: str = os.path.abspath(applications_file_path)
     applications_dir_path: str = os.path.dirname(applications_file_path)

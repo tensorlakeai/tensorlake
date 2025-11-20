@@ -1,9 +1,9 @@
 import base64
-from typing import Any, List
+from typing import Any
 
 from ..function.type_hints import deserialize_type_hints
 from ..function.user_data_serializer import deserialize_value
-from ..interface import ApplicationValidationError, Request
+from ..interface import DeserializationError, Request, RequestFailed
 from ..metadata import ValueMetadata
 from .api_client import APIClient
 from .manifests.application import ApplicationManifest
@@ -27,9 +27,13 @@ class RemoteRequest(Request):
         return self._request_id
 
     def output(self) -> Any:
-        self._client.wait_on_request_completion(
-            application_name=self._application_name, request_id=self._request_id
-        )
+        try:
+            self._client.wait_on_request_completion(
+                application_name=self._application_name, request_id=self._request_id
+            )
+        except Exception as e:
+            raise RequestFailed(str(e))
+
         serialized_output: bytes
         output_content_type: str
         serialized_output, output_content_type = self._client.request_output(
@@ -39,28 +43,28 @@ class RemoteRequest(Request):
         # When deserializing API function inputs we use its payload type hints to
         # deserialize the output correctly. Here we're doing a symmetric operation.
         # We use API function return value type hint. This is a consistent UX for API functions.
-        output_type_hints_base64: str = (
-            self._application_manifest.entrypoint.output_type_hints_base64
-        )
-        serialized_output_type_hints: bytes = base64.decodebytes(
-            output_type_hints_base64.encode("utf-8")
-        )
         try:
-            return_type_hints: List[Any] = deserialize_type_hints(
+            output_type_hints_base64: str = (
+                self._application_manifest.entrypoint.output_type_hints_base64
+            )
+            serialized_output_type_hints: bytes = base64.decodebytes(
+                output_type_hints_base64.encode("utf-8")
+            )
+            return_type_hints: list[Any] = deserialize_type_hints(
                 serialized_output_type_hints
             )
         except Exception:
             # If we can't deserialize type hints, we just assume no type hints.
             # This usually happens when the application function return types are not loaded into current process.
-            return_type_hints: List[Any] = []
-
-        last_exception: BaseException | None = None
+            return_type_hints: list[Any] = []
 
         if len(return_type_hints) == 0:
-            raise ApplicationValidationError(
+            raise DeserializationError(
                 "Can't deserialize request output. Please add a return type hint to the application function "
-                f"{self._application_name} to enable deserialization of the request output."
+                f"'{self._application_name}' to enable deserialization of the request output."
             )
+
+        last_deserialize_error: DeserializationError | None = None
 
         for type_hint in return_type_hints:
             try:
@@ -73,8 +77,8 @@ class RemoteRequest(Request):
                         content_type=output_content_type,
                     ),
                 )
-            except BaseException as e:
-                last_exception = e
+            except DeserializationError as e:
+                last_deserialize_error = e
 
         # last_exception is Never None here if return_type_hints is not empty.
-        raise last_exception
+        raise last_deserialize_error

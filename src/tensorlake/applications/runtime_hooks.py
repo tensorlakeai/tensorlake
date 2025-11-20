@@ -1,5 +1,7 @@
 from typing import Any, Callable, List, TypeVar
 
+from .interface.exceptions import InternalError
+
 # This module is not part of SDK interface. It contains internal runtime hooks.
 
 # Type vars to make it clear what we expect without importing the corresponding SDK classes.
@@ -28,9 +30,7 @@ def wait_futures(
     """
     global __wait_futures
     if __wait_futures is None:
-        raise RuntimeError(
-            "Internal error: __wait_futures runtime hook not initialized"
-        )
+        raise InternalError("__wait_futures runtime hook not initialized")
 
     return __wait_futures(futures, timeout, return_when)
 
@@ -38,9 +38,7 @@ def wait_futures(
 def set_wait_futures_hook(hook: Any) -> None:
     global __wait_futures
     if __wait_futures is not None:
-        raise RuntimeError(
-            "Internal error: __wait_futures runtime hook already initialized"
-        )
+        raise InternalError("__wait_futures runtime hook already initialized")
 
     __wait_futures = hook
 
@@ -64,7 +62,7 @@ def run_futures(futures: List[Future], start_delay: float | None) -> None:
     """
     global __run_futures
     if __run_futures is None:
-        raise RuntimeError("Internal error: __run_futures runtime hook not initialized")
+        raise InternalError("__run_futures runtime hook not initialized")
 
     return __run_futures(futures, start_delay)
 
@@ -72,9 +70,7 @@ def run_futures(futures: List[Future], start_delay: float | None) -> None:
 def set_run_futures_hook(hook: Any) -> None:
     global __run_futures
     if __run_futures is not None:
-        raise RuntimeError(
-            "Internal error: __run_futures runtime hook already initialized"
-        )
+        raise InternalError("__run_futures runtime hook already initialized")
 
     __run_futures = hook
 

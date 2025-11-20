@@ -10,38 +10,41 @@ from queue import Empty as QueueEmptyError
 from queue import SimpleQueue
 from typing import Any, Dict, List
 
+from ..algorithms.validate_user_object import validate_user_object
 from ..function.application_call import (
     deserialize_application_function_call_payload,
 )
+from ..function.function_call import create_function_error
 from ..function.user_data_serializer import (
     deserialize_value,
     function_input_serializer,
     function_output_serializer,
     serialize_value,
 )
-from ..interface.awaitables import (
+from ..interface import (
     RETURN_WHEN,
     Awaitable,
+    File,
+    Function,
+    FunctionError,
+    Future,
+    InternalError,
+    Request,
+    RequestContext,
+    RequestError,
+    RequestFailed,
+    SDKUsageError,
+    TensorlakeError,
+)
+from ..interface.awaitables import (
     AwaitableList,
     FunctionCallAwaitable,
     FunctionCallFuture,
-    Future,
     ListFuture,
     ReduceOperationAwaitable,
     ReduceOperationFuture,
-    RuntimeFutureTypes,
-    request_scoped_id,
+    _request_scoped_id,
 )
-from ..interface.exceptions import (
-    ApplicationValidationError,
-    FunctionCallFailure,
-    RequestFailureException,
-    TensorlakeException,
-)
-from ..interface.file import File
-from ..interface.function import Function
-from ..interface.request import Request
-from ..interface.request_context import RequestContext
 from ..metadata import (
     CollectionItemMetadata,
     CollectionMetadata,
@@ -108,7 +111,7 @@ class LocalRunner:
         self._future_runs: Dict[str, LocalFutureRun] = {}
         # Exception that caused the request to fail.
         # None when request finished successfully.
-        self._request_exception: RequestFailureException | None = None
+        self._request_failed_exception: RequestFailed | None = None
         self._request_context: RequestContext = RequestContextBase(
             request_id=_LOCAL_REQUEST_ID,
             state=LocalRequestState(),
@@ -138,7 +141,7 @@ class LocalRunner:
                 return LocalRequest(
                     id=_LOCAL_REQUEST_ID,
                     output=None,
-                    exception=RequestFailureException(
+                    error=RequestFailed(
                         "Local application run aborted due to code validation errors, "
                         "please address them before running the application."
                     ),
@@ -147,69 +150,84 @@ class LocalRunner:
             return self._run()
         except BaseException as e:
             # This is an unexpected exception in LocalRunner code itself.
-            # The function run exception is stored in self._exception and handled above.
+            # The function run exception is stored in self._request_failed_exception and handled above.
             print_exception(e)
             return LocalRequest(
                 id=_LOCAL_REQUEST_ID,
                 output=None,
-                exception=(
-                    RequestFailureException("Request failed")
-                    if not isinstance(e, KeyboardInterrupt)
-                    else RequestFailureException("Request cancelled by user")
+                error=(
+                    RequestFailed("Cancelled by user")
+                    if isinstance(e, KeyboardInterrupt)
+                    else RequestFailed("Unexpected exception: " + str(e))
                 ),
             )
 
     def _run(self) -> LocalRequest:
-        set_run_futures_hook(self._runtime_hook_run_futures)
-        set_wait_futures_hook(self._runtime_hook_wait_futures)
+        """Runs the request.
+
+        Doesn't raise any exceptions unless there's a coding bug.
+        """
+        set_run_futures_hook(self._run_futures_runtime_hook)
+        set_wait_futures_hook(self._wait_futures_runtime_hook)
 
         # Serialize application payload the same way as in remote mode.
         input_serializer: UserDataSerializer = function_input_serializer(self._app)
-        serialized_payload, payload_metadata = serialize_value(
-            value=self._app_payload, serializer=input_serializer, value_id="fake_id"
-        )
 
-        payload: Any = deserialize_application_function_call_payload(
-            application=self._app,
-            payload=serialized_payload,
-            payload_content_type=payload_metadata.content_type,
-        )
-        app_function_call_awaitable: FunctionCallAwaitable = self._app.awaitable(
-            payload
-        )
-        self._create_future_run_for_awaitable(
-            awaitable=app_function_call_awaitable,
-            existing_awaitable_future=None,
-            start_delay=None,
-            output_consumer_future_id=None,
-            output_serializer_name_override=None,
-        )
+        try:
+            serialized_payload, payload_metadata = serialize_value(
+                value=self._app_payload, serializer=input_serializer, value_id="fake_id"
+            )
+            payload: Any = deserialize_application_function_call_payload(
+                application=self._app,
+                payload=serialized_payload,
+                payload_content_type=payload_metadata.content_type,
+            )
+            app_function_call_awaitable: FunctionCallAwaitable = self._app.awaitable(
+                payload
+            )
+            self._create_future_run_for_awaitable(
+                awaitable=app_function_call_awaitable,
+                existing_awaitable_future=None,
+                start_delay=None,
+                output_consumer_future_id=None,
+                output_serializer_name_override=None,
+            )
+        except TensorlakeError as e:
+            # Handle exceptions that depend on user inputs. All other exceptions are
+            # unexpected and usually mean a bug in local runner.
+            self._handle_user_exception(e)
+            return LocalRequest(
+                id=_LOCAL_REQUEST_ID,
+                output=None,
+                error=self._request_failed_exception,
+            )
 
         self._control_loop()
 
-        if self._request_exception is not None:
+        if self._request_failed_exception is not None:
             return LocalRequest(
                 id=_LOCAL_REQUEST_ID,
                 output=None,
-                exception=self._request_exception,
-            )
-
-        if not self._blob_store.has(app_function_call_awaitable.id):
-            # FIXME: This should not happen, it means that we didn't set self._request_exception.
-            # But this actually happens.
-            return LocalRequest(
-                id=_LOCAL_REQUEST_ID,
-                output=None,
-                exception=RequestFailureException(
-                    "Application didn't return an output."
-                ),
+                error=self._request_failed_exception,
             )
 
         app_output_blob: BLOB = self._blob_store.get(app_function_call_awaitable.id)
+        try:
+            request_output: Any = _deserialize_blob_value(app_output_blob)
+        except TensorlakeError as e:
+            # Handle exceptions that depend on user inputs. All other exceptions are
+            # unexpected and usually mean a bug in local runner.
+            self._handle_user_exception(e)
+            return LocalRequest(
+                id=_LOCAL_REQUEST_ID,
+                output=None,
+                error=self._request_failed_exception,
+            )
+
         return LocalRequest(
             id=_LOCAL_REQUEST_ID,
-            output=_deserialize_blob_value(app_output_blob),
-            exception=None,
+            output=request_output,
+            error=None,
         )
 
     def close(self) -> None:
@@ -230,29 +248,48 @@ class LocalRunner:
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
 
-    def _runtime_hook_run_futures(
+    def _run_futures_runtime_hook(
         self, futures: List[Future], start_delay: float | None
     ) -> None:
         # Don't catch any exceptions here because this is called from user code
         # and we want to propagate them to the user. We don't know what user gave
         # so it's easy to fail for any reason here.
-        self._user_code_cancellation_point()
+        #
+        # NB: all exceptions raised here must be derived from TensorlakeError.
 
-        for user_future in futures:
-            self._create_future_run_for_awaitable(
-                awaitable=user_future.awaitable,
-                existing_awaitable_future=user_future,
-                start_delay=start_delay,
-                output_consumer_future_id=None,
-                output_serializer_name_override=None,
-            )
+        try:
+            self._user_code_cancellation_point()
+            for user_future in futures:
+                self._create_future_run_for_awaitable(
+                    awaitable=user_future.awaitable,
+                    existing_awaitable_future=user_future,
+                    start_delay=start_delay,
+                    output_consumer_future_id=None,
+                    output_serializer_name_override=None,
+                )
+        except TensorlakeError:
+            raise
+        except Exception as e:
+            raise InternalError(f"Unexpected error while running futures") from e
 
-    def _runtime_hook_wait_futures(
+    def _wait_futures_runtime_hook(
         self, futures: List[Future], timeout: float | None, return_when: RETURN_WHEN
     ) -> tuple[List[Future], List[Future]]:
         # Don't catch any exceptions here because this is called from user code
         # and we want to propagate them to the user. We don't know what user gave
         # so it's easy to fail for any reason here.
+        #
+        # NB: all exceptions raised here must be derived from TensorlakeError.
+        try:
+            return self.__wait_futures_runtime_hook(futures, timeout, return_when)
+        except TensorlakeError:
+            raise
+        except Exception as e:
+            raise InternalError(f"Unexpected error while waiting futures") from e
+
+    def __wait_futures_runtime_hook(
+        self, futures: List[Future], timeout: float | None, return_when: RETURN_WHEN
+    ) -> tuple[List[Future], List[Future]]:
         self._user_code_cancellation_point()
 
         if return_when == RETURN_WHEN.FIRST_COMPLETED:
@@ -262,18 +299,12 @@ class LocalRunner:
         elif return_when == RETURN_WHEN.ALL_COMPLETED:
             std_return_when = STD_ALL_COMPLETED
         else:
-            raise ApplicationValidationError(
-                "Internal error: unexpected return_when value: {}".format(return_when)
-            )
+            raise SDKUsageError(f"Not supported return_when value: '{return_when}'")
 
         std_futures: List[StdFuture] = []
         for future in futures:
             if future.id not in self._future_runs:
-                raise TensorlakeException(
-                    "Internal error: future with ID {} is not registered".format(
-                        future.id
-                    )
-                )
+                raise InternalError(f"Future with ID {future.id} is not registered")
             std_futures.append(self._future_runs[future.id].std_future)
 
         # Std futures are always running as long as their user futures are considered running.
@@ -310,13 +341,13 @@ class LocalRunner:
         # Raise this exception outside of "except" to not have LookupError in
         # "during handling of the above exception, another exception occurred" message.
         if no_current_future_run:
-            raise ApplicationValidationError(
-                "Tensorlake SDK was called outside of a Tensorlake Function thread."
-                "Please only call Tensorlake SDK functions from inside Tensorlake Functions."
+            raise SDKUsageError(
+                "Tensorlake SDK was called outside of a Tensorlake Function thread or process."
+                "Please only call Tensorlake SDK from Tensorlake Functions."
             )
 
     def _finished(self) -> bool:
-        if self._request_exception is not None:
+        if self._request_failed_exception is not None:
             return True
 
         if not self._future_run_result_queue.empty():
@@ -325,13 +356,13 @@ class LocalRunner:
         return all(fr.std_future.done() for fr in self._future_runs.values())
 
     def _control_loop(self) -> None:
+        # NB: any exception raised here in control loop is unexpected and means a bug in LocalRunner.
         while not self._finished():
             self._control_loop_start_runnable_futures()
             # Process one future run result at a time because it takes
             # ~_SLEEP_POLL_INTERVAL_SECONDS at most. This keeps our timers accurate enough.
             self._control_loop_wait_and_process_future_run_result()
-            if self._request_exception is not None:
-                print_exception(self._request_exception)
+            if self._request_failed_exception is not None:
                 break
 
     def _control_loop_start_runnable_futures(self) -> None:
@@ -344,7 +375,15 @@ class LocalRunner:
             if not self._future_run_data_dependencies_are_resolved(future_run):
                 continue
 
-            self._start_future_run(future_run)
+            try:
+                self._start_future_run(future_run)
+            except TensorlakeError as e:
+                # Handle exceptions that depend on user inputs. All other exceptions are
+                # unexpected and usually mean a bug in local runner.
+                self._handle_future_run_failure(
+                    future_run=future_run,
+                    error=e,
+                )
 
     def _control_loop_wait_and_process_future_run_result(self) -> None:
         try:
@@ -356,13 +395,21 @@ class LocalRunner:
             # No new result for now.
             return
 
-        self._control_loop_process_future_run_result(result)
+        future_run: LocalFutureRun = self._future_runs[result.id]
+        try:
+            self._control_loop_process_future_run_result(future_run, result)
+        except TensorlakeError as e:
+            # Handle exceptions that depend on user inputs. All other exceptions are
+            # unexpected and usually mean a bug in local runner.
+            self._handle_future_run_failure(
+                future_run=future_run,
+                error=e,
+            )
 
     def _control_loop_process_future_run_result(
-        self, result: LocalFutureRunResult
+        self, future_run: LocalFutureRun, result: LocalFutureRunResult
     ) -> None:
-        future_run: LocalFutureRun = self._future_runs[result.id]
-        user_future: RuntimeFutureTypes = future_run.local_future.user_future
+        user_future: Future = future_run.local_future.user_future
         metadata: UserFutureMetadataType = future_run.local_future.user_future_metadata
 
         function_name: str = "<unknown>"
@@ -388,8 +435,8 @@ class LocalRunner:
         else:
             self._handle_future_run_failure(
                 future_run=future_run,
-                exception=TensorlakeException(
-                    f"Internal error: unexpected future run type: {repr(future_run)} "
+                error=InternalError(
+                    f"Unexpected LocalFutureRun subclass: {type(future_run)}."
                 ),
             )
             return
@@ -401,32 +448,22 @@ class LocalRunner:
             if isinstance(result.output, AwaitableList):
                 self._handle_future_run_failure(
                     future_run=future_run,
-                    exception=ApplicationValidationError(
-                        f"Function '{function_name}' returned an AwaitableList {repr(result.output)}. "
-                        "An AwaitableList can only be used as a function argument, not returned from it."
+                    error=SDKUsageError(
+                        f"Function '{function_name}' returned {result.output}. "
+                        f"A {result.output.kind_str} can only be used as a function argument, not returned from it."
                     ),
                 )
                 return
 
-            try:
-                self._create_future_run_for_user_object(
-                    object=result.output,
-                    start_delay=None,
-                    output_consumer_future_id=user_future.id,
-                    output_serializer_name_override=output_blob_serializer.name,
-                )
-            except BaseException as e:
-                print_exception(e)
-                self._handle_future_run_failure(
-                    future_run=future_run,
-                    exception=TensorlakeException(
-                        f"Failed to run Awaitable returned from function '{function_name}': {str(e)}",
-                    ),
-                )
-                return
+            self._create_future_run_for_user_object(
+                object=result.output,
+                start_delay=None,
+                output_consumer_future_id=user_future.id,
+                output_serializer_name_override=output_blob_serializer.name,
+            )
         else:
             blob: BLOB | None = None
-            if result.exception is None:
+            if result.error is None:
                 blob = _value_to_blob(
                     blob_id=user_future.id,
                     value=result.output,
@@ -434,32 +471,46 @@ class LocalRunner:
                 )
                 self._blob_store.put(blob)
                 self._handle_future_run_final_output(
-                    future_run=future_run, blob=blob, exception=None
+                    future_run=future_run, blob=blob, error=None
                 )
             else:
                 self._handle_future_run_failure(
-                    future_run=future_run, exception=result.exception
+                    future_run=future_run, error=result.error
                 )
 
     def _handle_future_run_failure(
         self,
         future_run: LocalFutureRun,
-        exception: TensorlakeException,
+        error: TensorlakeError,
     ) -> None:
-        # All request failures must be subclasses of RequestFailureException.
-        if isinstance(exception, RequestFailureException):
-            self._request_exception = exception
-        else:
-            self._request_exception = RequestFailureException(
-                "Request failed: " + str(exception)
+        self._handle_user_exception(error)
+
+        if not isinstance(error, FunctionError):
+            # A future failure is always reported to user as FunctionError.
+            error = create_function_error(
+                future_run.local_future.user_future.awaitable, cause=str(error)
             )
 
-        # A future failure is reported to user as FunctionCallFailure.
         self._handle_future_run_final_output(
             future_run=future_run,
             blob=None,
-            exception=FunctionCallFailure("Function call failed: " + str(exception)),
+            error=error,
         )
+
+    def _handle_user_exception(self, error: TensorlakeError) -> None:
+        """Handles an exception raised from user code.
+
+        Marks the request as failed. User code includes code that we run with user
+        supplied inputs, like serialization.
+        """
+        # Always print the user exception.
+        # This aligns with remote mode UX where the user exception is printed in FE.
+        print_exception(error)
+        if isinstance(error, RequestError):
+            self._request_failed_exception = error
+        else:
+            # Consistent with remote mode, full exception trace is printed separately.
+            self._request_failed_exception = RequestFailed("function_error")
 
     def _collection_is_resolved(self, collection_metadata: CollectionMetadata) -> bool:
         for item in collection_metadata.items:
@@ -506,10 +557,8 @@ class LocalRunner:
         else:
             self._handle_future_run_failure(
                 future_run=future_run,
-                exception=TensorlakeException(
-                    "Internal error: unexpected future run type: {}".format(
-                        type(future_run)
-                    )
+                error=InternalError(
+                    f"Unexpected LocalFutureRun subclass: {type(future_run)}"
                 ),
             )
             return False
@@ -518,7 +567,7 @@ class LocalRunner:
         self,
         future_run: LocalFutureRun,
         blob: BLOB | None,
-        exception: RequestFailureException | None,
+        error: TensorlakeError | None,
     ) -> None:
         """Handles final output of the supplied future run.
 
@@ -528,15 +577,15 @@ class LocalRunner:
         """
         future: LocalFuture = future_run.local_future
 
-        if exception is not None:
-            future.user_future.set_exception(exception)
+        if error is not None:
+            future.user_future.set_exception(error)
         else:
             # Intentionally do serialize -> deserialize cycle to ensure the same UX as in remote mode.
             future.user_future.set_result(_deserialize_blob_value(blob))
 
         # Finish std future so wait hooks waiting on it unblock.
         # Success/failure needs to be propagated to std future as well so std wait calls work correctly.
-        future_run.finish(is_exception=exception is not None)
+        future_run.finish(is_exception=error is not None)
 
         # Propagate output to consumer future if any.
         if future.output_consumer_future_id is None:
@@ -547,14 +596,14 @@ class LocalRunner:
         ]
         consumer_future: LocalFuture = consumer_future_run.local_future
         consumer_future_output: BLOB | None = None
-        if exception is None:
+        if error is None:
             consumer_future_output = blob.copy()
             consumer_future_output.metadata.id = consumer_future.user_future.id
             self._blob_store.put(consumer_future_output)
         self._handle_future_run_final_output(
             future_run=consumer_future_run,
             blob=consumer_future_output,
-            exception=exception,
+            error=error,
         )
 
     def _start_future_run(self, future_run: LocalFutureRun) -> None:
@@ -571,10 +620,8 @@ class LocalRunner:
         elif isinstance(future_run, ListFutureRun):
             self._start_list_future_run(future_run)
         else:
-            self._request_exception = RequestFailureException(
-                "Internal error: unexpected future type: {}".format(
-                    type(future_run.local_future.user_future)
-                )
+            raise InternalError(
+                f"Unexpcted LocalFutureRun subclass: {type(future_run)}"
             )
 
     def _start_function_call_future_run(
@@ -631,14 +678,9 @@ class LocalRunner:
     ) -> None:
         """Creates future run for the supplied user object if it's an Awaitable.
 
-        Doesn't do anything if it's a concrete value. Raises TensorlakeException on error.
+        Doesn't do anything if it's a concrete value. Raises TensorlakeError on error.
         """
-        if isinstance(object, Future):
-            raise ApplicationValidationError(
-                f"Invalid argument: cannot run Future {repr(object)}, "
-                "please pass an Awaitable or a concrete value."
-            )
-
+        validate_user_object(object, function_call_ids=self._future_runs.keys())
         if isinstance(object, Awaitable):
             return self._create_future_run_for_awaitable(
                 awaitable=object,
@@ -659,18 +701,12 @@ class LocalRunner:
         """Creates future run for the supplied Awaitable.
 
         Doesn't create a user Future if existing_awaitable_future is supplied.
-        Raises TensorlakeException on error.
         output_consumer_future_id is the ID of the Future that will consume the output of the future run.
         output_serializer_name_override is the name of the serializer to use for serializing
         the output of the future run. This is used when propagating output to consumer future when the
         consumer future expects a specific serialization format.
+        Raises TensorlakeError on error.
         """
-        if awaitable.id in self._future_runs:
-            raise ApplicationValidationError(
-                f"Invalid argument: {repr(awaitable)} is an Awaitable with already running Future, "
-                "only not running Awaitable can be passed as function argument or returned from a function."
-            )
-
         if isinstance(awaitable, AwaitableList):
             self._create_future_run_for_awaitable_list(
                 awaitable=awaitable,
@@ -695,10 +731,6 @@ class LocalRunner:
                 output_consumer_future_id=output_consumer_future_id,
                 output_serializer_name_override=output_serializer_name_override,
             )
-        else:
-            raise ApplicationValidationError(
-                f"Unexpected type of awaitable: {type(awaitable)}"
-            )
 
     def _create_future_run_for_awaitable_list(
         self,
@@ -710,15 +742,16 @@ class LocalRunner:
     ) -> None:
         """Creates ListFutureRun for the supplied awaitable.
 
-        Raises TensorlakeException on error.
+        Raises TensorlakeError on error.
         """
+        # Checking for errors in our own logic.
         if output_consumer_future_id is not None:
-            raise TensorlakeException(
-                "Internal error: cannot set output consumer future ID on AwaitableList because it can't be returned from a function."
+            raise InternalError(
+                "Cannot set output consumer future ID on AwaitableList because it can't be returned from a function."
             )
         if output_serializer_name_override is not None:
-            raise TensorlakeException(
-                "Internal error: cannot set output serializer name override on AwaitableList because it can't be returned from a function."
+            raise InternalError(
+                "Cannot set output serializer name override on AwaitableList because it can't be returned from a function."
             )
 
         user_future: ListFuture = (
@@ -763,7 +796,7 @@ class LocalRunner:
     ) -> None:
         """Creates LocalFunctionCallFutureRun for the supplied awaitable.
 
-        Raises TensorlakeException on error.
+        Raises TensorlakeError on error.
         """
         function: Function = get_function(awaitable.function_name)
         user_input_serializer: UserDataSerializer = function_input_serializer(function)
@@ -835,7 +868,7 @@ class LocalRunner:
                     collection=None,
                 )
         else:
-            value_id: str = request_scoped_id()
+            value_id: str = _request_scoped_id()
             self._blob_store.put(
                 _value_to_blob(
                     blob_id=value_id, value=arg, value_serializer=value_serializer
@@ -870,7 +903,7 @@ class LocalRunner:
                         )
                     )
             else:
-                value_id: str = request_scoped_id()
+                value_id: str = _request_scoped_id()
                 self._blob_store.put(
                     _value_to_blob(
                         blob_id=value_id, value=item, value_serializer=value_serializer
@@ -894,23 +927,21 @@ class LocalRunner:
     ) -> None:
         """Creates LocalReduceOperationFutureRun for the supplied awaitable.
 
-        Raises TensorlakeException on error.
+        Raises TensorlakeError on error.
         """
-        reduce_operation_result: Awaitable | Any = awaitable.inputs[0]
-
-        if len(awaitable.inputs) >= 2:
-            function: Function = get_function(awaitable.function_name)
-            # Create a chain of function calls to reduce all inputs one by one.
-            # Ordering of calls is important here. We should reduce ["a", "b", "c", "d"]
-            # using string concat function into "abcd".
-            previous_function_call_awaitable: FunctionCallAwaitable = (
-                function.awaitable(awaitable.inputs[0], awaitable.inputs[1])
+        # inputs have at least two items.
+        function: Function = get_function(awaitable.function_name)
+        # Create a chain of function calls to reduce all inputs one by one.
+        # Ordering of calls is important here. We should reduce ["a", "b", "c", "d"]
+        # using string concat function into "abcd".
+        previous_function_call_awaitable: FunctionCallAwaitable = function.awaitable(
+            awaitable.inputs[0], awaitable.inputs[1]
+        )
+        for input_item in awaitable.inputs[2:]:
+            previous_function_call_awaitable = function.awaitable(
+                previous_function_call_awaitable, input_item
             )
-            for input_item in awaitable.inputs[2:]:
-                previous_function_call_awaitable = function.awaitable(
-                    previous_function_call_awaitable, input_item
-                )
-            reduce_operation_result = previous_function_call_awaitable
+        reduce_operation_result = previous_function_call_awaitable
 
         # Don't create future runs for the function calls chain because we're
         # going to return it from ReturnOutputFutureRun as a tail call.

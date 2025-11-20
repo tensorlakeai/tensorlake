@@ -3,13 +3,14 @@ from queue import SimpleQueue
 from typing import Any, Dict, List
 
 from ...function.function_call import (
+    create_function_error,
     set_self_arg,
 )
 from ...interface.awaitables import (
     FunctionCallAwaitable,
     FunctionCallFuture,
 )
-from ...interface.exceptions import RequestError, RequestFailureException
+from ...interface.exceptions import FunctionError, InternalError, RequestError
 from ...interface.function import Function
 from ...interface.request_context import RequestContext
 from ...interface.retries import Retries
@@ -42,7 +43,10 @@ class FunctionCallFutureRun(LocalFutureRun):
             thread_pool=thread_pool,
         )
         if not isinstance(local_future.user_future, FunctionCallFuture):
-            raise ValueError("local_future must be a LocalFuture of FunctionCallFuture")
+            raise InternalError(
+                "local_future must be a LocalFuture of FunctionCallFuture"
+            )
+
         self._application: Function = application
         self._function: Function = function
         self._class_instance: Any | None = class_instance
@@ -87,24 +91,21 @@ class FunctionCallFutureRun(LocalFutureRun):
                 result: Any = self._function._original_function(
                     *self._arg_values, **self._kwarg_values
                 )
-                return LocalFutureRunResult(
-                    id=awaitable.id, output=result, exception=None
-                )
+                return LocalFutureRunResult(id=awaitable.id, output=result, error=None)
             except RequestError as e:
                 # Never retry on RequestError.
-                return LocalFutureRunResult(id=awaitable.id, output=None, exception=e)
+                return LocalFutureRunResult(id=awaitable.id, output=None, error=e)
             except StopLocalFutureRun:
                 return LocalFutureRunResult(
                     id=awaitable.id,
                     output=None,
-                    exception=RequestFailureException("Function run stopped"),
+                    error=create_function_error(awaitable, "stopped"),
                 )
             except BaseException as e:
                 runs_left -= 1
                 if runs_left == 0:
-                    print_exception(e)
                     return LocalFutureRunResult(
                         id=awaitable.id,
                         output=None,
-                        exception=RequestFailureException("Function failed"),
+                        error=create_function_error(awaitable),
                     )

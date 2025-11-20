@@ -1,5 +1,7 @@
 from typing import Any
 
+from .exceptions import InternalError
+
 
 class Request:
     def __init__(self, id: str):
@@ -13,15 +15,16 @@ class Request:
         """Returns output of the request API function.
 
         API function output is what was returned from it.
-        Raises RequestFailureException on error during the request execution.
-        Raises RequestNotFinished if the request is not yet completed.
-        Raises RemoteAPIError on error communicating with the remote API.
-        Raises ApplicationValidationError on application validation errors.
+        Raises RequestFailed if the request failed.
+        Raises RequestError if the request failed due to unhandled RequestError raised in a function.
+        Raises TensorlakeError on other errors.
         """
-        raise NotImplementedError("output is implemented in subclasses.")
+        raise InternalError("Request subclasses must implement output method.")
 
     def __repr__(self) -> str:
-        return f"Tensorlake Application Request(id={self._id})"
+        # Shows a exact structure of the Request. Used for debug logging.
+        return f"{type(self)}: (id={self._id})"
 
     def __str__(self) -> str:
-        return self.__repr__()
+        # Shows a simple human readable representation of the Request. Used in error messages.
+        return f"Tensorlake Request(id={self._id})"

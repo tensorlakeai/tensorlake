@@ -1,5 +1,6 @@
 import pickle
 
+from ..interface import InternalError
 from .function_call import FunctionCallMetadata
 from .reduce_operation import ReduceOperationMetadata
 from .value import ValueMetadata
@@ -21,4 +22,7 @@ def serialize_metadata(
 def deserialize_metadata(
     data: bytes,
 ) -> ValueMetadata | FunctionCallMetadata | ReduceOperationMetadata:
-    return pickle.loads(data)
+    try:
+        return pickle.loads(data)
+    except Exception as e:
+        raise InternalError(f"Failed to deserialize metadata: {str(e)}") from e

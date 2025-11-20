@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime
 from typing import List
 
+from tensorlake.applications import InternalError
 from tensorlake.function_executor.blob_store.s3_blob_store import S3BLOBStore
 from tensorlake.function_executor.logger import FunctionExecutorLogger
 from tensorlake.vendor.nanoid import generate as nanoid_generate
@@ -93,7 +94,7 @@ class TestS3BLOBStore(unittest.TestCase):
 
     def test_get_non_existent_object(self):
         """Tests getting a non-existent object from S3."""
-        with self.assertRaises(Exception):
+        with self.assertRaises(InternalError):
             got_data: bytearray = bytearray(1024)
             self.s3_blob_store.get(
                 uri=self.presigned_uri(
@@ -106,7 +107,7 @@ class TestS3BLOBStore(unittest.TestCase):
 
     def test_get_malformed_presigned_uri(self):
         """Tests getting an object with an invalid presigned URI."""
-        with self.assertRaises(Exception):
+        with self.assertRaises(InternalError):
             got_data: bytearray = bytearray(1024)
             self.s3_blob_store.get(
                 uri="s3://malformed-uri",
@@ -155,7 +156,7 @@ class TestS3BLOBStore(unittest.TestCase):
 
     def test_put_malformed_presigned_uri(self):
         """Tests putting an object with an invalid presigned URI."""
-        with self.assertRaises(Exception):
+        with self.assertRaises(InternalError):
             self.s3_blob_store.put(
                 uri="s3://malformed-uri",
                 source=[memoryview(b"test")],

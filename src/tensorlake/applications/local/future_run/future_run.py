@@ -7,16 +7,16 @@ from threading import Event
 from typing import Any
 
 from ...interface.awaitables import Awaitable
-from ...interface.exceptions import RequestError, RequestFailureException
+from ...interface.exceptions import InternalError, TensorlakeError
 from ..future import LocalFuture
 
 
 @dataclass
 class LocalFutureRunResult:
     id: str
-    # Either output or exception are set.
+    # Either output or error are set.
     output: Any | Awaitable | None
-    exception: RequestError | RequestFailureException | None
+    error: TensorlakeError | None
 
 
 class StopLocalFutureRun(BaseException):
@@ -99,10 +99,12 @@ class LocalFutureRun:
             self._finish_event.wait()
 
         if self._finish_with_exception:
-            # sets self._std_future.exception to propagate the failure to waiters.
+            # Sets self._std_future.exception to notify waiters about failure.
+            # This exception is not used for anything else.
             raise Exception("Future run finished with exception")
         else:
-            # sets self._std_future.result to propagate the success to waiters.
+            # Sets self._std_future.result to notify waiters about success.
+            # This value is not used for anything else.
             return None
 
     def _run_future_in_context(self) -> LocalFutureRunResult:
@@ -114,7 +116,7 @@ class LocalFutureRun:
 
         A new contextvars.Context is created for running the user future.
         """
-        raise NotImplementedError(
+        raise InternalError(
             "_run_future must be implemented by LocalFutureRun subclasses"
         )
 

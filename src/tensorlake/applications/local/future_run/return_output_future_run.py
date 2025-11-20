@@ -41,5 +41,5 @@ class ReturnOutputFutureRun(LocalFutureRun):
         return LocalFutureRunResult(
             id=self.local_future.user_future.id,
             output=self.output,
-            exception=None,
+            error=None,
         )

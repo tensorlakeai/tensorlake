@@ -1,7 +1,7 @@
 import math
 from typing import List
 
-from ...interface.function import Function
+from ...interface import Function, SDKUsageError
 from .function_manifests import FunctionResourcesManifest, GPUResourceManifest
 
 
@@ -9,7 +9,7 @@ def _parse_gpu_resource(gpu: str) -> GPUResourceManifest:
     # Example: "A100-80GB:2", "H100", "A100-40GB:4"
     parts: List[str] = gpu.split(":")
     if len(parts) > 2:
-        raise ValueError(
+        raise SDKUsageError(
             f"Invalid GPU format: {gpu}. Expected format is 'GPU_MODEL:COUNT'."
         )
 
@@ -31,7 +31,7 @@ def _parse_gpu_resources(
         return [_parse_gpu_resource(gpu)]
     if isinstance(gpu, list):
         return [_parse_gpu_resource(g) for g in gpu]
-    raise ValueError(f"Invalid GPU format: {gpu}. Expected str or List[str].")
+    raise SDKUsageError(f"Invalid GPU format: {gpu}. Expected str or List[str].")
 
 
 def resources_for_function(

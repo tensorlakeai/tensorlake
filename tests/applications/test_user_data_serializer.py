@@ -2,6 +2,7 @@ import unittest
 
 from pydantic import BaseModel
 
+from tensorlake.applications import DeserializationError
 from tensorlake.applications.function.user_data_serializer import (
     deserialize_value,
     serialize_value,
@@ -146,26 +147,26 @@ class TestUserDataSerializer(unittest.TestCase):
         self.assertEqual(result.content_type, "text/plain")
 
     def test_deserialize_value_file_missing_content_type(self):
-        """Test that deserializing File without content_type raises ValueError."""
+        """Test that deserializing File without content_type raises DeserializationError."""
         from tensorlake.applications.interface.file import File
 
         metadata = ValueMetadata(
             id="file_test", cls=File, serializer_name=None, content_type=None
         )
         data = b"Hello"
-        with self.assertRaises(ValueError) as cm:
+        with self.assertRaises(DeserializationError) as cm:
             deserialize_value(data, metadata)
         self.assertIn(
             "Deserializing to File requires a content type", str(cm.exception)
         )
 
     def test_deserialize_value_non_file_missing_serializer(self):
-        """Test that deserializing non-File without serializer_name raises ValueError."""
+        """Test that deserializing non-File without serializer_name raises DeserializationError."""
         metadata = ValueMetadata(
             id="test", cls=str, serializer_name=None, content_type=None
         )
         data = b'"test"'
-        with self.assertRaises(ValueError) as cm:
+        with self.assertRaises(DeserializationError) as cm:
             deserialize_value(data, metadata)
         self.assertIn("Serializer name is None for non-File value", str(cm.exception))
 
@@ -196,7 +197,7 @@ class TestUserDataSerializer(unittest.TestCase):
             serializer_name="json",
             content_type="application/json",
         )
-        with self.assertRaises(ValueError) as cm:
+        with self.assertRaises(DeserializationError) as cm:
             _ = deserialize_value(b"David", metadata)
         self.assertEqual(
             "Failed to deserialize data with json serializer: Expecting value: line 1 column 1 (char 0)",

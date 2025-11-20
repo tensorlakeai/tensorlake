@@ -8,7 +8,7 @@ from typing import Dict, List, Set
 import click
 from pydantic import BaseModel
 
-from ...interface.function import Function
+from ...interface import Function, SDKUsageError
 from .loader import walk_code
 
 
@@ -38,10 +38,11 @@ def zip_code(
 ) -> bytes:
     """Returns ZIP archive with all Python source files from the source code directory.
 
-    Raises ValueError if failed to create the ZIP archive due to code directory issues.
+    Raises SDKUsageError if failed to create the ZIP archive due to code directory issues.
+    Raises Exception on other errors.
     """
     code_zip_manifest: CodeZIPManifest = _create_code_zip_manifest(
-        code_dir_path=code_dir_path, all_functions=all_functions
+        code_dir_path=code_dir_path, functions=all_functions
     )
 
     zip_buffer = io.BytesIO()
@@ -53,8 +54,6 @@ def zip_code(
             ignored_absolute_paths=ignored_absolute_paths,
         )
         return zip_buffer.getvalue()
-    except Exception:
-        raise
     finally:
         _save_zip_for_debugging(zip_buffer)
 
@@ -67,7 +66,8 @@ def _zip_code(
 ) -> None:
     """Zips the code directory and writes it to the ZIP buffer.
 
-    Raises ValueError if failed to create the ZIP archive due to code directory issues.
+    Raises SDKUsageError if failed to create the ZIP archive due to code directory issues.
+    Raises Exception on other errors.
     """
     zip_code_size: int = 0
     zip_infos: List[zipfile.ZipInfo] = []
@@ -86,7 +86,7 @@ def _zip_code(
             # We need to check that file owner has read access on the file so the unzipping process
             # can load and run them.
             if not (os.stat(file_path).st_mode & stat.S_IRUSR):
-                raise ValueError(
+                raise SDKUsageError(
                     f"Application code file {file_path} is not readable by its owner. "
                     "Please change the file permissions."
                 )
@@ -103,7 +103,7 @@ def _zip_code(
 def _check_code_size(app_code_size: int, zip_infos: List[zipfile.ZipInfo]) -> None:
     """Checks if the size of the application code is less than _MAX_APPLICATION_CODE_SIZE_BYTES.
 
-    If the size is greater than _MAX_APPLICATION_CODE_SIZE_BYTES, raises a ValueError.
+    If the size is greater than _MAX_APPLICATION_CODE_SIZE_BYTES, raises a SDKUsageError.
     """
     if app_code_size <= _MAX_CODE_SIZE_BYTES:
         return
@@ -111,7 +111,7 @@ def _check_code_size(app_code_size: int, zip_infos: List[zipfile.ZipInfo]) -> No
     click.echo(f"Application code ZIP archive content:")
     for zip_info in zip_infos:
         click.echo(f"  {zip_info.filename}: {zip_info.file_size} bytes")
-    raise ValueError(
+    raise SDKUsageError(
         f"Application code size {app_code_size / 1024 / 1024} MB exceeds maximum size {_MAX_CODE_SIZE_BYTES / 1024/ 1024} MB. "
         "Please check the application code ZIP archive content above to see if anything unexpected is included."
     )
@@ -127,11 +127,16 @@ def _save_zip_for_debugging(zip_buffer: io.BytesIO) -> None:
 
 
 def _create_code_zip_manifest(
-    code_dir_path: str, all_functions: List[Function]
+    code_dir_path: str, functions: List[Function]
 ) -> CodeZIPManifest:
+    """Creates CodeZIPManifest with all the supplied functions.
+
+    Raises SDKUsageError if failed to create the ZIP archive due to code directory issues.
+    Raises Exception on other errors.
+    """
     function_manifests: Dict[str, FunctionZIPManifest] = {}
     # Functions defined in ignored files are not available in the registry.
-    for function in all_functions:
+    for function in functions:
         function: Function
         function_manifests[function._function_config.function_name] = (
             _create_function_zip_manifest(
@@ -148,17 +153,21 @@ def _create_code_zip_manifest(
 def _create_function_zip_manifest(
     function: Function, code_dir_path: str
 ) -> FunctionZIPManifest:
-    function_name: str = function._function_config.function_name
+    """Creates FunctionZIPManifest for the supplied function.
+
+    Raises SDKUsageError if failed to create the ZIP archive due to code directory issues.
+    Raises Exception on other errors.
+    """
     import_file_path: str = inspect.getsourcefile(function._original_function)
     if import_file_path is None:
-        raise ValueError(
-            f"Function {function_name} is not defined in any file. "
+        raise SDKUsageError(
+            f"{function} is not defined in any file in application source code directory '{code_dir_path}'. "
             "Please copy the function file into the application source code directory."
         )
     import_file_path = os.path.abspath(import_file_path)
     if not import_file_path.startswith(code_dir_path):
-        raise ValueError(
-            f"Function {function_name} is defined in {import_file_path} "
+        raise SDKUsageError(
+            f"{function} is defined in {import_file_path} "
             f"which is not inside the application source code directory {code_dir_path}. "
             "Please copy or symlink the function file into the application source code directory."
         )

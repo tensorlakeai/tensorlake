@@ -1,7 +1,6 @@
 import json
-import logging
 import os
-from typing import Iterator, List
+from typing import Iterator
 
 import httpx
 from httpx_sse import ServerSentEvent, connect_sse
@@ -15,7 +14,7 @@ from tensorlake.applications.interface.exceptions import (
     RequestError as RequestErrorException,
 )
 from tensorlake.applications.interface.exceptions import (
-    RequestFailureException,
+    RequestFailed,
     RequestNotFinished,
 )
 from tensorlake.applications.remote.manifests.application import ApplicationManifest
@@ -76,7 +75,7 @@ class FunctionRun(BaseModel):
     outcome: str
     created_at: int
     application_version: str
-    allocations: List[Allocation]
+    allocations: list[Allocation]
 
 
 class RequestMetadata(BaseModel):
@@ -88,7 +87,7 @@ class RequestMetadata(BaseModel):
     application_version: str
     created_at: int
     request_error: RequestError | None = None
-    function_runs: List[FunctionRun]
+    function_runs: list[FunctionRun]
 
 
 class RequestCreatedEvent(BaseModel):
@@ -163,6 +162,10 @@ class APIClient:
         self._client.close()
 
     def _request(self, method: str, **kwargs) -> httpx.Response:
+        """Sends an HTTP request and returns the response.
+
+        Raises RemoteAPIError on request failure.
+        """
         try:
             # No request timeouts for now.
             # This is only correct for when we're waiting for application request completion.
@@ -219,7 +222,11 @@ class APIClient:
         code_zip: bytes,
         upgrade_running_requests: bool,
     ):
-        response = self._post(
+        """Creates or updates an application in the namespace.
+
+        Raises RemoteAPIError on failure.
+        """
+        self._post(
             f"v1/namespaces/{self._namespace}/applications",
             files={"code": code_zip},
             data={
@@ -228,7 +235,6 @@ class APIClient:
                 "upgrade_requests_to_latest_code": upgrade_running_requests,
             },
         )
-        response.raise_for_status()
 
     def delete_application(
         self,
@@ -236,16 +242,18 @@ class APIClient:
     ) -> None:
         """
         Deletes an application and all of its requests from the namespace.
-        :param application_name: The name of the application to delete.
-        WARNING: This operation is irreversible.
+
+        Raises RemoteAPIError on failure.
         """
-        response = self._delete(
+        self._delete(
             f"v1/namespaces/{self._namespace}/applications/{application_name}",
         )
-        response.raise_for_status()
 
-    def applications(self) -> List[ApplicationListItem]:
-        """Returns list of all existing applications."""
+    def applications(self) -> list[ApplicationListItem]:
+        """Returns list of all existing applications.
+
+        Raises RemoteAPIError on failure.
+        """
         return [
             ApplicationListItem(**app)
             for app in self._get(
@@ -254,25 +262,32 @@ class APIClient:
         ]
 
     def application(self, application_name: str) -> ApplicationManifest:
-        """Returns manifest json dict for a specific application."""
+        """Returns manifest json dict for a specific application.
+
+        Raises RemoteAPIError on failure.
+        """
         return ApplicationManifest(
             **self._get(
                 f"v1/namespaces/{self._namespace}/applications/{application_name}"
             ).json()
         )
 
-    def call(
+    def run_request(
         self,
         application_name: str,
-        payload: bytes,
-        payload_content_type: str,
+        input: bytes,
+        input_content_type: str,
     ) -> str:
+        """Runs a request for a specific application with given input.
+
+        Raises RemoteAPIError on failure.
+        """
         kwargs = {
             "headers": {
-                "Content-Type": payload_content_type,
+                "Content-Type": input_content_type,
                 "Accept": "application/json",
             },
-            "content": payload,
+            "content": input,
         }
         response = self._post(
             f"v1/namespaces/{self._namespace}/applications/{application_name}",
@@ -319,6 +334,10 @@ class APIClient:
         request_id: str,
         **kwargs,
     ):
+        """Waits for a request to complete by connecting to its progress SSE stream.
+
+        Raises Exception on failure.
+        """
         self._add_api_key(kwargs)
         with connect_sse(
             self._client,
@@ -340,10 +359,13 @@ class APIClient:
         application_name: str,
         request_id: str,
     ) -> tuple[bytes, str]:
+        """Downloads the output of a completed request.
+
+        Raises RemoteAPIError on failure.
+        """
         response = self._get(
             f"v1/namespaces/{self._namespace}/applications/{application_name}/requests/{request_id}/output",
         )
-        response.raise_for_status()
         return response.content, response.headers.get("Content-Type", "")
 
     def request_output(
@@ -351,17 +373,22 @@ class APIClient:
         application_name: str,
         request_id: str,
     ) -> tuple[bytes, str]:
+        """Gets the output of a completed request.
+
+        Raises RequestNotFinished if the request is not yet finished.
+        Raises RequestFailed if the request has failed.
+        Raises RemoteAPIError if failed to get request output from remote API.
+        """
         response = self._get(
             f"v1/namespaces/{self._namespace}/applications/{application_name}/requests/{request_id}",
         )
-        response.raise_for_status()
         request = RequestMetadata(**response.json())
         if request.outcome is None:
             raise RequestNotFinished()
 
         if isinstance(request.outcome, dict):
             if request.request_error is None:
-                raise RequestFailureException(request.outcome["failure"])
+                raise RequestFailed(request.outcome["failure"])
             else:
                 raise RequestErrorException(request.request_error.message)
 

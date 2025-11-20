@@ -1,3 +1,5 @@
+from tensorlake.applications import InternalError
+
 from ..proto.function_executor_pb2 import RequestStateResponse
 from ..proto.message_validator import MessageValidator
 
@@ -9,7 +11,7 @@ class ResponseValidator(MessageValidator):
     def check(self):
         """Validates the request.
 
-        Raises: ValueError: If the response is invalid.
+        Raises: InternalError: If the response is invalid.
         """
         (
             MessageValidator(self._response)
@@ -26,4 +28,4 @@ class ResponseValidator(MessageValidator):
                 .optional_serialized_object("value")
             )
         else:
-            raise ValueError(f"Unknown response type: {self._response}")
+            raise InternalError(f"Unknown response type: {self._response}")

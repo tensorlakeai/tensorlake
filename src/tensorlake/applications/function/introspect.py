@@ -2,7 +2,7 @@ import inspect
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from ..interface.function import Function, _function_name
+from ..interface.function import _function_name
 
 
 @dataclass
@@ -164,11 +164,3 @@ def object_source_file_line(object: Any) -> int:
         return inspect.getsourcelines(object)[1]
     except (OSError, TypeError):
         return -1
-
-
-def is_application_function(fn: Function) -> bool:
-    """Returns True if the function defines an application.
-
-    Doesn't raise any exceptions. Works for invalid functions that fail validation.
-    """
-    return fn._application_config is not None

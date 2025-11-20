@@ -5,6 +5,7 @@ from typing import List
 from parameterized import parameterized
 from testing import create_tmp_blob, read_tmp_blob_bytes, write_tmp_blob_bytes
 
+from tensorlake.applications import InternalError
 from tensorlake.function_executor.blob_store.blob_store import BLOBStore
 from tensorlake.function_executor.logger import FunctionExecutorLogger
 from tensorlake.function_executor.proto.function_executor_pb2 import (
@@ -111,7 +112,7 @@ class TestBLOBStore(unittest.TestCase):
             id="test-blob", chunks_count=chunks_count, chunk_size=chunk_size
         )
         blob_size: int = chunks_count * chunk_size
-        with self.assertRaises(IndexError):
+        with self.assertRaises(InternalError):
             self.blob_store.get(
                 blob=blob, offset=blob_size + 1, size=1, logger=self.logger
             )
@@ -124,7 +125,7 @@ class TestBLOBStore(unittest.TestCase):
             id="test-blob", chunks_count=chunks_count, chunk_size=chunk_size
         )
         blob_size: int = chunks_count * chunk_size
-        with self.assertRaises(IndexError):
+        with self.assertRaises(InternalError):
             self.blob_store.get(
                 blob=blob, offset=blob_size - 1, size=2, logger=self.logger
             )
@@ -277,7 +278,7 @@ class TestBLOBStore(unittest.TestCase):
         blob: BLOB = create_tmp_blob(
             id="test-blob", chunks_count=chunks_count, chunk_size=chunk_size
         )
-        with self.assertRaises(ValueError):
+        with self.assertRaises(InternalError):
             self.blob_store.put(
                 blob=blob,
                 data=[b"a" * (chunks_count * chunk_size), b"b"],

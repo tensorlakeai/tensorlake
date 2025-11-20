@@ -3,7 +3,7 @@ import pickle
 from types import UnionType
 from typing import Any, List, Union, get_args, get_origin
 
-from ..interface.function import Function
+from ..interface import Function
 
 
 def function_arg_type_hint(function: Function, arg_ix: int) -> List[Any]:

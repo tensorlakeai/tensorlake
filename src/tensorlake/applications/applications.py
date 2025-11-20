@@ -1,6 +1,6 @@
 from typing import Any, Generator, Iterator
 
-from .interface.function import Function
+from .interface.function import Function, _is_application_function
 from .interface.request import Request
 from .interface.run import run_local_application, run_remote_application
 
@@ -13,7 +13,7 @@ def filter_applications(
     """Yields all applications out of the supplied functions."""
     for function in functions:
         function: Function
-        if function._application_config is None:
+        if not _is_application_function(function):
             continue
         yield function
 

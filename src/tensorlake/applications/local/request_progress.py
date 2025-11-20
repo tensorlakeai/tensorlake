@@ -8,4 +8,5 @@ class LocalFunctionProgress(FunctionProgress):
         super().__init__()
 
     def update(self, current: float, total: float) -> None:
+        # Not catching any errors here because there's no way this can fail.
         print(f"Progress update, current: {current}, total: {total}")

@@ -1,8 +1,8 @@
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List
 
 from tensorlake.applications import (
-    ApplicationValidationError,
     Function,
+    InternalError,
 )
 from tensorlake.applications.function.application_call import (
     deserialize_application_function_call_payload,
@@ -19,9 +19,8 @@ from tensorlake.applications.interface.awaitables import (
     Awaitable,
     AwaitableList,
     FunctionCallAwaitable,
-    Future,
     ReduceOperationAwaitable,
-    request_scoped_id,
+    _request_scoped_id,
 )
 from tensorlake.applications.metadata import (
     CollectionItemMetadata,
@@ -50,56 +49,9 @@ from ..proto.function_executor_pb2 import (
 from .value import SerializedValue, Value
 
 
-def validate_user_object(
-    user_object: Awaitable | Future | Any, function_call_ids: Set[str]
-) -> None:
-    """Validates the object produced by user function.
-
-    Raises ApplicationValidationError if the object is invalid.
-    """
-    # NB: This code needs to be in sync with LocalRunner where it's doing a similar thing.
-    if not isinstance(user_object, (Awaitable, Future)):
-        return
-
-    # TODO: Allow passing Futures that are already running. This makes our implementation
-    # more complex because each running Future can be used as argument in multiple other
-    # trees of Awaitables.
-    if isinstance(user_object, Future):
-        raise ApplicationValidationError(
-            f"Invalid argument: cannot run Future {repr(user_object)}, "
-            "please pass an Awaitable or a concrete value."
-        )
-
-    awaitable: Awaitable = user_object
-    if awaitable.id in function_call_ids:
-        raise ApplicationValidationError(
-            f"Invalid argument: {repr(awaitable)} is an Awaitable with already running Future, "
-            "only not running Awaitable can be passed as function argument or returned from a function."
-        )
-
-    if isinstance(awaitable, AwaitableList):
-        awaitable: AwaitableList
-        for item in awaitable.items:
-            validate_user_object(user_object=item, function_call_ids=function_call_ids)
-    elif isinstance(awaitable, ReduceOperationAwaitable):
-        awaitable: ReduceOperationAwaitable
-        for item in awaitable.inputs:
-            validate_user_object(user_object=item, function_call_ids=function_call_ids)
-    elif isinstance(awaitable, FunctionCallAwaitable):
-        awaitable: FunctionCallAwaitable
-        for arg in awaitable.args:
-            validate_user_object(user_object=arg, function_call_ids=function_call_ids)
-        for arg in awaitable.kwargs.values():
-            validate_user_object(user_object=arg, function_call_ids=function_call_ids)
-    else:
-        raise ApplicationValidationError(
-            f"Unexpected type of awaitable returned from function: {type(awaitable)}"
-        )
-
-
 # FIXME: We're modifying user's Awaitables here in place which is not ideal.
 # We might want to clone the Awaitables instead to avoid surprising the user.
-# Or create and AST intermediate representation of the Awaitable tree and work with it.
+# Or create an intermediate representation of the Awaitable tree and work with it.
 def serialize_values_in_awaitable_tree(
     user_object: Awaitable | Any,
     value_serializer: UserDataSerializer,
@@ -111,11 +63,16 @@ def serialize_values_in_awaitable_tree(
     SerializedValue instead of the original user object. Updates serialized_values with
     each SerializedValue created from concrete values. serialized_values is mapping from
     value ID to SerializedValue.
+
+    Raises SerializationError if serialization of any value fails.
+    Raises TensorlakeError for other errors.
     """
     # NB: This code needs to be in sync with LocalRunner where it's doing a similar thing.
     if not isinstance(user_object, Awaitable):
         data, metadata = serialize_value(
-            value=user_object, serializer=value_serializer, value_id=request_scoped_id()
+            value=user_object,
+            serializer=value_serializer,
+            value_id=_request_scoped_id(),
         )
         serialized_values[metadata.id] = SerializedValue(
             metadata=metadata,
@@ -168,6 +125,8 @@ def serialize_values_in_awaitable_tree(
                 serialized_values=serialized_values,
             )
         return awaitable
+    else:
+        raise InternalError(f"Unexpected Awaitable subclass: {type(awaitable)}")
 
 
 def awaitable_to_execution_plan_updates(
@@ -182,6 +141,8 @@ def awaitable_to_execution_plan_updates(
     The awaitable must be validated already. The root awaitable must not be an AwaitableList.
     Caller must call this function for each item in the AwaitableList separately instead.
     Each value in the awaitable tree must be a SerializedValue present in uploaded_serialized_objects.
+
+    Raises TensorlakeError on error.
     """
     updates: List[ExecutionPlanUpdate] = []
     _fill_execution_plan_updates(
@@ -270,7 +231,7 @@ def _fill_execution_plan_updates(
                     collection=None,
                 )
             else:
-                raise ApplicationValidationError(
+                raise InternalError(
                     f"Unexpected type of function call argument: {type(arg)}"
                 )
 
@@ -309,11 +270,7 @@ def _fill_execution_plan_updates(
                         value=uploaded_serialized_objects[item.metadata.id],
                     )
                 )
-            elif isinstance(item, AwaitableList):
-                raise ApplicationValidationError(
-                    "AwaitableList cannot be used as an input item for ReduceOperationAwaitable, "
-                    "please use individual Awaitable items instead."
-                )
+            # AwaitableList inside ReduceOperation inputs is not supported. We checked for this during user object validation.
             elif isinstance(item, (FunctionCallAwaitable, ReduceOperationAwaitable)):
                 _fill_execution_plan_updates(
                     awaitable=item,
@@ -329,7 +286,7 @@ def _fill_execution_plan_updates(
                     )
                 )
             else:
-                raise ApplicationValidationError(
+                raise InternalError(
                     f"Unexpected type of reduce operation input item: {type(item)}"
                 )
 
@@ -348,9 +305,7 @@ def _fill_execution_plan_updates(
         )
         destination.append(update)
     else:
-        raise ApplicationValidationError(
-            f"Unexpected type of awaitable: {type(awaitable)}"
-        )
+        raise InternalError(f"Unexpected Awaitable subclass: {type(awaitable)}")
 
 
 def _to_collection_metadata(
@@ -382,9 +337,7 @@ def _to_collection_metadata(
                 )
             )
         else:
-            raise ApplicationValidationError(
-                f"Unexpected type of awaitable list item: {type(item)}"
-            )
+            raise InternalError(f"Unexpected type of AwaitableList item: {type(item)}")
     return collection_metadata
 
 
@@ -412,9 +365,7 @@ def _embed_collection_into_function_pb_args(
                 )
             )
         else:
-            raise ApplicationValidationError(
-                f"Unexpected type of AwaitableList item: {type(item)}"
-            )
+            raise InternalError(f"Unexpected type of AwaitableList item: {type(item)}")
 
 
 def deserialize_function_arguments(
@@ -459,25 +410,25 @@ def validate_and_deserialize_function_call_metadata(
                 logger.error(
                     "function argument is missing metadata",
                 )
-                raise ValueError("Function argument is missing metadata.")
+                raise InternalError("Function argument is missing metadata.")
 
         function_call_metadata = deserialize_metadata(serialized_function_call_metadata)
         if not isinstance(
             function_call_metadata, (FunctionCallMetadata, ReduceOperationMetadata)
         ):
             logger.error(
-                "unsupported function call metadata type",
-                metadata_type=type(function_call_metadata).__name__,
+                "unexpected function call metadata type",
+                metadata_type=type(function_call_metadata),
             )
-            raise ValueError(
-                f"Unsupported function call metadata type: {type(function_call_metadata).__name__}"
+            raise InternalError(
+                f"Unexpected function call metadata type: {type(function_call_metadata)}"
             )
 
         if (
             isinstance(function_call_metadata, ReduceOperationMetadata)
             and len(serialized_args) != 2
         ):
-            raise ValueError(
+            raise InternalError(
                 f"Expected 2 arguments for reducer function call, got {len(serialized_args)}"
             )
 
@@ -489,13 +440,15 @@ def validate_and_deserialize_function_call_metadata(
                 "expected exactly one function argument for server-created application function call",
                 num_args=len(serialized_args),
             )
-            raise ValueError(
+            raise InternalError(
                 f"Expected exactly one function argument for server-created application "
                 f"function call, got {len(serialized_args)}."
             )
 
         if function._application_config is None:
-            raise ValueError("Non-application function was called without SDK metadata")
+            raise InternalError(
+                "Non-application function was called without SDK metadata"
+            )
 
         return None
 

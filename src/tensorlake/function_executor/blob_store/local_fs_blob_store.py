@@ -1,8 +1,9 @@
 import hashlib
 import os
 import os.path
-from itertools import chain
 from typing import List
+
+from tensorlake.applications import InternalError
 
 from ..logger import FunctionExecutorLogger
 
@@ -20,11 +21,11 @@ class LocalFSBLOBStore:
         """Reads binary data stored in file at the supplied URI and offset into the destination memoryview.
 
         The URI must be a file URI (starts with "file://"). The path must be absolute.
-        Raises Exception on error.
+        Raises InternalError on error.
         """
         blob_path: str = _blob_path_from_uri(uri)
         if not os.path.isabs(blob_path):
-            raise ValueError(f"BLOB file path {blob_path} must be absolute")
+            raise InternalError(f"BLOB file path {blob_path} must be absolute")
 
         if os.path.exists(blob_path):
             with open(blob_path, mode="rb") as blob_file:
@@ -32,7 +33,7 @@ class LocalFSBLOBStore:
                 # memoryview ensures that the slice we pass points at destination.
                 blob_file.readinto(destination)
         else:
-            raise KeyError(f"BLOB file at {blob_path} does not exist")
+            raise InternalError(f"BLOB file at {blob_path} does not exist")
 
     def put(
         self,
@@ -49,7 +50,7 @@ class LocalFSBLOBStore:
         """
         blob_path: str = _blob_path_from_uri(uri)
         if not os.path.isabs(blob_path):
-            raise ValueError(f"BLOB file path {blob_path} must be absolute")
+            raise InternalError(f"BLOB file path {blob_path} must be absolute")
 
         os.makedirs(os.path.dirname(blob_path), exist_ok=True)
         _create_file_if_doesnt_exist(blob_path)

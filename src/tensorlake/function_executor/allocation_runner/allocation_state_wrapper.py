@@ -2,6 +2,8 @@ import hashlib
 import threading
 from typing import Any, Callable, Iterable
 
+from tensorlake.applications import InternalError
+
 from ..proto.function_executor_pb2 import (
     BLOB,
     AllocationFunctionCall,
@@ -134,10 +136,10 @@ def _remove_repeated_field_item(
 ) -> None:
     """Removes the first item matching the predicate in the repeated proto field.
 
-    Raises ValueError if no item matches the predicate.
+    Raises InternalError if no item matches the predicate.
     """
     for index, item in enumerate(repeated_field):
         if predicate(item):
             del repeated_field[index]
             return
-    raise ValueError("No item found matching the predicate.")
+    raise InternalError(f"No item found in {repeated_field} matching the predicate.")

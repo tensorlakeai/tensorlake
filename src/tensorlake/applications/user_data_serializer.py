@@ -9,6 +9,12 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     SerializedObjectEncoding,
 )
 
+from .interface.exceptions import (
+    DeserializationError,
+    InternalError,
+    SerializationError,
+)
+
 # API functions use serializers customizable by users because API functions
 # can be called over HTTP where a serialized payload is passed.
 # All non-API functions are called using Python SDK where Pickle is available.
@@ -28,28 +34,32 @@ class UserDataSerializer:
     @property
     def name(self) -> str:
         """Returns the name of the serializer."""
-        raise NotImplementedError("Subclasses should implement this method.")
+        raise InternalError("Subclasses should implement this method.")
 
     @property
     def content_type(self) -> str:
         """Returns the content type of the serializer."""
-        raise NotImplementedError("Subclasses should implement this method.")
+        raise InternalError("Subclasses should implement this method.")
 
     @property
     def serialized_object_encoding(self) -> SerializedObjectEncoding:
         """Returns the serialized object encoding of the serializer."""
-        raise NotImplementedError("Subclasses should implement this method.")
+        raise InternalError("Subclasses should implement this method.")
 
     def serialize(self, object: Any) -> bytes:
-        """Serializes the given object into bytes."""
-        raise NotImplementedError("Subclasses should implement this method.")
+        """Serializes the given object into bytes.
+
+        Raises SerializationError on failure.
+        """
+        raise InternalError("Subclasses should implement this method.")
 
     def deserialize(self, data: bytes, possible_types: List[Any]) -> Any:
         """Deserializes the given bytes into an object.
 
         The `possible_types` parameter specify possible types of the deserialized object.
+        Raises DeserializationError on failure.
         """
-        raise NotImplementedError("Subclasses should implement this method.")
+        raise InternalError("Subclasses should implement this method.")
 
 
 class JSONUserDataSerializer(UserDataSerializer):
@@ -87,7 +97,7 @@ class JSONUserDataSerializer(UserDataSerializer):
             else:
                 return json.dumps(object).encode("utf-8")
         except Exception as e:
-            raise ValueError(
+            raise SerializationError(
                 f"Failed to serialize data with json serializer: {e}"
             ) from e
 
@@ -117,7 +127,7 @@ class JSONUserDataSerializer(UserDataSerializer):
         try:
             return json.loads(decoded_data)
         except Exception as e:
-            raise ValueError(
+            raise DeserializationError(
                 f"Failed to deserialize data with json serializer: {e}"
             ) from e
 
@@ -152,7 +162,7 @@ class PickleUserDataSerializer(UserDataSerializer):
         try:
             return pickle.dumps(object, protocol=self._PROTOCOL_LEVEL)
         except Exception as e:
-            raise ValueError(
+            raise SerializationError(
                 f"Failed to serialize data with pickle serializer: {e}"
             ) from e
 
@@ -160,14 +170,20 @@ class PickleUserDataSerializer(UserDataSerializer):
         try:
             return pickle.loads(data)
         except Exception as e:
-            raise ValueError(
+            raise DeserializationError(
                 f"Failed to deserialize data with pickle serializer: {e}"
             ) from e
 
 
 def serializer_by_name(serializer_name: str) -> UserDataSerializer:
+    """Returns the UserDataSerializer instance for the given serializer name.
+
+    The caller must validate the serializer name beforehand.
+    Raises InternalError if the serializer name is unknown.
+    """
     if serializer_name == PickleUserDataSerializer.NAME:
         return PickleUserDataSerializer()
     elif serializer_name == JSONUserDataSerializer.NAME:
         return JSONUserDataSerializer()
-    raise ValueError(f"Unknown serializer name: {serializer_name}")
+    # We're validating application serializers on app deployment so this should never happen.
+    raise InternalError(f"Unknown serializer name: {serializer_name}")

@@ -2,6 +2,7 @@ import hashlib
 import time
 from typing import List
 
+from tensorlake.applications import InternalError
 from tensorlake.applications.metadata import ValueMetadata, deserialize_metadata
 
 from ..blob_store.blob_store import BLOBStore
@@ -47,7 +48,7 @@ def download_serialized_objects(
     # chunks and parallelizes large downloads and performance degrades with
     # too much parallelization.
     if len(serialized_objects) != len(serialized_object_blobs):
-        raise ValueError(
+        raise InternalError(
             "Mismatched serialized objects and serialized object blobs lengths, "
             f"{len(serialized_objects)} != {len(serialized_object_blobs)}"
         )
@@ -66,7 +67,7 @@ def _download_serialized_value(
 ) -> SerializedValue:
     """Returns the raw bytes of the serialized object metadata and data from blob store."""
     if not so.manifest.HasField("metadata_size"):
-        raise ValueError("SerializedObjectManifest is missing metadata_size.")
+        raise InternalError("SerializedObjectManifest is missing metadata_size.")
 
     # Download each part separately to avoid splitting the downloaded data and consuming extra memory.
     serialized_metadata: bytes | None = None
@@ -94,7 +95,7 @@ def _download_serialized_value(
             got_hash=so_hash,
             expected_hash=so.manifest.sha256_hash,
         )
-        raise ValueError(
+        raise InternalError(
             f"Serialized object hash {so_hash} does not match expected hash {so.manifest.sha256_hash}."
         )
 
@@ -121,8 +122,8 @@ def _deserialize_value_metadata(
     """Deserializes Serialized Object created by Python SDK into original value with sdk metadata."""
     value_metadata: ValueMetadata = deserialize_metadata(serialized_metadata)
     if not isinstance(value_metadata, ValueMetadata):
-        raise ValueError(
-            "Deserialized sdk value metadata is not of type ValueMetadata."
+        raise InternalError(
+            f"Deserialized sdk value metadata is not of type ValueMetadata. Actual type: {type(value_metadata)}"
         )
 
     # The Data Payload is produced by one of the nodes in a call tree. This data payload gets assigned as

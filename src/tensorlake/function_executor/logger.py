@@ -1,9 +1,10 @@
-import datetime
 import io
 import json
 import sys
 import traceback
 from typing import Any, Dict
+
+from tensorlake.applications import InternalError
 
 from .cloud_events import new_cloud_event
 
@@ -50,6 +51,7 @@ class FunctionExecutorLogger:
         """Formats the log message with context and additional key-value pairs.
 
         The format is the same json format as structlog uses.
+        Raises InternalError on error.
         """
         context: Dict[str, Any] = self._context.copy()
         context.update(kwargs)
@@ -62,6 +64,9 @@ class FunctionExecutorLogger:
             )
             del context["exc_info"]
 
-        return json.dumps(
-            new_cloud_event(context, source="/tensorlake/function_executor/logger")
-        )
+        try:
+            return json.dumps(
+                new_cloud_event(context, source="/tensorlake/function_executor/logger")
+            )
+        except Exception as e:
+            raise InternalError("failed to serialize log message to JSON") from e

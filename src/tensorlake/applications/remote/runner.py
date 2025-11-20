@@ -41,10 +41,10 @@ class RemoteRunner:
         if metadata.content_type is None:
             metadata.content_type = input_serializer.content_type
 
-        request_id: str = self._client.call(
+        request_id: str = self._client.run_request(
             application_name=self._application_name,
-            payload=serialized_payload,
-            payload_content_type=metadata.content_type,
+            input=serialized_payload,
+            input_content_type=metadata.content_type,
         )
         return RemoteRequest(
             application_name=self._application_name,

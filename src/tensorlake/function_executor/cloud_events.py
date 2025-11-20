@@ -1,18 +1,19 @@
 import datetime
 import json
-import os
 import uuid
 from typing import Any
 
-import httpx
-from pydantic import BaseModel
+from tensorlake.applications import InternalError
 
 
 def print_cloud_event(event: dict[str, Any]) -> None:
     """
     Takes a dictionary representing an event produced by the executor, wraps it in a CloudEvent and prints it to stdout.
     """
-    print(json.dumps(new_cloud_event(event)), flush=True)
+    try:
+        print(json.dumps(new_cloud_event(event)), flush=True)
+    except Exception as e:
+        raise InternalError("Failed to print cloud event") from e
 
 
 def new_cloud_event(

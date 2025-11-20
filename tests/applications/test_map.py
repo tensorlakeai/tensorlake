@@ -6,7 +6,7 @@ import parameterized
 from tensorlake.applications import (
     Future,
     Request,
-    RequestFailureException,
+    RequestFailed,
     application,
     function,
 )
@@ -75,7 +75,7 @@ class TestRecursiveMaps(unittest.TestCase):
         )
         # Map tail calls are not working by design because Server can't convert individual
         # resolved items into a python list.
-        self.assertRaises(RequestFailureException, request.output)
+        self.assertRaises(RequestFailed, request.output)
 
 
 if __name__ == "__main__":
