@@ -1,23 +1,24 @@
-import hashlib
 import os
-import threading
-import time
 import unittest
-from typing import Generator, Iterator, List
+from typing import Iterator
 
 import grpc
 from models import StructuredField, StructuredState
 from testing import (
     FunctionExecutorProcessContextManager,
     application_function_inputs,
+    create_tmp_blob,
     download_and_deserialize_so,
     initialize,
+    read_tmp_blob_bytes,
     rpc_channel,
-    run_allocation_that_fails,
-    run_allocation_that_returns_output,
+    run_allocation,
+    wait_result_of_allocation_that_returns_output,
+    write_tmp_blob_bytes,
 )
 
 from tensorlake.applications import (
+    InternalError,
     RequestContext,
     application,
     function,
@@ -26,84 +27,47 @@ from tensorlake.applications.user_data_serializer import (
     PickleUserDataSerializer,
 )
 from tensorlake.function_executor.proto.function_executor_pb2 import (
+    BLOB,
     Allocation,
     AllocationOutcomeCode,
+    AllocationRequestStateCommitWriteOperationResult,
+    AllocationRequestStateOperation,
+    AllocationRequestStateOperationResult,
+    AllocationRequestStatePrepareReadOperationResult,
+    AllocationRequestStatePrepareWriteOperationResult,
     AllocationResult,
+    AllocationState,
+    AllocationUpdate,
     CreateAllocationRequest,
-    GetRequestStateRequest,
-    GetRequestStateResponse,
     InitializationOutcomeCode,
     InitializeResponse,
-    RequestStateRequest,
-    RequestStateResponse,
-    SerializedObject,
-    SerializedObjectEncoding,
-    SerializedObjectManifest,
-    SetRequestStateRequest,
-    SetRequestStateResponse,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
+from tensorlake.function_executor.proto.status_pb2 import (
+    Status,
+)
 
 APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
-
-
-def request_state_client_stub(
-    test_case: unittest.TestCase,
-    stub: FunctionExecutorStub,
-    expected_requests: List[RequestStateRequest],
-    responses: List[RequestStateResponse],
-) -> threading.Thread:
-    server_request_iterator = stub.initialize_request_state_server(iter(responses))
-
-    def loop():
-        for expected_request in expected_requests:
-            request = next(server_request_iterator)
-            request: RequestStateRequest
-            test_case.assertEqual(
-                request.state_request_id, expected_request.state_request_id
-            )
-            test_case.assertEqual(request.allocation_id, expected_request.allocation_id)
-            if request.HasField("set"):
-                test_case.assertEqual(request.set.key, expected_request.set.key)
-                # Two different serialized objects are not equal so we need to deserialize them and dump
-                # into models that have corretly functioning equality operator.
-                test_case.assertEqual(
-                    PickleUserDataSerializer()
-                    .deserialize(
-                        request.set.value.data,
-                        possible_types=[],
-                    )
-                    .model_dump(),
-                    PickleUserDataSerializer()
-                    .deserialize(
-                        expected_request.set.value.data,
-                        possible_types=[],
-                    )
-                    .model_dump(),
-                )
-            else:
-                test_case.assertEqual(request.get.key, expected_request.get.key)
-
-    request_state_client_thread = threading.Thread(target=loop)
-    request_state_client_thread.start()
-    return request_state_client_thread
 
 
 @application()
 @function()
 def set_request_state(x: int) -> str:
     ctx: RequestContext = RequestContext.get()
-    ctx.state.set(
-        "test_state_key",
-        StructuredState(
-            string="hello",
-            integer=x,
-            structured=StructuredField(list=[1, 2, 3], dictionary={"a": 1, "b": 2}),
-        ),
-    )
-    return "success"
+    try:
+        ctx.state.set(
+            "test_state_key",
+            StructuredState(
+                string="hello",
+                integer=x,
+                structured=StructuredField(list=[1, 2, 3], dictionary={"a": 1, "b": 2}),
+            ),
+        )
+        return "success"
+    except InternalError as e:
+        return str(e)
 
 
 class TestSetRequestState(unittest.TestCase):
@@ -125,54 +89,120 @@ class TestSetRequestState(unittest.TestCase):
             with rpc_channel(fe) as channel:
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 self._initialize_function_executor(stub)
-                data: bytes = PickleUserDataSerializer().serialize(
-                    StructuredState(
-                        string="hello",
-                        integer=42,
-                        structured=StructuredField(
-                            list=[1, 2, 3], dictionary={"a": 1, "b": 2}
-                        ),
-                    )
-                )
-                expected_requests = [
-                    RequestStateRequest(
-                        state_request_id="0",
-                        allocation_id="test-allocation",
-                        set=SetRequestStateRequest(
-                            key="test_state_key",
-                            value=SerializedObject(
-                                manifest=SerializedObjectManifest(
-                                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-                                    encoding_version=0,
-                                    size=len(data),
-                                    sha256_hash=hashlib.sha256(data).hexdigest(),
-                                ),
-                                data=data,
-                            ),
-                        ),
-                    ),
-                ]
-                responses = [
-                    RequestStateResponse(
-                        state_request_id="0",
-                        success=True,
-                        set=SetRequestStateResponse(),
-                    ),
-                ]
-                client_thread = request_state_client_stub(
-                    self, stub, expected_requests, responses
-                )
-                alloc_result: AllocationResult = run_allocation_that_returns_output(
-                    self,
+                allocation_id: str = "test-allocation-id"
+                allocation_states: Iterator[AllocationState] = run_allocation(
                     stub,
                     request=CreateAllocationRequest(
                         allocation=Allocation(
                             request_id="123",
                             function_call_id="test-function-call",
-                            allocation_id="test-allocation",
+                            allocation_id=allocation_id,
                             inputs=application_function_inputs(42),
                         ),
                     ),
+                )
+
+                request_state_blob: BLOB | None = None
+                current_allocation_state = "wait_prepare_request_state_write_operation"
+                for allocation_state in allocation_states:
+                    allocation_state: AllocationState
+
+                    if (
+                        current_allocation_state
+                        == "wait_prepare_request_state_write_operation"
+                    ):
+                        if len(allocation_state.request_state_operations) == 0:
+                            continue
+                        self.assertEqual(
+                            len(allocation_state.request_state_operations), 1
+                        )
+                        operation: AllocationRequestStateOperation = (
+                            allocation_state.request_state_operations[0]
+                        )
+                        self.assertTrue(operation.HasField("prepare_write"))
+                        self.assertEqual(
+                            operation.state_key,
+                            "test_state_key",
+                        )
+                        request_state_blob = create_tmp_blob(
+                            id=f"request_state/{operation.state_key}",
+                            chunks_count=1,
+                            chunk_size=operation.prepare_write.size,
+                        )
+                        stub.send_allocation_update(
+                            AllocationUpdate(
+                                allocation_id=allocation_id,
+                                request_state_operation_result=AllocationRequestStateOperationResult(
+                                    operation_id=operation.operation_id,
+                                    status=Status(
+                                        code=grpc.StatusCode.OK.value[0],
+                                    ),
+                                    prepare_write=AllocationRequestStatePrepareWriteOperationResult(
+                                        blob=request_state_blob,
+                                    ),
+                                ),
+                            )
+                        )
+                        current_allocation_state = (
+                            "wait_prepare_request_state_write_operation_deletion"
+                        )
+
+                    if (
+                        current_allocation_state
+                        == "wait_prepare_request_state_write_operation_deletion"
+                    ):
+                        found_prepare_write_operation: bool = False
+                        for operation in allocation_state.request_state_operations:
+                            operation: AllocationRequestStateOperation
+                            if operation.HasField("prepare_write"):
+                                found_prepare_write_operation = True
+                                break
+                        if found_prepare_write_operation:
+                            continue
+                        else:
+                            current_allocation_state = (
+                                "wait_commit_request_state_write_operation"
+                            )
+
+                    if (
+                        current_allocation_state
+                        == "wait_commit_request_state_write_operation"
+                    ):
+                        if len(allocation_state.request_state_operations) == 0:
+                            continue
+                        self.assertEqual(
+                            len(allocation_state.request_state_operations), 1
+                        )
+                        operation: AllocationRequestStateOperation = (
+                            allocation_state.request_state_operations[0]
+                        )
+                        self.assertTrue(operation.HasField("commit_write"))
+                        self.assertEqual(
+                            operation.state_key,
+                            "test_state_key",
+                        )
+                        # Commit is a noop for local blob store.
+                        stub.send_allocation_update(
+                            AllocationUpdate(
+                                allocation_id=allocation_id,
+                                request_state_operation_result=AllocationRequestStateOperationResult(
+                                    operation_id=operation.operation_id,
+                                    status=Status(
+                                        code=grpc.StatusCode.OK.value[0],
+                                    ),
+                                    commit_write=AllocationRequestStateCommitWriteOperationResult(),
+                                ),
+                            )
+                        )
+                        break
+
+                alloc_result: AllocationResult = (
+                    wait_result_of_allocation_that_returns_output(
+                        allocation_id,
+                        self,
+                        stub,
+                        timeout_sec=None,
+                    )
                 )
                 self.assertEqual(
                     alloc_result.outcome_code,
@@ -185,85 +215,111 @@ class TestSetRequestState(unittest.TestCase):
                 )
                 self.assertEqual("success", output)
 
-                print(
-                    "Joining request state client thread, it should exit immediately..."
+                self.assertIsNotNone(request_state_blob)
+                serialized_request_state: bytes = read_tmp_blob_bytes(
+                    request_state_blob, offset=0, size=request_state_blob.chunks[0].size
                 )
-                client_thread.join()
-
-    def test_client_failure(self):
-        with FunctionExecutorProcessContextManager(capture_std_outputs=True) as fe:
-            with rpc_channel(fe) as channel:
-                stub: FunctionExecutorStub = FunctionExecutorStub(channel)
-                self._initialize_function_executor(stub)
-                data: bytes = PickleUserDataSerializer().serialize(
+                deserialized_request_state: (
+                    StructuredState
+                ) = PickleUserDataSerializer().deserialize(
+                    serialized_request_state,
+                    possible_types=[StructuredState],
+                )
+                self.assertEqual(
                     StructuredState(
                         string="hello",
                         integer=42,
                         structured=StructuredField(
                             list=[1, 2, 3], dictionary={"a": 1, "b": 2}
                         ),
-                    )
+                    ).model_dump(),
+                    deserialized_request_state.model_dump(),
                 )
-                expected_requests = [
-                    RequestStateRequest(
-                        state_request_id="0",
-                        allocation_id="test-allocation",
-                        set=SetRequestStateRequest(
-                            key="test_state_key",
-                            value=SerializedObject(
-                                manifest=SerializedObjectManifest(
-                                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-                                    encoding_version=0,
-                                    size=len(data),
-                                    sha256_hash=hashlib.sha256(data).hexdigest(),
-                                ),
-                                data=data,
-                            ),
-                        ),
-                    ),
-                ]
-                responses = [
-                    RequestStateResponse(
-                        state_request_id="0",
-                        success=False,
-                        set=SetRequestStateResponse(),
-                    ),
-                ]
-                client_thread = request_state_client_stub(
-                    self, stub, expected_requests, responses
-                )
-                alloc_result: AllocationResult = run_allocation_that_fails(
+
+    def test_prepare_write_operation_failed(self):
+        with FunctionExecutorProcessContextManager() as fe:
+            with rpc_channel(fe) as channel:
+                stub: FunctionExecutorStub = FunctionExecutorStub(channel)
+                self._initialize_function_executor(stub)
+                allocation_id: str = "test-allocation-id"
+                allocation_states: Iterator[AllocationState] = run_allocation(
                     stub,
                     request=CreateAllocationRequest(
                         allocation=Allocation(
                             request_id="123",
                             function_call_id="test-function-call",
-                            allocation_id="test-allocation",
+                            allocation_id=allocation_id,
                             inputs=application_function_inputs(42),
                         ),
                     ),
                 )
+
+                current_allocation_state = "wait_prepare_request_state_write_operation"
+                for allocation_state in allocation_states:
+                    allocation_state: AllocationState
+
+                    if (
+                        current_allocation_state
+                        == "wait_prepare_request_state_write_operation"
+                    ):
+                        if len(allocation_state.request_state_operations) == 0:
+                            continue
+                        self.assertEqual(
+                            len(allocation_state.request_state_operations), 1
+                        )
+                        operation: AllocationRequestStateOperation = (
+                            allocation_state.request_state_operations[0]
+                        )
+                        self.assertTrue(operation.HasField("prepare_write"))
+                        self.assertEqual(
+                            operation.state_key,
+                            "test_state_key",
+                        )
+                        stub.send_allocation_update(
+                            AllocationUpdate(
+                                allocation_id=allocation_id,
+                                request_state_operation_result=AllocationRequestStateOperationResult(
+                                    operation_id=operation.operation_id,
+                                    status=Status(
+                                        code=grpc.StatusCode.INTERNAL.value[0],
+                                    ),
+                                ),
+                            )
+                        )
+                        break
+
+                alloc_result: AllocationResult = (
+                    wait_result_of_allocation_that_returns_output(
+                        allocation_id,
+                        self,
+                        stub,
+                        timeout_sec=None,
+                    )
+                )
                 self.assertEqual(
                     alloc_result.outcome_code,
-                    AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,
+                    AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
                 )
-
-                print(
-                    "Joining request state client thread, it should exit immediately..."
+                output: str = download_and_deserialize_so(
+                    self,
+                    alloc_result.value,
+                    alloc_result.uploaded_function_outputs_blob,
                 )
-                client_thread.join()
-
-        self.assertIn(
-            "failed to set the request state for key",
-            fe.read_stdout(),
-        )
+                self.assertEqual(
+                    "Request state set operation failed for key 'test_state_key'.",
+                    output,
+                )
 
 
 @application()
 @function()
 def check_request_state_is_expected(x: int) -> str:
     ctx: RequestContext = RequestContext.get()
-    got_state: StructuredState = ctx.state.get("test_state_key")
+    try:
+        got_state: StructuredState = ctx.state.get("test_state_key")
+    except InternalError as e:
+        return str(e)
+
     expected_state: StructuredState = StructuredState(
         string="hello",
         integer=x,
@@ -284,8 +340,8 @@ def check_request_state_is_none(x: int) -> str:
     return "success" if got_state is None else "failure"
 
 
-class TestGetInvocationState(unittest.TestCase):
-    def test_success(self):
+class TestGetRequestState(unittest.TestCase):
+    def test_read_expected_state_value(self):
         with FunctionExecutorProcessContextManager() as fe:
             with rpc_channel(fe) as channel:
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
@@ -301,56 +357,99 @@ class TestGetInvocationState(unittest.TestCase):
                     InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
                 )
 
-                expected_requests = [
-                    RequestStateRequest(
-                        state_request_id="0",
-                        allocation_id="test-allocation",
-                        get=GetRequestStateRequest(
-                            key="test_state_key",
-                        ),
-                    ),
-                ]
-                data: bytes = PickleUserDataSerializer().serialize(
-                    StructuredState(
-                        string="hello",
-                        integer=33,
-                        structured=StructuredField(
-                            list=[1, 2, 3], dictionary={"a": 1, "b": 2}
-                        ),
-                    )
-                )
-                responses = [
-                    RequestStateResponse(
-                        state_request_id="0",
-                        success=True,
-                        get=GetRequestStateResponse(
-                            key="test_state_key",
-                            value=SerializedObject(
-                                manifest=SerializedObjectManifest(
-                                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-                                    encoding_version=0,
-                                    size=len(data),
-                                    sha256_hash=hashlib.sha256(data).hexdigest(),
-                                ),
-                                data=data,
-                            ),
-                        ),
-                    ),
-                ]
-                client_thread = request_state_client_stub(
-                    self, stub, expected_requests, responses
-                )
-                alloc_result: AllocationResult = run_allocation_that_returns_output(
-                    self,
+                allocation_id: str = "test-allocation"
+                allocation_states: Iterator[AllocationState] = run_allocation(
                     stub,
                     request=CreateAllocationRequest(
                         allocation=Allocation(
                             request_id="123",
                             function_call_id="test-function-call",
-                            allocation_id="test-allocation",
+                            allocation_id=allocation_id,
                             inputs=application_function_inputs(33),
                         ),
                     ),
+                )
+
+                current_allocation_state = "wait_prepare_request_state_read_operation"
+                for allocation_state in allocation_states:
+                    allocation_state: AllocationState
+
+                    if (
+                        current_allocation_state
+                        == "wait_prepare_request_state_read_operation"
+                    ):
+                        if len(allocation_state.request_state_operations) == 0:
+                            continue
+                        self.assertEqual(
+                            len(allocation_state.request_state_operations), 1
+                        )
+                        operation: AllocationRequestStateOperation = (
+                            allocation_state.request_state_operations[0]
+                        )
+                        self.assertTrue(operation.HasField("prepare_read"))
+                        self.assertEqual(
+                            operation.state_key,
+                            "test_state_key",
+                        )
+                        request_state_read_result: (
+                            bytes
+                        ) = PickleUserDataSerializer().serialize(
+                            StructuredState(
+                                string="hello",
+                                integer=33,
+                                structured=StructuredField(
+                                    list=[1, 2, 3], dictionary={"a": 1, "b": 2}
+                                ),
+                            )
+                        )
+                        request_state_blob: BLOB = create_tmp_blob(
+                            id=f"request_state/{operation.state_key}",
+                            chunks_count=1,
+                            chunk_size=len(request_state_read_result),
+                        )
+                        write_tmp_blob_bytes(
+                            request_state_blob, request_state_read_result
+                        )
+                        stub.send_allocation_update(
+                            AllocationUpdate(
+                                allocation_id=allocation_id,
+                                request_state_operation_result=AllocationRequestStateOperationResult(
+                                    operation_id=operation.operation_id,
+                                    status=Status(
+                                        code=grpc.StatusCode.OK.value[0],
+                                    ),
+                                    prepare_read=AllocationRequestStatePrepareReadOperationResult(
+                                        blob=request_state_blob,
+                                    ),
+                                ),
+                            )
+                        )
+                        current_allocation_state = (
+                            "wait_prepare_request_state_read_operation_deletion"
+                        )
+
+                    if (
+                        current_allocation_state
+                        == "wait_prepare_request_state_read_operation_deletion"
+                    ):
+                        found_prepare_read_operation: bool = False
+                        for operation in allocation_state.request_state_operations:
+                            operation: AllocationRequestStateOperation
+                            if operation.HasField("prepare_read"):
+                                found_prepare_read_operation = True
+                                break
+                        if found_prepare_read_operation:
+                            continue
+                        else:
+                            break
+
+                alloc_result: AllocationResult = (
+                    wait_result_of_allocation_that_returns_output(
+                        allocation_id,
+                        self,
+                        stub,
+                        timeout_sec=None,
+                    )
                 )
                 self.assertEqual(
                     alloc_result.outcome_code,
@@ -363,12 +462,7 @@ class TestGetInvocationState(unittest.TestCase):
                 )
                 self.assertEqual("success", output)
 
-                print(
-                    "Joining request state client thread, it should exit immediately..."
-                )
-                client_thread.join()
-
-    def test_success_none_value(self):
+    def test_read_default_none(self):
         with FunctionExecutorProcessContextManager() as fe:
             with rpc_channel(fe) as channel:
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
@@ -383,39 +477,79 @@ class TestGetInvocationState(unittest.TestCase):
                     initialize_response.outcome_code,
                     InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
                 )
-                expected_requests = [
-                    RequestStateRequest(
-                        state_request_id="0",
-                        allocation_id="test-allocation",
-                        get=GetRequestStateRequest(
-                            key="test_state_key",
-                        ),
-                    ),
-                ]
-                responses = [
-                    RequestStateResponse(
-                        state_request_id="0",
-                        success=True,
-                        get=GetRequestStateResponse(
-                            key="test_state_key",
-                            value=None,
-                        ),
-                    ),
-                ]
-                client_thread = request_state_client_stub(
-                    self, stub, expected_requests, responses
-                )
-                alloc_result: AllocationResult = run_allocation_that_returns_output(
-                    self,
+
+                allocation_id: str = "test-allocation"
+                allocation_states: Iterator[AllocationState] = run_allocation(
                     stub,
                     request=CreateAllocationRequest(
                         allocation=Allocation(
                             request_id="123",
                             function_call_id="test-function-call",
-                            allocation_id="test-allocation",
+                            allocation_id=allocation_id,
                             inputs=application_function_inputs(33),
                         ),
                     ),
+                )
+
+                current_allocation_state = "wait_prepare_request_state_read_operation"
+                for allocation_state in allocation_states:
+                    allocation_state: AllocationState
+
+                    if (
+                        current_allocation_state
+                        == "wait_prepare_request_state_read_operation"
+                    ):
+                        if len(allocation_state.request_state_operations) == 0:
+                            continue
+                        self.assertEqual(
+                            len(allocation_state.request_state_operations), 1
+                        )
+                        operation: AllocationRequestStateOperation = (
+                            allocation_state.request_state_operations[0]
+                        )
+                        self.assertTrue(operation.HasField("prepare_read"))
+                        self.assertEqual(
+                            operation.state_key,
+                            "test_state_key",
+                        )
+                        stub.send_allocation_update(
+                            AllocationUpdate(
+                                allocation_id=allocation_id,
+                                request_state_operation_result=AllocationRequestStateOperationResult(
+                                    operation_id=operation.operation_id,
+                                    status=Status(
+                                        code=grpc.StatusCode.NOT_FOUND.value[0],
+                                    ),
+                                    prepare_read=AllocationRequestStatePrepareReadOperationResult(),
+                                ),
+                            )
+                        )
+                        current_allocation_state = (
+                            "wait_prepare_request_state_read_operation_deletion"
+                        )
+
+                    if (
+                        current_allocation_state
+                        == "wait_prepare_request_state_read_operation_deletion"
+                    ):
+                        found_prepare_read_operation: bool = False
+                        for operation in allocation_state.request_state_operations:
+                            operation: AllocationRequestStateOperation
+                            if operation.HasField("prepare_read"):
+                                found_prepare_read_operation = True
+                                break
+                        if found_prepare_read_operation:
+                            continue
+                        else:
+                            break
+
+                alloc_result: AllocationResult = (
+                    wait_result_of_allocation_that_returns_output(
+                        allocation_id,
+                        self,
+                        stub,
+                        timeout_sec=None,
+                    )
                 )
                 self.assertEqual(
                     alloc_result.outcome_code,
@@ -428,13 +562,8 @@ class TestGetInvocationState(unittest.TestCase):
                 )
                 self.assertEqual("success", output)
 
-                print(
-                    "Joining request state client thread, it should exit immediately..."
-                )
-                client_thread.join()
-
-    def test_client_failure(self):
-        with FunctionExecutorProcessContextManager(capture_std_outputs=True) as fe:
+    def test_prepare_read_operation_failed(self):
+        with FunctionExecutorProcessContextManager() as fe:
             with rpc_channel(fe) as channel:
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 initialize_response: InitializeResponse = initialize(
@@ -448,135 +577,93 @@ class TestGetInvocationState(unittest.TestCase):
                     initialize_response.outcome_code,
                     InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
                 )
-                expected_requests = [
-                    RequestStateRequest(
-                        state_request_id="0",
-                        allocation_id="test-allocation",
-                        get=GetRequestStateRequest(
-                            key="test_state_key",
-                        ),
-                    ),
-                ]
-                responses = [
-                    RequestStateResponse(
-                        state_request_id="0",
-                        success=False,
-                        get=GetRequestStateResponse(key="test_state_key"),
-                    ),
-                ]
-                client_thread = request_state_client_stub(
-                    self, stub, expected_requests, responses
-                )
-                alloc_result: AllocationResult = run_allocation_that_fails(
+
+                allocation_id: str = "test-allocation"
+                allocation_states: Iterator[AllocationState] = run_allocation(
                     stub,
                     request=CreateAllocationRequest(
                         allocation=Allocation(
                             request_id="123",
                             function_call_id="test-function-call",
-                            allocation_id="test-allocation",
-                            inputs=application_function_inputs(14),
-                        )
+                            allocation_id=allocation_id,
+                            inputs=application_function_inputs(33),
+                        ),
                     ),
+                )
+
+                current_allocation_state = "wait_prepare_request_state_read_operation"
+                for allocation_state in allocation_states:
+                    allocation_state: AllocationState
+
+                    if (
+                        current_allocation_state
+                        == "wait_prepare_request_state_read_operation"
+                    ):
+                        if len(allocation_state.request_state_operations) == 0:
+                            continue
+                        self.assertEqual(
+                            len(allocation_state.request_state_operations), 1
+                        )
+                        operation: AllocationRequestStateOperation = (
+                            allocation_state.request_state_operations[0]
+                        )
+                        self.assertTrue(operation.HasField("prepare_read"))
+                        self.assertEqual(
+                            operation.state_key,
+                            "test_state_key",
+                        )
+                        stub.send_allocation_update(
+                            AllocationUpdate(
+                                allocation_id=allocation_id,
+                                request_state_operation_result=AllocationRequestStateOperationResult(
+                                    operation_id=operation.operation_id,
+                                    status=Status(
+                                        code=grpc.StatusCode.INTERNAL.value[0],
+                                    ),
+                                    prepare_read=AllocationRequestStatePrepareReadOperationResult(),
+                                ),
+                            )
+                        )
+                        current_allocation_state = (
+                            "wait_prepare_request_state_read_operation_deletion"
+                        )
+
+                    if (
+                        current_allocation_state
+                        == "wait_prepare_request_state_read_operation_deletion"
+                    ):
+                        found_prepare_read_operation: bool = False
+                        for operation in allocation_state.request_state_operations:
+                            operation: AllocationRequestStateOperation
+                            if operation.HasField("prepare_read"):
+                                found_prepare_read_operation = True
+                                break
+                        if found_prepare_read_operation:
+                            continue
+                        else:
+                            break
+
+                alloc_result: AllocationResult = (
+                    wait_result_of_allocation_that_returns_output(
+                        allocation_id,
+                        self,
+                        stub,
+                        timeout_sec=None,
+                    )
                 )
                 self.assertEqual(
                     alloc_result.outcome_code,
-                    AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,
+                    AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
                 )
-                print(
-                    "Joining request state client thread, it should exit immediately..."
+                output: str = download_and_deserialize_so(
+                    self,
+                    alloc_result.value,
+                    alloc_result.uploaded_function_outputs_blob,
                 )
-                client_thread.join()
-
-        self.assertIn(
-            "failed to get the request state for key",
-            fe.read_stdout(),
-        )
-
-
-class TestRequestStateServerReconnect(unittest.TestCase):
-    def test_second_initialize_request_state_server_request_fails(self):
-        def infinite_response_generator() -> (
-            Generator[RequestStateResponse, None, None]
-        ):
-            while True:
-                yield RequestStateResponse(
-                    state_request_id="0", success=True, set=SetRequestStateResponse()
+                self.assertEqual(
+                    "Request state get operation failed for key 'test_state_key'.",
+                    output,
                 )
-
-        with FunctionExecutorProcessContextManager() as fe:
-            with rpc_channel(fe) as channel:
-                stub: FunctionExecutorStub = FunctionExecutorStub(channel)
-                first_request_iterator: Iterator[RequestStateRequest] = (
-                    stub.initialize_request_state_server(infinite_response_generator())
-                )
-                # The fact that first request iterator works correctly is checked in other tests.
-
-                # The second request should fail because there's already a proxy server running.
-                second_request_iterator: Iterator[RequestStateRequest] = (
-                    stub.initialize_request_state_server(infinite_response_generator())
-                )
-                try:
-                    for request in second_request_iterator:
-                        self.fail(
-                            "Second request iterator should not return any requests but should raise an exception"
-                        )
-                except grpc.RpcError as e:
-                    self.assertEqual(grpc.StatusCode.ALREADY_EXISTS, e.code())
-
-    def test_second_initialize_request_state_server_request_succeeds_after_channel_close(
-        self,
-    ):
-        def infinite_response_generator() -> (
-            Generator[RequestStateResponse, None, None]
-        ):
-            while True:
-                yield RequestStateResponse(
-                    state_request_id="0", success=True, set=SetRequestStateResponse()
-                )
-
-        with FunctionExecutorProcessContextManager() as fe:
-            with rpc_channel(fe) as channel_1:
-                stub: FunctionExecutorStub = FunctionExecutorStub(channel_1)
-                first_request_iterator: Iterator[RequestStateRequest] = (
-                    stub.initialize_request_state_server(infinite_response_generator())
-                )
-                # On exit from this with block the channel is closed and proxy server should cleanely shutdown.
-
-            time.sleep(5)  # Wait until the channel closes and proxy server shuts down.
-
-            with rpc_channel(fe) as channel_2:
-                stub: FunctionExecutorStub = FunctionExecutorStub(channel_2)
-                # The second request should succeed because the first channel was closed with results in clean proxy server shutdown.
-                second_request_iterator: Iterator[RequestStateRequest] = (
-                    stub.initialize_request_state_server(infinite_response_generator())
-                )
-
-                def thread_func():
-                    try:
-                        for request in second_request_iterator:
-                            self.fail(
-                                "Second request iterator should not return any requests"
-                            )
-                    except grpc.RpcError as e:
-                        self.assertEqual(
-                            grpc.StatusCode.CANCELLED, e.code()
-                        )  # This happens when we close the channel
-                    except Exception as e:
-                        self.fail(
-                            "Second request iterator should not raise any exceptions"
-                        )
-
-                thread = threading.Thread(target=thread_func)
-                thread.start()
-                time.sleep(
-                    5
-                )  # Wait for the thread to start and check that it doesn't raise any exceptions.
-                self.assertTrue(
-                    thread.is_alive()
-                )  # Check that the thread is still blocked on the iterator without any Exceptions.
-
-            # channel_2 is closed, the thread should return immediately.
-            thread.join()
 
 
 if __name__ == "__main__":
