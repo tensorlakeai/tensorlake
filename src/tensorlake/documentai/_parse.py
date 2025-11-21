@@ -4,14 +4,14 @@ import asyncio
 import inspect
 import json
 import time
-from typing import Any, Callable, Dict, List, Mapping, Optional, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Union, overload
 
 from httpx_sse import ServerSentEvent, aconnect_sse, connect_sse
 from pydantic import BaseModel, ValidationError
 from rich.live import Live
 from rich.text import Text
 
-from ._base import _BaseClient
+from ._base import _BaseClient, _validate_file_input
 from ._utils import _drop_none
 from .models import (
     EnrichmentOptions,
@@ -28,9 +28,81 @@ from .models import (
 
 class _ParseMixin(_BaseClient):
 
+    # Sync method overloads
+    @overload
+    def parse(
+        self,
+        *,
+        file_id: str,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> str:
+        """Parse document by file ID."""
+
+    @overload
+    def parse(
+        self,
+        *,
+        file_url: str,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> str:
+        """Parse document from URL."""
+
+    @overload
+    def parse(
+        self,
+        *,
+        raw_text: str,
+        mime_type: MimeType,  # Required when using raw_text
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+    ) -> str:
+        """Parse from raw text. MIME type is required."""
+
+    @overload
     def parse(
         self,
         file: str,
+        *,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> str:
+        """Parse document from file ID, URL, or raw text."""
+
+    def parse(
+        self,
+        file: Optional[str] = None,
+        file_id: Optional[str] = None,
+        file_url: Optional[str] = None,
+        raw_text: Optional[str] = None,
         parsing_options: Optional[ParsingOptions] = None,
         structured_extraction_options: Optional[
             Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
@@ -73,20 +145,121 @@ class _ParseMixin(_BaseClient):
 
             mime_type: Optional MIME type of the file. This can be used to specify the type of content being parsed, such as "application/pdf" or "text/plain".
         """
+        if file:
+            if any([file_id, file_url, raw_text]):
+                raise ValueError(
+                    "If 'file' is provided, 'file_id', 'file_url', and 'raw_text' must not be provided."
+                )
+            if file.startswith(("http://", "https://")):
+                file_url = file
+            elif file.startswith("tensorlake-") or file.startswith("file_"):
+                file_id = file
+            else:
+                raw_text = file
+
+        _validate_file_input(
+            file_id=file_id, file_url=file_url, raw_text=raw_text, mime_type=mime_type
+        )
 
         body = _create_parse_req(
-            file,
-            parsing_options,
-            structured_extraction_options,
-            enrichment_options,
-            page_classifications,
-            page_range,
-            labels,
-            mime_type,
+            file_id=file_id,
+            file_url=file_url,
+            raw_text=raw_text,
+            parsing_options=parsing_options,
+            structured_extraction_options=structured_extraction_options,
+            enrichment_options=enrichment_options,
+            page_classifications=page_classifications,
+            page_range=page_range,
+            labels=labels,
+            mime_type=mime_type,
         )
+
         return self._request("POST", "/parse", json=body).json()["parse_id"]
 
-    async def parse_async(self, *args, **kw) -> str:
+    @overload
+    async def parse_async(
+        self,
+        *,
+        file_id: str,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> str:
+        """Parse document by file ID asynchronously."""
+
+    @overload
+    async def parse_async(
+        self,
+        *,
+        file_url: str,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> str:
+        """Parse document from URL asynchronously."""
+
+    @overload
+    async def parse_async(
+        self,
+        *,
+        raw_text: str,
+        mime_type: MimeType,  # Required when using raw_text
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+    ) -> str:
+        """Parse from raw text asynchronously. MIME type is required."""
+
+    @overload
+    async def parse_async(
+        self,
+        file: str,
+        *,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> str:
+        """Parse document from file ID, URL, or raw text asynchronously."""
+
+    async def parse_async(
+        self,
+        file: Optional[str] = None,
+        file_id: Optional[str] = None,
+        file_url: Optional[str] = None,
+        raw_text: Optional[str] = None,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> str:
         """
         Parse a document asynchronously.
 
@@ -119,7 +292,35 @@ class _ParseMixin(_BaseClient):
 
             mime_type: Optional MIME type of the file. This can be used to specify the type of content being parsed, such as "application/pdf" or "text/plain".
         """
-        body = _create_parse_req(*args, **kw)
+        if file:
+            if any([file_id, file_url, raw_text]):
+                raise ValueError(
+                    "If 'file' is provided, 'file_id', 'file_url', and 'raw_text' must not be provided."
+                )
+            if file.startswith(("http://", "https://")):
+                file_url = file
+            elif file.startswith("tensorlake-") or file.startswith("file_"):
+                file_id = file
+            else:
+                raw_text = file
+
+        _validate_file_input(
+            file_id=file_id, file_url=file_url, raw_text=raw_text, mime_type=mime_type
+        )
+
+        body = _create_parse_req(
+            file_id=file_id,
+            file_url=file_url,
+            raw_text=raw_text,
+            parsing_options=parsing_options,
+            structured_extraction_options=structured_extraction_options,
+            enrichment_options=enrichment_options,
+            page_classifications=page_classifications,
+            page_range=page_range,
+            labels=labels,
+            mime_type=mime_type,
+        )
+
         resp = await self._arequest("POST", "/parse", json=body)
         return resp.json()["parse_id"]
 
@@ -147,7 +348,7 @@ class _ParseMixin(_BaseClient):
             live.console.print(f"Parse ID: {parse_id}")
 
             def set_status(message: str, style: Optional[str] = None) -> None:
-                live.update(Text(message, style=style), refresh=True)
+                live.update(Text(message, style=style if style else ""), refresh=True)
 
             def print_line(message: str) -> None:
                 live.console.print(message)
@@ -227,7 +428,7 @@ class _ParseMixin(_BaseClient):
             live.console.print(f"Parse ID: {parse_id}")
 
             def set_status(message: str, style: Optional[str] = None) -> None:
-                live.update(Text(message, style=style), refresh=True)
+                live.update(Text(message, style=style if style else ""), refresh=True)
 
             def print_line(message: str) -> None:
                 live.console.print(message)
@@ -323,12 +524,83 @@ class _ParseMixin(_BaseClient):
                 set_status(f"Unknown SSE event: {sse_event.event}", "cyan")
                 return None
 
+    @overload
+    def parse_and_wait(
+        self,
+        *,
+        file_id: str,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> ParseResult:
+        """Parse document by file ID asynchronously."""
+
+    @overload
+    def parse_and_wait(
+        self,
+        *,
+        file_url: str,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> ParseResult:
+        """Parse document from URL asynchronously."""
+
+    @overload
+    def parse_and_wait(
+        self,
+        *,
+        raw_text: str,
+        mime_type: MimeType,  # Required when using raw_text
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+    ) -> ParseResult:
+        """Parse from raw text asynchronously. MIME type is required."""
+
+    @overload
     def parse_and_wait(
         self,
         file: str,
+        *,
         parsing_options: Optional[ParsingOptions] = None,
         structured_extraction_options: Optional[
-            List[StructuredExtractionOptions]
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> ParseResult:
+        """Parse document from file ID, URL, or raw text asynchronously."""
+
+    def parse_and_wait(
+        self,
+        file: Optional[str] = None,
+        file_id: Optional[str] = None,
+        file_url: Optional[str] = None,
+        raw_text: Optional[str] = None,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
@@ -365,24 +637,135 @@ class _ParseMixin(_BaseClient):
 
             mime_type: Optional MIME type of the file. This can be used to specify the type of content being parsed, such as "application/pdf" or "text/plain".
         """
-        parse_id = self.parse(
-            file,
-            parsing_options,
-            structured_extraction_options,
-            enrichment_options,
-            page_classifications,
-            page_range,
-            labels,
-            mime_type,
-        )
+
+        if file:
+            parse_id = self.parse(
+                file=file,
+                parsing_options=parsing_options,
+                structured_extraction_options=structured_extraction_options,
+                enrichment_options=enrichment_options,
+                page_classifications=page_classifications,
+                page_range=page_range,
+                labels=labels,
+                mime_type=mime_type,
+            )
+        elif file_id:
+            parse_id = self.parse(
+                file_id=file_id,
+                parsing_options=parsing_options,
+                structured_extraction_options=structured_extraction_options,
+                enrichment_options=enrichment_options,
+                page_classifications=page_classifications,
+                page_range=page_range,
+                labels=labels,
+                mime_type=mime_type,
+            )
+        elif file_url:
+            parse_id = self.parse(
+                file_url=file_url,
+                parsing_options=parsing_options,
+                structured_extraction_options=structured_extraction_options,
+                enrichment_options=enrichment_options,
+                page_classifications=page_classifications,
+                page_range=page_range,
+                labels=labels,
+                mime_type=mime_type,
+            )
+        elif raw_text:
+            parse_id = self.parse(
+                raw_text=raw_text,
+                mime_type=mime_type if mime_type else MimeType.TEXT,
+                parsing_options=parsing_options,
+                structured_extraction_options=structured_extraction_options,
+                enrichment_options=enrichment_options,
+                page_classifications=page_classifications,
+                page_range=page_range,
+                labels=labels,
+            )
+        else:
+            raise ValueError(
+                "One of 'file', 'file_id', 'file_url', or 'raw_text' must be provided."
+            )
+
         return self.wait_for_completion(parse_id)
 
+    @overload
+    async def parse_and_wait_async(
+        self,
+        *,
+        file_id: str,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> ParseResult:
+        """Parse document by file ID asynchronously."""
+
+    @overload
+    async def parse_and_wait_async(
+        self,
+        *,
+        file_url: str,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> ParseResult:
+        """Parse document from URL asynchronously."""
+
+    @overload
+    async def parse_and_wait_async(
+        self,
+        *,
+        raw_text: str,
+        mime_type: MimeType,  # Required when using raw_text
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+    ) -> ParseResult:
+        """Parse from raw text asynchronously. MIME type is required."""
+
+    @overload
     async def parse_and_wait_async(
         self,
         file: str,
+        *,
         parsing_options: Optional[ParsingOptions] = None,
         structured_extraction_options: Optional[
-            List[StructuredExtractionOptions]
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
+        ] = None,
+        enrichment_options: Optional[EnrichmentOptions] = None,
+        page_classifications: Optional[List[PageClassConfig]] = None,
+        page_range: Optional[str] = None,
+        labels: Optional[dict] = None,
+        mime_type: Optional[MimeType] = None,
+    ) -> ParseResult:
+        """Parse document from file ID, URL, or raw text asynchronously."""
+
+    async def parse_and_wait_async(
+        self,
+        file: Optional[str] = None,
+        file_id: Optional[str] = None,
+        file_url: Optional[str] = None,
+        raw_text: Optional[str] = None,
+        parsing_options: Optional[ParsingOptions] = None,
+        structured_extraction_options: Optional[
+            Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
@@ -423,16 +806,55 @@ class _ParseMixin(_BaseClient):
 
             mime_type: Optional MIME type of the file. This can be used to specify the type of content being parsed, such as "application/pdf" or "text/plain".
         """
-        parse_id = await self.parse_async(
-            file,
-            parsing_options,
-            structured_extraction_options,
-            enrichment_options,
-            page_classifications,
-            page_range,
-            labels,
-            mime_type,
-        )
+        if file:
+            parse_id = await self.parse_async(
+                file=file,
+                parsing_options=parsing_options,
+                structured_extraction_options=structured_extraction_options,
+                enrichment_options=enrichment_options,
+                page_classifications=page_classifications,
+                page_range=page_range,
+                labels=labels,
+                mime_type=mime_type,
+            )
+        elif file_id:
+            parse_id = await self.parse_async(
+                file_id=file_id,
+                parsing_options=parsing_options,
+                structured_extraction_options=structured_extraction_options,
+                enrichment_options=enrichment_options,
+                page_classifications=page_classifications,
+                page_range=page_range,
+                labels=labels,
+                mime_type=mime_type,
+            )
+        elif file_url:
+            parse_id = await self.parse_async(
+                file_url=file_url,
+                parsing_options=parsing_options,
+                structured_extraction_options=structured_extraction_options,
+                enrichment_options=enrichment_options,
+                page_classifications=page_classifications,
+                page_range=page_range,
+                labels=labels,
+                mime_type=mime_type,
+            )
+        elif raw_text:
+            parse_id = await self.parse_async(
+                raw_text=raw_text,
+                mime_type=mime_type if mime_type else MimeType.TEXT,
+                parsing_options=parsing_options,
+                structured_extraction_options=structured_extraction_options,
+                enrichment_options=enrichment_options,
+                page_classifications=page_classifications,
+                page_range=page_range,
+                labels=labels,
+            )
+        else:
+            raise ValueError(
+                "One of 'file', 'file_id', 'file_url', or 'raw_text' must be provided."
+            )
+
         return await self.wait_for_completion_async(parse_id)
 
     def get_parsed_result(self, parse_id: str) -> ParseResult:
@@ -621,7 +1043,9 @@ class _ParseMixin(_BaseClient):
 
 
 def _create_parse_req(
-    file: str,
+    file_id: Optional[str] = None,
+    file_url: Optional[str] = None,
+    raw_text: Optional[str] = None,
     parsing_options: Optional[ParsingOptions] = None,
     structured_extraction_options: Optional[
         Union[StructuredExtractionOptions, List[StructuredExtractionOptions]]
@@ -632,30 +1056,32 @@ def _create_parse_req(
     labels: Optional[dict] = None,
     mime_type: Optional[MimeType] = None,
 ) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {}
 
-    if file.startswith(("http://", "https://")):
-        payload["file_url"] = file
-    elif file.startswith("tensorlake-") or file.startswith("file_"):
-        payload["file_id"] = file
-    else:
-        payload["raw_text"] = file
-
-    if labels:
-        payload["labels"] = labels
-    if page_range:
-        payload["page_range"] = page_range
-    if mime_type:
-        payload["mime_type"] = mime_type.value
-
-    if parsing_options:
-        payload["parsing_options"] = parsing_options.model_dump(exclude_none=True)
-    if enrichment_options:
-        payload["enrichment_options"] = enrichment_options.model_dump(exclude_none=True)
-    if page_classifications:
-        payload["page_classifications"] = [
-            pc.model_dump(exclude_none=True) for pc in page_classifications
-        ]
+    payload = _drop_none(
+        {
+            "file_id": file_id,
+            "file_url": file_url,
+            "raw_text": raw_text,
+            "page_range": page_range,
+            "labels": labels,
+            "mime_type": mime_type.value if mime_type else None,
+            "parsing_options": (
+                parsing_options.model_dump(exclude_none=True)
+                if parsing_options
+                else None
+            ),
+            "enrichment_options": (
+                enrichment_options.model_dump(exclude_none=True)
+                if enrichment_options
+                else None
+            ),
+            "page_classifications": (
+                [pc.model_dump(exclude_none=True) for pc in page_classifications]
+                if page_classifications
+                else None
+            ),
+        }
+    )
 
     if structured_extraction_options:
         if isinstance(structured_extraction_options, StructuredExtractionOptions):
