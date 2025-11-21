@@ -4,7 +4,7 @@ import asyncio
 import inspect
 import json
 import time
-from typing import Any, Callable, Dict, List, Mapping, Optional, Union, overload
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Union, overload
 
 from httpx_sse import ServerSentEvent, aconnect_sse, connect_sse
 from pydantic import BaseModel, ValidationError
@@ -40,7 +40,7 @@ class _ParseMixin(_BaseClient):
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> str:
@@ -57,7 +57,7 @@ class _ParseMixin(_BaseClient):
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> str:
@@ -75,7 +75,7 @@ class _ParseMixin(_BaseClient):
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
     ) -> str:
         """Parse from raw text. MIME type is required."""
@@ -91,7 +91,7 @@ class _ParseMixin(_BaseClient):
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> str:
@@ -109,7 +109,7 @@ class _ParseMixin(_BaseClient):
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> str:
@@ -145,7 +145,7 @@ class _ParseMixin(_BaseClient):
                 page classification on the documents in the dataset. This can help in organizing and understanding the
                 content of the documents based on their page types.
 
-            page_range: Optional page range to parse. This can be a string like "1,2,3-5" to specify specific pages or ranges.
+            page_range: Optional page range to parse. This can be a string like "1,2,3-5" to specify specific pages or ranges, or a set of integers like {1, 2, 3, 5}.
 
             labels: Optional labels to attach to the parsed document. This can be a dictionary of key-value pairs.
 
@@ -193,7 +193,7 @@ class _ParseMixin(_BaseClient):
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> str:
@@ -210,7 +210,7 @@ class _ParseMixin(_BaseClient):
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> str:
@@ -228,7 +228,7 @@ class _ParseMixin(_BaseClient):
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
     ) -> str:
         """Parse from raw text asynchronously. MIME type is required."""
@@ -244,7 +244,7 @@ class _ParseMixin(_BaseClient):
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> str:
@@ -262,7 +262,7 @@ class _ParseMixin(_BaseClient):
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> str:
@@ -298,7 +298,7 @@ class _ParseMixin(_BaseClient):
                 page classification on the documents in the dataset. This can help in organizing and understanding the
                 content of the documents based on their page types.
 
-            page_range: Optional page range to parse. This can be a string like "1,2,3-5" to specify specific pages or ranges.
+            page_range: Optional page range to parse. This can be a string like "1,2,3-5" to specify specific pages or ranges, or a set of integers like {1, 2, 3, 5}.
 
             labels: Optional labels to attach to the parsed document. This can be a dictionary of key-value pairs.
 
@@ -547,7 +547,7 @@ class _ParseMixin(_BaseClient):
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> ParseResult:
@@ -564,7 +564,7 @@ class _ParseMixin(_BaseClient):
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> ParseResult:
@@ -582,7 +582,7 @@ class _ParseMixin(_BaseClient):
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
     ) -> ParseResult:
         """Parse from raw text asynchronously. MIME type is required."""
@@ -598,7 +598,7 @@ class _ParseMixin(_BaseClient):
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> ParseResult:
@@ -616,7 +616,7 @@ class _ParseMixin(_BaseClient):
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> ParseResult:
@@ -649,7 +649,7 @@ class _ParseMixin(_BaseClient):
                 page classification on the documents in the dataset. This can help in organizing and understanding the
                 content of the documents based on their page types.
 
-            page_range: Optional page range to parse. This can be a string like "1,2,3-5" to specify specific pages or ranges.
+            page_range: Optional page range to parse. This can be a string like "1,2,3-5" to specify specific pages or ranges, or a set of integers like {1, 2, 3, 5}.
 
             labels: Optional labels to attach to the parsed document. This can be a dictionary of key-value pairs.
 
@@ -718,7 +718,7 @@ class _ParseMixin(_BaseClient):
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> ParseResult:
@@ -735,7 +735,7 @@ class _ParseMixin(_BaseClient):
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> ParseResult:
@@ -753,7 +753,7 @@ class _ParseMixin(_BaseClient):
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
     ) -> ParseResult:
         """Parse from raw text asynchronously. MIME type is required."""
@@ -769,7 +769,7 @@ class _ParseMixin(_BaseClient):
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> ParseResult:
@@ -787,7 +787,7 @@ class _ParseMixin(_BaseClient):
         ] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
         page_classifications: Optional[List[PageClassConfig]] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> ParseResult:
@@ -825,7 +825,7 @@ class _ParseMixin(_BaseClient):
                 page classification on the documents in the dataset. This can help in organizing and understanding the
                 content of the documents based on their page types.
 
-            page_range: Optional page range to parse. This can be a string like "1,2,3-5" to specify specific pages or ranges.
+            page_range: Optional page range to parse. This can be a string like "1,2,3-5" to specify specific pages or ranges, or a set of integers like {1, 2, 3, 5}.
 
             labels: Optional labels to attach to the parsed document. This can be a dictionary of key-value pairs.
 
@@ -1095,11 +1095,10 @@ def _create_parse_req(
     ] = None,
     enrichment_options: Optional[EnrichmentOptions] = None,
     page_classifications: Optional[List[PageClassConfig]] = None,
-    page_range: Optional[str] = None,
+    page_range: Optional[Union[str, Set[int]]] = None,
     labels: Optional[dict] = None,
     mime_type: Optional[MimeType] = None,
 ) -> Dict[str, Any]:
-
     payload = _drop_none(
         {
             "file_id": file_id,
