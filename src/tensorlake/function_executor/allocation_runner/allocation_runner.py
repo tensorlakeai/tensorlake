@@ -760,7 +760,8 @@ class ProxiedAllocationProgress(FunctionProgress):
         # This method is called from user function code.
         try:
             self._allocation_runner._allocation_state.update_progress(current, total)
-            _print_progress_update(current, total, message, **kwargs)
+            request_id = self._allocation_runner._request_context.request_id
+            _print_progress_update(request_id, current, total, message, **kwargs)
             # sleep(0) here momentarily releases the GIL, giving other
             # FE threads a chance to run before returning back to customer code that
             # might never return GIL. i.e. allowing the FE to handle incoming RPCs,
@@ -779,15 +780,20 @@ class ProxiedAllocationProgress(FunctionProgress):
 
 
 def _print_progress_update(
-    current: float, total: float, message: str | None = None, **kwargs
+    request_id: str, current: float, total: float, message: str | None = None, **kwargs
 ) -> None:
-    event: dict[str, Any] = kwargs or {}
-    event["message"] = message or f"Executing step {current} of {total}"
-    event["step"] = current
-    event["total"] = total
+    event: dict[str, Any] = {
+        "RequestProgressUpdated": {
+            "request_id": request_id,
+            "message": message or f"Executing step {current} of {total}",
+            "step": current,
+            "total": total,
+            "attributes": kwargs,
+        }
+    }
 
     print_cloud_event(
         event,
-        type="ai.tensorlake.progress-update",
+        type="ai.tensorlake.progress_update",
         source="/tensorlake/function_executor/runner",
     )
