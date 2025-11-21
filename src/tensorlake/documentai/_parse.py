@@ -123,9 +123,15 @@ class _ParseMixin(_BaseClient):
         provides methods to check the status of the parsing operation and retrieve the parsed result.
 
         Args:
-            file: The file to parse. This can be a URL, a file ID (from Tensorlake), or raw text.
+            file: (Deprecated) The file to parse. This can be a URL, a file ID (from Tensorlake), or raw text. Use specific parameters like file_id, file_url, or raw_text instead.
 
-             parsing_options: Optional parsing options to customize how documents in the dataset are parsed. Tensorlake
+            file_id: The ID of the file to parse. This should be a file that has already been uploaded to Tensorlake.
+
+            file_url: The URL of the file to parse. This can be any publicly accessible URL.
+
+            raw_text: The raw text content to parse. This can be used for plain text documents. When using raw_text, mime_type must be specified.
+
+            parsing_options: Optional parsing options to customize how documents in the dataset are parsed. Tensorlake
                 provides default parsing options, but you can specify custom options to tailor the parsing process.
 
             structured_extraction_options: Optional structured extraction options to guide the extraction of structured
@@ -270,9 +276,15 @@ class _ParseMixin(_BaseClient):
         provides methods to check the status of the parsing operation and retrieve the parsed result.
 
         Args:
-            file: The file to parse. This can be a URL, a file ID (from Tensorlake), or raw text.
+            file: (Deprecated) The file to parse. This can be a URL, a file ID (from Tensorlake), or raw text. Use specific parameters like file_id, file_url, or raw_text instead.
 
-             parsing_options: Optional parsing options to customize how documents in the dataset are parsed. Tensorlake
+            file_id: The ID of the file to parse. This should be a file that has already been uploaded to Tensorlake.
+
+            file_url: The URL of the file to parse. This can be any publicly accessible URL.
+
+            raw_text: The raw text content to parse. This can be used for plain text documents. When using raw_text, mime_type must be specified.
+
+            parsing_options: Optional parsing options to customize how documents in the dataset are parsed. Tensorlake
                 provides default parsing options, but you can specify custom options to tailor the parsing process.
 
             structured_extraction_options: Optional structured extraction options to guide the extraction of structured
@@ -615,9 +627,15 @@ class _ParseMixin(_BaseClient):
         ParseResult once the parsing operation is complete.
 
         Args:
-            file: The file to parse. This can be a URL, a file ID (from Tensorlake), or raw text.
+            file: (Deprecated) The file to parse. This can be a URL, a file ID (from Tensorlake), or raw text. Use specific parameters like file_id, file_url, or raw_text instead.
 
-             parsing_options: Optional parsing options to customize how documents in the dataset are parsed. Tensorlake
+            file_id: The ID of the file to parse. This should be a file that has already been uploaded to Tensorlake.
+
+            file_url: The URL of the file to parse. This can be any publicly accessible URL.
+
+            raw_text: The raw text content to parse. This can be used for plain text documents. When using raw_text, mime_type must be specified.
+
+            parsing_options: Optional parsing options to customize how documents in the dataset are parsed. Tensorlake
                 provides default parsing options, but you can specify custom options to tailor the parsing process.
 
             structured_extraction_options: Optional structured extraction options to guide the extraction of structured
@@ -780,7 +798,14 @@ class _ParseMixin(_BaseClient):
         ParseResult once the parsing operation is complete.
 
         Args:
-            file: The file to parse. This can be a URL, a file ID (from Tensorlake), or raw text.
+            file: (Deprecated) The file to parse. This can be a URL, a file ID (from Tensorlake), or raw text. Use specific parameters like file_id, file_url, or raw_text instead.
+
+            file_id: The ID of the file to parse. This should be a file that has already been uploaded to Tensorlake.
+
+            file_url: The URL of the file to parse. This can be any publicly accessible URL.
+
+            raw_text: The raw text content to parse. This can be used for plain text documents. When using raw_text, mime_type must be specified.
+
             parsing_options: Optional parsing options to customize how documents in the dataset are parsed.
             structured_extraction_options: Optional structured extraction options to guide the extraction of structured data.
             enrichment_options: Optional enrichment options to extend the output of the document parsing process.
@@ -1040,6 +1065,24 @@ class _ParseMixin(_BaseClient):
         return PaginatedResult[ParseResult].model_validate(
             resp.json(), from_attributes=True
         )
+
+    def result(self, parse_id: str) -> ParseResult:
+        """
+        Wait for the completion of a parse operation and return the result.
+
+        Args:
+            parse_id: The ID of the parse operation to retrieve. This is the string returned by the parse method.
+        """
+        return self.wait_for_completion(parse_id)
+
+    async def result_async(self, parse_id: str) -> ParseResult:
+        """
+        Wait for the completion of a parse operation asynchronously and return the result.
+
+        Args:
+            parse_id: The ID of the parse operation to retrieve. This is the string returned by the parse method.
+        """
+        return await self.wait_for_completion_async(parse_id)
 
 
 def _create_parse_req(
