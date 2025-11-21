@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
+import grpc
 from google.protobuf.timestamp_pb2 import Timestamp
 
 from tensorlake.applications import (
@@ -54,6 +55,7 @@ from ..proto.function_executor_pb2 import (
     Allocation,
     AllocationFunctionCallResult,
     AllocationOutcomeCode,
+    AllocationOutputBLOB,
     AllocationResult,
     AllocationState,
     AllocationUpdate,
@@ -203,19 +205,34 @@ class AllocationRunner:
             future_info: _UserFutureInfo = self._user_futures[function_call_id]
             future_info.result = update.function_call_result
             future_info.result_available.set()
-        elif update.HasField("output_blob"):
-            blob_id: str = update.output_blob.id
-            if blob_id not in self._output_blob_requests:
+        elif update.HasField("output_blob_deprecated") or update.HasField(
+            "output_blob"
+        ):
+            if update.HasField("output_blob_deprecated"):
+                blob: BLOB = update.output_blob_deprecated
+            else:
+                if update.output_blob.status.code != grpc.StatusCode.OK.value[0]:
+                    self._logger.error(
+                        "received output blob update with error status",
+                        blob_id=update.output_blob.blob.id,
+                        status=update.output_blob.status,
+                    )
+                    # TODO: Implement error handling logic in blob_request_info.blob_available.set() consumer.
+                    # It's more convenient to do once we remove output_blob_deprecated support.
+                    return
+                blob: BLOB = update.output_blob.blob
+
+            if blob.id not in self._output_blob_requests:
                 self._logger.error(
                     "received output blob update for unknown blob request",
-                    blob_id=blob_id,
+                    blob_id=blob.id,
                 )
                 return
 
             blob_request_info: _OutputBLOBRequestInfo = self._output_blob_requests[
-                blob_id
+                blob.id
             ]
-            blob_request_info.blob = update.output_blob
+            blob_request_info.blob = blob
             blob_request_info.blob_available.set()
         else:
             self._logger.error(

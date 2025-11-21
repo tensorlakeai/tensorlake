@@ -16,6 +16,7 @@ from tensorlake.applications.user_data_serializer import (
 )
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     BLOB,
+    AllocationOutputBLOB,
     AllocationOutputBLOBRequest,
     AllocationResult,
     AllocationState,
@@ -37,6 +38,7 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
 from tensorlake.function_executor.proto.server_configuration import GRPC_SERVER_OPTIONS
+from tensorlake.function_executor.proto.status_pb2 import Status
 
 
 class FunctionExecutorProcessContextManager:
@@ -189,7 +191,10 @@ def run_allocation_that_returns_output(
             stub.send_allocation_update(
                 AllocationUpdate(
                     allocation_id=allocation_id,
-                    output_blob=function_output_blob,
+                    output_blob=AllocationOutputBLOB(
+                        status=Status(code=grpc.StatusCode.OK.value[0]),
+                        blob=function_output_blob,
+                    ),
                 )
             )
             current_allocation_state = "wait_blob_deletion"

@@ -332,10 +332,10 @@ message AllocationUpdate {
     oneof update {
         // Function call result if the function call is watched by allocation.
         AllocationFunctionCallResult function_call_result = 2;
-        // When output_blob is set, then output_blob_result is set too.
-        // This is to migrate from BLOB to AllocationOutputBLOB.
-        BLOB output_blob = 3;
-        AllocationOutputBLOB output_blob_result = 4;
+        // TODO: Delete output_blob_deprecated once all FEs can use both
+        // output_blob_deprecated and output_blob.
+        BLOB output_blob_deprecated = 3;
+        AllocationOutputBLOB output_blob = 4;
         AllocationRequestStateOperationResult request_state_operation_result = 5;
     }
 }

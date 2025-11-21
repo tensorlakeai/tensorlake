@@ -668,19 +668,19 @@ class AllocationUpdate(_message.Message):
     __slots__ = (
         "allocation_id",
         "function_call_result",
+        "output_blob_deprecated",
         "output_blob",
-        "output_blob_result",
         "request_state_operation_result",
     )
     ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_CALL_RESULT_FIELD_NUMBER: _ClassVar[int]
+    OUTPUT_BLOB_DEPRECATED_FIELD_NUMBER: _ClassVar[int]
     OUTPUT_BLOB_FIELD_NUMBER: _ClassVar[int]
-    OUTPUT_BLOB_RESULT_FIELD_NUMBER: _ClassVar[int]
     REQUEST_STATE_OPERATION_RESULT_FIELD_NUMBER: _ClassVar[int]
     allocation_id: str
     function_call_result: AllocationFunctionCallResult
-    output_blob: BLOB
-    output_blob_result: AllocationOutputBLOB
+    output_blob_deprecated: BLOB
+    output_blob: AllocationOutputBLOB
     request_state_operation_result: AllocationRequestStateOperationResult
     def __init__(
         self,
@@ -688,8 +688,8 @@ class AllocationUpdate(_message.Message):
         function_call_result: _Optional[
             _Union[AllocationFunctionCallResult, _Mapping]
         ] = ...,
-        output_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
-        output_blob_result: _Optional[_Union[AllocationOutputBLOB, _Mapping]] = ...,
+        output_blob_deprecated: _Optional[_Union[BLOB, _Mapping]] = ...,
+        output_blob: _Optional[_Union[AllocationOutputBLOB, _Mapping]] = ...,
         request_state_operation_result: _Optional[
             _Union[AllocationRequestStateOperationResult, _Mapping]
         ] = ...,

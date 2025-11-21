@@ -3,6 +3,7 @@ import os
 import unittest
 from typing import Iterator, List
 
+import grpc
 from models import FileChunk
 from testing import (
     FunctionExecutorProcessContextManager,
@@ -45,6 +46,7 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     AllocationFunctionCallResult,
     AllocationFunctionCallWatcher,
     AllocationOutcomeCode,
+    AllocationOutputBLOB,
     AllocationOutputBLOBRequest,
     AllocationResult,
     AllocationState,
@@ -68,6 +70,7 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
+from tensorlake.function_executor.proto.status_pb2 import Status
 
 APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
 
@@ -351,7 +354,10 @@ class TestRunAllocation(unittest.TestCase):
                         stub.send_allocation_update(
                             AllocationUpdate(
                                 allocation_id=allocation_id,
-                                output_blob=blocking_call_args_blob,
+                                output_blob=AllocationOutputBLOB(
+                                    status=Status(code=grpc.StatusCode.OK.value[0]),
+                                    blob=blocking_call_args_blob,
+                                ),
                             )
                         )
                         current_allocation_state = "wait_blob_deletion"
@@ -543,7 +549,10 @@ class TestRunAllocation(unittest.TestCase):
                         stub.send_allocation_update(
                             AllocationUpdate(
                                 allocation_id=allocation_id,
-                                output_blob=function_output_blob,
+                                output_blob=AllocationOutputBLOB(
+                                    status=Status(code=grpc.StatusCode.OK.value[0]),
+                                    blob=function_output_blob,
+                                ),
                             )
                         )
                         current_allocation_state = "wait_blob_deletion"
@@ -731,7 +740,10 @@ class TestRunAllocation(unittest.TestCase):
                         stub.send_allocation_update(
                             AllocationUpdate(
                                 allocation_id=allocation_id,
-                                output_blob=function_output_blob,
+                                output_blob=AllocationOutputBLOB(
+                                    status=Status(code=grpc.StatusCode.OK.value[0]),
+                                    blob=function_output_blob,
+                                ),
                             )
                         )
                         current_allocation_state = "wait_blob_deletion"
@@ -892,7 +904,10 @@ class TestRunAllocation(unittest.TestCase):
                         stub.send_allocation_update(
                             AllocationUpdate(
                                 allocation_id=allocation_id,
-                                output_blob=function_output_blob,
+                                output_blob=AllocationOutputBLOB(
+                                    status=Status(code=grpc.StatusCode.OK.value[0]),
+                                    blob=function_output_blob,
+                                ),
                             )
                         )
                         current_allocation_state = "wait_blob_deletion"
