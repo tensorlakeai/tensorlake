@@ -61,8 +61,6 @@ from ..proto.function_executor_pb2 import (
     FunctionRef,
     SerializedObjectInsideBLOB,
 )
-from ..request_state.proxied_request_state import ProxiedRequestState
-from ..request_state.request_state_proxy_server import RequestStateProxyServer
 from ..user_events import (
     AllocationEventDetails,
     log_user_event_allocations_finished,
@@ -117,7 +115,6 @@ class AllocationRunner:
     def __init__(
         self,
         allocation: Allocation,
-        request_state_proxy_server: RequestStateProxyServer,
         function_ref: FunctionRef,
         function: Function,
         function_instance_arg: Any | None,
@@ -125,9 +122,6 @@ class AllocationRunner:
         logger: FunctionExecutorLogger,
     ):
         self._allocation: Allocation = allocation
-        self._request_state_proxy_server: RequestStateProxyServer = (
-            request_state_proxy_server
-        )
         self._function_ref: FunctionRef = function_ref
         self._function: Function = function
         self._function_instance_arg: Any | None = function_instance_arg
@@ -146,11 +140,12 @@ class AllocationRunner:
 
         self._request_context: RequestContextBase = RequestContextBase(
             request_id=self._allocation.request_id,
-            state=ProxiedRequestState(
-                allocation_id=self._allocation.allocation_id,
-                proxy_server=self._request_state_proxy_server,
-                logger=logger,
-            ),
+            state=None,  # FIXME
+            # state=ProxiedRequestState(
+            #     allocation_id=self._allocation.allocation_id,
+            #     proxy_server=self._request_state_proxy_server,
+            #     logger=logger,
+            # ),
             progress=ProxiedAllocationProgress(self, logger),
             metrics=RequestMetricsRecorder(),
         )

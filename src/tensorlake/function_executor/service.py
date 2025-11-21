@@ -5,7 +5,7 @@ import tempfile
 import time
 import zipfile
 from dataclasses import dataclass
-from typing import Any, Dict, Generator, Iterator, List
+from typing import Any, Dict, Generator, List
 
 import grpc
 
@@ -53,13 +53,9 @@ from .proto.function_executor_pb2 import (
     InitializeResponse,
     ListAllocationsRequest,
     ListAllocationsResponse,
-    RequestStateRequest,
-    RequestStateResponse,
-    SerializedObjectEncoding,
     WatchAllocationStateRequest,
 )
 from .proto.function_executor_pb2_grpc import FunctionExecutorServicer
-from .request_state.request_state_proxy_server import RequestStateProxyServer
 from .user_events import (
     InitializationEventDetails,
     log_user_event_initialization_failed,
@@ -84,7 +80,6 @@ class Service(FunctionExecutorServicer):
         self._function: Function | None = None
         self._function_instance_arg: Any | None = None
         self._blob_store: BLOBStore | None = None
-        self._request_state_proxy_server: RequestStateProxyServer | None = None
         self._health_check_handler: HealthCheckHandler | None = None
         self._allocation_infos: Dict[str, _AllocationInfo] = {}
 
@@ -191,37 +186,6 @@ class Service(FunctionExecutorServicer):
             outcome_code=InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
         )
 
-    def initialize_request_state_server(
-        self,
-        client_responses: Iterator[RequestStateResponse],
-        context: grpc.ServicerContext,
-    ) -> Generator[RequestStateRequest, None, None]:
-        start_time = time.monotonic()
-        self._logger.info("initializing request state proxy server")
-
-        if self._request_state_proxy_server is not None:
-            self._logger.error(
-                "request state proxy server already exists, looks like client reconnected without disconnecting first"
-            )
-            context.abort(
-                grpc.StatusCode.ALREADY_EXISTS,
-                "request state proxy server already exists, please disconnect first",
-            )
-
-        self._request_state_proxy_server = RequestStateProxyServer(
-            # Should match RequestState object user serializer in RequestContext
-            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-            client_responses=client_responses,
-            logger=self._logger,
-        )
-
-        self._logger.info(
-            "initialized request state proxy server",
-            duration_sec=f"{time.monotonic() - start_time:.3f}",
-        )
-        yield from self._request_state_proxy_server.run()
-        self._request_state_proxy_server = None
-
     def check_health(
         self, request: HealthCheckRequest, context: grpc.ServicerContext
     ) -> HealthCheckResponse:
@@ -269,7 +233,6 @@ class Service(FunctionExecutorServicer):
         )
         allocation_runner: AllocationRunner = AllocationRunner(
             allocation=allocation,
-            request_state_proxy_server=self._request_state_proxy_server,
             function_ref=self._function_ref,
             function=self._function,
             function_instance_arg=self._function_instance_arg,
