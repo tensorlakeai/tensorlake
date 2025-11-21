@@ -1,4 +1,4 @@
-from typing import List, Optional, overload
+from typing import List, Optional, Set, Union, overload
 
 from ._base import _BaseClient, _validate_file_input
 from ._utils import _drop_none
@@ -17,7 +17,7 @@ class _ClassifyMixin(_BaseClient):
         page_classifications: List[PageClassConfig],
         *,
         file_id: str,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> str:
@@ -29,7 +29,7 @@ class _ClassifyMixin(_BaseClient):
         page_classifications: List[PageClassConfig],
         *,
         file_url: str,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> str:
@@ -42,7 +42,7 @@ class _ClassifyMixin(_BaseClient):
         *,
         raw_text: str,
         mime_type: MimeType,  # Required when using raw_text
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
     ) -> str:
         """Classify from raw text. MIME type is required."""
@@ -53,7 +53,7 @@ class _ClassifyMixin(_BaseClient):
         file_id: Optional[str] = None,
         file_url: Optional[str] = None,
         raw_text: Optional[str] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> str:
@@ -114,7 +114,7 @@ class _ClassifyMixin(_BaseClient):
         page_classifications: List[PageClassConfig],
         *,
         file_id: str,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> str:
@@ -126,7 +126,7 @@ class _ClassifyMixin(_BaseClient):
         page_classifications: List[PageClassConfig],
         *,
         file_url: str,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> str:
@@ -139,7 +139,7 @@ class _ClassifyMixin(_BaseClient):
         *,
         raw_text: str,
         mime_type: MimeType,  # Required when using raw_text
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
     ) -> str:
         """Classify from raw text asynchronously. MIME type is required."""
@@ -150,7 +150,7 @@ class _ClassifyMixin(_BaseClient):
         file_id: Optional[str] = None,
         file_url: Optional[str] = None,
         raw_text: Optional[str] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
     ) -> str:

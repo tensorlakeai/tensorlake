@@ -4,7 +4,7 @@ Dataset creation, parsing and deletion helpers.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 from ._base import _BaseClient
 from ._parse import _convert_seo
@@ -166,7 +166,7 @@ class _DatasetMixin(_BaseClient):
         self,
         dataset: Dataset | str,
         file: str,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
         wait_for_completion: bool = False,
@@ -209,7 +209,7 @@ class _DatasetMixin(_BaseClient):
         self,
         dataset: Dataset | str,
         file: str,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
         wait_for_completion: bool = False,

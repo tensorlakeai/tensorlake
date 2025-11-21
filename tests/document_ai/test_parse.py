@@ -38,7 +38,7 @@ class TestParse(unittest.TestCase):
         self.assertIsNotNone(parse_id)
         print(f"Parse ID: {parse_id}")
 
-        parse_result = self.doc_ai.wait_for_completion(parse_id=parse_id)
+        parse_result = self.doc_ai.result(parse_id=parse_id)
         self.assertEqual(parse_result.status, ParseStatus.SUCCESSFUL)
         self.assertIsNotNone(parse_result)
         self.assertIsNotNone(parse_result.pages)
@@ -64,7 +64,7 @@ class TestParse(unittest.TestCase):
         doc_ai_eu = DocumentAI(region=Region.EU)
 
         parse_id = doc_ai_eu.parse(
-            file="https://pub-226479de18b2493f96b64c6674705dd8.r2.dev/real-estate-purchase-all-signed.pdf",
+            file_url="https://pub-226479de18b2493f96b64c6674705dd8.r2.dev/real-estate-purchase-all-signed.pdf",
             page_range="1-2",
         )
         self.assertIsNotNone(parse_id)
@@ -99,7 +99,7 @@ class TestParse(unittest.TestCase):
         self.assertIsNotNone(file_id)
 
         parsed_result = self.doc_ai.parse_and_wait(
-            file=file_id,
+            file_id=file_id,
             page_range="1",
         )
         self.assertIsNotNone(parsed_result)
