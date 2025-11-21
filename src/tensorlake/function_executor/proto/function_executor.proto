@@ -158,7 +158,7 @@ message AllocationFunctionCallWatcher {
 message AllocationRequestStateStartReadOperation {}
 
 message AllocationRequestStateStartWriteOperation {
-    optional uint64 data_size = 1;
+    optional uint64 write_size = 1;
 }
 
 message AllocationRequestStateCommitWriteOperation {
@@ -320,7 +320,6 @@ message AllocationRequestStateCommitWriteOperationResult {}
 
 message AllocationRequestStateOperationResult {
     optional string operation_id = 1;
-    optional string state_key = 2;
     optional google.rpc.Status status = 3;
     // result is set if status is OK.
     oneof result {

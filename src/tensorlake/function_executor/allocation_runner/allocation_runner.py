@@ -235,7 +235,9 @@ class AllocationRunner:
             blob_request_info.blob = blob
             blob_request_info.blob_available.set()
         elif update.HasField("request_state_operation_result"):
-            self._request_state.deliver_result(update.request_state_operation_result)
+            self._request_state.deliver_operation_result(
+                update.request_state_operation_result
+            )
         else:
             self._logger.error(
                 "received unexpected allocation update",

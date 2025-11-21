@@ -13,9 +13,12 @@ from tensorlake.applications.request_context.request_state import (
 )
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     BLOB,
+    AllocationRequestStateCommitWriteOperation,
+    AllocationRequestStateOperation,
     AllocationRequestStateOperationResult,
+    AllocationRequestStateStartReadOperation,
+    AllocationRequestStateStartWriteOperation,
 )
-from tensorlake.function_executor.proto.status_pb2 import Status
 
 from ..blob_store.blob_store import BLOBStore
 from ..logger import FunctionExecutorLogger
@@ -94,7 +97,9 @@ class AllocationRequestState(RequestState):
             )
             raise InternalError(f"Failed to get request state for key '{key}'.")
 
-    def deliver_result(self, result: AllocationRequestStateOperationResult) -> None:
+    def deliver_operation_result(
+        self, result: AllocationRequestStateOperationResult
+    ) -> None:
         """Deliver the result of a request state operation.
 
         Doesn't raise any exceptions.
@@ -115,13 +120,91 @@ class AllocationRequestState(RequestState):
 
         Returns None if the key does not exist.
         """
-        # TODO: Implement this method.
-        pass
+        operation: AllocationRequestStateOperation = AllocationRequestStateOperation(
+            operation_id=_request_scoped_id(),
+            key=key,
+            start_read=AllocationRequestStateStartReadOperation(),
+        )
+        operation_info: _RequestStateOperationInfo = _RequestStateOperationInfo(
+            result=None,
+            result_available=threading.Event(),
+        )
+        self._request_state_operations[operation.operation_id] = operation_info
+        self._allocation_state.add_request_state_operation(operation)
+
+        operation_info.result_available.wait()
+
+        self._allocation_state.remove_request_state_operation(id=operation.operation_id)
+        del self._request_state_operations[operation.operation_id]
+
+        if operation_info.result.status.code == grpc.StatusCode.NOT_FOUND.value[0]:
+            return None
+        elif operation_info.result.status.code != grpc.StatusCode.OK.value[0]:
+            self._logger.error(
+                "failed to get read-only blob for request state get operation",
+                operation_id=operation.operation_id,
+                status=operation_info.result.status,
+            )
+            raise InternalError(f"Request state get operation failed for key '{key}'.")
+
+        return operation_info.result.start_read.blob
 
     def _get_writeable_blob(self, key: str, size: int) -> BLOB:
-        # TODO: Implement this method.
-        pass
+        """Gets a write-only BLOB for the given key."""
+        operation: AllocationRequestStateOperation = AllocationRequestStateOperation(
+            operation_id=_request_scoped_id(),
+            key=key,
+            start_write=AllocationRequestStateStartWriteOperation(
+                write_size=size,
+            ),
+        )
+        operation_info: _RequestStateOperationInfo = _RequestStateOperationInfo(
+            result=None,
+            result_available=threading.Event(),
+        )
+        self._request_state_operations[operation.operation_id] = operation_info
+        self._allocation_state.add_request_state_operation(operation)
+
+        operation_info.result_available.wait()
+
+        self._allocation_state.remove_request_state_operation(id=operation.operation_id)
+        del self._request_state_operations[operation.operation_id]
+
+        if operation_info.result.status.code != grpc.StatusCode.OK.value[0]:
+            self._logger.error(
+                "failed to get write-only blob for request state set operation",
+                operation_id=operation.operation_id,
+                status=operation_info.result.status,
+            )
+            raise InternalError(f"Request state set operation failed for key '{key}'.")
+
+        return operation_info.result.start_write.blob
 
     def _commit_writeable_blob(self, key: str, blob: BLOB) -> None:
-        # TODO: Implement this method.
-        pass
+        """Commits writes to a previously obtained write-only BLOB for the given key."""
+        operation: AllocationRequestStateOperation = AllocationRequestStateOperation(
+            operation_id=_request_scoped_id(),
+            key=key,
+            commit_write=AllocationRequestStateCommitWriteOperation(
+                blob=blob,
+            ),
+        )
+        operation_info: _RequestStateOperationInfo = _RequestStateOperationInfo(
+            result=None,
+            result_available=threading.Event(),
+        )
+        self._request_state_operations[operation.operation_id] = operation_info
+        self._allocation_state.add_request_state_operation(operation, blob=blob)
+
+        operation_info.result_available.wait()
+
+        self._allocation_state.remove_request_state_operation(id=operation.operation_id)
+        del self._request_state_operations[operation.operation_id]
+
+        if operation_info.result.status.code != grpc.StatusCode.OK.value[0]:
+            self._logger.error(
+                "failed to commit BLOB write for request state set operation",
+                operation_id=operation.operation_id,
+                status=operation_info.result.status,
+            )
+            raise InternalError(f"Request state set operation failed for key '{key}'.")
