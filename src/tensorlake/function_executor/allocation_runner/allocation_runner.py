@@ -55,7 +55,6 @@ from ..proto.function_executor_pb2 import (
     Allocation,
     AllocationFunctionCallResult,
     AllocationOutcomeCode,
-    AllocationOutputBLOB,
     AllocationResult,
     AllocationState,
     AllocationUpdate,
@@ -71,6 +70,7 @@ from ..user_events import (
 from .allocation_state_wrapper import AllocationStateWrapper
 from .contextvars import set_allocation_id_context_variable
 from .download import download_function_arguments, download_serialized_objects
+from .request_state import AllocationRequestState
 from .result_helper import ResultHelper
 from .sdk_algorithms import (
     awaitable_to_execution_plan_updates,
@@ -128,7 +128,7 @@ class AllocationRunner:
         self._function: Function = function
         self._function_instance_arg: Any | None = function_instance_arg
         self._blob_store: BLOBStore = blob_store
-        self._logger = logger.bind(module=__name__)
+        self._logger: FunctionExecutorLogger = logger.bind(module=__name__)
 
         self._allocation_event_details: AllocationEventDetails = AllocationEventDetails(
             namespace=self._function_ref.namespace,
@@ -140,14 +140,15 @@ class AllocationRunner:
             allocation_id=self._allocation.allocation_id,
         )
 
+        self._allocation_state: AllocationStateWrapper = AllocationStateWrapper()
+        self._request_state: AllocationRequestState = AllocationRequestState(
+            allocation_state=self._allocation_state,
+            blob_store=blob_store,
+            logger=logger,
+        )
         self._request_context: RequestContextBase = RequestContextBase(
             request_id=self._allocation.request_id,
-            state=None,  # FIXME
-            # state=ProxiedRequestState(
-            #     allocation_id=self._allocation.allocation_id,
-            #     proxy_server=self._request_state_proxy_server,
-            #     logger=logger,
-            # ),
+            state=self._request_state,
             progress=ProxiedAllocationProgress(self, logger),
             metrics=RequestMetricsRecorder(),
         )
@@ -157,7 +158,6 @@ class AllocationRunner:
             metrics=self._request_context.metrics,
             logger=self._logger,
         )
-        self._allocation_state: AllocationStateWrapper = AllocationStateWrapper()
         self._allocation_thread: threading.Thread = threading.Thread(
             target=self._run_allocation_thread,
             daemon=True,
@@ -234,9 +234,11 @@ class AllocationRunner:
             ]
             blob_request_info.blob = blob
             blob_request_info.blob_available.set()
+        elif update.HasField("request_state_operation_result"):
+            self._request_state.deliver_result(update.request_state_operation_result)
         else:
             self._logger.error(
-                "received empty allocation update",
+                "received unexpected allocation update",
                 update=str(update),
             )
 

@@ -293,7 +293,7 @@ class AllocationFunctionCallWatcher(_message.Message):
         self, watcher_id: _Optional[str] = ..., function_call_id: _Optional[str] = ...
     ) -> None: ...
 
-class AllocationRequestStateReadOperation(_message.Message):
+class AllocationRequestStateStartReadOperation(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
 
@@ -304,8 +304,10 @@ class AllocationRequestStateStartWriteOperation(_message.Message):
     def __init__(self, data_size: _Optional[int] = ...) -> None: ...
 
 class AllocationRequestStateCommitWriteOperation(_message.Message):
-    __slots__ = ()
-    def __init__(self) -> None: ...
+    __slots__ = ("blob",)
+    BLOB_FIELD_NUMBER: _ClassVar[int]
+    blob: BLOB
+    def __init__(self, blob: _Optional[_Union[BLOB, _Mapping]] = ...) -> None: ...
 
 class AllocationRequestStateOperation(_message.Message):
     __slots__ = (
@@ -322,7 +324,7 @@ class AllocationRequestStateOperation(_message.Message):
     COMMIT_WRITE_FIELD_NUMBER: _ClassVar[int]
     operation_id: str
     state_key: str
-    start_read: AllocationRequestStateReadOperation
+    start_read: AllocationRequestStateStartReadOperation
     start_write: AllocationRequestStateStartWriteOperation
     commit_write: AllocationRequestStateCommitWriteOperation
     def __init__(
@@ -330,7 +332,7 @@ class AllocationRequestStateOperation(_message.Message):
         operation_id: _Optional[str] = ...,
         state_key: _Optional[str] = ...,
         start_read: _Optional[
-            _Union[AllocationRequestStateReadOperation, _Mapping]
+            _Union[AllocationRequestStateStartReadOperation, _Mapping]
         ] = ...,
         start_write: _Optional[
             _Union[AllocationRequestStateStartWriteOperation, _Mapping]
@@ -346,17 +348,17 @@ class AllocationState(_message.Message):
         "output_blob_requests",
         "function_calls",
         "function_call_watchers",
+        "request_state_operations",
         "result",
         "sha256_hash",
-        "request_state_operations",
     )
     PROGRESS_FIELD_NUMBER: _ClassVar[int]
     OUTPUT_BLOB_REQUESTS_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_CALLS_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_CALL_WATCHERS_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_STATE_OPERATIONS_FIELD_NUMBER: _ClassVar[int]
     RESULT_FIELD_NUMBER: _ClassVar[int]
     SHA256_HASH_FIELD_NUMBER: _ClassVar[int]
-    REQUEST_STATE_OPERATIONS_FIELD_NUMBER: _ClassVar[int]
     progress: AllocationProgress
     output_blob_requests: _containers.RepeatedCompositeFieldContainer[
         AllocationOutputBLOBRequest
@@ -365,11 +367,11 @@ class AllocationState(_message.Message):
     function_call_watchers: _containers.RepeatedCompositeFieldContainer[
         AllocationFunctionCallWatcher
     ]
-    result: AllocationResult
-    sha256_hash: str
     request_state_operations: _containers.RepeatedCompositeFieldContainer[
         AllocationRequestStateOperation
     ]
+    result: AllocationResult
+    sha256_hash: str
     def __init__(
         self,
         progress: _Optional[_Union[AllocationProgress, _Mapping]] = ...,
@@ -382,11 +384,11 @@ class AllocationState(_message.Message):
         function_call_watchers: _Optional[
             _Iterable[_Union[AllocationFunctionCallWatcher, _Mapping]]
         ] = ...,
-        result: _Optional[_Union[AllocationResult, _Mapping]] = ...,
-        sha256_hash: _Optional[str] = ...,
         request_state_operations: _Optional[
             _Iterable[_Union[AllocationRequestStateOperation, _Mapping]]
         ] = ...,
+        result: _Optional[_Union[AllocationResult, _Mapping]] = ...,
+        sha256_hash: _Optional[str] = ...,
     ) -> None: ...
 
 class FunctionInputs(_message.Message):

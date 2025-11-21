@@ -155,19 +155,22 @@ message AllocationFunctionCallWatcher {
     optional string function_call_id = 2;
 }
 
-message AllocationRequestStateReadOperation {}
+message AllocationRequestStateStartReadOperation {}
 
 message AllocationRequestStateStartWriteOperation {
     optional uint64 data_size = 1;
 }
 
-message AllocationRequestStateCommitWriteOperation {}
+message AllocationRequestStateCommitWriteOperation {
+    // BLOB with the uploaded data.
+    optional BLOB blob = 1;
+}
 
 message AllocationRequestStateOperation {
     optional string operation_id = 1;
     optional string state_key = 2;
     oneof operation {
-        AllocationRequestStateReadOperation start_read = 3;
+        AllocationRequestStateStartReadOperation start_read = 3;
         AllocationRequestStateStartWriteOperation start_write = 4;
         AllocationRequestStateCommitWriteOperation commit_write = 5;
     }
@@ -187,12 +190,13 @@ message AllocationState {
     repeated AllocationFunctionCall function_calls = 3;
     // Watchers for function calls started by the allocation.
     repeated AllocationFunctionCallWatcher function_call_watchers = 4;
+    // Request state operations.
+    repeated AllocationRequestStateOperation request_state_operations = 7;
+
     // Optional allocation result. Set when allocation finishes.
     AllocationResult result = 5;
     // Required state hash.
     optional string sha256_hash = 6;
-    // Request state operations.
-    repeated AllocationRequestStateOperation request_state_operations = 7;
 }
 
 // FunctionInputs contains the input data for allocation execution
@@ -210,7 +214,7 @@ message FunctionArg {
   oneof source {
     // Data dependency reference to another function call.
     string function_call_id = 1;
-    // Stored inside uploaded_function_outputs_blob.
+    // Stored inside uploaded_function_outputs_blob or args_blob.
     SerializedObjectInsideBLOB value = 2;
   }
 }
