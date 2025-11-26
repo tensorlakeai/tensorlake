@@ -435,12 +435,19 @@ class AllocationRunner:
                         )
                     )
                 else:
-                    future.set_exception(create_function_error(future.awaitable))
+                    # We don't have a user visible cause of failure.
+                    future.set_exception(
+                        create_function_error(future.awaitable, cause=None)
+                    )
             else:
                 self._logger.error(
                     f"Unexpected outcome code in function call result: {result.outcome_code}"
                 )
-                future.set_exception(create_function_error(future.awaitable))
+                future.set_exception(
+                    InternalError(
+                        f"Unexpected outcome code in function call result: {result.outcome_code}"
+                    )
+                )
         else:
             # timeout and no result or error are available.
             future.set_exception(TimeoutError())

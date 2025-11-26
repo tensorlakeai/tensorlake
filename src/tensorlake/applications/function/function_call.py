@@ -1,3 +1,4 @@
+from traceback import format_exception
 from typing import Any, List
 
 from ..interface import Awaitable, FunctionError, InternalError
@@ -20,11 +21,12 @@ def set_self_arg(args: List[Any], self_instance: Any) -> None:
 
 
 def create_function_error(
-    awaitable: Awaitable, cause: str | None = None
+    awaitable: Awaitable, cause: str | BaseException | None
 ) -> FunctionError:
-    # We currently don't provide cause details because except in rare cases we don't know them
-    # at function caller side. The cause details are printed in called function's logs instead.
-    if cause is None:
-        return FunctionError(f"{awaitable} failed")
-    else:
+    if isinstance(cause, BaseException):
+        exception_str: str = "".join(format_exception(cause))
+        return FunctionError(f"{awaitable} failed due to exception: \n{exception_str}")
+    elif isinstance(cause, str):
         return FunctionError(f"{awaitable} failed: {cause}")
+    elif cause is None:
+        return FunctionError(f"{awaitable} failed")

@@ -1,3 +1,5 @@
+import io
+import sys
 import unittest
 
 import parameterized
@@ -34,6 +36,35 @@ class TestRequestFailedRaisedOnFunctionError(unittest.TestCase):
             self.fail("Expected RequestFailed exception")
         except RequestFailed as e:
             self.assertEqual(str(e), "function_error")
+
+    def test_original_function_exception_is_pretty_printed_in_local_mode(self):
+        # In remote mode FE prints the function exception to FE stdout so we can't
+        # see it here. But in local mode the same exception should be printed to our
+        # stdout.
+
+        captured_stderr = io.StringIO()
+        sys.stderr = captured_stderr
+
+        try:
+            request: Request = run_application(
+                application_function,
+                "magic_string",
+                remote=False,
+            )
+            self.assertRaises(RequestFailed, request.output)
+        finally:
+            sys.stderr = sys.__stderr__
+
+        stderr: str = captured_stderr.getvalue()
+        self.assertIn(
+            "FunctionError: Tensorlake Function Call application_function(\n"
+            "  'magic_string',\n"
+            ") failed due to exception: \n"
+            "Traceback (most recent call last):\n",
+            stderr,
+        )
+        self.assertIn('raise RuntimeError("Fail!")\n', stderr)
+        self.assertIn("RuntimeError: Fail!", stderr)
 
 
 if __name__ == "__main__":
