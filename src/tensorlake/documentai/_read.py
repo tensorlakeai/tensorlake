@@ -1,4 +1,4 @@
-from typing import Optional, overload
+from typing import Optional, Set, Union, overload
 
 from ._base import _BaseClient, _validate_file_input
 from ._utils import _drop_none
@@ -17,7 +17,7 @@ class _ReadMixin(_BaseClient):
         self,
         *,
         file_id: str,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
         parsing_options: Optional[ParsingOptions] = None,
@@ -30,7 +30,7 @@ class _ReadMixin(_BaseClient):
         self,
         *,
         file_url: str,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
         parsing_options: Optional[ParsingOptions] = None,
@@ -44,7 +44,7 @@ class _ReadMixin(_BaseClient):
         *,
         raw_text: str,
         mime_type: MimeType,  # Required when using raw_text
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         parsing_options: Optional[ParsingOptions] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
@@ -56,7 +56,7 @@ class _ReadMixin(_BaseClient):
         file_id: Optional[str] = None,
         file_url: Optional[str] = None,
         raw_text: Optional[str] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
         parsing_options: Optional[ParsingOptions] = None,
@@ -129,7 +129,7 @@ class _ReadMixin(_BaseClient):
         self,
         *,
         file_id: str,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
         parsing_options: Optional[ParsingOptions] = None,
@@ -142,7 +142,7 @@ class _ReadMixin(_BaseClient):
         self,
         *,
         file_url: str,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
         parsing_options: Optional[ParsingOptions] = None,
@@ -156,7 +156,7 @@ class _ReadMixin(_BaseClient):
         *,
         raw_text: str,
         mime_type: MimeType,  # Required when using raw_text
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         parsing_options: Optional[ParsingOptions] = None,
         enrichment_options: Optional[EnrichmentOptions] = None,
@@ -168,7 +168,7 @@ class _ReadMixin(_BaseClient):
         file_id: Optional[str] = None,
         file_url: Optional[str] = None,
         raw_text: Optional[str] = None,
-        page_range: Optional[str] = None,
+        page_range: Optional[Union[str, Set[int]]] = None,
         labels: Optional[dict] = None,
         mime_type: Optional[MimeType] = None,
         parsing_options: Optional[ParsingOptions] = None,
