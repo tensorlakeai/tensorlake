@@ -10,13 +10,12 @@ from ...interface.awaitables import (
     FunctionCallAwaitable,
     FunctionCallFuture,
 )
-from ...interface.exceptions import FunctionError, InternalError, RequestError
+from ...interface.exceptions import InternalError, RequestError
 from ...interface.function import Function
 from ...interface.request_context import RequestContext
 from ...interface.retries import Retries
 from ...request_context.contextvar import set_current_request_context
 from ..future import LocalFuture
-from ..utils import print_exception
 from .future_run import (
     LocalFutureRun,
     LocalFutureRunResult,
@@ -99,7 +98,7 @@ class FunctionCallFutureRun(LocalFutureRun):
                 return LocalFutureRunResult(
                     id=awaitable.id,
                     output=None,
-                    error=create_function_error(awaitable, "stopped"),
+                    error=create_function_error(awaitable, cause="stopped"),
                 )
             except BaseException as e:
                 runs_left -= 1
@@ -107,5 +106,5 @@ class FunctionCallFutureRun(LocalFutureRun):
                     return LocalFutureRunResult(
                         id=awaitable.id,
                         output=None,
-                        error=create_function_error(awaitable),
+                        error=create_function_error(awaitable, cause=e),
                     )

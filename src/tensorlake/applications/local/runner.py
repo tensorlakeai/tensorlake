@@ -485,12 +485,6 @@ class LocalRunner:
     ) -> None:
         self._handle_user_exception(error)
 
-        if not isinstance(error, FunctionError):
-            # A future failure is always reported to user as FunctionError.
-            error = create_function_error(
-                future_run.local_future.user_future.awaitable, cause=str(error)
-            )
-
         self._handle_future_run_final_output(
             future_run=future_run,
             blob=None,
