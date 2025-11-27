@@ -29,6 +29,9 @@ def deploy_applications(
                                Should be set to True when called from CLI, False when called programmatically from test code
                                because applications in test code are already loaded into registry.
     `api_client` is an optional APIClient to use for deployment. If not supplied, a new client will be created from environment.
+
+    Raises SDKUsageError if the APIClient configuration is not valid for the operation.
+    Raises TensorlakeError on other errors.
     """
     # Work with absolute paths to make sure that the path comparisons work correctly.
     applications_file_path: str = os.path.abspath(applications_file_path)

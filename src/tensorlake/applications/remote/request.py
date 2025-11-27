@@ -5,7 +5,7 @@ from ..function.type_hints import deserialize_type_hints
 from ..function.user_data_serializer import deserialize_value
 from ..interface import DeserializationError, Request, RequestFailed
 from ..metadata import ValueMetadata
-from .api_client import APIClient
+from .api_client import APIClient, RequestOutput
 from .manifests.application import ApplicationManifest
 
 
@@ -27,16 +27,11 @@ class RemoteRequest(Request):
         return self._request_id
 
     def output(self) -> Any:
-        try:
-            self._client.wait_on_request_completion(
-                application_name=self._application_name, request_id=self._request_id
-            )
-        except Exception as e:
-            raise RequestFailed(str(e))
+        self._client.wait_on_request_completion(
+            application_name=self._application_name, request_id=self._request_id
+        )
 
-        serialized_output: bytes
-        output_content_type: str
-        serialized_output, output_content_type = self._client.request_output(
+        request_output: RequestOutput = self._client.request_output(
             application_name=self._application_name,
             request_id=self._request_id,
         )
@@ -69,12 +64,12 @@ class RemoteRequest(Request):
         for type_hint in return_type_hints:
             try:
                 return deserialize_value(
-                    serialized_value=serialized_output,
+                    serialized_value=request_output.serialized_value,
                     metadata=ValueMetadata(
                         id="fake_id",
                         cls=type_hint,
                         serializer_name=self._application_manifest.entrypoint.output_serializer,
-                        content_type=output_content_type,
+                        content_type=request_output.content_type,
                     ),
                 )
             except DeserializationError as e:
