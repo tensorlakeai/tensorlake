@@ -82,9 +82,13 @@ class FileUploader:
                 },
                 files=files,
             )
-            response.raise_for_status()
+
+            if response.status_code >= 400:
+                print(f"Error uploading file: {response.text}")
+                raise RuntimeError(f"Error uploading file: {response.text}")
+
             resp = response.json()
-            return resp.get("id")
+            return resp.get("file_id")
 
     async def upload_file_async(self, path: Union[str, Path]) -> str:
         """
@@ -120,7 +124,7 @@ class FileUploader:
                 print(e.response.text)
                 raise e
             resp = response.json()
-            return resp.get("id")
+            return resp.get("file_id")
 
     def _headers(self):
         return {
