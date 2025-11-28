@@ -82,11 +82,13 @@ class OcrPipelineProvider(str, Enum):
     Tensorlake01: It's fast but could have lower accuracy on complex tables. It's good for legal documents with footnotes.
     Tensorlake02: It's slower but could have higher accuracy on complex tables. It's good for financial documents with merged cells.
     Tensorlake03: A compact model that we deliver to on-premise users. It takes about 2 minutes to startup on Tensorlake's Cloud because it's meant for testing for users who are eventually going to deploy this model on dedicated hardware in their own datacenter.
+    Gemini: Call Google Gemini 3 API for OCR processing
     """
 
     TENSORLAKE01 = "model01"
     TENSORLAKE02 = "model02"
     TENSORLAKE03 = "model03"
+    GEMINI = "gemini"
 
 
 class ParseStatus(str, Enum):
