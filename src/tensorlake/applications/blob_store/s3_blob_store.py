@@ -2,10 +2,9 @@ from typing import List
 
 import httpx
 
-from tensorlake.applications import InternalError
+from tensorlake.applications.interface.exceptions import InternalError
+from tensorlake.applications.internal_logger import InternalLogger
 from tensorlake.utils.retries import exponential_backoff
-
-from ..logger import FunctionExecutorLogger
 
 # Customers can upload and download large files, allow up to 1 hour per S3 operation.
 _S3_OPERATION_TIMEOUT_SEC = 1 * 60 * 60  # 1 hour
@@ -35,7 +34,7 @@ class S3BLOBStore:
         uri: str,
         offset: int,
         destination: memoryview,
-        logger: FunctionExecutorLogger,
+        logger: InternalLogger,
     ) -> bytes:
         """Reads binary data stored in S3 object at the supplied URI and offset into the destination memoryview.
 
@@ -57,10 +56,10 @@ class S3BLOBStore:
                     # because we're in streaming mode.
                     e.response.read()
                     response = e.response.text
-            except Exception as e:
+            except Exception as extract_response_exception:
                 logger.error(
                     "failed to extract status code and response from failed S3 get response",
-                    exc_info=e,
+                    exc_info=extract_response_exception,
                 )
 
             # The URI can be presigned, it should not be logged as it provides access to customer data.
@@ -105,10 +104,23 @@ class S3BLOBStore:
         except httpx.HTTPStatusError as e:
             # The URI can be presigned, it should not be logged as it provides access to customer data.
             # Response text doesn't contain the URI, so it can be logged.
+            status_code: str = "None"
+            response: str = "None"
+            try:
+                status_code = e.response.status_code
+                # .read() is required before accessing .text
+                # because we're in streaming mode.
+                e.response.read()
+                response = e.response.text
+            except Exception as extract_response_exception:
+                logger.error(
+                    "failed to extract status code and response from failed S3 get response",
+                    exc_info=extract_response_exception,
+                )
             logger.error(
                 "failed to get S3 object",
-                status_code=e.response.status_code,
-                response=e.response.text,
+                status_code=status_code,
+                response=response,
                 offset=offset,
                 size=len(destination),
             )
@@ -129,7 +141,7 @@ class S3BLOBStore:
         self,
         uri: str,
         source: List[memoryview],
-        logger: FunctionExecutorLogger,
+        logger: InternalLogger,
     ) -> str:
         """Stores the supplied memoryviews in a S3 object at the supplied URI.
 
@@ -152,10 +164,10 @@ class S3BLOBStore:
                 if isinstance(e, httpx.HTTPStatusError):
                     status_code = e.response.status_code
                     response = e.response.text
-            except Exception as e:
+            except Exception as extract_response_exception:
                 logger.error(
                     "failed to extract status code and response from failed S3 put response",
-                    exc_info=e,
+                    exc_info=extract_response_exception,
                 )
 
             logger.error(

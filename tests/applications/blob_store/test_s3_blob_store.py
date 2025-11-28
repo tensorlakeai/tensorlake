@@ -5,8 +5,8 @@ from datetime import datetime
 from typing import List
 
 from tensorlake.applications import InternalError
-from tensorlake.function_executor.blob_store.s3_blob_store import S3BLOBStore
-from tensorlake.function_executor.logger import FunctionExecutorLogger
+from tensorlake.applications.blob_store.s3_blob_store import S3BLOBStore
+from tensorlake.applications.internal_logger import InternalLogger
 from tensorlake.vendor.nanoid import generate as nanoid_generate
 
 # Please delete the bucket after running the test.
@@ -21,7 +21,7 @@ class TestS3BLOBStore(unittest.TestCase):
         import boto3  # needs to be installed into the environment manually
 
         cls.s3_blob_store = S3BLOBStore(io_workers_count=5)
-        cls.logger = FunctionExecutorLogger(context={}, log_file=sys.stdout)
+        cls.logger = InternalLogger.get_logger()
         cls.s3 = boto3.client("s3")
 
         existing_buckets: List[str] = [

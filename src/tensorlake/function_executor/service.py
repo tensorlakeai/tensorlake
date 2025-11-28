@@ -16,7 +16,10 @@ from tensorlake.applications import (
     RequestFailed,
     SDKUsageError,
 )
+from tensorlake.applications.blob_store import BLOBStore
 from tensorlake.applications.function.function_call import create_self_instance
+from tensorlake.applications.internal_logger import InternalLogger
+from tensorlake.applications.multiprocessing import setup_multiprocessing
 from tensorlake.applications.registry import get_function, get_functions, has_function
 from tensorlake.applications.remote.code.zip import (
     CODE_ZIP_MANIFEST_FILE_NAME,
@@ -30,10 +33,8 @@ from tensorlake.applications.runtime_hooks import (
 
 from .allocation_runner.allocation_runner import AllocationRunner
 from .allocation_runner.contextvars import get_allocation_id_context_variable
-from .blob_store.blob_store import BLOBStore
 from .health_check import HealthCheckHandler
 from .info import info_response_kv_args
-from .logger import FunctionExecutorLogger
 from .message_validators import InitializeRequestValidator, validate_new_allocation
 from .proto.function_executor_pb2 import (
     Allocation,
@@ -71,9 +72,9 @@ class _AllocationInfo:
 
 
 class Service(FunctionExecutorServicer):
-    def __init__(self, logger: FunctionExecutorLogger):
+    def __init__(self, logger: InternalLogger):
         # All the fields are set during the initialization call.
-        self._logger: FunctionExecutorLogger = logger.bind(
+        self._logger: InternalLogger = logger.bind(
             module=__name__, **info_response_kv_args()
         )
         self._function_ref: FunctionRef | None = None
@@ -108,6 +109,7 @@ class Service(FunctionExecutorServicer):
         )
         set_run_futures_hook(self._run_futures_runtime_hook)
         set_wait_futures_hook(self._wait_futures_runtime_hook)
+        setup_multiprocessing()
 
         app_modules_zip_fd, app_modules_zip_path = tempfile.mkstemp(suffix=".zip")
         with open(app_modules_zip_fd, "wb") as graph_modules_zip_file:
@@ -172,9 +174,7 @@ class Service(FunctionExecutorServicer):
             )
 
         available_cpu_count: int = int(self._function._function_config.cpu)
-        self._blob_store = BLOBStore(
-            available_cpu_count=available_cpu_count, logger=self._logger
-        )
+        self._blob_store = BLOBStore(available_cpu_count=available_cpu_count)
         # Only pass health checks if FE was initialized successfully.
         self._health_check_handler = HealthCheckHandler(self._logger)
         self._logger.info(
@@ -226,7 +226,7 @@ class Service(FunctionExecutorServicer):
                 f"Allocation {allocation.allocation_id} already exists",
             )
 
-        allocation_logger: FunctionExecutorLogger = self._logger.bind(
+        allocation_logger: InternalLogger = self._logger.bind(
             request_id=allocation.request_id,
             fn_call_id=allocation.function_call_id,
             allocation_id=allocation.allocation_id,

@@ -5,7 +5,7 @@ import unittest
 from datetime import datetime, timezone
 
 from tensorlake.applications import SerializationError
-from tensorlake.function_executor.cloud_events import (
+from tensorlake.applications.cloud_events import (
     new_cloud_event,
     print_cloud_event,
 )
