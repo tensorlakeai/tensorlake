@@ -10,7 +10,7 @@ from click.testing import CliRunner
 from test_helpers import get_base_url
 
 import tensorlake.cli._configuration as config_module
-from tensorlake.applications.remote.api_client import ApplicationListItem
+from tensorlake.applications.remote.api_client import Application
 from tensorlake.cli import cli
 from tensorlake.cli._common import Context
 
@@ -67,7 +67,7 @@ class TestApplicationsList(unittest.TestCase):
         runner = CliRunner()
 
         applications = [
-            ApplicationListItem(
+            Application(
                 name="app1",
                 description="First app",
                 tags={},
@@ -75,7 +75,7 @@ class TestApplicationsList(unittest.TestCase):
                 tombstoned=False,
                 created_at=1697539200000,  # 2023-10-17 12:00:00 UTC in milliseconds
             ),
-            ApplicationListItem(
+            Application(
                 name="app2",
                 description="Second app",
                 tags={},
@@ -103,7 +103,7 @@ class TestApplicationsList(unittest.TestCase):
         runner = CliRunner()
 
         applications = [
-            ApplicationListItem(
+            Application(
                 name="single_app",
                 description="Only app",
                 tags={},
@@ -142,7 +142,7 @@ class TestApplicationsList(unittest.TestCase):
         runner = CliRunner()
 
         applications = [
-            ApplicationListItem(
+            Application(
                 name="active_app",
                 description="Active",
                 tags={},
@@ -150,7 +150,7 @@ class TestApplicationsList(unittest.TestCase):
                 tombstoned=False,
                 created_at=1697539200000,
             ),
-            ApplicationListItem(
+            Application(
                 name="deleted_app",
                 description="Deleted",
                 tags={},
@@ -176,7 +176,7 @@ class TestApplicationsList(unittest.TestCase):
         runner = CliRunner()
 
         applications = [
-            ApplicationListItem(
+            Application(
                 name="test_app",
                 description="Test",
                 tags={},
@@ -204,7 +204,7 @@ class TestApplicationsList(unittest.TestCase):
         runner = CliRunner()
 
         applications = [
-            ApplicationListItem(
+            Application(
                 name="test_app",
                 description="Test",
                 tags={},
@@ -232,7 +232,7 @@ class TestApplicationsList(unittest.TestCase):
         runner = CliRunner()
 
         applications = [
-            ApplicationListItem(
+            Application(
                 name="test_app",
                 description="Test",
                 tags={},
@@ -256,7 +256,7 @@ class TestApplicationsList(unittest.TestCase):
         runner = CliRunner()
 
         applications = [
-            ApplicationListItem(
+            Application(
                 name="test_app",
                 description="",
                 tags={},
@@ -280,7 +280,7 @@ class TestApplicationsList(unittest.TestCase):
         runner = CliRunner()
 
         applications = [
-            ApplicationListItem(
+            Application(
                 name="test_app",
                 description="Test",
                 tags={},

@@ -4,6 +4,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+from tensorlake.applications import SDKUsageError, TensorlakeError
 from tensorlake.cli._common import Context, require_auth_and_project
 
 
@@ -13,7 +14,12 @@ def ls(ctx: Context):
     """
     List all applications in the current project.
     """
-    applications = ctx.api_client.applications()
+    try:
+        applications = ctx.api_client.applications()
+    except SDKUsageError as e:
+        raise click.UsageError(str(e)) from None
+    except TensorlakeError as e:
+        raise click.ClickException(f"Failed to fetch applications: {e}") from None
 
     # Filter out tombstoned applications
     active_applications = [app for app in applications if not app.tombstoned]

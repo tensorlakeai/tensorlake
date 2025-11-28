@@ -13,9 +13,6 @@ from tensorlake.cli._configuration import (
     load_credentials,
     load_local_config,
 )
-from tensorlake.utils.http_client import (
-    EventHook,
-)
 
 try:
     VERSION = importlib.metadata.version("tensorlake")
@@ -116,7 +113,6 @@ class Context:
                 organization_id=org_id,
                 project_id=proj_id,
                 namespace=self.namespace,
-                event_hooks=HTTP_EVENT_HOOKS,
             )
 
         return self._api_client

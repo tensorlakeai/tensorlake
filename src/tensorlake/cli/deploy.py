@@ -5,7 +5,7 @@ from typing import Dict, List
 
 import click
 
-from tensorlake.applications import Function, Image
+from tensorlake.applications import Function, Image, SDKUsageError, TensorlakeError
 from tensorlake.applications.applications import filter_applications
 from tensorlake.applications.image import ImageInformation, image_infos
 from tensorlake.applications.interface.function import (
@@ -182,8 +182,10 @@ curl {auth.api_url}/applications/{func_name} \\
 """,
                 )
         return
-    except click.UsageError as error:
-        raise error
+    except SDKUsageError as e:
+        raise click.UsageError(str(e)) from None
+    except TensorlakeError as e:
+        raise click.ClickException(f"Failed to deploy applications: {e}") from e
     except Exception as e:
         click.echo(
             f"Applications could not be deployed, please check the error message: {e}",

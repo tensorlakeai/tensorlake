@@ -3,9 +3,6 @@ from typing import Any, Callable
 import httpx
 import yaml
 
-TRANSIENT_HTTPX_ERRORS = (httpx.NetworkError, httpx.RemoteProtocolError)
-
-
 EventHook = Callable[..., Any]
 
 

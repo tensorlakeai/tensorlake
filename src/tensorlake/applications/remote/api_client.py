@@ -1,13 +1,12 @@
-import json
 import os
-from typing import Iterator
+from typing import Any, Callable
 
 import httpx
-from httpx_sse import ServerSentEvent, connect_sse
+from httpx_sse import EventSource, ServerSentEvent, connect_sse
 from pydantic import BaseModel
-from rich import print  # TODO: Migrate to use click.echo
 
 from tensorlake.applications.interface.exceptions import (
+    InternalError,
     RemoteAPIError,
 )
 from tensorlake.applications.interface.exceptions import (
@@ -16,17 +15,26 @@ from tensorlake.applications.interface.exceptions import (
 from tensorlake.applications.interface.exceptions import (
     RequestFailed,
     RequestNotFinished,
+    SDKUsageError,
+    TensorlakeError,
 )
 from tensorlake.applications.remote.manifests.application import ApplicationManifest
 from tensorlake.utils.http_client import (
-    TRANSIENT_HTTPX_ERRORS,
     EventHook,
 )
 from tensorlake.utils.retries import exponential_backoff
 
+# Timeout used by default for HTTP requests that don't run customer code
+# or download large amounts of data.
+_DEFAULT_HTTP_REQUEST_TIMEOUT_SEC = 5.0
 
-# Model for applications returned by the list endpoint
-class ApplicationListItem(BaseModel):
+_API_NAMESPACE_FROM_ENV: str | None = os.getenv("INDEXIFY_NAMESPACE", "default")
+_API_URL_FROM_ENV: str = os.getenv("TENSORLAKE_API_URL", "https://api.tensorlake.ai")
+_API_KEY_ENVIRONMENT_VARIABLE_NAME = "TENSORLAKE_API_KEY"
+_API_KEY_FROM_ENV: str | None = os.getenv(_API_KEY_ENVIRONMENT_VARIABLE_NAME)
+
+
+class Application(BaseModel):
     name: str
     description: str
     tags: dict[str, str]
@@ -35,47 +43,9 @@ class ApplicationListItem(BaseModel):
     created_at: int | None = None
 
 
-_API_NAMESPACE_FROM_ENV: str = os.getenv("INDEXIFY_NAMESPACE", "default")
-_API_URL_FROM_ENV: str = os.getenv("TENSORLAKE_API_URL", "https://api.tensorlake.ai")
-_API_KEY_FROM_ENV: str = os.getenv("TENSORLAKE_API_KEY")
-
-
-class DataPayload(BaseModel):
-    id: str
-    path: str
-    size: int
-    sha256_hash: str
-
-
 class RequestError(BaseModel):
     function_name: str
     message: str
-
-
-class Allocation(BaseModel):
-    id: str
-    function_name: str
-    executor_id: str
-    function_executor_id: str
-    created_at: int
-    # dict when failure outcome
-    # str when success outcome
-    # None when not finished
-    outcome: dict | str | None = None
-    attempt_number: int
-    execution_duration_ms: int | None = None
-
-
-class FunctionRun(BaseModel):
-    id: str
-    name: str
-    application: str
-    namespace: str
-    status: str
-    outcome: str
-    created_at: int
-    application_version: str
-    allocations: list[Allocation]
 
 
 class RequestMetadata(BaseModel):
@@ -87,51 +57,79 @@ class RequestMetadata(BaseModel):
     application_version: str
     created_at: int
     request_error: RequestError | None = None
-    function_runs: list[FunctionRun]
 
 
-class RequestCreatedEvent(BaseModel):
-    request_id: str
+class RequestOutput(BaseModel):
+    serialized_value: bytes
+    content_type: str
 
 
-class RequestFinishedEvent(BaseModel):
-    request_id: str
-
-
-class RequestProgressPayload(BaseModel):
-    request_id: str
-    function_name: str
-    function_run_id: str
-    allocation_id: str | None = None
-    executor_id: str | None = None
-    outcome: str | None = None
-
-
-class WorkflowEvent(BaseModel):
-    event_name: str
-    stdout: str | None = None
-    stderr: str | None = None
-    payload: RequestCreatedEvent | RequestProgressPayload | RequestFinishedEvent
-
-    def __str__(self) -> str:
-        stdout = (
-            ""
-            if self.stdout is None
-            else f"[bold red]stdout[/bold red]: \n {self.stdout}\n"
-        )
-        stderr = (
-            ""
-            if self.stderr is None
-            else f"[bold red]stderr[/bold red]: \n {self.stderr}\n"
-        )
-
-        return f"{stdout}{stderr}[bold green]{self.event_name}[/bold green]: {self.payload}"
-
-
-def log_retries(e: BaseException, sleep_time: float, retries: int):
+def _print_retry(e: BaseException, sleep_time: float, retries: int):
+    # Print each retry to keep user's UX interactive.
     print(
-        f"Retrying after {sleep_time:.2f} seconds. Retry count: {retries}. Retryable exception: {e.__repr__()}"
+        f"Retrying remote API request after {sleep_time:.2f} seconds. Retry count: {retries}. Retryable exception: {e}",
     )
+
+
+# We use _is_retriable_exception to decide which exceptions are retriable.
+_RETRIABLE_EXCEPTIONS = (Exception,)
+
+
+def _is_retriable_exception(e: Exception) -> bool:
+    if isinstance(e, RemoteAPIError):
+        # 503 Service Unavailable is returned by reverse proxies when the backend server is not available.
+        # i.e. when a single replica Server is getting deployed. We also convert all transient httpx exceptions
+        # into it.
+        if e.status_code == 503:
+            return True
+        # Server timeout or client side timeout.
+        if e.status_code == 504:
+            return True
+
+    return False
+
+
+def _raise_as_tensorlake_error(e: Exception) -> None:
+    """Converts various exceptions into TensorlakeError subclasses.
+
+    Re-raises the original TensorlakeError without modifications.
+    Raises SDKUsageError if the provided API credentials are not valid or authorized.
+    Raises RemoteAPIError for HTTP errors.
+    Raises TensorlakeError on other errors.
+    """
+    if isinstance(e, TensorlakeError):
+        raise  # Propagate original TensorlakeError without modifications.
+
+    # Convert all transient httpx exceptions into RemoteAPIError with 503 status code
+    # which indicates Service Temporarily Unavailable. Similar meaning.
+    if isinstance(e, (httpx.NetworkError, httpx.RemoteProtocolError)):
+        raise RemoteAPIError(
+            status_code=503, message=f"Transient HTTP error: {str(e)}"
+        ) from e
+
+    # Convert client side timeout into HTTP timeout error.
+    if isinstance(e, httpx.TimeoutException):
+        raise RemoteAPIError(
+            status_code=504, message=f"Request timed out: {str(e)}"
+        ) from e
+
+    if isinstance(e, httpx.HTTPStatusError):
+        if e.response.status_code == 401:
+            raise SDKUsageError(
+                "The provided Tensorlake API credentials are not valid. "
+                f"Please check your `tensorlake login` status or '{_API_KEY_ENVIRONMENT_VARIABLE_NAME}' environment variable."
+            ) from None
+        elif e.response.status_code == 403:
+            raise SDKUsageError(
+                "The provided Tensorlake API credentials are not authorized for the requested operation."
+            ) from None
+        else:
+            message: str = f"HTTP request failed: {e.response.text}"
+            raise RemoteAPIError(
+                status_code=e.response.status_code, message=message
+            ) from e
+
+    raise InternalError(str(e)) from e
 
 
 class APIClient:
@@ -141,99 +139,51 @@ class APIClient:
         api_key: str | None = _API_KEY_FROM_ENV,
         organization_id: str | None = None,
         project_id: str | None = None,
-        namespace: str = _API_NAMESPACE_FROM_ENV,
-        event_hooks: dict[str, list[EventHook]] | None = None,
+        namespace: str | None = _API_NAMESPACE_FROM_ENV,
     ):
-        self._client: httpx.Client = httpx.Client(event_hooks=event_hooks)
-
-        self._namespace: str = namespace
+        self._client: httpx.Client = httpx.Client(
+            timeout=_DEFAULT_HTTP_REQUEST_TIMEOUT_SEC
+        )
+        self._namespace: str | None = namespace
         self._api_url: str = api_url
         self._api_key: str | None = api_key
         self._organization_id: str | None = organization_id
         self._project_id: str | None = project_id
 
     def __enter__(self) -> "APIClient":
+        """Context manager entry point."""
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        """Context manager exit point where resources are freed."""
         self.close()
 
     def close(self):
+        """Frees resources held by the API client."""
         self._client.close()
-
-    def _request(self, method: str, **kwargs) -> httpx.Response:
-        """Sends an HTTP request and returns the response.
-
-        Raises RemoteAPIError on request failure.
-        """
-        try:
-            # No request timeouts for now.
-            # This is only correct for when we're waiting for application request completion.
-            request = self._client.build_request(method, timeout=None, **kwargs)
-            response = self._client.send(request)
-            status_code = response.status_code
-            if status_code >= 400:
-                raise RemoteAPIError(status_code=status_code, message=response.text)
-        except httpx.RequestError as e:
-            message = f"Make sure the server is running and accessible at {self._api_url}, {e}"
-            raise RemoteAPIError(status_code=503, message=message)
-        return response
-
-    def _add_api_key(self, kwargs):
-        if self._api_key:
-            if "headers" not in kwargs:
-                kwargs["headers"] = {}
-            kwargs["headers"]["Authorization"] = f"Bearer {self._api_key}"
-
-        # Add X-Forwarded-Organization-Id and X-Forwarded-Project-Id headers when org/project IDs are provided
-        # These are needed when using PAT (API keys get org/project via introspection)
-        if "headers" not in kwargs:
-            kwargs["headers"] = {}
-        if self._organization_id:
-            kwargs["headers"]["X-Forwarded-Organization-Id"] = self._organization_id
-        if self._project_id:
-            kwargs["headers"]["X-Forwarded-Project-Id"] = self._project_id
-
-    @exponential_backoff(
-        max_retries=5,
-        retryable_exceptions=(RemoteAPIError,),
-        is_retryable=lambda e: isinstance(e, RemoteAPIError) and e.status_code == 503,
-        on_retry=log_retries,
-    )
-    def _get(self, endpoint: str, **kwargs) -> httpx.Response:
-        self._add_api_key(kwargs)
-        return self._request("GET", url=f"{self._api_url}/{endpoint}", **kwargs)
-
-    def _post(self, endpoint: str, **kwargs) -> httpx.Response:
-        self._add_api_key(kwargs)
-        return self._request("POST", url=f"{self._api_url}/{endpoint}", **kwargs)
-
-    def _put(self, endpoint: str, **kwargs) -> httpx.Response:
-        self._add_api_key(kwargs)
-        return self._request("PUT", url=f"{self._api_url}/{endpoint}", **kwargs)
-
-    def _delete(self, endpoint: str, **kwargs) -> httpx.Response:
-        self._add_api_key(kwargs)
-        return self._request("DELETE", url=f"{self._api_url}/{endpoint}", **kwargs)
 
     def upsert_application(
         self,
         manifest_json: str,
         code_zip: bytes,
         upgrade_running_requests: bool,
-    ):
+    ) -> None:
         """Creates or updates an application in the namespace.
 
-        Raises RemoteAPIError on failure.
+        Raises SDKUsageError if the client configuration is not valid for the operation.
+        Raises TensorlakeError on other errors.
         """
-        self._post(
-            f"v1/namespaces/{self._namespace}/applications",
-            files={"code": code_zip},
-            data={
-                "code_content_type": "application/zip",
-                "application": manifest_json,
-                "upgrade_requests_to_latest_code": upgrade_running_requests,
-            },
+        self._run_request(
+            self._client.build_request(
+                "POST",
+                url=self._endpoint_url(f"v1/namespaces/{self._namespace}/applications"),
+                files={"code": code_zip},
+                data={
+                    "code_content_type": "application/zip",
+                    "application": manifest_json,
+                    "upgrade_requests_to_latest_code": upgrade_running_requests,
+                },
+            )
         )
 
     def delete_application(
@@ -243,34 +193,59 @@ class APIClient:
         """
         Deletes an application and all of its requests from the namespace.
 
-        Raises RemoteAPIError on failure.
+        Raises SDKUsageError if the client configuration is not valid for the operation.
+        Raises TensorlakeError on other errors.
         """
-        self._delete(
-            f"v1/namespaces/{self._namespace}/applications/{application_name}",
+        self._run_request(
+            self._client.build_request(
+                "DELETE",
+                url=self._endpoint_url(
+                    f"v1/namespaces/{self._namespace}/applications/{application_name}"
+                ),
+            )
         )
 
-    def applications(self) -> list[ApplicationListItem]:
+    def applications(self) -> list[Application]:
         """Returns list of all existing applications.
 
-        Raises RemoteAPIError on failure.
+        Raises SDKUsageError if the client configuration is not valid for the operation.
+        Raises TensorlakeError on other errors.
         """
-        return [
-            ApplicationListItem(**app)
-            for app in self._get(
-                f"v1/namespaces/{self._namespace}/applications"
-            ).json()["applications"]
-        ]
+        applications_response: httpx.Response = self._run_request(
+            self._client.build_request(
+                "GET",
+                url=self._endpoint_url(f"v1/namespaces/{self._namespace}/applications"),
+            )
+        )
+        try:
+            application_jsons: list[dict] = applications_response.json()["applications"]
+
+            return [Application.model_validate(app) for app in application_jsons]
+        except Exception as e:
+            raise InternalError(
+                f"failed to parse applications list response: {applications_response.text}"
+            ) from e
 
     def application(self, application_name: str) -> ApplicationManifest:
         """Returns manifest json dict for a specific application.
 
-        Raises RemoteAPIError on failure.
+        Raises SDKUsageError if the client configuration is not valid for the operation.
+        Raises TensorlakeError on other errors.
         """
-        return ApplicationManifest(
-            **self._get(
-                f"v1/namespaces/{self._namespace}/applications/{application_name}"
-            ).json()
+        application_response: httpx.Response = self._run_request(
+            self._client.build_request(
+                "GET",
+                url=self._endpoint_url(
+                    f"v1/namespaces/{self._namespace}/applications/{application_name}"
+                ),
+            )
         )
+        try:
+            return ApplicationManifest.model_validate_json(application_response.text)
+        except Exception as e:
+            raise InternalError(
+                f"failed to parse application response: {application_response.text}"
+            ) from e
 
     def run_request(
         self,
@@ -280,120 +255,186 @@ class APIClient:
     ) -> str:
         """Runs a request for a specific application with given input.
 
-        Raises RemoteAPIError on failure.
+        Returns the request ID.
+        Raises SDKUsageError if the client configuration is not valid for the operation.
+        Raises TensorlakeError on other errors.
         """
-        kwargs = {
-            "headers": {
-                "Content-Type": input_content_type,
-                "Accept": "application/json",
-            },
-            "content": input,
-        }
-        response = self._post(
-            f"v1/namespaces/{self._namespace}/applications/{application_name}",
-            **kwargs,
+        response: httpx.Response = self._run_request(
+            self._client.build_request(
+                "POST",
+                url=self._endpoint_url(
+                    f"v1/namespaces/{self._namespace}/applications/{application_name}"
+                ),
+                headers={
+                    "Content-Type": input_content_type,
+                    "Accept": "application/json",
+                },
+                content=input,
+            )
         )
-        return response.json()["request_id"]
 
-    def _parse_request_events_from_sse_event(
-        self, sse: ServerSentEvent
-    ) -> Iterator[WorkflowEvent]:
-        obj = json.loads(sse.data)
+        try:
+            return response.json()["request_id"]
+        except Exception as e:
+            raise InternalError(
+                f"failed to parse run request response: {response.text}"
+            ) from e
 
-        for event_name, event_data in obj.items():
-            # Handle bare ID events
-            if event_name == "id":
-                yield WorkflowEvent(
-                    event_name="RequestCreated",
-                    payload=RequestCreatedEvent(request_id=event_data),
-                )
-                continue
-
-            # Handle RequestFinished events
-            if event_name == "RequestFinished":
-                yield WorkflowEvent(
-                    event_name=event_name,
-                    payload=RequestFinishedEvent(request_id=event_data["request_id"]),
-                )
-                continue
-
-            # Handle all other event types
-            event_payload = RequestProgressPayload.model_validate(event_data)
-            event = WorkflowEvent(event_name=event_name, payload=event_payload)
-
-            yield event
-
-    @exponential_backoff(
-        max_retries=10,
-        retryable_exceptions=TRANSIENT_HTTPX_ERRORS,
-        on_retry=log_retries,
-    )
     def wait_on_request_completion(
         self,
         application_name: str,
         request_id: str,
-        **kwargs,
     ):
         """Waits for a request to complete by connecting to its progress SSE stream.
 
-        Raises Exception on failure.
+        Raises SDKUsageError if the client configuration is not valid for the operation.
+        Raises TensorlakeError on other errors.
         """
-        self._add_api_key(kwargs)
-        with connect_sse(
-            self._client,
-            "GET",
-            f"{self._api_url}/v1/namespaces/{self._namespace}/applications/{application_name}/requests/{request_id}/progress",
-            **kwargs,
-        ) as event_source:
-            if not event_source.response.is_success:
-                resp = event_source.response.read().decode("utf-8")
-                raise Exception(f"failed to wait for request: {resp}")
-            for sse in event_source.iter_sse():
-                events = self._parse_request_events_from_sse_event(sse)
-                for event in events:
-                    if event.event_name == "RequestFinished":
-                        break
 
-    def _download_request_output(
-        self,
-        application_name: str,
-        request_id: str,
-    ) -> tuple[bytes, str]:
-        """Downloads the output of a completed request.
+        def event_processor(sse: ServerSentEvent) -> None | bool:
+            event: dict[str, Any] = sse.json()
+            # Finish processing when we see RequestFinished event.
+            if "RequestFinished" in event:
+                return True
 
-        Raises RemoteAPIError on failure.
-        """
-        response = self._get(
-            f"v1/namespaces/{self._namespace}/applications/{application_name}/requests/{request_id}/output",
+        self._run_sse_stream(
+            method="GET",
+            url=self._endpoint_url(
+                f"v1/namespaces/{self._namespace}/applications/{application_name}/requests/{request_id}/progress"
+            ),
+            timeout=None,  # No timeout as we wait for customer code completion
+            event_processor=event_processor,
         )
-        return response.content, response.headers.get("Content-Type", "")
 
     def request_output(
         self,
         application_name: str,
         request_id: str,
-    ) -> tuple[bytes, str]:
+    ) -> RequestOutput:
         """Gets the output of a completed request.
 
         Raises RequestNotFinished if the request is not yet finished.
         Raises RequestFailed if the request has failed.
         Raises RemoteAPIError if failed to get request output from remote API.
+        Raises SDKUsageError if the client configuration is not valid for the operation.
+        Raises TensorlakeError on other errors.
         """
-        response = self._get(
-            f"v1/namespaces/{self._namespace}/applications/{application_name}/requests/{request_id}",
+        request_metadata_response: httpx.Response = self._run_request(
+            self._client.build_request(
+                "GET",
+                url=self._endpoint_url(
+                    f"v1/namespaces/{self._namespace}/applications/{application_name}/requests/{request_id}"
+                ),
+            )
         )
-        request = RequestMetadata(**response.json())
-        if request.outcome is None:
+
+        try:
+            request_metadata: RequestMetadata = RequestMetadata.model_validate_json(
+                request_metadata_response.text
+            )
+        except Exception as e:
+            raise InternalError(
+                f"failed to parse request metadata response: {request_metadata_response.text}"
+            ) from e
+
+        if request_metadata.outcome is None:
             raise RequestNotFinished()
 
-        if isinstance(request.outcome, dict):
-            if request.request_error is None:
-                raise RequestFailed(request.outcome["failure"])
+        if isinstance(request_metadata.outcome, dict):
+            if request_metadata.request_error is None:
+                raise RequestFailed(request_metadata.outcome["failure"])
             else:
-                raise RequestErrorException(request.request_error.message)
+                raise RequestErrorException(request_metadata.request_error.message)
 
-        # request.outcome is str at this point so the request is finished successfully.
-        return self._download_request_output(
-            application_name=application_name,
-            request_id=request_id,
+        # request.outcome is str at this point so the request is finished successfully and its output is available.
+        request_output_response: httpx.Response = self._run_request(
+            self._client.build_request(
+                "GET",
+                url=self._endpoint_url(
+                    f"v1/namespaces/{self._namespace}/applications/{application_name}/requests/{request_id}/output"
+                ),
+                timeout=None,  # No timeout as we download customer data of any size
+            )
         )
+        return RequestOutput(
+            serialized_value=request_output_response.content,
+            content_type=request_output_response.headers.get("Content-Type", ""),
+        )
+
+    @exponential_backoff(
+        max_retries=5,
+        retryable_exceptions=_RETRIABLE_EXCEPTIONS,
+        is_retryable=_is_retriable_exception,
+        on_retry=_print_retry,
+    )
+    def _run_request(self, request: httpx.Request) -> httpx.Response:
+        """Sends an HTTP request and returns the response.
+
+        Raises SDKUsageError if the client configuration is not valid for the operation.
+        Raises TensorlakeError on other errors.
+        """
+        self._add_auth_headers(request.headers)
+
+        try:
+            response: httpx.Response = self._client.send(request)
+            response.raise_for_status()
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+        return response
+
+    @exponential_backoff(
+        max_retries=10,  # Give extra retries for SSE streams because they have much higher change of getting disrupted due to transient errors
+        retryable_exceptions=_RETRIABLE_EXCEPTIONS,
+        is_retryable=_is_retriable_exception,
+        on_retry=_print_retry,
+    )
+    def _run_sse_stream(
+        self,
+        method: str,
+        url: str,
+        timeout: float | None,
+        event_processor: Callable[[ServerSentEvent], None | Any],
+    ) -> Any:
+        """Sends an HTTP request to connect to an SSE stream and calls the event processor for each event.
+
+        If the event processor returns non None value then the stream processing stops and the non None value is returned.
+        Raises SDKUsageError if the client configuration is not valid for the operation.
+        Raises TensorlakeError on other errors.
+        """
+        auth_headers: dict[str, str] = {}
+        self._add_auth_headers(auth_headers)
+
+        try:
+            with connect_sse(
+                self._client,
+                method=method,
+                url=url,
+                headers=auth_headers,
+                timeout=timeout,
+            ) as event_source:
+                event_source: EventSource
+                event_source.response.raise_for_status()
+                for sse in event_source.iter_sse():
+                    result: Any | None = event_processor(sse)
+                    if result is not None:
+                        return result
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def _add_auth_headers(self, headers: dict[str, str]) -> None:
+        """Adds authentication headers to the headers dict.
+
+        Doesn't raise any exceptions.
+        """
+        if self._api_key is not None:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        # Add X-Forwarded-Organization-Id and X-Forwarded-Project-Id headers when org/project IDs are provided
+        # These are needed when using PAT (API keys get org/project via introspection)
+        if self._organization_id is not None:
+            headers["X-Forwarded-Organization-Id"] = self._organization_id
+        if self._project_id is not None:
+            headers["X-Forwarded-Project-Id"] = self._project_id
+
+    def _endpoint_url(self, endpoint: str) -> str:
+        return f"{self._api_url}/{endpoint}"

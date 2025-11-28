@@ -57,7 +57,7 @@ class RemoteAPIError(TensorlakeError):
 
 
 class SDKUsageError(TensorlakeError):
-    """Raised when a Tensorlake Function uses Applications SDK incorrectly."""
+    """Raised when Applications SDK is used incorrectly."""
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
