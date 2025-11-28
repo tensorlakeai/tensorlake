@@ -1,3 +1,6 @@
+import multiprocessing as mp
+import queue as mt_queue
+import threading
 import unittest
 
 import parameterized
@@ -12,24 +15,84 @@ from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
 
 
+def update_progress_worker(ctx: RequestContext, values: tuple[int, int], q) -> None:
+    try:
+        ctx.progress.update(current=values[0], total=values[1])
+        q.put(None)
+    except Exception as e:
+        print(f"Exception in update_progress_worker: {e}")
+        q.put(e)
+
+
 @application()
 @function()
-def test_update_progress(values: tuple[int, int]) -> str:
+def func_update_progress(values: tuple[int, int]) -> str:
     ctx: RequestContext = RequestContext.get()
-    ctx.progress.update(current=values[0], total=values[1])
-    return "success"
+    q: mt_queue.SimpleQueue = mt_queue.SimpleQueue()
+    update_progress_worker(ctx, values, q)
+    return "success" if q.get() is None else "failure"
 
 
-class TestProgress(unittest.TestCase):
+class TestUseProgressFromFunction(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_update_progress(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
 
         request: Request = run_application(
-            test_update_progress, (10, 100), remote=is_remote
+            func_update_progress, (10, 100), remote=is_remote
         )
-        self.assertEqual("success", request.output())
+        self.assertEqual(request.output(), "success")
+
+
+@application()
+@function()
+def mt_update_progress(values: tuple[int, int]) -> str:
+    ctx: RequestContext = RequestContext.get()
+    q: mt_queue.SimpleQueue = mt_queue.SimpleQueue()
+    thread: threading.Thread = threading.Thread(
+        target=update_progress_worker, args=(ctx, values, q)
+    )
+    thread.start()
+    thread.join()
+    return "success" if q.get() is None else "failure"
+
+
+class TestUseProgressFromChildThread(unittest.TestCase):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_update_progress(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+
+        request: Request = run_application(
+            mt_update_progress, (10, 100), remote=is_remote
+        )
+        self.assertEqual(request.output(), "success")
+
+
+@application()
+@function()
+def mp_update_progress(values: tuple[int, int]) -> str:
+    ctx: RequestContext = RequestContext.get()
+    q: mp.Queue = mp.Queue()
+    process: mp.Process = mp.Process(
+        target=update_progress_worker, args=(ctx, values, q)
+    )
+    process.start()
+    process.join()
+    return "success" if q.get() is None else "failure"
+
+
+class TestUseProgressFromChildProcess(unittest.TestCase):
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_update_progress(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+
+        request: Request = run_application(
+            mp_update_progress, (10, 100), remote=is_remote
+        )
+        self.assertEqual(request.output(), "success")
 
 
 if __name__ == "__main__":

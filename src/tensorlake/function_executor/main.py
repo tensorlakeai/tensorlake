@@ -52,7 +52,7 @@ def main():
 
     # Set "spawn" method because grpc Server doesn't support forking. exec is required.
     # "spawn" is supported by all OSes: Windows, Linux, MacOS.
-    multiprocessing.set_start_method(method="spawn", force=True)
+    multiprocessing.set_start_method(method="spawn")
     Server(
         server_address=args.address,
         service=Service(logger),
