@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 import httpx
 from pydantic import ValidationError
 
-from .common import get_doc_ai_base_url_v1, get_doc_ai_base_url_v2
+from .common import get_doc_ai_base_url
 from .models import DocumentAIError, ErrorCode, ErrorResponse, MimeType, Region
 
 
@@ -26,27 +26,20 @@ class _BaseClient:
                 "API key is required. Set TENSORLAKE_API_KEY or pass api_key."
             )
 
-        doc_ai_v1 = get_doc_ai_base_url_v1(region=region, server_url=server_url)
-
-        self._client_v1 = httpx.Client(base_url=doc_ai_v1, timeout=None)
-        self._aclient_v1 = httpx.AsyncClient(base_url=doc_ai_v1, timeout=None)
-
-        doc_ai_v2 = get_doc_ai_base_url_v2(region=region, server_url=server_url)
-        self._client = httpx.Client(base_url=doc_ai_v2, timeout=None)
-        self._aclient = httpx.AsyncClient(base_url=doc_ai_v2, timeout=None)
+        doc_ai_url = get_doc_ai_base_url(region=region, server_url=server_url)
+        self._client = httpx.Client(base_url=doc_ai_url, timeout=None)
+        self._aclient = httpx.AsyncClient(base_url=doc_ai_url, timeout=None)
 
     def close(self):
         """
         Close the HTTP clients.
         """
-        self._client_v1.close()
         self._client.close()
 
     async def _aclose(self):
         """
         Close the asynchronous HTTP clients.
         """
-        await self._aclient_v1.aclose()
         await self._aclient.aclose()
 
     def __enter__(self):
@@ -82,11 +75,6 @@ class _BaseClient:
             "Connection": "close",
         }
 
-    def _request_v1(self, method: str, url: str, **kw: Any) -> httpx.Response:
-        resp = self._client_v1.request(method, url, headers=self._headers(), **kw)
-        resp.raise_for_status()
-        return resp
-
     def _request(self, method: str, url: str, **kw: Any) -> httpx.Response:
         resp = self._client.request(method, url, headers=self._headers(), **kw)
         if resp.is_success:
@@ -107,13 +95,6 @@ class _BaseClient:
             message=error_response.message,
             code=error_response.code,
         )
-
-    async def _arequest_v1(self, method: str, url: str, **kw: Any) -> httpx.Response:
-        resp = await self._aclient_v1.request(
-            method, url, headers=self._headers(), **kw
-        )
-        resp.raise_for_status()
-        return resp
 
     async def _arequest(self, method: str, url: str, **kw: Any) -> httpx.Response:
         resp = await self._aclient.request(method, url, headers=self._headers(), **kw)

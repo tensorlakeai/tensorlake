@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tensorlake"
-version = "0.2.82"
+version = "0.2.83"
 description = "Tensorlake SDK for Document Ingestion API and Serverless Applications"
 readme = "README.md"
 authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
@@ -19,7 +19,6 @@ pyyaml = "^6.0.3"
 click = "8.3.1"
 retry = "^0.9.2"
 aiofiles = "^24.1.0"
-tqdm = "^4.67.1"
 tomlkit = "^0.13.3"
 
 # Required only by Function Executor

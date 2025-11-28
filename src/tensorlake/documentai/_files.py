@@ -26,6 +26,9 @@ class _FilesMixin(_BaseClient):
         """
         Initialize the FilesMixin with an API key and optional server URL.
         """
+        if region is None:
+            region = Region.US
+
         super().__init__(api_key=api_key, server_url=server_url, region=region)
         self._uploader = FileUploader(
             api_key=self.api_key, server_url=server_url, region=region
@@ -57,12 +60,12 @@ class _FilesMixin(_BaseClient):
                 "direction": direction.value if direction else None,
                 "limit": limit,
                 "filename": filename,
-                "createdAfter": created_after,
-                "createdBefore": created_before,
+                "created_after": created_after,
+                "created_before": created_before,
             }
         )
 
-        resp = self._request_v1("GET", "files", params=params)
+        resp = self._request("GET", "files", params=params)
         return PaginatedResult[FileInfo].model_validate(resp.json())
 
     async def files_async(
@@ -91,12 +94,12 @@ class _FilesMixin(_BaseClient):
                 "direction": direction.value if direction else None,
                 "limit": limit,
                 "filename": filename,
-                "createdAfter": created_after,
-                "createdBefore": created_before,
+                "created_after": created_after,
+                "created_before": created_before,
             }
         )
 
-        resp = await self._arequest_v1("GET", "files", params=params)
+        resp = await self._arequest("GET", "files", params=params)
         return PaginatedResult[FileInfo].model_validate(resp.json())
 
     def upload(self, path: Union[str, Path]) -> str:
@@ -128,7 +131,7 @@ class _FilesMixin(_BaseClient):
         Args:
             file_id: The ID of the file to delete. This is the string returned by the upload method.
         """
-        self._request_v1("DELETE", f"files/{file_id}")
+        self._request("DELETE", f"files/{file_id}")
 
     async def delete_file_async(self, file_id: str) -> None:
         """
@@ -141,4 +144,4 @@ class _FilesMixin(_BaseClient):
         Args:
             file_id: The ID of the file to delete. This is the string returned by the upload method.
         """
-        await self._arequest_v1("DELETE", f"files/{file_id}")
+        await self._arequest("DELETE", f"files/{file_id}")
