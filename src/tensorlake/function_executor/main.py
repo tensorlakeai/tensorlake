@@ -1,5 +1,5 @@
 import argparse
-import multiprocessing as mp
+import multiprocessing
 from typing import Any
 
 from .info import info_response_kv_args
@@ -19,8 +19,6 @@ def validate_args(args, logger: Any):
 
 
 def main():
-    # Set "spawn" method because grpc Server only works correctly if there's exec after fork.
-    mp.set_start_method("spawn")
     parser = argparse.ArgumentParser(
         description="Runs Function Executor with the specified API server address"
     )
@@ -52,6 +50,9 @@ def main():
     if len(ignored_args) > 0:
         logger.warning("ignored cli arguments", ignored_args=ignored_args)
 
+    # Set "spawn" method because grpc Server doesn't support forking. exec is required.
+    # "spawn" is supported by all OSes: Windows, Linux, MacOS.
+    multiprocessing.set_start_method(method="spawn", force=True)
     Server(
         server_address=args.address,
         service=Service(logger),

@@ -107,7 +107,7 @@ def test_request_context_state_set_get_pydantic_model_internal(model_name: str) 
     return "success"
 
 
-class TestRequestContext(unittest.TestCase):
+class TestRequestState(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_request_context_state_set_get_simple_value(self, _: str, is_remote: bool):
         if is_remote:
