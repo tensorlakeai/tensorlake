@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
+import grpc
 from google.protobuf.timestamp_pb2 import Timestamp
 
 from tensorlake.applications import (
@@ -62,8 +63,6 @@ from ..proto.function_executor_pb2 import (
     FunctionRef,
     SerializedObjectInsideBLOB,
 )
-from ..request_state.proxied_request_state import ProxiedRequestState
-from ..request_state.request_state_proxy_server import RequestStateProxyServer
 from ..user_events import (
     AllocationEventDetails,
     log_user_event_allocations_finished,
@@ -72,6 +71,7 @@ from ..user_events import (
 from .allocation_state_wrapper import AllocationStateWrapper
 from .contextvars import set_allocation_id_context_variable
 from .download import download_function_arguments, download_serialized_objects
+from .request_state import AllocationRequestState
 from .result_helper import ResultHelper
 from .sdk_algorithms import (
     awaitable_to_execution_plan_updates,
@@ -118,7 +118,6 @@ class AllocationRunner:
     def __init__(
         self,
         allocation: Allocation,
-        request_state_proxy_server: RequestStateProxyServer,
         function_ref: FunctionRef,
         function: Function,
         function_instance_arg: Any | None,
@@ -126,14 +125,11 @@ class AllocationRunner:
         logger: FunctionExecutorLogger,
     ):
         self._allocation: Allocation = allocation
-        self._request_state_proxy_server: RequestStateProxyServer = (
-            request_state_proxy_server
-        )
         self._function_ref: FunctionRef = function_ref
         self._function: Function = function
         self._function_instance_arg: Any | None = function_instance_arg
         self._blob_store: BLOBStore = blob_store
-        self._logger = logger.bind(module=__name__)
+        self._logger: FunctionExecutorLogger = logger.bind(module=__name__)
 
         self._allocation_event_details: AllocationEventDetails = AllocationEventDetails(
             namespace=self._function_ref.namespace,
@@ -145,13 +141,15 @@ class AllocationRunner:
             allocation_id=self._allocation.allocation_id,
         )
 
+        self._allocation_state: AllocationStateWrapper = AllocationStateWrapper()
+        self._request_state: AllocationRequestState = AllocationRequestState(
+            allocation_state=self._allocation_state,
+            blob_store=blob_store,
+            logger=logger,
+        )
         self._request_context: RequestContextBase = RequestContextBase(
             request_id=self._allocation.request_id,
-            state=ProxiedRequestState(
-                allocation_id=self._allocation.allocation_id,
-                proxy_server=self._request_state_proxy_server,
-                logger=logger,
-            ),
+            state=self._request_state,
             progress=ProxiedAllocationProgress(self, logger),
             metrics=RequestMetricsRecorder(),
         )
@@ -161,7 +159,6 @@ class AllocationRunner:
             metrics=self._request_context.metrics,
             logger=self._logger,
         )
-        self._allocation_state: AllocationStateWrapper = AllocationStateWrapper()
         self._allocation_thread: threading.Thread = threading.Thread(
             target=self._run_allocation_thread,
             daemon=True,
@@ -209,23 +206,42 @@ class AllocationRunner:
             future_info: _UserFutureInfo = self._user_futures[function_call_id]
             future_info.result = update.function_call_result
             future_info.result_available.set()
-        elif update.HasField("output_blob"):
-            blob_id: str = update.output_blob.id
-            if blob_id not in self._output_blob_requests:
+        elif update.HasField("output_blob_deprecated") or update.HasField(
+            "output_blob"
+        ):
+            if update.HasField("output_blob_deprecated"):
+                blob: BLOB = update.output_blob_deprecated
+            else:
+                if update.output_blob.status.code != grpc.StatusCode.OK.value[0]:
+                    self._logger.error(
+                        "received output blob update with error status",
+                        blob_id=update.output_blob.blob.id,
+                        status=update.output_blob.status,
+                    )
+                    # TODO: Implement error handling logic in blob_request_info.blob_available.set() consumer.
+                    # It's more convenient to do once we remove output_blob_deprecated support.
+                    return
+                blob: BLOB = update.output_blob.blob
+
+            if blob.id not in self._output_blob_requests:
                 self._logger.error(
                     "received output blob update for unknown blob request",
-                    blob_id=blob_id,
+                    blob_id=blob.id,
                 )
                 return
 
             blob_request_info: _OutputBLOBRequestInfo = self._output_blob_requests[
-                blob_id
+                blob.id
             ]
-            blob_request_info.blob = update.output_blob
+            blob_request_info.blob = blob
             blob_request_info.blob_available.set()
+        elif update.HasField("request_state_operation_result"):
+            self._request_state.deliver_operation_result(
+                update.request_state_operation_result
+            )
         else:
             self._logger.error(
-                "received empty allocation update",
+                "received unexpected allocation update",
                 update=str(update),
             )
 

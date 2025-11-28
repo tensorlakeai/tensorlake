@@ -17,6 +17,7 @@ build_proto:
 		--python_out=. \
 		--pyi_out=. \
 		--grpc_python_out=. \
+		${PROTO_DIR_PATH_INSIDE_PACKAGE}/status.proto \
 		${PROTO_DIR_PATH_INSIDE_PACKAGE}/function_executor.proto
 	@#The generated proto files don't pass linter checks and need to get reformatted.
 	@poetry run black ${PROTO_DIR_PATH}

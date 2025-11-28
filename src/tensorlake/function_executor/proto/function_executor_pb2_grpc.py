@@ -8,7 +8,7 @@ from tensorlake.function_executor.proto import (
     function_executor_pb2 as tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2,
 )
 
-GRPC_GENERATED_VERSION = "1.75.1"
+GRPC_GENERATED_VERSION = "1.76.0"
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -24,7 +24,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f"The grpc package installed is at version {GRPC_VERSION},"
-        + f" but the generated code in tensorlake/function_executor/proto/function_executor_pb2_grpc.py depends on"
+        + " but the generated code in tensorlake/function_executor/proto/function_executor_pb2_grpc.py depends on"
         + f" grpcio>={GRPC_GENERATED_VERSION}."
         + f" Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}"
         + f" or downgrade your generated code using grpcio-tools<={GRPC_VERSION}."
@@ -44,12 +44,6 @@ class FunctionExecutorStub(object):
             "/function_executor_service.FunctionExecutor/initialize",
             request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.InitializeRequest.SerializeToString,
             response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.InitializeResponse.FromString,
-            _registered_method=True,
-        )
-        self.initialize_request_state_server = channel.stream_stream(
-            "/function_executor_service.FunctionExecutor/initialize_request_state_server",
-            request_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RequestStateResponse.SerializeToString,
-            response_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RequestStateRequest.FromString,
             _registered_method=True,
         )
         self.list_allocations = channel.unary_unary(
@@ -109,15 +103,6 @@ class FunctionExecutorServicer(object):
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def initialize_request_state_server(self, request_iterator, context):
-        """Initializes a server that sends requests to the client to perform actions on an allocation's
-        request state. This method is called only once per Function Executor
-        It should be called before calling create_allocation.
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details("Method not implemented!")
-        raise NotImplementedError("Method not implemented!")
-
     def list_allocations(self, request, context):
         """Lists the currently-running allocations."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -171,11 +156,6 @@ def add_FunctionExecutorServicer_to_server(servicer, server):
             servicer.initialize,
             request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.InitializeRequest.FromString,
             response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.InitializeResponse.SerializeToString,
-        ),
-        "initialize_request_state_server": grpc.stream_stream_rpc_method_handler(
-            servicer.initialize_request_state_server,
-            request_deserializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RequestStateResponse.FromString,
-            response_serializer=tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RequestStateRequest.SerializeToString,
         ),
         "list_allocations": grpc.unary_unary_rpc_method_handler(
             servicer.list_allocations,
@@ -245,36 +225,6 @@ class FunctionExecutor(object):
             "/function_executor_service.FunctionExecutor/initialize",
             tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.InitializeRequest.SerializeToString,
             tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.InitializeResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True,
-        )
-
-    @staticmethod
-    def initialize_request_state_server(
-        request_iterator,
-        target,
-        options=(),
-        channel_credentials=None,
-        call_credentials=None,
-        insecure=False,
-        compression=None,
-        wait_for_ready=None,
-        timeout=None,
-        metadata=None,
-    ):
-        return grpc.experimental.stream_stream(
-            request_iterator,
-            target,
-            "/function_executor_service.FunctionExecutor/initialize_request_state_server",
-            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RequestStateResponse.SerializeToString,
-            tensorlake_dot_function__executor_dot_proto_dot_function__executor__pb2.RequestStateRequest.FromString,
             options,
             channel_credentials,
             insecure,

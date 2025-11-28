@@ -27,6 +27,9 @@ def new_cloud_event(
 ) -> dict[str, Any]:
     """
     Creates a new CloudEvent from the given event dictionary.
+
+    All values in the event dictionary must be JSON serializable.
+    See https://docs.python.org/3/library/json.html#json.JSONEncoder.
     """
     event_dict = {
         "specversion": "1.0",

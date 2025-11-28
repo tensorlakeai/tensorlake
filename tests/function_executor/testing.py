@@ -16,6 +16,7 @@ from tensorlake.applications.user_data_serializer import (
 )
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     BLOB,
+    AllocationOutputBLOB,
     AllocationOutputBLOBRequest,
     AllocationResult,
     AllocationState,
@@ -37,6 +38,7 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
 from tensorlake.function_executor.proto.server_configuration import GRPC_SERVER_OPTIONS
+from tensorlake.function_executor.proto.status_pb2 import Status
 
 
 class FunctionExecutorProcessContextManager:
@@ -160,14 +162,27 @@ def run_allocation_that_returns_output(
     stub: FunctionExecutorStub,
     request: CreateAllocationRequest,
     timeout_sec: float | None = None,
-) -> tuple[AllocationResult, BLOB]:
-    allocation_id: str = request.allocation.allocation_id
-    current_allocation_state = "wait_blob_request"
-
-    allocation_states: Iterator[AllocationState] = run_allocation(
+) -> AllocationResult:
+    stub.create_allocation(request)
+    return wait_result_of_allocation_that_returns_output(
+        request.allocation.allocation_id,
+        test_case,
         stub,
-        request=request,
         timeout_sec=timeout_sec,
+    )
+
+
+def wait_result_of_allocation_that_returns_output(
+    allocation_id: str,
+    test_case: unittest.TestCase,
+    stub: FunctionExecutorStub,
+    timeout_sec: float | None,
+) -> AllocationResult:
+    current_allocation_state: str = "wait_blob_request"
+
+    allocation_states: Iterator[AllocationState] = stub.watch_allocation_state(
+        WatchAllocationStateRequest(allocation_id=allocation_id),
+        timeout=timeout_sec,
     )
 
     for allocation_state in allocation_states:
@@ -189,7 +204,10 @@ def run_allocation_that_returns_output(
             stub.send_allocation_update(
                 AllocationUpdate(
                     allocation_id=allocation_id,
-                    output_blob=function_output_blob,
+                    output_blob=AllocationOutputBLOB(
+                        status=Status(code=grpc.StatusCode.OK.value[0]),
+                        blob=function_output_blob,
+                    ),
                 )
             )
             current_allocation_state = "wait_blob_deletion"
