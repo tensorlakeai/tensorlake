@@ -778,7 +778,11 @@ class ProxiedAllocationProgress(FunctionProgress):
         self._logger: FunctionExecutorLogger = logger.bind(module=__name__)
 
     def update(
-        self, current: float, total: float, message: str | None = None, **kwargs
+        self,
+        current: float,
+        total: float,
+        message: str | None = None,
+        attributes: dict[str, str] | None = None,
     ) -> None:
         # This method is called from user function code.
         try:
@@ -786,7 +790,7 @@ class ProxiedAllocationProgress(FunctionProgress):
             request_id = self._allocation_runner._request_context.request_id
             function_name = self._allocation_runner._function_ref.function_name
             _print_progress_update(
-                request_id, current, total, function_name, message, **kwargs
+                request_id, current, total, function_name, message, attributes
             )
             # sleep(0) here momentarily releases the GIL, giving other
             # FE threads a chance to run before returning back to customer code that
