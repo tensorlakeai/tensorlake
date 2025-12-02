@@ -1,5 +1,5 @@
 import os
-from tensorlake.applications import run_remote_application, Request
+from tensorlake.applications import run_remote_application
 
 
 def test_remote_invocation():

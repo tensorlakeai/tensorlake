@@ -1,7 +1,7 @@
 import os
-from typing import Dict
 from openai import OpenAI
-from tensorlake.applications import application, function, run_local_application, Image
+from tensorlake.applications import application, Image, function, run_local_application
+from typing import Dict
 
 image = Image(base_image="python:3.11-slim", name="openai_story_writer").run(
     "pip install openai"
