@@ -109,8 +109,9 @@ class TestProgressRaisesError(unittest.TestCase):
         request: Request = run_application(
             test_update_progress_raises_error, (10, 100), remote=False
         )
-        with self.assertRaises(RequestFailed):
+        with self.assertRaises(RequestFailed) as cm:
             request.output()
+        self.assertEqual("function_error", str(cm.exception))
 
         output = self.captured_stderr.getvalue().strip()
         self.assertIn(
