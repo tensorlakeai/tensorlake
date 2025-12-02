@@ -13,7 +13,7 @@
 [![Documentation](https://img.shields.io/badge/docs-tensorlake.ai-blue)](https://docs.tensorlake.ai)
 [![Slack](https://img.shields.io/badge/slack-TensorlakeCloud-purple?logo=slack)](https://join.slack.com/t/tensorlakecloud/shared_invite/zt-32fq4nmib-gO0OM5RIar3zLOBm~ZGqKg)
 
-Tensorlake is the platform for agentic applications. Build and deploy scalable, durable, data-heavy applications in minutes, leveraging our best-in-class Document AI API for transforming unstructured documents into AI-ready data.
+Tensorlake is the platform for agentic applications. Build and deploy high throughput, durable, agentic applications and workflows in minutes, leveraging our best-in-class Document Ingestion API and compute platform for applications.
 
 ![Animation showing the Tensorlake Document Ingestion UI parsing an ACORD doc into Markdown](/assets/README-DocAI.gif)
 </div>
@@ -22,7 +22,7 @@ Tensorlake is the platform for agentic applications. Build and deploy scalable, 
 
 - **[Document Ingestion](#document-ingestion-quickstart)** - Parse documents (PDFs, DOCX, spreadsheets, presentations, images, and raw text) to markdown or extract structured data with schemas. This is powered by Tensorlake's state of the art layout detection and table recognition models. Review our [benchmarks here](https://www.tensorlake.ai/blog/benchmarks).
 
-- **[Agentic Applications](#build-durable-agentic-applications-in-python)** - Build and deploy data ingestion and orchestration APIs using durable functions in Python that scales automatically on fully managed infrastructure.
+- **[Agentic Applications](#build-durable-agentic-applications-in-python)** - Deploy Agentic Applications and AI Workflows using durable functions, with sandboxed and managed compute infrastructure that scales your agents with usage.
 
 ---
 
@@ -163,15 +163,15 @@ Structured Extraction is guided by the provided schema. We support Pydantic Mode
 
 ## Build Durable Agentic Applications in Python
 
-Tensorlake Agentic Applications allow you to chain Python functions into durable, distributed workflows. These functions can be deployed to a serverless backend with a single command.
+Tensorlake's Agentic Runtime allows you to deploy agentic applications built in any framework on a districutred runtime, which scales them as they get requests. The platform has built in durable execution to let applications restart from where they crash automatically. 
 
-**No Queues**: We handle the state and orchestration.
+**No Queues**: We manage internal state of applications and orchestration - no need for queues, background jobs and brittle retry logic.
 
 **Zero Infra**: Write Python, deploy to Tensorlake.
 
 ### Agentic Applications Quickstart
 
-Define an Application by implementing its data transformation steps as Python functions decorated with `@function()`. Specify the image needed for each function and any required secrets as parameters to the `@function()` decorator. Add the `@application()` decorator to each entrypoint function. 
+Write an Application in Python, decorate the entrypoint of your application with `@application()` and the functions with `@function()` if you want their state to be checkpointed or run them in sandboxes. Specify the image needed for functions and any required secrets as parameters to the decorator.
 
 The example below creates a workflow with the following steps:
 
@@ -199,7 +199,7 @@ def analyze_sentiment(feedback: str) -> str:
     print(f"Analyzing: {feedback}")
     client = OpenAI()
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-5.1",
         messages=[
             {"role": "system", "content": "You are a sentiment analyzer. Respond with only one word: POSITIVE or NEGATIVE."},
             {"role": "user", "content": feedback}
