@@ -18,7 +18,7 @@ class LocalFunctionProgress(FunctionProgress):
         attributes: dict[str, str] | None = None,
     ) -> None:
         print(
-            f"Executing step {current} of {total}{format_message(message, attributes)}"
+            f"executing step {current} of {total}{format_message(message, attributes)}"
         )
 
 
