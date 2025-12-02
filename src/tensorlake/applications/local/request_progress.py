@@ -1,6 +1,6 @@
 import json
-from typing import Any
 
+from ..interface import SerializationError
 from ..interface.request_context import FunctionProgress
 
 
@@ -23,12 +23,15 @@ class LocalFunctionProgress(FunctionProgress):
 
 
 def format_message(message: str | None, attributes: dict[str, str] | None) -> str:
-    if message is None and not attributes:
-        return ""
+    try:
+        if message is None and attributes is None:
+            return ""
 
-    if message is None:
-        return json.dumps(attributes)
-    elif not attributes:
-        return f": {message}."
-    else:
-        return f": {message}. {json.dumps(attributes)}"
+        if message is None:
+            return json.dumps(attributes)
+        elif not attributes:
+            return f": {message}."
+        else:
+            return f": {message}. {json.dumps(attributes)}"
+    except Exception as e:
+        raise SerializationError(f"Failed to serialize event payload: {e}") from e
