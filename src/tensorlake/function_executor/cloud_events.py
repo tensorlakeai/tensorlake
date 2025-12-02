@@ -3,8 +3,6 @@ import json
 import uuid
 from typing import Any
 
-import pydantic
-
 from tensorlake.applications import SerializationError
 
 
@@ -52,34 +50,18 @@ def _current_time() -> str:
 
 
 def _serialize_json(obj: dict[str, Any]) -> str:
-    """Recursively convert Pydantic models to dicts and verify JSON serializability.
+    """Convert a dictionary to a JSON string.
 
     Args:
-        obj: The object to serialize
+        obj: The dictionary to serialize
 
     Returns:
-        A JSON-serializable version of the object
+        A JSON-serializable version of the object as a string
 
     Raises:
         SerializationError: If the object cannot be serialized to JSON
     """
     try:
-        # Recursively serializes Pydantic models to dicts
-        for key, value in obj.items():
-            obj[key] = _serialize_value(value)
         return json.dumps(obj)
     except Exception as e:
         raise SerializationError(f"Failed to serialize event payload: {e}") from e
-
-
-def _serialize_value(obj: Any) -> Any:
-    if isinstance(obj, pydantic.BaseModel):
-        return obj.model_dump()
-    elif isinstance(obj, dict):
-        for key, value in obj.items():
-            obj[key] = _serialize_value(value)
-        return obj
-    elif isinstance(obj, (list, tuple)):
-        return [_serialize_value(item) for item in obj]
-    else:
-        return obj

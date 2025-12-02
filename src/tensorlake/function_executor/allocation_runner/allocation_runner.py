@@ -784,7 +784,10 @@ class ProxiedAllocationProgress(FunctionProgress):
         try:
             self._allocation_runner._allocation_state.update_progress(current, total)
             request_id = self._allocation_runner._request_context.request_id
-            _print_progress_update(request_id, current, total, message, **kwargs)
+            function_name = self._allocation_runner._function_ref.function_name
+            _print_progress_update(
+                request_id, current, total, function_name, message, **kwargs
+            )
             # sleep(0) here momentarily releases the GIL, giving other
             # FE threads a chance to run before returning back to customer code that
             # might never return GIL. i.e. allowing the FE to handle incoming RPCs,
@@ -803,17 +806,27 @@ class ProxiedAllocationProgress(FunctionProgress):
 
 
 def _print_progress_update(
-    request_id: str, current: float, total: float, message: str | None = None, **kwargs
+    request_id: str,
+    current: float,
+    total: float,
+    function_name: str,
+    message: str | None = None,
+    attributes: dict[str, str] | None = None,
 ) -> None:
-    event_message = message or f"Executing step {current} of {total}"
+    event_message = (
+        message
+        if message is not None
+        else f"{function_name}: executing step {current} of {total}"
+    )
 
     event: dict[str, Any] = {
         "RequestProgressUpdated": {
             "request_id": request_id,
+            "function_name": function_name,
             "message": event_message,
             "step": current,
             "total": total,
-            "attributes": kwargs,
+            "attributes": attributes,
         }
     }
 

@@ -11,18 +11,24 @@ class LocalFunctionProgress(FunctionProgress):
         super().__init__()
 
     def update(
-        self, current: float, total: float, message: str | None = None, **kwargs
+        self,
+        current: float,
+        total: float,
+        message: str | None = None,
+        attributes: dict[str, str] | None = None,
     ) -> None:
-        print(f"Executing step {current} of {total}{format_message(message, kwargs)}")
+        print(
+            f"Executing step {current} of {total}{format_message(message, attributes)}"
+        )
 
 
-def format_message(message: str | None, kwargs: dict[str, Any]) -> str:
-    if message is None and not kwargs:
+def format_message(message: str | None, attributes: dict[str, str] | None) -> str:
+    if message is None and not attributes:
         return ""
 
     if message is None:
-        return json.dumps(kwargs)
-    elif not kwargs:
+        return json.dumps(attributes)
+    elif not attributes:
         return f": {message}."
     else:
-        return f": {message}. {json.dumps(kwargs)}"
+        return f": {message}. {json.dumps(attributes)}"
