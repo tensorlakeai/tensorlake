@@ -64,7 +64,7 @@ class FunctionProgress:
         Args:
             current: Current function call execution step
             total: Total function call execution steps
-            message: Optional message to display with the progress update
+            message: Optional message to display with the progress update. A default message is printed if None.
             attributes: A dictionary of key/value string pairs to pass to the progress update
 
         Raises:
