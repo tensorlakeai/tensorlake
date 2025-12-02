@@ -87,11 +87,7 @@ def create_guide(city: str, weather: str, activity: str) -> str:
 @application(
     tags={"type": "example", "use_case": "city_guide"},
 )
-@function(
-    description="City Guide Application", 
-    secrets=["OPENAI_API_KEY"],
-    image=image
-)
+@function(description="City Guide Application", secrets=["OPENAI_API_KEY"], image=image)
 def city_guide_app(city: str) -> str:
     """
     Main application workflow:
@@ -99,15 +95,16 @@ def city_guide_app(city: str) -> str:
     2. Get activity based on weather using Web Search.
     3. Create final guide with appropriate units.
     """
+
     # 1. Get weather
     @function_tool
     def get_weather_tool(city: str) -> str:
         return get_weather(city)
-    
+
     @function_tool
     def get_activity_tool(city: str, weather: str) -> str:
         return get_activity(city, weather)
-    
+
     @function_tool
     def create_guide_tool(city: str, weather: str, activity: str) -> str:
         return create_guide(city, weather, activity)
