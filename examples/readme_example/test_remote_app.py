@@ -5,19 +5,15 @@ from tensorlake.applications import run_remote_application
 
 def test_remote_invocation():
     """
-    Tests invoking the customer_support application remotely on Tensorlake Cloud.
+    Tests invoking the city_guide_app application remotely on Tensorlake Cloud.
     """
-    feedbacks = {
-        "customer_a": "The product was great!",
-        "customer_b": "I am very disappointed with the service.",
-        "customer_c": "It worked perfectly, thank you!",
-    }
-    print(f"Invoking customer_support remotely for feedbacks:\n{feedbacks}\n")
+    city = "San Francisco"
+    print(f"Invoking city_guide_app remotely for city: {city}\n")
 
     try:
         # remote=True is implied when using run_remote_application, but we pass the function object
         # which allows the SDK to resolve the name automatically.
-        request = run_remote_application("customer_support", feedbacks)
+        request = run_remote_application("city_guide_app", city)
 
         print(f"Request ID: {request.id}")
         print("Waiting for completion (this may take a moment as it calls OpenAI)...")
@@ -25,7 +21,7 @@ def test_remote_invocation():
         response = request.output()
 
         print("\n" + "=" * 50)
-        print("REMOTE RESPONSE")
+        print("CITY GUIDE")
         print("=" * 50 + "\n")
         print(response)
 
