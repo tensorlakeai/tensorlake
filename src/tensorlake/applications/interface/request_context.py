@@ -53,17 +53,22 @@ class FunctionProgress:
     """Abstract interface for reporting Tensorlake Function call progress."""
 
     def update(
-        self, current: float, total: float, message: str | None = None, **kwargs
+        self,
+        current: float,
+        total: float,
+        message: str | None = None,
+        attributes: dict[str, str] | None = None,
     ) -> None:
         """Update the progress of the current Tensorlake Function call execution.
 
         Args:
-            current: Current request progress value
-            total: Total request progress value
-            message: Optional message to display with the progress update
-            kwargs: Additional keyword arguments to pass to the progress update
+            current: Current function call execution step
+            total: Total function call execution steps
+            message: Optional message to display with the progress update. A default message is printed if None.
+            attributes: A dictionary of key/value string pairs to pass to the progress update
 
-        Raises TensorlakeError on error.
+        Raises:
+            SerializationError: If attributes cannot be serialized to JSON.
         """
         raise InternalError("FunctionProgress subclasses must implement update method.")
 

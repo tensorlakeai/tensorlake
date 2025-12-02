@@ -3,27 +3,26 @@ import json
 import uuid
 from typing import Any
 
-from tensorlake.applications import InternalError
+from tensorlake.applications import SerializationError
 
 
 def print_cloud_event(
     event: dict[str, Any],
     type: str = "ai.tensorlake.event",
     source: str = "/tensorlake/function_executor/events",
+    message: str | None = None,
 ) -> None:
     """
     Takes a dictionary representing an event produced by the executor, wraps it in a CloudEvent and prints it to stdout.
     """
-    try:
-        print(json.dumps(new_cloud_event(event)), flush=True)
-    except Exception as e:
-        raise InternalError("Failed to print cloud event") from e
+    print(_serialize_json(new_cloud_event(event, type, source, message)), flush=True)
 
 
 def new_cloud_event(
     event: dict[str, Any],
     type: str = "ai.tensorlake.event",
     source: str = "/tensorlake/function_executor/events",
+    message: str | None = None,
 ) -> dict[str, Any]:
     """
     Creates a new CloudEvent from the given event dictionary.
@@ -34,13 +33,35 @@ def new_cloud_event(
     event_dict = {
         "specversion": "1.0",
         "id": str(uuid.uuid4()),
-        "timestamp": current_time(),
+        "timestamp": _current_time(),
         "type": type,
         "source": source,
         "data": event,
     }
+    # add custom message outside of the event dictionary to
+    # avoid having to search for it in deep structures.
+    if message is not None:
+        event_dict["message"] = message
     return event_dict
 
 
-def current_time() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z"
+def _current_time() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _serialize_json(obj: dict[str, Any]) -> str:
+    """Convert a dictionary to a JSON string.
+
+    Args:
+        obj: The dictionary to serialize
+
+    Returns:
+        A JSON-serializable version of the object as a string
+
+    Raises:
+        SerializationError: If the object cannot be serialized to JSON
+    """
+    try:
+        return json.dumps(obj)
+    except Exception as e:
+        raise SerializationError(f"Failed to serialize event payload: {e}") from e
