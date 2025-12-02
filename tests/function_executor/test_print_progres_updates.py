@@ -3,16 +3,14 @@ import json
 import os
 import random
 import unittest
-from typing import Iterator
 
-import grpc
 from testing import (
     FunctionExecutorProcessContextManager,
     create_request_error_blob,
     create_tmp_blob,
     initialize,
     rpc_channel,
-    run_allocation,
+    run_allocation_that_returns_output,
     write_tmp_blob_bytes,
 )
 
@@ -34,11 +32,7 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     BLOB,
     Allocation,
     AllocationOutcomeCode,
-    AllocationOutputBLOB,
-    AllocationOutputBLOBRequest,
     AllocationResult,
-    AllocationState,
-    AllocationUpdate,
     CreateAllocationRequest,
     FunctionInputs,
     InitializationOutcomeCode,
@@ -50,7 +44,6 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
 )
-from tensorlake.function_executor.proto.status_pb2 import Status
 
 APPLICATION_CODE_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
 
@@ -129,7 +122,8 @@ class TestPrintProgressUpdates(unittest.TestCase):
                 )
 
                 allocation_id: str = "test-allocation-id"
-                allocation_states: Iterator[AllocationState] = run_allocation(
+                alloc_result: AllocationResult = run_allocation_that_returns_output(
+                    self,
                     stub,
                     request=CreateAllocationRequest(
                         allocation=Allocation(
@@ -170,43 +164,6 @@ class TestPrintProgressUpdates(unittest.TestCase):
                         ),
                     ),
                 )
-                current_allocation_state = "wait_blob_request"
-                for allocation_state in allocation_states:
-                    allocation_state: AllocationState
-
-                    if current_allocation_state == "wait_blob_request":
-                        if len(allocation_state.output_blob_requests) == 0:
-                            continue  # Received empty initial AllocationState, keep waiting.
-
-                        self.assertEqual(len(allocation_state.output_blob_requests), 1)
-                        function_output_blob_request: AllocationOutputBLOBRequest = (
-                            allocation_state.output_blob_requests[0]
-                        )
-                        # Simulate function output BLOB with 10 chunks.
-                        function_output_blob: BLOB = create_tmp_blob(
-                            id=function_output_blob_request.id,
-                            chunks_count=10,
-                            chunk_size=1024,
-                        )
-                        stub.send_allocation_update(
-                            AllocationUpdate(
-                                allocation_id=allocation_id,
-                                output_blob=AllocationOutputBLOB(
-                                    status=Status(code=grpc.StatusCode.OK.value[0]),
-                                    blob=function_output_blob,
-                                ),
-                            )
-                        )
-                        current_allocation_state = "wait_blob_deletion"
-
-                    if current_allocation_state == "wait_blob_deletion":
-                        if len(allocation_state.output_blob_requests) == 0:
-                            current_allocation_state = "wait_result"
-
-                    if current_allocation_state == "wait_result":
-                        if allocation_state.HasField("result"):
-                            alloc_result: AllocationResult = allocation_state.result
-                            break
 
                 self.assertEqual(
                     alloc_result.outcome_code,
@@ -280,7 +237,8 @@ class TestPrintProgressUpdates(unittest.TestCase):
                 )
 
                 allocation_id: str = "test-allocation-id"
-                allocation_states: Iterator[AllocationState] = run_allocation(
+                alloc_result: AllocationResult = run_allocation_that_returns_output(
+                    self,
                     stub,
                     request=CreateAllocationRequest(
                         allocation=Allocation(
@@ -321,43 +279,6 @@ class TestPrintProgressUpdates(unittest.TestCase):
                         ),
                     ),
                 )
-                current_allocation_state = "wait_blob_request"
-                for allocation_state in allocation_states:
-                    allocation_state: AllocationState
-
-                    if current_allocation_state == "wait_blob_request":
-                        if len(allocation_state.output_blob_requests) == 0:
-                            continue  # Received empty initial AllocationState, keep waiting.
-
-                        self.assertEqual(len(allocation_state.output_blob_requests), 1)
-                        function_output_blob_request: AllocationOutputBLOBRequest = (
-                            allocation_state.output_blob_requests[0]
-                        )
-                        # Simulate function output BLOB with 10 chunks.
-                        function_output_blob: BLOB = create_tmp_blob(
-                            id=function_output_blob_request.id,
-                            chunks_count=10,
-                            chunk_size=1024,
-                        )
-                        stub.send_allocation_update(
-                            AllocationUpdate(
-                                allocation_id=allocation_id,
-                                output_blob=AllocationOutputBLOB(
-                                    status=Status(code=grpc.StatusCode.OK.value[0]),
-                                    blob=function_output_blob,
-                                ),
-                            )
-                        )
-                        current_allocation_state = "wait_blob_deletion"
-
-                    if current_allocation_state == "wait_blob_deletion":
-                        if len(allocation_state.output_blob_requests) == 0:
-                            current_allocation_state = "wait_result"
-
-                    if current_allocation_state == "wait_result":
-                        if allocation_state.HasField("result"):
-                            alloc_result: AllocationResult = allocation_state.result
-                            break
 
                 self.assertEqual(
                     alloc_result.outcome_code,
