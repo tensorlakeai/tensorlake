@@ -805,10 +805,12 @@ class ProxiedAllocationProgress(FunctionProgress):
 def _print_progress_update(
     request_id: str, current: float, total: float, message: str | None = None, **kwargs
 ) -> None:
+    event_message = message or f"Executing step {current} of {total}"
+
     event: dict[str, Any] = {
         "RequestProgressUpdated": {
             "request_id": request_id,
-            "message": message or f"Executing step {current} of {total}",
+            "message": event_message,
             "step": current,
             "total": total,
             "attributes": kwargs,
@@ -819,4 +821,5 @@ def _print_progress_update(
         event,
         type="ai.tensorlake.progress_update",
         source="/tensorlake/function_executor/runner",
+        message=event_message,
     )

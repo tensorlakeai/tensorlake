@@ -58,12 +58,15 @@ class FunctionProgress:
         """Update the progress of the current Tensorlake Function call execution.
 
         Args:
-            current: Current request progress value
-            total: Total request progress value
+            current: Current function call execution step
+            total: Total function call execution steps
             message: Optional message to display with the progress update
-            kwargs: Additional keyword arguments to pass to the progress update
+            kwargs: Additional keyword arguments to pass to the progress update as attributes.
+                    All attributes must be JSON-serializable or Pydantic models.
 
-        Raises TensorlakeError on error.
+        Raises:
+            SerializationError: If attributes cannot be serialized to JSON.
+            TensorlakeError: On other errors.
         """
         raise InternalError("FunctionProgress subclasses must implement update method.")
 
