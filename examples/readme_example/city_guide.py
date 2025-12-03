@@ -14,12 +14,21 @@ FUNCTION_CONTAINER_IMAGE = Image(
 ).run("pip install openai openai-agents")
 
 
+@function_tool
 @function(
     image=FUNCTION_CONTAINER_IMAGE,
     description="Gets the weather for a city in Fahrenheit",
     secrets=["OPENAI_API_KEY"],
 )
-def get_weather(city: str) -> str:
+def get_weather_tool(city: str) -> str:
+    """Get the current weather for a city.
+
+    Args:
+        city: The name of the city to get weather for.
+
+    Returns:
+        A string describing the current weather conditions.
+    """
     print(f"Getting weather for: {city}")
 
     agent = Agent(
@@ -32,12 +41,22 @@ def get_weather(city: str) -> str:
     return result.final_output.strip()
 
 
+@function_tool
 @function(
     image=FUNCTION_CONTAINER_IMAGE,
     description="Suggests an activity based on the weather using Web Search",
     secrets=["OPENAI_API_KEY"],
 )
-def get_activity(city: str, weather: str) -> str:
+def get_activity_tool(city: str, weather: str) -> str:
+    """Suggest an activity based on the weather.
+
+    Args:
+        city: The name of the city.
+        weather: The current weather conditions.
+
+    Returns:
+        A suggested activity for the given weather.
+    """
     print(f"Finding activity for {city} with weather: {weather}")
 
     agent = Agent(
@@ -76,12 +95,24 @@ def run_unsafe_python_code(python_code: str) -> str:
         os.remove(temp_file_path)
 
 
+@function_tool
 @function(
     image=FUNCTION_CONTAINER_IMAGE,
     description="Creates a final guide with appropriate temperature units",
     secrets=["OPENAI_API_KEY"],
 )
-def create_guide(city: str, weather: str, activity: str) -> str:
+def create_guide_tool(city: str, weather: str, activity: str) -> str:
+    """Create a city guide combining weather and activity.
+
+    Args:
+        city: The name of the city.
+        weather: The weather description in Fahrenheit.
+        activity: The suggested activity.
+
+    Returns:
+        A friendly city guide for the user.
+    """
+
     @function_tool
     def convert_to_celsius_tool(python_code: str) -> float:
         """Converts a temperature from Fahrenheit to Celsius using the provided Python code.
@@ -124,53 +155,13 @@ def city_guide_app(city: str) -> str:
     2. Get activity based on weather using Web Search.
     3. Create final guide with appropriate units.
     """
-
-    @function_tool
-    def weather_tool(city: str) -> str:
-        """Get the current weather for a city.
-
-        Args:
-            city: The name of the city to get weather for.
-
-        Returns:
-            A string describing the current weather conditions.
-        """
-        return get_weather(city)
-
-    @function_tool
-    def activity_tool(city: str, weather: str) -> str:
-        """Suggest an activity based on the weather.
-
-        Args:
-            city: The name of the city.
-            weather: The current weather conditions.
-
-        Returns:
-            A suggested activity for the given weather.
-        """
-        return get_activity(city, weather)
-
-    @function_tool
-    def create_guide_tool(city: str, weather: str, activity: str) -> str:
-        """Create a city guide combining weather and activity.
-
-        Args:
-            city: The name of the city.
-            weather: The weather description in Fahrenheit.
-            activity: The suggested activity.
-
-        Returns:
-            A friendly city guide for the user.
-        """
-        return create_guide(city, weather, activity)
-
     agent = Agent(
         name="Guide Creator",
-        instructions="You are a helpful travel assistant. Use the `weather_tool`, `activity_tool`, and `create_guide_tool` "
+        instructions="You are a helpful travel assistant. Use the `get_weather_tool`, `get_activity_tool`, and `create_guide_tool` "
         "tools to generate a city guide for the given city. Do not modify what the create_guide_tool returns.",
         tools=[
-            weather_tool,
-            activity_tool,
+            get_weather_tool,
+            get_activity_tool,
             create_guide_tool,
         ],
     )
