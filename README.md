@@ -196,7 +196,7 @@ FUNCTION_CONTAINER_IMAGE = Image(base_image="python:3.11-slim", name="city_guide
     secrets=["OPENAI_API_KEY"],
     image=FUNCTION_CONTAINER_IMAGE,
 )
-def get_weather(city: str) -> str:
+def get_weather_tool(city: str) -> str:
     """Uses an OpenAI Agent with WebSearchTool to find current weather."""
     agent = Agent(
         name="Weather Reporter",
@@ -205,31 +205,6 @@ def get_weather(city: str) -> str:
     )
     result = Runner.run_sync(agent, f"City: {city}")
     return result.final_output.strip()
-
-@function(
-    image=FUNCTION_CONTAINER_IMAGE,
-    description="Runs unsafe (i.e. AI-generated) Python code in an isolated Function container and returns output printed by the code",
-    timeout=5,  # Allow to run the code for up to 5 seconds as the code is not trusted.
-)
-def run_unsafe_python_code(python_code: str) -> str:
-    print(f"Running unsafe Python code:\n{python_code}")
-
-    with tempfile.NamedTemporaryFile(
-        mode="w+", suffix=".py", delete=False
-    ) as temp_file:
-        temp_file.write(python_code)
-        temp_file_path = temp_file.name
-
-    try:
-        result = subprocess.run(
-            [sys.executable, temp_file_path],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return result.stdout.strip()
-    finally:
-        os.remove(temp_file_path)
 
 @application(tags={"type": "example", "use_case": "city_guide"})
 @function(
@@ -243,12 +218,12 @@ def city_guide_app(city: str) -> str:
     @function_tool
     def convert_to_celsius_tool(python_code: str) -> float:
         """Converts Fahrenheit to Celsius - runs as Python code via Agent."""
-        return float(run_unsafe_python_code(python_code))
+        return float(eval(python_code))
     
     agent = Agent(
         name="Guide Creator",
         instructions="Using the appropriate tools, get the weather for the purposes of the guide. If the city uses Celsius, call convert_to_celsius_tool to convert the temperature, passing in the code needed to convert the temperature to Celsius. Create a friendly guide that references the temperature of the city in Celsius if the city typically uses Celsius, otherwise reference the temperature in Fahrenheit. Only reference Celsius or Farenheit, not both.",
-        tools=[get_weather, convert_to_celsius_tool],  # Agent can execute this Python function
+        tools=[get_weather_tool, convert_to_celsius_tool],  # Agent can execute this Python function
     )
     result = Runner.run_sync(agent, f"City: {city}")
     return result.final_output.strip()
@@ -263,7 +238,7 @@ The following code is included to run it locally on your computer:
 
 ```python
 if __name__ == "__main__":
-    CITY = "San Francisco"
+    CITY = "Paris"
     
     print(f"Generating city guide for: {CITY}\n")
     
@@ -296,11 +271,11 @@ Here is some example output from the simplified version:
 CITY GUIDE
 ==================================================
 
-Welcome to San Francisco!
+Welcome to Paris! Today, the weather is cloudy with a current temperature of about 8°C. As you explore the city, you can expect evening and nighttime temperatures to stay between 5°C and 6°C.
 
-Today, the city is enjoying mostly cloudy skies with a temperature of 58°F. Throughout the day, you can expect mild weather, with temperatures gently rising to about 61°F in the early afternoon before dipping again in the evening.
+Don’t forget your jacket as you stroll along the Seine or visit the Eiffel Tower! Paris can feel especially charming under a cloudy sky, so embrace the cozy atmosphere and maybe stop by a café for a warm drink.
 
-If you're heading out, a light jacket or sweater is perfect for this classic Bay Area weather. Enjoy your time in San Francisco! If you need more details or an extended forecast, just let me know.
+If you need tips for what to do on a cloudy day in Paris, just let me know—enjoy your stay!
 ```
 
 Testing your applications locally is convenient during development. There's no need to wait until the application is deployed to see how it works.
