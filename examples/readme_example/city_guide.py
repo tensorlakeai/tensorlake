@@ -73,6 +73,7 @@ def get_activity_tool(city: str, weather: str) -> str:
 @function(
     image=FUNCTION_CONTAINER_IMAGE,
     description="Runs unsafe (i.e. AI-generated) Python code in an isolated Function container and returns output printed by the code",
+    timeout=5,  # Allow to run the code for up to 5 seconds as the code is not trusted.
 )
 def run_unsafe_python_code(python_code: str) -> str:
     print(f"Running unsafe Python code:\n{python_code}")
