@@ -1,3 +1,4 @@
+import inspect
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List
 
@@ -62,6 +63,29 @@ class Function:
         self._awaitables_factory: FunctionAwaitablesFactory = FunctionAwaitablesFactory(
             self
         )
+        # Mimic original function if it's a regular user defined function.
+        if inspect.isfunction(self._original_function):
+            # Copy original function metadata into this Function object so function inspection
+            # tools like these used by Agentic frameworks to generate tool descriptions work.
+            # See the attributes at "function" at
+            # https://docs.python.org/3/library/inspect.html#types-and-members.
+            for mimic_attr in [
+                "__doc__",
+                "__name__",
+                "__qualname__",
+                "__code__",
+                "__defaults__",
+                "__kwdefaults__",
+                "__globals__",
+                "__builtins__",
+                "__annotations__",
+                "__type_params__",
+                "__module__",
+            ]:
+                if hasattr(self._original_function, mimic_attr):
+                    setattr(
+                        self, mimic_attr, getattr(self._original_function, mimic_attr)
+                    )
 
     def __call__(self, *args, **kwargs) -> Any:
         """Does a blocking function call and returns its result.

@@ -90,7 +90,7 @@ def function_class_name(fn: Callable) -> str | None:
     Doesn't raise any exceptions.
     """
     # This is a reliable heuristic, see https://peps.python.org/pep-3155/.
-    # NB: this might not be a function is user passed something else.
+    # NB: this might not be a function if user passed something else.
     if inspect.isfunction(fn) or inspect.ismethod(fn):
         qualname_parts: list[str] = getattr(fn, "__qualname__", "<unknown>").split(".")
         if len(qualname_parts) == 1:
