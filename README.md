@@ -13,16 +13,17 @@
 [![Documentation](https://img.shields.io/badge/docs-tensorlake.ai-blue)](https://docs.tensorlake.ai)
 [![Slack](https://img.shields.io/badge/slack-TensorlakeCloud-purple?logo=slack)](https://join.slack.com/t/tensorlakecloud/shared_invite/zt-32fq4nmib-gO0OM5RIar3zLOBm~ZGqKg)
 
-TensorLake transforms unstructured documents into AI-ready data through Document Ingestion APIs and enables building scalable data processing pipelines with a serverless workflow runtime. 
+Tensorlake is the platform for agentic applications. Build and deploy high throughput, durable, agentic applications and workflows in minutes, leveraging our best-in-class Document Ingestion API and compute platform for applications.
 
-![gh_animation](https://github.com/user-attachments/assets/bc57d5f5-c745-4a36-926a-d85767b9115e)
+![Animation showing the Tensorlake Document Ingestion UI parsing an ACORD doc into Markdown](/assets/README-DocAI.gif)
 </div>
 
 ## Features
 
-- **Document Ingestion** - Parse documents (PDFs, DOCX, spreadsheets, presentations, images, and raw text) to markdown or extract structured data with schemas. This is powered by Tensorlake's state of the art Layout Detection and Table Recognition models.
+- **[Document Ingestion](#document-ingestion-quickstart)** - Parse documents (PDFs, DOCX, spreadsheets, presentations, images, and raw text) to markdown or extract structured data with schemas. This is powered by Tensorlake's state of the art layout detection and table recognition models. Review our [benchmarks here](https://www.tensorlake.ai/blog/benchmarks).
 
-- **Serverless Workflows** - Build and deploy data ingestion and orchestration APIs using Durable Functions in Python that scales automatically on fully managed infrastructure. The requests to workflows automatically resume from failure checkpoints and scale to zero when idle.
+- **[Agentic Applications](#build-durable-agentic-applications-in-python)** - Deploy Agentic Applications and AI Workflows using durable functions, with sandboxed and managed compute infrastructure that scales your agents with usage.
+
 ---
 
 ## Document Ingestion Quickstart
@@ -160,142 +161,194 @@ Structured Extraction is guided by the provided schema. We support Pydantic Mode
 * [Page Classification](https://docs.tensorlake.ai/document-ingestion/parsing/page-classification)
 * [Signature Detection](https://docs.tensorlake.ai/document-ingestion/parsing/signature)
 
-## Data Workflows
+## Build Durable Agentic Applications in Python
 
-Workflows enables building and deploying workflow APIs. The workflow APIs are exposed as HTTP Endpoints.Functions in workflows can do anything from calling a web service to loading a data model into a GPU to run inference.
+Tensorlake's Agentic Runtime allows you to deploy agentic applications built in any framework on a districutred runtime, which scales them as they get requests. The platform has built in durable execution to let applications restart from where they crash automatically. 
 
-### Workflows Quickstart
+**No Queues**: We manage internal state of applications and orchestration - no need for queues, background jobs and brittle retry logic.
 
-Define a workflow by implementing its data transformation steps as Python functions decorated with `@tensorlake_function()`.
-Connect the outputs of a function to the inputs of another function using edges in a `Graph` object, which represents the full workflow.
+**Zero Infra**: Write Python, deploy to Tensorlake.
+
+### Agentic Applications Quickstart
+
+Write an Application in Python, decorate the entrypoint of your application with `@application()` and the functions with `@function()` if you want their state to be checkpointed or run them in sandboxes. Specify the image needed for functions and any required secrets as parameters to the decorator.
 
 The example below creates a workflow with the following steps:
 
-1. Generate a sequence of numbers from 0 to the supplied value.
-2. Compute square of each number.
-3. Sum all the squares.
-4. Send the sum to a web service.
+1. Use OpenAI to analyze the sentiment of customer feedback.
+2. Use OpenAI to draft a customer support email based on the sentiment.
 
 ```python
 import os
-import urllib.request
-from typing import List, Optional
+from typing import Dict
+from openai import OpenAI
+from tensorlake.applications import application, function, run_local_application, Image
 
-import click # Used for pretty printing to console.
-
-from tensorlake import Graph, RemoteGraph, tensorlake_function
-
-# Define a function for each workflow step
-
-
-# 1. Generate a sequence of numbers from 0 to the supplied value.
-@tensorlake_function()
-def generate_sequence(last_sequence_number: int) -> List[int]:
-    # This function impelements a map operation because it returns a list.
-    return [i for i in range(last_sequence_number + 1)]
-
-
-# 2. Compute square of each number.
-@tensorlake_function()
-def squared(number: int) -> int:
-    # This function transforms each element of the sequence because it accepts
-    # only a single int as a parameter.
-    return number * number
-
-
-# 3. Sum all the squares.
-@tensorlake_function(accumulate=int)
-def sum_all(current_sum: int, number: int) -> int:
-    # This function implements a reduce operation.
-    # It is called for each element of the sequence. The returned value is passed
-    # to the next call in `current_sum` parameter. The first call gets `current_sum`=int()
-    # which is 0. The return value of the last call is the result of the reduce operation.
-    return current_sum + number
-
-
-# 4. Send the sum to a web service.
-@tensorlake_function()
-def send_to_web_service(value: int) -> str:
-    # This function accepts the sum from the previous step and sends it to a web service.
-    url = f"https://example.com/?number={value}"
-    req = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(req) as response:
-        return response.read()
-
-
-# Define the full workflow using Graph object
-g = Graph(
-    name="example_workflow",
-    start_node=generate_sequence,
-    description="Example workflow",
+image = (
+    Image(base_image="python:3.11-slim", name="openai_story_writer")
+    .run("pip install openai")
 )
-g.add_edge(generate_sequence, squared)
-g.add_edge(squared, sum_all)
-g.add_edge(sum_all, send_to_web_service)
 
-# Invoke the workflow for sequence [0..200].
-def run_workflow(g: Graph) -> None:
-    invocation_id: str = g.run(last_sequence_number=200, block_until_done=True)
+@function(
+    description="Analyzes the sentiment of input text",
+    secrets=["OPENAI_API_KEY"],
+    image=image
+)
+def analyze_sentiment(feedback: str) -> str:
+    """Step 1: Analyze the sentiment of the input text."""
+    print(f"Analyzing: {feedback}")
+    client = OpenAI()
+    response = client.chat.completions.create(
+        model="gpt-5.1",
+        messages=[
+            {"role": "system", "content": "You are a sentiment analyzer. Respond with only one word: POSITIVE or NEGATIVE."},
+            {"role": "user", "content": feedback}
+        ]
+    )
+    return response.choices[0].message.content.strip()
 
-    # Get the output of the the workflow (of its last step).
-    last_step_output: str = g.output(invocation_id, "send_to_web_service")
-    click.secho("Web service response:", fg="green", bold=True)
-    click.echo(last_step_output[0])
-    click.echo()
+@function(
+    description="Drafts a customer support email based on the sentiment.",
+    secrets=["OPENAI_API_KEY"],
+    image=image
+)
+def draft_response(sentiment: str) -> str:
+    """Step 2: Draft a customer support email based on the sentiment."""
+    print(f"Drafting email for {sentiment} feedback...")
+    if sentiment == "NEGATIVE":
+        prompt = "Write a short, empathetic apology email to a customer."
+    else:
+        prompt = "Write a short, enthusiastic thank you email to a customer."
+    
+    client = OpenAI()
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.choices[0].message.content
 
-    # Get the sum.
-    sum_output: str = g.output(invocation_id, "sum_all")
-    click.secho("Sum:", fg="green", bold=True)
-    click.echo(sum_output[0])
-    click.echo()
+@application(
+    tags={"type": "quickstart", "use_case": "customer_support"},
+)
+@function(
+    description="Customer Support application.",
+    image=image
+)
+def customer_support(feedbacks: Dict[str, str]) -> Dict[str, str]:
+    """
+    Main application workflow:
+    1. Analyze sentiment for all feedbacks in parallel.
+    2. Draft responses for all sentiments in parallel.
+    3. Aggregate results into a dictionary.
+    """
+    names = list(feedbacks.keys())
+    feedback_texts = list(feedbacks.values())
+    
+    # 1. Analyze sentiment in parallel
+    sentiments = analyze_sentiment.map(feedback_texts)
+    
+    # 2. Draft responses in parallel
+    responses = draft_response.map(sentiments)
+    
+    # 3. Compile: Return dictionary
+    return dict(zip(names, responses))
 ```
 
 #### Running locally
 
-The workflow code is available at [examples/readme_example.py](examples/readme_example.py).
+The application code is available at [examples/readme_example/customer_support_example.py](examples/readme_example/customer_support_example.py).
 The following code was added there to create the workflow and run it locally on your computer:
 
 ```python
-run_workflow(g)
+if __name__ == "__main__":
+    # Example usage
+    FEEDBACKS = {
+        "customer_a": "The product was great!",
+        "customer_b": "I am very disappointed with the service.",
+        "customer_c": "It worked perfectly, thank you!",
+    }
+    
+    print(f"Generating responses for: {FEEDBACKS}\n")
+    
+    if not os.environ.get("OPENAI_API_KEY"):
+        print("Error: OPENAI_API_KEY environment variable is not set.")
+        exit(1)
+
+    # Run locally using Tensorlake's local runner
+    request = run_local_application(customer_support, FEEDBACKS)
+    response = request.output()
+    
+    print("\n" + "="*50)
+    print("FINAL RESPONSE")
+    print("="*50 + "\n")
+    print(response)
 ```
 
 Run the workflow locally:
 
 ```bash
-python examples/readme_example.py
+python examples/readme_example/customer_support_example.py
 ```
 
-In console output you can see that the workflow computed the sum and got a response from the web service.
-Running a workflow locally is convenient during its development. There's no need to wait until the workflow sgets deployed to see how it works.
+In the console output you can see the result of the application:
+```json
+{
+  "customer_a": "Subject: Thank You for Choosing Us!\n\nDear [Customer's Name],\n\nI hope this message finds you well. I just wanted to take a moment to express our heartfelt thanks for choosing [Your Company Name]! We are thrilled to have the opportunity to serve you and are grateful for your trust in us.\n\nYour satisfaction is our top priority, and we are committed to going above and beyond to ensure you have the best experience possible. If there is anything more we can do for you, please don't hesitate to let us know.\n\nThank you once again for your support. We look forward to serving you again soon!\n\nWarm regards,\n\n[Your Name]  \n[Your Position]  \n[Your Company Name]  \n[Contact Information]",
+  "customer_b": "Subject: Sincere Apologies for Your Recent Experience\n\nDear [Customer's Name],\n\nI hope this message finds you well. I am writing to personally apologize for the inconvenience you experienced with our product/service. Ensuring our customers have a positive experience is our top priority, and I am truly sorry that we fell short of your expectations on this occasion.\n\nPlease rest assured that we are taking your feedback seriously and are working diligently to address the issues you've encountered. Your satisfaction is important to us, and we are committed to making this right for you.\n\nIf there's anything specific we can do to improve your experience, please do not hesitate to let us know. We value your trust and are eager to resolve this matter to your satisfaction.\n\nThank you for your understanding and patience. We truly appreciate your business and look forward to serving you better in the future.\n\nWarm regards,\n\n[Your Name]  \n[Your Position]  \n[Your Company]  \n[Contact Information]  ",
+  "customer_c": "Subject: Thank You for Your Purchase!\n\nHi [Customer's Name],\n\nI hope this message finds you well. I just wanted to take a moment to personally thank you for choosing us. Your support means the world to us, and we are thrilled to have you as a part of our community.\n\nWe strive to provide the best products and services, and your satisfaction is our top priority. If you have any questions or need assistance, please don't hesitate to reach out.\n\nOnce again, thank you for your trust in us. We're excited to serve you and look forward to seeing you again soon!\n\nWarm regards,\n\n[Your Name]  \n[Your Position]  \n[Company Name]  \n[Contact Information]"
+}
+```
 
-#### Running on Tensorlake Cloud
+Testing your applications locally is convenient during its development. There's no need to wait until the application is deployed to see how it works.
 
-To run the workflow on tensorlake cloud it first needs to get deployed there.
+#### Deploying and running on Tensorlake Cloud
+
+To run the application on tensorlake cloud it first needs to get deployed there.
 
 1. Set `TENSORLAKE_API_KEY` environment variable in your shell session:
 ```bash
 export TENSORLAKE_API_KEY="Paste your API key here"
 ```
-2. Deploy the workflow to Tensorlake Cloud:
+2. Set `OPENAI_API_KEY` environment variable in your Tensorlake Secrets so that your application can make calls to OpenAI:
 ```bash
-tensorlake deploy examples/readme_example.py
+tensorlake secrets set OPENAI_API_KEY "Paste your API key here"
 ```
-3. The following code was added to the workflow file to run it on Tensorlake Cloud:
+3. Deploy the application to Tensorlake Cloud:
+```bash
+tensorlake deploy examples/readme_example/customer_support_example.py
+```
+4. Run the remote test script, found in `examples/readme_example/test_remote_app.py`:
 ```python
-from tensorlake import RemoteGraph
+from tensorlake.applications import run_remote_application
+from readme_example import customer_support
 
-cloud_workflow = RemoteGraph.by_name("example_workflow")
-run_workflow(cloud_workflow)
+# ... (feedbacks dictionary definition)
+
+# Run the application remotely
+request = run_remote_application(customer_support, feedbacks)
+print(f"Request ID: {request.id}")
+
+# Get the output
+response = request.output()
+print(response)
 ```
-4. Run the workflow on Tensorlake Cloud:
 
+5. Confirm you get the same response as before, maybe slightly different since the emails are generated by OpenAI.
+
+### Updating your application
+Any time you update your application, just re-deploy it to Tensorlake Cloud:
 ```bash
-python examples/readme_example.py
+tensorlake deploy examples/readme_example/customer_support_example.py
 ```
 
-## Learn more about workflows 
+And run the remote test script again:
+```bash
+python examples/readme_example/test_remote_app.py
+```
 
-* [Serverless Workflows Documentation](https://docs.tensorlake.ai/applications/quickstart)
-* [Key programming concepts in Tensorlake Workflows](https://docs.tensorlake.ai/applications/compute)
-* [Dependencies and container images in Tensorlake Workflows](https://docs.tensorlake.ai/applications/images)
-* [Open Source Workflow Compute Engine](https://docs.tensorlake.ai/opensource/indexify)
+## Learn more about Tensorlake's Agentic Applications 
+
+* [Agentic Applications Documentation](https://docs.tensorlake.ai/applications/quickstart)
+* [Key programming concepts in Tensorlake Agentic Applications](https://docs.tensorlake.ai/applications/compute)
+* [Dependencies and container images in Tensorlake Agentic Applications](https://docs.tensorlake.ai/applications/images)
+* [Open Source Compute Engine](https://docs.tensorlake.ai/opensource/indexify)
