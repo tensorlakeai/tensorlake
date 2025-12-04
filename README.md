@@ -171,139 +171,118 @@ Tensorlake's Agentic Runtime allows you to deploy agentic applications built in 
 
 ### Agentic Applications Quickstart
 
-Write an Application in Python, decorate the entrypoint of your application with `@application()` and the functions with `@function()` if you want their state to be checkpointed or run them in sandboxes. Specify the image needed for functions and any required secrets as parameters to the decorator.
+Write an Application in Python, decorate the entrypoint of your application with `@application()` and the functions with `@function()` if you want their state to be checkpointed or run them in sandboxes. **Each Tensorlake function runs in its own isolated sandbox**, allowing you to safely execute code and use different dependencies per function.
 
-The example below creates a workflow with the following steps:
+The example below creates a city guide application using **OpenAI Agents with tool calls**. It demonstrates:
 
-1. Use OpenAI to analyze the sentiment of customer feedback.
-2. Use OpenAI to draft a customer support email based on the sentiment.
+1. **Tool Calls**: Using OpenAI Agents with `WebSearchTool` to search the web and `function_tool` to execute Python code, including Tensorlake Functions.
+2. **Sandboxed Execution**: Each `@function` runs in its own isolated environment with specified dependencies.
+3. **Code Execution**: Agents can run Python code via `function_tool` within the sandbox.
 
 ```python
 import os
-from typing import Dict
-from openai import OpenAI
+from agents import Agent, Runner
+from agents.tool import WebSearchTool, function_tool
 from tensorlake.applications import application, function, run_local_application, Image
 
-image = (
-    Image(base_image="python:3.11-slim", name="openai_story_writer")
-    .run("pip install openai")
+# Define the image with necessary dependencies
+FUNCTION_CONTAINER_IMAGE = Image(base_image="python:3.11-slim", name="city_guide_image").run(
+    "pip install openai openai-agents"
 )
 
+@function_tool
 @function(
-    description="Analyzes the sentiment of input text",
+    description="Gets the weather for a city using an OpenAI Agent with web search",
     secrets=["OPENAI_API_KEY"],
-    image=image
+    image=FUNCTION_CONTAINER_IMAGE,
 )
-def analyze_sentiment(feedback: str) -> str:
-    """Step 1: Analyze the sentiment of the input text."""
-    print(f"Analyzing: {feedback}")
-    client = OpenAI()
-    response = client.chat.completions.create(
-        model="gpt-5.1",
-        messages=[
-            {"role": "system", "content": "You are a sentiment analyzer. Respond with only one word: POSITIVE or NEGATIVE."},
-            {"role": "user", "content": feedback}
-        ]
+def get_weather_tool(city: str) -> str:
+    """Uses an OpenAI Agent with WebSearchTool to find current weather."""
+    agent = Agent(
+        name="Weather Reporter",
+        instructions="Use web search to find current weather in Fahrenheit for the city.",
+        tools=[WebSearchTool()],  # Agent can search the web
     )
-    return response.choices[0].message.content.strip()
+    result = Runner.run_sync(agent, f"City: {city}")
+    return result.final_output.strip()
 
+@application(tags={"type": "example", "use_case": "city_guide"})
 @function(
-    description="Drafts a customer support email based on the sentiment.",
+    description="Creates a guide with temperature conversion using function_tool",
     secrets=["OPENAI_API_KEY"],
-    image=image
+    image=FUNCTION_CONTAINER_IMAGE,
 )
-def draft_response(sentiment: str) -> str:
-    """Step 2: Draft a customer support email based on the sentiment."""
-    print(f"Drafting email for {sentiment} feedback...")
-    if sentiment == "NEGATIVE":
-        prompt = "Write a short, empathetic apology email to a customer."
-    else:
-        prompt = "Write a short, enthusiastic thank you email to a customer."
+def city_guide_app(city: str) -> str:
+    """Uses an OpenAI Agent with function_tool to run Python code for conversion."""
     
-    client = OpenAI()
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": prompt}]
+    @function_tool
+    def convert_to_celsius_tool(python_code: str) -> float:
+        """Converts Fahrenheit to Celsius - runs as Python code via Agent."""
+        return float(eval(python_code))
+    
+    agent = Agent(
+        name="Guide Creator",
+        instructions="Using the appropriate tools, get the weather for the purposes of the guide. If the city uses Celsius, call convert_to_celsius_tool to convert the temperature, passing in the code needed to convert the temperature to Celsius. Create a friendly guide that references the temperature of the city in Celsius if the city typically uses Celsius, otherwise reference the temperature in Fahrenheit. Only reference Celsius or Farenheit, not both.",
+        tools=[get_weather_tool, convert_to_celsius_tool],  # Agent can execute this Python function
     )
-    return response.choices[0].message.content
-
-@application(
-    tags={"type": "quickstart", "use_case": "customer_support"},
-)
-@function(
-    description="Customer Support application.",
-    image=image
-)
-def customer_support(feedbacks: Dict[str, str]) -> Dict[str, str]:
-    """
-    Main application workflow:
-    1. Analyze sentiment for all feedbacks in parallel.
-    2. Draft responses for all sentiments in parallel.
-    3. Aggregate results into a dictionary.
-    """
-    names = list(feedbacks.keys())
-    feedback_texts = list(feedbacks.values())
-    
-    # 1. Analyze sentiment in parallel
-    sentiments = analyze_sentiment.map(feedback_texts)
-    
-    # 2. Draft responses in parallel
-    responses = draft_response.map(sentiments)
-    
-    # 3. Compile: Return dictionary
-    return dict(zip(names, responses))
+    result = Runner.run_sync(agent, f"City: {city}")
+    return result.final_output.strip()
 ```
+
+> **Note**: This is a simplified version. See the complete example at [examples/readme_example/city_guide.py](examples/readme_example/city_guide.py) for the full implementation including activity suggestions and agent orchestration.
 
 #### Running locally
 
-The application code is available at [examples/readme_example/customer_support_example.py](examples/readme_example/customer_support_example.py).
-The following code was added there to create the workflow and run it locally on your computer:
+The complete application code is available at [examples/readme_example/city_guide.py](examples/readme_example/city_guide.py).
+The following code is included to run it locally on your computer:
 
 ```python
 if __name__ == "__main__":
-    # Example usage
-    FEEDBACKS = {
-        "customer_a": "The product was great!",
-        "customer_b": "I am very disappointed with the service.",
-        "customer_c": "It worked perfectly, thank you!",
-    }
+    CITY = "Paris"
     
-    print(f"Generating responses for: {FEEDBACKS}\n")
+    print(f"Generating city guide for: {CITY}\n")
     
     if not os.environ.get("OPENAI_API_KEY"):
         print("Error: OPENAI_API_KEY environment variable is not set.")
         exit(1)
 
     # Run locally using Tensorlake's local runner
-    request = run_local_application(customer_support, FEEDBACKS)
+    request = run_local_application("city_guide_app", CITY)
     response = request.output()
     
     print("\n" + "="*50)
-    print("FINAL RESPONSE")
+    print("CITY GUIDE")
     print("="*50 + "\n")
     print(response)
 ```
 
-Run the workflow locally:
+Run the application locally:
 
 ```bash
-python examples/readme_example/customer_support_example.py
+python examples/readme_example/city_guide.py
 ```
 
-In the console output you can see the result of the application:
-```json
-{
-  "customer_a": "Subject: Thank You for Choosing Us!\n\nDear [Customer's Name],\n\nI hope this message finds you well. I just wanted to take a moment to express our heartfelt thanks for choosing [Your Company Name]! We are thrilled to have the opportunity to serve you and are grateful for your trust in us.\n\nYour satisfaction is our top priority, and we are committed to going above and beyond to ensure you have the best experience possible. If there is anything more we can do for you, please don't hesitate to let us know.\n\nThank you once again for your support. We look forward to serving you again soon!\n\nWarm regards,\n\n[Your Name]  \n[Your Position]  \n[Your Company Name]  \n[Contact Information]",
-  "customer_b": "Subject: Sincere Apologies for Your Recent Experience\n\nDear [Customer's Name],\n\nI hope this message finds you well. I am writing to personally apologize for the inconvenience you experienced with our product/service. Ensuring our customers have a positive experience is our top priority, and I am truly sorry that we fell short of your expectations on this occasion.\n\nPlease rest assured that we are taking your feedback seriously and are working diligently to address the issues you've encountered. Your satisfaction is important to us, and we are committed to making this right for you.\n\nIf there's anything specific we can do to improve your experience, please do not hesitate to let us know. We value your trust and are eager to resolve this matter to your satisfaction.\n\nThank you for your understanding and patience. We truly appreciate your business and look forward to serving you better in the future.\n\nWarm regards,\n\n[Your Name]  \n[Your Position]  \n[Your Company]  \n[Contact Information]  ",
-  "customer_c": "Subject: Thank You for Your Purchase!\n\nHi [Customer's Name],\n\nI hope this message finds you well. I just wanted to take a moment to personally thank you for choosing us. Your support means the world to us, and we are thrilled to have you as a part of our community.\n\nWe strive to provide the best products and services, and your satisfaction is our top priority. If you have any questions or need assistance, please don't hesitate to reach out.\n\nOnce again, thank you for your trust in us. We're excited to serve you and look forward to seeing you again soon!\n\nWarm regards,\n\n[Your Name]  \n[Your Position]  \n[Company Name]  \n[Contact Information]"
-}
+The application will orchestrate multiple OpenAI Agents with tool calls to generate a personalized city guide. Each agent runs in its own sandbox and can execute code (like temperature conversion) and make web searches.
+
+Here is some example output from the simplified version:
+
+```bash
+==================================================
+CITY GUIDE
+==================================================
+
+Welcome to Paris! Today, the weather is cloudy with a current temperature of about 8°C. As you explore the city, you can expect evening and nighttime temperatures to stay between 5°C and 6°C.
+
+Don’t forget your jacket as you stroll along the Seine or visit the Eiffel Tower! Paris can feel especially charming under a cloudy sky, so embrace the cozy atmosphere and maybe stop by a café for a warm drink.
+
+If you need tips for what to do on a cloudy day in Paris, just let me know—enjoy your stay!
 ```
 
-Testing your applications locally is convenient during its development. There's no need to wait until the application is deployed to see how it works.
+Testing your applications locally is convenient during development. There's no need to wait until the application is deployed to see how it works.
 
 #### Deploying and running on Tensorlake Cloud
 
-To run the application on tensorlake cloud it first needs to get deployed there.
+To run the application on Tensorlake Cloud, it first needs to be deployed.
 
 1. Set `TENSORLAKE_API_KEY` environment variable in your shell session:
 ```bash
@@ -315,17 +294,16 @@ tensorlake secrets set OPENAI_API_KEY "Paste your API key here"
 ```
 3. Deploy the application to Tensorlake Cloud:
 ```bash
-tensorlake deploy examples/readme_example/customer_support_example.py
+tensorlake deploy examples/readme_example/city_guide.py
 ```
 4. Run the remote test script, found in `examples/readme_example/test_remote_app.py`:
 ```python
 from tensorlake.applications import run_remote_application
-from readme_example import customer_support
 
-# ... (feedbacks dictionary definition)
+city = "San Francisco"
 
 # Run the application remotely
-request = run_remote_application(customer_support, feedbacks)
+request = run_remote_application("city_guide_app", city)
 print(f"Request ID: {request.id}")
 
 # Get the output
@@ -333,12 +311,12 @@ response = request.output()
 print(response)
 ```
 
-5. Confirm you get the same response as before, maybe slightly different since the emails are generated by OpenAI.
+5. The application will execute on Tensorlake Cloud, with each function running in its own isolated sandbox.
 
 ### Updating your application
 Any time you update your application, just re-deploy it to Tensorlake Cloud:
 ```bash
-tensorlake deploy examples/readme_example/customer_support_example.py
+tensorlake deploy examples/readme_example/city_guide.py
 ```
 
 And run the remote test script again:
