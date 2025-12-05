@@ -103,6 +103,10 @@ class ParsingOptions(BaseModel):
         None,
         description="Set of page fragment types to ignore during parsing. This can be used to skip certain types of content, such as headers, footers, or other non-essential elements. If not provided, all page fragment types will be considered.",
     )
+    include_images: Optional[bool] = Field(
+        None,
+        description="Embed images from document in the markdown.",
+    )
 
     @field_serializer("ignore_sections")
     def serialize_ignore_sections(
