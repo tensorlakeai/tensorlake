@@ -5,14 +5,15 @@ from typing import Any, Dict
 import grpc
 
 from tensorlake.applications import InternalError, RequestState, TensorlakeError
+from tensorlake.applications.blob_store import BLOB, BLOBStore
 from tensorlake.applications.interface.awaitables import (
     _request_scoped_id,
 )
 from tensorlake.applications.request_context.request_state import (
     REQUEST_STATE_USER_DATA_SERIALIZER,
 )
+from tensorlake.function_executor.proto.function_executor_pb2 import BLOB as BLOBProto
 from tensorlake.function_executor.proto.function_executor_pb2 import (
-    BLOB,
     AllocationRequestStateCommitWriteOperation,
     AllocationRequestStateOperation,
     AllocationRequestStateOperationResult,
@@ -20,9 +21,9 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     AllocationRequestStatePrepareWriteOperation,
 )
 
-from ..blob_store.blob_store import BLOBStore
-from ..logger import FunctionExecutorLogger
+from ...applications.internal_logger import InternalLogger
 from .allocation_state_wrapper import AllocationStateWrapper
+from .blob_utils import blob_proto_to_blob, blob_to_blob_proto
 
 
 @dataclass
@@ -37,11 +38,11 @@ class AllocationRequestState(RequestState):
         self,
         allocation_state: AllocationStateWrapper,
         blob_store: BLOBStore,
-        logger: FunctionExecutorLogger,
+        logger: InternalLogger,
     ) -> None:
         self._allocation_state: AllocationStateWrapper = allocation_state
         self._blob_store: BLOBStore = blob_store
-        self._logger: FunctionExecutorLogger = logger.bind(module=__name__)
+        self._logger: InternalLogger = logger.bind(module=__name__)
 
         # Operation ID -> _RequestStateOperationInfo.
         self._request_state_operations: Dict[str, _RequestStateOperationInfo] = {}
@@ -54,11 +55,15 @@ class AllocationRequestState(RequestState):
             serialized_value: bytes = REQUEST_STATE_USER_DATA_SERIALIZER.serialize(
                 value
             )
-            blob: BLOB = self._get_writeable_blob(key=key, size=len(serialized_value))
-            self._blob_store.put(
-                blob=blob, data=[serialized_value], logger=self._logger
+            blob: BLOBProto = self._get_writeable_blob(
+                key=key, size=len(serialized_value)
             )
-            self._commit_writeable_blob(key=key, blob=blob)
+            uploaded_blob: BLOB = self._blob_store.put(
+                blob=blob_proto_to_blob(blob),
+                data=[serialized_value],
+                logger=self._logger,
+            )
+            self._commit_writeable_blob(key=key, blob=blob_to_blob_proto(uploaded_blob))
         except TensorlakeError:
             raise
         except Exception as e:
@@ -74,13 +79,13 @@ class AllocationRequestState(RequestState):
         # NB: This is called from user code, user code is blocked.
         # Any exception raised here goes directly to user code.
         try:
-            blob: BLOB | None = self._get_read_only_blob(key=key)
+            blob: BLOBProto | None = self._get_read_only_blob(key=key)
             if blob is None:
                 return default
 
             size: int = sum(chunk.size for chunk in blob.chunks)
             serialized_value: bytes = self._blob_store.get(
-                blob=blob, offset=0, size=size, logger=self._logger
+                blob=blob_proto_to_blob(blob), offset=0, size=size, logger=self._logger
             )
             # possible_types=[] because pickle deserializer knows the target type already.
             deserialized_value: Any = REQUEST_STATE_USER_DATA_SERIALIZER.deserialize(
@@ -115,7 +120,7 @@ class AllocationRequestState(RequestState):
         operation_info.result = result
         operation_info.result_available.set()
 
-    def _get_read_only_blob(self, key: str) -> BLOB | None:
+    def _get_read_only_blob(self, key: str) -> BLOBProto | None:
         """Gets a read-only BLOB for the given key.
 
         Returns None if the key does not exist.
@@ -149,7 +154,7 @@ class AllocationRequestState(RequestState):
 
         return operation_info.result.prepare_read.blob
 
-    def _get_writeable_blob(self, key: str, size: int) -> BLOB:
+    def _get_writeable_blob(self, key: str, size: int) -> BLOBProto:
         """Gets a write-only BLOB for the given key."""
         operation: AllocationRequestStateOperation = AllocationRequestStateOperation(
             operation_id=_request_scoped_id(),
@@ -180,7 +185,7 @@ class AllocationRequestState(RequestState):
 
         return operation_info.result.prepare_write.blob
 
-    def _commit_writeable_blob(self, key: str, blob: BLOB) -> None:
+    def _commit_writeable_blob(self, key: str, blob: BLOBProto) -> None:
         """Commits writes to a previously obtained write-only BLOB for the given key."""
         operation: AllocationRequestStateOperation = AllocationRequestStateOperation(
             operation_id=_request_scoped_id(),

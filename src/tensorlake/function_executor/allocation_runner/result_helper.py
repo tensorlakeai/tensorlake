@@ -1,6 +1,5 @@
-import traceback
-
 from tensorlake.applications import Function, RequestError
+from tensorlake.applications.internal_logger import InternalLogger
 from tensorlake.applications.request_context.request_metrics_recorder import (
     RequestMetricsRecorder,
 )
@@ -9,9 +8,8 @@ from tensorlake.function_executor.user_events import (
     log_user_event_function_call_failed,
 )
 
-from ..logger import FunctionExecutorLogger
+from ..proto.function_executor_pb2 import BLOB as BLOBProto
 from ..proto.function_executor_pb2 import (
-    BLOB,
     AllocationFailureReason,
     AllocationOutcomeCode,
     AllocationResult,
@@ -28,12 +26,12 @@ class ResultHelper:
         function_ref: FunctionRef,
         function: Function,
         metrics: RequestMetricsRecorder,
-        logger: FunctionExecutorLogger,
+        logger: InternalLogger,
     ):
         self._function_ref: FunctionRef = function_ref
         self._function: Function = function
         self._request_metrics = metrics
-        self._logger: FunctionExecutorLogger = logger.bind(module=__name__)
+        self._logger: InternalLogger = logger.bind(module=__name__)
 
     def internal_error(self) -> AllocationResult:
         """Creates an AllocationResult representing an internal error in Function Executor code."""
@@ -66,7 +64,7 @@ class ResultHelper:
         details: AllocationEventDetails,
         request_error: RequestError,
         request_error_output: SerializedObjectInsideBLOB,
-        uploaded_request_error_blob: BLOB,
+        uploaded_request_error_blob: BLOBProto,
     ) -> AllocationResult:
         """Creates an AllocationResult representing a request error."""
         # Give the full traceback + alloc metadata to the user for debugging.
@@ -87,7 +85,7 @@ class ResultHelper:
     def from_function_output(
         self,
         output: SerializedObjectInsideBLOB | ExecutionPlanUpdates,
-        uploaded_outputs_blob: BLOB | None,
+        uploaded_outputs_blob: BLOBProto | None,
     ) -> AllocationResult:
         result = AllocationResult(
             outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,

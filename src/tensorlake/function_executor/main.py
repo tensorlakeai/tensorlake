@@ -1,9 +1,8 @@
 import argparse
-import multiprocessing
 from typing import Any
 
+from ..applications.internal_logger import InternalLogger
 from .info import info_response_kv_args
-from .logger import FunctionExecutorLogger
 from .server import Server
 from .service import Service
 
@@ -38,7 +37,7 @@ def main():
     # Don't fail if unknown arguments are present. This supports backward compatibility when new args are added.
     args, ignored_args = parser.parse_known_args()
 
-    logger = FunctionExecutorLogger.get_logger(module=__name__)
+    logger = InternalLogger.get_logger(module=__name__)
     validate_args(args, logger)
 
     logger = logger.bind(
@@ -50,9 +49,6 @@ def main():
     if len(ignored_args) > 0:
         logger.warning("ignored cli arguments", ignored_args=ignored_args)
 
-    # Set "spawn" method because grpc Server doesn't support forking. exec is required.
-    # "spawn" is supported by all OSes: Windows, Linux, MacOS.
-    multiprocessing.set_start_method(method="spawn", force=True)
     Server(
         server_address=args.address,
         service=Service(logger),

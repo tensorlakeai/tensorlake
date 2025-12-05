@@ -20,6 +20,8 @@ from tensorlake.applications import (
     TimeoutError,
 )
 from tensorlake.applications.algorithms.validate_user_object import validate_user_object
+from tensorlake.applications.blob_store import BLOBStore
+from tensorlake.applications.cloud_events import print_cloud_event
 from tensorlake.applications.function.function_call import create_function_error
 from tensorlake.applications.function.user_data_serializer import (
     deserialize_value,
@@ -30,6 +32,7 @@ from tensorlake.applications.interface.awaitables import (
     AwaitableList,
     _request_scoped_id,
 )
+from tensorlake.applications.internal_logger import InternalLogger
 from tensorlake.applications.metadata import (
     FunctionCallMetadata,
     ReduceOperationMetadata,
@@ -47,10 +50,7 @@ from tensorlake.applications.user_data_serializer import (
     PickleUserDataSerializer,
     UserDataSerializer,
 )
-from tensorlake.function_executor.cloud_events import print_cloud_event
 
-from ..blob_store.blob_store import BLOBStore
-from ..logger import FunctionExecutorLogger
 from ..proto.function_executor_pb2 import (
     BLOB,
     Allocation,
@@ -122,14 +122,14 @@ class AllocationRunner:
         function: Function,
         function_instance_arg: Any | None,
         blob_store: BLOBStore,
-        logger: FunctionExecutorLogger,
+        logger: InternalLogger,
     ):
         self._allocation: Allocation = allocation
         self._function_ref: FunctionRef = function_ref
         self._function: Function = function
         self._function_instance_arg: Any | None = function_instance_arg
         self._blob_store: BLOBStore = blob_store
-        self._logger: FunctionExecutorLogger = logger.bind(module=__name__)
+        self._logger: InternalLogger = logger.bind(module=__name__)
 
         self._allocation_event_details: AllocationEventDetails = AllocationEventDetails(
             namespace=self._function_ref.namespace,
@@ -771,11 +771,9 @@ class AllocationRunner:
 
 
 class ProxiedAllocationProgress(FunctionProgress):
-    def __init__(
-        self, allocation_runner: AllocationRunner, logger: FunctionExecutorLogger
-    ):
+    def __init__(self, allocation_runner: AllocationRunner, logger: InternalLogger):
         self._allocation_runner: AllocationRunner = allocation_runner
-        self._logger: FunctionExecutorLogger = logger.bind(module=__name__)
+        self._logger: InternalLogger = logger.bind(module=__name__)
 
     def update(
         self,
@@ -785,6 +783,19 @@ class ProxiedAllocationProgress(FunctionProgress):
         attributes: dict[str, str] | None = None,
     ) -> None:
         # This method is called from user function code.
+        if attributes is not None:
+            if not isinstance(attributes, dict):
+                raise SDKUsageError(
+                    f"'attributes' needs to be a dictionary of string key/value pairs, got: {attributes}"
+                )
+            for key, value in attributes.items():
+                if not isinstance(key, str):
+                    raise SDKUsageError(f"'attributes' key {key} needs to be a string")
+                if not isinstance(value, str):
+                    raise SDKUsageError(
+                        f"'attributes' value {value} for key '{key}' needs to be a string"
+                    )
+
         try:
             self._allocation_runner._allocation_state.update_progress(current, total)
             request_id = self._allocation_runner._request_context.request_id

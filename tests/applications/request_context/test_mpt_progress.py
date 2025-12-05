@@ -15,88 +15,87 @@ from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
 
 
-def emit_metrics_worker(ctx: RequestContext, q) -> None:
+def update_progress_worker(ctx: RequestContext, values: tuple[int, int], q) -> None:
     try:
-        ctx.metrics.timer("test_timer", 2.5)
-        ctx.metrics.counter("test_counter", 5)
+        ctx.progress.update(current=values[0], total=values[1])
         q.put(None)
     except Exception as e:
-        print(f"Exception in emit_metrics_worker: {e}")
+        print(f"Exception in update_progress_worker: {e}")
         q.put(e)
 
 
 @application()
 @function()
-def func_emit_metrics(_: int) -> str:
+def func_update_progress(values: tuple[int, int]) -> str:
     ctx: RequestContext = RequestContext.get()
     q: mt_queue.SimpleQueue = mt_queue.SimpleQueue()
-    emit_metrics_worker(ctx, q)
+    update_progress_worker(ctx, values, q)
     return "success" if q.get() is None else "failure"
 
 
-class TestUseMetricsFromFunction(unittest.TestCase):
+class TestUseProgressFromFunction(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_emit_metrics(self, _: str, is_remote: bool):
+    def test_update_progress(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(func_emit_metrics, 1, remote=is_remote)
+        request: Request = run_application(
+            func_update_progress, (10, 100), remote=is_remote
+        )
         self.assertEqual(request.output(), "success")
-
-        # No verification of metrics values yet because SDK doesn't yet provide an interface
-        # for reading request metrics.
 
 
 @application()
 @function()
-def mt_emit_metrics(_: int) -> str:
+def mt_update_progress(values: tuple[int, int]) -> str:
     ctx: RequestContext = RequestContext.get()
     q: mt_queue.SimpleQueue = mt_queue.SimpleQueue()
     thread: threading.Thread = threading.Thread(
-        target=emit_metrics_worker, args=(ctx, q)
+        target=update_progress_worker, args=(ctx, values, q)
     )
     thread.start()
     thread.join()
     return "success" if q.get() is None else "failure"
 
 
-class TestUseMetricsFromChildThread(unittest.TestCase):
+class TestUseProgressFromChildThread(unittest.TestCase):
     # TODO: add remote mode when FE support IPC request context.
     @parameterized.parameterized.expand([("local", False)])
-    def test_emit_metrics(self, _: str, is_remote: bool):
+    def test_update_progress(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(mt_emit_metrics, 1, remote=is_remote)
+        request: Request = run_application(
+            mt_update_progress, (10, 100), remote=is_remote
+        )
         self.assertEqual(request.output(), "success")
-
-        # No verification of metrics values yet because SDK doesn't yet provide an interface
-        # for reading request metrics.
 
 
 @application()
 @function()
-def mp_emit_metrics(_: int) -> str:
+def mp_update_progress(values: tuple[int, int]) -> str:
     ctx: RequestContext = RequestContext.get()
     q: mp.Queue = mp.Queue()
-    process: mp.Process = mp.Process(target=emit_metrics_worker, args=(ctx, q))
+    process: mp.Process = mp.Process(
+        target=update_progress_worker, args=(ctx, values, q)
+    )
     process.start()
     process.join()
     return "success" if q.get() is None else "failure"
 
 
-class TestUseMetricsFromChildProcess(unittest.TestCase):
+class TestUseProgressFromChildProcess(unittest.TestCase):
     # TODO: add remote mode when FE support IPC request context.
     @parameterized.parameterized.expand([("local", False)])
-    def test_emit_metrics(self, _: str, is_remote: bool):
+    def test_update_progress(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(mp_emit_metrics, 1, remote=is_remote)
+        request: Request = run_application(
+            mp_update_progress, (10, 100), remote=is_remote
+        )
+        self.assertEqual("success", request.output())
         self.assertEqual(request.output(), "success")
-
-        # No verification of metrics values yet because SDK doesn't yet provide an interface
-        # for reading request metrics.
 
 
 if __name__ == "__main__":

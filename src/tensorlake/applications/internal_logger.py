@@ -13,30 +13,59 @@ from .cloud_events import new_cloud_event
 # and are augmented with context information which allows separating them from customer logs.
 
 
-class FunctionExecutorLogger:
-    def __init__(self, context: Dict[str, Any], log_file: io.TextIOWrapper):
+class InternalLogger:
+    class LOG_FILE(Enum):
+        STDOUT = 1
+        STDERR = 2
+        NULL = 3
+
+    """Picklable internal logger for use in FE and SDK."""
+
+    def __init__(self, context: Dict[str, Any], destination: LOG_FILE):
         self._context: Dict[str, Any] = context
-        self._log_file: io.TextIOWrapper = log_file
+        self._destination: InternalLogger.LOG_FILE = destination
+        self._log_file: io.TextIOWrapper | None = None
+
+        if destination == InternalLogger.LOG_FILE.STDOUT:
+            self._log_file = sys.stdout
+        elif destination == InternalLogger.LOG_FILE.STDERR:
+            self._log_file = sys.stderr
+
+    def __getstate__(self):
+        """Get the state for pickling."""
+        # This is called when i.e. user creates a new subprocess to capture the logger state for pickling.
+        # When a user creates a new child thread, this is not called.
+        return {
+            "context": self._context,
+            "destination": self._destination,
+        }
+
+    def __setstate__(self, state: dict[str, Any]):
+        """Set the state for unpickling."""
+        self.__init__(
+            context=state["context"],
+            destination=state["destination"],
+        )
 
     @classmethod
-    def get_logger(cls, **kwargs) -> "FunctionExecutorLogger":
+    def get_logger(cls, **kwargs) -> "InternalLogger":
         """Gets the root logger with the given context.
 
         Doesn't raise any exceptions.
         """
-        return FunctionExecutorLogger(
+        return InternalLogger(
             context=kwargs,
-            log_file=sys.stdout,
+            destination=InternalLogger.LOG_FILE.STDOUT,
         )
 
-    def bind(self, **kwargs) -> "FunctionExecutorLogger":
+    def bind(self, **kwargs) -> "InternalLogger":
         """Binds additional context to the logger.
 
         Doesn't raise any exceptions.
         """
         context = self._context.copy()
         context.update(kwargs)
-        return FunctionExecutorLogger(context=context, log_file=self._log_file)
+        return InternalLogger(context=context, destination=self._destination)
 
     def info(self, message: str, **kwargs):
         """Logs an info level message.
@@ -72,7 +101,8 @@ class FunctionExecutorLogger:
         Doesn't raise any exceptions.
         """
         formatted_message = self._format_message(level, message, **kwargs)
-        self._log_file.write(formatted_message + "\n")
+        if self._log_file is not None:
+            self._log_file.write(formatted_message + "\n")
 
     def _format_message(self, level: str, message: str, **kwargs) -> str:
         """Formats the log message with context and additional key-value pairs.
@@ -106,7 +136,7 @@ class FunctionExecutorLogger:
             )
         except Exception as e:
             print(
-                "Failed to serialize Function Executor internal log message to JSON",
+                "Failed to serialize internal log message to JSON",
                 "original context:",
                 context,
                 "exception:",

@@ -32,14 +32,14 @@ class RequestState:
 class RequestMetrics:
     """Abstract interface for reporting application request metrics."""
 
-    def timer(self, name: str, value: float):
+    def timer(self, name: str, value: float) -> None:
         """Records a duration metric with the supplied name and value.
 
         Raises TensorlakeError on error.
         """
         raise InternalError("RequestMetrics subclasses must implement timer method.")
 
-    def counter(self, name: str, value: int = 1):
+    def counter(self, name: str, value: int = 1) -> None:
         """Adds the supplied value to the counter with the supplied name.
 
         If the counter does not exist, it is created with the supplied value.
@@ -68,7 +68,8 @@ class FunctionProgress:
             attributes: A dictionary of key/value string pairs to pass to the progress update
 
         Raises:
-            SerializationError: If attributes cannot be serialized to JSON.
+            SDKUsageError: If attributes is not a dictionary of string key/value pairs or None.
+            TensorlakeError: On other errors.
         """
         raise InternalError("FunctionProgress subclasses must implement update method.")
 

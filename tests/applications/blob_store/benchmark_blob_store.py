@@ -4,12 +4,8 @@ import time
 from datetime import datetime
 from typing import List
 
-from tensorlake.function_executor.blob_store.blob_store import BLOBStore
-from tensorlake.function_executor.logger import FunctionExecutorLogger
-from tensorlake.function_executor.proto.function_executor_pb2 import (
-    BLOB,
-    BLOBChunk,
-)
+from tensorlake.applications.blob_store import BLOB, BLOBChunk, BLOBStore
+from tensorlake.applications.internal_logger import InternalLogger
 from tensorlake.vendor.nanoid import generate as nanoid_generate
 
 # Please delete the bucket after running the benchmark.
@@ -22,10 +18,8 @@ class Benchmark:
     def __init__(self, available_cpu_count: int):
         import boto3  # needs to be installed into the environment manually
 
-        self.logger = FunctionExecutorLogger(context={}, log_file=sys.stdout)
-        self.blob_store = BLOBStore(
-            available_cpu_count=available_cpu_count, logger=self.logger
-        )
+        self.logger = InternalLogger.get_logger()
+        self.blob_store = BLOBStore(available_cpu_count=available_cpu_count)
         self.s3 = boto3.client("s3")
 
         existing_buckets: List[str] = [
@@ -77,7 +71,10 @@ class Benchmark:
         multipart_upload_id: str = self.s3.create_multipart_upload(
             Bucket=TEST_BUCKET_NAME, Key=blob_key
         )["UploadId"]
-        blob: BLOB = BLOB()
+        blob: BLOB = BLOB(
+            id="benchmark-blob",
+            chunks=[],
+        )
         for chunk_ix in range(chunks_count):
             blob.chunks.append(
                 BLOBChunk(
@@ -88,6 +85,7 @@ class Benchmark:
                         upload_id=multipart_upload_id,
                     ),
                     size=chunk_size_bytes,
+                    etag=None,
                 )
             )
 
@@ -113,7 +111,10 @@ class Benchmark:
             },
         )
 
-        blob: BLOB = BLOB()
+        blob: BLOB = BLOB(
+            id="benchmark-blob",
+            chunks=[],
+        )
         for chunk_ix in range(chunks_count):
             blob.chunks.append(
                 BLOBChunk(
@@ -122,6 +123,7 @@ class Benchmark:
                         operation="get_object",
                     ),
                     size=chunk_size_bytes,
+                    etag=None,
                 )
             )
 

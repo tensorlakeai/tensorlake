@@ -2,18 +2,19 @@ import hashlib
 import time
 from typing import Dict, List, Tuple
 
+from tensorlake.applications.blob_store import BLOBStore
 from tensorlake.applications.interface import InternalError
+from tensorlake.applications.internal_logger import InternalLogger
 from tensorlake.applications.metadata import serialize_metadata
 from tensorlake.applications.user_data_serializer import serializer_by_name
 
-from ..blob_store.blob_store import BLOBStore
-from ..logger import FunctionExecutorLogger
+from ..proto.function_executor_pb2 import BLOB as BLOBProto
 from ..proto.function_executor_pb2 import (
-    BLOB,
     SerializedObjectEncoding,
     SerializedObjectInsideBLOB,
     SerializedObjectManifest,
 )
+from .blob_utils import blob_proto_to_blob, blob_to_blob_proto
 from .value import SerializedValue
 
 
@@ -65,10 +66,10 @@ def serialized_values_to_serialized_objects(
 def upload_serialized_objects_to_blob(
     serialized_objects: Dict[str, SerializedObjectInsideBLOB],
     blob_data: List[bytes],
-    destination_blob: BLOB,
+    destination_blob: BLOBProto,
     blob_store: BLOBStore,
-    logger: FunctionExecutorLogger,
-) -> BLOB:
+    logger: InternalLogger,
+) -> BLOBProto:
     """Uploads serialized values to the destination blob and returns uploaded BLOB with all chunks used."""
 
     total_size: int = sum(len(data) for data in blob_data)
@@ -78,7 +79,7 @@ def upload_serialized_objects_to_blob(
         objects_count=len(serialized_objects),
         total_size=total_size,
     )
-    uploaded_blob: BLOB = _put_data_to_blob(
+    uploaded_blob: BLOBProto = _put_data_to_blob(
         blob_data=blob_data,
         destination=destination_blob,
         blob_store=blob_store,
@@ -96,16 +97,16 @@ def upload_serialized_objects_to_blob(
 
 def upload_request_error(
     utf8_message: bytes,
-    destination_blob: BLOB,
+    destination_blob: BLOBProto,
     blob_store: BLOBStore,
-    logger: FunctionExecutorLogger,
-) -> Tuple[SerializedObjectInsideBLOB, BLOB]:
+    logger: InternalLogger,
+) -> Tuple[SerializedObjectInsideBLOB, BLOBProto]:
     start_time = time.monotonic()
     logger.info(
         "uploading request error output",
         size=len(utf8_message),
     )
-    uploaded_blob: BLOB = _put_data_to_blob(
+    uploaded_blob: BLOBProto = _put_data_to_blob(
         [utf8_message],
         destination_blob,
         blob_store,
@@ -134,10 +135,10 @@ def upload_request_error(
 
 def _put_data_to_blob(
     blob_data: List[bytes],
-    destination: BLOB,
+    destination: BLOBProto,
     blob_store: BLOBStore,
-    logger: FunctionExecutorLogger,
-) -> BLOB:
+    logger: InternalLogger,
+) -> BLOBProto:
     """Uploads outputs to the blob and returns it with the updated chunks."""
     outputs_size: int = sum(len(output) for output in blob_data)
     blob_size: int = sum(chunk.size for chunk in destination.chunks)
@@ -146,10 +147,12 @@ def _put_data_to_blob(
             f"Function output size {outputs_size} exceeds the total size of BLOB {blob_size}."
         )
 
-    return blob_store.put(
-        blob=destination,
-        data=blob_data,
-        logger=logger,
+    return blob_to_blob_proto(
+        blob_store.put(
+            blob=blob_proto_to_blob(destination),
+            data=blob_data,
+            logger=logger,
+        )
     )
 
 

@@ -3,9 +3,8 @@ import os
 import os.path
 from typing import List
 
-from tensorlake.applications import InternalError
-
-from ..logger import FunctionExecutorLogger
+from tensorlake.applications.interface.exceptions import InternalError
+from tensorlake.applications.internal_logger import InternalLogger
 
 
 class LocalFSBLOBStore:
@@ -16,7 +15,7 @@ class LocalFSBLOBStore:
         uri: str,
         offset: int,
         destination: memoryview,
-        logger: FunctionExecutorLogger,
+        logger: InternalLogger,
     ) -> None:
         """Reads binary data stored in file at the supplied URI and offset into the destination memoryview.
 
@@ -40,7 +39,7 @@ class LocalFSBLOBStore:
         uri: str,
         offset: int,
         source: List[memoryview],
-        logger: FunctionExecutorLogger,
+        logger: InternalLogger,
     ) -> str:
         """Stores the supplied memoryviews of binary data in a file at the supplied URI and offset.
 

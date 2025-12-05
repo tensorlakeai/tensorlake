@@ -1,11 +1,11 @@
 from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from typing import List
+from typing import Any
 
-from tensorlake.applications import InternalError
+from tensorlake.applications.interface.exceptions import InternalError
+from tensorlake.applications.internal_logger import InternalLogger
 
-from ..logger import FunctionExecutorLogger
-from ..proto.function_executor_pb2 import BLOB, BLOBChunk
+from .blob import BLOB, BLOBChunk
 from .local_fs_blob_store import LocalFSBLOBStore
 from .s3_blob_store import S3BLOBStore
 
@@ -27,10 +27,13 @@ class _ChunkInfo:
 class BLOBStore:
     """Dispatches generic BLOB store calls to their real backends.
 
-    Implements chunking."""
+    Implements chunking. Thread-safe. Picklable.
+    """
 
-    def __init__(self, available_cpu_count: int, logger: FunctionExecutorLogger):
+    def __init__(self, available_cpu_count: int):
         """Creates a BLOB store that uses the supplied BLOB stores."""
+        self._available_cpu_count: int = available_cpu_count
+
         max_io_workers: int = min(
             available_cpu_count * _IO_WORKER_THREADS_PER_AVAILABLE_CPU,
             _MAX_WORKER_THREADS,
@@ -40,15 +43,20 @@ class BLOBStore:
         )
         self._local: LocalFSBLOBStore = LocalFSBLOBStore()
         self._s3: S3BLOBStore = S3BLOBStore(io_workers_count=max_io_workers)
-        logger.info(
-            "BLOBStore initialized",
-            available_cpu_count=available_cpu_count,
-            max_io_workers=max_io_workers,
+
+    def __getstate__(self):
+        """Get the state for pickling."""
+        return {
+            "available_cpu_count": self._available_cpu_count,
+        }
+
+    def __setstate__(self, state: dict[str, Any]):
+        """Set the state for unpickling."""
+        self.__init__(
+            available_cpu_count=state["available_cpu_count"],
         )
 
-    def get(
-        self, blob: BLOB, offset: int, size: int, logger: FunctionExecutorLogger
-    ) -> bytes:
+    def get(self, blob: BLOB, offset: int, size: int, logger: InternalLogger) -> bytes:
         """Returns binary data stored in BLOB with the supplied URI at the supplied offset.
 
         Raises InternalError on error.
@@ -60,7 +68,7 @@ class BLOBStore:
 
         # Read data from BLOB chunks in parallel until all data is read.
         # Minimize data copying by not creating any intermediate bytes/bytearray objects.
-        read_chunk_futures: List[Future] = []
+        read_chunk_futures: list[Future] = []
         destination: bytearray = bytearray(size)
         destination_view: memoryview = memoryview(destination)
         read_offset: int = offset
@@ -110,7 +118,7 @@ class BLOBStore:
         blob_uri: str,
         blob_read_offset: int,
         destination: memoryview,
-        logger: FunctionExecutorLogger,
+        logger: InternalLogger,
     ) -> bytes:
         if _is_file_uri(blob_uri):
             self._local.get(
@@ -127,9 +135,7 @@ class BLOBStore:
                 logger=logger,
             )
 
-    def put(
-        self, blob: BLOB, data: List[bytes], logger: FunctionExecutorLogger
-    ) -> BLOB:
+    def put(self, blob: BLOB, data: list[bytes], logger: InternalLogger) -> BLOB:
         """Stores the supplied binary data into the supplied BLOB starting from its very beginning.
 
         Overwrites BLOB. Raises Exception on error.
@@ -150,14 +156,14 @@ class BLOBStore:
         # Write data to BLOB chunks in parallel until all data is written.
         # Minimize data copying by not creating any intermediate bytes/bytearray objects.
         data_read_offset: int = 0
-        write_chunk_futures: List[Future] = []
-        uploaded_chunk_sizes: List[int] = []
+        write_chunk_futures: list[Future] = []
+        uploaded_chunk_sizes: list[int] = []
 
         data_ix: int = 0
         read_offset_inside_data: int = 0
         for chunk in blob.chunks:
             chunk: BLOBChunk
-            chunk_data: List[memoryview] = []
+            chunk_data: list[memoryview] = []
             chunk_data_size: int = 0
             chunk_offset: int = data_read_offset
             if data_ix == len(data):
@@ -198,6 +204,7 @@ class BLOBStore:
         wait(write_chunk_futures, return_when=FIRST_EXCEPTION)
         uploaded_blob: BLOB = BLOB(
             id=blob.id,
+            chunks=[],
         )
         for ix, future in enumerate(write_chunk_futures):
             if future.exception() is not None:
@@ -206,8 +213,7 @@ class BLOBStore:
                 ) from future.exception()
             # The futures list is ordered by the chunk index, so appending here preserves
             # the original chunks order.
-            uploaded_chunk: BLOBChunk = BLOBChunk()
-            uploaded_chunk.CopyFrom(blob.chunks[ix])
+            uploaded_chunk: BLOBChunk = blob.chunks[ix].model_copy()
             uploaded_chunk.size = uploaded_chunk_sizes[ix]
             uploaded_chunk.etag = future.result()
             uploaded_blob.chunks.append(uploaded_chunk)
@@ -218,8 +224,8 @@ class BLOBStore:
         self,
         chunk_uri: str,
         chunk_offset: int,
-        source: List[memoryview],
-        logger: FunctionExecutorLogger,
+        source: list[memoryview],
+        logger: InternalLogger,
     ) -> str:
         if _is_file_uri(chunk_uri):
             return self._local.put(

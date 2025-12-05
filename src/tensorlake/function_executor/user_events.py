@@ -10,7 +10,7 @@
 import traceback
 from dataclasses import dataclass
 
-from tensorlake.function_executor.cloud_events import print_cloud_event
+from tensorlake.applications.cloud_events import print_cloud_event
 
 
 @dataclass
