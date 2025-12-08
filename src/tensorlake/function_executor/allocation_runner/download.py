@@ -3,21 +3,22 @@ import time
 from typing import List
 
 from tensorlake.applications import InternalError
+from tensorlake.applications.blob_store import BLOBStore
+from tensorlake.applications.internal_logger import InternalLogger
 from tensorlake.applications.metadata import ValueMetadata, deserialize_metadata
 
-from ..blob_store.blob_store import BLOBStore
-from ..logger import FunctionExecutorLogger
+from ..proto.function_executor_pb2 import BLOB as BLOBProto
 from ..proto.function_executor_pb2 import (
-    BLOB,
     Allocation,
     SerializedObjectInsideBLOB,
     SerializedObjectManifest,
 )
+from .blob_utils import blob_proto_to_blob
 from .value import SerializedValue
 
 
 def download_function_arguments(
-    allocation: Allocation, blob_store: BLOBStore, logger: FunctionExecutorLogger
+    allocation: Allocation, blob_store: BLOBStore, logger: InternalLogger
 ) -> List[SerializedValue]:
     start_time = time.monotonic()
     logger = logger.bind(module=__name__)
@@ -40,9 +41,9 @@ def download_function_arguments(
 
 def download_serialized_objects(
     serialized_objects: List[SerializedObjectInsideBLOB],
-    serialized_object_blobs: List[BLOB],
+    serialized_object_blobs: List[BLOBProto],
     blob_store: BLOBStore,
-    logger: FunctionExecutorLogger,
+    logger: InternalLogger,
 ) -> List[SerializedValue]:
     # TODO: Do this in parallel. Keep in mind that the underlying BLOB store
     # chunks and parallelizes large downloads and performance degrades with
@@ -60,10 +61,10 @@ def download_serialized_objects(
 
 
 def _download_serialized_value(
-    blob: BLOB,
+    blob: BLOBProto,
     so: SerializedObjectInsideBLOB,
     blob_store: BLOBStore,
-    logger: FunctionExecutorLogger,
+    logger: InternalLogger,
 ) -> SerializedValue:
     """Returns the raw bytes of the serialized object metadata and data from blob store."""
     if not so.manifest.HasField("metadata_size"):
@@ -73,14 +74,14 @@ def _download_serialized_value(
     serialized_metadata: bytes | None = None
     if so.manifest.metadata_size > 0:
         serialized_metadata = blob_store.get(
-            blob=blob,
+            blob=blob_proto_to_blob(blob),
             offset=so.offset,
             size=so.manifest.metadata_size,
             logger=logger,
         )
 
     serialized_data: bytes = blob_store.get(
-        blob=blob,
+        blob=blob_proto_to_blob(blob),
         offset=so.offset + so.manifest.metadata_size,
         size=so.manifest.size - so.manifest.metadata_size,
         logger=logger,

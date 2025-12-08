@@ -6,11 +6,8 @@ from parameterized import parameterized
 from testing import create_tmp_blob, read_tmp_blob_bytes, write_tmp_blob_bytes
 
 from tensorlake.applications import InternalError
-from tensorlake.function_executor.blob_store.blob_store import BLOBStore
-from tensorlake.function_executor.logger import FunctionExecutorLogger
-from tensorlake.function_executor.proto.function_executor_pb2 import (
-    BLOB,
-)
+from tensorlake.applications.blob_store import BLOB, BLOBChunk, BLOBStore
+from tensorlake.applications.internal_logger import InternalLogger
 
 TESTED_CHUNKS = [
     ("single_big_chunk", 1, 1024),
@@ -21,8 +18,8 @@ TESTED_CHUNKS = [
 
 class TestBLOBStore(unittest.TestCase):
     def setUp(self):
-        self.logger = FunctionExecutorLogger(context={}, log_file=sys.stdout)
-        self.blob_store = BLOBStore(available_cpu_count=1, logger=self.logger)
+        self.logger = InternalLogger.get_logger()
+        self.blob_store = BLOBStore(available_cpu_count=1)
 
     def generate_data(self, size: int) -> bytes:
         """Generates a pattern of data to be used in tests."""
@@ -59,7 +56,10 @@ class TestBLOBStore(unittest.TestCase):
             data=expect_blob_data,
         )
         got_blob_data: bytes = self.blob_store.get(
-            blob=blob, offset=0, size=blob_size // 2, logger=self.logger
+            blob=blob,
+            offset=0,
+            size=blob_size // 2,
+            logger=self.logger,
         )
         self.assertEqual(got_blob_data, expect_blob_data[: blob_size // 2])
 
@@ -100,7 +100,10 @@ class TestBLOBStore(unittest.TestCase):
         start: int = blob_size // 2 // 2
         end: int = start + blob_size // 2
         got_blob_data: bytes = self.blob_store.get(
-            blob=blob, offset=start, size=end - start, logger=self.logger
+            blob=blob,
+            offset=start,
+            size=end - start,
+            logger=self.logger,
         )
         self.assertEqual(got_blob_data, expect_blob_data[start:end])
 
@@ -114,7 +117,10 @@ class TestBLOBStore(unittest.TestCase):
         blob_size: int = chunks_count * chunk_size
         with self.assertRaises(InternalError):
             self.blob_store.get(
-                blob=blob, offset=blob_size + 1, size=1, logger=self.logger
+                blob=blob,
+                offset=blob_size + 1,
+                size=1,
+                logger=self.logger,
             )
 
     @parameterized.expand(TESTED_CHUNKS)
@@ -127,7 +133,10 @@ class TestBLOBStore(unittest.TestCase):
         blob_size: int = chunks_count * chunk_size
         with self.assertRaises(InternalError):
             self.blob_store.get(
-                blob=blob, offset=blob_size - 1, size=2, logger=self.logger
+                blob=blob,
+                offset=blob_size - 1,
+                size=2,
+                logger=self.logger,
             )
 
     @parameterized.expand(TESTED_CHUNKS)
@@ -144,6 +153,7 @@ class TestBLOBStore(unittest.TestCase):
             data=expect_blob_data,
             logger=self.logger,
         )
+        uploaded_blob: BLOB = uploaded_blob
         self.assertEqual(len(uploaded_blob.chunks), chunks_count)
         for ix, uploaded_chunk in enumerate(uploaded_blob.chunks):
             self.assertIsNotNone(uploaded_chunk.etag)
@@ -173,6 +183,7 @@ class TestBLOBStore(unittest.TestCase):
             data=expect_blob_data,
             logger=self.logger,
         )
+        uploaded_blob: BLOB = uploaded_blob
         self.assertEqual(len(uploaded_blob.chunks), chunks_count)
         for ix, uploaded_chunk in enumerate(uploaded_blob.chunks):
             self.assertIsNotNone(uploaded_chunk.etag)
@@ -197,8 +208,9 @@ class TestBLOBStore(unittest.TestCase):
             data=expect_blob_data,
             logger=self.logger,
         )
+        uploaded_blob: BLOB = uploaded_blob
         self.assertEqual(len(uploaded_blob.chunks), 1)
-        uploaded_chunk: BLOB = uploaded_blob.chunks[0]
+        uploaded_chunk: BLOBChunk = uploaded_blob.chunks[0]
         self.assertIsNotNone(uploaded_chunk.etag)
         self.assertEqual(uploaded_chunk.size, chunk_size)
         self.assertEqual(uploaded_chunk.uri, blob.chunks[0].uri)
@@ -223,8 +235,9 @@ class TestBLOBStore(unittest.TestCase):
             data=expect_blob_data,
             logger=self.logger,
         )
+        uploaded_blob: BLOB = uploaded_blob
         self.assertEqual(len(uploaded_blob.chunks), 1)
-        uploaded_chunk: BLOB = uploaded_blob.chunks[0]
+        uploaded_chunk: BLOBChunk = uploaded_blob.chunks[0]
         self.assertIsNotNone(uploaded_chunk.etag)
         self.assertEqual(uploaded_chunk.size, chunk_size // 2)
         self.assertEqual(uploaded_chunk.uri, blob.chunks[0].uri)
@@ -251,6 +264,7 @@ class TestBLOBStore(unittest.TestCase):
             data=expect_blob_data,
             logger=self.logger,
         )
+        uploaded_blob: BLOB = uploaded_blob
         self.assertEqual(
             len(uploaded_blob.chunks), (len(expect_blob_data[0]) - 1) // chunk_size + 1
         )

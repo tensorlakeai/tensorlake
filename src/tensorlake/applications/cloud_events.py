@@ -3,7 +3,7 @@ import json
 import uuid
 from typing import Any
 
-from tensorlake.applications import SerializationError
+from .interface.exceptions import SerializationError
 
 
 def print_cloud_event(
@@ -14,6 +14,8 @@ def print_cloud_event(
 ) -> None:
     """
     Takes a dictionary representing an event produced by the executor, wraps it in a CloudEvent and prints it to stdout.
+
+    Raises SerializationError: If the event cannot be serialized to JSON.
     """
     print(_serialize_json(new_cloud_event(event, type, source, message)), flush=True)
 
@@ -56,7 +58,7 @@ def _serialize_json(obj: dict[str, Any]) -> str:
         obj: The dictionary to serialize
 
     Returns:
-        A JSON-serializable version of the object as a string
+        A version of the object serialized into a JSON string
 
     Raises:
         SerializationError: If the object cannot be serialized to JSON

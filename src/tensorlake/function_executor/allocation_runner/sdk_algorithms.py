@@ -36,7 +36,7 @@ from tensorlake.applications.user_data_serializer import (
     UserDataSerializer,
 )
 
-from ..logger import FunctionExecutorLogger
+from ...applications.internal_logger import InternalLogger
 from ..proto.function_executor_pb2 import (
     ExecutionPlanUpdate,
     ExecutionPlanUpdates,
@@ -134,7 +134,7 @@ def awaitable_to_execution_plan_updates(
     uploaded_serialized_objects: Dict[str, SerializedObjectInsideBLOB],
     output_serializer_name_override: str,
     function_ref: FunctionRef,
-    logger: FunctionExecutorLogger,
+    logger: InternalLogger,
 ) -> ExecutionPlanUpdates:
     """Traverses the awaitable tree and constructs ExecutionPlanUpdates proto.
 
@@ -165,7 +165,7 @@ def _fill_execution_plan_updates(
     output_serializer_name_override: str | None,
     destination: List[ExecutionPlanUpdate],
     function_ref: FunctionRef,
-    logger: FunctionExecutorLogger,
+    logger: InternalLogger,
 ) -> None:
     if isinstance(awaitable, FunctionCallAwaitable):
         metadata: FunctionCallMetadata = FunctionCallMetadata(
@@ -309,7 +309,7 @@ def _fill_execution_plan_updates(
 
 
 def _to_collection_metadata(
-    awaitable: AwaitableList, logger: FunctionExecutorLogger
+    awaitable: AwaitableList, logger: InternalLogger
 ) -> CollectionMetadata:
     collection_metadata: CollectionMetadata = CollectionMetadata(
         items=[],
@@ -345,7 +345,7 @@ def _embed_collection_into_function_pb_args(
     awaitable: AwaitableList,
     uploaded_serialized_objects: Dict[str, SerializedObjectInsideBLOB],
     function_pb_args: List[FunctionArg],
-    logger: FunctionExecutorLogger,
+    logger: InternalLogger,
 ) -> None:
     for item in awaitable.items:
         if isinstance(item, SerializedValue):
@@ -401,7 +401,7 @@ def validate_and_deserialize_function_call_metadata(
     serialized_function_call_metadata: bytes,
     serialized_args: List[SerializedValue],
     function: Function,
-    logger: FunctionExecutorLogger,
+    logger: InternalLogger,
 ) -> FunctionCallMetadata | ReduceOperationMetadata | None:
     if len(serialized_function_call_metadata) > 0:
         # Function call created by SDK.

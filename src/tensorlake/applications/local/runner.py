@@ -1,3 +1,6 @@
+import shutil
+import tempfile
+import threading
 from concurrent.futures import ALL_COMPLETED as STD_ALL_COMPLETED
 from concurrent.futures import FIRST_COMPLETED as STD_FIRST_COMPLETED
 from concurrent.futures import FIRST_EXCEPTION as STD_FIRST_EXCEPTION
@@ -10,11 +13,14 @@ from queue import Empty as QueueEmptyError
 from queue import SimpleQueue
 from typing import Any, Dict, List
 
+from tensorlake.applications.blob_store import BLOBStore
+from tensorlake.applications.internal_logger import InternalLogger
+from tensorlake.applications.multiprocessing import setup_multiprocessing
+
 from ..algorithms.validate_user_object import validate_user_object
 from ..function.application_call import (
     deserialize_application_function_call_payload,
 )
-from ..function.function_call import create_function_error
 from ..function.user_data_serializer import (
     deserialize_value,
     function_input_serializer,
@@ -26,11 +32,9 @@ from ..interface import (
     Awaitable,
     File,
     Function,
-    FunctionError,
     Future,
     InternalError,
     Request,
-    RequestContext,
     RequestError,
     RequestFailed,
     SDKUsageError,
@@ -53,8 +57,8 @@ from ..metadata import (
     ReduceOperationMetadata,
 )
 from ..registry import get_function
-from ..request_context.request_context_base import RequestContextBase
-from ..request_context.request_metrics_recorder import RequestMetricsRecorder
+from ..request_context.http_client.context import RequestContextHTTPClient
+from ..request_context.http_server.server import RequestContextHTTPServer
 from ..runtime_hooks import (
     clear_run_futures_hook,
     clear_wait_futures_hook,
@@ -71,7 +75,6 @@ from ..validation import (
     print_validation_messages,
     validate_loaded_applications,
 )
-from .blob_store import BLOB, BLOBStore
 from .class_instance_store import ClassInstanceStore
 from .future import LocalFuture, UserFutureMetadataType
 from .future_run.function_call_future_run import FunctionCallFutureRun
@@ -84,11 +87,12 @@ from .future_run.future_run import (
 from .future_run.list_future_run import ListFutureRun
 from .future_run.return_output_future_run import ReturnOutputFutureRun
 from .request import LocalRequest
-from .request_progress import LocalFunctionProgress
-from .request_state import LocalRequestState
+from .request_context.http_handler_factory import LocalRequestContextHTTPHandlerFactory
 from .utils import print_exception
+from .value_store import SerializedValue, SerializedValueStore
 
-_LOCAL_REQUEST_ID = "local-request"
+_LOCAL_ALLOCATION_ID = "local-allocation-id"
+_LOCAL_REQUEST_ID = "local-request-id"
 # 2 ms  interval for code paths that do polling.
 # This keeps our timers very accurate and doesn't add too much latency and CPU overhead.
 _SLEEP_POLL_INTERVAL_SECONDS = 0.002
@@ -104,20 +108,26 @@ class LocalRunner:
     def __init__(self, app: Function, app_payload: Any):
         self._app: Function = app
         self._app_payload: Any = app_payload
-        # Value ID/Future ID -> BLOB.
-        self._blob_store: BLOBStore = BLOBStore()
+
+        self._logger: InternalLogger = InternalLogger.get_logger().bind(module=__name__)
+        self._blob_store_dir_path: str = tempfile.mkdtemp(
+            prefix="tensorlake_local_blob_store_"
+        )
+        # local FS blob store is used in local mode so we get high performance without parallelism.
+        self._blob_store: BLOBStore = BLOBStore(available_cpu_count=1)
+        # Value ID/Future ID -> SerializedValue.
+        self._value_store: SerializedValueStore = SerializedValueStore(
+            blob_store_dir_path=self._blob_store_dir_path,
+            blob_store=self._blob_store,
+            logger=self._logger,
+        )
+
         # Future runs that currently exist.
         # Future ID -> LocalFutureRun
         self._future_runs: Dict[str, LocalFutureRun] = {}
         # Exception that caused the request to fail.
         # None when request finished successfully.
         self._request_failed_exception: RequestFailed | None = None
-        self._request_context: RequestContext = RequestContextBase(
-            request_id=_LOCAL_REQUEST_ID,
-            state=LocalRequestState(),
-            progress=LocalFunctionProgress(),
-            metrics=RequestMetricsRecorder(),
-        )
         # Share class instances between all functions. If we don't do this then there's
         # going to be >1 instance of the same class per process.
         self._class_instance_store: ClassInstanceStore = ClassInstanceStore.singleton()
@@ -129,6 +139,27 @@ class LocalRunner:
             # user function threads can grow indefinitely.
             max_workers=10000,
             thread_name_prefix="LocalFutureRunner:",
+        )
+
+        self._request_context_http_server: RequestContextHTTPServer = (
+            RequestContextHTTPServer(
+                server_router_class=LocalRequestContextHTTPHandlerFactory(
+                    blob_store_dir_path=self._blob_store_dir_path,
+                    logger=self._logger,
+                ),
+            )
+        )
+        self._request_context_http_server_thread: threading.Thread = threading.Thread(
+            target=self._request_context_http_server.start,
+            name="LocalRequestContextHTTPServerThread",
+            daemon=True,
+        )
+        self._request_context: RequestContextHTTPClient = RequestContextHTTPClient(
+            request_id=_LOCAL_REQUEST_ID,
+            allocation_id=_LOCAL_ALLOCATION_ID,
+            server_base_url=self._request_context_http_server.base_url,
+            blob_store=self._blob_store,
+            logger=self._logger,
         )
 
     def run(self) -> Request:
@@ -167,8 +198,11 @@ class LocalRunner:
 
         Doesn't raise any exceptions unless there's a coding bug.
         """
+        self._request_context_http_server_thread.start()
+
         set_run_futures_hook(self._run_futures_runtime_hook)
         set_wait_futures_hook(self._wait_futures_runtime_hook)
+        setup_multiprocessing()
 
         # Serialize application payload the same way as in remote mode.
         input_serializer: UserDataSerializer = function_input_serializer(self._app)
@@ -211,9 +245,11 @@ class LocalRunner:
                 error=self._request_failed_exception,
             )
 
-        app_output_blob: BLOB = self._blob_store.get(app_function_call_awaitable.id)
+        ser_request_output: SerializedValue = self._value_store.get(
+            app_function_call_awaitable.id
+        )
         try:
-            request_output: Any = _deserialize_blob_value(app_output_blob)
+            request_output: Any = _deserialize_value(ser_request_output)
         except TensorlakeError as e:
             # Handle exceptions that depend on user inputs. All other exceptions are
             # unexpected and usually mean a bug in local runner.
@@ -234,10 +270,25 @@ class LocalRunner:
         """Closes the LocalRunner and releases all resources.
 
         Cancels all running functions and waits for them to finish.
+        Doesn't raise any exceptions.
         """
-        for fr in self._future_runs.values():
+        # Future runs can be modified concurrently so iterate over a copy.
+        for fr in self._future_runs.copy().values():
             fr.cancel()
         self._future_run_thread_pool.shutdown(wait=True, cancel_futures=True)
+
+        # Only shutdown the HTTP server after all function runs are stopped so
+        # they don't use it. The http server thread exits when we stop the server.
+        self._request_context_http_server.stop()
+        self._request_context.close()
+
+        try:
+            shutil.rmtree(self._blob_store_dir_path)
+        except OSError as e:
+            self._logger.error(
+                f"Failed to delete temporary blob store directory '{self._blob_store_dir_path}': {e}"
+            )
+
         # Only clear runtime hooks at the very end when nothing can use them.
         clear_run_futures_hook()
         clear_wait_futures_hook()
@@ -366,7 +417,8 @@ class LocalRunner:
                 break
 
     def _control_loop_start_runnable_futures(self) -> None:
-        for future_run in self._future_runs.values():
+        # Future runs can be modified concurrently so iterate over a copy.
+        for future_run in self._future_runs.copy().values():
             future: LocalFuture = future_run.local_future
 
             if not future.start_time_elapsed:
@@ -462,16 +514,16 @@ class LocalRunner:
                 output_serializer_name_override=output_blob_serializer.name,
             )
         else:
-            blob: BLOB | None = None
+            ser_value: SerializedValue | None = None
             if result.error is None:
-                blob = _value_to_blob(
-                    blob_id=user_future.id,
+                ser_value = _to_serialized_value(
+                    value_id=user_future.id,
                     value=result.output,
                     value_serializer=output_blob_serializer,
                 )
-                self._blob_store.put(blob)
+                self._value_store.put(ser_value)
                 self._handle_future_run_final_output(
-                    future_run=future_run, blob=blob, error=None
+                    future_run=future_run, ser_value=ser_value, error=None
                 )
             else:
                 self._handle_future_run_failure(
@@ -487,7 +539,7 @@ class LocalRunner:
 
         self._handle_future_run_final_output(
             future_run=future_run,
-            blob=None,
+            ser_value=None,
             error=error,
         )
 
@@ -512,7 +564,7 @@ class LocalRunner:
                 if not self._collection_is_resolved(item.collection):
                     return False
             else:
-                if not self._blob_store.has(item.value_id):
+                if not self._value_store.has(item.value_id):
                     return False
         return True
 
@@ -522,7 +574,7 @@ class LocalRunner:
         if arg_metadata.collection is not None:
             return self._collection_is_resolved(arg_metadata.collection)
         else:
-            return self._blob_store.has(arg_metadata.value_id)
+            return self._value_store.has(arg_metadata.value_id)
 
     def _future_run_data_dependencies_are_resolved(
         self, future_run: LocalFutureRun
@@ -560,7 +612,7 @@ class LocalRunner:
     def _handle_future_run_final_output(
         self,
         future_run: LocalFutureRun,
-        blob: BLOB | None,
+        ser_value: SerializedValue | None,
         error: TensorlakeError | None,
     ) -> None:
         """Handles final output of the supplied future run.
@@ -575,7 +627,7 @@ class LocalRunner:
             future.user_future.set_exception(error)
         else:
             # Intentionally do serialize -> deserialize cycle to ensure the same UX as in remote mode.
-            future.user_future.set_result(_deserialize_blob_value(blob))
+            future.user_future.set_result(_deserialize_value(ser_value))
 
         # Finish std future so wait hooks waiting on it unblock.
         # Success/failure needs to be propagated to std future as well so std wait calls work correctly.
@@ -589,14 +641,17 @@ class LocalRunner:
             future.output_consumer_future_id
         ]
         consumer_future: LocalFuture = consumer_future_run.local_future
-        consumer_future_output: BLOB | None = None
+        consumer_future_output: SerializedValue | None = None
         if error is None:
-            consumer_future_output = blob.copy()
+            consumer_future_output = SerializedValue(
+                data=ser_value.data,
+                metadata=ser_value.metadata.model_copy(),
+            )
             consumer_future_output.metadata.id = consumer_future.user_future.id
-            self._blob_store.put(consumer_future_output)
+            self._value_store.put(consumer_future_output)
         self._handle_future_run_final_output(
             future_run=consumer_future_run,
-            blob=consumer_future_output,
+            ser_value=consumer_future_output,
             error=error,
         )
 
@@ -640,7 +695,7 @@ class LocalRunner:
     ) -> Any:
         """Reconstructs the original value from function arg metadata."""
         if arg_metadata.collection is None:
-            return _deserialize_blob_value(self._blob_store.get(arg_metadata.value_id))
+            return _deserialize_value(self._value_store.get(arg_metadata.value_id))
         else:
             return self._reconstruct_collection_value(arg_metadata.collection)
 
@@ -656,9 +711,7 @@ class LocalRunner:
         values: List[Any] = []
         for item in collection_metadata.items:
             if item.collection is None:
-                values.append(
-                    _deserialize_blob_value(self._blob_store.get(item.value_id))
-                )
+                values.append(_deserialize_value(self._value_store.get(item.value_id)))
             else:
                 values.append(self._reconstruct_collection_value(item.collection))
         return values
@@ -863,9 +916,9 @@ class LocalRunner:
                 )
         else:
             value_id: str = _request_scoped_id()
-            self._blob_store.put(
-                _value_to_blob(
-                    blob_id=value_id, value=arg, value_serializer=value_serializer
+            self._value_store.put(
+                _to_serialized_value(
+                    value_id=value_id, value=arg, value_serializer=value_serializer
                 )
             )
             return FunctionCallArgumentMetadata(
@@ -898,9 +951,9 @@ class LocalRunner:
                     )
             else:
                 value_id: str = _request_scoped_id()
-                self._blob_store.put(
-                    _value_to_blob(
-                        blob_id=value_id, value=item, value_serializer=value_serializer
+                self._value_store.put(
+                    _to_serialized_value(
+                        value_id=value_id, value=item, value_serializer=value_serializer
                     )
                 )
                 items_metadata.append(
@@ -963,20 +1016,20 @@ class LocalRunner:
         )
 
 
-def _deserialize_blob_value(blob: BLOB) -> Any | File:
+def _deserialize_value(ser_value: SerializedValue) -> Any | File:
     return deserialize_value(
-        serialized_value=blob.data,
-        metadata=blob.metadata,
+        serialized_value=ser_value.data,
+        metadata=ser_value.metadata,
     )
 
 
-def _value_to_blob(
-    blob_id: str, value: Any, value_serializer: UserDataSerializer
-) -> BLOB:
+def _to_serialized_value(
+    value_id: str, value: Any, value_serializer: UserDataSerializer
+) -> SerializedValue:
     serialized_value, metadata = serialize_value(
-        value, value_serializer, value_id=blob_id
+        value, value_serializer, value_id=value_id
     )
-    return BLOB(
+    return SerializedValue(
         data=serialized_value,
         metadata=metadata,
     )

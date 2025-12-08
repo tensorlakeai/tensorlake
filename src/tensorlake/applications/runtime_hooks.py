@@ -1,6 +1,6 @@
 from typing import Any, Callable, List, TypeVar
 
-from .interface.exceptions import InternalError
+from .interface.exceptions import InternalError, SDKUsageError
 
 # This module is not part of SDK interface. It contains internal runtime hooks.
 
@@ -30,7 +30,7 @@ def wait_futures(
     """
     global __wait_futures
     if __wait_futures is None:
-        raise InternalError("__wait_futures runtime hook not initialized")
+        _raise_multiprocessing_usage_error()
 
     return __wait_futures(futures, timeout, return_when)
 
@@ -62,7 +62,7 @@ def run_futures(futures: List[Future], start_delay: float | None) -> None:
     """
     global __run_futures
     if __run_futures is None:
-        raise InternalError("__run_futures runtime hook not initialized")
+        _raise_multiprocessing_usage_error()
 
     return __run_futures(futures, start_delay)
 
@@ -82,3 +82,11 @@ def clear_run_futures_hook() -> None:
     """
     global __run_futures
     __run_futures = None
+
+
+def _raise_multiprocessing_usage_error() -> None:
+    raise SDKUsageError(
+        "Tensorlake SDK is not initialized. If you are using multiprocessing, please note that "
+        "only a RequestContext created in the main process can be used in child processes. "
+        "Other SDK features are not available in child processes at the moment."
+    )
