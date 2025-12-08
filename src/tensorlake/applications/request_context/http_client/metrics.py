@@ -22,7 +22,14 @@ class RequestMetricsHTTPClient(RequestMetrics):
         self._allocation_id: str = allocation_id
         self._http_client: httpx.Client = http_client
 
-    def timer(self, name: str, value: float):
+    def timer(self, name: str, value: int | float):
+        # If we don't validate user supplied inputs here then there will be a Pydantic validation error
+        # below which will raise an InternalError instead of SDKUsageError.
+        if not isinstance(name, str):
+            raise SDKUsageError(f"Timer name must be a string, got: {name}")
+        if not isinstance(value, (int, float)):
+            raise SDKUsageError(f"Timer value must be a number, got: {value}")
+
         request_payload: AddMetricsRequest = AddMetricsRequest(
             request_id=self._request_id,
             allocation_id=self._allocation_id,
@@ -32,6 +39,13 @@ class RequestMetricsHTTPClient(RequestMetrics):
         self._run_add_request(request_payload)
 
     def counter(self, name: str, value: int = 1):
+        # If we don't validate user supplied inputs here then there will be a Pydantic validation error
+        # below which will raise an InternalError instead of SDKUsageError.
+        if not isinstance(name, str):
+            raise SDKUsageError(f"Counter name must be a string, got: {name}")
+        if not isinstance(value, int):
+            raise SDKUsageError(f"Counter value must be an int, got: {value}")
+
         request_payload: AddMetricsRequest = AddMetricsRequest(
             request_id=self._request_id,
             allocation_id=self._allocation_id,

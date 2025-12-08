@@ -8,7 +8,7 @@ ADD_METRICS_VERB: str = "POST"
 
 class AddTimerRequest(BaseModel):
     name: str
-    value: float
+    value: int | float
 
 
 class AddCounterRequest(BaseModel):

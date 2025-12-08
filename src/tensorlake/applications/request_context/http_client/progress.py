@@ -2,7 +2,7 @@ import json
 
 import httpx
 
-from ...interface.exceptions import InternalError, SDKUsageError, SerializationError
+from ...interface.exceptions import InternalError, SDKUsageError
 from ...interface.request_context import FunctionProgress
 from ..http_server.handlers.progress_update import (
     PROGRESS_UPDATE_PATH,
@@ -24,12 +24,20 @@ class FunctionProgressHTTPClient(FunctionProgress):
 
     def update(
         self,
-        current: float,
-        total: float,
+        current: int | float,
+        total: int | float,
         message: str | None = None,
         attributes: dict[str, str] | None = None,
     ) -> None:
-        # Instead of handling serialization errors on the Server, just validate attributes on client side.
+        # If we don't validate user supplied inputs here then there will be a Pydantic validation error
+        # below which will raise an InternalError instead of SDKUsageError.
+        if not isinstance(current, (int, float)):
+            raise SDKUsageError(f"'current' needs to be a number, got: {current}")
+        if not isinstance(total, (int, float)):
+            raise SDKUsageError(f"'total' needs to be a number, got: {total}")
+        if message is not None and not isinstance(message, str):
+            raise SDKUsageError(f"'message' needs to be a string, got: {message}")
+
         if attributes is not None:
             if not isinstance(attributes, dict):
                 raise SDKUsageError(

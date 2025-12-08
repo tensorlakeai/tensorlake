@@ -32,7 +32,7 @@ class RequestState:
 class RequestMetrics:
     """Abstract interface for reporting application request metrics."""
 
-    def timer(self, name: str, value: float) -> None:
+    def timer(self, name: str, value: int | float) -> None:
         """Records a duration metric with the supplied name and value.
 
         Raises TensorlakeError on error.
@@ -54,8 +54,8 @@ class FunctionProgress:
 
     def update(
         self,
-        current: float,
-        total: float,
+        current: int | float,
+        total: int | float,
         message: str | None = None,
         attributes: dict[str, str] | None = None,
     ) -> None:
