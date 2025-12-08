@@ -66,11 +66,13 @@ class ModelProvider(str, Enum):
     The model provider to use for structured data extraction.
 
     TENSORLAKE: Private models, running on Tensorlake infrastructure.
+    GEMINI: Google's Gemini 3
     SONNET: Latest release of Claude 3.5 Sonnet model from Anthropic
     GPT4OMINI: GPT-4o-mini model from OpenAI.
     """
 
     TENSORLAKE = "tensorlake"
+    GEMINI = "gemini"
     SONNET = "sonnet"
     GPT4OMINI = "gpt_4o_mini"
 
