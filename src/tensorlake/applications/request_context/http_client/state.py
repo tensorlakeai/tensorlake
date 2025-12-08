@@ -53,6 +53,10 @@ class RequestStateHTTPClient(RequestState):
         # NB: This is called from user code, user code is blocked.
         # Any exception raised here goes directly to user code.
 
+        # If we don't validate user supplied inputs here then there will be a Pydantic validation error
+        # below which will raise an InternalError instead of SDKUsageError.
+        if not isinstance(key, str):
+            raise SDKUsageError(f"State key must be a string, got: {key}")
         # Raises SerializationError to customer code on failure.
         serialized_value: bytes = REQUEST_STATE_USER_DATA_SERIALIZER.serialize(value)
 
@@ -75,6 +79,12 @@ class RequestStateHTTPClient(RequestState):
     def get(self, key: str, default: Any | None = None) -> Any | None:
         # NB: This is called from user code, user code is blocked.
         # Any exception raised here goes directly to user code.
+
+        # If we don't validate user supplied inputs here then there will be a Pydantic validation error
+        # below which will raise an InternalError instead of SDKUsageError.
+        if not isinstance(key, str):
+            raise SDKUsageError(f"State key must be a string, got: {key}")
+
         try:
             blob: BLOB | None = self._get_read_only_blob(key=key)
             if blob is None:
