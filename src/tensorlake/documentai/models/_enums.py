@@ -72,7 +72,7 @@ class ModelProvider(str, Enum):
     """
 
     TENSORLAKE = "tensorlake"
-    GEMINI = "gemini"
+    GEMINI3 = "gemini3"
     SONNET = "sonnet"
     GPT4OMINI = "gpt_4o_mini"
 
