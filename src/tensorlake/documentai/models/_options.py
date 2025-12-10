@@ -107,6 +107,10 @@ class ParsingOptions(BaseModel):
         None,
         description="Embed images from document in the markdown.",
     )
+    barcode_detection: Optional[bool] = Field(
+        None,
+        description="Flag to enable barcode detection in the document. This flag incurs additional billing costs. The default is `false`.",
+    )
 
     @field_serializer("ignore_sections")
     def serialize_ignore_sections(

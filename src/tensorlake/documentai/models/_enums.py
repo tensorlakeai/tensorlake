@@ -214,3 +214,4 @@ class PageFragmentType(str, Enum):
     PAGE_NUMBER = "page_number"
     SIGNATURE = "signature"
     STRIKETHROUGH = "strikethrough"
+    BARCODE = "barcode"
