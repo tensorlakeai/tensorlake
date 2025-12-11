@@ -98,19 +98,36 @@ class InternalLogger:
     def _log(self, level: str, message: str, **kwargs):
         """Logs a message with the given level and context.
 
-        Doesn't raise any exceptions.
+        Doesn't raise any exceptions as Internal FE logger must be absolutely reliable.
+        Especially given that it's called in most exception handling code paths.
         """
-        formatted_message = self._format_message(level, message, **kwargs)
-        if self._log_file is not None:
+        if self._log_file is None:
+            return
+
+        try:
+            formatted_message: str = self._format_message(level, message, **kwargs)
             self._log_file.write(formatted_message + "\n")
+            self._log_file.flush()
+        except Exception as e:
+            # This can easily happen if i.e. a message context in kwargs is not json-serializable.
+            try:
+                print(
+                    "Failed to log internal logger message",
+                    message,
+                    "context",
+                    str(kwargs),
+                    "exception:",
+                    str(e),
+                    flush=True,
+                )
+            except Exception:
+                # Fallback in case the print fallback failed.
+                print("Internal log message context is lost", message, flush=True)
 
     def _format_message(self, level: str, message: str, **kwargs) -> str:
         """Formats the log message with context and additional key-value pairs.
 
         The format is the same json format as structlog uses.
-        Internal FE logger must be absolutely reliable.
-        Especially given that it's called in most exception handling code paths.
-        Doesn't raise any exceptions.
         """
         context: Dict[str, Any] = self._context.copy()
         context.update(kwargs)
@@ -130,15 +147,6 @@ class InternalLogger:
             ):
                 context[key] = str(value)
 
-        try:
-            return json.dumps(
-                new_cloud_event(context, source="/tensorlake/function_executor/logger")
-            )
-        except Exception as e:
-            print(
-                "Failed to serialize internal log message to JSON",
-                "original context:",
-                context,
-                "exception:",
-                str(e),
-            )
+        return json.dumps(
+            new_cloud_event(context, source="/tensorlake/function_executor/logger")
+        )
