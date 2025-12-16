@@ -116,20 +116,31 @@ def _raise_as_tensorlake_error(e: Exception) -> None:
         ) from e
 
     if isinstance(e, httpx.HTTPStatusError):
-        if e.response.status_code == 401:
+        status_code: int = e.response.status_code
+
+        try:
+            response_text: str = e.response.text
+        except httpx.ResponseNotRead:
+            # This exceptions is raised when response content has not been read yet.
+            # because the response is in streaming mode. We have to call .read() first.
+            try:
+                e.response.read()
+                response_text: str = e.response.text
+            except Exception:
+                response_text: str = "Failed to read response text"
+
+        if status_code == 401:
             raise SDKUsageError(
                 "The provided Tensorlake API credentials are not valid. "
                 f"Please check your `tensorlake login` status or '{_API_KEY_ENVIRONMENT_VARIABLE_NAME}' environment variable."
             ) from None
-        elif e.response.status_code == 403:
+        elif status_code == 403:
             raise SDKUsageError(
                 "The provided Tensorlake API credentials are not authorized for the requested operation."
             ) from None
         else:
-            message: str = f"HTTP request failed: {e.response.text}"
-            raise RemoteAPIError(
-                status_code=e.response.status_code, message=message
-            ) from e
+            message: str = f"HTTP request failed: {response_text}"
+            raise RemoteAPIError(status_code=status_code, message=message) from e
 
     raise InternalError(str(e)) from e
 
