@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Union
 
-from retry import retry
+from tensorlake.utils.retries import exponential_backoff
 
 from ._base import _BaseClient
 from ._utils import _drop_none
@@ -111,7 +111,7 @@ class _FilesMixin(_BaseClient):
         """
         return self._uploader.upload_file(path)
 
-    @retry(tries=10, delay=2)
+    @exponential_backoff(max_retries=10, initial_delay_seconds=2)
     async def upload_async(self, path: Union[str, Path]) -> str:
         """
         Upload a file to Tensorlake asynchronously.

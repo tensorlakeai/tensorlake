@@ -11,7 +11,7 @@ def exponential_backoff(
     initial_delay_seconds: float = 0.1,
     max_delay_seconds: float = 15.0,
     jitter_range: tuple[float, float] = (0.5, 1.0),
-    retryable_exceptions: tuple[Type[BaseException], ...] = (),
+    retryable_exceptions: tuple[Type[BaseException], ...] = (Exception,),
     is_retryable: Callable[[BaseException], bool] = lambda e: True,
     on_retry: Union[Callable[[BaseException, float, int], None], None] = None,
 ) -> Callable[[Callable[..., R]], Callable[..., R]]:
@@ -24,7 +24,8 @@ def exponential_backoff(
         initial_delay_seconds: Initial delay in seconds between retries.
         max_delay_seconds: Maximum delay in seconds between retries.
         jitter_range: Tuple of (min, max) multipliers for jitter to randomize the delay.
-        retryable_exceptions: Tuple of exception types that should trigger a retry.
+        retryable_exceptions: Tuple of exception types that should trigger a retry,
+                              any Exception subclass by default.
         is_retryable: Optional callable that determines if an exception is retryable.
         on_retry: Optional callback function called before each retry
                   with (exception, sleep_time, retry_count).
