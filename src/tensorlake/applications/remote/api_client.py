@@ -19,9 +19,6 @@ from tensorlake.applications.interface.exceptions import (
     TensorlakeError,
 )
 from tensorlake.applications.remote.manifests.application import ApplicationManifest
-from tensorlake.utils.http_client import (
-    EventHook,
-)
 from tensorlake.utils.retries import exponential_backoff
 
 # Timeout used by default for HTTP requests that don't run customer code
@@ -77,6 +74,11 @@ _RETRIABLE_EXCEPTIONS = (Exception,)
 
 def _is_retriable_exception(e: Exception) -> bool:
     if isinstance(e, RemoteAPIError):
+        # 502 Service Unavailable is returned by reverse proxies when the backend server is not available.
+        # i.e. when a single replica Server is getting deployed. We also convert all transient httpx exceptions
+        # into it.
+        if e.status_code == 502:
+            return True
         # 503 Service Unavailable is returned by reverse proxies when the backend server is not available.
         # i.e. when a single replica Server is getting deployed. We also convert all transient httpx exceptions
         # into it.
