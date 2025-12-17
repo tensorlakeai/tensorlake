@@ -29,37 +29,46 @@ class RequestContextHTTPClient(RequestContext):
         self,
         request_id: str,
         allocation_id: str,
+        function_name: str,
         server_base_url: str,
+        http_client: httpx.Client,
         blob_store: BLOBStore,
         logger: InternalLogger,
     ):
         self._request_id: str = request_id
         self._allocation_id: str = allocation_id
+        self._function_name: str = function_name
         self._server_base_url: str = server_base_url
         self._blob_store: BLOBStore = blob_store
         self._logger: InternalLogger = logger.bind(module=__name__)
 
-        # httpx.Client is thread-safe.
-        self._http_client: httpx.Client = httpx.Client(
-            timeout=_DEFAULT_HTTP_REQUEST_TIMEOUT_SEC, base_url=server_base_url
-        )
-
         self._state: RequestStateHTTPClient = RequestStateHTTPClient(
             request_id=request_id,
             allocation_id=allocation_id,
-            http_client=self._http_client,
+            http_client=http_client,
             blob_store=self._blob_store,
             logger=self._logger,
         )
         self._progress: FunctionProgressHTTPClient = FunctionProgressHTTPClient(
             request_id=request_id,
             allocation_id=allocation_id,
-            http_client=self._http_client,
+            function_name=function_name,
+            http_client=http_client,
         )
         self._metrics: RequestMetricsHTTPClient = RequestMetricsHTTPClient(
             request_id=request_id,
             allocation_id=allocation_id,
-            http_client=self._http_client,
+            function_name=function_name,
+            http_client=http_client,
+        )
+
+    @classmethod
+    def create_http_client(cls, server_base_url: str) -> httpx.Client:
+        """Creates an HTTP client for use in RequestContextHTTPClient."""
+        # httpx.Client is thread-safe.
+        return httpx.Client(
+            timeout=_DEFAULT_HTTP_REQUEST_TIMEOUT_SEC,
+            base_url=server_base_url,
         )
 
     def __getstate__(self):
@@ -69,6 +78,7 @@ class RequestContextHTTPClient(RequestContext):
         return {
             "request_id": self._request_id,
             "allocation_id": self._allocation_id,
+            "function_name": self._function_name,
             "server_base_url": self._server_base_url,
             "blob_store": self._blob_store,
             "logger": self._logger,
@@ -81,20 +91,14 @@ class RequestContextHTTPClient(RequestContext):
         self.__init__(
             request_id=state["request_id"],
             allocation_id=state["allocation_id"],
+            function_name=state["function_name"],
             server_base_url=state["server_base_url"],
+            http_client=RequestContextHTTPClient.create_http_client(
+                state["server_base_url"]
+            ),
             blob_store=state["blob_store"],
             logger=state["logger"],
         )
-
-    def close(self) -> None:
-        """Releases all resources.
-
-        Doesn't raise any exceptions.
-        """
-        try:
-            self._http_client.close()
-        except Exception as e:
-            self._logger.error("Failed to close HTTP client", exc_info=e)
 
     @property
     def request_id(self) -> str:

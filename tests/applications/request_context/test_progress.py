@@ -58,12 +58,31 @@ class TestProgress(unittest.TestCase):
 
     def test_update_progress_local_default_message(self):
         request: Request = run_application(
-            test_update_progress, (10, 100), remote=False
+            test_update_progress, (12.3, 20), remote=False
         )
         self.assertEqual("success", request.output())
 
         output = self.captured_output.getvalue().strip()
-        self.assertIn("executing step 10 of 100", output)
+        self.assertTrue(
+            output.startswith("Progress Update:"),
+        )
+        self.assertIn(
+            "'function_name': 'test_update_progress'",
+            output,
+        )
+        self.assertIn(
+            "'message': 'test_update_progress: executing step 12.3 of 20'",
+            output,
+        )
+        self.assertIn(
+            "'step': 12.3,",
+            output,
+        )
+        self.assertIn(
+            "'total': 20,",
+            output,
+        )
+        self.assertIn("'attributes': None", output)
 
     def test_update_progress_local_custom_message(self):
         request: Request = run_application(
@@ -72,9 +91,26 @@ class TestProgress(unittest.TestCase):
         self.assertEqual("success", request.output())
 
         output = self.captured_output.getvalue().strip()
-        self.assertIn(
-            'executing step 10 of 100: Updating progress. {"key": "value"}', output
+        self.assertTrue(
+            output.startswith("Progress Update:"),
         )
+        self.assertIn(
+            "'function_name': 'test_update_progress_with_parameters'",
+            output,
+        )
+        self.assertIn(
+            "'message': 'Updating progress'",
+            output,
+        )
+        self.assertIn(
+            "'step': 10,",
+            output,
+        )
+        self.assertIn(
+            "'total': 100,",
+            output,
+        )
+        self.assertIn("'attributes': {'key': 'value'}", output)
 
 
 @application()

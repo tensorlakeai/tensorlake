@@ -1,16 +1,23 @@
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict
 
 import grpc
 
-from tensorlake.applications import InternalError, RequestState, TensorlakeError
-from tensorlake.applications.blob_store import BLOB, BLOBStore
 from tensorlake.applications.interface.awaitables import (
     _request_scoped_id,
 )
-from tensorlake.applications.request_context.request_state import (
-    REQUEST_STATE_USER_DATA_SERIALIZER,
+from tensorlake.applications.internal_logger import InternalLogger
+from tensorlake.applications.request_context.http_server.handlers.request_state.commit_write import (
+    CommitWriteRequest,
+    CommitWriteResponse,
+)
+from tensorlake.applications.request_context.http_server.handlers.request_state.prepare_read import (
+    PrepareReadRequest,
+    PrepareReadResponse,
+)
+from tensorlake.applications.request_context.http_server.handlers.request_state.prepare_write import (
+    PrepareWriteRequest,
+    PrepareWriteResponse,
 )
 from tensorlake.function_executor.proto.function_executor_pb2 import BLOB as BLOBProto
 from tensorlake.function_executor.proto.function_executor_pb2 import (
@@ -21,9 +28,8 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     AllocationRequestStatePrepareWriteOperation,
 )
 
-from ...applications.internal_logger import InternalLogger
-from .allocation_state_wrapper import AllocationStateWrapper
-from .blob_utils import blob_proto_to_blob, blob_to_blob_proto
+from ..allocation_state_wrapper import AllocationStateWrapper
+from ..blob_utils import blob_proto_to_blob, blob_to_blob_proto
 
 
 @dataclass
@@ -33,74 +39,34 @@ class _RequestStateOperationInfo:
     result_available: threading.Event
 
 
-class AllocationRequestState(RequestState):
+class AllocationRequestState:
     def __init__(
         self,
         allocation_state: AllocationStateWrapper,
-        blob_store: BLOBStore,
         logger: InternalLogger,
     ) -> None:
         self._allocation_state: AllocationStateWrapper = allocation_state
-        self._blob_store: BLOBStore = blob_store
         self._logger: InternalLogger = logger.bind(module=__name__)
-
         # Operation ID -> _RequestStateOperationInfo.
-        self._request_state_operations: Dict[str, _RequestStateOperationInfo] = {}
+        self._request_state_operations: dict[str, _RequestStateOperationInfo] = {}
 
-    def set(self, key: str, value: Any) -> None:
-        """Set a key-value pair."""
-        # NB: This is called from user code, user code is blocked.
-        # Any exception raised here goes directly to user code.
-        try:
-            serialized_value: bytes = REQUEST_STATE_USER_DATA_SERIALIZER.serialize(
-                value
-            )
-            blob: BLOBProto = self._get_writeable_blob(
-                key=key, size=len(serialized_value)
-            )
-            uploaded_blob: BLOB = self._blob_store.put(
-                blob=blob_proto_to_blob(blob),
-                data=[serialized_value],
-                logger=self._logger,
-            )
-            self._commit_writeable_blob(key=key, blob=blob_to_blob_proto(uploaded_blob))
-        except TensorlakeError:
-            raise
-        except Exception as e:
-            self._logger.error(
-                "Failed to set request state",
-                exc_info=e,
-                key=key,
-            )
-            raise InternalError(f"Failed to set request state for key '{key}'.")
+    def prepare_read(self, request: PrepareReadRequest) -> PrepareReadResponse:
+        blob: BLOBProto | None = self._get_read_only_blob(key=request.state_key)
+        return PrepareReadResponse(
+            blob=None if blob is None else blob_proto_to_blob(blob)
+        )
 
-    def get(self, key: str, default: Any | None = None) -> Any | None:
-        """Get a value by key. If the key does not exist, return the default value."""
-        # NB: This is called from user code, user code is blocked.
-        # Any exception raised here goes directly to user code.
-        try:
-            blob: BLOBProto | None = self._get_read_only_blob(key=key)
-            if blob is None:
-                return default
+    def prepare_write(self, request: PrepareWriteRequest) -> PrepareWriteResponse:
+        blob: BLOBProto = self._get_writeable_blob(
+            key=request.state_key, size=request.size
+        )
+        return PrepareWriteResponse(blob=blob_proto_to_blob(blob))
 
-            size: int = sum(chunk.size for chunk in blob.chunks)
-            serialized_value: bytes = self._blob_store.get(
-                blob=blob_proto_to_blob(blob), offset=0, size=size, logger=self._logger
-            )
-            # possible_types=[] because pickle deserializer knows the target type already.
-            deserialized_value: Any = REQUEST_STATE_USER_DATA_SERIALIZER.deserialize(
-                serialized_value, possible_types=[]
-            )
-            return deserialized_value
-        except TensorlakeError:
-            raise
-        except Exception as e:
-            self._logger.error(
-                "Failed to get request state",
-                exc_info=e,
-                key=key,
-            )
-            raise InternalError(f"Failed to get request state for key '{key}'.")
+    def commit_write(self, request: CommitWriteRequest) -> CommitWriteResponse:
+        self._commit_writeable_blob(
+            key=request.state_key, blob=blob_to_blob_proto(request.blob)
+        )
+        return CommitWriteResponse()
 
     def deliver_operation_result(
         self, result: AllocationRequestStateOperationResult
@@ -150,7 +116,7 @@ class AllocationRequestState(RequestState):
                 operation_id=operation.operation_id,
                 status=operation_info.result.status,
             )
-            raise InternalError(f"Request state get operation failed for key '{key}'.")
+            raise RuntimeError(f"Request state get operation failed for key '{key}'.")
 
         return operation_info.result.prepare_read.blob
 
@@ -181,7 +147,7 @@ class AllocationRequestState(RequestState):
                 operation_id=operation.operation_id,
                 status=operation_info.result.status,
             )
-            raise InternalError(f"Request state set operation failed for key '{key}'.")
+            raise RuntimeError(f"Request state set operation failed for key '{key}'.")
 
         return operation_info.result.prepare_write.blob
 
@@ -212,4 +178,4 @@ class AllocationRequestState(RequestState):
                 operation_id=operation.operation_id,
                 status=operation_info.result.status,
             )
-            raise InternalError(f"Request state set operation failed for key '{key}'.")
+            raise RuntimeError(f"Request state set operation failed for key '{key}'.")

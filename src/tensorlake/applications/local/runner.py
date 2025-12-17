@@ -13,6 +13,8 @@ from queue import Empty as QueueEmptyError
 from queue import SimpleQueue
 from typing import Any, Dict, List
 
+import httpx
+
 from tensorlake.applications.blob_store import BLOBStore
 from tensorlake.applications.internal_logger import InternalLogger
 from tensorlake.applications.multiprocessing import setup_multiprocessing
@@ -91,7 +93,6 @@ from .request_context.http_handler_factory import LocalRequestContextHTTPHandler
 from .utils import print_exception
 from .value_store import SerializedValue, SerializedValueStore
 
-_LOCAL_ALLOCATION_ID = "local-allocation-id"
 _LOCAL_REQUEST_ID = "local-request-id"
 # 2 ms  interval for code paths that do polling.
 # This keeps our timers very accurate and doesn't add too much latency and CPU overhead.
@@ -154,12 +155,12 @@ class LocalRunner:
             name="LocalRequestContextHTTPServerThread",
             daemon=True,
         )
-        self._request_context: RequestContextHTTPClient = RequestContextHTTPClient(
-            request_id=_LOCAL_REQUEST_ID,
-            allocation_id=_LOCAL_ALLOCATION_ID,
-            server_base_url=self._request_context_http_server.base_url,
-            blob_store=self._blob_store,
-            logger=self._logger,
+        # Use a single HTTP client for the whole LocalRunner. It's thread-safe.
+        # It reduces resource usage and makes it easy to close just one client at the end.
+        self._request_context_http_client: httpx.Client = (
+            RequestContextHTTPClient.create_http_client(
+                server_base_url=self._request_context_http_server.base_url,
+            )
         )
 
     def run(self) -> Request:
@@ -280,8 +281,14 @@ class LocalRunner:
         # Only shutdown the HTTP server after all function runs are stopped so
         # they don't use it. The http server thread exits when we stop the server.
         self._request_context_http_server.stop()
-        self._request_context.close()
+        try:
+            self._request_context_http_client.close()
+        except Exception as e:
+            self._logger.error(
+                "Failed to close request context HTTP client", exc_info=e
+            )
 
+        self._blob_store.close()
         try:
             shutil.rmtree(self._blob_store_dir_path)
         except OSError as e:
@@ -884,6 +891,17 @@ class LocalRunner:
                 arg, user_input_serializer
             )
 
+        function_run_request_context: RequestContextHTTPClient = (
+            RequestContextHTTPClient(
+                request_id=_LOCAL_REQUEST_ID,
+                allocation_id=awaitable.id,
+                function_name=awaitable.function_name,
+                server_base_url=self._request_context_http_server.base_url,
+                http_client=self._request_context_http_client,
+                blob_store=self._blob_store,
+                logger=self._logger,
+            )
+        )
         self._future_runs[awaitable.id] = FunctionCallFutureRun(
             local_future=LocalFuture(
                 user_future=user_future,
@@ -896,7 +914,7 @@ class LocalRunner:
             application=self._app,
             function=function,
             class_instance=self._class_instance_store.get(function),
-            request_context=self._request_context,
+            request_context=function_run_request_context,
         )
 
     def _function_arg_metadata(

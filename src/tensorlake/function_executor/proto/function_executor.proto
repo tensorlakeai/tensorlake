@@ -112,8 +112,7 @@ message ListAllocationsResponse {
 }
 
 message Metrics {
-    map<string, float> timers = 1;
-    map<string, uint64> counters = 2;
+    // TODO: Delete the Metrics message once Executor stops using it.
 }
 
 enum AllocationOutcomeCode {

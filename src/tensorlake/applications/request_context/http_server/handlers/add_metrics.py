@@ -19,6 +19,7 @@ class AddCounterRequest(BaseModel):
 class AddMetricsRequest(BaseModel):
     request_id: str
     allocation_id: str
+    function_name: str
     timer: AddTimerRequest | None
     counter: AddCounterRequest | None
 

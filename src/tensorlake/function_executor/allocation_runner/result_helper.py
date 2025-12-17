@@ -1,8 +1,5 @@
 from tensorlake.applications import Function, RequestError
 from tensorlake.applications.internal_logger import InternalLogger
-from tensorlake.applications.request_context.request_metrics_recorder import (
-    RequestMetricsRecorder,
-)
 from tensorlake.function_executor.user_events import (
     AllocationEventDetails,
     log_user_event_function_call_failed,
@@ -15,7 +12,6 @@ from ..proto.function_executor_pb2 import (
     AllocationResult,
     ExecutionPlanUpdates,
     FunctionRef,
-    Metrics,
     SerializedObjectInsideBLOB,
 )
 
@@ -25,12 +21,10 @@ class ResultHelper:
         self,
         function_ref: FunctionRef,
         function: Function,
-        metrics: RequestMetricsRecorder,
         logger: InternalLogger,
     ):
         self._function_ref: FunctionRef = function_ref
         self._function: Function = function
-        self._request_metrics = metrics
         self._logger: InternalLogger = logger.bind(module=__name__)
 
     def internal_error(self) -> AllocationResult:
@@ -39,7 +33,6 @@ class ResultHelper:
         return AllocationResult(
             outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,
             failure_reason=AllocationFailureReason.ALLOCATION_FAILURE_REASON_INTERNAL_ERROR,
-            metrics=self._generate_metrics_proto(),
         )
 
     def from_user_exception(
@@ -56,7 +49,6 @@ class ResultHelper:
         return AllocationResult(
             outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,
             failure_reason=AllocationFailureReason.ALLOCATION_FAILURE_REASON_FUNCTION_ERROR,
-            metrics=self._generate_metrics_proto(),
         )
 
     def from_request_error(
@@ -79,7 +71,6 @@ class ResultHelper:
             failure_reason=AllocationFailureReason.ALLOCATION_FAILURE_REASON_REQUEST_ERROR,
             request_error_output=request_error_output,
             uploaded_request_error_blob=uploaded_request_error_blob,
-            metrics=self._generate_metrics_proto(),
         )
 
     def from_function_output(
@@ -90,7 +81,6 @@ class ResultHelper:
         result = AllocationResult(
             outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
             uploaded_function_outputs_blob=uploaded_outputs_blob,
-            metrics=self._generate_metrics_proto(),
         )
 
         if isinstance(output, SerializedObjectInsideBLOB):
@@ -99,9 +89,3 @@ class ResultHelper:
             result.updates.CopyFrom(output)
 
         return result
-
-    def _generate_metrics_proto(self) -> Metrics:
-        return Metrics(
-            timers=self._request_metrics.timers,
-            counters=self._request_metrics.counters,
-        )

@@ -11,9 +11,9 @@ from google.protobuf.timestamp_pb2 import Timestamp
 from tensorlake.applications import (
     RETURN_WHEN,
     Function,
-    FunctionProgress,
     Future,
     InternalError,
+    RequestContext,
     RequestError,
     SDKUsageError,
     TensorlakeError,
@@ -21,7 +21,6 @@ from tensorlake.applications import (
 )
 from tensorlake.applications.algorithms.validate_user_object import validate_user_object
 from tensorlake.applications.blob_store import BLOBStore
-from tensorlake.applications.cloud_events import print_cloud_event
 from tensorlake.applications.function.function_call import create_function_error
 from tensorlake.applications.function.user_data_serializer import (
     deserialize_value,
@@ -40,11 +39,21 @@ from tensorlake.applications.metadata import (
 from tensorlake.applications.request_context.contextvar import (
     set_current_request_context,
 )
-from tensorlake.applications.request_context.request_context_base import (
-    RequestContextBase,
+from tensorlake.applications.request_context.http_server.handlers.progress_update import (
+    FunctionProgressUpdateRequest,
+    FunctionProgressUpdateResponse,
 )
-from tensorlake.applications.request_context.request_metrics_recorder import (
-    RequestMetricsRecorder,
+from tensorlake.applications.request_context.http_server.handlers.request_state.commit_write import (
+    CommitWriteRequest,
+    CommitWriteResponse,
+)
+from tensorlake.applications.request_context.http_server.handlers.request_state.prepare_read import (
+    PrepareReadRequest,
+    PrepareReadResponse,
+)
+from tensorlake.applications.request_context.http_server.handlers.request_state.prepare_write import (
+    PrepareWriteRequest,
+    PrepareWriteResponse,
 )
 from tensorlake.applications.user_data_serializer import (
     PickleUserDataSerializer,
@@ -71,7 +80,8 @@ from ..user_events import (
 from .allocation_state_wrapper import AllocationStateWrapper
 from .contextvars import set_allocation_id_context_variable
 from .download import download_function_arguments, download_serialized_objects
-from .request_state import AllocationRequestState
+from .request_context.progress import AllocationProgress
+from .request_context.request_state import AllocationRequestState
 from .result_helper import ResultHelper
 from .sdk_algorithms import (
     awaitable_to_execution_plan_updates,
@@ -122,6 +132,7 @@ class AllocationRunner:
         function: Function,
         function_instance_arg: Any | None,
         blob_store: BLOBStore,
+        request_context: RequestContext,
         logger: InternalLogger,
     ):
         self._allocation: Allocation = allocation
@@ -129,6 +140,7 @@ class AllocationRunner:
         self._function: Function = function
         self._function_instance_arg: Any | None = function_instance_arg
         self._blob_store: BLOBStore = blob_store
+        self._request_context: RequestContext = request_context
         self._logger: InternalLogger = logger.bind(module=__name__)
 
         self._allocation_event_details: AllocationEventDetails = AllocationEventDetails(
@@ -144,19 +156,16 @@ class AllocationRunner:
         self._allocation_state: AllocationStateWrapper = AllocationStateWrapper()
         self._request_state: AllocationRequestState = AllocationRequestState(
             allocation_state=self._allocation_state,
-            blob_store=blob_store,
             logger=logger,
         )
-        self._request_context: RequestContextBase = RequestContextBase(
-            request_id=self._allocation.request_id,
-            state=self._request_state,
-            progress=ProxiedAllocationProgress(self, logger),
-            metrics=RequestMetricsRecorder(),
+        self._allocation_progress: AllocationProgress = AllocationProgress(
+            allocation_state=self._allocation_state,
+            logger=logger,
         )
+        self._request_context: RequestContext = request_context
         self._result_helper: ResultHelper = ResultHelper(
             function_ref=function_ref,
             function=function,
-            metrics=self._request_context.metrics,
             logger=self._logger,
         )
         self._allocation_thread: threading.Thread = threading.Thread(
@@ -243,6 +252,38 @@ class AllocationRunner:
             self._logger.error(
                 "received unexpected allocation update",
                 update=str(update),
+            )
+
+    def run_request_context_operation(
+        self,
+        operation: (
+            PrepareWriteRequest
+            | PrepareReadRequest
+            | CommitWriteRequest
+            | FunctionProgressUpdateRequest
+        ),
+    ) -> (
+        PrepareWriteResponse
+        | PrepareReadResponse
+        | CommitWriteResponse
+        | FunctionProgressUpdateResponse
+    ):
+        """Runs the given request context operation and returns its result.
+
+        Blocks until the operation completes.
+        Raises exception on error.
+        """
+        if isinstance(operation, PrepareReadRequest):
+            return self._request_state.prepare_read(operation)
+        elif isinstance(operation, PrepareWriteRequest):
+            return self._request_state.prepare_write(operation)
+        elif isinstance(operation, CommitWriteRequest):
+            return self._request_state.commit_write(operation)
+        elif isinstance(operation, FunctionProgressUpdateRequest):
+            return self._allocation_progress.update(operation)
+        else:
+            raise RuntimeError(
+                f"Unknown request context operation type: {type(operation)}"
             )
 
     def run_futures_runtime_hook(
@@ -768,86 +809,3 @@ class AllocationRunner:
                 "function finished",
                 duration_sec=f"{time.monotonic() - start_time:.3f}",
             )
-
-
-class ProxiedAllocationProgress(FunctionProgress):
-    def __init__(self, allocation_runner: AllocationRunner, logger: InternalLogger):
-        self._allocation_runner: AllocationRunner = allocation_runner
-        self._logger: InternalLogger = logger.bind(module=__name__)
-
-    def update(
-        self,
-        current: float,
-        total: float,
-        message: str | None = None,
-        attributes: dict[str, str] | None = None,
-    ) -> None:
-        # This method is called from user function code.
-        if attributes is not None:
-            if not isinstance(attributes, dict):
-                raise SDKUsageError(
-                    f"'attributes' needs to be a dictionary of string key/value pairs, got: {attributes}"
-                )
-            for key, value in attributes.items():
-                if not isinstance(key, str):
-                    raise SDKUsageError(f"'attributes' key {key} needs to be a string")
-                if not isinstance(value, str):
-                    raise SDKUsageError(
-                        f"'attributes' value {value} for key '{key}' needs to be a string"
-                    )
-
-        try:
-            self._allocation_runner._allocation_state.update_progress(current, total)
-            request_id = self._allocation_runner._request_context.request_id
-            function_name = self._allocation_runner._function_ref.function_name
-            _print_progress_update(
-                request_id, current, total, function_name, message, attributes
-            )
-            # sleep(0) here momentarily releases the GIL, giving other
-            # FE threads a chance to run before returning back to customer code that
-            # might never return GIL. i.e. allowing the FE to handle incoming RPCs,
-            # report back allocation state updates, etc.
-            # NB: this was never tested to fix anything in practice but nice to have
-            # this just in case.
-            time.sleep(0)
-        except TensorlakeError:
-            raise
-        except Exception as e:
-            self._logger.error(
-                "Failed to update allocation progress",
-                exc_info=e,
-            )
-            raise InternalError("Failed to update allocation progress.")
-
-
-def _print_progress_update(
-    request_id: str,
-    current: float,
-    total: float,
-    function_name: str,
-    message: str | None = None,
-    attributes: dict[str, str] | None = None,
-) -> None:
-    event_message = (
-        message
-        if message is not None
-        else f"{function_name}: executing step {current} of {total}"
-    )
-
-    event: dict[str, Any] = {
-        "RequestProgressUpdated": {
-            "request_id": request_id,
-            "function_name": function_name,
-            "message": event_message,
-            "step": current,
-            "total": total,
-            "attributes": attributes,
-        }
-    }
-
-    print_cloud_event(
-        event,
-        type="ai.tensorlake.progress_update",
-        source="/tensorlake/function_executor/runner",
-        message=event_message,
-    )

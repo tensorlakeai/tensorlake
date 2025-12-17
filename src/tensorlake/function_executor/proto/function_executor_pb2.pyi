@@ -219,37 +219,8 @@ class ListAllocationsResponse(_message.Message):
     ) -> None: ...
 
 class Metrics(_message.Message):
-    __slots__ = ("timers", "counters")
-
-    class TimersEntry(_message.Message):
-        __slots__ = ("key", "value")
-        KEY_FIELD_NUMBER: _ClassVar[int]
-        VALUE_FIELD_NUMBER: _ClassVar[int]
-        key: str
-        value: float
-        def __init__(
-            self, key: _Optional[str] = ..., value: _Optional[float] = ...
-        ) -> None: ...
-
-    class CountersEntry(_message.Message):
-        __slots__ = ("key", "value")
-        KEY_FIELD_NUMBER: _ClassVar[int]
-        VALUE_FIELD_NUMBER: _ClassVar[int]
-        key: str
-        value: int
-        def __init__(
-            self, key: _Optional[str] = ..., value: _Optional[int] = ...
-        ) -> None: ...
-
-    TIMERS_FIELD_NUMBER: _ClassVar[int]
-    COUNTERS_FIELD_NUMBER: _ClassVar[int]
-    timers: _containers.ScalarMap[str, float]
-    counters: _containers.ScalarMap[str, int]
-    def __init__(
-        self,
-        timers: _Optional[_Mapping[str, float]] = ...,
-        counters: _Optional[_Mapping[str, int]] = ...,
-    ) -> None: ...
+    __slots__ = ()
+    def __init__(self) -> None: ...
 
 class AllocationProgress(_message.Message):
     __slots__ = ("current", "total")

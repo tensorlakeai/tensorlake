@@ -66,8 +66,7 @@ def mt_get_after_set(_: str) -> str:
 
 
 class TestUseRequestStateFromChildThread(unittest.TestCase):
-    # TODO: add remote mode when FE support IPC request context.
-    @parameterized.parameterized.expand([("local", False)])
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_get_after_set(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
@@ -107,8 +106,7 @@ def mp_get_after_set(_: str) -> str:
 
 
 class TestUseRequestStateFromChildProcess(unittest.TestCase):
-    # TODO: add remote mode when FE support IPC request context.
-    @parameterized.parameterized.expand([("local", False)])
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_get_after_set(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)

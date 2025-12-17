@@ -59,8 +59,7 @@ def mt_update_progress(values: tuple[int, int]) -> str:
 
 
 class TestUseProgressFromChildThread(unittest.TestCase):
-    # TODO: add remote mode when FE support IPC request context.
-    @parameterized.parameterized.expand([("local", False)])
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_update_progress(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
@@ -85,8 +84,7 @@ def mp_update_progress(values: tuple[int, int]) -> str:
 
 
 class TestUseProgressFromChildProcess(unittest.TestCase):
-    # TODO: add remote mode when FE support IPC request context.
-    @parameterized.parameterized.expand([("local", False)])
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_update_progress(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)

@@ -17,9 +17,16 @@ class RequestMetricsHTTPClient(RequestMetrics):
     Thread-safe for use in multiple threaded applications.
     """
 
-    def __init__(self, request_id: str, allocation_id: str, http_client: httpx.Client):
+    def __init__(
+        self,
+        request_id: str,
+        allocation_id: str,
+        function_name: str,
+        http_client: httpx.Client,
+    ):
         self._request_id: str = request_id
         self._allocation_id: str = allocation_id
+        self._function_name: str = function_name
         self._http_client: httpx.Client = http_client
 
     def timer(self, name: str, value: int | float):
@@ -33,6 +40,7 @@ class RequestMetricsHTTPClient(RequestMetrics):
         request_payload: AddMetricsRequest = AddMetricsRequest(
             request_id=self._request_id,
             allocation_id=self._allocation_id,
+            function_name=self._function_name,
             timer=AddTimerRequest(name=name, value=value),
             counter=None,
         )
@@ -49,6 +57,7 @@ class RequestMetricsHTTPClient(RequestMetrics):
         request_payload: AddMetricsRequest = AddMetricsRequest(
             request_id=self._request_id,
             allocation_id=self._allocation_id,
+            function_name=self._function_name,
             timer=None,
             counter=AddCounterRequest(name=name, value=value),
         )
