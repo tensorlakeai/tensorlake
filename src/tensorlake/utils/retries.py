@@ -1,7 +1,9 @@
+import asyncio
+import inspect
 import random
 import time
 from functools import wraps
-from typing import Any, Callable, Type, TypeVar, Union
+from typing import Any, Callable, Type, TypeVar
 
 R = TypeVar("R")
 
@@ -13,7 +15,7 @@ def exponential_backoff(
     jitter_range: tuple[float, float] = (0.5, 1.0),
     retryable_exceptions: tuple[Type[BaseException], ...] = (Exception,),
     is_retryable: Callable[[BaseException], bool] = lambda e: True,
-    on_retry: Union[Callable[[BaseException, float, int], None], None] = None,
+    on_retry: Callable[[BaseException, float, int], None] | None = None,
 ) -> Callable[[Callable[..., R]], Callable[..., R]]:
     """
     Decorator that implements exponential backoff retry logic.
@@ -43,10 +45,16 @@ def exponential_backoff(
         ```
     """
 
+    def calculate_sleep_time(retries: int) -> float:
+        base_delay = initial_delay_seconds * (2**retries)
+        sleep_time = min(base_delay, max_delay_seconds)
+        jitter = random.uniform(*jitter_range)
+        return sleep_time * jitter
+
     def decorator(func: Callable[..., R]) -> Callable[..., R]:
         @wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> R:
-            retries = 0
+        def sync_wrapper(*args: Any, **kwargs: Any) -> R:
+            retries: int = 0
 
             while True:
                 try:
@@ -56,19 +64,37 @@ def exponential_backoff(
                         raise
 
                     retries += 1
-                    if retries >= max_retries:
+                    if retries > max_retries:
                         raise
 
-                    base_delay = initial_delay_seconds * (2**retries)
-                    sleep_time = min(base_delay, max_delay_seconds)
-                    jitter = random.uniform(*jitter_range)
-                    sleep_time *= jitter
-
+                    sleep_time: float = calculate_sleep_time(retries)
                     if on_retry:
                         on_retry(e, sleep_time, retries)
-
                     time.sleep(sleep_time)
 
-        return wrapper
+        @wraps(func)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> R:
+            retries: int = 0
+
+            while True:
+                try:
+                    return await func(*args, **kwargs)
+                except retryable_exceptions as e:
+                    if not is_retryable(e):
+                        raise
+
+                    retries += 1
+                    if retries > max_retries:
+                        raise
+
+                    sleep_time: float = calculate_sleep_time(retries)
+                    if on_retry:
+                        on_retry(e, sleep_time, retries)
+                    await asyncio.sleep(sleep_time)
+
+        if inspect.iscoroutinefunction(func):
+            return async_wrapper
+        else:
+            return sync_wrapper
 
     return decorator
