@@ -305,6 +305,12 @@ message AllocationFunctionCallResult {
     optional BLOB request_error_blob = 6;
 }
 
+message AllocationFunctionCallCreationResult {
+    // From ExecutionPlanUpdates.root_function_call_id.
+    optional string function_call_id = 1;
+    optional google.rpc.Status status = 2;
+}
+
 message AllocationRequestStatePrepareReadOperationResult {
     // A readable BLOB with the value of the requested key.
     // Reading the BLOB will fail if the state key doesn't exist.
@@ -340,6 +346,8 @@ message AllocationUpdate {
         BLOB output_blob_deprecated = 3;
         AllocationOutputBLOB output_blob = 4;
         AllocationRequestStateOperationResult request_state_operation_result = 5;
+        // Result of creating a function call requested by the allocation.
+        AllocationFunctionCallCreationResult function_call_creation_result = 6;
     }
 }
 

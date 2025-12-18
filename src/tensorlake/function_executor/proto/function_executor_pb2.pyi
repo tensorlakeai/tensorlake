@@ -584,6 +584,18 @@ class AllocationFunctionCallResult(_message.Message):
         request_error_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
     ) -> None: ...
 
+class AllocationFunctionCallCreationResult(_message.Message):
+    __slots__ = ("function_call_id", "status")
+    FUNCTION_CALL_ID_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    function_call_id: str
+    status: _status_pb2.Status
+    def __init__(
+        self,
+        function_call_id: _Optional[str] = ...,
+        status: _Optional[_Union[_status_pb2.Status, _Mapping]] = ...,
+    ) -> None: ...
+
 class AllocationRequestStatePrepareReadOperationResult(_message.Message):
     __slots__ = ("blob",)
     BLOB_FIELD_NUMBER: _ClassVar[int]
@@ -640,17 +652,20 @@ class AllocationUpdate(_message.Message):
         "output_blob_deprecated",
         "output_blob",
         "request_state_operation_result",
+        "function_call_creation_result",
     )
     ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_CALL_RESULT_FIELD_NUMBER: _ClassVar[int]
     OUTPUT_BLOB_DEPRECATED_FIELD_NUMBER: _ClassVar[int]
     OUTPUT_BLOB_FIELD_NUMBER: _ClassVar[int]
     REQUEST_STATE_OPERATION_RESULT_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_CALL_CREATION_RESULT_FIELD_NUMBER: _ClassVar[int]
     allocation_id: str
     function_call_result: AllocationFunctionCallResult
     output_blob_deprecated: BLOB
     output_blob: AllocationOutputBLOB
     request_state_operation_result: AllocationRequestStateOperationResult
+    function_call_creation_result: AllocationFunctionCallCreationResult
     def __init__(
         self,
         allocation_id: _Optional[str] = ...,
@@ -661,6 +676,9 @@ class AllocationUpdate(_message.Message):
         output_blob: _Optional[_Union[AllocationOutputBLOB, _Mapping]] = ...,
         request_state_operation_result: _Optional[
             _Union[AllocationRequestStateOperationResult, _Mapping]
+        ] = ...,
+        function_call_creation_result: _Optional[
+            _Union[AllocationFunctionCallCreationResult, _Mapping]
         ] = ...,
     ) -> None: ...
 

@@ -63,6 +63,7 @@ from tensorlake.applications.user_data_serializer import (
 from ..proto.function_executor_pb2 import (
     BLOB,
     Allocation,
+    AllocationFunctionCallCreationResult,
     AllocationFunctionCallResult,
     AllocationOutcomeCode,
     AllocationOutputBLOB,
@@ -97,6 +98,14 @@ from .upload import (
     upload_serialized_objects_to_blob,
 )
 from .value import SerializedValue, Value
+
+
+@dataclass
+class FunctionCallCreationInfo:
+    # Not None when the function call creation is completed by Executor.
+    result: AllocationFunctionCallCreationResult | None
+    # Set only once after the function call creation result is set.
+    result_available: threading.Event
 
 
 @dataclass
@@ -177,6 +186,8 @@ class AllocationRunner:
         # Futures that were created by user code during this allocation.
         # Future ID -> _UserFutureInfo.
         self._user_futures: Dict[str, _UserFutureInfo] = {}
+        # Function Call ID -> FunctionCallCreationInfo.
+        self._function_call_creations: Dict[str, FunctionCallCreationInfo] = {}
         # BLOB ID -> _OutputBLOBRequestInfo.
         self._output_blob_requests: Dict[str, _OutputBLOBRequestInfo] = {}
 
@@ -206,7 +217,22 @@ class AllocationRunner:
 
     def deliver_allocation_update(self, update: AllocationUpdate) -> None:
         # No need for any locks because we never block here so we hold GIL non stop.
-        if update.HasField("function_call_result"):
+        if update.HasField("function_call_creation_result"):
+            function_call_id: str = (
+                update.function_call_creation_result.function_call_id
+            )
+            if function_call_id not in self._function_call_creations:
+                self._logger.error(
+                    "received function call creation result for unknown function call",
+                    function_call_id=function_call_id,
+                )
+                return
+            function_call_creation_info: FunctionCallCreationInfo = (
+                self._function_call_creations[function_call_id]
+            )
+            function_call_creation_info.result = update.function_call_creation_result
+            function_call_creation_info.result_available.set()
+        elif update.HasField("function_call_result"):
             function_call_id: str = update.function_call_result.function_call_id
             if function_call_id not in self._user_futures:
                 self._logger.error(
@@ -573,7 +599,7 @@ class AllocationRunner:
             serialized_objects, blob_data = serialized_values_to_serialized_objects(
                 serialized_values=serialized_values
             )
-            args_blob: BLOB | None = self._get_new_output_blob(
+            args_blob: BLOB = self._get_new_output_blob(
                 size=sum(len(data) for data in blob_data)
             )
             uploaded_args_blob = upload_serialized_objects_to_blob(
@@ -601,10 +627,32 @@ class AllocationRunner:
             )
             awaitable_execution_plan_pb.start_at.CopyFrom(start_at)
 
+        function_call_creation_info: FunctionCallCreationInfo = (
+            FunctionCallCreationInfo(
+                result=None,
+                result_available=threading.Event(),
+            )
+        )
+        self._function_call_creations[future.awaitable.id] = function_call_creation_info
+
         self._allocation_state.add_function_call(
             execution_plan_updates=awaitable_execution_plan_pb,
             args_blob=uploaded_args_blob,
         )
+        # TODO: Uncomment this code block once all Executors send the function call creation results.
+        # function_call_creation_info.result_available.wait()
+        # if (
+        #     function_call_creation_info.result.status.code
+        #     != grpc.StatusCode.OK.value[0]
+        # ):
+        #     self._logger.error(
+        #         "child future function call creation failed",
+        #         child_future_id=future.awaitable.id,
+        #         status=function_call_creation_info.result.status,
+        #     )
+        #     exception: InternalError = InternalError("Failed to start function call")
+        #     future.set_exception(exception)
+        #     raise exception
 
     def _get_new_output_blob(self, size: int) -> BLOB:
         """Returns new BLOB to upload function outputs to.
