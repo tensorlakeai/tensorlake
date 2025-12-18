@@ -65,6 +65,7 @@ from ..proto.function_executor_pb2 import (
     Allocation,
     AllocationFunctionCallResult,
     AllocationOutcomeCode,
+    AllocationOutputBLOB,
     AllocationResult,
     AllocationState,
     AllocationUpdate,
@@ -114,7 +115,8 @@ class _UserFutureInfo:
 @dataclass
 class _OutputBLOBRequestInfo:
     # Not None once the BLOB is ready to be used.
-    blob: BLOB | None
+    # BLOB type use here is deprecated.
+    blob: BLOB | AllocationOutputBLOB | None
     # Set only once after the BLOB is set.
     blob_available: threading.Event
 
@@ -218,29 +220,24 @@ class AllocationRunner:
         elif update.HasField("output_blob_deprecated") or update.HasField(
             "output_blob"
         ):
+            blob: BLOB | AllocationOutputBLOB | None = None
+            blob_id: str | None = None
             if update.HasField("output_blob_deprecated"):
-                blob: BLOB = update.output_blob_deprecated
+                blob = update.output_blob_deprecated
+                blob_id = blob.id
             else:
-                if update.output_blob.status.code != grpc.StatusCode.OK.value[0]:
-                    self._logger.error(
-                        "received output blob update with error status",
-                        blob_id=update.output_blob.blob.id,
-                        status=update.output_blob.status,
-                    )
-                    # TODO: Implement error handling logic in blob_request_info.blob_available.set() consumer.
-                    # It's more convenient to do once we remove output_blob_deprecated support.
-                    return
-                blob: BLOB = update.output_blob.blob
+                blob = update.output_blob
+                blob_id = blob.blob.id
 
-            if blob.id not in self._output_blob_requests:
+            if blob_id not in self._output_blob_requests:
                 self._logger.error(
                     "received output blob update for unknown blob request",
-                    blob_id=blob.id,
+                    blob_id=blob_id,
                 )
                 return
 
             blob_request_info: _OutputBLOBRequestInfo = self._output_blob_requests[
-                blob.id
+                blob_id
             ]
             blob_request_info.blob = blob
             blob_request_info.blob_available.set()
@@ -610,7 +607,10 @@ class AllocationRunner:
         )
 
     def _get_new_output_blob(self, size: int) -> BLOB:
-        """Returns new BLOB to upload function outputs to."""
+        """Returns new BLOB to upload function outputs to.
+
+        Raises exception on error.
+        """
         blob_id: str = _request_scoped_id()
         blob_request_info: _OutputBLOBRequestInfo = _OutputBLOBRequestInfo(
             blob=None,
@@ -622,7 +622,20 @@ class AllocationRunner:
         blob_request_info.blob_available.wait()
         self._allocation_state.remove_output_blob_request(id=blob_id)
         del self._output_blob_requests[blob_id]
-        return blob_request_info.blob
+
+        if isinstance(blob_request_info.blob, AllocationOutputBLOB):
+            if blob_request_info.blob.status.code != grpc.StatusCode.OK.value[0]:
+                self._logger.error(
+                    "received output blob with error status",
+                    blob_id=blob_request_info.blob.blob.id,
+                    status=blob_request_info.blob.status,
+                )
+                raise RuntimeError(
+                    f"Failed to create output BLOB: {blob_request_info.blob.status}"
+                )
+            return blob_request_info.blob.blob
+        else:
+            return blob_request_info.blob
 
     def _run_allocation_thread(self) -> None:
         alloc_result: AllocationResult | None = None
