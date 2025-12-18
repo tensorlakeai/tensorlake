@@ -9,6 +9,7 @@ PROGRESS_UPDATE_VERB: str = "POST"
 class FunctionProgressUpdateRequest(BaseModel):
     request_id: str
     allocation_id: str
+    function_name: str
     current: float
     total: float
     message: str | None

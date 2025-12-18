@@ -306,7 +306,7 @@ class TestSetRequestState(unittest.TestCase):
                     alloc_result.uploaded_function_outputs_blob,
                 )
                 self.assertEqual(
-                    "Request state set operation failed for key 'test_state_key'.",
+                    "Failed to set request state for key 'test_state_key'.",
                     output,
                 )
 
@@ -661,7 +661,7 @@ class TestGetRequestState(unittest.TestCase):
                     alloc_result.uploaded_function_outputs_blob,
                 )
                 self.assertEqual(
-                    "Request state get operation failed for key 'test_state_key'.",
+                    "Failed to get request state for key 'test_state_key'.",
                     output,
                 )
 

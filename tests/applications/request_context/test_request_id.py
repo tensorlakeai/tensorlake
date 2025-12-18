@@ -78,8 +78,7 @@ def mp_get_request_id(_: int) -> str:
 
 
 class TestUseRequestIdFromChildProcess(unittest.TestCase):
-    # TODO: add remote mode when FE support IPC request context.
-    @parameterized.parameterized.expand([("local", False)])
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_get_expected_request_id(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)

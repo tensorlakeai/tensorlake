@@ -2,12 +2,13 @@ import importlib
 import json
 import sys
 import tempfile
+import threading
 import time
 import zipfile
-from dataclasses import dataclass
 from typing import Any, Dict, Generator, List
 
 import grpc
+import httpx
 
 from tensorlake.applications import (
     RETURN_WHEN,
@@ -26,11 +27,18 @@ from tensorlake.applications.remote.code.zip import (
     CodeZIPManifest,
     FunctionZIPManifest,
 )
+from tensorlake.applications.request_context.http_client.context import (
+    RequestContextHTTPClient,
+)
+from tensorlake.applications.request_context.http_server.server import (
+    RequestContextHTTPServer,
+)
 from tensorlake.applications.runtime_hooks import (
     set_run_futures_hook,
     set_wait_futures_hook,
 )
 
+from .allocation_info import AllocationInfo
 from .allocation_runner.allocation_runner import AllocationRunner
 from .allocation_runner.contextvars import get_allocation_id_context_variable
 from .health_check import HealthCheckHandler
@@ -57,18 +65,13 @@ from .proto.function_executor_pb2 import (
     WatchAllocationStateRequest,
 )
 from .proto.function_executor_pb2_grpc import FunctionExecutorServicer
+from .request_context.http_handler_factory import RequestContextHTTPHandlerFactory
 from .user_events import (
     InitializationEventDetails,
     log_user_event_initialization_failed,
     log_user_event_initialization_finished,
     log_user_event_initialization_started,
 )
-
-
-@dataclass
-class _AllocationInfo:
-    allocation: Allocation
-    runner: AllocationRunner
 
 
 class Service(FunctionExecutorServicer):
@@ -81,8 +84,13 @@ class Service(FunctionExecutorServicer):
         self._function: Function | None = None
         self._function_instance_arg: Any | None = None
         self._blob_store: BLOBStore | None = None
+        self._request_context_http_server: RequestContextHTTPServer | None = None
+        self._request_context_http_server_thread: threading.Thread | None = None
+        self._request_context_http_client: httpx.Client | None = None
         self._health_check_handler: HealthCheckHandler | None = None
-        self._allocation_infos: Dict[str, _AllocationInfo] = {}
+        # Tracks all existing allocations.
+        # Added by create_allocation RPC, removed by delete_allocation RPC.
+        self._allocation_infos: Dict[str, AllocationInfo] = {}
 
     def initialize(
         self, request: InitializeRequest, context: grpc.ServicerContext
@@ -175,6 +183,23 @@ class Service(FunctionExecutorServicer):
 
         available_cpu_count: int = int(self._function._function_config.cpu)
         self._blob_store = BLOBStore(available_cpu_count=available_cpu_count)
+
+        self._request_context_http_server = RequestContextHTTPServer(
+            server_router_class=RequestContextHTTPHandlerFactory(
+                allocation_infos=self._allocation_infos,
+                logger=self._logger,
+            ),
+        )
+        self._request_context_http_server_thread = threading.Thread(
+            target=self._request_context_http_server.start,
+            name="FunctionExecutorRequestContextHTTPServerThread",
+            daemon=True,
+        )
+        self._request_context_http_server_thread.start()
+        self._request_context_http_client = RequestContextHTTPClient.create_http_client(
+            server_base_url=self._request_context_http_server.base_url
+        )
+
         # Only pass health checks if FE was initialized successfully.
         self._health_check_handler = HealthCheckHandler(self._logger)
         self._logger.info(
@@ -237,9 +262,18 @@ class Service(FunctionExecutorServicer):
             function=self._function,
             function_instance_arg=self._function_instance_arg,
             blob_store=self._blob_store,
+            request_context=RequestContextHTTPClient(
+                request_id=allocation.request_id,
+                allocation_id=allocation.allocation_id,
+                function_name=self._function_ref.function_name,
+                server_base_url=self._request_context_http_server.base_url,
+                http_client=self._request_context_http_client,
+                blob_store=self._blob_store,
+                logger=allocation_logger,
+            ),
             logger=allocation_logger,
         )
-        self._allocation_infos[allocation.allocation_id] = _AllocationInfo(
+        self._allocation_infos[allocation.allocation_id] = AllocationInfo(
             allocation=allocation,
             runner=allocation_runner,
         )
@@ -258,7 +292,7 @@ class Service(FunctionExecutorServicer):
                 f"Allocation {request.allocation_id} not found",
             )
 
-        allocation_info: _AllocationInfo = self._allocation_infos[request.allocation_id]
+        allocation_info: AllocationInfo = self._allocation_infos[request.allocation_id]
 
         # Stream allocation state updates until the allocation completes.
         last_seen_hash: str | None = None
@@ -282,7 +316,7 @@ class Service(FunctionExecutorServicer):
                 f"Allocation {request.allocation_id} not found",
             )
 
-        allocation_info: _AllocationInfo = self._allocation_infos[request.allocation_id]
+        allocation_info: AllocationInfo = self._allocation_infos[request.allocation_id]
         if allocation_info.runner.finished:
             context.abort(
                 grpc.StatusCode.FAILED_PRECONDITION,
@@ -303,7 +337,7 @@ class Service(FunctionExecutorServicer):
                 f"Allocation {request.allocation_id} not found",
             )
 
-        allocation_info: _AllocationInfo = self._allocation_infos[request.allocation_id]
+        allocation_info: AllocationInfo = self._allocation_infos[request.allocation_id]
         if not allocation_info.runner.finished:
             context.abort(
                 grpc.StatusCode.FAILED_PRECONDITION,

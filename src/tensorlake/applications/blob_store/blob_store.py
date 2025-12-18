@@ -44,6 +44,10 @@ class BLOBStore:
         self._local: LocalFSBLOBStore = LocalFSBLOBStore()
         self._s3: S3BLOBStore = S3BLOBStore(io_workers_count=max_io_workers)
 
+    def close(self):
+        """Closes the BLOB store and its resources."""
+        self._io_workers_pool.shutdown(wait=True, cancel_futures=True)
+
     def __getstate__(self):
         """Get the state for pickling."""
         return {

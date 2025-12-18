@@ -5,6 +5,7 @@ from tensorlake.applications.request_context.http_server.handlers.progress_updat
     FunctionProgressUpdateRequest,
     FunctionProgressUpdateResponse,
 )
+from tensorlake.applications.request_context.progress import print_progress_update
 
 
 class LocalProgressUpdateHandler(BaseProgressUpdateHandler):
@@ -14,26 +15,13 @@ class LocalProgressUpdateHandler(BaseProgressUpdateHandler):
     def _handle(
         self, request: FunctionProgressUpdateRequest
     ) -> FunctionProgressUpdateResponse:
-        print(
-            f"executing step {_format_step(request.current)} of {_format_step(request.total)}{_format_message(request.message, request.attributes)}",
-            flush=True,
+        print_progress_update(
+            request_id=request.request_id,
+            function_name=request.function_name,
+            current=request.current,
+            total=request.total,
+            message=request.message,
+            attributes=request.attributes,
+            local_mode=True,
         )
         return FunctionProgressUpdateResponse()
-
-
-def _format_message(message: str | None, attributes: dict[str, str] | None) -> str:
-    if message is None and attributes is None:
-        return ""
-
-    if message is None:
-        return json.dumps(attributes)
-    elif attributes is None:
-        return f": {message}."
-    else:
-        return f": {message}. {json.dumps(attributes)}"
-
-
-def _format_step(value: float) -> str:
-    if value.is_integer():
-        return str(int(value))
-    return str(value)

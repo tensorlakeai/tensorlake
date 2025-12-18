@@ -1,3 +1,5 @@
+import contextlib
+import io
 import multiprocessing as mp
 import queue as mt_queue
 import threading
@@ -18,7 +20,7 @@ from tensorlake.applications.remote.deploy import deploy_applications
 def emit_metrics_worker(ctx: RequestContext, q) -> None:
     try:
         ctx.metrics.timer("test_timer", 2.5)
-        ctx.metrics.counter("test_counter", 5)
+        ctx.metrics.counter("test_counter")
         q.put(None)
     except Exception as e:
         print(f"Exception in emit_metrics_worker: {e}")
@@ -43,8 +45,45 @@ class TestUseMetricsFromFunction(unittest.TestCase):
         request: Request = run_application(func_emit_metrics, 1, remote=is_remote)
         self.assertEqual(request.output(), "success")
 
-        # No verification of metrics values yet because SDK doesn't yet provide an interface
-        # for reading request metrics.
+    def test_emit_local_metrics_output(self):
+        stdout: io.StringIO = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            request: Request = run_application(func_emit_metrics, 1, remote=False)
+            self.assertEqual("success", request.output())
+
+        output: str = stdout.getvalue().strip()
+        self.assertIn(
+            "Counter Incremented: ",
+            output,
+        )
+        self.assertIn(
+            f"'request_id': '{request.id}'",
+            output,
+        )
+        self.assertIn(
+            "'function_name': 'func_emit_metrics'",
+            output,
+        )
+        self.assertIn(
+            "'counter_name': 'test_counter'",
+            output,
+        )
+        self.assertIn(
+            "'counter_inc': 1",
+            output,
+        )
+        self.assertIn(
+            "Timer Recorded: ",
+            output,
+        )
+        self.assertIn(
+            "'timer_name': 'test_timer'",
+            output,
+        )
+        self.assertIn(
+            "'timer_value': 2.5",
+            output,
+        )
 
 
 @application()
@@ -61,8 +100,7 @@ def mt_emit_metrics(_: int) -> str:
 
 
 class TestUseMetricsFromChildThread(unittest.TestCase):
-    # TODO: add remote mode when FE support IPC request context.
-    @parameterized.parameterized.expand([("local", False)])
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_emit_metrics(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
@@ -86,8 +124,7 @@ def mp_emit_metrics(_: int) -> str:
 
 
 class TestUseMetricsFromChildProcess(unittest.TestCase):
-    # TODO: add remote mode when FE support IPC request context.
-    @parameterized.parameterized.expand([("local", False)])
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_emit_metrics(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)

@@ -9,7 +9,7 @@ from tensorlake.applications.request_context.metrics import (
 )
 
 
-class LocalAddMetricsHandler(BaseAddMetricsHandler):
+class AddMetricsHandler(BaseAddMetricsHandler):
     def __init__(self):
         super().__init__()
 
@@ -20,7 +20,7 @@ class LocalAddMetricsHandler(BaseAddMetricsHandler):
                 function_name=request.function_name,
                 counter_name=request.counter.name,
                 counter_value=request.counter.value,
-                local_mode=True,
+                local_mode=False,
             )
         if request.timer is not None:
             print_timer_recorded_event(
@@ -28,6 +28,6 @@ class LocalAddMetricsHandler(BaseAddMetricsHandler):
                 function_name=request.function_name,
                 timer_name=request.timer.name,
                 timer_value=request.timer.value,
-                local_mode=True,
+                local_mode=False,
             )
         return AddMetricsResponse()
