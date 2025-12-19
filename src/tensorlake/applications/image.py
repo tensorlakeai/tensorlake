@@ -23,7 +23,7 @@ _SDK_VERSION: str = importlib.metadata.version("tensorlake")
 class ImageInformation:
     image: Image
     # Functions that are using the image.
-    functions: List[Function]
+    functions: set[Function]
 
 
 def image_infos() -> Dict[Image, ImageInformation]:
@@ -33,8 +33,8 @@ def image_infos() -> Dict[Image, ImageInformation]:
         func: Function
         image: Image = func._function_config.image
         if image not in image_infos:
-            image_infos[image] = ImageInformation(image=image, functions=[])
-        image_infos[image].functions.append(func)
+            image_infos[image] = ImageInformation(image=image, functions=set())
+        image_infos[image].functions.add(func)
 
     return image_infos
 
