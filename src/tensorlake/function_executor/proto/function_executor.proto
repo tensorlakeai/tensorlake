@@ -148,6 +148,9 @@ message AllocationFunctionCall {
     optional BLOB args_blob = 2;
 }
 
+// Watcher for a function call started by the allocation.
+// A presence of a watcher means that customer code is blocked waiting
+// for the watcher's function call to finish.
 message AllocationFunctionCallWatcher {
     optional string watcher_id = 1;
     // Only root_function_call_id of ExecutionPlanUpdates can be watched.
