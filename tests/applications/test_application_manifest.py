@@ -404,5 +404,83 @@ class TestGraphMetadataParameterExtraction(unittest.TestCase):
 #         )
 
 
+@function()
+def function_with_default_container_limits(x: int) -> str:
+    return "success"
+
+
+@function(min_containers=2, max_containers=10)
+def function_with_custom_container_limits(x: int) -> str:
+    return "success"
+
+
+@function(min_containers=1)
+def function_with_only_min_containers(x: int) -> str:
+    return "success"
+
+
+@function(max_containers=5)
+def function_with_only_max_containers(x: int) -> str:
+    return "success"
+
+
+class TestFunctionManifestContainerLimits(unittest.TestCase):
+    def test_default_container_limits(self):
+        app_manifest: ApplicationManifest = create_application_manifest(
+            application_function=default_application_function,
+            all_functions=get_functions(),
+        )
+
+        self.assertIsNone(
+            app_manifest.functions["function_with_default_container_limits"].min_containers,
+        )
+        self.assertIsNone(
+            app_manifest.functions["function_with_default_container_limits"].max_containers,
+        )
+
+    def test_custom_container_limits(self):
+        app_manifest: ApplicationManifest = create_application_manifest(
+            application_function=default_application_function,
+            all_functions=get_functions(),
+        )
+
+        self.assertEqual(
+            app_manifest.functions["function_with_custom_container_limits"].min_containers,
+            2,
+        )
+        self.assertEqual(
+            app_manifest.functions["function_with_custom_container_limits"].max_containers,
+            10,
+        )
+
+    def test_only_min_containers(self):
+        app_manifest: ApplicationManifest = create_application_manifest(
+            application_function=default_application_function,
+            all_functions=get_functions(),
+        )
+
+        self.assertEqual(
+            app_manifest.functions["function_with_only_min_containers"].min_containers,
+            1,
+        )
+        self.assertIsNone(
+            app_manifest.functions["function_with_only_min_containers"].max_containers,
+        )
+
+    def test_only_max_containers(self):
+        app_manifest: ApplicationManifest = create_application_manifest(
+            application_function=default_application_function,
+            all_functions=get_functions(),
+        )
+
+        self.assertIsNone(
+            app_manifest.functions["function_with_only_max_containers"].min_containers,
+        )
+        self.assertEqual(
+            app_manifest.functions["function_with_only_max_containers"].max_containers,
+            5,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
