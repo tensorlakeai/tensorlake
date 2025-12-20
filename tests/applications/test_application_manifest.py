@@ -432,10 +432,14 @@ class TestFunctionManifestContainerLimits(unittest.TestCase):
         )
 
         self.assertIsNone(
-            app_manifest.functions["function_with_default_container_limits"].min_containers,
+            app_manifest.functions[
+                "function_with_default_container_limits"
+            ].min_containers,
         )
         self.assertIsNone(
-            app_manifest.functions["function_with_default_container_limits"].max_containers,
+            app_manifest.functions[
+                "function_with_default_container_limits"
+            ].max_containers,
         )
 
     def test_custom_container_limits(self):
@@ -445,11 +449,15 @@ class TestFunctionManifestContainerLimits(unittest.TestCase):
         )
 
         self.assertEqual(
-            app_manifest.functions["function_with_custom_container_limits"].min_containers,
+            app_manifest.functions[
+                "function_with_custom_container_limits"
+            ].min_containers,
             2,
         )
         self.assertEqual(
-            app_manifest.functions["function_with_custom_container_limits"].max_containers,
+            app_manifest.functions[
+                "function_with_custom_container_limits"
+            ].max_containers,
             10,
         )
 
