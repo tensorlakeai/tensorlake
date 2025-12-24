@@ -134,13 +134,17 @@ message AllocationProgress {
 }
 
 message AllocationOutputBLOBRequest {
-    // ID of the BLOB, unique per allocation.
+    // ID of the BLOB in AllocationState, unique per allocation.
+    // New BLOB requests are detected by comparing IDs.
     optional string id = 1;
     optional uint64 size = 2;
 }
 
 message AllocationFunctionCall {
-    // Call ID is the same as root_function_call_id in ExecutionPlanUpdates.
+    // ID of the function call in AllocationState, unique per allocation.
+    // New function calls are detected by comparing IDs.
+    // This is different from function call IDs in ExecutionPlanUpdates.
+    optional string id = 3;
     optional ExecutionPlanUpdates updates = 1;
     // SerializedObjectInsideBLOB arguments from the execution
     // plan are stored inside this BLOB.
@@ -152,9 +156,15 @@ message AllocationFunctionCall {
 // A presence of a watcher means that customer code is blocked waiting
 // for the watcher's function call to finish.
 message AllocationFunctionCallWatcher {
+    // Deprecated: Use id to match the watcher.
     optional string watcher_id = 1;
-    // Only root_function_call_id of ExecutionPlanUpdates can be watched.
+    // Deprecated: Use root_function_call_id.
     optional string function_call_id = 2;
+    // ID of the watcher in AllocationState, unique per allocation.
+    // New watchers are detected by comparing IDs.
+    optional string id = 3;
+    // root_function_call_id from ExecutionPlanUpdates of an already started allocation function call.
+    optional string root_function_call_id = 4;
 }
 
 message AllocationRequestStatePrepareReadOperation {}
@@ -169,6 +179,8 @@ message AllocationRequestStateCommitWriteOperation {
 }
 
 message AllocationRequestStateOperation {
+    // ID of the operation in AllocationState, unique per allocation.
+    // New operations are detected by comparing IDs.
     optional string operation_id = 1;
     optional string state_key = 2;
     oneof operation {
@@ -184,8 +196,6 @@ message AllocationState {
     // Requests for writable BLOBs so allocation can upload data there.
     repeated AllocationOutputBLOBRequest output_blob_requests = 2;
     // Function calls started by the allocation.
-    // New function calls are detected by client when it sees a new
-    // ExecutionPlanUpdates.root_function_call_id.
     //
     // If a not finished function call gets removed from this list then
     // it doesn't get cancelled by the client. ExecutionPlanUpdates are immutable.
@@ -299,8 +309,11 @@ message AllocationOutputBLOB {
 }
 
 message AllocationFunctionCallResult {
-    // From ExecutionPlanUpdates.root_function_call_id.
+    // Deprecated: Use watcher_id to match the result to the watcher.
+    // TODO: Delete this field once all FEs use watcher_id.
+    // root_function_call_id from ExecutionPlanUpdates of the function call.
     optional string function_call_id = 1;
+    optional string watcher_id = 7;
     optional AllocationOutcomeCode outcome_code = 2;
     optional SerializedObjectInsideBLOB value_output = 3;
     optional BLOB value_blob = 4;
@@ -309,8 +322,11 @@ message AllocationFunctionCallResult {
 }
 
 message AllocationFunctionCallCreationResult {
+    // Deprecated: Use allocation_function_call_id to match the result to the function call.
     // From ExecutionPlanUpdates.root_function_call_id.
     optional string function_call_id = 1;
+    // allocation_function_call_id from AllocationFunctionCall.
+    optional string allocation_function_call_id = 3;
     optional google.rpc.Status status = 2;
 }
 
