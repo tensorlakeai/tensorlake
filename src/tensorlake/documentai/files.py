@@ -2,10 +2,10 @@
 This module contains the FileUploader class, which is used to upload files to the DocumentAI API.
 """
 
+import asyncio
 from pathlib import Path
 from typing import Optional, Union
 
-import aiofiles
 import httpx
 from pydantic import BaseModel, Field
 
@@ -109,22 +109,22 @@ class FileUploader:
         if not path.exists():
             raise FileNotFoundError(f"File not found: {path}")
 
-        async with aiofiles.open(path, "rb") as f:
-            files = {"file": (path.name, await f.read())}
-            response = await self._async_client.put(
-                url="files",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                },
-                files=files,
-            )
-            try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                print(e.response.text)
-                raise e
-            resp = response.json()
-            return resp.get("file_id")
+        file_content = await asyncio.to_thread(path.read_bytes)
+        files = {"file": (path.name, file_content)}
+        response = await self._async_client.put(
+            url="files",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            files=files,
+        )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            print(e.response.text)
+            raise e
+        resp = response.json()
+        return resp.get("file_id")
 
     def _headers(self):
         return {

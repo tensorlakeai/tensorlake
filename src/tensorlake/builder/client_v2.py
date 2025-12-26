@@ -19,7 +19,6 @@ import os
 import tempfile
 from dataclasses import dataclass
 
-import aiofiles
 import click
 import httpx
 from httpx_sse import aconnect_sse
@@ -192,9 +191,8 @@ class ImageBuilderV2Client:
             f"{image.name}: Posting {os.path.getsize(context_file_path)} bytes of context to build service...."
         )
 
-        files = {}
-        async with aiofiles.open(context_file_path, "rb") as fp:
-            files["context"] = await fp.read()
+        file_content = await asyncio.to_thread(lambda: open(context_file_path, "rb").read())
+        files = {"context": file_content}
 
         os.remove(context_file_path)
         data = {
