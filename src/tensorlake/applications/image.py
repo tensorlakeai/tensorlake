@@ -82,7 +82,12 @@ def dockerfile_content(img: Image) -> str:
 
     # Run tensorlake install after all user commands. There's implicit dependency
     # of tensorlake install success on user commands right now.
-    dockerfile_lines.append(f"RUN pip install tensorlake=={_SDK_VERSION}")
+    # Use PIP_BREAK_SYSTEM_PACKAGES env var to handle externally-managed environments
+    # (PEP 668) on modern Linux distros like Ubuntu 24.04. Using env var instead of
+    # --break-system-packages flag for compatibility with older pip versions.
+    dockerfile_lines.append(
+        f"RUN PIP_BREAK_SYSTEM_PACKAGES=1 pip install tensorlake=={_SDK_VERSION}"
+    )
 
     return "\n".join(dockerfile_lines)
 
