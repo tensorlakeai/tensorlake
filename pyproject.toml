@@ -17,7 +17,6 @@ httpx-sse = "^0.4.1"
 rich = "14.2.0"
 pyyaml = "^6.0.3"
 click = "8.3.1"
-aiofiles = "^24.1.0"
 tomlkit = "^0.13.3"
 
 # Required only by Function Executor
