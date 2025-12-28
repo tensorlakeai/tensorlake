@@ -1,13 +1,36 @@
 from typing import Any
 
+import pydantic
+
 from ..function.user_data_serializer import serialize_value
 from ..interface.request import Request
 from ..metadata import ValueMetadata
-from ..user_data_serializer import UserDataSerializer, serializer_by_name
+from ..user_data_serializer import (
+    PickleUserDataSerializer,
+    UserDataSerializer,
+    serializer_by_name,
+)
 from .api_client import APIClient
 from .app_manifest_cache import get_app_manifest, has_app_manifest, set_app_manifest
 from .manifests.application import ApplicationManifest
 from .request import RemoteRequest
+
+
+def _convert_pydantic_to_dict(obj: Any) -> Any:
+    """Recursively converts Pydantic models to dicts.
+
+    This is used for pickle serialization to avoid class reference issues
+    when sending Pydantic instances across process boundaries.
+    """
+    if isinstance(obj, pydantic.BaseModel):
+        return obj.model_dump()
+    elif isinstance(obj, dict):
+        return {k: _convert_pydantic_to_dict(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_convert_pydantic_to_dict(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(_convert_pydantic_to_dict(item) for item in obj)
+    return obj
 
 
 class RemoteRunner:
@@ -33,10 +56,17 @@ class RemoteRunner:
             app_manifest.entrypoint.input_serializer
         )
 
+        # For pickle serializer, convert Pydantic models to dicts to avoid
+        # class reference issues across process boundaries. The FE will
+        # reconstruct Pydantic models using coerce_to_type and type hints.
+        payload_to_serialize = self._payload
+        if isinstance(input_serializer, PickleUserDataSerializer):
+            payload_to_serialize = _convert_pydantic_to_dict(self._payload)
+
         serialized_payload: bytes
         metadata: ValueMetadata
         serialized_payload, metadata = serialize_value(
-            value=self._payload, serializer=input_serializer, value_id="fake_id"
+            value=payload_to_serialize, serializer=input_serializer, value_id="fake_id"
         )
         if metadata.content_type is None:
             metadata.content_type = input_serializer.content_type

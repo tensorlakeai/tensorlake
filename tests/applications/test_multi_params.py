@@ -177,6 +177,11 @@ class TestMultiParams(unittest.TestCase):
 
     @parameterized.parameterized.expand([("local", False), ("remote", True)])
     def test_multi_param_pickle_with_instances(self, _: str, is_remote: bool):
+        """Test pickle with actual Pydantic instances.
+
+        Pydantic models are automatically converted to dicts before pickle
+        serialization to avoid class reference issues across processes.
+        """
         if is_remote:
             deploy_applications(__file__)
         payload = {
