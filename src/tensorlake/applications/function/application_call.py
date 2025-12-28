@@ -1,7 +1,7 @@
 import inspect
 from typing import Any, Dict, List
 
-from ..interface import DeserializationError, Function, InternalError
+from ..interface import DeserializationError, Function, SDKUsageError
 from ..metadata import ValueMetadata
 from .type_hints import coerce_to_type, function_arg_type_hint, function_signature
 from .user_data_serializer import deserialize_value, function_input_serializer
@@ -39,7 +39,7 @@ def _coerce_payload_to_kwargs(
         elif param.default is not inspect.Parameter.empty:
             kwargs[param.name] = param.default
         else:
-            raise InternalError(
+            raise SDKUsageError(
                 f"Missing required parameter '{param.name}' in application payload"
             )
 
