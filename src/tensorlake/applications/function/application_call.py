@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 
 from ..interface import DeserializationError, Function, InternalError
 from ..metadata import ValueMetadata
-from .type_hints import function_arg_type_hint, function_signature
+from .type_hints import coerce_to_type, function_arg_type_hint, function_signature
 from .user_data_serializer import deserialize_value, function_input_serializer
 
 
@@ -15,31 +15,6 @@ def _get_application_param_count(application: Function) -> int:
     if len(params) > 0 and params[0].name == "self":
         params = params[1:]
     return len(params)
-
-
-def _coerce_to_type(value: Any, type_hint: Any) -> Any:
-    """Coerces a value to the expected type if needed.
-
-    Handles Pydantic models and other types that can be constructed from dicts.
-    """
-    if type_hint is inspect.Parameter.empty:
-        return value
-
-    # If value is already the expected type, return as-is
-    if isinstance(value, type_hint) if isinstance(type_hint, type) else False:
-        return value
-
-    # Handle Pydantic models - construct from dict
-    if isinstance(value, dict) and isinstance(type_hint, type):
-        # Check if it's a Pydantic model
-        if hasattr(type_hint, "model_validate"):
-            # Pydantic v2
-            return type_hint.model_validate(value)
-        elif hasattr(type_hint, "parse_obj"):
-            # Pydantic v1
-            return type_hint.parse_obj(value)
-
-    return value
 
 
 def _coerce_payload_to_kwargs(
@@ -60,7 +35,7 @@ def _coerce_payload_to_kwargs(
     for param in params:
         if param.name in payload:
             raw_value = payload[param.name]
-            kwargs[param.name] = _coerce_to_type(raw_value, param.annotation)
+            kwargs[param.name] = coerce_to_type(raw_value, param.annotation)
         elif param.default is not inspect.Parameter.empty:
             kwargs[param.name] = param.default
         else:

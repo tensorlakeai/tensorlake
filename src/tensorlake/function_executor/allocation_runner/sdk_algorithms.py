@@ -6,6 +6,7 @@ from tensorlake.applications import (
     InternalError,
 )
 from tensorlake.applications.function.application_call import (
+    _coerce_payload_to_kwargs,
     deserialize_application_function_call_payload,
 )
 from tensorlake.applications.function.type_hints import function_signature
@@ -511,46 +512,7 @@ def _reconstruct_application_function_call_args(
             f"got {type(payload).__name__}"
         )
 
-    kwargs: Dict[str, Any] = {}
-    for param in params:
-        if param.name in payload:
-            raw_value = payload[param.name]
-            # Convert to expected type if needed (e.g., dict to Pydantic model)
-            kwargs[param.name] = _coerce_to_type(raw_value, param.annotation)
-        elif param.default is not inspect.Parameter.empty:
-            # Use default value if key is missing and default exists
-            kwargs[param.name] = param.default
-        else:
-            raise InternalError(
-                f"Missing required parameter '{param.name}' in application payload"
-            )
-
-    return [], kwargs
-
-
-def _coerce_to_type(value: Any, type_hint: Any) -> Any:
-    """Coerces a value to the expected type if needed.
-
-    Handles Pydantic models and other types that can be constructed from dicts.
-    """
-    if type_hint is inspect.Parameter.empty:
-        return value
-
-    # If value is already the expected type, return as-is
-    if isinstance(value, type_hint) if isinstance(type_hint, type) else False:
-        return value
-
-    # Handle Pydantic models - construct from dict
-    if isinstance(value, dict) and isinstance(type_hint, type):
-        # Check if it's a Pydantic model
-        if hasattr(type_hint, "model_validate"):
-            # Pydantic v2
-            return type_hint.model_validate(value)
-        elif hasattr(type_hint, "parse_obj"):
-            # Pydantic v1
-            return type_hint.parse_obj(value)
-
-    return value
+    return [], _coerce_payload_to_kwargs(function, payload)
 
 
 def _reconstruct_sdk_function_call_args(

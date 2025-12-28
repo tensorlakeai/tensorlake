@@ -134,3 +134,36 @@ def _resolve_union_type_hint(union_type_hint: Any) -> List[Any]:
         str | FunctionCall -> [str, FunctionCall]
     """
     return [t for t in get_args(union_type_hint)]
+
+
+def coerce_to_type(value: Any, type_hint: Any) -> Any:
+    """Coerces a value to the expected type if needed.
+
+    Handles Pydantic models and other types that can be constructed from dicts.
+    Used by both LocalRunner and Function Executor for multi-parameter functions.
+    """
+    if type_hint is inspect.Parameter.empty:
+        return value
+
+    # If value is already the expected type, return as-is
+    if isinstance(type_hint, type):
+        if isinstance(value, type_hint):
+            return value
+        # Check by class name as fallback (handles pickle class identity issues)
+        if (
+            hasattr(value, "__class__")
+            and value.__class__.__name__ == type_hint.__name__
+        ):
+            return value
+
+    # Handle Pydantic models - construct from dict
+    if isinstance(value, dict) and isinstance(type_hint, type):
+        # Check if it's a Pydantic model
+        if hasattr(type_hint, "model_validate"):
+            # Pydantic v2
+            return type_hint.model_validate(value)
+        elif hasattr(type_hint, "parse_obj"):
+            # Pydantic v1
+            return type_hint.parse_obj(value)
+
+    return value

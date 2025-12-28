@@ -7,9 +7,9 @@ from pydantic import BaseModel
 from tensorlake.applications import application, function
 from tensorlake.applications.function.application_call import (
     _coerce_payload_to_kwargs,
-    _coerce_to_type,
     _get_application_param_count,
 )
+from tensorlake.applications.function.type_hints import coerce_to_type
 
 
 class Item(BaseModel):
@@ -47,24 +47,24 @@ def three_params_with_default(item: Item, count: int, label: str = "default") ->
 
 
 class TestCoerceToType(unittest.TestCase):
-    """Tests for _coerce_to_type function."""
+    """Tests for coerce_to_type function."""
 
     def test_empty_type_hint_returns_value_as_is(self):
         """When type_hint is empty, return value unchanged."""
         value = {"name": "test"}
-        result = _coerce_to_type(value, inspect.Parameter.empty)
+        result = coerce_to_type(value, inspect.Parameter.empty)
         self.assertEqual(result, value)
 
     def test_value_already_correct_type(self):
         """When value is already the correct type, return as-is."""
         item = Item(name="Widget", price=10.0)
-        result = _coerce_to_type(item, Item)
+        result = coerce_to_type(item, Item)
         self.assertIs(result, item)  # Same object
 
     def test_dict_to_pydantic_model(self):
         """Dict should be converted to Pydantic model."""
         data = {"name": "Gadget", "price": 20.0}
-        result = _coerce_to_type(data, Item)
+        result = coerce_to_type(data, Item)
         self.assertIsInstance(result, Item)
         self.assertEqual(result.name, "Gadget")
         self.assertEqual(result.price, 20.0)
@@ -72,15 +72,15 @@ class TestCoerceToType(unittest.TestCase):
     def test_non_dict_non_matching_returns_as_is(self):
         """Non-dict value that doesn't match type returns as-is."""
         value = "hello"
-        result = _coerce_to_type(value, int)
+        result = coerce_to_type(value, int)
         self.assertEqual(result, "hello")
 
     def test_primitive_types(self):
         """Primitive types should return as-is when matching."""
-        self.assertEqual(_coerce_to_type(42, int), 42)
-        self.assertEqual(_coerce_to_type("hello", str), "hello")
-        self.assertEqual(_coerce_to_type(3.14, float), 3.14)
-        self.assertEqual(_coerce_to_type(True, bool), True)
+        self.assertEqual(coerce_to_type(42, int), 42)
+        self.assertEqual(coerce_to_type("hello", str), "hello")
+        self.assertEqual(coerce_to_type(3.14, float), 3.14)
+        self.assertEqual(coerce_to_type(True, bool), True)
 
 
 class TestCoercePayloadToKwargs(unittest.TestCase):
