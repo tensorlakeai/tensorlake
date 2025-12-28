@@ -132,6 +132,20 @@ class JSONUserDataSerializer(UserDataSerializer):
             ) from e
 
 
+def _convert_pydantic_to_dict(obj: Any) -> Any:
+    if isinstance(obj, pydantic.BaseModel):
+        # Convert Pydantic model to dict, recursively handling nested models
+        return {k: _convert_pydantic_to_dict(v) for k, v in obj.model_dump().items()}
+    elif isinstance(obj, dict):
+        return {k: _convert_pydantic_to_dict(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_convert_pydantic_to_dict(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(_convert_pydantic_to_dict(item) for item in obj)
+    else:
+        return obj
+
+
 class PickleUserDataSerializer(UserDataSerializer):
     """A serializer that uses binary serialization with pickle.
 
@@ -140,6 +154,10 @@ class PickleUserDataSerializer(UserDataSerializer):
     Users are responsible for compatibility of data they are serializing, i.e.
     a Pandas DataFrame serialized on newer Pandas versions might not be readable
     on older versions.
+
+    Note: Pydantic models are automatically converted to dicts before pickling
+    to avoid class reference issues across processes. They will be reconstructed
+    on deserialization using type hints.
     """
 
     NAME = "pickle"
@@ -160,7 +178,9 @@ class PickleUserDataSerializer(UserDataSerializer):
 
     def serialize(self, object: Any) -> bytes:
         try:
-            return pickle.dumps(object, protocol=self._PROTOCOL_LEVEL)
+            # Convert Pydantic models to dicts to avoid class reference issues
+            converted = _convert_pydantic_to_dict(object)
+            return pickle.dumps(converted, protocol=self._PROTOCOL_LEVEL)
         except Exception as e:
             raise SerializationError(
                 f"Failed to serialize data with pickle serializer: {e}"
@@ -168,7 +188,15 @@ class PickleUserDataSerializer(UserDataSerializer):
 
     def deserialize(self, data: bytes, possible_types: List[Any]) -> Any:
         try:
-            return pickle.loads(data)
+            result = pickle.loads(data)
+            # If result is a dict and we expect a Pydantic model, reconstruct it
+            if isinstance(result, dict) and possible_types:
+                for type_hint in possible_types:
+                    if inspect.isclass(type_hint) and issubclass(
+                        type_hint, pydantic.BaseModel
+                    ):
+                        return type_hint.model_validate(result)
+            return result
         except Exception as e:
             raise DeserializationError(
                 f"Failed to deserialize data with pickle serializer: {e}"
