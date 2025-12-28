@@ -1,10 +1,8 @@
 import unittest
 
 from tensorlake.applications import application, function
-from tensorlake.applications.function.introspect import FunctionDetails
 from tensorlake.applications.validation import (
     ValidationMessage,
-    ValidationMessageSeverity,
     validate_loaded_applications,
 )
 
@@ -16,32 +14,11 @@ def application_function(bar: str, buzz: int) -> str:
 
 
 class TestMultipleParameters(unittest.TestCase):
-    def test_fails_validation(self):
+    def test_passes_validation(self):
+        """Multiple parameters are now supported for application functions."""
         validation_messages: list[ValidationMessage] = validate_loaded_applications()
-        self.assertEqual(len(validation_messages), 1)
-
-        validation_message: ValidationMessage = validation_messages[0]
-        self.assertEqual(
-            validation_message.severity,
-            ValidationMessageSeverity.ERROR,
-        )
-        self.assertEqual(
-            "Application function needs to have exactly one parameter (aka request input). "
-            "Please change the function parameters. Non-application functions don't have this limitation.",
-            validation_message.message,
-        )
-
-        self.assertIsNotNone(validation_message.details)
-        function_details: FunctionDetails = validation_message.details
-        self.assertEqual(
-            function_details.name,
-            "application_function",
-        )
-        self.assertEqual(function_details.module_import_name, __name__)
-        self.assertEqual(function_details.class_name, None)
-        self.assertEqual(function_details.class_method_name, None)
-        self.assertEqual(function_details.source_file_path, __file__)
-        self.assertEqual(function_details.source_file_line, 12)
+        # No validation errors - multiple parameters are allowed
+        self.assertEqual(len(validation_messages), 0)
 
 
 if __name__ == "__main__":

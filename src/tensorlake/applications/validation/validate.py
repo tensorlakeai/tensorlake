@@ -452,37 +452,23 @@ def _validate_application_function(
         )
 
     signature: inspect.Signature = function_signature(function)
-    signature_is_valid: bool = True
-    if function_details.class_name is None:
-        if len(signature.parameters) != 1:
-            signature_is_valid = False
-            messages.append(
-                ValidationMessage(
-                    message="Application function needs to have exactly one parameter (aka request input). "
-                    "Please change the function parameters. Non-application functions don't have this limitation.",
-                    severity=ValidationMessageSeverity.ERROR,
-                    details=function_details,
-                )
-            )
-    else:
-        if len(signature.parameters) != 2:
-            signature_is_valid = False
-            messages.append(
-                ValidationMessage(
-                    message="Application function needs to have exactly two parameters (self and request input). "
-                    "Please change the function parameters. Non-application functions don't have this limitation.",
-                    severity=ValidationMessageSeverity.ERROR,
-                    details=function_details,
-                )
-            )
 
-    if signature_is_valid:
-        # Warning: if you want to delete this or reduce severity then add a test that verifies that things work without type hints.
-        request_input_type_hints: list[Any] = function_arg_type_hint(function, -1)
-        if len(request_input_type_hints) == 0:
+    # Get parameters excluding 'self' for class methods
+    params = list(signature.parameters.values())
+    if (
+        function_details.class_name is not None
+        and len(params) > 0
+        and params[0].name == "self"
+    ):
+        params = params[1:]  # Exclude 'self' parameter
+
+    # Validate that all parameters have type hints
+    for param in params:
+        if param.annotation is inspect.Parameter.empty:
             messages.append(
                 ValidationMessage(
-                    message="Application function parameter requires a type hint. Please add a type hint to the parameter.",
+                    message=f"Application function parameter '{param.name}' requires a type hint. "
+                    "Please add a type hint to all parameters.",
                     severity=ValidationMessageSeverity.ERROR,
                     details=function_details,
                 )

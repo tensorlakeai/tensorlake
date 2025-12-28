@@ -21,6 +21,8 @@ from tensorlake.applications.multiprocessing import setup_multiprocessing
 
 from ..algorithms.validate_user_object import validate_user_object
 from ..function.application_call import (
+    _coerce_payload_to_kwargs,
+    _get_application_param_count,
     deserialize_application_function_call_payload,
 )
 from ..function.user_data_serializer import (
@@ -217,9 +219,23 @@ class LocalRunner:
                 payload=serialized_payload,
                 payload_content_type=payload_metadata.content_type,
             )
-            app_function_call_awaitable: FunctionCallAwaitable = self._app.awaitable(
-                payload
-            )
+            # Create awaitable based on number of parameters
+            param_count = _get_application_param_count(self._app)
+            if param_count == 0:
+                app_function_call_awaitable: FunctionCallAwaitable = (
+                    self._app.awaitable()
+                )
+            elif param_count == 1:
+                # Backward compatible: single parameter as positional arg
+                app_function_call_awaitable: FunctionCallAwaitable = (
+                    self._app.awaitable(payload)
+                )
+            else:
+                # Multiple parameters: coerce payload values to expected types and pass as kwargs
+                coerced_kwargs = _coerce_payload_to_kwargs(self._app, payload)
+                app_function_call_awaitable: FunctionCallAwaitable = (
+                    self._app.awaitable(**coerced_kwargs)
+                )
             self._create_future_run_for_awaitable(
                 awaitable=app_function_call_awaitable,
                 existing_awaitable_future=None,

@@ -26,7 +26,8 @@ class TestMissingRequestInputParameterTypeHint(unittest.TestCase):
             ValidationMessageSeverity.ERROR,
         )
         self.assertEqual(
-            "Application function parameter requires a type hint. Please add a type hint to the parameter.",
+            "Application function parameter 'bar' requires a type hint. "
+            "Please add a type hint to all parameters.",
             validation_message.message,
         )
 

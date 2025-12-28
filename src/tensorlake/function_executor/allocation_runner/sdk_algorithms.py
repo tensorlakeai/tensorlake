@@ -1,3 +1,4 @@
+import inspect
 from typing import Any, Dict, List
 
 from tensorlake.applications import (
@@ -7,9 +8,7 @@ from tensorlake.applications import (
 from tensorlake.applications.function.application_call import (
     deserialize_application_function_call_payload,
 )
-from tensorlake.applications.function.function_call import (
-    set_self_arg,
-)
+from tensorlake.applications.function.type_hints import function_signature
 from tensorlake.applications.function.user_data_serializer import (
     deserialize_value,
     function_input_serializer,
@@ -454,16 +453,21 @@ def validate_and_deserialize_function_call_metadata(
 
 
 def reconstruct_function_call_args(
+    function: Function,
     function_call_metadata: FunctionCallMetadata | ReduceOperationMetadata | None,
     arg_values: Dict[str, Value],
-    function_instance_arg: Any | None,
 ) -> tuple[List[Any], Dict[str, Any]]:
-    """Returns function call args and kwargs reconstructed from arg_values."""
+    """Returns function call args and kwargs reconstructed from arg_values.
+
+    For class methods, inserts the class instance as the first argument (self).
+    """
     if function_call_metadata is None:
         # Application function call created by Server.
         payload_arg: Value = arg_values["application_payload"]
-        args: List[Any] = [payload_arg.object]
-        kwargs: Dict[str, Any] = {}
+        args, kwargs = _reconstruct_application_function_call_args(
+            payload=payload_arg.object,
+            function=function,
+        )
     else:
         # SDK-created function call.
         args, kwargs = _reconstruct_sdk_function_call_args(
@@ -471,10 +475,82 @@ def reconstruct_function_call_args(
             arg_values=arg_values,
         )
 
-    if function_instance_arg is not None:
-        set_self_arg(args, function_instance_arg)
-
     return args, kwargs
+
+
+def _reconstruct_application_function_call_args(
+    payload: Any,
+    function: Function,
+) -> tuple[List[Any], Dict[str, Any]]:
+    """Reconstructs args and kwargs for application function calls.
+
+    Handles three cases:
+    - Zero parameters: returns ([], {})
+    - Single parameter (backward compatible): returns ([payload], {})
+    - Multiple parameters: returns ([], {param_name: value, ...})
+    """
+    signature: inspect.Signature = function_signature(function)
+    params = list(signature.parameters.values())
+
+    # Exclude 'self' parameter for class methods
+    if len(params) > 0 and params[0].name == "self":
+        params = params[1:]
+
+    # Zero parameters case
+    if len(params) == 0:
+        return [], {}
+
+    # Single parameter case (backward compatible)
+    if len(params) == 1:
+        return [payload], {}
+
+    # Multiple parameters case - map payload dict keys to kwargs
+    if not isinstance(payload, dict):
+        raise InternalError(
+            f"Application function with multiple parameters expects a dict payload, "
+            f"got {type(payload).__name__}"
+        )
+
+    kwargs: Dict[str, Any] = {}
+    for param in params:
+        if param.name in payload:
+            raw_value = payload[param.name]
+            # Convert to expected type if needed (e.g., dict to Pydantic model)
+            kwargs[param.name] = _coerce_to_type(raw_value, param.annotation)
+        elif param.default is not inspect.Parameter.empty:
+            # Use default value if key is missing and default exists
+            kwargs[param.name] = param.default
+        else:
+            raise InternalError(
+                f"Missing required parameter '{param.name}' in application payload"
+            )
+
+    return [], kwargs
+
+
+def _coerce_to_type(value: Any, type_hint: Any) -> Any:
+    """Coerces a value to the expected type if needed.
+
+    Handles Pydantic models and other types that can be constructed from dicts.
+    """
+    if type_hint is inspect.Parameter.empty:
+        return value
+
+    # If value is already the expected type, return as-is
+    if isinstance(value, type_hint) if isinstance(type_hint, type) else False:
+        return value
+
+    # Handle Pydantic models - construct from dict
+    if isinstance(value, dict) and isinstance(type_hint, type):
+        # Check if it's a Pydantic model
+        if hasattr(type_hint, "model_validate"):
+            # Pydantic v2
+            return type_hint.model_validate(value)
+        elif hasattr(type_hint, "parse_obj"):
+            # Pydantic v1
+            return type_hint.parse_obj(value)
+
+    return value
 
 
 def _reconstruct_sdk_function_call_args(
