@@ -75,6 +75,9 @@ def dockerfile_content(img: Image) -> str:
     dockerfile_lines: List[str] = [
         f"FROM {img._base_image}",
         "WORKDIR /app",
+        # Handle externally-managed environments (PEP 668) on modern Linux distros
+        # like Ubuntu 24.04. This env var allows pip to install packages globally.
+        "ENV PIP_BREAK_SYSTEM_PACKAGES=1",
     ]
 
     for op in img._build_operations:
