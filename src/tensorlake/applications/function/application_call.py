@@ -1,9 +1,12 @@
 import inspect
+import json
 from typing import Any, Dict, List
+
+import pydantic
 
 from ..interface import DeserializationError, Function, SDKUsageError
 from ..metadata import ValueMetadata
-from .type_hints import coerce_to_type, function_arg_type_hint, function_signature
+from .type_hints import function_arg_type_hint, function_signature
 from .user_data_serializer import deserialize_value, function_input_serializer
 
 
@@ -17,12 +20,52 @@ def _get_application_param_count(application: Function) -> int:
     return len(params)
 
 
+def _deserialize_param_value(value: Any, type_hint: Any, serializer_name: str) -> Any:
+    """Deserializes a parameter value using the serializer if needed.
+
+    For JSON serializer with dict values and Pydantic type hints:
+    re-serializes to JSON and deserializes through the serializer.
+
+    For pickle serializer: values are already deserialized, so we use
+    Pydantic's model_validate directly (same as JSON serializer does internally).
+    """
+    # If no type hint or value is already the correct type, return as-is
+    if type_hint is inspect.Parameter.empty:
+        return value
+
+    if isinstance(type_hint, type) and isinstance(value, type_hint):
+        return value
+
+    # For dict values that should become Pydantic models
+    if isinstance(value, dict) and isinstance(type_hint, type):
+        if issubclass(type_hint, pydantic.BaseModel):
+            if serializer_name == "json":
+                # Re-serialize to JSON bytes and deserialize with correct type hint
+                # This reuses the JSON serializer's Pydantic handling
+                json_bytes = json.dumps(value).encode("utf-8")
+                return deserialize_value(
+                    serialized_value=json_bytes,
+                    metadata=ValueMetadata(
+                        id="param_coerce",
+                        cls=type_hint,
+                        serializer_name=serializer_name,
+                        content_type=None,
+                    ),
+                )
+            else:
+                # For pickle: values are already Python objects, just validate
+                return type_hint.model_validate(value)
+
+    return value
+
+
 def _coerce_payload_to_kwargs(
     application: Function, payload: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Coerces payload dict values to their expected types based on function signature.
+    """Maps payload dict to kwargs, deserializing values to their expected types.
 
     Used for multi-parameter application functions.
+    Reuses the serializer for Pydantic conversion.
     """
     signature: inspect.Signature = function_signature(application)
     params = list(signature.parameters.values())
@@ -31,16 +74,21 @@ def _coerce_payload_to_kwargs(
     if len(params) > 0 and params[0].name == "self":
         params = params[1:]
 
+    serializer_name = function_input_serializer(application).name
     kwargs: Dict[str, Any] = {}
+
     for param in params:
         if param.name in payload:
             raw_value = payload[param.name]
-            kwargs[param.name] = coerce_to_type(raw_value, param.annotation)
+            kwargs[param.name] = _deserialize_param_value(
+                raw_value, param.annotation, serializer_name
+            )
         elif param.default is not inspect.Parameter.empty:
             kwargs[param.name] = param.default
         else:
             raise SDKUsageError(
-                f"Missing required parameter '{param.name}' in application payload"
+                f"Missing required parameter '{param.name}' in request payload. "
+                f"Please include '{param.name}' in your JSON payload."
             )
 
     return kwargs

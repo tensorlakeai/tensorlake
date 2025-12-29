@@ -1,15 +1,14 @@
 import inspect
 import unittest
-from typing import Any, Dict
 
 from pydantic import BaseModel
 
 from tensorlake.applications import application, function
 from tensorlake.applications.function.application_call import (
     _coerce_payload_to_kwargs,
+    _deserialize_param_value,
     _get_application_param_count,
 )
-from tensorlake.applications.function.type_hints import coerce_to_type
 
 
 class Item(BaseModel):
@@ -46,41 +45,41 @@ def three_params_with_default(item: Item, count: int, label: str = "default") ->
     return f"{label}: {item.name}: {count}"
 
 
-class TestCoerceToType(unittest.TestCase):
-    """Tests for coerce_to_type function."""
+class TestDeserializeParamValue(unittest.TestCase):
+    """Tests for _deserialize_param_value function."""
 
     def test_empty_type_hint_returns_value_as_is(self):
         """When type_hint is empty, return value unchanged."""
         value = {"name": "test"}
-        result = coerce_to_type(value, inspect.Parameter.empty)
+        result = _deserialize_param_value(value, inspect.Parameter.empty, "json")
         self.assertEqual(result, value)
 
     def test_value_already_correct_type(self):
         """When value is already the correct type, return as-is."""
         item = Item(name="Widget", price=10.0)
-        result = coerce_to_type(item, Item)
+        result = _deserialize_param_value(item, Item, "json")
         self.assertIs(result, item)  # Same object
 
     def test_dict_to_pydantic_model(self):
-        """Dict should be converted to Pydantic model."""
+        """Dict should be converted to Pydantic model via serializer."""
         data = {"name": "Gadget", "price": 20.0}
-        result = coerce_to_type(data, Item)
+        result = _deserialize_param_value(data, Item, "json")
         self.assertIsInstance(result, Item)
         self.assertEqual(result.name, "Gadget")
         self.assertEqual(result.price, 20.0)
 
-    def test_non_dict_non_matching_returns_as_is(self):
-        """Non-dict value that doesn't match type returns as-is."""
-        value = "hello"
-        result = coerce_to_type(value, int)
-        self.assertEqual(result, "hello")
+    def test_non_pydantic_dict_returns_as_is(self):
+        """Dict with non-Pydantic type hint returns as-is."""
+        value = {"key": "value"}
+        result = _deserialize_param_value(value, dict, "json")
+        self.assertEqual(result, value)
 
     def test_primitive_types(self):
         """Primitive types should return as-is when matching."""
-        self.assertEqual(coerce_to_type(42, int), 42)
-        self.assertEqual(coerce_to_type("hello", str), "hello")
-        self.assertEqual(coerce_to_type(3.14, float), 3.14)
-        self.assertEqual(coerce_to_type(True, bool), True)
+        self.assertEqual(_deserialize_param_value(42, int, "json"), 42)
+        self.assertEqual(_deserialize_param_value("hello", str, "json"), "hello")
+        self.assertEqual(_deserialize_param_value(3.14, float, "json"), 3.14)
+        self.assertEqual(_deserialize_param_value(True, bool, "json"), True)
 
 
 class TestCoercePayloadToKwargs(unittest.TestCase):
@@ -121,16 +120,20 @@ class TestCoercePayloadToKwargs(unittest.TestCase):
 
         self.assertEqual(result["label"], "default")
 
-    def test_missing_required_param_raises(self):
-        """Missing required parameter should raise error."""
+    def test_missing_required_param_raises_helpful_error(self):
+        """Missing required parameter should raise SDKUsageError with helpful message."""
+        from tensorlake.applications.interface import SDKUsageError
+
         payload = {
             "item": {"name": "Test", "price": 10.0},
             # Missing 'count' which is required
         }
-        with self.assertRaises(Exception) as context:
+        with self.assertRaises(SDKUsageError) as context:
             _coerce_payload_to_kwargs(two_params, payload)
 
-        self.assertIn("count", str(context.exception))
+        error_msg = str(context.exception)
+        self.assertIn("count", error_msg)
+        self.assertIn("Missing required parameter", error_msg)
 
 
 class TestGetApplicationParamCount(unittest.TestCase):

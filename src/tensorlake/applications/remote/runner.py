@@ -58,7 +58,7 @@ class RemoteRunner:
 
         # For pickle serializer, convert Pydantic models to dicts to avoid
         # class reference issues across process boundaries. The FE will
-        # reconstruct Pydantic models using coerce_to_type and type hints.
+        # reconstruct Pydantic models using the serializer and type hints.
         payload_to_serialize = self._payload
         if isinstance(input_serializer, PickleUserDataSerializer):
             payload_to_serialize = _convert_pydantic_to_dict(self._payload)
