@@ -43,6 +43,7 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     Allocation,
     AllocationFailureReason,
     AllocationFunctionCall,
+    AllocationFunctionCallCreationResult,
     AllocationFunctionCallResult,
     AllocationFunctionCallWatcher,
     AllocationOutcomeCode,
@@ -364,17 +365,27 @@ class TestRunAllocation(unittest.TestCase):
 
                     if current_allocation_state == "wait_blob_deletion":
                         if len(allocation_state.output_blob_requests) == 0:
-                            current_allocation_state = "wait_function_call_and_watcher"
+                            current_allocation_state = "wait_function_call"
 
-                    if current_allocation_state == "wait_function_call_and_watcher":
-                        if (
-                            len(allocation_state.function_calls) > 0
-                            and len(allocation_state.function_call_watchers) > 0
-                        ):
+                    if current_allocation_state == "wait_function_call":
+                        if len(allocation_state.function_calls) > 0:
                             self.assertEqual(len(allocation_state.function_calls), 1)
                             allocation_function_call: AllocationFunctionCall = (
                                 allocation_state.function_calls[0]
                             )
+                            stub.send_allocation_update(
+                                AllocationUpdate(
+                                    allocation_id=allocation_id,
+                                    function_call_creation_result=AllocationFunctionCallCreationResult(
+                                        status=Status(code=grpc.StatusCode.OK.value[0]),
+                                        allocation_function_call_id=allocation_function_call.id,
+                                    ),
+                                )
+                            )
+                            current_allocation_state = "wait_function_call_watcher"
+
+                    if current_allocation_state == "wait_function_call_watcher":
+                        if len(allocation_state.function_call_watchers) > 0:
                             self.assertEqual(
                                 len(allocation_state.function_call_watchers), 1
                             )
@@ -383,6 +394,7 @@ class TestRunAllocation(unittest.TestCase):
                             ) = allocation_state.function_call_watchers[0]
                             break
 
+                self.assertTrue(allocation_function_call.HasField("id"))
                 self.assertTrue(allocation_function_call.HasField("updates"))
                 self.assertTrue(allocation_function_call.HasField("args_blob"))
                 self.assertEqual(
@@ -451,8 +463,10 @@ class TestRunAllocation(unittest.TestCase):
                     function_call_metadata.kwargs["num_chunks"].collection, None
                 )
 
+                self.assertTrue(allocation_function_call_watcher.HasField("id"))
                 self.assertEqual(
-                    allocation_function_call_watcher.function_call_id, function_call.id
+                    allocation_function_call_watcher.root_function_call_id,
+                    function_call.id,
                 )
 
                 # All good - the function call from FE is valid.
@@ -505,7 +519,7 @@ class TestRunAllocation(unittest.TestCase):
                     AllocationUpdate(
                         allocation_id=allocation_id,
                         function_call_result=AllocationFunctionCallResult(
-                            function_call_id=function_call.id,
+                            watcher_id=allocation_function_call_watcher.id,
                             outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
                             value_output=SerializedObjectInsideBLOB(
                                 manifest=SerializedObjectManifest(

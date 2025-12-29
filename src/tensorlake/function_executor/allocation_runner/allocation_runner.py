@@ -109,16 +109,19 @@ class FunctionCallCreationInfo:
 
 
 @dataclass
+class FunctionCallWatcherInfo:
+    # Not None when the function call result is delivered by Executor.
+    result: AllocationFunctionCallResult | None
+    # Set only once after the function call creation result is set.
+    result_available: threading.Event
+
+
+@dataclass
 class _UserFutureInfo:
     # Original Future created by user code.
     user_future: Future
     # Not None if this user future is for an AwaitableList.
     collection: List[Future | Any] | None
-    # Not None when the future is completed.
-    # Requires a watcher setup.
-    result: AllocationFunctionCallResult | None
-    # Set only once after the result is set.
-    result_available: threading.Event
 
 
 @dataclass
@@ -186,8 +189,11 @@ class AllocationRunner:
         # Futures that were created by user code during this allocation.
         # Future ID -> _UserFutureInfo.
         self._user_futures: Dict[str, _UserFutureInfo] = {}
-        # Function Call ID -> FunctionCallCreationInfo.
+        # Allocation Function Call ID -> FunctionCallCreationInfo.
+        # Allocation Function Call ID is different from Function Call ID in ExecutionPlanUpdates.
         self._function_call_creations: Dict[str, FunctionCallCreationInfo] = {}
+        # Watcher ID -> FunctionCallWatcherInfo.
+        self._function_call_watchers: Dict[str, FunctionCallWatcherInfo] = {}
         # BLOB ID -> _OutputBLOBRequestInfo.
         self._output_blob_requests: Dict[str, _OutputBLOBRequestInfo] = {}
 
@@ -218,31 +224,41 @@ class AllocationRunner:
     def deliver_allocation_update(self, update: AllocationUpdate) -> None:
         # No need for any locks because we never block here so we hold GIL non stop.
         if update.HasField("function_call_creation_result"):
-            function_call_id: str = (
-                update.function_call_creation_result.function_call_id
+            alloc_function_call_id: str = (
+                update.function_call_creation_result.allocation_function_call_id
+                if update.function_call_creation_result.HasField(
+                    "allocation_function_call_id"
+                )
+                else update.function_call_creation_result.function_call_id
             )
-            if function_call_id not in self._function_call_creations:
+            if alloc_function_call_id not in self._function_call_creations:
                 self._logger.error(
-                    "received function call creation result for unknown function call",
-                    function_call_id=function_call_id,
+                    "received function call creation result for unknown allocation function call",
+                    alloc_fn_call_id=alloc_function_call_id,
                 )
                 return
             function_call_creation_info: FunctionCallCreationInfo = (
-                self._function_call_creations[function_call_id]
+                self._function_call_creations[alloc_function_call_id]
             )
             function_call_creation_info.result = update.function_call_creation_result
             function_call_creation_info.result_available.set()
         elif update.HasField("function_call_result"):
-            function_call_id: str = update.function_call_result.function_call_id
-            if function_call_id not in self._user_futures:
+            watcher_id: str = (
+                update.function_call_result.watcher_id
+                if update.function_call_result.HasField("watcher_id")
+                else update.function_call_result.function_call_id
+            )
+            if watcher_id not in self._function_call_watchers:
                 self._logger.error(
-                    "received function call result for unknown future",
-                    function_call_id=function_call_id,
+                    "received function call result for unknown watcher",
+                    watcher_id=watcher_id,
                 )
                 return
-            future_info: _UserFutureInfo = self._user_futures[function_call_id]
-            future_info.result = update.function_call_result
-            future_info.result_available.set()
+            watcher_info: FunctionCallWatcherInfo = self._function_call_watchers[
+                watcher_id
+            ]
+            watcher_info.result = update.function_call_result
+            watcher_info.result_available.set()
         elif update.HasField("output_blob_deprecated") or update.HasField(
             "output_blob"
         ):
@@ -336,8 +352,6 @@ class AllocationRunner:
             future_info: _UserFutureInfo = _UserFutureInfo(
                 user_future=future,
                 collection=None,
-                result=None,
-                result_available=threading.Event(),
             )
             if isinstance(future.awaitable, AwaitableList):
                 future_info.collection = []
@@ -467,17 +481,35 @@ class AllocationRunner:
             self._wait_future_list_completion(future_info, deadline)
             return
 
-        function_call_id: str = future_info.user_future.awaitable.id
         function_call_watcher_id: str = _request_scoped_id()
+        watcher_info: FunctionCallWatcherInfo = FunctionCallWatcherInfo(
+            result=None,
+            result_available=threading.Event(),
+        )
+        self._function_call_watchers[function_call_watcher_id] = watcher_info
+        # FIXME: Temorary workaround for missing watcher_id coming from Executor.
+        # Remove once Executor is updated.
+        self._function_call_watchers[future.awaitable.id] = watcher_info
         self._allocation_state.add_function_call_watcher(
-            watcher_id=function_call_watcher_id, function_call_id=function_call_id
+            id=function_call_watcher_id,
+            root_function_call_id=future_info.user_future.awaitable.id,
         )
 
         result_wait_timeout: float | None = (
             deadline - time.monotonic() if deadline is not None else None
         )
-        if future_info.result_available.wait(timeout=result_wait_timeout):
-            result: AllocationFunctionCallResult = future_info.result
+        result_available: bool = watcher_info.result_available.wait(
+            timeout=result_wait_timeout
+        )
+
+        self._allocation_state.delete_function_call_watcher(id=function_call_watcher_id)
+        del self._function_call_watchers[function_call_watcher_id]
+        # FIXME: Temorary workaround for missing watcher_id coming from Executor.
+        # Remove once Executor is updated.
+        del self._function_call_watchers[future.awaitable.id]
+
+        if result_available:
+            result: AllocationFunctionCallResult = watcher_info.result
             if (
                 result.outcome_code
                 == AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS
@@ -532,10 +564,8 @@ class AllocationRunner:
             # timeout and no result or error are available.
             future.set_exception(TimeoutError())
 
-        self._allocation_state.delete_function_call_watcher(
-            watcher_id=function_call_watcher_id
-        )
-        self._allocation_state.delete_function_call(function_call_id=function_call_id)
+        # Future result is set, we can remove the Future from tracking.
+        del self._user_futures[future.awaitable.id]
         self._logger.info(
             "child future completed",
             child_future_id=future.awaitable.id,
@@ -633,26 +663,39 @@ class AllocationRunner:
                 result_available=threading.Event(),
             )
         )
+        alloc_function_call_id: str = _request_scoped_id()
+        self._function_call_creations[alloc_function_call_id] = (
+            function_call_creation_info
+        )
+        # Temporary workaround for missing allocation_function_call_id coming from Executor.
+        # TODO: Remove once Executor is updated.
         self._function_call_creations[future.awaitable.id] = function_call_creation_info
-
         self._allocation_state.add_function_call(
+            id=alloc_function_call_id,
             execution_plan_updates=awaitable_execution_plan_pb,
             args_blob=uploaded_args_blob,
         )
-        # TODO: Uncomment this code block once all Executors send the function call creation results.
-        # function_call_creation_info.result_available.wait()
-        # if (
-        #     function_call_creation_info.result.status.code
-        #     != grpc.StatusCode.OK.value[0]
-        # ):
-        #     self._logger.error(
-        #         "child future function call creation failed",
-        #         child_future_id=future.awaitable.id,
-        #         status=function_call_creation_info.result.status,
-        #     )
-        #     exception: InternalError = InternalError("Failed to start function call")
-        #     future.set_exception(exception)
-        #     raise exception
+
+        function_call_creation_info.result_available.wait()
+
+        del self._function_call_creations[alloc_function_call_id]
+        # TODO: Remove once Executor is updated.
+        del self._function_call_creations[future.awaitable.id]
+        self._allocation_state.delete_function_call(id=alloc_function_call_id)
+
+        if (
+            function_call_creation_info.result.status.code
+            != grpc.StatusCode.OK.value[0]
+        ):
+            self._logger.error(
+                "child future function call creation failed",
+                alloc_fn_call_id=alloc_function_call_id,
+                child_future_id=future.awaitable.id,
+                status=function_call_creation_info.result.status,
+            )
+            exception: InternalError = InternalError("Failed to start function call")
+            future.set_exception(exception)
+            raise exception
 
     def _get_new_output_blob(self, size: int) -> BLOB:
         """Returns new BLOB to upload function outputs to.
@@ -668,6 +711,7 @@ class AllocationRunner:
         self._allocation_state.add_output_blob_request(id=blob_id, size=size)
 
         blob_request_info.blob_available.wait()
+
         self._allocation_state.remove_output_blob_request(id=blob_id)
         del self._output_blob_requests[blob_id]
 
