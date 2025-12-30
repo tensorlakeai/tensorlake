@@ -99,7 +99,7 @@ class Function:
         # Called when the Function is called using () operator.
         return (
             FunctionCallAwaitable(
-                id=_request_scoped_id(),
+                dedup_key=_request_scoped_id(),
                 function_name=self._function_config.function_name,
                 args=list(args),
                 kwargs=dict(kwargs),
@@ -208,7 +208,7 @@ class FunctionAwaitablesFactory:
         Raises TensorlakeError on error.
         """
         return FunctionCallAwaitable(
-            id=_request_scoped_id(),
+            dedup_key=_request_scoped_id(),
             function_name=self._function._function_config.function_name,
             args=list(args),
             kwargs=dict(kwargs),

@@ -155,7 +155,7 @@ def awaitable_to_execution_plan_updates(
     )
     return ExecutionPlanUpdates(
         updates=updates,
-        root_function_call_id=awaitable.id,
+        root_function_call_id=awaitable.object_id,
     )
 
 
@@ -169,7 +169,7 @@ def _fill_execution_plan_updates(
 ) -> None:
     if isinstance(awaitable, FunctionCallAwaitable):
         metadata: FunctionCallMetadata = FunctionCallMetadata(
-            id=awaitable.id,
+            id=awaitable.object_id,
             output_serializer_name_override=output_serializer_name_override,
             args=[],
             kwargs={},
@@ -223,11 +223,11 @@ def _fill_execution_plan_updates(
                 )
                 function_pb_args.append(
                     FunctionArg(
-                        function_call_id=arg.id,
+                        function_call_id=arg.object_id,
                     )
                 )
                 return FunctionCallArgumentMetadata(
-                    value_id=arg.id,
+                    value_id=arg.object_id,
                     collection=None,
                 )
             else:
@@ -243,7 +243,7 @@ def _fill_execution_plan_updates(
 
         update = ExecutionPlanUpdate(
             function_call=FunctionCall(
-                id=awaitable.id,
+                id=awaitable.object_id,
                 target=FunctionRef(
                     namespace=function_ref.namespace,
                     application_name=function_ref.application_name,
@@ -258,7 +258,7 @@ def _fill_execution_plan_updates(
 
     elif isinstance(awaitable, ReduceOperationAwaitable):
         metadata: ReduceOperationMetadata = ReduceOperationMetadata(
-            id=awaitable.id,
+            id=awaitable.object_id,
             output_serializer_name_override=output_serializer_name_override,
         )
         collection: List[FunctionArg] = []
@@ -282,7 +282,7 @@ def _fill_execution_plan_updates(
                 )
                 collection.append(
                     FunctionArg(
-                        function_call_id=item.id,
+                        function_call_id=item.object_id,
                     )
                 )
             else:
@@ -292,7 +292,7 @@ def _fill_execution_plan_updates(
 
         update = ExecutionPlanUpdate(
             reduce=ReduceOp(
-                id=awaitable.id,
+                id=awaitable.object_id,
                 reducer=FunctionRef(
                     namespace=function_ref.namespace,
                     application_name=function_ref.application_name,
@@ -332,7 +332,7 @@ def _to_collection_metadata(
         elif isinstance(item, (FunctionCallAwaitable, ReduceOperationAwaitable)):
             collection_metadata.items.append(
                 CollectionItemMetadata(
-                    value_id=item.id,
+                    value_id=item.object_id,
                     collection=None,
                 )
             )
@@ -361,7 +361,7 @@ def _embed_collection_into_function_pb_args(
         elif isinstance(item, (FunctionCallAwaitable, ReduceOperationAwaitable)):
             function_pb_args.append(
                 FunctionArg(
-                    function_call_id=item.id,
+                    function_call_id=item.object_id,
                 )
             )
         else:

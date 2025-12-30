@@ -37,7 +37,7 @@ def validate_user_object(
         )
 
     awaitable: Awaitable = user_object
-    if awaitable.id in function_call_ids:
+    if awaitable.object_id in function_call_ids:
         raise SDKUsageError(
             f"{awaitable} has an already running Future. "
             "Only not running Awaitable can be passed as function argument or returned from a function."

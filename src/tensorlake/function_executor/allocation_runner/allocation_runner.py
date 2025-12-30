@@ -378,7 +378,7 @@ class AllocationRunner:
                 )
                 self._run_user_future(future, start_delay)
 
-            self._user_futures[future.awaitable.id] = future_info
+            self._user_futures[future.awaitable.object_id] = future_info
 
     def wait_futures_runtime_hook(
         self, futures: List[Future], timeout: float | None, return_when: RETURN_WHEN
@@ -434,7 +434,7 @@ class AllocationRunner:
                 # Something went wrong while waiting for the future.
                 self._logger.error(
                     "Unexpected error while waiting for child future completion",
-                    child_future_id=future.awaitable.id,
+                    child_future_id=future.awaitable.object_id,
                     exc_info=e,
                 )
                 future.set_exception(
@@ -470,13 +470,13 @@ class AllocationRunner:
         start_time: float = time.monotonic()
         self._logger.info(
             "waiting for child future completion",
-            child_future_id=future.awaitable.id,
+            child_future_id=future.awaitable.object_id,
         )
 
         deadline: float | None = (
             time.monotonic() + timeout if timeout is not None else None
         )
-        future_info: _UserFutureInfo = self._user_futures[future.awaitable.id]
+        future_info: _UserFutureInfo = self._user_futures[future.awaitable.object_id]
         if future_info.collection is not None:
             self._wait_future_list_completion(future_info, deadline)
             return
@@ -489,10 +489,10 @@ class AllocationRunner:
         self._function_call_watchers[function_call_watcher_id] = watcher_info
         # FIXME: Temorary workaround for missing watcher_id coming from Executor.
         # Remove once Executor is updated.
-        self._function_call_watchers[future.awaitable.id] = watcher_info
+        self._function_call_watchers[future.awaitable.object_id] = watcher_info
         self._allocation_state.add_function_call_watcher(
             id=function_call_watcher_id,
-            root_function_call_id=future_info.user_future.awaitable.id,
+            root_function_call_id=future_info.user_future.awaitable.object_id,
         )
 
         result_wait_timeout: float | None = (
@@ -506,7 +506,7 @@ class AllocationRunner:
         del self._function_call_watchers[function_call_watcher_id]
         # FIXME: Temorary workaround for missing watcher_id coming from Executor.
         # Remove once Executor is updated.
-        del self._function_call_watchers[future.awaitable.id]
+        del self._function_call_watchers[future.awaitable.object_id]
 
         if result_available:
             result: AllocationFunctionCallResult = watcher_info.result
@@ -565,10 +565,10 @@ class AllocationRunner:
             future.set_exception(TimeoutError())
 
         # Future result is set, we can remove the Future from tracking.
-        del self._user_futures[future.awaitable.id]
+        del self._user_futures[future.awaitable.object_id]
         self._logger.info(
             "child future completed",
-            child_future_id=future.awaitable.id,
+            child_future_id=future.awaitable.object_id,
             duration_sec=f"{time.monotonic() - start_time:.3f}",
             success=future.exception is None,
         )
@@ -610,7 +610,7 @@ class AllocationRunner:
     def _run_user_future(self, future: Future, start_delay: float | None) -> None:
         self._logger.info(
             "starting child future",
-            child_future_id=future.awaitable.id,
+            child_future_id=future.awaitable.object_id,
         )
         serialized_values: Dict[str, SerializedValue] = {}
         awaitable_with_serialized_values: Awaitable = (
@@ -669,7 +669,9 @@ class AllocationRunner:
         )
         # Temporary workaround for missing allocation_function_call_id coming from Executor.
         # TODO: Remove once Executor is updated.
-        self._function_call_creations[future.awaitable.id] = function_call_creation_info
+        self._function_call_creations[future.awaitable.object_id] = (
+            function_call_creation_info
+        )
         self._allocation_state.add_function_call(
             id=alloc_function_call_id,
             execution_plan_updates=awaitable_execution_plan_pb,
@@ -680,7 +682,7 @@ class AllocationRunner:
 
         del self._function_call_creations[alloc_function_call_id]
         # TODO: Remove once Executor is updated.
-        del self._function_call_creations[future.awaitable.id]
+        del self._function_call_creations[future.awaitable.object_id]
         self._allocation_state.delete_function_call(id=alloc_function_call_id)
 
         if (
@@ -690,7 +692,7 @@ class AllocationRunner:
             self._logger.error(
                 "child future function call creation failed",
                 alloc_fn_call_id=alloc_function_call_id,
-                child_future_id=future.awaitable.id,
+                child_future_id=future.awaitable.object_id,
                 status=function_call_creation_info.result.status,
             )
             exception: InternalError = InternalError("Failed to start function call")

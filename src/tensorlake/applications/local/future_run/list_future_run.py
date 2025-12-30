@@ -42,7 +42,7 @@ class ListFutureRun(LocalFutureRun):
             )
 
         return LocalFutureRunResult(
-            id=self._local_future.user_future.id,
+            id=self._local_future.user_future.awaitable.object_id,
             output=self._values,
             error=None,
         )

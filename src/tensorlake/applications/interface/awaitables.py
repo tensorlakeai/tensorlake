@@ -10,14 +10,10 @@ from .exceptions import InternalError, SDKUsageError, TensorlakeError
 
 
 def _request_scoped_id() -> str:
-    """Generates a unique ID scoped to a single request.
-
-    This ID is used to identify function calls, futures and values (data payloads)
-    within a single request.
-    """
+    """Generates a unique ID scoped to a single request."""
     # We need full sized nanoid here because we can run a request
-    # for months and we don't want to ever collide these IDs between
-    # function calls of the same request.
+    # for months and we don't want to ever collide these IDs within
+    # the same request.
     return nanoid_generate()
 
 
@@ -28,12 +24,30 @@ class Awaitable:
     by i.e. passing one Awaitable as an input to another Awaitable.
     """
 
-    def __init__(self, id: str):
-        self._id: str = id
+    def __init__(self, dedup_key: str):
+        """Constructs an Awaitable with the given deduplication key.
+
+        Multiple Awaitables might have the same deduplication key within
+        if they represent the same computation (i.e. deduplicated function calls).
+        """
+        self._dedup_key: str = dedup_key
+        # TODO: Use str(id(self)) once usage of .object_id property is correct.
+        self._object_id: str = _request_scoped_id()
 
     @property
-    def id(self) -> str:
-        return self._id
+    def object_id(self) -> str:
+        """Returns unique ID of Awaitable object.
+
+        Used for identifying Awaitable objects created by user inside a single process.
+        This ID must not be passed outside of the process as it can be the same across
+        different Python processes.
+        """
+        return self._object_id
+
+    @property
+    def dedup_key(self) -> str:
+        """Returns the deduplication key of this Awaitable."""
+        return self._dedup_key
 
     def run(self) -> "Future":
         """Runs this Awaitable as soon as possible and returns its Future.
@@ -129,10 +143,6 @@ class Future:
         # Lock is not needed because we're not doing any blocking reads/writes here.
         self._result: Any | _FutureResultMissingType = _FutureResultMissing
         self._exception: TensorlakeError | None = None
-
-    @property
-    def id(self) -> str:
-        return self._awaitable.id
 
     @property
     def awaitable(self) -> Awaitable:
@@ -267,11 +277,11 @@ class AwaitableList(Awaitable):
 
     def __init__(
         self,
-        id: str,
+        dedup_key: str,
         items: Iterable[Awaitable | Any],
         metadata: _AwaitableListMetadata,
     ):
-        super().__init__(id=id)
+        super().__init__(dedup_key=dedup_key)
         self._items: List[Awaitable | Any] = list(items)
         self._metadata: _AwaitableListMetadata = metadata
 
@@ -298,7 +308,8 @@ class AwaitableList(Awaitable):
         # Shows exact structure of the Awaitable. Used for debug logging.
         return (
             f"<{type(self)}(\n"
-            f"  id={self.id!r},\n"
+            f"  id={self.object_id!r},\n"
+            f"  dedup_key={self.dedup_key!r},\n"
             f"  items=[\n    "
             + ",\n    ".join(repr(awaitable) for awaitable in self.items)
             + "\n  ]\n"
@@ -312,10 +323,10 @@ def make_map_operation_awaitable(
     if isinstance(items, AwaitableList):
         items = items.items
     return AwaitableList(
-        id=_request_scoped_id(),
+        dedup_key=_request_scoped_id(),
         items=[
             FunctionCallAwaitable(
-                id=_request_scoped_id(),
+                dedup_key=_request_scoped_id(),
                 function_name=function_name,
                 args=[item],
                 kwargs={},
@@ -351,12 +362,12 @@ class FunctionCallAwaitable(Awaitable):
 
     def __init__(
         self,
-        id: str,
+        dedup_key: str,
         function_name: str,
         args: List[Any | Awaitable],
         kwargs: Dict[str, Any | Awaitable],
     ):
-        super().__init__(id=id)
+        super().__init__(dedup_key=dedup_key)
         self._function_name: str = function_name
         self._args: List[Any | Awaitable] = args
         self._kwargs: Dict[str, Any | Awaitable] = kwargs
@@ -380,7 +391,8 @@ class FunctionCallAwaitable(Awaitable):
         # Shows exact structure of the Awaitable. Used for debug logging.
         return (
             f"<{type(self)}(\n"
-            f"  id={self.id!r},\n"
+            f"  id={self.object_id!r},\n"
+            f"  dedup_key={self.dedup_key!r},\n"
             f"  function_name={self.function_name!r},\n"
             f"  args=[\n    "
             + ",\n    ".join(repr(arg) for arg in self.args)
@@ -414,11 +426,11 @@ class ReduceOperationAwaitable(Awaitable):
 
     def __init__(
         self,
-        id: str,
+        dedup_key: str,
         function_name: str,
         inputs: List[Any | Awaitable],
     ):
-        super().__init__(id=id)
+        super().__init__(dedup_key=dedup_key)
         self._function_name: str = function_name
         # Contains at least two items due to prior validations.
         self._inputs: List[Any | Awaitable] = inputs
@@ -438,7 +450,8 @@ class ReduceOperationAwaitable(Awaitable):
         # Shows exact structure of the Awaitable. Used for debug logging.
         return (
             f"<{type(self)}(\n"
-            f"  id={self.id!r},\n"
+            f"  id={self.object_id!r},\n"
+            f"  dedup_key={self.dedup_key!r},\n"
             f"  function_name={self.function_name!r},\n"
             f"  inputs={self.inputs!r},\n"
             f")>"
@@ -493,7 +506,7 @@ def make_reduce_operation_awaitable(
         )
 
     reduce_op = ReduceOperationAwaitable(
-        id=_request_scoped_id(),
+        dedup_key=_request_scoped_id(),
         function_name=function_name,
         inputs=inputs,
     )

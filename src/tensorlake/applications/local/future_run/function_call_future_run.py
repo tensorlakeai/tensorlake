@@ -90,13 +90,17 @@ class FunctionCallFutureRun(LocalFutureRun):
                 result: Any = self._function._original_function(
                     *self._arg_values, **self._kwarg_values
                 )
-                return LocalFutureRunResult(id=awaitable.id, output=result, error=None)
+                return LocalFutureRunResult(
+                    id=awaitable.object_id, output=result, error=None
+                )
             except RequestError as e:
                 # Never retry on RequestError.
-                return LocalFutureRunResult(id=awaitable.id, output=None, error=e)
+                return LocalFutureRunResult(
+                    id=awaitable.object_id, output=None, error=e
+                )
             except StopLocalFutureRun:
                 return LocalFutureRunResult(
-                    id=awaitable.id,
+                    id=awaitable.object_id,
                     output=None,
                     error=create_function_error(awaitable, cause="stopped"),
                 )
@@ -104,7 +108,7 @@ class FunctionCallFutureRun(LocalFutureRun):
                 runs_left -= 1
                 if runs_left == 0:
                     return LocalFutureRunResult(
-                        id=awaitable.id,
+                        id=awaitable.object_id,
                         output=None,
                         error=create_function_error(awaitable, cause=e),
                     )
