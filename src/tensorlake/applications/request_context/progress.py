@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any
 
 from tensorlake.applications.cloud_events import print_cloud_event
@@ -32,14 +33,17 @@ def print_progress_update(
         "step": current,
         "total": total,
         "attributes": attributes,
+        "created_at": int(datetime.now().timestamp() * 1000),
     }
 
     if local_mode:
         print(f"Progress Update: {event}", flush=True)
     else:
         try:
-            # Keep seemingly redundant "RequestProgressUpdated" key for backward compatibility.
             print_cloud_event(
+                # The shape of the object is important because these events
+                # get merged with events sent by Indexify server,
+                # which sets a key with the struct name with the event as value.
                 {"RequestProgressUpdated": event},
                 type="ai.tensorlake.progress_update",
                 source="/tensorlake/applications/progress",

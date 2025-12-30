@@ -108,18 +108,18 @@ class TestPrintProgressUpdates(unittest.TestCase):
 
         for num in range(arg):
             data = {
-                "RequestProgressUpdated": {
-                    "request_id": "123",
-                    "function_name": "prints_progress_updates",
-                    "message": f"prints_progress_updates: executing step {num} of {arg}",
-                    "step": num,
-                    "total": arg,
-                    "attributes": {"key": "value"},
-                }
+                "request_id": "123",
+                "function_name": "prints_progress_updates",
+                "message": f"prints_progress_updates: executing step {num} of {arg}",
+                "step": num,
+                "total": arg,
+                "attributes": {"key": "value"},
             }
 
             self.assertIn(
-                json.dumps(data),
+                # strip the closing braket because there might be other fields after attributes,
+                # but we don't care about them.
+                json.dumps(data).strip("}"),
                 fe_stdout,
             )
 
@@ -170,18 +170,18 @@ class TestPrintProgressUpdates(unittest.TestCase):
 
         for num in range(arg):
             data = {
-                "RequestProgressUpdated": {
-                    "request_id": "123",
-                    "function_name": "prints_progress_updates_with_message",
-                    "message": f"this is step {num} of {arg} steps in this function",
-                    "step": num,
-                    "total": arg,
-                    "attributes": {"key": "value"},
-                }
+                "request_id": "123",
+                "function_name": "prints_progress_updates_with_message",
+                "message": f"this is step {num} of {arg} steps in this function",
+                "step": num,
+                "total": arg,
+                "attributes": {"key": "value"},
             }
 
             self.assertIn(
-                json.dumps(data),
+                # strip the closing braket because there might be other fields after attributes,
+                # but we don't care about them.
+                json.dumps(data).strip("}"),
                 fe_stdout,
             )
 
