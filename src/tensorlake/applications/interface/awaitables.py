@@ -116,6 +116,9 @@ class Future:
 
     A Future tracks an asynchronous computation in Tensorlake Application
     and provides access to its result.
+
+    Each Awaitable object can only have one Future associated with it.
+    This is validated by the runtime when creating Futures for Awaitables.
     """
 
     # Warning: a Future object cannot be copied by value because it'll result in
@@ -131,12 +134,8 @@ class Future:
         self._exception: TensorlakeError | None = None
 
     @property
-    def id(self) -> str:
-        return self._awaitable.id
-
-    @property
     def awaitable(self) -> Awaitable:
-        """The Awaitable that created this Future."""
+        """The Awaitable of this Future."""
         return self._awaitable
 
     def set_result(self, result: Any):
