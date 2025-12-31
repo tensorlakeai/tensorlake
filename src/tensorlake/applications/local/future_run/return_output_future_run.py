@@ -39,7 +39,7 @@ class ReturnOutputFutureRun(LocalFutureRun):
 
     def _run_future(self) -> LocalFutureRunResult:
         return LocalFutureRunResult(
-            id=self.local_future.user_future.id,
+            id=self.local_future.user_future.awaitable.id,
             output=self.output,
             error=None,
         )

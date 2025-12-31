@@ -14,7 +14,7 @@ from ..interface.awaitables import (
 
 
 def validate_user_object(
-    user_object: Awaitable | Future | Any, function_call_ids: Set[str]
+    user_object: Awaitable | Future | Any, running_awaitable_ids: Set[str]
 ) -> None:
     """Validates the object produced by user function.
 
@@ -37,7 +37,7 @@ def validate_user_object(
         )
 
     awaitable: Awaitable = user_object
-    if awaitable.id in function_call_ids:
+    if awaitable.id in running_awaitable_ids:
         raise SDKUsageError(
             f"{awaitable} has an already running Future. "
             "Only not running Awaitable can be passed as function argument or returned from a function."
@@ -46,16 +46,24 @@ def validate_user_object(
     if isinstance(awaitable, AwaitableList):
         awaitable: AwaitableList
         for item in awaitable.items:
-            validate_user_object(user_object=item, function_call_ids=function_call_ids)
+            validate_user_object(
+                user_object=item, running_awaitable_ids=running_awaitable_ids
+            )
     elif isinstance(awaitable, ReduceOperationAwaitable):
         awaitable: ReduceOperationAwaitable
         for item in awaitable.inputs:
-            validate_user_object(user_object=item, function_call_ids=function_call_ids)
+            validate_user_object(
+                user_object=item, running_awaitable_ids=running_awaitable_ids
+            )
     elif isinstance(awaitable, FunctionCallAwaitable):
         awaitable: FunctionCallAwaitable
         for arg in awaitable.args:
-            validate_user_object(user_object=arg, function_call_ids=function_call_ids)
+            validate_user_object(
+                user_object=arg, running_awaitable_ids=running_awaitable_ids
+            )
         for arg in awaitable.kwargs.values():
-            validate_user_object(user_object=arg, function_call_ids=function_call_ids)
+            validate_user_object(
+                user_object=arg, running_awaitable_ids=running_awaitable_ids
+            )
     else:
         raise InternalError(f"Unexpected Awaitable subclass: {type(awaitable)}")

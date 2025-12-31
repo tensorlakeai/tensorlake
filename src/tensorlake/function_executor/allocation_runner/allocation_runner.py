@@ -358,7 +358,7 @@ class AllocationRunner:
                 for item in future.awaitable.items:
                     validate_user_object(
                         user_object=item,
-                        function_call_ids=self._user_futures.keys(),
+                        running_awaitable_ids=self._user_futures.keys(),
                     )
                     if isinstance(item, Awaitable):
                         # Calls our hook recursively.
@@ -374,7 +374,7 @@ class AllocationRunner:
             else:
                 validate_user_object(
                     user_object=future.awaitable,
-                    function_call_ids=self._user_futures.keys(),
+                    running_awaitable_ids=self._user_futures.keys(),
                 )
                 self._run_user_future(future, start_delay)
 
@@ -837,7 +837,7 @@ class AllocationRunner:
         try:
             validate_user_object(
                 user_object=output,
-                function_call_ids=self._user_futures.keys(),
+                running_awaitable_ids=self._user_futures.keys(),
             )
             serialized_values: Dict[str, SerializedValue] = {}
             output: SerializedValue | Awaitable = serialize_values_in_awaitable_tree(
