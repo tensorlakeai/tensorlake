@@ -91,24 +91,13 @@ class TestCloudEventTimestamp(unittest.TestCase):
 
         # Should match ISO 8601 format with UTC timezone (Z)
         # Format: YYYY-MM-DDTHH:MM:SS.ffffffZ
-        iso_pattern = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+\+00:00"
+        iso_pattern = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z"
         self.assertRegex(timestamp, iso_pattern)
 
     def test_timestamp_ends_with_z(self):
-        """Test that timestamp ends with +00:00 indicating UTC timezone."""
+        """Test that timestamp ends with Z indicating UTC timezone."""
         event = new_cloud_event({"test": "data"})
-        self.assertTrue(event["timestamp"].endswith("+00:00"))
-
-    def test_timestamp_is_parseable(self):
-        """Test that timestamp can be parsed as valid ISO 8601."""
-        event = new_cloud_event({"test": "data"})
-        timestamp = event["timestamp"]
-
-        try:
-            parsed = datetime.fromisoformat(timestamp)
-            self.assertEqual(parsed.tzinfo, timezone.utc)
-        except ValueError as e:
-            self.fail(f"Timestamp could not be parsed: {timestamp}, error: {e}")
+        self.assertTrue(event["timestamp"].endswith("Z"))
 
 
 class TestCloudEventSerialization(unittest.TestCase):

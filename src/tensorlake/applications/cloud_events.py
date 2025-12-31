@@ -1,6 +1,6 @@
-import datetime
 import json
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from .interface.exceptions import SerializationError
@@ -35,7 +35,7 @@ def new_cloud_event(
     event_dict = {
         "specversion": "1.0",
         "id": str(uuid.uuid4()),
-        "timestamp": _current_time(),
+        "timestamp": event_time(),
         "type": type,
         "source": source,
         "data": event,
@@ -47,8 +47,11 @@ def new_cloud_event(
     return event_dict
 
 
-def _current_time() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+def event_time() -> str:
+    # We want the times to always use the `Z` format.
+    # Python 3.11+ has a `utc_as_z=True` parameter in `isoformat`,
+    # but we also want to support Python 3.10, so we do a string substitution.
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _serialize_json(obj: dict[str, Any]) -> str:
