@@ -1,7 +1,6 @@
-from datetime import datetime
 from typing import Any
 
-from tensorlake.applications.cloud_events import print_cloud_event
+from tensorlake.applications.cloud_events import event_time, print_cloud_event
 
 
 def print_progress_update(
@@ -33,7 +32,7 @@ def print_progress_update(
         "step": current,
         "total": total,
         "attributes": attributes,
-        "created_at": int(datetime.now().timestamp() * 1000),
+        "created_at": event_time(),
     }
 
     if local_mode:
