@@ -1,3 +1,4 @@
+import hashlib
 from typing import Any, Dict, List
 
 from tensorlake.applications import (
@@ -49,17 +50,154 @@ from ..proto.function_executor_pb2 import (
 from .value import SerializedValue, Value
 
 
-# FIXME: We're modifying user's Awaitables here in place which is not ideal.
-# We might want to clone the Awaitables instead to avoid surprising the user.
-# Or create an intermediate representation of the Awaitable tree and work with it.
+def to_durable_awaitable_tree(
+    root: Awaitable | Any,
+    parent_function_call_id: str,
+    awaitable_sequence_number: int,
+) -> tuple[Awaitable | Any, int]:
+    """Returns a shallow copy of the supplied Awaitable tree with Awaitable IDs supporting durable execution.
+
+    The shallow copy has the same structure as the original tree, but each Awaitable in the tree
+    has its ID replaced with a durable ID. User provided values are kept in the returned tree as is.
+
+    parent_function_call_id is ID of the function call that created the awaitable tree.
+    awaitable_sequence_number is the last unused sequential number of awaitables created by the parent function call.
+
+    Durable Awaitable IDs are the same across different executions (allocations) of the same parent function call
+    if the parent function call is deterministic, i.e. it creates the same awaitable trees in the same order each
+    time it's executed. If this is not the case then the Awaitable IDs will differ between executions, which may
+    lead to re-execution of some function calls even if their inputs are the same as in a previous execution.
+
+    To produce a durable Awaitable ID, we compute it as a hash of:
+    - parent_function_call_id in the tree
+    - awaitable_sequence_number (unique per Awaitable in the tree). This ensures that any two Awaitables created by
+      the same parent function call get different durable IDs even if the Awaitables are otherwise identical
+      (i.e. two calls of the same function with same parameters). This also ensures that each durable ID is unique
+      per each execution of parent function call.
+    - Awaitable-specific metadata. This ensures that we detect changes in Awaitable tree nodes, i.e. change of called function name.
+    - Deterministically ordered durable IDs of all immediate child Awaitables.
+      This ensures that changes in the structure of the awaitable tree leads to different durable IDs of its nodes
+      starting from root so it's easy to detect a drift on Server side just by comparing durable ID of root.
+
+    We're deliberately not hashing entire awaitables to produce their durable IDs. This is because hashing entire awaitables
+    is an expensive operation (i.e. hashing gigabytes of arbitrary user supplied objects which are function call parameters).
+    This also results in better UX, i.e. this allows:
+    - Seamless Schema Evolution: Users may want to change the schema of function parameters (e.g. add a new field with a default value
+      to a pydantic model).
+    - Use of non-deterministic functions: Users may want to use non-deterministic functions (e.g. functions that return current time or random values)
+      inside otherwise deterministic function call trees.
+    - To avoid "Serialization Flakiness": Strict equality checks on serialized data are fragile and can lead to false positive
+      re-executions due to minor, non-semantic changes in serialization (e.g. different field ordering in protobufs, or insertion order in dicts).
+    - To decouple Logic from Data. We adhere to a philosophy of being Strict on Control Flow but Lenient on Data. "The History is the Source of Truth."
+
+    Raises TensorlakeError on error.
+    """
+    # NB: Any change to ordering of operations in this function results in change of durable IDs for all durable Awaitables
+    # which would lead to previously computed IDs not being replayable anymore.
+    if not isinstance(root, Awaitable):
+        return root, awaitable_sequence_number  # Return user-provided value as is.
+
+    awaitable: Awaitable = root
+    durable_id_attrs: list[str] = [
+        parent_function_call_id,
+        str(awaitable_sequence_number),
+    ]
+    awaitable_sequence_number += 1
+
+    if isinstance(awaitable, AwaitableList):
+        awaitable: AwaitableList
+        # Awaitable specific metadata, part of durable ID.
+        durable_id_attrs.append(awaitable.metadata.durability_key)
+        durable_items: list[Awaitable | Any] = []
+        for item in awaitable.items:
+            durable_item, awaitable_sequence_number = to_durable_awaitable_tree(
+                root=item,
+                parent_function_call_id=parent_function_call_id,
+                awaitable_sequence_number=awaitable_sequence_number,
+            )
+            durable_items.append(durable_item)
+            _add_durable_id_attr(durable_items[-1], durable_id_attrs)
+
+        return (
+            AwaitableList(
+                id=_sha256_hash_strings(durable_id_attrs),
+                items=durable_items,
+                metadata=awaitable.metadata,
+            ),
+            awaitable_sequence_number,
+        )
+
+    elif isinstance(awaitable, ReduceOperationAwaitable):
+        awaitable: ReduceOperationAwaitable
+        # Awaitable specific metadata, part of durable ID.
+        durable_id_attrs.extend(["ReduceOperation", awaitable.function_name])
+        durable_inputs: list[Awaitable | Any] = []
+        for input in awaitable.inputs:
+            durable_input, awaitable_sequence_number = to_durable_awaitable_tree(
+                root=input,
+                parent_function_call_id=parent_function_call_id,
+                awaitable_sequence_number=awaitable_sequence_number,
+            )
+            durable_inputs.append(durable_input)
+            _add_durable_id_attr(durable_inputs[-1], durable_id_attrs)
+
+        return (
+            ReduceOperationAwaitable(
+                id=_sha256_hash_strings(durable_id_attrs),
+                function_name=awaitable.function_name,
+                inputs=durable_inputs,
+            ),
+            awaitable_sequence_number,
+        )
+
+    elif isinstance(awaitable, FunctionCallAwaitable):
+        awaitable: FunctionCallAwaitable
+        # Awaitable specific metadata, part of durable ID.
+        durable_id_attrs.extend(["FunctionCall", awaitable.function_name])
+        durable_args: list[Awaitable | Any] = []
+        for arg in awaitable.args:
+            durable_arg, awaitable_sequence_number = to_durable_awaitable_tree(
+                root=arg,
+                parent_function_call_id=parent_function_call_id,
+                awaitable_sequence_number=awaitable_sequence_number,
+            )
+            durable_args.append(durable_arg)
+            _add_durable_id_attr(durable_args[-1], durable_id_attrs)
+
+        durable_kwargs: dict[str, Awaitable | Any] = {}
+        # Iterate over sorted dict keys to ensure deterministic hash key order.
+        sorted_kwarg_keys: list[str] = sorted(awaitable.kwargs.keys())
+        for kwarg_name in sorted_kwarg_keys:
+            kwarg_value: Awaitable | Any = awaitable.kwargs[kwarg_name]
+            durable_kwarg, awaitable_sequence_number = to_durable_awaitable_tree(
+                root=kwarg_value,
+                parent_function_call_id=parent_function_call_id,
+                awaitable_sequence_number=awaitable_sequence_number,
+            )
+            durable_kwargs[kwarg_name] = durable_kwarg
+            _add_durable_id_attr(durable_kwargs[kwarg_name], durable_id_attrs)
+
+        return (
+            FunctionCallAwaitable(
+                id=_sha256_hash_strings(durable_id_attrs),
+                function_name=awaitable.function_name,
+                args=durable_args,
+                kwargs=durable_kwargs,
+            ),
+            awaitable_sequence_number,
+        )
+    else:
+        raise InternalError(f"Unexpected Awaitable subclass: {type(awaitable)}")
+
+
 def serialize_values_in_awaitable_tree(
-    user_object: Awaitable | Any,
+    root: Awaitable | Any,
     value_serializer: UserDataSerializer,
     serialized_values: Dict[str, SerializedValue],
 ) -> SerializedValue | Awaitable:
-    """Converts values in the given user generated Awaitable tree into SerializedValues.
+    """Converts values in the given Awaitable tree into SerializedValues.
 
-    This results in the original Awaitable tree being returned with each value being
+    The provided Awaitable tree is modified in-place with each user supplied value being
     SerializedValue instead of the original user object. Updates serialized_values with
     each SerializedValue created from concrete values. serialized_values is mapping from
     value ID to SerializedValue.
@@ -68,9 +206,9 @@ def serialize_values_in_awaitable_tree(
     Raises TensorlakeError for other errors.
     """
     # NB: This code needs to be in sync with LocalRunner where it's doing a similar thing.
-    if not isinstance(user_object, Awaitable):
+    if not isinstance(root, Awaitable):
         data, metadata = serialize_value(
-            value=user_object,
+            value=root,
             serializer=value_serializer,
             value_id=_request_scoped_id(),
         )
@@ -81,13 +219,13 @@ def serialize_values_in_awaitable_tree(
         )
         return serialized_values[metadata.id]
 
-    awaitable: Awaitable = user_object
+    awaitable: Awaitable = root
     if isinstance(awaitable, AwaitableList):
         awaitable: AwaitableList
         for index, item in enumerate(list(awaitable.items)):
             # Iterating over list copy to allow modifying the original list.
             awaitable.items[index] = serialize_values_in_awaitable_tree(
-                user_object=item,
+                root=item,
                 value_serializer=value_serializer,
                 serialized_values=serialized_values,
             )
@@ -100,7 +238,7 @@ def serialize_values_in_awaitable_tree(
         for index, item in enumerate(list(awaitable.inputs)):
             # Iterating over list copy to allow modifying the original list.
             awaitable.inputs[index] = serialize_values_in_awaitable_tree(
-                user_object=item,
+                root=item,
                 value_serializer=args_serializer,
                 serialized_values=serialized_values,
             )
@@ -113,14 +251,14 @@ def serialize_values_in_awaitable_tree(
         for index, arg in enumerate(list(awaitable.args)):
             # Iterating over list copy to allow modifying the original list.
             awaitable.args[index] = serialize_values_in_awaitable_tree(
-                user_object=arg,
+                root=arg,
                 value_serializer=args_serializer,
                 serialized_values=serialized_values,
             )
         for kwarg_name, kwarg_value in dict(awaitable.kwargs).items():
             # Iterating over dict copy to allow modifying the original list.
             awaitable.kwargs[kwarg_name] = serialize_values_in_awaitable_tree(
-                user_object=kwarg_value,
+                root=kwarg_value,
                 value_serializer=args_serializer,
                 serialized_values=serialized_values,
             )
@@ -129,7 +267,7 @@ def serialize_values_in_awaitable_tree(
         raise InternalError(f"Unexpected Awaitable subclass: {type(awaitable)}")
 
 
-def awaitable_to_execution_plan_updates(
+def to_execution_plan_updates(
     awaitable: Awaitable,
     uploaded_serialized_objects: Dict[str, SerializedObjectInsideBLOB],
     output_serializer_name_override: str,
@@ -493,6 +631,10 @@ def _reconstruct_sdk_function_call_args(
             )
         return args, kwargs
     elif isinstance(function_call_metadata, ReduceOperationMetadata):
+        if len(arg_values) != 2:
+            raise InternalError(
+                f"Expected exactly 2 argument values for reducer function call, got {len(arg_values)}"
+            )
         args: List[Value] = list(arg_values.values())
         # Server provides accumulator first, item second
         args.sort(key=lambda arg: arg.input_ix)
@@ -522,3 +664,22 @@ def _reconstruct_collection_value(
         else:
             values.append(_reconstruct_collection_value(item.collection, arg_values))
     return values
+
+
+def _add_durable_id_attr(node: Awaitable | Any, durable_attrs: list[str]) -> None:
+    # We don't hash user provided values. Only hash Awaitables to verify tree structure.
+    if isinstance(node, Awaitable):
+        durable_attrs.append(node.id)
+
+
+def _sha256_hash_strings(strings: list[str]) -> str:
+    """Returns sha256 hash of the concatenation of strings in the given list.
+
+    If the strings are sha256 hashes, the result is also a high quality sha256 hash
+    of the original hashed values. See https://en.wikipedia.org/wiki/Merkle_tree.
+    """
+    sha256 = hashlib.sha256()
+    for s in strings:
+        sha256.update(s.encode("utf-8"))
+        sha256.update(b"|")  # Separator to avoid collisions of neighbouring strings.
+    return sha256.hexdigest()

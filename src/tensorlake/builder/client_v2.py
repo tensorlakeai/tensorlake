@@ -191,7 +191,9 @@ class ImageBuilderV2Client:
             f"{image.name}: Posting {os.path.getsize(context_file_path)} bytes of context to build service...."
         )
 
-        file_content = await asyncio.to_thread(lambda: open(context_file_path, "rb").read())
+        file_content = await asyncio.to_thread(
+            lambda: open(context_file_path, "rb").read()
+        )
         files = {"context": file_content}
 
         os.remove(context_file_path)

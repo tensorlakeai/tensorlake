@@ -14,7 +14,7 @@ class FunctionCallArgumentMetadata(BaseModel):
 
 
 class FunctionCallMetadata(BaseModel):
-    # Request scoped unique identifier of the function call.
+    # ID of the function call, uniquness guarantees depend on how the field is set.
     id: str
     # Not None if output serialization format is overridden for this function call.
     # This is used when the output of this function call is consumed by another function call
