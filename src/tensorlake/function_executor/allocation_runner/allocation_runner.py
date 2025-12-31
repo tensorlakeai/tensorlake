@@ -86,10 +86,12 @@ from .request_context.progress import AllocationProgress
 from .request_context.request_state import AllocationRequestState
 from .result_helper import ResultHelper
 from .sdk_algorithms import (
+    assign_sequence_numbers_to_awaitables,
     awaitable_to_execution_plan_updates,
     deserialize_function_arguments,
     reconstruct_function_call_args,
     serialize_values_in_awaitable_tree,
+    to_durable_awaitable_tree,
     validate_and_deserialize_function_call_metadata,
 )
 from .upload import (
@@ -120,6 +122,8 @@ class FunctionCallWatcherInfo:
 class _UserFutureInfo:
     # Original Future created by user code.
     user_future: Future
+    # Not None if this user future is not an AwaitableList.
+    durable_awaitable_id: str | None
     # Not None if this user future is for an AwaitableList.
     collection: List[Future | Any] | None
 
@@ -186,9 +190,17 @@ class AllocationRunner:
             target=self._run_allocation_thread,
             daemon=True,
         )
-        # Futures that were created by user code during this allocation.
-        # Future ID -> _UserFutureInfo.
+        # Futures that were created (started) by user code during this allocation.
+        # Future Awaitable ID -> _UserFutureInfo.
         self._user_futures: Dict[str, _UserFutureInfo] = {}
+        # Sequence numbers of all Awaitables created during this allocation.
+        # Future Awaitables get sequence numbers assigned when Futures run.
+        # Tail call Awaitables get sequence numbers assigned on return from user function.
+        # Awaitable ID -> sequence number.
+        self._awaitable_sequence_numbers: Dict[str, int] = {}
+        self._current_awaitable_sequence_number: int = (
+            0  # Unlimited due to transparent BigInt.
+        )
         # Allocation Function Call ID -> FunctionCallCreationInfo.
         # Allocation Function Call ID is different from Function Call ID in ExecutionPlanUpdates.
         self._function_call_creations: Dict[str, FunctionCallCreationInfo] = {}
@@ -351,8 +363,10 @@ class AllocationRunner:
         for future in futures:
             future_info: _UserFutureInfo = _UserFutureInfo(
                 user_future=future,
+                durable_awaitable_id=None,
                 collection=None,
             )
+            # Server can't run AwaitableList, we need to run each item separately.
             if isinstance(future.awaitable, AwaitableList):
                 future_info.collection = []
                 for item in future.awaitable.items:
@@ -376,7 +390,7 @@ class AllocationRunner:
                     user_object=future.awaitable,
                     running_awaitable_ids=self._user_futures.keys(),
                 )
-                self._run_user_future(future, start_delay)
+                self._run_user_future(future_info, start_delay)
 
             self._user_futures[future.awaitable.id] = future_info
 
@@ -434,7 +448,7 @@ class AllocationRunner:
                 # Something went wrong while waiting for the future.
                 self._logger.error(
                     "Unexpected error while waiting for child future completion",
-                    child_future_id=future.awaitable.id,
+                    future_id=future.awaitable.id,
                     exc_info=e,
                 )
                 future.set_exception(
@@ -463,16 +477,11 @@ class AllocationRunner:
         return done, not_done
 
     def _wait_future_completion(self, future: Future, timeout: float | None) -> None:
-        """Wait for the completion of the future and sets its result or exception if didn't timeout.
+        """Waits for the completion of the future and sets its result or exception if didn't timeout.
 
         Raises Exception on unexpected internal error. Normally all exceptions are set on the future itself.
         """
         start_time: float = time.monotonic()
-        self._logger.info(
-            "waiting for child future completion",
-            child_future_id=future.awaitable.id,
-        )
-
         deadline: float | None = (
             time.monotonic() + timeout if timeout is not None else None
         )
@@ -481,7 +490,20 @@ class AllocationRunner:
             self._wait_future_list_completion(future_info, deadline)
             return
 
+        if future_info.durable_awaitable_id is None:
+            self._logger.error(
+                "Durable Awaitable ID is not set for user future.",
+                future_id=future_info.user_future.awaitable.id,
+            )
+            raise InternalError("Durable Awaitable ID is not set for user future.")
+
         function_call_watcher_id: str = _request_scoped_id()
+        self._logger.info(
+            "waiting for child future completion",
+            future_id=future.awaitable.id,
+            future_fn_call_id=future_info.durable_awaitable_id,
+            future_watcher_id=function_call_watcher_id,
+        )
         watcher_info: FunctionCallWatcherInfo = FunctionCallWatcherInfo(
             result=None,
             result_available=threading.Event(),
@@ -489,10 +511,10 @@ class AllocationRunner:
         self._function_call_watchers[function_call_watcher_id] = watcher_info
         # FIXME: Temorary workaround for missing watcher_id coming from Executor.
         # Remove once Executor is updated.
-        self._function_call_watchers[future.awaitable.id] = watcher_info
+        self._function_call_watchers[future_info.durable_awaitable_id] = watcher_info
         self._allocation_state.add_function_call_watcher(
             id=function_call_watcher_id,
-            root_function_call_id=future_info.user_future.awaitable.id,
+            root_function_call_id=future_info.durable_awaitable_id,
         )
 
         result_wait_timeout: float | None = (
@@ -506,7 +528,7 @@ class AllocationRunner:
         del self._function_call_watchers[function_call_watcher_id]
         # FIXME: Temorary workaround for missing watcher_id coming from Executor.
         # Remove once Executor is updated.
-        del self._function_call_watchers[future.awaitable.id]
+        del self._function_call_watchers[future_info.durable_awaitable_id]
 
         if result_available:
             result: AllocationFunctionCallResult = watcher_info.result
@@ -568,7 +590,9 @@ class AllocationRunner:
         del self._user_futures[future.awaitable.id]
         self._logger.info(
             "child future completed",
-            child_future_id=future.awaitable.id,
+            future_id=future.awaitable.id,
+            future_fn_call_id=future_info.durable_awaitable_id,
+            future_watcher_id=function_call_watcher_id,
             duration_sec=f"{time.monotonic() - start_time:.3f}",
             success=future.exception is None,
         )
@@ -607,19 +631,26 @@ class AllocationRunner:
         else:
             future.set_result(collection)
 
-    def _run_user_future(self, future: Future, start_delay: float | None) -> None:
-        self._logger.info(
-            "starting child future",
-            child_future_id=future.awaitable.id,
+    def _run_user_future(
+        self, future_info: _UserFutureInfo, start_delay: float | None
+    ) -> None:
+        self._current_awaitable_sequence_number = assign_sequence_numbers_to_awaitables(
+            node=future_info.user_future.awaitable,
+            current_sequence_number=self._current_awaitable_sequence_number,
+            awaitable_sequence_numbers=self._awaitable_sequence_numbers,
         )
+        durable_awaitable: Awaitable = to_durable_awaitable_tree(
+            node=future_info.user_future.awaitable,
+            parent_function_call_id=self._allocation.function_call_id,
+            awaitable_sequence_numbers=self._awaitable_sequence_numbers,
+        )
+        future_info.durable_awaitable_id = durable_awaitable.id
         serialized_values: Dict[str, SerializedValue] = {}
-        awaitable_with_serialized_values: Awaitable = (
-            serialize_values_in_awaitable_tree(
-                user_object=future.awaitable,
-                # value serializer is not going to be used because we're serializing a call tree here, not a value.
-                value_serializer=PickleUserDataSerializer(),
-                serialized_values=serialized_values,
-            )
+        serialize_values_in_awaitable_tree(
+            node=durable_awaitable,
+            # Use pickle because we only serialize inputs, not outputs.
+            value_serializer=PickleUserDataSerializer(),
+            serialized_values=serialized_values,
         )
 
         serialized_objects: Dict[str, SerializedObjectInsideBLOB] = {}
@@ -642,7 +673,7 @@ class AllocationRunner:
 
         awaitable_execution_plan_pb: ExecutionPlanUpdates
         awaitable_execution_plan_pb = awaitable_to_execution_plan_updates(
-            awaitable=awaitable_with_serialized_values,
+            awaitable=durable_awaitable,
             uploaded_serialized_objects=serialized_objects,
             # Output serializer name override is only applicable to tail calls.
             output_serializer_name_override=None,
@@ -664,12 +695,20 @@ class AllocationRunner:
             )
         )
         alloc_function_call_id: str = _request_scoped_id()
+        self._logger.info(
+            "starting child future",
+            future_id=future_info.user_future.awaitable.id,
+            future_fn_call_id=future_info.durable_awaitable_id,
+            future_alloc_fn_call_id=alloc_function_call_id,
+        )
         self._function_call_creations[alloc_function_call_id] = (
             function_call_creation_info
         )
         # Temporary workaround for missing allocation_function_call_id coming from Executor.
         # TODO: Remove once Executor is updated.
-        self._function_call_creations[future.awaitable.id] = function_call_creation_info
+        self._function_call_creations[durable_awaitable.id] = (
+            function_call_creation_info
+        )
         self._allocation_state.add_function_call(
             id=alloc_function_call_id,
             execution_plan_updates=awaitable_execution_plan_pb,
@@ -680,7 +719,7 @@ class AllocationRunner:
 
         del self._function_call_creations[alloc_function_call_id]
         # TODO: Remove once Executor is updated.
-        del self._function_call_creations[future.awaitable.id]
+        del self._function_call_creations[durable_awaitable.id]
         self._allocation_state.delete_function_call(id=alloc_function_call_id)
 
         if (
@@ -689,13 +728,21 @@ class AllocationRunner:
         ):
             self._logger.error(
                 "child future function call creation failed",
-                alloc_fn_call_id=alloc_function_call_id,
-                child_future_id=future.awaitable.id,
+                future_id=future_info.user_future.awaitable.id,
+                future_fn_call_id=future_info.durable_awaitable_id,
+                future_alloc_fn_call_id=alloc_function_call_id,
                 status=function_call_creation_info.result.status,
             )
             exception: InternalError = InternalError("Failed to start function call")
-            future.set_exception(exception)
+            future_info.user_future.set_exception(exception)
             raise exception
+        else:
+            self._logger.info(
+                "started child future",
+                future_id=future_info.user_future.awaitable.id,
+                future_fn_call_id=future_info.durable_awaitable_id,
+                future_alloc_fn_call_id=alloc_function_call_id,
+            )
 
     def _get_new_output_blob(self, size: int) -> BLOB:
         """Returns new BLOB to upload function outputs to.
@@ -839,9 +886,29 @@ class AllocationRunner:
                 user_object=output,
                 running_awaitable_ids=self._user_futures.keys(),
             )
+        except BaseException as e:
+            # This is internal FE code.
+            return self._result_helper.from_user_exception(
+                self._allocation_event_details, e
+            )
+
+        # This is internal FE code.
+        self._current_awaitable_sequence_number = assign_sequence_numbers_to_awaitables(
+            node=output,
+            current_sequence_number=self._current_awaitable_sequence_number,
+            awaitable_sequence_numbers=self._awaitable_sequence_numbers,
+        )
+        durable_awaitable: Awaitable | Any = to_durable_awaitable_tree(
+            node=output,
+            parent_function_call_id=self._allocation.function_call_id,
+            awaitable_sequence_numbers=self._awaitable_sequence_numbers,
+        )
+
+        # This is user code.
+        try:
             serialized_values: Dict[str, SerializedValue] = {}
             output: SerializedValue | Awaitable = serialize_values_in_awaitable_tree(
-                user_object=output,
+                node=durable_awaitable,
                 value_serializer=output_serializer,
                 serialized_values=serialized_values,
             )
