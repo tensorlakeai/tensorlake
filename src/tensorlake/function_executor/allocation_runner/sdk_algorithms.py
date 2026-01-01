@@ -10,6 +10,7 @@ from tensorlake.applications.function.application_call import (
     _coerce_payload_to_kwargs,
     deserialize_application_function_call_payload,
 )
+from tensorlake.applications.function.function_call import set_self_arg
 from tensorlake.applications.function.type_hints import function_signature
 from tensorlake.applications.function.user_data_serializer import (
     deserialize_value,
@@ -458,11 +459,12 @@ def reconstruct_function_call_args(
     function: Function,
     function_call_metadata: FunctionCallMetadata | ReduceOperationMetadata | None,
     arg_values: Dict[str, Value],
+    function_instance_arg: Any | None = None,
 ) -> tuple[List[Any], Dict[str, Any]]:
     """Returns function call args and kwargs reconstructed from arg_values.
 
-    For class methods, the 'self' parameter is excluded from argument mapping;
-    the class instance is set separately via set_self_arg in allocation_runner.
+    For class methods, if function_instance_arg is provided, it is inserted
+    as the first positional argument (self).
     """
     if function_call_metadata is None:
         # Application function call created by Server.
@@ -477,6 +479,9 @@ def reconstruct_function_call_args(
             function_call_metadata=function_call_metadata,
             arg_values=arg_values,
         )
+
+    if function_instance_arg is not None:
+        set_self_arg(args, function_instance_arg)
 
     return args, kwargs
 

@@ -21,10 +21,7 @@ from tensorlake.applications import (
 )
 from tensorlake.applications.algorithms.validate_user_object import validate_user_object
 from tensorlake.applications.blob_store import BLOBStore
-from tensorlake.applications.function.function_call import (
-    create_function_error,
-    set_self_arg,
-)
+from tensorlake.applications.function.function_call import create_function_error
 from tensorlake.applications.function.user_data_serializer import (
     deserialize_value,
     function_output_serializer,
@@ -751,9 +748,8 @@ class AllocationRunner:
             function=self._function,
             function_call_metadata=function_call_metadata,
             arg_values=arg_values,
+            function_instance_arg=self._function_instance_arg,
         )
-        if self._function_instance_arg is not None:
-            set_self_arg(args, self._function_instance_arg)
 
         # This is user code.
         try:
