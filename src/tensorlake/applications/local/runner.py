@@ -231,10 +231,12 @@ class LocalRunner:
                     self._app.awaitable(payload)
                 )
             else:
-                # Multiple parameters: coerce payload values to expected types and pass as kwargs
-                coerced_kwargs = _coerce_payload_to_kwargs(self._app, payload)
+                # Multiple parameters: coerce payload values to expected types
+                coerced_args, coerced_kwargs = _coerce_payload_to_kwargs(
+                    self._app, payload
+                )
                 app_function_call_awaitable: FunctionCallAwaitable = (
-                    self._app.awaitable(**coerced_kwargs)
+                    self._app.awaitable(*coerced_args, **coerced_kwargs)
                 )
             self._create_future_run_for_awaitable(
                 awaitable=app_function_call_awaitable,

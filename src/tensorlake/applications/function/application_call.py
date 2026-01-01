@@ -1,6 +1,6 @@
 import inspect
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import pydantic
 
@@ -10,12 +10,20 @@ from .type_hints import function_arg_type_hint, function_signature
 from .user_data_serializer import deserialize_value, function_input_serializer
 
 
+def _is_class_method(application: Function) -> bool:
+    """Returns True if the application function is a class method."""
+    return (
+        application._function_config is not None
+        and application._function_config.class_name is not None
+    )
+
+
 def _get_application_param_count(application: Function) -> int:
     """Returns the number of parameters for the application function, excluding 'self'."""
     signature: inspect.Signature = function_signature(application)
     params = list(signature.parameters.values())
-    # Exclude 'self' parameter for class methods
-    if len(params) > 0 and params[0].name == "self":
+    # Exclude 'self' parameter for class methods (verified by checking class_name)
+    if _is_class_method(application) and len(params) > 0 and params[0].name == "self":
         params = params[1:]
     return len(params)
 
@@ -61,37 +69,58 @@ def _deserialize_param_value(value: Any, type_hint: Any, serializer_name: str) -
 
 def _coerce_payload_to_kwargs(
     application: Function, payload: Dict[str, Any]
-) -> Dict[str, Any]:
-    """Maps payload dict to kwargs, deserializing values to their expected types.
+) -> Tuple[List[Any], Dict[str, Any]]:
+    """Maps payload dict to args and kwargs, deserializing values to their expected types.
 
     Used for multi-parameter application functions.
     Reuses the serializer for Pydantic conversion.
+
+    Returns (args, kwargs) where:
+    - args: positional-only parameters (before /)
+    - kwargs: all other parameters
     """
     signature: inspect.Signature = function_signature(application)
     params = list(signature.parameters.values())
 
-    # Exclude 'self' parameter for class methods
-    if len(params) > 0 and params[0].name == "self":
+    # Exclude 'self' parameter for class methods (verified by checking class_name)
+    if _is_class_method(application) and len(params) > 0 and params[0].name == "self":
         params = params[1:]
 
     serializer_name = function_input_serializer(application).name
+    args: List[Any] = []
     kwargs: Dict[str, Any] = {}
 
     for param in params:
+        # Skip variadic parameters (*args, **kwargs) - they're inherently optional
+        if param.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            continue
+
         if param.name in payload:
             raw_value = payload[param.name]
-            kwargs[param.name] = _deserialize_param_value(
+            value = _deserialize_param_value(
                 raw_value, param.annotation, serializer_name
             )
+            # Positional-only parameters go in args, others in kwargs
+            if param.kind == inspect.Parameter.POSITIONAL_ONLY:
+                args.append(value)
+            else:
+                kwargs[param.name] = value
         elif param.default is not inspect.Parameter.empty:
-            kwargs[param.name] = param.default
+            # Use default value
+            if param.kind == inspect.Parameter.POSITIONAL_ONLY:
+                args.append(param.default)
+            else:
+                kwargs[param.name] = param.default
         else:
             raise SDKUsageError(
                 f"Missing required parameter '{param.name}' in request payload. "
                 f"Please include '{param.name}' in your JSON payload."
             )
 
-    return kwargs
+    return args, kwargs
 
 
 def deserialize_application_function_call_payload(

@@ -8,6 +8,7 @@ from tensorlake.applications import (
 )
 from tensorlake.applications.function.application_call import (
     _coerce_payload_to_kwargs,
+    _is_class_method,
     deserialize_application_function_call_payload,
 )
 from tensorlake.applications.function.function_call import set_self_arg
@@ -495,13 +496,13 @@ def _reconstruct_application_function_call_args(
     Handles three cases:
     - Zero parameters: returns ([], {})
     - Single parameter (backward compatible): returns ([payload], {})
-    - Multiple parameters: returns ([], {param_name: value, ...})
+    - Multiple parameters: returns (args, kwargs) from _coerce_payload_to_kwargs
     """
     signature: inspect.Signature = function_signature(function)
     params = list(signature.parameters.values())
 
-    # Exclude 'self' parameter for class methods
-    if len(params) > 0 and params[0].name == "self":
+    # Exclude 'self' parameter for class methods (verified by checking class_name)
+    if _is_class_method(function) and len(params) > 0 and params[0].name == "self":
         params = params[1:]
 
     # Zero parameters case
@@ -512,14 +513,14 @@ def _reconstruct_application_function_call_args(
     if len(params) == 1:
         return [payload], {}
 
-    # Multiple parameters case - map payload dict keys to kwargs
+    # Multiple parameters case - map payload dict keys to args/kwargs
     if not isinstance(payload, dict):
         raise SDKUsageError(
             f"Application function with multiple parameters expects a dict payload, "
             f"got {type(payload).__name__}"
         )
 
-    return [], _coerce_payload_to_kwargs(function, payload)
+    return _coerce_payload_to_kwargs(function, payload)
 
 
 def _reconstruct_sdk_function_call_args(
