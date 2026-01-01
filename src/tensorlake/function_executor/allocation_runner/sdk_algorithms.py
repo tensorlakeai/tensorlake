@@ -4,6 +4,7 @@ from typing import Any, Dict, List
 from tensorlake.applications import (
     Function,
     InternalError,
+    SDKUsageError,
 )
 from tensorlake.applications.function.application_call import (
     _coerce_payload_to_kwargs,
@@ -460,7 +461,8 @@ def reconstruct_function_call_args(
 ) -> tuple[List[Any], Dict[str, Any]]:
     """Returns function call args and kwargs reconstructed from arg_values.
 
-    For class methods, inserts the class instance as the first argument (self).
+    For class methods, the 'self' parameter is excluded from argument mapping;
+    the class instance is set separately via set_self_arg in allocation_runner.
     """
     if function_call_metadata is None:
         # Application function call created by Server.
@@ -507,7 +509,7 @@ def _reconstruct_application_function_call_args(
 
     # Multiple parameters case - map payload dict keys to kwargs
     if not isinstance(payload, dict):
-        raise InternalError(
+        raise SDKUsageError(
             f"Application function with multiple parameters expects a dict payload, "
             f"got {type(payload).__name__}"
         )
