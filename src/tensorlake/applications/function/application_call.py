@@ -22,8 +22,8 @@ def _get_application_param_count(application: Function) -> int:
     """Returns the number of parameters for the application function, excluding 'self'."""
     signature: inspect.Signature = function_signature(application)
     params = list(signature.parameters.values())
-    # Exclude 'self' parameter for class methods (verified by checking class_name)
-    if _is_class_method(application) and len(params) > 0 and params[0].name == "self":
+    # Exclude first parameter for class methods (it's always the instance)
+    if _is_class_method(application) and len(params) > 0:
         params = params[1:]
     return len(params)
 
@@ -82,8 +82,8 @@ def _coerce_payload_to_kwargs(
     signature: inspect.Signature = function_signature(application)
     params = list(signature.parameters.values())
 
-    # Exclude 'self' parameter for class methods (verified by checking class_name)
-    if _is_class_method(application) and len(params) > 0 and params[0].name == "self":
+    # Exclude first parameter for class methods (it's always the instance)
+    if _is_class_method(application) and len(params) > 0:
         params = params[1:]
 
     serializer_name = function_input_serializer(application).name

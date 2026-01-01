@@ -501,8 +501,8 @@ def _reconstruct_application_function_call_args(
     signature: inspect.Signature = function_signature(function)
     params = list(signature.parameters.values())
 
-    # Exclude 'self' parameter for class methods (verified by checking class_name)
-    if _is_class_method(function) and len(params) > 0 and params[0].name == "self":
+    # Exclude first parameter for class methods (it's always the instance)
+    if _is_class_method(function) and len(params) > 0:
         params = params[1:]
 
     # Zero parameters case
