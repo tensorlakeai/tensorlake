@@ -453,14 +453,10 @@ def _validate_application_function(
 
     signature: inspect.Signature = function_signature(function)
 
-    # Get parameters excluding 'self' for class methods
+    # Get parameters excluding first param for class methods (it's always the instance)
     params = list(signature.parameters.values())
-    if (
-        function_details.class_name is not None
-        and len(params) > 0
-        and params[0].name == "self"
-    ):
-        params = params[1:]  # Exclude 'self' parameter
+    if function_details.class_name is not None and len(params) > 0:
+        params = params[1:]
 
     # Validate that all parameters have type hints
     for param in params:
