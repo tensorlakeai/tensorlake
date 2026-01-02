@@ -19,12 +19,24 @@ def _is_class_method(application: Function) -> bool:
 
 
 def _get_application_param_count(application: Function) -> int:
-    """Returns the number of parameters for the application function, excluding 'self'."""
+    """Returns the number of callable parameters for the application function.
+
+    Excludes:
+    - 'self' for class methods
+    - VAR_POSITIONAL (*args) and VAR_KEYWORD (**kwargs) - these are optional
+    """
     signature: inspect.Signature = function_signature(application)
     params = list(signature.parameters.values())
     # Exclude first parameter for class methods (it's always the instance)
     if _is_class_method(application) and len(params) > 0:
         params = params[1:]
+    # Exclude variadic parameters (*args, **kwargs) - they're inherently optional
+    params = [
+        p
+        for p in params
+        if p.kind
+        not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    ]
     return len(params)
 
 
