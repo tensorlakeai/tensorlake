@@ -6,7 +6,7 @@ import pydantic
 
 from ..interface import DeserializationError, Function, SDKUsageError
 from ..metadata import ValueMetadata
-from .type_hints import function_arg_type_hint, function_signature
+from .type_hints import _resolve_type_hint, function_arg_type_hint, function_signature
 from .user_data_serializer import deserialize_value, function_input_serializer
 
 
@@ -48,33 +48,51 @@ def _deserialize_param_value(value: Any, type_hint: Any, serializer_name: str) -
 
     For pickle serializer: values are already deserialized, so we use
     Pydantic's model_validate directly (same as JSON serializer does internally).
+
+    Handles Union/Optional types by extracting concrete types and finding
+    the first Pydantic model to deserialize to.
     """
-    # If no type hint or value is already the correct type, return as-is
+    # If no type hint, return as-is
     if type_hint is inspect.Parameter.empty:
         return value
 
-    if isinstance(type_hint, type) and isinstance(value, type_hint):
+    # Resolve the type hint to get concrete types (handles Union, Optional, etc.)
+    resolved_types: List[Any] = _resolve_type_hint(type_hint)
+
+    # Handle None values - if NoneType is in the resolved types, allow None
+    if value is None:
+        if type(None) in resolved_types:
+            return None
+        # If None not allowed but value is None, return as-is (let validation handle it)
         return value
 
-    # For dict values that should become Pydantic models
-    if isinstance(value, dict) and isinstance(type_hint, type):
-        if issubclass(type_hint, pydantic.BaseModel):
-            if serializer_name == "json":
-                # Re-serialize to JSON bytes and deserialize with correct type hint
-                # This reuses the JSON serializer's Pydantic handling
-                json_bytes = json.dumps(value).encode("utf-8")
-                return deserialize_value(
-                    serialized_value=json_bytes,
-                    metadata=ValueMetadata(
-                        id="param_coerce",
-                        cls=type_hint,
-                        serializer_name=serializer_name,
-                        content_type=None,
-                    ),
-                )
-            else:
-                # For pickle: values are already Python objects, just validate
-                return type_hint.model_validate(value)
+    # Check if value is already one of the expected types
+    for resolved_type in resolved_types:
+        if isinstance(resolved_type, type) and isinstance(value, resolved_type):
+            return value
+
+    # For dict values, find a Pydantic model in the resolved types and deserialize
+    if isinstance(value, dict):
+        for resolved_type in resolved_types:
+            if isinstance(resolved_type, type) and issubclass(
+                resolved_type, pydantic.BaseModel
+            ):
+                if serializer_name == "json":
+                    # Re-serialize to JSON bytes and deserialize with correct type hint
+                    # This reuses the JSON serializer's Pydantic handling
+                    json_bytes = json.dumps(value).encode("utf-8")
+                    return deserialize_value(
+                        serialized_value=json_bytes,
+                        metadata=ValueMetadata(
+                            id="param_coerce",
+                            cls=resolved_type,
+                            serializer_name=serializer_name,
+                            content_type=None,
+                        ),
+                    )
+                else:
+                    # For pickle: values are already Python objects, just validate
+                    return resolved_type.model_validate(value)
 
     return value
 
