@@ -1,15 +1,18 @@
+import inspect
 from typing import Any, Dict, List
 
 from tensorlake.applications import (
     Function,
     InternalError,
+    SDKUsageError,
 )
 from tensorlake.applications.function.application_call import (
+    _coerce_payload_to_kwargs,
+    _is_class_method,
     deserialize_application_function_call_payload,
 )
-from tensorlake.applications.function.function_call import (
-    set_self_arg,
-)
+from tensorlake.applications.function.function_call import set_self_arg
+from tensorlake.applications.function.type_hints import function_signature
 from tensorlake.applications.function.user_data_serializer import (
     deserialize_value,
     function_input_serializer,
@@ -454,16 +457,23 @@ def validate_and_deserialize_function_call_metadata(
 
 
 def reconstruct_function_call_args(
+    function: Function,
     function_call_metadata: FunctionCallMetadata | ReduceOperationMetadata | None,
     arg_values: Dict[str, Value],
-    function_instance_arg: Any | None,
+    function_instance_arg: Any | None = None,
 ) -> tuple[List[Any], Dict[str, Any]]:
-    """Returns function call args and kwargs reconstructed from arg_values."""
+    """Returns function call args and kwargs reconstructed from arg_values.
+
+    For class methods, if function_instance_arg is provided, it is inserted
+    as the first positional argument (self).
+    """
     if function_call_metadata is None:
         # Application function call created by Server.
         payload_arg: Value = arg_values["application_payload"]
-        args: List[Any] = [payload_arg.object]
-        kwargs: Dict[str, Any] = {}
+        args, kwargs = _reconstruct_application_function_call_args(
+            payload=payload_arg.object,
+            function=function,
+        )
     else:
         # SDK-created function call.
         args, kwargs = _reconstruct_sdk_function_call_args(
@@ -475,6 +485,36 @@ def reconstruct_function_call_args(
         set_self_arg(args, function_instance_arg)
 
     return args, kwargs
+
+
+def _reconstruct_application_function_call_args(
+    payload: Any,
+    function: Function,
+) -> tuple[List[Any], Dict[str, Any]]:
+    """Reconstructs args and kwargs for application function calls.
+
+    Handles three cases:
+    - Zero parameters: returns ([], {})
+    - Single parameter (backward compatible): returns ([payload], {})
+    - Multiple parameters: returns (args, kwargs) from _coerce_payload_to_kwargs
+    """
+    signature: inspect.Signature = function_signature(function)
+    params = list(signature.parameters.values())
+
+    # Exclude first parameter for class methods (it's always the instance)
+    if _is_class_method(function) and len(params) > 0:
+        params = params[1:]
+
+    # Zero parameters case
+    if len(params) == 0:
+        return [], {}
+
+    # Single parameter case (backward compatible)
+    if len(params) == 1:
+        return [payload], {}
+
+    # Multiple parameters case - map payload dict keys to args/kwargs
+    return _coerce_payload_to_kwargs(function, payload)
 
 
 def _reconstruct_sdk_function_call_args(

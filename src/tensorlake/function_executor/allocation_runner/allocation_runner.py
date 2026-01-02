@@ -789,6 +789,7 @@ class AllocationRunner:
 
         # This is internal FE code.
         args, kwargs = reconstruct_function_call_args(
+            function=self._function,
             function_call_metadata=function_call_metadata,
             arg_values=arg_values,
             function_instance_arg=self._function_instance_arg,
