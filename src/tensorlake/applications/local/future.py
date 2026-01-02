@@ -26,10 +26,6 @@ class LocalFuture:
         self._output_consumer_future_id: str | None = output_consumer_future_id
 
     @property
-    def id(self) -> str:
-        return self._user_future.id
-
-    @property
     def user_future(self) -> Future:
         return self._user_future
 

@@ -2,7 +2,7 @@ from pydantic import BaseModel
 
 
 class ReduceOperationMetadata(BaseModel):
-    # Request scoped unique identifier of the reduce operation.
+    # ID of the reduce operation, uniquness guarantees depend on how the field is set.
     id: str
     # Not None if output serialization format is overridden
     # for reduce function calls.

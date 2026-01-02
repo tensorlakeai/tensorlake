@@ -33,6 +33,10 @@ class Awaitable:
 
     @property
     def id(self) -> str:
+        """ID of this Awaitable object.
+
+        Uniqueness guarantees are up to the caller that creates the Awaitable.
+        """
         return self._id
 
     def run(self) -> "Future":
@@ -85,6 +89,9 @@ class Awaitable:
         """
         raise InternalError("Tensorlake Awaitable subclasses must implement __repr__()")
 
+    def __eq__(self, other: object) -> bool:
+        raise InternalError("Tensorlake Awaitable subclasses must implement __eq__()")
+
     def __str__(self) -> str:
         """Returns a pretty printed human readable string representation of the Awaitable.
 
@@ -116,6 +123,9 @@ class Future:
 
     A Future tracks an asynchronous computation in Tensorlake Application
     and provides access to its result.
+
+    Each Awaitable object can only have one Future associated with it.
+    This is validated by the runtime when creating Futures for Awaitables.
     """
 
     # Warning: a Future object cannot be copied by value because it'll result in
@@ -131,12 +141,8 @@ class Future:
         self._exception: TensorlakeError | None = None
 
     @property
-    def id(self) -> str:
-        return self._awaitable.id
-
-    @property
     def awaitable(self) -> Awaitable:
-        """The Awaitable that created this Future."""
+        """The Awaitable of this Future."""
         return self._awaitable
 
     def set_result(self, result: Any):
@@ -257,6 +263,13 @@ class _AwaitableListMetadata:
     # Not None for MAP_OPERATION kind.
     function_name: str | None
 
+    @property
+    def durability_key(self) -> str:
+        if self.kind == _AwaitableListKind.MAP_OPERATION:
+            return f"MAP_OPERATION:{self.function_name}"
+        else:
+            return f"UNKNOWN_KIND:{self.kind}"
+
 
 class AwaitableList(Awaitable):
     """Combines a list of awaitables and user objects into a single awaitable.
@@ -303,6 +316,15 @@ class AwaitableList(Awaitable):
             + ",\n    ".join(repr(awaitable) for awaitable in self.items)
             + "\n  ]\n"
             f")>"
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, AwaitableList):
+            return False
+        return (
+            self.id == other.id
+            and self.items == other.items
+            and self.metadata == other.metadata
         )
 
 
@@ -391,6 +413,16 @@ class FunctionCallAwaitable(Awaitable):
             f")>"
         )
 
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, FunctionCallAwaitable):
+            return False
+        return (
+            self.id == other.id
+            and self.function_name == other.function_name
+            and self.args == other.args
+            and self.kwargs == other.kwargs
+        )
+
 
 class FunctionCallFuture(Future):
     """A Future that represents a call to a Tensorlake Function.
@@ -442,6 +474,15 @@ class ReduceOperationAwaitable(Awaitable):
             f"  function_name={self.function_name!r},\n"
             f"  inputs={self.inputs!r},\n"
             f")>"
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, ReduceOperationAwaitable):
+            return False
+        return (
+            self.id == other.id
+            and self.function_name == other.function_name
+            and self.inputs == other.inputs
         )
 
     def _validate_inputs(self) -> None:
