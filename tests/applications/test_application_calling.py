@@ -268,6 +268,37 @@ class TestApplicationCalling(unittest.TestCase):
         self.assertEqual(output["quantity"], 1)
         self.assertEqual(output["total_price"], 100.0)  # 50 * 1 * 2
 
+    def test_multi_params_non_dict_payload_error(self):
+        """Multi-param function with non-dict payload raises RequestFailed.
+
+        The detailed SDKUsageError message is logged during execution:
+        'Application function has multiple parameters but received a non-dict payload...'
+        """
+        from tensorlake.applications.interface import RequestFailed
+
+        # Sending a string instead of a dict to a multi-param function
+        request = run_application(multi_params, "not a dict", remote=False)
+        with self.assertRaises(RequestFailed):
+            request.output()
+
+    def test_multi_params_missing_required_param_error(self):
+        """Multi-param function with missing required param raises RequestFailed.
+
+        The detailed SDKUsageError message is logged during execution:
+        'Missing required parameter X in request payload...'
+        """
+        from tensorlake.applications.interface import RequestFailed
+
+        # Missing 'importance' parameter
+        payload = {
+            "item": {"name": "Test", "price": 10.0},
+            "user": {"username": "test", "full_name": "Test User"},
+            # Missing 'importance' which is required
+        }
+        request = run_application(multi_params, payload, remote=False)
+        with self.assertRaises(RequestFailed):
+            request.output()
+
 
 if __name__ == "__main__":
     unittest.main()

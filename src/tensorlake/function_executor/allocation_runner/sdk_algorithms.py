@@ -514,12 +514,6 @@ def _reconstruct_application_function_call_args(
         return [payload], {}
 
     # Multiple parameters case - map payload dict keys to args/kwargs
-    if not isinstance(payload, dict):
-        raise SDKUsageError(
-            f"Application function with multiple parameters expects a dict payload, "
-            f"got {type(payload).__name__}"
-        )
-
     return _coerce_payload_to_kwargs(function, payload)
 
 

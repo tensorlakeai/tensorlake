@@ -109,6 +109,15 @@ def _coerce_payload_to_kwargs(
     - args: positional-only parameters (before /)
     - kwargs: all other parameters
     """
+    # Validate payload is a dict
+    if not isinstance(payload, dict):
+        raise SDKUsageError(
+            f"Application function has multiple parameters but received a non-dict payload "
+            f"(got {type(payload).__name__}). "
+            f"For multi-parameter functions, your JSON payload must be an object with keys "
+            f'matching the parameter names. Example: {{"param1": value1, "param2": value2}}'
+        )
+
     signature: inspect.Signature = function_signature(application)
     params = list(signature.parameters.values())
 
