@@ -6,7 +6,7 @@ from tensorlake.applications import (
     InternalError,
 )
 from tensorlake.applications.function.application_call import (
-    deserialize_application_function_call_payload,
+    deserialize_application_function_call_kwargs,
 )
 from tensorlake.applications.function.function_call import (
     set_self_arg,
@@ -515,7 +515,7 @@ def deserialize_function_arguments(
             # Application payload argument. It's allready validated to be only one argument.
             args["application_payload"] = Value(
                 metadata=None,
-                object=deserialize_application_function_call_payload(
+                object=deserialize_application_function_call_kwargs(
                     application=function,
                     payload=serialized_arg.data,
                     payload_content_type=serialized_arg.content_type,

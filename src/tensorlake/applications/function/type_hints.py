@@ -32,6 +32,12 @@ def function_kwarg_type_hint(function: Function, key: str) -> List[Any]:
     return _resolve_type_hint(parameter.annotation)
 
 
+def function_has_kwarg(function: Function, key: str) -> bool:
+    """Returns True if the function has a keyword argument with the specified key."""
+    signature: inspect.Signature = function_signature(function)
+    return key in signature.parameters
+
+
 def function_return_type_hint(function: Function) -> List[Any]:
     signature: inspect.Signature = function_signature(function)
     if signature.return_annotation is inspect.Signature.empty:
