@@ -128,7 +128,7 @@ class Benchmark:
             )
 
         start_time = time.monotonic()
-        got_blob_data: bytes = self.blob_store.get(
+        got_blob_data: bytearray = self.blob_store.get(
             blob=blob,
             offset=0,
             size=data_size,

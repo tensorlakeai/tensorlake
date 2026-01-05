@@ -39,9 +39,7 @@ class TestUseProgressFromFunction(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(
-            func_update_progress, (10, 100), remote=is_remote
-        )
+        request: Request = run_application(func_update_progress, is_remote, (10, 100))
         self.assertEqual(request.output(), "success")
 
 
@@ -64,9 +62,7 @@ class TestUseProgressFromChildThread(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(
-            mt_update_progress, (10, 100), remote=is_remote
-        )
+        request: Request = run_application(mt_update_progress, is_remote, (10, 100))
         self.assertEqual(request.output(), "success")
 
 
@@ -89,9 +85,7 @@ class TestUseProgressFromChildProcess(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(
-            mp_update_progress, (10, 100), remote=is_remote
-        )
+        request: Request = run_application(mp_update_progress, is_remote, (10, 100))
         self.assertEqual("success", request.output())
         self.assertEqual(request.output(), "success")
 

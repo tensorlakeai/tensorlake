@@ -10,6 +10,7 @@ from google.protobuf.timestamp_pb2 import Timestamp
 
 from tensorlake.applications import (
     RETURN_WHEN,
+    DeserializationError,
     Function,
     Future,
     InternalError,
@@ -86,8 +87,9 @@ from .request_context.progress import AllocationProgress
 from .request_context.request_state import AllocationRequestState
 from .result_helper import ResultHelper
 from .sdk_algorithms import (
-    deserialize_function_arguments,
-    reconstruct_function_call_args,
+    deserialize_application_function_call_args,
+    deserialize_sdk_function_call_args,
+    reconstruct_sdk_function_call_args,
     serialize_values_in_awaitable_tree,
     to_durable_awaitable_tree,
     to_execution_plan_updates,
@@ -807,33 +809,57 @@ class AllocationRunner:
             function=self._function,
             logger=self._logger,
         )
-        output_serializer_override: str | None = None
-        if function_call_metadata is not None:
-            output_serializer_override = (
-                function_call_metadata.output_serializer_name_override
-            )
-        output_serializer: UserDataSerializer = function_output_serializer(
-            self._function,
-            output_serializer_override=output_serializer_override,
-        )
 
-        # This is user code.
-        try:
-            arg_values: Dict[str, Value] = deserialize_function_arguments(
-                self._function, serialized_args
+        if function_call_metadata is None:
+            # Application function call created by Server.
+            # This is our code.
+            # Application function call doesn't have a parent call that can override output serializer.
+            output_serializer: UserDataSerializer = function_output_serializer(
+                function=self._function,
+                output_serializer_override=None,
             )
-        except BaseException as e:
+            if len(serialized_args) == 0:
+                # We expect exactly one argument but support more for any future FE protocol migrations.
+                raise InternalError(
+                    f"Application function call must have at least one argument, got {len(serialized_args)}."
+                )
+            # This is user code.
+            try:
+                args, kwargs = deserialize_application_function_call_args(
+                    function=self._function,
+                    payload=serialized_args[0],
+                    function_instance_arg=self._function_instance_arg,
+                )
+            except DeserializationError as e:
+                # Failed due to user error. All other exceptions are out internal FE errors.
+                return self._result_helper.from_user_exception(
+                    self._allocation_event_details, e
+                )
+        else:
+            # Regular function call created by SDK. Uses function call metadata.
+            #
+            # This is our code.
+            output_serializer: UserDataSerializer = function_output_serializer(
+                function=self._function,
+                output_serializer_override=function_call_metadata.output_serializer_name_override,
+            )
+            # This is user code.
+            try:
+                arg_values: Dict[str, Value] = deserialize_sdk_function_call_args(
+                    serialized_args
+                )
+            except BaseException as e:
+                # This is internal FE code.
+                return self._result_helper.from_user_exception(
+                    self._allocation_event_details, e
+                )
+
             # This is internal FE code.
-            return self._result_helper.from_user_exception(
-                self._allocation_event_details, e
+            args, kwargs = reconstruct_sdk_function_call_args(
+                function_call_metadata=function_call_metadata,
+                arg_values=arg_values,
+                function_instance_arg=self._function_instance_arg,
             )
-
-        # This is internal FE code.
-        args, kwargs = reconstruct_function_call_args(
-            function_call_metadata=function_call_metadata,
-            arg_values=arg_values,
-            function_instance_arg=self._function_instance_arg,
-        )
 
         # This is user code.
         try:

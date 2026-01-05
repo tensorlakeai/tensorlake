@@ -71,7 +71,7 @@ def _download_serialized_value(
         raise InternalError("SerializedObjectManifest is missing metadata_size.")
 
     # Download each part separately to avoid splitting the downloaded data and consuming extra memory.
-    serialized_metadata: bytes | None = None
+    serialized_metadata: bytearray | None = None
     if so.manifest.metadata_size > 0:
         serialized_metadata = blob_store.get(
             blob=blob_proto_to_blob(blob),
@@ -80,7 +80,7 @@ def _download_serialized_value(
             logger=logger,
         )
 
-    serialized_data: bytes = blob_store.get(
+    serialized_data: bytearray = blob_store.get(
         blob=blob_proto_to_blob(blob),
         offset=so.offset + so.manifest.metadata_size,
         size=so.manifest.size - so.manifest.metadata_size,
@@ -143,7 +143,7 @@ def _deserialize_value_metadata(
     return value_metadata
 
 
-def _sha256_hexdigest(metadata: bytes, data: bytes) -> str:
+def _sha256_hexdigest(metadata: bytes | bytearray, data: bytes | bytearray) -> str:
     hasher = hashlib.sha256()
     hasher.update(metadata)
     hasher.update(data)

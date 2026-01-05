@@ -7,7 +7,7 @@ from tensorlake.applications.metadata import ValueMetadata
 @dataclass
 class SerializedValue:
     metadata: ValueMetadata | None
-    data: bytes
+    data: bytearray | bytes | memoryview
     # Not None if the data is using raw serialization format.
     content_type: str | None = None
 

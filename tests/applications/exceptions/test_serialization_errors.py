@@ -62,8 +62,8 @@ class TestSerializationErrors(unittest.TestCase):
 
         request: Request = run_application(
             application_call_function_with_not_serializable_object,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 
@@ -74,8 +74,8 @@ class TestSerializationErrors(unittest.TestCase):
 
         request: Request = run_application(
             application_call_function_with_not_serializable_object,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 
@@ -91,8 +91,8 @@ class TestSerializationErrors(unittest.TestCase):
 
         request: Request = run_application(
             application_call_function_that_returns_not_deserializable_object,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 

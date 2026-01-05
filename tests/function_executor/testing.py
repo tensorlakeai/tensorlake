@@ -3,6 +3,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List
 
 import grpc
@@ -351,3 +352,37 @@ def write_tmp_blob_bytes(blob: BLOB, data: bytes) -> None:
     blob_file_path: str = blob.chunks[0].uri.replace("file://", "", 1)
     with open(blob_file_path, "wb") as f:
         return f.write(data)
+
+
+@dataclass
+class HTTPBodyPart:
+    content_type: str
+    field_name: str
+    body: bytes
+
+
+def create_multipart_invoke_http_request(
+    parts: list[HTTPBodyPart], boundary: str
+) -> bytes:
+    """Creates a multipart HTTP request with the given parts and boundary."""
+    lines: list[bytes] = [
+        b"POST /invoke HTTP/1.1",
+        b"Host: localhost",
+        f'Content-Type: multipart/form-data; boundary="{boundary}"'.encode("utf-8"),
+        b"",  # Empty line between headers and body
+    ]
+    boundary_bytes: bytes = boundary.encode("utf-8")
+
+    for part in parts:
+        lines.append(b"--" + boundary_bytes)
+        lines.append(
+            f'Content-Disposition: form-data; name="{part.field_name}"'.encode("utf-8")
+        )
+        lines.append(f"Content-Type: {part.content_type}".encode("utf-8"))
+        lines.append(b"")  # Empty line between headers and body
+        lines.append(part.body)
+
+    lines.append(b"--" + boundary_bytes + b"--")
+    lines.append(b"")
+
+    return b"\r\n".join(lines)

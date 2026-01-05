@@ -18,7 +18,7 @@ class TestRunRegularFunctionAsApplication(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_raises_sdk_usage_error(self, _: str, is_remote: bool):
         with self.assertRaises(SDKUsageError) as assert_context:
-            run_application(regular_function, 1, remote=is_remote)
+            run_application(regular_function, is_remote, 1)
         self.assertEqual(
             str(assert_context.exception),
             "Tensorlake Function 'regular_function' is not an application function and cannot be run as an application. "

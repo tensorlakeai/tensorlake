@@ -159,8 +159,8 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
         request: Request = run_application(
             function_call_list_as_function_argument,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 
@@ -171,8 +171,8 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
         request: Request = run_application(
             return_list_of_function_calls,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         with self.assertRaises(RequestFailed) as context:
             request.output()
@@ -189,8 +189,8 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
         request: Request = run_application(
             future_list_as_function_argument,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 
@@ -201,8 +201,8 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
         request: Request = run_application(
             return_list_of_futures,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         with self.assertRaises(RequestFailed) as context:
             request.output()
@@ -219,8 +219,8 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
         request: Request = run_application(
             function_as_function_argument,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 
@@ -231,8 +231,8 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
         request: Request = run_application(
             return_function,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         with self.assertRaises(RequestFailed) as context:
             request.output()
@@ -249,8 +249,8 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
         request: Request = run_application(
             future_wait_wrong_return_when,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 
@@ -261,8 +261,8 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
         request: Request = run_application(
             return_map_awaitable,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         with self.assertRaises(RequestFailed) as context:
             request.output()
@@ -279,8 +279,8 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
         request: Request = run_application(
             pass_map_awaitable_as_reduced_item,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 
@@ -291,8 +291,8 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
         request: Request = run_application(
             return_future,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         with self.assertRaises(RequestFailed) as context:
             request.output()
@@ -309,8 +309,8 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
         request: Request = run_application(
             return_running_awaitable,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         with self.assertRaises(RequestFailed) as context:
             request.output()

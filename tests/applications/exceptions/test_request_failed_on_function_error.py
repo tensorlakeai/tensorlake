@@ -28,8 +28,8 @@ class TestRequestFailedRaisedOnFunctionError(unittest.TestCase):
 
         request: Request = run_application(
             application_function,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         try:
             request.output()
@@ -48,8 +48,8 @@ class TestRequestFailedRaisedOnFunctionError(unittest.TestCase):
         try:
             request: Request = run_application(
                 application_function,
+                False,
                 "magic_string",
-                remote=False,
             )
             self.assertRaises(RequestFailed, request.output)
         finally:

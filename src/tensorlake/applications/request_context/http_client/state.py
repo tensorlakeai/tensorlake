@@ -91,7 +91,7 @@ class RequestStateHTTPClient(RequestState):
                 return default
 
             size: int = sum(chunk.size for chunk in blob.chunks)
-            serialized_value: bytes = self._blob_store.get(
+            serialized_value: bytearray = self._blob_store.get(
                 blob=blob, offset=0, size=size, logger=self._logger
             )
         except Exception as e:

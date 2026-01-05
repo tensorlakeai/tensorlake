@@ -33,8 +33,8 @@ class TestRequestError(unittest.TestCase):
 
         request: Request = run_application(
             start_func,
+            is_remote,
             "fail_request",
-            remote=is_remote,
         )
 
         try:

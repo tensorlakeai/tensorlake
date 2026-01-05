@@ -53,7 +53,7 @@ class TestRecursiveMaps(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(
-            api_function_recursive_blocking_map, [1, 2, 3, 4, 5], remote=is_remote
+            api_function_recursive_blocking_map, is_remote, [1, 2, 3, 4, 5]
         )
         self.assertEqual(request.output(), [1, 2, 3, 4, 5])
 
@@ -62,7 +62,7 @@ class TestRecursiveMaps(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(
-            api_function_recursive_non_blocking_map, [1, 2, 3, 4, 5], remote=is_remote
+            api_function_recursive_non_blocking_map, is_remote, [1, 2, 3, 4, 5]
         )
         self.assertEqual(request.output(), [1, 2, 3, 4, 5])
 
@@ -71,7 +71,7 @@ class TestRecursiveMaps(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(
-            api_function_recursive_tail_call_map, [1, 2, 3, 4, 5], remote=is_remote
+            api_function_recursive_tail_call_map, is_remote, [1, 2, 3, 4, 5]
         )
         # Map tail calls are not working by design because Server can't convert individual
         # resolved items into a python list.

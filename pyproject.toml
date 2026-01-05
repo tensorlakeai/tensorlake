@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tensorlake"
-version = "0.2.101"
+version = "0.3.1"
 description = "Tensorlake SDK for Document Ingestion API and Serverless Applications"
 readme = "README.md"
 authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
