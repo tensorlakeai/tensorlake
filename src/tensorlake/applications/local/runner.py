@@ -124,7 +124,7 @@ class LocalRunner:
         )
 
         # Future runs that currently exist.
-        # Future ID -> LocalFutureRun
+        # Future Awaitable ID -> LocalFutureRun
         self._future_runs: Dict[str, LocalFutureRun] = {}
         # Exception that caused the request to fail.
         # None when request finished successfully.
@@ -361,9 +361,11 @@ class LocalRunner:
 
         std_futures: List[StdFuture] = []
         for future in futures:
-            if future.id not in self._future_runs:
-                raise InternalError(f"Future with ID {future.id} is not registered")
-            std_futures.append(self._future_runs[future.id].std_future)
+            if future.awaitable.id not in self._future_runs:
+                raise InternalError(
+                    f"Future with Awaitable ID {future.awaitable.id} is not registered"
+                )
+            std_futures.append(self._future_runs[future.awaitable.id].std_future)
 
         # Std futures are always running as long as their user futures are considered running.
         # Their outcomes (if failed or succeeded) are also synchronized.
@@ -373,7 +375,7 @@ class LocalRunner:
         done_user_futures: List[Future] = []
         not_done_user_futures: List[Future] = []
         for future in futures:
-            local_future_run: LocalFutureRun = self._future_runs[future.id]
+            local_future_run: LocalFutureRun = self._future_runs[future.awaitable.id]
             if local_future_run.std_future in done_std_futures:
                 done_user_futures.append(future)
             else:
@@ -517,14 +519,14 @@ class LocalRunner:
             self._create_future_run_for_user_object(
                 object=result.output,
                 start_delay=None,
-                output_consumer_future_id=user_future.id,
+                output_consumer_future_id=user_future.awaitable.id,
                 output_serializer_name_override=output_blob_serializer.name,
             )
         else:
             ser_value: SerializedValue | None = None
             if result.error is None:
                 ser_value = _to_serialized_value(
-                    value_id=user_future.id,
+                    value_id=user_future.awaitable.id,
                     value=result.output,
                     value_serializer=output_blob_serializer,
                 )
@@ -654,7 +656,9 @@ class LocalRunner:
                 data=ser_value.data,
                 metadata=ser_value.metadata.model_copy(),
             )
-            consumer_future_output.metadata.id = consumer_future.user_future.id
+            consumer_future_output.metadata.id = (
+                consumer_future.user_future.awaitable.id
+            )
             self._value_store.put(consumer_future_output)
         self._handle_future_run_final_output(
             future_run=consumer_future_run,
@@ -734,7 +738,7 @@ class LocalRunner:
 
         Doesn't do anything if it's a concrete value. Raises TensorlakeError on error.
         """
-        validate_user_object(object, function_call_ids=self._future_runs.keys())
+        validate_user_object(object, running_awaitable_ids=self._future_runs.keys())
         if isinstance(object, Awaitable):
             return self._create_future_run_for_awaitable(
                 awaitable=object,
