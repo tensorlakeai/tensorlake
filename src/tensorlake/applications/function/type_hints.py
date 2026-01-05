@@ -6,16 +6,16 @@ from typing import Any, List, Union, get_args, get_origin
 from ..interface import Function
 
 
-def function_arg_type_hint(function: Function, arg_ix: int) -> List[Any]:
+def function_arg_type_hint(function: Function, arg_index: int) -> List[Any]:
     """Returns the type hint for positional function call argument at the specified index, or None if not found.
 
     arg_ix can be negative to indicate position from the end of the argument list.
     """
     signature: inspect.Signature = function_signature(function)
     parameters: list[inspect.Parameter] = list(signature.parameters.values())
-    if arg_ix >= len(parameters) or arg_ix < -len(parameters):
+    if arg_index >= len(parameters) or arg_index < -len(parameters):
         return []
-    parameter: inspect.Parameter = parameters[arg_ix]
+    parameter: inspect.Parameter = parameters[arg_index]
     if parameter.annotation is inspect.Parameter.empty:
         return []
     return _resolve_type_hint(parameter.annotation)
@@ -30,6 +30,12 @@ def function_kwarg_type_hint(function: Function, key: str) -> List[Any]:
     if parameter.annotation is inspect.Parameter.empty:
         return []
     return _resolve_type_hint(parameter.annotation)
+
+
+def function_has_kwarg(function: Function, key: str) -> bool:
+    """Returns True if the function has a keyword argument with the specified key."""
+    signature: inspect.Signature = function_signature(function)
+    return key in signature.parameters
 
 
 def function_return_type_hint(function: Function) -> List[Any]:

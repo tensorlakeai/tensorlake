@@ -65,7 +65,7 @@ class TestRegularFunctionCallSignatures(unittest.TestCase):
             deploy_applications(__file__)
 
         request: Request = run_application(
-            test_function_with_no_args_api, None, remote=is_remote
+            test_function_with_no_args_api, is_remote, None
         )
         self.assertEqual(request.output(), "success")
 
@@ -76,8 +76,8 @@ class TestRegularFunctionCallSignatures(unittest.TestCase):
 
         request: Request = run_application(
             test_only_positional_args_api,
+            is_remote,
             {"a": 42, "b": "hello", "c": 3.14, "d": True},
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "a=42,b=hello,c=3.14,d=True")
 
@@ -88,8 +88,8 @@ class TestRegularFunctionCallSignatures(unittest.TestCase):
 
         request: Request = run_application(
             test_only_kwargs_api,
+            is_remote,
             {"a": 42, "b": "hello", "c": 3.14, "d": True},
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "a=42,b=hello,c=3.14,d=True")
 
@@ -100,8 +100,8 @@ class TestRegularFunctionCallSignatures(unittest.TestCase):
 
         request1: Request = run_application(
             test_mixed_args_api,
+            is_remote,
             {"a": 1, "b": "x", "c": 2.71, "d": False},
-            remote=is_remote,
         )
         self.assertEqual(request1.output(), "a=1,b=x,c=2.71,d=False")
 

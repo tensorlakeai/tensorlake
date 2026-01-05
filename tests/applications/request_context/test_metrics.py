@@ -42,13 +42,13 @@ class TestUseMetricsFromFunction(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(func_emit_metrics, 1, remote=is_remote)
+        request: Request = run_application(func_emit_metrics, is_remote, 1)
         self.assertEqual(request.output(), "success")
 
     def test_emit_local_metrics_output(self):
         stdout: io.StringIO = io.StringIO()
         with contextlib.redirect_stdout(stdout):
-            request: Request = run_application(func_emit_metrics, 1, remote=False)
+            request: Request = run_application(func_emit_metrics, False, 1)
             self.assertEqual("success", request.output())
 
         output: str = stdout.getvalue().strip()
@@ -105,7 +105,7 @@ class TestUseMetricsFromChildThread(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(mt_emit_metrics, 1, remote=is_remote)
+        request: Request = run_application(mt_emit_metrics, is_remote, 1)
         self.assertEqual(request.output(), "success")
 
         # No verification of metrics values yet because SDK doesn't yet provide an interface
@@ -129,7 +129,7 @@ class TestUseMetricsFromChildProcess(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(mp_emit_metrics, 1, remote=is_remote)
+        request: Request = run_application(mp_emit_metrics, is_remote, 1)
         self.assertEqual(request.output(), "success")
 
         # No verification of metrics values yet because SDK doesn't yet provide an interface

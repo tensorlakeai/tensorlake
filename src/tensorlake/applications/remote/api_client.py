@@ -56,6 +56,12 @@ class RequestMetadata(BaseModel):
     request_error: RequestError | None = None
 
 
+class RequestInput(BaseModel):
+    data: bytes
+    content_type: str
+    name: str
+
+
 class RequestOutput(BaseModel):
     serialized_value: bytes
     content_type: str
@@ -263,28 +269,67 @@ class APIClient:
     def run_request(
         self,
         application_name: str,
-        input: bytes,
-        input_content_type: str,
+        inputs: list[RequestInput],
     ) -> str:
-        """Runs a request for a specific application with given input.
+        """Runs a request for a specific application with given inputs.
 
         Returns the request ID.
         Raises SDKUsageError if the client configuration is not valid for the operation.
         Raises TensorlakeError on other errors.
         """
-        response: httpx.Response = self._run_request(
-            self._client.build_request(
-                "POST",
-                url=self._endpoint_url(
-                    f"v1/namespaces/{self._namespace}/applications/{application_name}"
-                ),
-                headers={
-                    "Content-Type": input_content_type,
-                    "Accept": "application/json",
-                },
-                content=input,
+        # NB. Keep all the modes used here supported because when users run requests using regular
+        # HTTP clients they only use multipart requests for multiple inputs. For 1 input they use
+        # regular HTTP request with content type set to the input content type. And for 0 inputs
+        # they use regular HTTP request with empty body. All these modes must be covered in tests.
+        if len(inputs) == 0:
+            # Empty body mode for no application function parameters.
+            response: httpx.Response = self._run_request(
+                self._client.build_request(
+                    "POST",
+                    url=self._endpoint_url(
+                        f"v1/namespaces/{self._namespace}/applications/{application_name}"
+                    ),
+                    headers={
+                        "Accept": "application/json",
+                    },
+                    content=b"",
+                )
             )
-        )
+        elif len(inputs) == 1:
+            # Single part mode for single application function parameter.
+            response: httpx.Response = self._run_request(
+                self._client.build_request(
+                    "POST",
+                    url=self._endpoint_url(
+                        f"v1/namespaces/{self._namespace}/applications/{application_name}"
+                    ),
+                    headers={
+                        "Accept": "application/json",
+                        "Content-Type": inputs[0].content_type,
+                    },
+                    content=inputs[0].data,
+                )
+            )
+        else:
+            # Multipart mode for multiple application function parameters.
+            # field name -> (filename, filedata, content_type)
+            files: dict[str, tuple[str, bytes, str]] = {}
+            for part in inputs:
+                files[part.name] = (part.name, part.data, part.content_type)
+
+            response: httpx.Response = self._run_request(
+                self._client.build_request(
+                    "POST",
+                    url=self._endpoint_url(
+                        f"v1/namespaces/{self._namespace}/applications/{application_name}"
+                    ),
+                    headers={
+                        "Accept": "application/json",
+                        # Content type is set by httpx when using multipart form data.
+                    },
+                    files=files,
+                )
+            )
 
         try:
             return response.json()["request_id"]

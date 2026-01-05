@@ -213,12 +213,18 @@ message AllocationState {
 
 // FunctionInputs contains the input data for allocation execution
 message FunctionInputs {
+    // Values for function call arguments of function calls created by SDK.
+    // Original sanitized HTTP request for application function calls.
+    // - HTTP request body is free from any compression and other transformations.
+    // - HTTP request headers are represented in plain text following HTTP/1.1 standard.
+    // - Only safe or user configured HTTP headers are preserved.
     repeated SerializedObjectInsideBLOB args = 1;
     // Each arg has a matching BLOB.
     repeated BLOB arg_blobs = 2;
     // BLOB where to upload request error message if allocation fails with request error.
     optional BLOB request_error_blob = 3;
-    // Always set. An empty bytes array if no metadata, e.g. for API function call.
+    // SDK metadata for function calls created by SDK.
+    // Empty byte array for application function calls.
     optional bytes function_call_metadata = 4;
 }
 
@@ -284,7 +290,6 @@ message Allocation {
     optional string request_id = 1;
     optional string function_call_id = 2;
     optional string allocation_id = 3;
-    // Original allocation inputs.
     optional FunctionInputs inputs = 4;
     // Set when allocation finishes.
     optional AllocationResult result = 5;

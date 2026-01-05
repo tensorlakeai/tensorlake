@@ -107,8 +107,8 @@ class TestCallSDKFromChildThread(unittest.TestCase):
 
         request: Request = run_application(
             application_mt_get_context,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 
@@ -119,8 +119,8 @@ class TestCallSDKFromChildThread(unittest.TestCase):
 
         request: Request = run_application(
             application_mt_run_future,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 
@@ -131,8 +131,8 @@ class TestCallSDKFromChildThread(unittest.TestCase):
 
         request: Request = run_application(
             application_mt_wait_future,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 
@@ -184,8 +184,8 @@ class TestCallSDKFromChildProcess(unittest.TestCase):
 
         request: Request = run_application(
             application_mp_get_context,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 
@@ -196,8 +196,8 @@ class TestCallSDKFromChildProcess(unittest.TestCase):
 
         request: Request = run_application(
             application_mp_run_future,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 

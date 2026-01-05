@@ -6,7 +6,8 @@ from tensorlake.applications import (
     InternalError,
 )
 from tensorlake.applications.function.application_call import (
-    deserialize_application_function_call_payload,
+    SerializedApplicationArgument,
+    deserialize_application_function_call_arguments,
 )
 from tensorlake.applications.function.function_call import (
     set_self_arg,
@@ -506,33 +507,49 @@ def _embed_collection_into_function_pb_args(
             raise InternalError(f"Unexpected type of AwaitableList item: {type(item)}")
 
 
-def deserialize_function_arguments(
-    function: Function, serialized_args: List[SerializedValue]
-) -> Dict[str, Value]:
-    args: Dict[str, Value] = {}
-    for ix, serialized_arg in enumerate(serialized_args):
-        if serialized_arg.metadata is None:
-            # Application payload argument. It's allready validated to be only one argument.
-            args["application_payload"] = Value(
-                metadata=None,
-                object=deserialize_application_function_call_payload(
-                    application=function,
-                    payload=serialized_arg.data,
-                    payload_content_type=serialized_arg.content_type,
-                ),
-                input_ix=ix,
-            )
-        else:
-            args[serialized_arg.metadata.id] = Value(
-                metadata=serialized_arg.metadata,
-                object=deserialize_value(
-                    serialized_value=serialized_arg.data,
-                    metadata=serialized_arg.metadata,
-                ),
-                input_ix=ix,
-            )
+def deserialize_application_function_call_args(
+    function: Function,
+    payload: SerializedValue,
+    function_instance_arg: Any | None,
+) -> tuple[List[Any], Dict[str, Any]]:
+    """Returns a mapping from application function positional argument index or keyword to its deserialized Value.
 
-    return args
+    Raises DeserializationError if deserialization of any argument fails.
+    Raises InternalError on other errors.
+    """
+    input_serializer: UserDataSerializer = function_input_serializer(function)
+    serialized_args: list[SerializedApplicationArgument] = []
+    serialized_kwargs: dict[str, SerializedApplicationArgument] = {}
+
+    if payload.content_type == "message/http":
+        # Current mode of application function call.
+        raise InternalError("HTTP payload deserialization is not yet implemented.")
+    else:
+        # Legacy mode of application function call.
+        # Was used in the past when application functions supported only a single argument.
+        # TODO: remove this mode once latest Server is deployed.
+        content_type: str = (
+            input_serializer.content_type
+            if payload.content_type is None
+            else payload.content_type
+        )
+        serialized_args.append(
+            SerializedApplicationArgument(
+                data=payload.data,
+                content_type=content_type,
+            )
+        )
+
+    args, kwargs = deserialize_application_function_call_arguments(
+        application=function,
+        serialized_args=serialized_args,
+        serialized_kwargs=serialized_kwargs,
+    )
+
+    if function_instance_arg is not None:
+        set_self_arg(args, function_instance_arg)
+
+    return args, kwargs
 
 
 def validate_and_deserialize_function_call_metadata(
@@ -591,23 +608,40 @@ def validate_and_deserialize_function_call_metadata(
         return None
 
 
-def reconstruct_function_call_args(
-    function_call_metadata: FunctionCallMetadata | ReduceOperationMetadata | None,
+def deserialize_sdk_function_call_args(
+    serialized_args: List[SerializedValue],
+) -> Dict[str, Value]:
+    """Returns a mapping from serialized argument IDs to their deserialized Values.
+
+    Raises TensorlakeError on error.
+    """
+    args: Dict[str, Value] = {}
+    for ix, serialized_arg in enumerate(serialized_args):
+        if serialized_arg.metadata is None:
+            raise InternalError("SDK function call arguments must have metadata.")
+
+        args[serialized_arg.metadata.id] = Value(
+            metadata=serialized_arg.metadata,
+            object=deserialize_value(
+                serialized_value=serialized_arg.data,
+                metadata=serialized_arg.metadata,
+            ),
+            input_ix=ix,
+        )
+
+    return args
+
+
+def reconstruct_sdk_function_call_args(
+    function_call_metadata: FunctionCallMetadata | ReduceOperationMetadata,
     arg_values: Dict[str, Value],
     function_instance_arg: Any | None,
 ) -> tuple[List[Any], Dict[str, Any]]:
     """Returns function call args and kwargs reconstructed from arg_values."""
-    if function_call_metadata is None:
-        # Application function call created by Server.
-        payload_arg: Value = arg_values["application_payload"]
-        args: List[Any] = [payload_arg.object]
-        kwargs: Dict[str, Any] = {}
-    else:
-        # SDK-created function call.
-        args, kwargs = _reconstruct_sdk_function_call_args(
-            function_call_metadata=function_call_metadata,
-            arg_values=arg_values,
-        )
+    args, kwargs = _reconstruct_sdk_function_call_args(
+        function_call_metadata=function_call_metadata,
+        arg_values=arg_values,
+    )
 
     if function_instance_arg is not None:
         set_self_arg(args, function_instance_arg)

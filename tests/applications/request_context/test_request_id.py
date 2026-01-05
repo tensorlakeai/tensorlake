@@ -39,7 +39,7 @@ class TestUseRequestIdFromFunction(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(func_get_request_id, 11, remote=is_remote)
+        request: Request = run_application(func_get_request_id, is_remote, 11)
         self.assertEqual(request.id, request.output())
 
 
@@ -62,7 +62,7 @@ class TestUseRequestIdFromChildThread(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(mt_get_request_id, 11, remote=is_remote)
+        request: Request = run_application(mt_get_request_id, is_remote, 11)
         self.assertEqual(request.id, request.output())
 
 
@@ -83,7 +83,7 @@ class TestUseRequestIdFromChildProcess(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(mp_get_request_id, 11, remote=is_remote)
+        request: Request = run_application(mp_get_request_id, is_remote, 11)
         self.assertEqual(request.id, request.output())
 
 

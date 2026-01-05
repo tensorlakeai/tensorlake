@@ -137,7 +137,7 @@ class TestFuturesWait(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(
-            api_function_return_when_all_completed, "foo", remote=is_remote
+            api_function_return_when_all_completed, is_remote, "foo"
         )
         self.assertEqual(request.output(), "success")
 
@@ -146,7 +146,7 @@ class TestFuturesWait(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(
-            api_function_return_when_first_completed, "foo", remote=is_remote
+            api_function_return_when_first_completed, is_remote, "foo"
         )
         self.assertEqual(request.output(), "success")
 
@@ -155,9 +155,7 @@ class TestFuturesWait(unittest.TestCase):
     def test_wait_timeout(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
-        request: Request = run_application(
-            api_function_wait_timeout, "foo", remote=is_remote
-        )
+        request: Request = run_application(api_function_wait_timeout, is_remote, "foo")
         self.assertEqual(request.output(), "success")
 
     # FIXME: Enable this test for local mode. It's currently disabled because in
@@ -171,7 +169,7 @@ class TestFuturesWait(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(
-            api_function_return_when_first_failure, "foo", remote=is_remote
+            api_function_return_when_first_failure, is_remote, "foo"
         )
         self.assertEqual(request.output(), "success")
 
