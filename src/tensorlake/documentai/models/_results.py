@@ -96,7 +96,7 @@ class PageFragment(BaseModel):
     """
 
     fragment_type: PageFragmentType
-    content: Union[Text, Header, Table, Figure, Signature]
+    content: Union[Text, Header, Table, Figure, Chart, Signature]
     reading_order: Optional[int] = None
     bbox: Optional[dict[str, float]] = None
 
