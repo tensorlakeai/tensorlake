@@ -215,3 +215,4 @@ class PageFragmentType(str, Enum):
     SIGNATURE = "signature"
     STRIKETHROUGH = "strikethrough"
     BARCODE = "barcode"
+    CHART = "chart"
