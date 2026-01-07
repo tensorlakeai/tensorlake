@@ -45,6 +45,10 @@ class EnrichmentOptions(BaseModel):
         None,
         description="Use full page image in addition to the cropped table and figure images. This provides Language Models context about the table and figure they are summarizing in addition to the cropped images, and could improve the summarization quality. The default is `false`.",
     )
+    chart_extraction: Optional[bool] = Field(
+        None,
+        description="Boolean flag to enable chart extraction. The default is `false`.",
+    )
 
 
 class PageClassConfig(BaseModel):
