@@ -37,6 +37,7 @@ from ._pagination import PaginatedResult, PaginationDirection
 from ._results import (
     Chunk,
     Figure,
+    Chart,
     Page,
     PageClass,
     PageFragment,
@@ -74,6 +75,7 @@ __all__ = [
     "ParseResult",
     "Chunk",
     "Figure",
+    "Chart",
     "Page",
     "PageFragment",
     "PageFragmentType",

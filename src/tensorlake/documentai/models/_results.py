@@ -81,6 +81,14 @@ class Signature(BaseModel):
 
     content: str
 
+class Chart(BaseModel):
+    """
+    Chart content of a page fragment.
+    """
+
+    content: str
+    data: Optional[str] = None
+
 
 class PageFragment(BaseModel):
     """
