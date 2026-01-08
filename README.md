@@ -313,6 +313,58 @@ print(response)
 
 5. The application will execute on Tensorlake Cloud, with each function running in its own isolated sandbox.
 
+#### Calling applications via HTTP
+
+You can also invoke deployed applications directly via HTTP without using the Python SDK. This is useful for integrating with other languages or services.
+
+**Invoke an application:**
+```bash
+curl https://api.tensorlake.ai/applications/city_guide_app \
+  -H "Authorization: Bearer $TENSORLAKE_API_KEY" \
+  --json '"San Francisco"'
+```
+
+This returns a request ID:
+```json
+{"request_id": "beae8736ece31ef9"}
+```
+
+**Check request status:**
+```bash
+curl https://api.tensorlake.ai/applications/city_guide_app/requests/{request_id} \
+  -H "Authorization: Bearer $TENSORLAKE_API_KEY"
+```
+
+The response includes an `outcome` field: `"success"`, `"failure"`, or `null` (still processing).
+
+**Get the result:**
+```bash
+curl https://api.tensorlake.ai/applications/city_guide_app/requests/{request_id}/output \
+  -H "Authorization: Bearer $TENSORLAKE_API_KEY"
+```
+
+**Streaming with Server-Sent Events (SSE):**
+
+To receive real-time progress updates and the final output as a stream of events, use the `Accept: text/event-stream` header:
+```bash
+curl https://api.tensorlake.ai/applications/city_guide_app \
+  -H "Authorization: Bearer $TENSORLAKE_API_KEY" \
+  -H "Accept: text/event-stream" \
+  --json '"San Francisco"'
+```
+
+This returns an SSE stream with progress events throughout execution, and the final output as the last message.
+
+**Sending files:**
+
+For applications that accept `File` parameters, send the file as raw bytes with the appropriate Content-Type:
+```bash
+curl https://api.tensorlake.ai/applications/my_pdf_processor \
+  -H "Authorization: Bearer $TENSORLAKE_API_KEY" \
+  -H "Content-Type: application/pdf" \
+  --data-binary @document.pdf
+```
+
 ### Updating your application
 Any time you update your application, just re-deploy it to Tensorlake Cloud:
 ```bash
