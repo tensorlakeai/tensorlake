@@ -52,7 +52,7 @@ file_id = doc_ai.upload("/path/to/document.pdf")
 parse_id = doc_ai.parse(file_id)
 
 # Wait for completion and get results
-result = doc_ai.wait_for_completion(parse_id)
+result = doc_ai.result(parse_id)
 
 if result.status == ParseStatus.SUCCESSFUL:
     for chunk in result.chunks:
@@ -61,51 +61,36 @@ if result.status == ParseStatus.SUCCESSFUL:
 
 ### Customize Parsing
 
-Various aspect of Document Parsing, such as detecting strike through lines, table output mode, figure and table summarization can be customized. The API is [documented here](https://docs.tensorlake.ai/document-ingestion/parsing/read#options-for-parsing-documents).
+Configure chunking, table output, figure summarization, and more. [See all options](https://docs.tensorlake.ai/document-ingestion/parsing/read#options-for-parsing-documents).
 
 ```python
-from tensorlake.documentai import DocumentAI, ParsingOptions, EnrichmentOptions, ParseStatus, ChunkingStrategy, TableOutputMode
+from tensorlake.documentai import DocumentAI, ParsingOptions, EnrichmentOptions, ChunkingStrategy, TableOutputMode
 
 doc_ai = DocumentAI(api_key="your-api-key")
-
-# Skip the upload step, if you are passing pre-signed URLs or HTTPS accessible files.
 file_id = doc_ai.upload("/path/to/document.pdf")
 
-# Configure parsing options
-parsing_options = ParsingOptions(
-    chunking_strategy=ChunkingStrategy.SECTION,
-    table_output_mode=TableOutputMode.HTML,
-    signature_detection=True
-)
-
-# Configure enrichment options
-enrichment_options = EnrichmentOptions(
-    figure_summarization=True,
-    table_summarization=True
-)
-
-# Parse and wait for completion
 result = doc_ai.parse_and_wait(
     file_id,
-    parsing_options=parsing_options,
-    enrichment_options=enrichment_options
+    parsing_options=ParsingOptions(
+        chunking_strategy=ChunkingStrategy.SECTION,
+        table_output_mode=TableOutputMode.HTML,
+        signature_detection=True
+    ),
+    enrichment_options=EnrichmentOptions(
+        figure_summarization=True,
+        table_summarization=True
+    )
 )
-
-if result.status == ParseStatus.SUCCESSFUL:
-    for chunk in result.chunks:
-        print(chunk.content)
 ```
 
 ### Structured Extraction
 
-Extract specific data fields from documents using JSON schemas or Pydantic models:
+Extract specific data fields using Pydantic models or JSON schemas. [See docs](https://docs.tensorlake.ai/document-ingestion/parsing/structured-extraction).
 
-#### Using Pydantic Models
 ```python
-from tensorlake.documentai import DocumentAI, StructuredExtractionOptions, ParseStatus
+from tensorlake.documentai import DocumentAI, StructuredExtractionOptions
 from pydantic import BaseModel, Field
 
-# Define Pydantic model
 class InvoiceData(BaseModel):
     invoice_number: str = Field(description="Invoice number")
     total_amount: float = Field(description="Total amount due")
@@ -114,46 +99,15 @@ class InvoiceData(BaseModel):
 
 doc_ai = DocumentAI(api_key="your-api-key")
 
-# Passing https accessible file directly (no need to upload to Tensorlake)
-file_id = "https://...."   # publicly available URL of the invoice data file
-
-# Configure structured extraction using Pydantic model
-structured_extraction_options = StructuredExtractionOptions(
-    schema_name="Invoice Data",
-    json_schema=InvoiceData  # Can pass Pydantic model directly
-)
-
-# Parse and wait for completion
 result = doc_ai.parse_and_wait(
-    file_id,
-    structured_extraction_options=[structured_extraction_options]
+    "https://example.com/invoice.pdf",  # Or use file_id from upload()
+    structured_extraction_options=[StructuredExtractionOptions(
+        schema_name="Invoice Data",
+        json_schema=InvoiceData
+    )]
 )
-
-if result.status == ParseStatus.SUCCESSFUL:
-    print(result.structured_data)
+print(result.structured_data)
 ```
-
-#### Using JSON Schema
-```python
-# Define JSON schema directly
-invoice_schema = {
-    "title": "InvoiceData",
-    "type": "object",
-    "properties": {
-        "invoice_number": {"type": "string", "description": "Invoice number"},
-        "total_amount": {"type": "number", "description": "Total amount due"},
-        "due_date": {"type": "string", "description": "Payment due date"},
-        "vendor_name": {"type": "string", "description": "Vendor company name"}
-    }
-}
-
-structured_extraction_options = StructuredExtractionOptions(
-    schema_name="Invoice Data",
-    json_schema=invoice_schema
-)
-```
-
-Structured Extraction is guided by the provided schema. We support Pydantic Models as well JSON Schema. All the levers for structured extraction are documented [here](https://docs.tensorlake.ai/document-ingestion/parsing/structured-extraction).
 
 ### Learn More
 * [Document Parsing Guide](https://docs.tensorlake.ai/document-ingestion/parsing/read)
@@ -163,27 +117,22 @@ Structured Extraction is guided by the provided schema. We support Pydantic Mode
 
 ## Build Durable Agentic Applications in Python
 
-Tensorlake's Agentic Runtime allows you to deploy agentic applications built in any framework on a districutred runtime, which scales them as they get requests. The platform has built in durable execution to let applications restart from where they crash automatically. 
+Deploy agentic applications on a distributed runtime with automatic scaling and durable execution — applications restart from where they crashed automatically. You can build with any Python framework. Agents are exposed as HTTP APIs like web applications.
 
-**No Queues**: We manage internal state of applications and orchestration - no need for queues, background jobs and brittle retry logic.
+- **No Queues**: We manage state and orchestration
+- **Zero Infra**: Write Python, deploy to Tensorlake
+- **Progress Updates**: Applications can run for any amount of time and stream updates to users.
 
-**Zero Infra**: Write Python, deploy to Tensorlake.
+### Quickstart
 
-### Agentic Applications Quickstart
+Decorate your entrypoint with `@application()` and functions with `@function()` for checkpointing and sandboxed execution. Each function runs in its own isolated sandbox.
 
-Write an Application in Python, decorate the entrypoint of your application with `@application()` and the functions with `@function()` if you want their state to be checkpointed or run them in sandboxes. **Each Tensorlake function runs in its own isolated sandbox**, allowing you to safely execute code and use different dependencies per function.
-
-The example below creates a city guide application using **OpenAI Agents with tool calls**. It demonstrates:
-
-1. **Tool Calls**: Using OpenAI Agents with `WebSearchTool` to search the web and `function_tool` to execute Python code, including Tensorlake Functions.
-2. **Sandboxed Execution**: Each `@function` runs in its own isolated environment with specified dependencies.
-3. **Code Execution**: Agents can run Python code via `function_tool` within the sandbox.
+**Example**: City guide using OpenAI Agents with web search and code execution:
 
 ```python
-import os
 from agents import Agent, Runner
 from agents.tool import WebSearchTool, function_tool
-from tensorlake.applications import application, function, run_local_application, Image
+from tensorlake.applications import application, function, Image
 
 # Define the image with necessary dependencies
 FUNCTION_CONTAINER_IMAGE = Image(base_image="python:3.11-slim", name="city_guide_image").run(
@@ -231,154 +180,48 @@ def city_guide_app(city: str) -> str:
 
 > **Note**: This is a simplified version. See the complete example at [examples/readme_example/city_guide.py](examples/readme_example/city_guide.py) for the full implementation including activity suggestions and agent orchestration.
 
-#### Running locally
+#### Deploy to Tensorlake Cloud
 
-The complete application code is available at [examples/readme_example/city_guide.py](examples/readme_example/city_guide.py).
-The following code is included to run it locally on your computer:
-
-```python
-if __name__ == "__main__":
-    CITY = "Paris"
-    
-    print(f"Generating city guide for: {CITY}\n")
-    
-    if not os.environ.get("OPENAI_API_KEY"):
-        print("Error: OPENAI_API_KEY environment variable is not set.")
-        exit(1)
-
-    # Run locally using Tensorlake's local runner
-    request = run_local_application("city_guide_app", CITY)
-    response = request.output()
-    
-    print("\n" + "="*50)
-    print("CITY GUIDE")
-    print("="*50 + "\n")
-    print(response)
-```
-
-Run the application locally:
-
+1. Set your API keys:
 ```bash
-python examples/readme_example/city_guide.py
+export TENSORLAKE_API_KEY="your-api-key"
+tensorlake secrets set OPENAI_API_KEY "your-openai-key"
 ```
 
-The application will orchestrate multiple OpenAI Agents with tool calls to generate a personalized city guide. Each agent runs in its own sandbox and can execute code (like temperature conversion) and make web searches.
-
-Here is some example output from the simplified version:
-
-```bash
-==================================================
-CITY GUIDE
-==================================================
-
-Welcome to Paris! Today, the weather is cloudy with a current temperature of about 8°C. As you explore the city, you can expect evening and nighttime temperatures to stay between 5°C and 6°C.
-
-Don’t forget your jacket as you stroll along the Seine or visit the Eiffel Tower! Paris can feel especially charming under a cloudy sky, so embrace the cozy atmosphere and maybe stop by a café for a warm drink.
-
-If you need tips for what to do on a cloudy day in Paris, just let me know—enjoy your stay!
-```
-
-Testing your applications locally is convenient during development. There's no need to wait until the application is deployed to see how it works.
-
-#### Deploying and running on Tensorlake Cloud
-
-To run the application on Tensorlake Cloud, it first needs to be deployed.
-
-1. Set `TENSORLAKE_API_KEY` environment variable in your shell session:
-```bash
-export TENSORLAKE_API_KEY="Paste your API key here"
-```
-2. Set `OPENAI_API_KEY` environment variable in your Tensorlake Secrets so that your application can make calls to OpenAI:
-```bash
-tensorlake secrets set OPENAI_API_KEY "Paste your API key here"
-```
-3. Deploy the application to Tensorlake Cloud:
+2. Deploy:
 ```bash
 tensorlake deploy examples/readme_example/city_guide.py
 ```
-4. Run the remote test script, found in `examples/readme_example/test_remote_app.py`:
-```python
-from tensorlake.applications import run_remote_application
 
-city = "San Francisco"
+#### Call via HTTP
 
-# Run the application remotely
-request = run_remote_application("city_guide_app", city)
-print(f"Request ID: {request.id}")
-
-# Get the output
-response = request.output()
-print(response)
-```
-
-5. The application will execute on Tensorlake Cloud, with each function running in its own isolated sandbox.
-
-#### Calling applications via HTTP
-
-You can also invoke deployed applications directly via HTTP without using the Python SDK. This is useful for integrating with other languages or services.
-
-**Invoke an application:**
 ```bash
+# Invoke the application
 curl https://api.tensorlake.ai/applications/city_guide_app \
   -H "Authorization: Bearer $TENSORLAKE_API_KEY" \
   --json '"San Francisco"'
-```
+# Returns: {"request_id": "beae8736ece31ef9"}
 
-This returns a request ID:
-```json
-{"request_id": "beae8736ece31ef9"}
-```
-
-**Check request status:**
-```bash
-curl https://api.tensorlake.ai/applications/city_guide_app/requests/{request_id} \
-  -H "Authorization: Bearer $TENSORLAKE_API_KEY"
-```
-
-The response includes an `outcome` field: `"success"`, `"failure"`, or `null` (still processing).
-
-**Get the result:**
-```bash
+# Get the result
 curl https://api.tensorlake.ai/applications/city_guide_app/requests/{request_id}/output \
   -H "Authorization: Bearer $TENSORLAKE_API_KEY"
-```
 
-**Streaming with Server-Sent Events (SSE):**
-
-To receive real-time progress updates and the final output as a stream of events, use the `Accept: text/event-stream` header:
-```bash
+# Stream results with SSE
 curl https://api.tensorlake.ai/applications/city_guide_app \
   -H "Authorization: Bearer $TENSORLAKE_API_KEY" \
   -H "Accept: text/event-stream" \
   --json '"San Francisco"'
-```
 
-This returns an SSE stream with progress events throughout execution, and the final output as the last message.
-
-**Sending files:**
-
-For applications that accept `File` parameters, send the file as raw bytes with the appropriate Content-Type:
-```bash
+# Send files
 curl https://api.tensorlake.ai/applications/my_pdf_processor \
   -H "Authorization: Bearer $TENSORLAKE_API_KEY" \
   -H "Content-Type: application/pdf" \
   --data-binary @document.pdf
 ```
 
-### Updating your application
-Any time you update your application, just re-deploy it to Tensorlake Cloud:
-```bash
-tensorlake deploy examples/readme_example/city_guide.py
-```
+## Learn More
 
-And run the remote test script again:
-```bash
-python examples/readme_example/test_remote_app.py
-```
-
-## Learn more about Tensorlake's Agentic Applications 
-
-* [Agentic Applications Documentation](https://docs.tensorlake.ai/applications/quickstart)
-* [Key programming concepts in Tensorlake Agentic Applications](https://docs.tensorlake.ai/applications/compute)
-* [Dependencies and container images in Tensorlake Agentic Applications](https://docs.tensorlake.ai/applications/images)
+* [Applications Documentation](https://docs.tensorlake.ai/applications/quickstart)
+* [Programming Concepts](https://docs.tensorlake.ai/applications/compute)
+* [Dependencies & Images](https://docs.tensorlake.ai/applications/images)
 * [Open Source Compute Engine](https://docs.tensorlake.ai/opensource/indexify)
