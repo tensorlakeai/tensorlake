@@ -71,7 +71,7 @@ class TestUseRequestStateFromChildThread(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(mt_get_after_set, 11, remote=is_remote)
+        request: Request = run_application(mt_get_after_set, is_remote, 11)
 
         output: int = request.output()
         self.assertEqual(output, "success")
@@ -111,7 +111,7 @@ class TestUseRequestStateFromChildProcess(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(mp_get_after_set, 11, remote=is_remote)
+        request: Request = run_application(mp_get_after_set, is_remote, 11)
 
         output: int = request.output()
         self.assertEqual(output, "success")

@@ -21,7 +21,8 @@ from tensorlake.applications.multiprocessing import setup_multiprocessing
 
 from ..algorithms.validate_user_object import validate_user_object
 from ..function.application_call import (
-    deserialize_application_function_call_payload,
+    deserialize_application_function_call_arguments,
+    serialize_application_function_call_arguments,
 )
 from ..function.user_data_serializer import (
     deserialize_value,
@@ -106,9 +107,10 @@ _SLEEP_POLL_INTERVAL_SECONDS = 0.002
 
 
 class LocalRunner:
-    def __init__(self, app: Function, app_payload: Any):
+    def __init__(self, app: Function, app_args: list[Any], app_kwargs: dict[str, Any]):
         self._app: Function = app
-        self._app_payload: Any = app_payload
+        self._app_args: list[Any] = app_args
+        self._app_kwargs: dict[str, Any] = app_kwargs
 
         self._logger: InternalLogger = InternalLogger.get_logger().bind(module=__name__)
         self._blob_store_dir_path: str = tempfile.mkdtemp(
@@ -205,20 +207,25 @@ class LocalRunner:
         set_wait_futures_hook(self._wait_futures_runtime_hook)
         setup_multiprocessing()
 
-        # Serialize application payload the same way as in remote mode.
-        input_serializer: UserDataSerializer = function_input_serializer(self._app)
-
         try:
-            serialized_payload, payload_metadata = serialize_value(
-                value=self._app_payload, serializer=input_serializer, value_id="fake_id"
+            # Serialize application payload the same way as in remote mode.
+            input_serializer: UserDataSerializer = function_input_serializer(self._app)
+            serialized_app_args, serialized_app_kwargs = (
+                serialize_application_function_call_arguments(
+                    input_serializer=input_serializer,
+                    args=self._app_args,
+                    kwargs=self._app_kwargs,
+                )
             )
-            payload: Any = deserialize_application_function_call_payload(
-                application=self._app,
-                payload=serialized_payload,
-                payload_content_type=payload_metadata.content_type,
+            deserialized_app_args, deserialized_app_kwargs = (
+                deserialize_application_function_call_arguments(
+                    application=self._app,
+                    serialized_args=serialized_app_args,
+                    serialized_kwargs=serialized_app_kwargs,
+                )
             )
             app_function_call_awaitable: FunctionCallAwaitable = self._app.awaitable(
-                payload
+                *deserialized_app_args, **deserialized_app_kwargs
             )
             self._create_future_run_for_awaitable(
                 awaitable=app_function_call_awaitable,

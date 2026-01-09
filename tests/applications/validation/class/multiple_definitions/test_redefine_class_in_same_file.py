@@ -39,7 +39,7 @@ class TestMultipleClassDefinitions(unittest.TestCase):
     ):
         if is_remote:
             deploy_applications(__file__)
-        request: Request = run_application("Class1.method", 1, remote=is_remote)
+        request: Request = run_application("Class1.method", is_remote, 1)
         self.assertEqual(request.output(), "Class1.method_redefined")
 
 

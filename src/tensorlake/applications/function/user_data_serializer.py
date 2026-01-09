@@ -59,7 +59,7 @@ def serialize_value(
 
 
 def deserialize_value(
-    serialized_value: bytes,
+    serialized_value: bytes | bytearray | memoryview,
     metadata: ValueMetadata,
 ) -> Any | File:
     """Deserializes the given value using the provided serializer and type hints.
@@ -74,6 +74,15 @@ def deserialize_value(
             raise DeserializationError(
                 "Deserializing to File requires a content type, but None was provided."
             )
+        # Don't pass memoryview or bytearray to users at a cost of memory copy.
+        # This is because bytes have much more capabilities than bytearray or memoryview.
+        # And it'll be confusing to users to handle the conversion themselves when they need bytes.
+        # We postpone this copying until we have to here. Other deserialization approaches don't do this.
+        serialized_value: bytes = (
+            bytes(serialized_value)
+            if isinstance(serialized_value, (memoryview, bytearray))
+            else serialized_value
+        )
         return File(content=serialized_value, content_type=metadata.content_type)
     else:
         if metadata.serializer_name is None:

@@ -46,7 +46,7 @@ class TestFunctionRetries(unittest.TestCase):
 
         start_time: float = time.monotonic()
         request: Request = run_application(
-            function_that_succeeds_on_3rd_retry, 1, remote=is_remote
+            function_that_succeeds_on_3rd_retry, is_remote, 1
         )
         self.assertEqual(request.output(), "success")
         duration_sec: float = time.monotonic() - start_time
@@ -61,9 +61,7 @@ class TestFunctionRetries(unittest.TestCase):
             deploy_applications(__file__)
 
         start_time: float = time.monotonic()
-        request: Request = run_application(
-            function_that_always_fails, 1, remote=is_remote
-        )
+        request: Request = run_application(function_that_always_fails, is_remote, 1)
         self.assertRaises(RequestFailed, request.output)
         duration_sec: float = time.monotonic() - start_time
 

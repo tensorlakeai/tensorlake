@@ -22,7 +22,7 @@ class TestGetInfo(unittest.TestCase):
             with rpc_channel(process) as channel:
                 stub: FunctionExecutorStub = FunctionExecutorStub(channel)
                 response: InfoResponse = stub.get_info(InfoRequest())
-                self.assertEqual(response.version, "0.1.1")
+                self.assertEqual(response.version, "0.1.2")
                 self.assertEqual(response.sdk_language, "python")
                 self.assertEqual(
                     response.sdk_version, importlib.metadata.version("tensorlake")

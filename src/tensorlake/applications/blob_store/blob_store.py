@@ -60,7 +60,9 @@ class BLOBStore:
             available_cpu_count=state["available_cpu_count"],
         )
 
-    def get(self, blob: BLOB, offset: int, size: int, logger: InternalLogger) -> bytes:
+    def get(
+        self, blob: BLOB, offset: int, size: int, logger: InternalLogger
+    ) -> bytearray:
         """Returns binary data stored in BLOB with the supplied URI at the supplied offset.
 
         Raises InternalError on error.
@@ -76,6 +78,10 @@ class BLOBStore:
         destination: bytearray = bytearray(size)
         destination_view: memoryview = memoryview(destination)
         read_offset: int = offset
+
+        # Allow reads of size 0. This happens when an application function call with no arguments is made.
+        if size == 0:
+            return destination
 
         first_chunk_info: _ChunkInfo = _find_chunk(blob, offset)
         chunk_ix: int = first_chunk_info.index

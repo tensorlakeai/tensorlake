@@ -127,8 +127,7 @@ def _validate_serialized_object_manifest(manifest: SerializedObjectManifest) -> 
 
 
 def _validate_blob(blob: BLOB) -> None:
-    if len(blob.chunks) < 1:
-        raise ValueError("BLOB must have at least one chunk")
+    # BLOB can have zero chunks (just an empty BLOB).
     for chunk in blob.chunks:
         _validate_blob_chunk(chunk)
 

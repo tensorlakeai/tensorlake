@@ -6,30 +6,40 @@ from typing import Any, List, Union, get_args, get_origin
 from ..interface import Function
 
 
-def function_arg_type_hint(function: Function, arg_ix: int) -> List[Any]:
-    """Returns the type hint for positional function call argument at the specified index, or None if not found.
+def parameter_type_hints(parameter: inspect.Parameter) -> List[Any]:
+    """Returns the type hint for the provided function parameter.
 
-    arg_ix can be negative to indicate position from the end of the argument list.
+    Returns empty list if the parameter has no type hint.
     """
-    signature: inspect.Signature = function_signature(function)
-    parameters: list[inspect.Parameter] = list(signature.parameters.values())
-    if arg_ix >= len(parameters) or arg_ix < -len(parameters):
-        return []
-    parameter: inspect.Parameter = parameters[arg_ix]
     if parameter.annotation is inspect.Parameter.empty:
         return []
-    return _resolve_type_hint(parameter.annotation)
+    return _resolve_type_hints(parameter.annotation)
+
+
+def function_arg_type_hint(function: Function, arg_index: int) -> List[Any]:
+    """Returns the type hint for function call argument at the specified index.
+
+    Returns empty list if the function has no such positional argument or if the argument has no type hint.
+    The index is zero-based, the ordering of parameters is the same as in the function definition.
+    arg_index can be negative to indicate position from the end of the argument list.
+    """
+    signature: inspect.Signature = function_signature(function)
+    # signature.parameters is an ordered mapping in parameters definition order.
+    parameters: list[inspect.Parameter] = list(signature.parameters.values())
+    if arg_index >= len(parameters) or arg_index < -len(parameters):
+        return []
+    return parameter_type_hints(parameters[arg_index])
 
 
 def function_kwarg_type_hint(function: Function, key: str) -> List[Any]:
-    """Returns the type hint for keyword function call argument with the specified key, or None if not found."""
+    """Returns the type hint for keyword function call argument with the specified key.
+
+    Returns empty list if the function has no such keyword argument or if the argument has no type hint.
+    """
     signature: inspect.Signature = function_signature(function)
     if key not in signature.parameters:
         return []
-    parameter: inspect.Parameter = signature.parameters[key]
-    if parameter.annotation is inspect.Parameter.empty:
-        return []
-    return _resolve_type_hint(parameter.annotation)
+    return parameter_type_hints(signature.parameters[key])
 
 
 def function_return_type_hint(function: Function) -> List[Any]:
@@ -37,7 +47,7 @@ def function_return_type_hint(function: Function) -> List[Any]:
     if signature.return_annotation is inspect.Signature.empty:
         return []
 
-    return _resolve_type_hint(signature.return_annotation)
+    return _resolve_type_hints(signature.return_annotation)
 
 
 def serialize_type_hints(type_hints: List[Any]) -> bytes:
@@ -61,63 +71,22 @@ def function_signature(function: Function) -> inspect.Signature:
     )
 
 
-def _resolve_type_hint(type_hint: Any) -> List[Any]:
-    """Returns all singular (scalar) types in the provided type hint.
-
-    Recurses only once into top level List or Tuple.
-    Also extracts types from all Union types.
+def _resolve_type_hints(type_hint: Any) -> List[Any]:
+    """Returns all types in the provided type hint.
 
     Examples:
         str -> [str]
-        List[str] -> str
-        Tuple[str, int] -> [str, int]
+        List[str] -> [List[str]]
+        Tuple[str, int] -> [Tuple[str, int]]
         str | FunctionCall -> [str, FunctionCall]
-        List[str | FunctionCall] -> [str, FunctionCall]
-        Tuple[str | FunctionCall, int] -> [str, FunctionCall, int]
+        List[str | FunctionCall] -> [List[str | FunctionCall]]
+        Tuple[str | FunctionCall, int] -> [Tuple[str | FunctionCall, int]]
 
     """
-    origin = get_origin(type_hint)
-    if origin is list:
-        return _resolve_list_type_hint(type_hint)
-    elif origin is tuple:
-        return _resolve_tuple_type_hint(type_hint)
-    elif _is_union_origin(origin):
+    if _is_union_origin(get_origin(type_hint)):
         return _resolve_union_type_hint(type_hint)
     else:
         return [type_hint]
-
-
-def _resolve_list_type_hint(list_type_hint: Any) -> List[Any]:
-    """Returns the singular (scalar) type in the provided list type hint.
-
-    Resolves Unions as List types.
-
-    Examples:
-        List[str] -> [str]
-        List[str | FunctionCall] -> [str, FunctionCall]
-    """
-    list_type_arg: Any = get_args(list_type_hint)[0]
-    # print(f"Resolving type hint: {list_type_arg}, origin: {get_origin(list_type_arg)}")
-    if _is_union_origin(get_origin(list_type_arg)):
-        return _resolve_union_type_hint(list_type_arg)
-    else:
-        return [list_type_arg]
-
-
-def _resolve_tuple_type_hint(tuple_type_hint: Any) -> List[Any]:
-    """Returns all singular (scalar) types in the provided tuple type hint.
-
-    Examples:
-        Tuple[str, int] -> [str, int]
-        Tuple[str | FunctionCall, int] -> [str, FunctionCall, int]
-    """
-    types: List[Any] = []
-    for t in get_args(tuple_type_hint):
-        if _is_union_origin(get_origin(t)):
-            types.extend(_resolve_union_type_hint(t))
-        else:
-            types.append(t)
-    return types
 
 
 def _is_union_origin(origin: Any) -> bool:

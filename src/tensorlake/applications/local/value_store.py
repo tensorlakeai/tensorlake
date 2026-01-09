@@ -9,7 +9,7 @@ from tensorlake.applications.metadata import ValueMetadata
 
 @dataclass
 class SerializedValue:
-    data: bytes
+    data: bytearray | bytes | memoryview
     metadata: ValueMetadata
 
 
@@ -54,7 +54,7 @@ class SerializedValueStore:
             )
         metadata: ValueMetadata = self._metadata[value_id].model_copy()
         value_size: int = self._stored_value_size(value_id)
-        data: bytes = self._blob_store.get(
+        data: bytearray = self._blob_store.get(
             blob=self._value_blob(value_id=value_id, value_size=value_size),
             offset=0,
             size=value_size,

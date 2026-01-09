@@ -1,7 +1,7 @@
 import inspect
 import json
 import pickle
-from typing import Any, List
+from typing import Any, List, Set, Tuple, get_origin
 
 import pydantic
 
@@ -53,7 +53,9 @@ class UserDataSerializer:
         """
         raise InternalError("Subclasses should implement this method.")
 
-    def deserialize(self, data: bytes, possible_types: List[Any]) -> Any:
+    def deserialize(
+        self, data: bytearray | bytes | memoryview, possible_types: List[Any]
+    ) -> Any:
         """Deserializes the given bytes into an object.
 
         The `possible_types` parameter specify possible types of the deserialized object.
@@ -95,20 +97,30 @@ class JSONUserDataSerializer(UserDataSerializer):
             if isinstance(object, pydantic.BaseModel):
                 return object.model_dump_json().encode("utf-8")
             else:
+                if isinstance(object, set):
+                    # json.dumps doesn't support sets natively.
+                    object = list(object)
                 return json.dumps(object).encode("utf-8")
         except Exception as e:
             raise SerializationError(
                 f"Failed to serialize data with json serializer: {e}"
             ) from e
 
-    def deserialize(self, data: bytes, possible_types: List[Any]) -> Any:
+    def deserialize(
+        self, data: bytearray | bytes | memoryview, possible_types: List[Any]
+    ) -> Any:
         model_classes: List[Any] = [
             t
             for t in possible_types
             if inspect.isclass(t) and issubclass(t, pydantic.BaseModel)
         ]
 
-        decoded_data: str = data.decode("utf-8")
+        # JSON objects are typically small so it's ok to convert memoryview to bytes here.
+        decoded_data: str = (
+            data.tobytes().decode("utf-8")
+            if isinstance(data, memoryview)
+            else data.decode("utf-8")
+        )
 
         # Pydantic model deserialization heuristic.
         # Try each possible model class one by one until one succeeds,
@@ -125,11 +137,31 @@ class JSONUserDataSerializer(UserDataSerializer):
                 continue
 
         try:
-            return json.loads(decoded_data)
+            deserialized_value: Any = json.loads(decoded_data)
         except Exception as e:
             raise DeserializationError(
                 f"Failed to deserialize data with json serializer: {e}"
             ) from e
+
+        if isinstance(deserialized_value, list):
+            # Tuple is serialized as array by json.dumps.
+            # Handles type hints: Tuple[T], tuple[T], tuple.
+            is_tuple: bool = any(
+                get_origin(t) is Tuple or get_origin(t) is tuple or t is tuple
+                for t in possible_types
+            )
+            # Set is serialized as array by json.dumps.
+            # Handles type hints: Set[T], set[T], set.
+            is_set: bool = any(
+                get_origin(t) is Set or get_origin(t) is set or t is set
+                for t in possible_types
+            )
+            if is_tuple:
+                deserialized_value = tuple(deserialized_value)
+            elif is_set:
+                deserialized_value = set(deserialized_value)
+
+        return deserialized_value
 
 
 class PickleUserDataSerializer(UserDataSerializer):
@@ -166,7 +198,9 @@ class PickleUserDataSerializer(UserDataSerializer):
                 f"Failed to serialize data with pickle serializer: {e}"
             ) from e
 
-    def deserialize(self, data: bytes, possible_types: List[Any]) -> Any:
+    def deserialize(
+        self, data: bytearray | bytes | memoryview, possible_types: List[Any]
+    ) -> Any:
         try:
             return pickle.loads(data)
         except Exception as e:

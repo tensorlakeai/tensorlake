@@ -50,6 +50,7 @@ class EnrichmentOptions(BaseModel):
         description="Boolean flag to enable chart extraction. The default is `false`.",
     )
 
+
 class PageClassConfig(BaseModel):
     """
     Configuration for page classification.

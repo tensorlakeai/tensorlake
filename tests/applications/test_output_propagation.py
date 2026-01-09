@@ -48,7 +48,7 @@ class TestFunctionOutputPropagation(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(
-            api_function_output_propagation, "test", remote=is_remote
+            api_function_output_propagation, is_remote, "test"
         )
         self.assertEqual(request.output(), "buzz")
 
@@ -85,7 +85,7 @@ class TestReducerValueOutputPropagation(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(
-            api_reducer_value_output_propagation, "test", remote=is_remote
+            api_reducer_value_output_propagation, is_remote, "test"
         )
         self.assertEqual(request.output(), "buzz_reducer_value")
 
@@ -130,7 +130,7 @@ class TestReducerSubcallOutputPropagation(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(
-            "api_reducer_subcall_output_propagation", "test", remote=is_remote
+            "api_reducer_subcall_output_propagation", is_remote, "test"
         )
         self.assertEqual(request.output(), "buzz_reducer_subcall")
 

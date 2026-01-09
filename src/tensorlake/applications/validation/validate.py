@@ -13,6 +13,7 @@ from ..function.type_hints import (
     function_arg_type_hint,
     function_return_type_hint,
     function_signature,
+    parameter_type_hints,
 )
 from ..interface import Function, InternalError
 from ..interface.decorators import (
@@ -428,7 +429,7 @@ def _validate_regular_function(
 def _validate_application_function(
     function: Function, function_details: FunctionDetails
 ) -> list[ValidationMessage]:
-    """Validates a application aspects of an application function."""
+    """Validates application aspects of an application function."""
     messages: list[ValidationMessage] = []
 
     function_decorator: _FunctionDecorator | None = None
@@ -451,44 +452,37 @@ def _validate_application_function(
             )
         )
 
-    signature: inspect.Signature = function_signature(function)
-    signature_is_valid: bool = True
-    if function_details.class_name is None:
-        if len(signature.parameters) != 1:
-            signature_is_valid = False
-            messages.append(
-                ValidationMessage(
-                    message="Application function needs to have exactly one parameter (aka request input). "
-                    "Please change the function parameters. Non-application functions don't have this limitation.",
-                    severity=ValidationMessageSeverity.ERROR,
-                    details=function_details,
-                )
+    try:
+        signature: inspect.Signature = function_signature(function)
+    except Exception as e:
+        messages.append(
+            ValidationMessage(
+                message=f"Failed to get signature of application function: {e}. "
+                "Please make sure that the application function is defined correctly.",
+                severity=ValidationMessageSeverity.ERROR,
+                details=function_details,
             )
-    else:
-        if len(signature.parameters) != 2:
-            signature_is_valid = False
+        )
+        # Return immediately because rest of validations don't make sense.
+        return messages
+
+    # skip 'self'
+    first_arg_index: int = 0 if function_details.class_name is None else 1
+    # signature.parameters is an ordered mapping in parameters definition order.
+    parameters_in_definition_order: list[inspect.Parameter] = list(
+        signature.parameters.values()
+    )
+    for i in range(first_arg_index, len(signature.parameters)):
+        parameter: inspect.Parameter = parameters_in_definition_order[i]
+        if len(parameter_type_hints(parameter)) == 0:
             messages.append(
                 ValidationMessage(
-                    message="Application function needs to have exactly two parameters (self and request input). "
-                    "Please change the function parameters. Non-application functions don't have this limitation.",
+                    message=f"Application function parameter '{parameter.name}' requires a type hint. Please add a type hint to the parameter.",
                     severity=ValidationMessageSeverity.ERROR,
                     details=function_details,
                 )
             )
 
-    if signature_is_valid:
-        # Warning: if you want to delete this or reduce severity then add a test that verifies that things work without type hints.
-        request_input_type_hints: list[Any] = function_arg_type_hint(function, -1)
-        if len(request_input_type_hints) == 0:
-            messages.append(
-                ValidationMessage(
-                    message="Application function parameter requires a type hint. Please add a type hint to the parameter.",
-                    severity=ValidationMessageSeverity.ERROR,
-                    details=function_details,
-                )
-            )
-
-    # Warning: if you want to delete this or reduce severity then add a test that verifies that things work without type hints.
     return_type_hints: list[Any] = function_return_type_hint(function)
     if len(return_type_hints) == 0:
         messages.append(
