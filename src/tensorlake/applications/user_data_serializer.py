@@ -1,7 +1,6 @@
-import inspect
 import json
 import pickle
-from typing import Any, List, Set, Tuple, get_origin
+from typing import Any
 
 import pydantic
 
@@ -9,6 +8,7 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     SerializedObjectEncoding,
 )
 
+from .function.type_hints import is_pydantic_type_hint
 from .interface.exceptions import (
     DeserializationError,
     InternalError,
@@ -54,7 +54,7 @@ class UserDataSerializer:
         raise InternalError("Subclasses should implement this method.")
 
     def deserialize(
-        self, data: bytearray | bytes | memoryview, possible_types: List[Any]
+        self, data: bytearray | bytes | memoryview, possible_types: list[Any]
     ) -> Any:
         """Deserializes the given bytes into an object.
 
@@ -91,9 +91,6 @@ class JSONUserDataSerializer(UserDataSerializer):
 
     def serialize(self, object: Any) -> bytes:
         try:
-            # FIXME: This heuristic doesn't cover natural cases like
-            # List[BaseModel], Dict[str, BaseModel], etc.
-            # These are easy to serialize to json too.
             if isinstance(object, pydantic.BaseModel):
                 return object.model_dump_json().encode("utf-8")
             else:
@@ -107,14 +104,8 @@ class JSONUserDataSerializer(UserDataSerializer):
             ) from e
 
     def deserialize(
-        self, data: bytearray | bytes | memoryview, possible_types: List[Any]
+        self, data: bytearray | bytes | memoryview, possible_types: list[Any]
     ) -> Any:
-        model_classes: List[Any] = [
-            t
-            for t in possible_types
-            if inspect.isclass(t) and issubclass(t, pydantic.BaseModel)
-        ]
-
         # JSON objects are typically small so it's ok to convert memoryview to bytes here.
         decoded_data: str = (
             data.tobytes().decode("utf-8")
@@ -122,46 +113,38 @@ class JSONUserDataSerializer(UserDataSerializer):
             else data.decode("utf-8")
         )
 
-        # Pydantic model deserialization heuristic.
-        # Try each possible model class one by one until one succeeds,
-        # otherwise, use default JSON deserialization.
-        #
-        # This heuristic won't work for customers who use multiple similar model classes
-        # that can deserialize into each other. If this becomes a problem then we can
-        # record actual class name of each object during json serialization and use it on
-        # deserialization.
-        for cls in model_classes:
+        # Deserialization heuristic: try each possible model class one by one until one succeeds,
+        # otherwise, use default JSON deserialization. Ordering of type hints is important.
+        # This is similar to how FastAPI works, see https://fastapi.tiangolo.com/tutorial/extra-models/#union-or-anyof.
+        last_exception: DeserializationError | None = None
+        for type_hint in possible_types:
             try:
-                return cls.model_validate_json(decoded_data)
-            except Exception:
+                return self._try_deserialize(decoded_data, type_hint)
+            except DeserializationError as e:
+                last_exception = e
                 continue
 
+        if last_exception is not None:
+            # The value has type hints and deserializing using them failed.
+            raise last_exception
+
+        # The value has no type hints, use default JSON deserialization.
+        return self._try_deserialize(decoded_data, Any)
+
+    def _try_deserialize(self, data: str, type_hint: Any) -> Any:
+        """Tries to deserialize the given data into the given type hint.
+
+        Raises DeserializationError on failure.
+        """
         try:
-            deserialized_value: Any = json.loads(decoded_data)
+            if is_pydantic_type_hint(type_hint):
+                return type_hint.model_validate_json(data)
+            else:
+                return json.loads(data)
         except Exception as e:
             raise DeserializationError(
                 f"Failed to deserialize data with json serializer: {e}"
             ) from e
-
-        if isinstance(deserialized_value, list):
-            # Tuple is serialized as array by json.dumps.
-            # Handles type hints: Tuple[T], tuple[T], tuple.
-            is_tuple: bool = any(
-                get_origin(t) is Tuple or get_origin(t) is tuple or t is tuple
-                for t in possible_types
-            )
-            # Set is serialized as array by json.dumps.
-            # Handles type hints: Set[T], set[T], set.
-            is_set: bool = any(
-                get_origin(t) is Set or get_origin(t) is set or t is set
-                for t in possible_types
-            )
-            if is_tuple:
-                deserialized_value = tuple(deserialized_value)
-            elif is_set:
-                deserialized_value = set(deserialized_value)
-
-        return deserialized_value
 
 
 class PickleUserDataSerializer(UserDataSerializer):
@@ -199,7 +182,7 @@ class PickleUserDataSerializer(UserDataSerializer):
             ) from e
 
     def deserialize(
-        self, data: bytearray | bytes | memoryview, possible_types: List[Any]
+        self, data: bytearray | bytes | memoryview, possible_types: list[Any]
     ) -> Any:
         try:
             return pickle.loads(data)

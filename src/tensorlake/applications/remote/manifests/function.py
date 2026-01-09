@@ -1,210 +1,390 @@
 import inspect
-from typing import Any, Dict, List, Union
+import json
+from dataclasses import dataclass
+from typing import Any, List
 
 from pydantic import BaseModel
-from typing_extensions import get_args, get_origin, get_type_hints
 
-from ...interface import InternalError
-from ...interface.function import Function, _ApplicationConfiguration
+from tensorlake.applications.function.type_hints import (
+    function_return_type_hint,
+    is_dict_type_hint,
+    is_file_type_hint,
+    is_list_type_hint,
+    is_pydantic_type_hint,
+    is_set_type_hint,
+    is_tuple_type_hint,
+    parameter_type_hints,
+    type_hint_arguments,
+)
+from tensorlake.applications.interface import File, InternalError
+from tensorlake.applications.interface.function import (
+    Function,
+    _ApplicationConfiguration,
+    _is_application_function,
+)
+
+from .docstring import (
+    DocstringStyle,
+    detect_docstring_style,
+    parameter_docstrings,
+    return_value_description,
+)
 from .function_manifests import (
     FunctionResourcesManifest,
+    JSONSchema,
     ParameterManifest,
     PlacementConstraintsManifest,
     RetryPolicyManifest,
 )
 from .function_resources import resources_for_function
 
-# JSON Schema Validation specification (RFC 8928, §6.1.1)
-# https://json-schema.org/draft/2020-12/json-schema-validation?#name-validation-keywords-for-any
-PYTHON_TYPE_TO_JSON_SCHEMA = {
-    "str": "string",
-    "int": "integer",
-    "float": "number",
-    "bool": "boolean",
-    "list": "array",
-    "dict": "object",
-    "tuple": "array",
-    "set": "array",
-    "NoneType": "null",
-}
-
 
 class FunctionManifest(BaseModel):
     name: str
     description: str
+    docstring: str = ""
     secret_names: List[str]
     initialization_timeout_sec: int
     timeout_sec: int
     resources: FunctionResourcesManifest
     retry_policy: RetryPolicyManifest
     cache_key: str | None
-    parameters: List[ParameterManifest] | None
-    return_type: Dict[str, Any] | None  # JSON Schema object
+    # Not empty for application functions only
+    parameters: List[ParameterManifest]
+    # Not None for application functions only
+    return_type: JSONSchema | None
     placement_constraints: PlacementConstraintsManifest
     max_concurrency: int
     min_containers: int | None = None
     max_containers: int | None = None
 
 
-def _parse_docstring_parameters(docstring: str) -> Dict[str, str]:
-    """Parse parameter descriptions from docstring.
-
-    Supports Google-style, NumPy-style, and simple parameter descriptions.
-
-    Args:
-        docstring: The function's docstring
-
-    Returns:
-        Dictionary mapping parameter names to their descriptions
-    """
-    if not docstring:
-        return {}
-
-    param_descriptions = {}
-    lines = docstring.strip().split("\n")
-
-    # Try Google-style docstring (Args: section)
-    in_args_section = False
-    for line in lines:
-        stripped = line.strip()
-
-        if stripped.lower() in ["args:", "arguments:", "parameters:"]:
-            in_args_section = True
-            continue
-        elif stripped.lower().endswith(":") and in_args_section:
-            # New section started, exit args section
-            break
-        elif in_args_section and stripped:
-            # Parse parameter line: "param_name: description" or "param_name (type): description"
-            if ":" in stripped:
-                parts = stripped.split(":", 1)
-                param_part = parts[0].strip()
-                description = parts[1].strip()
-
-                # Remove type annotation if present: "param_name (type)" -> "param_name"
-                if "(" in param_part and ")" in param_part:
-                    param_name = param_part.split("(")[0].strip()
-                else:
-                    param_name = param_part
-
-                param_descriptions[param_name] = description
-
-    # If no Args section found, try simple line-by-line parsing
-    if not param_descriptions:
-        for line in lines:
-            stripped = line.strip()
-            if ":" in stripped and not stripped.endswith(":"):
-                parts = stripped.split(":", 1)
-                if len(parts) == 2:
-                    param_part = parts[0].strip()
-                    description = parts[1].strip()
-
-                    # Remove type annotation if present
-                    if "(" in param_part and ")" in param_part:
-                        param_name = param_part.split("(")[0].strip()
-                    else:
-                        param_name = param_part
-
-                    param_descriptions[param_name] = description
-
-    return param_descriptions
+@dataclass
+class _JSONSchemaOptionalFields:
+    title: str | None = None
+    description: str | None = None
+    has_default_value: bool = False
+    default_value: Any = None
+    parameter_kind: str | None = None
 
 
-def _type_hint_json_schema(type_hint) -> Dict[str, str]:
-    """Format type hint as JSON Schema for MCP compatibility."""
-    if type_hint == Any:
-        return {"type": "string", "description": "Any type"}
-
-    # Handle Pydantic BaseModel first
-    if inspect.isclass(type_hint) and issubclass(type_hint, BaseModel):
-        if hasattr(type_hint, "model_json_schema"):
-            return type_hint.model_json_schema()
-
-    # Handle typing generics like List, Dict, etc.
-    origin = get_origin(type_hint)
-    args = get_args(type_hint)
-    if origin:
-        if origin is list:
-            if args:
-                return {"type": "array", "items": _type_hint_json_schema(args[0])}
-            else:
-                return {"type": "array", "items": {"type": "string"}}
-        elif origin is dict:
-            if len(args) >= 2:
-                return {
-                    "type": "object",
-                    "additionalProperties": _type_hint_json_schema(args[1]),
-                }
-            else:
-                return {"type": "object"}
-        elif origin is Union:
-            # Handle Union types like Union[str, int]
-            non_none_types = [arg for arg in args if arg is not type(None)]
-            if len(non_none_types) == 1:
-                # Optional type (Union[T, None])
-                return _type_hint_json_schema(non_none_types[0])
-            else:
-                # Multiple types - use anyOf
-                return {
-                    "anyOf": [_type_hint_json_schema(arg) for arg in non_none_types]
-                }
-
-    # Handle simple types
-    type_name = getattr(type_hint, "__name__", None)
-    if type_name and type_name in PYTHON_TYPE_TO_JSON_SCHEMA:
-        schema = {"type": PYTHON_TYPE_TO_JSON_SCHEMA[type_name]}
-        if type_name == "dict":
-            schema["description"] = "dict object"
+def _json_schema_with_optional_fields(
+    schema: JSONSchema,
+    fields: _JSONSchemaOptionalFields | None,
+) -> JSONSchema:
+    # Because we use exclude_unset=True in model_dump_json of ApplicationManifest,
+    # we explicitly set only those fields that are not None to keep the JSON schema
+    # output clean and minimal.
+    if fields is None:
         return schema
-    elif hasattr(type_hint, "__name__"):
-        # For custom classes, assume object type
-        return {"type": "object", "description": f"{type_hint.__name__} object"}
+
+    if fields.title is not None:
+        schema.title = fields.title
+    if fields.description is not None:
+        schema.description = fields.description
+    if fields.has_default_value:
+        try:
+            json.dumps(fields.default_value)
+            schema.default = fields.default_value
+        except Exception:
+            # Non-serializable default value.
+            # Use str representation. This is the best information we can provide.
+            schema.default = str(fields.default_value)
+    if fields.parameter_kind is not None:
+        schema.parameter_kind = fields.parameter_kind
+    return schema
+
+
+def _json_schema(
+    type_hints: list[Any],
+    fields: _JSONSchemaOptionalFields | None,
+) -> JSONSchema:
+    if len(type_hints) == 0 or type_hints[0] is Any:
+        # A value without a type hint or Any.
+        return _json_schema_with_optional_fields(
+            JSONSchema(
+                # Allow all json types.
+                type=[
+                    "null",
+                    "boolean",
+                    "object",
+                    "array",
+                    "number",
+                    "string",
+                    "integer",
+                ],
+            ),
+            fields=fields,
+        )
+
+    if len(type_hints) > 1:
+        # Multiple type hints for unions - use anyOf which means
+        # value can match one or more of the listed types.
+        return _json_schema_with_optional_fields(
+            JSONSchema(
+                anyOf=[
+                    _json_schema(
+                        type_hints=[th],
+                        fields=None,
+                    )
+                    for th in type_hints
+                ],
+            ),
+            fields=fields,
+        )
+
+    # Main case: single type hint where we handle all the logic.
+    type_hint: Any = type_hints[0]
+
+    if is_pydantic_type_hint(type_hint):
+        return _json_schema_with_optional_fields(
+            JSONSchema.model_validate(type_hint.model_json_schema()),
+            fields=fields,
+        )
+    elif is_list_type_hint(type_hint):
+        # There's only one type hint for lists, if more than one item
+        # then they are from union of the same T in List[T].
+        # If no type hints then this is list without [T].
+        item_type_hints: List[Any] = type_hint_arguments(type_hint)
+        if len(item_type_hints) > 0:
+            item_type_hints = item_type_hints[0]
+        return _json_schema_with_optional_fields(
+            JSONSchema(
+                type="array",
+                items=_json_schema(
+                    type_hints=item_type_hints,
+                    fields=None,
+                ),
+            ),
+            fields=fields,
+        )
+    elif is_tuple_type_hint(type_hint):
+        # Each tuple item can have its own type hint or no type hints.
+        # It can also have ellipsis ... at the end which means repeat the
+        # last type any number of times.
+        item_type_hints: List[Any] = type_hint_arguments(type_hint)
+        if len(item_type_hints) == 0:
+            # Tuple without type hints is similar to a list[Any].
+            return _json_schema_with_optional_fields(
+                JSONSchema(
+                    type="array",
+                    items=JSONSchema(
+                        # Allow all json types.
+                        type=[
+                            "null",
+                            "boolean",
+                            "object",
+                            "array",
+                            "number",
+                            "string",
+                            "integer",
+                        ],
+                    ),
+                ),
+                fields=fields,
+            )
+        else:
+            # Tuple with type hints for each item.
+            schema: JSONSchema = _json_schema_with_optional_fields(
+                JSONSchema(
+                    type="array",
+                    prefixItems=[
+                        _json_schema(
+                            type_hints=th,
+                            fields=None,
+                        )
+                        for th in item_type_hints
+                        if th is not ...
+                    ],
+                    minItems=(
+                        len(item_type_hints)
+                        if item_type_hints[-1] is not ...
+                        else len(item_type_hints) - 1
+                    ),
+                ),
+                fields=fields,
+            )
+            if item_type_hints[-1] is not ...:
+                schema.maxItems = schema.minItems
+            if len(item_type_hints) >= 2 and item_type_hints[-1] is ...:
+                # Ellipsis case - allow additional items of the last type.
+                schema.items = _json_schema(
+                    type_hints=item_type_hints[-2],
+                    fields=None,
+                )
+
+            return schema
+    elif is_set_type_hint(type_hint):
+        # Zero or one type hint for sets. Zero means set without [T].
+        item_type_hints: List[Any] = type_hint_arguments(type_hint)
+        if len(item_type_hints) > 0:
+            item_type_hints = item_type_hints[0]
+        return _json_schema_with_optional_fields(
+            JSONSchema(
+                type="array",
+                items=_json_schema(
+                    type_hints=item_type_hints,
+                    fields=None,
+                ),
+                uniqueItems=True,
+            ),
+            fields=fields,
+        )
+    elif is_dict_type_hint(type_hint):
+        # Zero or two type hints for dicts. Zero means dict without [K, V].
+        key_value_type_hints: List[Any] = type_hint_arguments(type_hint)
+
+        # Non-string keys are converted to strings by JSON serialization.
+        if len(key_value_type_hints) >= 1:
+            propertyNames: JSONSchema = _json_schema(
+                type_hints=key_value_type_hints[0],
+                fields=None,
+            )
+        else:
+            # No key type hint - allow any string keys.
+            propertyNames = JSONSchema(type="string")
+
+        value_type_hints: List[Any] = []
+        if len(key_value_type_hints) >= 2:
+            value_type_hints = key_value_type_hints[1]
+        return _json_schema_with_optional_fields(
+            JSONSchema(
+                type="object",
+                propertyNames=propertyNames,
+                additionalProperties=_json_schema(
+                    type_hints=value_type_hints,
+                    fields=None,
+                ),
+            ),
+            fields=fields,
+        )
+    elif is_file_type_hint(type_hint):
+        # Files are never serialized to JSON, they are provided to application
+        # function as HTTP body or part of a HTTP multipart request.
+        # This is a grey area because we don't support deserializing File from JSON
+        # but we still want to document it in function manifest so MCP clients and
+        # curl commands can render it properly.
+        return _json_schema_with_optional_fields(
+            JSONSchema(
+                type="file",  # Custom type for File, not part of JSON Schema spec
+            ),
+            fields=fields,
+        )
+    # Handle all basic JSON serializable types, see https://docs.python.org/3/library/json.html#py-to-json-table
+    elif type_hint is str:
+        return _json_schema_with_optional_fields(
+            JSONSchema(
+                type="string",
+            ),
+            fields=fields,
+        )
+    elif type_hint is int:
+        return _json_schema_with_optional_fields(
+            JSONSchema(
+                type="integer",
+            ),
+            fields=fields,
+        )
+    elif type_hint is float:
+        return _json_schema_with_optional_fields(
+            JSONSchema(
+                type="number",
+            ),
+            fields=fields,
+        )
+    elif type_hint is bool:
+        return _json_schema_with_optional_fields(
+            JSONSchema(
+                type="boolean",
+            ),
+            fields=fields,
+        )
+    elif type_hint is None:
+        return _json_schema_with_optional_fields(
+            JSONSchema(
+                type="null",
+            ),
+            fields=fields,
+        )
     else:
-        # Fallback for complex types without __name__
-        return {"type": "string", "description": str(type_hint)}
+        # Arbitrary class/object not supported by our JSON serializer.
+        # We fail application validation if there are type hints like this.
+        raise ValueError(
+            f"Cannot generate JSON schema, type hint {type_hint} is not JSON serializable"
+        )
 
 
-def _function_signature_info(
+def _function_parameter_manifests(
     function: Function,
-) -> tuple[List[ParameterManifest], Dict[str, str]]:
-    """Extract parameter names, types, and return type from TensorlakeCompute function."""
+    docstring: str,
+    docstring_style: DocstringStyle,
+) -> List[ParameterManifest]:
+    """Returns manifest for each function parameter (in parameter definition order)."""
+    try:
+        param_to_docstring: dict[str, str] = parameter_docstrings(
+            docstring, docstring_style
+        )
+    except Exception:
+        # Not a critical error, either docstring is malformed or our parser could be wrong.
+        param_to_docstring: dict[str, str] = {}
+
     signature = inspect.signature(function._original_function)
-    type_hints = get_type_hints(function._original_function)
-
-    # Extract parameter descriptions from docstring
-    docstring = inspect.getdoc(function._original_function) or ""
-    param_descriptions = _parse_docstring_parameters(docstring)
-
     parameters: List[ParameterManifest] = []
-    for param_name, param in signature.parameters.items():
-        if param_name == "self":
-            continue
+    for param_ix, (param_name, param) in enumerate(signature.parameters.items()):
+        if param_ix == 0 and function._function_config.class_name is not None:
+            continue  # Skip 'self' parameter for class methods
 
-        param_type = type_hints.get(param_name, Any)
-        schema = _type_hint_json_schema(param_type)
-
-        is_required = param.default == inspect.Parameter.empty
-        if not is_required:
-            # Add default value to JSON Schema
-            schema["default"] = param.default
-
-        # Get description from docstring
-        description = param_descriptions.get(param_name, None)
+        param_has_default: bool = param.default != inspect.Parameter.empty
+        param_type_hints: list[Any] = parameter_type_hints(param)
+        param_schema: JSONSchema = _json_schema(
+            type_hints=param_type_hints,
+            fields=_JSONSchemaOptionalFields(
+                title=param_name,
+                description=param_to_docstring.get(param_name, None),
+                parameter_kind=param.kind.name,
+                has_default_value=param_has_default,
+                default_value=param.default,
+            ),
+        )
 
         parameters.append(
             ParameterManifest(
                 name=param_name,
-                data_type=schema,
-                description=description,
-                required=is_required,
+                data_type=param_schema,
+                description=param_to_docstring.get(param_name, None),
+                required=not param_has_default,
             )
         )
 
-    # Extract return type
-    return_type: Any = type_hints.get("return", Any)
-    return_type_schema: Dict[str, str] = _type_hint_json_schema(return_type)
+    return parameters
 
-    return parameters, return_type_schema
+
+def _function_return_type_schema(
+    function: Function,
+    docstring: str,
+    docstring_style: DocstringStyle,
+) -> JSONSchema:
+    """Returns JSON schema for function return type.
+
+    Raises Exception on error.
+    """
+    description: str | None = None
+    try:
+        description = return_value_description(docstring, docstring_style)
+    except Exception:
+        pass  # Not a critical error, either docstring is malformed or our parser could be wrong.
+
+    return_type_hints: list[Any] = function_return_type_hint(function)
+    return _json_schema(
+        type_hints=return_type_hints,
+        fields=_JSONSchemaOptionalFields(
+            title="Return value",
+            description=description,
+            parameter_kind=None,
+            has_default_value=False,
+            default_value=None,
+        ),
+    )
 
 
 def create_function_manifest(
@@ -230,15 +410,34 @@ def create_function_manifest(
             delay_multiplier=function._function_config.retries.delay_multiplier,
         )
     )
-
-    parameters: List[ParameterManifest] = []
-    return_type_json_schema: Dict[str, str] = {}
+    docstring: str = inspect.getdoc(function._original_function) or ""
     try:
-        parameters, return_type_json_schema = _function_signature_info(function)
+        docstring_style: DocstringStyle = detect_docstring_style(docstring)
     except Exception as e:
-        raise InternalError(
-            f"Failed to extract function signature for {function}: {str(e)}"
-        )
+        pass  # Not a critical error, either docstring is malformed or our parser could be wrong.
+
+    # parameters and return type json schemas are only set for application functions
+    # because this is only functions that use JSON serializable parameters and return
+    # values sent via HTTP (or MCP).
+    parameters: List[ParameterManifest] = []
+    return_type: JSONSchema | None = None
+    if _is_application_function(function):
+        try:
+            parameters = _function_parameter_manifests(
+                function, docstring, docstring_style
+            )
+        except Exception as e:
+            raise InternalError(
+                f"Failed to extract function parameter manifests for {function}: {e}"
+            )
+        try:
+            return_type = _function_return_type_schema(
+                function, docstring, docstring_style
+            )
+        except Exception as e:
+            raise InternalError(
+                f"Failed to extract function return type schema for {function}: {e}"
+            )
 
     cache_key: str | None = (
         f"version_function={application_version}:{function._function_config.function_name}"
@@ -264,6 +463,7 @@ def create_function_manifest(
     return FunctionManifest(
         name=function._function_config.function_name,
         description=function._function_config.description,
+        docstring=docstring,
         is_api=function._application_config is not None,
         secret_names=function._function_config.secrets,
         # When a function doesn't have a class_init_timeout set it means it's not a class method.
@@ -278,7 +478,7 @@ def create_function_manifest(
         retry_policy=retry_policy,
         cache_key=cache_key,
         parameters=parameters,
-        return_type=return_type_json_schema,
+        return_type=return_type,
         placement_constraints=placement_constraints,
         max_concurrency=function._function_config.max_concurrency,
         min_containers=function._function_config.min_containers,

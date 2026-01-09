@@ -120,28 +120,6 @@ def test_pydantic_return_value_api() -> DirModel:
     return dir
 
 
-@function()
-@application()
-def test_set_arg_and_return_value_api(arg: set[str]) -> set[str]:
-    if not isinstance(arg, set):
-        raise RequestError(f"Set type mismatch: {type(arg)}")
-    if arg != {"apple", "banana", "cherry"}:
-        raise RequestError(f"Set content mismatch: {arg}")
-    return arg
-
-
-@function()
-@application()
-def test_tuple_arg_and_return_value_api(
-    arg: tuple[str, str, str, str],
-) -> tuple[str, str, str, str]:
-    if not isinstance(arg, tuple):
-        raise RequestError(f"Tuple type mismatch: {type(arg)}")
-    if arg != ("apple", "banana", "cherry", "cherry"):
-        raise RequestError(f"Tuple content mismatch: {arg}")
-    return arg
-
-
 class TestApplicationFunctionCallSignatures(unittest.TestCase):
     def test_applications_are_valid(self):
         self.assertEqual(validate_loaded_applications(), [])
@@ -316,34 +294,6 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
         self.assertEqual(output_dir.files[1].path, "/returned/dir/fileB.txt")
         self.assertEqual(output_dir.files[1].size, 222)
         self.assertTrue(output_dir.files[1].is_read_only)
-
-    @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_set_arg_and_return_value(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
-        request: Request = run_application(
-            test_set_arg_and_return_value_api,
-            is_remote,
-            {"apple", "banana", "cherry"},
-        )
-        output_set: set[str] = request.output()
-        self.assertIsInstance(output_set, set)
-        self.assertEqual(output_set, {"apple", "banana", "cherry"})
-
-    @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_tuple_arg_and_return_value(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
-        request: Request = run_application(
-            test_tuple_arg_and_return_value_api,
-            is_remote,
-            ("apple", "banana", "cherry", "cherry"),
-        )
-        output_tuple: tuple[str, str, str, str] = request.output()
-        self.assertIsInstance(output_tuple, tuple)
-        self.assertEqual(output_tuple, ("apple", "banana", "cherry", "cherry"))
 
 
 if __name__ == "__main__":

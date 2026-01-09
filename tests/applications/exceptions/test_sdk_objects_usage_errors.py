@@ -1,10 +1,10 @@
 import unittest
+from typing import Any
 
 import parameterized
 
 from tensorlake.applications import (
     Awaitable,
-    Function,
     Future,
     Request,
     RequestFailed,
@@ -84,7 +84,7 @@ def function_as_function_argument(_: str) -> str:
 # Check that it's not picklable in this test.
 @application(output_serializer="pickle")
 @function()
-def return_function(_: str) -> Function:
+def return_function(_: str) -> Any:
     return other_function
 
 
@@ -138,14 +138,14 @@ def other_function_reduce(arg1, arg2):
 
 @application()
 @function()
-def return_future(_: str) -> Future:
+def return_future(_: str) -> Any:
     future: Future = other_function.awaitable(1).run()
     return future
 
 
 @application()
 @function()
-def return_running_awaitable(_: str) -> Awaitable:
+def return_running_awaitable(_: str) -> Any:
     awaitable: Awaitable = other_function.awaitable(1)
     future: Future = awaitable.run()
     return awaitable

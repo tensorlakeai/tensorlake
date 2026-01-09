@@ -10,3 +10,8 @@ class File:
     @property
     def content_type(self) -> str:
         return self._content_type
+
+    def __str__(self) -> str:
+        return (
+            f"File(content_type={self._content_type}, content={self._content[:20]}...)"
+        )

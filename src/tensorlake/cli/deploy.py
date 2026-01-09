@@ -17,6 +17,7 @@ from tensorlake.applications.remote.code.loader import load_code
 from tensorlake.applications.remote.deploy import deploy_applications
 from tensorlake.applications.remote.manifests.function import (
     FunctionManifest,
+    JSONSchema,
     create_function_manifest,
 )
 from tensorlake.applications.secrets import list_secret_names
@@ -164,11 +165,12 @@ def _deploy_applications(
             click.echo(f"🚀 Application `{func_name}` deployed successfully\n")
             # TODO: update after parameterless function support
             if len(app_func_manifest.parameters) > 0:
-                param_type = app_func_manifest.parameters[0].data_type
+                param_type: JSONSchema = app_func_manifest.parameters[0].data_type
+                # TODO: Handle type unions and Files.
                 type = (
-                    param_type["type"]
-                    if param_type["type"] != "string"
-                    else f'"{param_type["type"]}"'
+                    param_type.type
+                    if param_type.type != "string"
+                    else f'"{param_type.type}"'
                 )
                 click.echo(
                     f"""💡 To invoke it, you can use the following cURL command:
@@ -177,10 +179,16 @@ curl {auth.api_url}/applications/{func_name} \\
 -H "Authorization: Bearer $TENSORLAKE_API_KEY" \\
 --json '{type}'
 ```
-
-📚 Visit or documentation if you need more information about invoking applications: https://docs.tensorlake.ai/applications/quickstart#calling-applications
-""",
+"""
                 )
+
+        click.echo(
+            """
+
+📚 Visit our documentation if you need more information about invoking applications: https://docs.tensorlake.ai/applications/quickstart#calling-applications
+
+"""
+        )
         return
     except SDKUsageError as e:
         raise click.UsageError(str(e)) from None

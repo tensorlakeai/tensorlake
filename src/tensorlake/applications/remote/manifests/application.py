@@ -27,6 +27,16 @@ class ApplicationManifest(BaseModel):
     functions: Dict[str, FunctionManifest]
     entrypoint: EntryPointManifest
 
+    def model_dump_json(self, **kwargs: Any) -> str:
+        # exclude_unset=True to avoid sending default None values.
+        # This is required for JSONSchema object fields where
+        # almost everything is optional. And 'default' fields.
+        # If they are set to None by it actually means that None is
+        # the default value, not absence of default value.
+        if "exclude_unset" not in kwargs:
+            kwargs["exclude_unset"] = True
+        return super().model_dump_json(**kwargs)
+
 
 def create_application_manifest(
     application_function: Function, all_functions: List[Function]

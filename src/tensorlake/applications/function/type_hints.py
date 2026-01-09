@@ -1,9 +1,11 @@
 import inspect
 import pickle
 from types import UnionType
-from typing import Any, List, Union, get_args, get_origin
+from typing import Annotated, Any, Dict, List, Set, Tuple, Union, get_args, get_origin
 
-from ..interface import Function
+import pydantic
+
+from ..interface import File, Function
 
 
 def parameter_type_hints(parameter: inspect.Parameter) -> List[Any]:
@@ -13,7 +15,27 @@ def parameter_type_hints(parameter: inspect.Parameter) -> List[Any]:
     """
     if parameter.annotation is inspect.Parameter.empty:
         return []
-    return _resolve_type_hints(parameter.annotation)
+    return _resolve_type_hint(parameter.annotation)
+
+
+def type_hint_arguments(type_hint: Any) -> List[Any]:
+    """Returns the type hints of arguments for the provided type hint.
+
+    Examples:
+    For List[str] returns [[str]].
+    For Dict[str, int] returns [[str], [int]].
+    For Union[str, int] returns [[str, int]].
+    For tuple[Union[str, int], bool] returns [[str, int], [bool]].
+    For List[int] returns [[int]].
+    For Dict[str, List[int]] returns [[str], [int]].
+    For Dict[str, List[int] | None] returns [[str], [int, None]].
+    For str returns [].
+    """
+    args: tuple[Any, ...] = get_args(type_hint)
+    resolved_args: List[Any] = []
+    for arg in args:
+        resolved_args.append(_resolve_type_hint(arg))
+    return resolved_args
 
 
 def function_arg_type_hint(function: Function, arg_index: int) -> List[Any]:
@@ -47,7 +69,7 @@ def function_return_type_hint(function: Function) -> List[Any]:
     if signature.return_annotation is inspect.Signature.empty:
         return []
 
-    return _resolve_type_hints(signature.return_annotation)
+    return _resolve_type_hint(signature.return_annotation)
 
 
 def serialize_type_hints(type_hints: List[Any]) -> bytes:
@@ -71,8 +93,12 @@ def function_signature(function: Function) -> inspect.Signature:
     )
 
 
-def _resolve_type_hints(type_hint: Any) -> List[Any]:
-    """Returns all types in the provided type hint.
+def _resolve_type_hint(type_hint: Any) -> List[Any]:
+    """Simplifies the provided type hint.
+
+    If the provided type hint is a union of types, returns all singular types in the union in a list.
+    If the type hint is an annotated type, like Annotated[T, ...] or Optional[T], returns T.
+    Otherwise, returns a list with the provided type hint as the only element.
 
     Examples:
         str -> [str]
@@ -81,10 +107,13 @@ def _resolve_type_hints(type_hint: Any) -> List[Any]:
         str | FunctionCall -> [str, FunctionCall]
         List[str | FunctionCall] -> [List[str | FunctionCall]]
         Tuple[str | FunctionCall, int] -> [Tuple[str | FunctionCall, int]]
-
     """
-    if _is_union_origin(get_origin(type_hint)):
+    origin: Any = get_origin(type_hint)
+    if _is_union_origin(origin):
+        # Also handles Optional[T] because its origin is Union[T, None].
         return _resolve_union_type_hint(type_hint)
+    elif origin is Annotated:
+        return _resolve_type_hint(get_args(type_hint)[0])
     else:
         return [type_hint]
 
@@ -103,3 +132,52 @@ def _resolve_union_type_hint(union_type_hint: Any) -> List[Any]:
         str | FunctionCall -> [str, FunctionCall]
     """
     return [t for t in get_args(union_type_hint)]
+
+
+def is_list_type_hint(type_hint: Any) -> bool:
+    """Returns True if the provided type hint is for a list."""
+    # Handles type hints: List[T], list[T], list.
+    return (
+        get_origin(type_hint) is List
+        or get_origin(type_hint) is list
+        or type_hint is list
+    )
+
+
+def is_dict_type_hint(type_hint: Any) -> bool:
+    """Returns True if the provided type hint is for a dict."""
+    # Handles type hints: Dict[K, V], dict[K, V], dict.
+    return (
+        get_origin(type_hint) is Dict
+        or get_origin(type_hint) is dict
+        or type_hint is dict
+    )
+
+
+def is_set_type_hint(type_hint: Any) -> bool:
+    """Returns True if the provided type hint is for a set."""
+    # Set is serialized as array by json.dumps.
+    # Handles type hints: Set[T], set[T], set.
+    return (
+        get_origin(type_hint) is Set or get_origin(type_hint) is set or type_hint is set
+    )
+
+
+def is_tuple_type_hint(type_hint: Any) -> bool:
+    """Returns True if the provided type hint is for a tuple."""
+    # Handles type hints: Tuple[T], tuple[T], tuple.
+    return (
+        get_origin(type_hint) is Tuple
+        or get_origin(type_hint) is tuple
+        or type_hint is tuple
+    )
+
+
+def is_pydantic_type_hint(type_hint: Any) -> bool:
+    """Returns True if the provided type hint is for a Pydantic model class."""
+    return inspect.isclass(type_hint) and issubclass(type_hint, pydantic.BaseModel)
+
+
+def is_file_type_hint(type_hint: Any) -> bool:
+    """Returns True if the provided type hint is for an SDK File."""
+    return inspect.isclass(type_hint) and issubclass(type_hint, File)
