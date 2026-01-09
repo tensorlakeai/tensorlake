@@ -4,6 +4,7 @@ import threading
 import unittest
 
 import parameterized
+import validate_all_applications
 
 from tensorlake.applications import (
     Request,
@@ -13,6 +14,9 @@ from tensorlake.applications import (
 )
 from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
+
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
 
 
 def get_state_worker(ctx: RequestContext, key: str, q) -> None:
@@ -35,7 +39,7 @@ def set_state_worker(ctx: RequestContext, key: str, value, q) -> None:
 
 @application()
 @function()
-def mt_get_after_set(_: str) -> str:
+def mt_get_after_set() -> str:
     ctx: RequestContext = RequestContext.get()
     key: str = "mt_key"
     value: str = "mt_value"
@@ -71,15 +75,15 @@ class TestUseRequestStateFromChildThread(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(mt_get_after_set, is_remote, 11)
+        request: Request = run_application(mt_get_after_set, is_remote)
 
-        output: int = request.output()
+        output: str = request.output()
         self.assertEqual(output, "success")
 
 
 @application()
 @function()
-def mp_get_after_set(_: str) -> str:
+def mp_get_after_set() -> str:
     ctx: RequestContext = RequestContext.get()
     key: str = "mt_key"
     value: str = "mt_value"
@@ -111,9 +115,9 @@ class TestUseRequestStateFromChildProcess(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(mp_get_after_set, is_remote, 11)
+        request: Request = run_application(mp_get_after_set, is_remote)
 
-        output: int = request.output()
+        output: str = request.output()
         self.assertEqual(output, "success")
 
 

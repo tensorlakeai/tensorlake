@@ -65,7 +65,7 @@ class TestRequestError(unittest.TestCase):
                             request_id="123",
                             function_call_id="test-function-call",
                             allocation_id="test-allocation-id",
-                            inputs=application_function_inputs(10),
+                            inputs=application_function_inputs(10, int),
                         ),
                     ),
                 )

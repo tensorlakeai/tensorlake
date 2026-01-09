@@ -1,6 +1,8 @@
 import unittest
 from typing import List
 
+import validate_all_applications
+
 # Import from local package using absolute import path.
 from hello_world.hello_world import hello_world
 from hello_world.subpackage.subpackage import (
@@ -22,6 +24,10 @@ from tensorlake.applications import (
     run_remote_application,
 )
 from tensorlake.applications.remote.deploy import deploy_applications
+
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
+
 
 # Warning: this test file is not a part of Python package so relative import from it are not possible.
 # Some subdirs in this code directory are Python packages (they have __init__.py file) and some are not.
@@ -117,9 +123,6 @@ class TestApplicationCodeSerialization(unittest.TestCase):
             TensorlakeFunctionSubpackageHelloWorld().run, "test"
         )
         self.assertEqual(request.output(), subpackage_hello_world())
-
-
-# TODO: Add test case that validates that multiprocessing works.
 
 
 if __name__ == "__main__":

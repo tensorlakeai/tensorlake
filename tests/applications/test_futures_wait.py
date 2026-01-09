@@ -3,6 +3,7 @@ import unittest
 from typing import Any
 
 import parameterized
+import validate_all_applications
 
 from tensorlake.applications import (
     RETURN_WHEN,
@@ -15,6 +16,9 @@ from tensorlake.applications import (
 )
 from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
+
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
 
 
 @application()

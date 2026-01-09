@@ -2,12 +2,15 @@ import unittest
 from typing import Any
 
 import parameterized
+import validate_all_applications
 from models import DirModel, FileModel
 
 from tensorlake.applications import File, Request, RequestError, application, function
 from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
-from tensorlake.applications.validation import validate_loaded_applications
+
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
 
 
 @application()
@@ -23,7 +26,7 @@ def test_function_with_no_args_internal() -> str:
 
 @application()
 @function()
-def test_function_returning_nothing_api(_: Any) -> None:
+def test_function_returning_nothing_api(_: Any) -> str:
     return_value: Any = test_function_returning_nothing_internal()
     if return_value is not None:
         raise RequestError(f"Expected None return value, got: {return_value}")
@@ -249,9 +252,6 @@ def test_tuple_arg_and_return_value_internal(
 
 
 class TestRegularFunctionCallSignatures(unittest.TestCase):
-    def test_applications_are_valid(self):
-        self.assertEqual(validate_loaded_applications(), [])
-
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_function_with_no_args(self, _: str, is_remote: bool):
         if is_remote:

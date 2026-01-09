@@ -1,11 +1,16 @@
 import unittest
 
+import validate_all_applications
+
 from tensorlake.applications import (
     Request,
     application,
     function,
     run_local_application,
 )
+
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
 
 
 @function()

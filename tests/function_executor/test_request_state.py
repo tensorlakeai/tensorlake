@@ -97,7 +97,7 @@ class TestSetRequestState(unittest.TestCase):
                             request_id="123",
                             function_call_id="test-function-call",
                             allocation_id=allocation_id,
-                            inputs=application_function_inputs(42),
+                            inputs=application_function_inputs(42, int),
                         ),
                     ),
                 )
@@ -223,7 +223,7 @@ class TestSetRequestState(unittest.TestCase):
                     StructuredState
                 ) = PickleUserDataSerializer().deserialize(
                     serialized_request_state,
-                    possible_types=[StructuredState],
+                    type_hint=StructuredState,
                 )
                 self.assertEqual(
                     StructuredState(
@@ -249,7 +249,7 @@ class TestSetRequestState(unittest.TestCase):
                             request_id="123",
                             function_call_id="test-function-call",
                             allocation_id=allocation_id,
-                            inputs=application_function_inputs(42),
+                            inputs=application_function_inputs(42, int),
                         ),
                     ),
                 )
@@ -365,7 +365,7 @@ class TestGetRequestState(unittest.TestCase):
                             request_id="123",
                             function_call_id="test-function-call",
                             allocation_id=allocation_id,
-                            inputs=application_function_inputs(33),
+                            inputs=application_function_inputs(33, int),
                         ),
                     ),
                 )
@@ -400,7 +400,8 @@ class TestGetRequestState(unittest.TestCase):
                                 structured=StructuredField(
                                     list=[1, 2, 3], dictionary={"a": 1, "b": 2}
                                 ),
-                            )
+                            ),
+                            StructuredState,
                         )
                         request_state_blob: BLOB = create_tmp_blob(
                             id=f"request_state/{operation.state_key}",
@@ -486,7 +487,7 @@ class TestGetRequestState(unittest.TestCase):
                             request_id="123",
                             function_call_id="test-function-call",
                             allocation_id=allocation_id,
-                            inputs=application_function_inputs(33),
+                            inputs=application_function_inputs(33, int),
                         ),
                     ),
                 )
@@ -586,7 +587,7 @@ class TestGetRequestState(unittest.TestCase):
                             request_id="123",
                             function_call_id="test-function-call",
                             allocation_id=allocation_id,
-                            inputs=application_function_inputs(33),
+                            inputs=application_function_inputs(33, int),
                         ),
                     ),
                 )

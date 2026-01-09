@@ -1,5 +1,3 @@
-from typing import Any
-
 from ..interface import SDKUsageError
 from ..local.runner import LocalRunner
 from ..registry import get_function

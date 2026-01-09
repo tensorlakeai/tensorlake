@@ -115,7 +115,7 @@ class TestHealthCheck(unittest.TestCase):
                                     request_id="123",
                                     function_call_id="test-function-call",
                                     allocation_id=allocation_id,
-                                    inputs=application_function_inputs("deadlock"),
+                                    inputs=application_function_inputs("deadlock", str),
                                 ),
                             ),
                             timeout_sec=HEALTH_CHECK_TIMEOUT_SEC,
@@ -160,7 +160,9 @@ class TestHealthCheck(unittest.TestCase):
                                 request_id="123",
                                 function_call_id="test-function-call",
                                 allocation_id="test-allocation-id",
-                                inputs=application_function_inputs("raise_exception"),
+                                inputs=application_function_inputs(
+                                    "raise_exception", str
+                                ),
                             ),
                         ),
                     )
@@ -206,7 +208,9 @@ class TestHealthCheck(unittest.TestCase):
                                     request_id="123",
                                     function_call_id="test-function-call",
                                     allocation_id="test-allocation-id",
-                                    inputs=application_function_inputs("crash_process"),
+                                    inputs=application_function_inputs(
+                                        "crash_process", str
+                                    ),
                                 ),
                             ),
                         )
@@ -249,7 +253,8 @@ class TestHealthCheck(unittest.TestCase):
                                     function_call_id="test-function-call",
                                     allocation_id="test-allocation-id",
                                     inputs=application_function_inputs(
-                                        "close_connections"
+                                        "close_connections",
+                                        str,
                                     ),
                                 ),
                             ),

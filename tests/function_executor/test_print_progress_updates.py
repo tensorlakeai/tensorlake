@@ -89,7 +89,7 @@ class TestPrintProgressUpdates(unittest.TestCase):
                             request_id="123",
                             function_call_id="test-function-call",
                             allocation_id="test-allocation-id",
-                            inputs=application_function_inputs(arg),
+                            inputs=application_function_inputs(arg, int),
                         ),
                     ),
                 )
@@ -152,7 +152,7 @@ class TestPrintProgressUpdates(unittest.TestCase):
                             request_id="123",
                             function_call_id="test-function-call",
                             allocation_id="test-allocation-id",
-                            inputs=application_function_inputs(arg),
+                            inputs=application_function_inputs(arg, int),
                         ),
                     ),
                 )

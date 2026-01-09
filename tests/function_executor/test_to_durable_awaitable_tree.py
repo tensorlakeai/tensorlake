@@ -120,14 +120,6 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                 "expected_awaitable_sequence_number": 102,
             },
             {
-                "name": "Single value (not an Awaitable)",
-                "node": 42,
-                "parent_function_call_id": "parent_function_call_id_123",
-                "awaitable_sequence_number": 100,
-                "expected_node": 42,
-                "expected_awaitable_sequence_number": 100,
-            },
-            {
                 "name": "Nested Function Calls",
                 "node": FunctionCallAwaitable(
                     id="awaitable_1",

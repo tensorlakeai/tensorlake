@@ -57,15 +57,11 @@ class _ApplicationDecorator(_Decorator):
         tags: Dict[str, str],
         retries: Retries,
         region: str | None,
-        input_deserializer: str,
-        output_serializer: str,
     ):
         super().__init__()
         self._tags: Dict[str, str] = tags
         self._retries: Retries = retries
         self._region: str | None = region
-        self._input_deserializer: str = input_deserializer
-        self._output_serializer: str = output_serializer
 
     def __call__(self, fn: _Decorator | Callable | Function) -> Function | _Decorator:
         fn: Function | _Decorator = self.create_function(fn)
@@ -77,8 +73,6 @@ class _ApplicationDecorator(_Decorator):
             tags=self._tags,
             retries=self._retries,
             region=self._region,
-            input_deserializer=self._input_deserializer,
-            output_serializer=self._output_serializer,
             # Use a unique random version. We don't provide user controlled versioning at the moment.
             # Use only alphanumeric characters so app version can be used as container tags.
             version=nanoid(
@@ -93,16 +87,12 @@ def application(
     tags: Dict[str, str] = {},
     retries: Retries = Retries(),
     region: Literal["us-east-1", "eu-west-1"] | None = None,
-    input_deserializer: Literal["json", "pickle"] = "json",
-    output_serializer: Literal["json", "pickle"] = "json",
 ) -> _ApplicationDecorator:
     return _ApplicationDecorator(
         # NB: the first argument here is used during pre-deployment validation.
         tags=tags,
         retries=retries,
         region=region,
-        input_deserializer=input_deserializer,
-        output_serializer=output_serializer,
     )
 
 
