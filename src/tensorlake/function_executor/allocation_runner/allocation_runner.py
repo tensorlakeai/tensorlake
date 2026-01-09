@@ -23,8 +23,9 @@ from tensorlake.applications import (
 from tensorlake.applications.algorithms.validate_user_object import validate_user_object
 from tensorlake.applications.blob_store import BLOBStore
 from tensorlake.applications.function.function_call import create_function_error
+from tensorlake.applications.function.type_hints import function_signature
 from tensorlake.applications.function.user_data_serializer import (
-    deserialize_value,
+    deserialize_value_with_metadata,
     function_output_serializer,
 )
 from tensorlake.applications.interface.awaitables import (
@@ -90,6 +91,7 @@ from .sdk_algorithms import (
     deserialize_application_function_call_args,
     deserialize_sdk_function_call_args,
     reconstruct_sdk_function_call_args,
+    serialize_user_value,
     serialize_values_in_awaitable_tree,
     to_durable_awaitable_tree,
     to_execution_plan_updates,
@@ -361,6 +363,8 @@ class AllocationRunner:
         # This is because self._awaitable_tree_sequence_number is used to generate durable
         # Awaitable IDs and it gets incremented after every use.
         for future in futures:
+            if not isinstance(future, Future):
+                raise SDKUsageError(f"Cannot run a non-Future object {future}.")
             future_info: _UserFutureInfo = _UserFutureInfo(
                 user_future=future,
                 durable_awaitable_id=None,
@@ -546,7 +550,7 @@ class AllocationRunner:
                     raise InternalError(
                         "Function Call output SerializedValue is missing metadata."
                     )
-                output: Any = deserialize_value(
+                output: Any = deserialize_value_with_metadata(
                     serialized_output.data, serialized_output.metadata
                 )
                 future.set_result(output)
@@ -673,6 +677,8 @@ class AllocationRunner:
             uploaded_serialized_objects=serialized_objects,
             # Output serializer name override is only applicable to tail calls.
             output_serializer_name_override=None,
+            output_type_hint_override=None,
+            has_output_type_hint_override=False,
             function_ref=self._function_ref,
             logger=self._logger,
         )
@@ -810,14 +816,22 @@ class AllocationRunner:
             logger=self._logger,
         )
 
+        output_value_serializer: UserDataSerializer
+        has_output_value_type_hint_override: bool = False
+        output_value_type_hint_override: Any = None
         if function_call_metadata is None:
             # Application function call created by Server.
             # This is our code.
             # Application function call doesn't have a parent call that can override output serializer.
-            output_serializer: UserDataSerializer = function_output_serializer(
+            output_value_serializer = function_output_serializer(
                 function=self._function,
                 output_serializer_override=None,
             )
+            # We validate application functions to have return type hints.
+            output_value_type_hint_override = function_signature(
+                self._function
+            ).return_annotation
+            has_output_value_type_hint_override = True
             if len(serialized_args) == 0:
                 # We expect exactly one argument but support more for any future FE protocol migrations.
                 raise InternalError(
@@ -839,10 +853,15 @@ class AllocationRunner:
             # Regular function call created by SDK. Uses function call metadata.
             #
             # This is our code.
-            output_serializer: UserDataSerializer = function_output_serializer(
+            output_value_serializer = function_output_serializer(
                 function=self._function,
                 output_serializer_override=function_call_metadata.output_serializer_name_override,
             )
+            if function_call_metadata.has_output_type_hint_override:
+                output_value_type_hint_override = (
+                    function_call_metadata.output_type_hint_override
+                )
+                has_output_value_type_hint_override = True
             # This is user code.
             try:
                 arg_values: Dict[str, Value] = deserialize_sdk_function_call_args(
@@ -912,22 +931,40 @@ class AllocationRunner:
                 self._allocation_event_details, e
             )
 
+        tail_call_durable_awaitable: Awaitable | None = None
         # This is internal FE code.
-        durable_awaitable: Awaitable | Any
-        durable_awaitable, self._awaitable_sequence_number = to_durable_awaitable_tree(
-            root=output,
-            parent_function_call_id=self._allocation.function_call_id,
-            awaitable_sequence_number=self._awaitable_sequence_number,
-        )
+        if isinstance(output, Awaitable):
+            tail_call_durable_awaitable, self._awaitable_sequence_number = (
+                to_durable_awaitable_tree(
+                    root=output,
+                    parent_function_call_id=self._allocation.function_call_id,
+                    awaitable_sequence_number=self._awaitable_sequence_number,
+                )
+            )
 
         # This is user code.
         try:
+            serialized_output: SerializedValue | Awaitable
             serialized_values: Dict[str, SerializedValue] = {}
-            output: SerializedValue | Awaitable = serialize_values_in_awaitable_tree(
-                root=durable_awaitable,
-                value_serializer=output_serializer,
-                serialized_values=serialized_values,
-            )
+            if tail_call_durable_awaitable is None:
+                serialized_output = serialize_user_value(
+                    value=output,
+                    serializer=output_value_serializer,
+                    type_hint=(
+                        output_value_type_hint_override
+                        if has_output_value_type_hint_override
+                        else type(output)
+                    ),
+                )
+                serialized_values[serialized_output.metadata.id] = serialized_output
+            else:
+                # Use Pickle serializer because we're only serializing inputs for SDK
+                # generated function calls, not their outputs.
+                serialized_output = serialize_values_in_awaitable_tree(
+                    root=tail_call_durable_awaitable,
+                    value_serializer=PickleUserDataSerializer(),
+                    serialized_values=serialized_values,
+                )
         except BaseException as e:
             # This is internal FE code.
             return self._result_helper.from_user_exception(
@@ -956,16 +993,18 @@ class AllocationRunner:
         output_pb: SerializedObjectInsideBLOB | ExecutionPlanUpdates
         # This is user code.
         try:
-            if isinstance(output, Awaitable):
+            if isinstance(serialized_output, Awaitable):
                 output_pb = to_execution_plan_updates(
-                    awaitable=output,
+                    awaitable=serialized_output,
                     uploaded_serialized_objects=serialized_objects,
-                    output_serializer_name_override=output_serializer.name,
+                    output_serializer_name_override=output_value_serializer.name,
+                    has_output_type_hint_override=has_output_value_type_hint_override,
+                    output_type_hint_override=output_value_type_hint_override,
                     function_ref=self._function_ref,
                     logger=self._logger,
                 )
             else:
-                output_pb = serialized_objects[output.metadata.id]
+                output_pb = serialized_objects[serialized_output.metadata.id]
         except BaseException as e:
             return self._result_helper.from_user_exception(
                 self._allocation_event_details, e

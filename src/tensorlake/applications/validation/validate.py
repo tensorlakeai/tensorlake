@@ -2,6 +2,8 @@ import inspect
 import os
 from typing import Any, Callable
 
+import pydantic
+
 from ..function.introspect import (
     ClassDetails,
     FunctionDetails,
@@ -10,12 +12,12 @@ from ..function.introspect import (
     is_module_level_function_or_class,
 )
 from ..function.type_hints import (
-    function_arg_type_hint,
-    function_return_type_hint,
     function_signature,
-    parameter_type_hints,
+    is_awaitable_type_hint,
+    is_file_type_hint,
 )
-from ..interface import Function, InternalError
+from ..function.user_data_serializer import function_input_serializer
+from ..interface import Awaitable, File, Function, InternalError
 from ..interface.decorators import (
     _ApplicationDecorator,
     _class_name,
@@ -31,6 +33,11 @@ from ..registry import (
     get_functions,
     get_functions_with_duplicates,
     has_class,
+)
+from ..user_data_serializer import (
+    UserDataSerializer,
+    create_type_adapter,
+    generate_json_schema,
 )
 from .message import ValidationMessage, ValidationMessageSeverity
 
@@ -339,29 +346,6 @@ def _validate_applications() -> list[ValidationMessage]:
             )
         )
 
-    for application in applications:
-        application_details: FunctionDetails = get_function_details(
-            application._original_function
-        )
-        if application._application_config.output_serializer not in ("json", "pickle"):
-            messages.append(
-                ValidationMessage(
-                    message=f"Application function uses not supported output serializer '{application._application_config.output_serializer}'. "
-                    "Only 'json' and 'pickle' are supported. Please use a supported output serializer.",
-                    severity=ValidationMessageSeverity.ERROR,
-                    details=application_details,
-                )
-            )
-        if application._application_config.input_deserializer not in ("json", "pickle"):
-            messages.append(
-                ValidationMessage(
-                    message=f"Application function uses not supported input deserializer '{application._application_config.input_deserializer}'. "
-                    "Only 'json' and 'pickle' are supported. Please use a supported input deserializer.",
-                    severity=ValidationMessageSeverity.ERROR,
-                    details=application_details,
-                )
-            )
-
     return messages
 
 
@@ -466,15 +450,27 @@ def _validate_application_function(
         # Return immediately because rest of validations don't make sense.
         return messages
 
-    # skip 'self'
     first_arg_index: int = 0 if function_details.class_name is None else 1
     # signature.parameters is an ordered mapping in parameters definition order.
     parameters_in_definition_order: list[inspect.Parameter] = list(
         signature.parameters.values()
-    )
-    for i in range(first_arg_index, len(signature.parameters)):
-        parameter: inspect.Parameter = parameters_in_definition_order[i]
-        if len(parameter_type_hints(parameter)) == 0:
+    )[first_arg_index:]
+    for parameter in parameters_in_definition_order:
+        parameter: inspect.Parameter
+
+        # This is required to not deal with complexities of POSITIONAL_ONLY and KEYWORD_ONLY parameters
+        # in application function calling conventions.
+        if parameter.kind != inspect.Parameter.POSITIONAL_OR_KEYWORD:
+            messages.append(
+                ValidationMessage(
+                    message=f"Application function parameter '{parameter.name}' has unsupported parameter kind '{parameter.kind.description}'. "
+                    "Please change the parameter to be positional or keyword (the default kind for Python parameters).",
+                    severity=ValidationMessageSeverity.ERROR,
+                    details=function_details,
+                )
+            )
+
+        if parameter.annotation is inspect.Parameter.empty:
             messages.append(
                 ValidationMessage(
                     message=f"Application function parameter '{parameter.name}' requires a type hint. Please add a type hint to the parameter.",
@@ -482,9 +478,71 @@ def _validate_application_function(
                     details=function_details,
                 )
             )
+        else:
+            if is_file_type_hint(parameter.annotation):
+                continue  # Not serialized using Pydantic
 
-    return_type_hints: list[Any] = function_return_type_hint(function)
-    if len(return_type_hints) == 0:
+            try:
+                type_adapter: pydantic.TypeAdapter = create_type_adapter(
+                    parameter.annotation
+                )
+            except Exception as e:
+                if str(File) in str(e):
+                    messages.append(
+                        ValidationMessage(
+                            message=f"Application function parameter '{parameter.name}' uses a File object in a complex type hint '{parameter.annotation}'. "
+                            f"Only simple type hints like '{parameter.name}: File' are supported for File objects in application function parameters. "
+                            f"A File object cannot be embedded inside other type hints like '{parameter.name}: list[File]', '{parameter.name}: dict[str, File]', etc or be a part of union "
+                            f"type hint like '{parameter.name}: File | None'.",
+                            severity=ValidationMessageSeverity.ERROR,
+                            details=function_details,
+                        )
+                    )
+                else:
+                    messages.append(
+                        ValidationMessage(
+                            message=f"Pydantic failed to generate CoreSchema for Application function parameter '{parameter.name}' "
+                            f"with type hint '{parameter.annotation}'. Please follow Pydantic documentation and the following Pydantic "
+                            f"error message to make the type hint compatible.\nPydantic error message:\n{e}\n",
+                            severity=ValidationMessageSeverity.ERROR,
+                            details=function_details,
+                        )
+                    )
+            else:
+                try:
+                    generate_json_schema(type_adapter)
+                except Exception as e:
+                    messages.append(
+                        ValidationMessage(
+                            message=f"Pydantic failed to generate JSON schema for Application function parameter '{parameter.name}' "
+                            f"with type hint '{parameter.annotation}'. Please follow Pydantic documentation and the following Pydantic "
+                            f"error message to make the type hint serializable to JSON format.\nPydantic error message:\n{e}\n",
+                            severity=ValidationMessageSeverity.ERROR,
+                            details=function_details,
+                        )
+                    )
+
+                if parameter.default is not inspect.Parameter.empty:
+                    default_arg_value_serializer: UserDataSerializer = (
+                        function_input_serializer(function, app_call=True)
+                    )
+                    try:
+                        default_arg_value_serializer.serialize(
+                            parameter.default, parameter.annotation
+                        )
+                    except Exception as e:
+                        messages.append(
+                            ValidationMessage(
+                                message=f"Application function parameter '{parameter.name}' has a default value that can't be serialized with "
+                                f"the type hint of the parameter {parameter.annotation}. "
+                                f"Please follow Pydantic documentation and the following Pydantic error message to make the default value serializable "
+                                "to JSON format.\nPydantic error message:\n{e}\n",
+                                severity=ValidationMessageSeverity.ERROR,
+                                details=function_details,
+                            )
+                        )
+
+    if signature.return_annotation is inspect.Signature.empty:
         messages.append(
             ValidationMessage(
                 message="Application function requires a return type hint. Please add a return type hint to the function.",
@@ -492,6 +550,72 @@ def _validate_application_function(
                 details=function_details,
             )
         )
+    else:
+        if is_file_type_hint(signature.return_annotation):
+            pass  # Not serialized using Pydantic
+        elif is_awaitable_type_hint(signature.return_annotation):
+            messages.append(
+                ValidationMessage(
+                    message=f"Application function return type hint is an Awaitable. "
+                    "Instead of using Awaitable as a return type hint, please use type hint of the value returned by the Awaitable. "
+                    "For example, if the Awaitable (once resolved) returns str, then please use 'str' in the return type hint of "
+                    "the application function instead of the Awaitable.",
+                    severity=ValidationMessageSeverity.ERROR,
+                    details=function_details,
+                )
+            )
+        else:
+            try:
+                type_adapter: pydantic.TypeAdapter = create_type_adapter(
+                    signature.return_annotation
+                )
+            except Exception as e:
+                e_str: str = str(e)
+                if str(File) in e_str:
+                    messages.append(
+                        ValidationMessage(
+                            message=f"Application function return type hint '{signature.return_annotation}' uses a File object in a complex type hint. "
+                            "Only simple type hints like 'foo: File' are supported for File objects in application function return types. "
+                            "A File object cannot be embedded inside other type hints like 'foo: list[File]', 'foo: dict[str, File]', etc or be a part of union "
+                            "type hint like 'foo: File | None'.",
+                            severity=ValidationMessageSeverity.ERROR,
+                            details=function_details,
+                        )
+                    )
+                elif str(Awaitable) in e_str:
+                    messages.append(
+                        ValidationMessage(
+                            message=f"Application function return type hint '{signature.return_annotation}' uses an Awaitable object. "
+                            "Instead of using Awaitable in the return type hint, please use type hint of the value returned by the Awaitable. "
+                            "For example, if the Awaitable (once resolved) returns str, then please use 'str' in the return type hint of "
+                            "the application function instead of the Awaitable.",
+                            severity=ValidationMessageSeverity.ERROR,
+                            details=function_details,
+                        )
+                    )
+                else:
+                    messages.append(
+                        ValidationMessage(
+                            message=f"Pydantic failed to generate CoreSchema for Application function return type hint '{signature.return_annotation}'. "
+                            "Please follow Pydantic documentation and the following Pydantic error message to make the type hint compatible."
+                            f"\nPydantic error message:\n{e_str}\n",
+                            severity=ValidationMessageSeverity.ERROR,
+                            details=function_details,
+                        )
+                    )
+            else:
+                try:
+                    generate_json_schema(type_adapter)
+                except Exception as e:
+                    messages.append(
+                        ValidationMessage(
+                            message=f"Pydantic failed to generate JSON schema for Application function return type hint '{signature.return_annotation}'. "
+                            "Please follow Pydantic documentation and the following Pydantic error message to make the type hint serializable to JSON format."
+                            f"\nPydantic error message:\n{e}\n",
+                            severity=ValidationMessageSeverity.ERROR,
+                            details=function_details,
+                        )
+                    )
 
     return messages
 

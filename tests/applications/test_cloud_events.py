@@ -2,7 +2,6 @@ import io
 import json
 import sys
 import unittest
-from datetime import datetime, timezone
 
 from tensorlake.applications import SerializationError
 from tensorlake.applications.cloud_events import (

@@ -3,6 +3,7 @@ import sys
 import unittest
 
 import parameterized
+import validate_all_applications
 
 from tensorlake.applications import (
     Request,
@@ -14,10 +15,13 @@ from tensorlake.applications.applications import run_application
 from tensorlake.applications.interface.exceptions import SDKUsageError
 from tensorlake.applications.remote.deploy import deploy_applications
 
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
+
 
 @application()
 @function()
-def test_update_progress(values: tuple[int, int]) -> str:
+def test_update_progress(values: tuple[int | float, int | float]) -> str:
     ctx: RequestContext = RequestContext.get()
     ctx.progress.update(current=values[0], total=values[1])
     return "success"
@@ -25,7 +29,9 @@ def test_update_progress(values: tuple[int, int]) -> str:
 
 @application()
 @function()
-def test_update_progress_with_parameters(values: tuple[int, int]) -> str:
+def test_update_progress_with_parameters(
+    values: tuple[int | float, int | float],
+) -> str:
     ctx: RequestContext = RequestContext.get()
     ctx.progress.update(
         current=values[0],
