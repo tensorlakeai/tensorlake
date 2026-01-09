@@ -1,6 +1,7 @@
 import unittest
 
 import parameterized
+import validate_all_applications
 from pydantic import BaseModel
 
 from tensorlake.applications import (
@@ -13,10 +14,13 @@ from tensorlake.applications import (
 from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
 
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
+
 
 @application()
 @function()
-def test_request_context_state_set_get_simple_value_api(value: int) -> str:
+def test_request_context_state_set_get_simple_value_api(value: int) -> int:
     ctx: RequestContext = RequestContext.get()
     ctx.state.set("key1", value)
     return test_request_context_state_set_get_simple_value_internal()
@@ -37,9 +41,7 @@ def test_request_context_state_get_default_value_api(default: str) -> str:
 
 @application()
 @function()
-def test_request_context_state_get_without_default_value_returns_none_api(
-    _: str,
-) -> None:
+def test_request_context_state_get_without_default_value_returns_none_api() -> None:
     ctx: RequestContext = RequestContext.get()
     return ctx.state.get("non_existing_key")
 
@@ -176,7 +178,6 @@ class TestRequestState(unittest.TestCase):
         request: Request = run_application(
             test_request_context_state_get_without_default_value_returns_none_api,
             is_remote,
-            None,
         )
 
         output: None | str = request.output()

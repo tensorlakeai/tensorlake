@@ -170,7 +170,9 @@ class TestRunAllocation(unittest.TestCase):
                             request_id="123",
                             function_call_id="test-function-call",
                             allocation_id=allocation_id,
-                            inputs=application_function_inputs("https://example.com"),
+                            inputs=application_function_inputs(
+                                "https://example.com", str
+                            ),
                         ),
                     ),
                 )
@@ -290,7 +292,7 @@ class TestRunAllocation(unittest.TestCase):
                             function_call_id="test-function-call",
                             allocation_id=allocation_id,
                             inputs=application_function_inputs(
-                                "https://blocking-example.com"
+                                "https://blocking-example.com", str
                             ),
                         ),
                     ),
@@ -436,9 +438,9 @@ class TestRunAllocation(unittest.TestCase):
                 serialized_function_call_output_metadata: bytes = serialize_metadata(
                     ValueMetadata(
                         id="function-call-output-id",
-                        cls=list,
+                        type_hint=list[FileChunk],
                         serializer_name=user_serializer.name,
-                        content_type=None,
+                        content_type=user_serializer.content_type,
                     )
                 )
                 serialized_function_call_output: bytes = user_serializer.serialize(
@@ -458,7 +460,8 @@ class TestRunAllocation(unittest.TestCase):
                             start=2,
                             end=3,
                         ),
-                    ]
+                    ],
+                    type_hint=list[FileChunk],
                 )
 
                 function_call_output_blob_data: bytes = b"".join(
@@ -596,25 +599,25 @@ class TestRunAllocation(unittest.TestCase):
                     HTTPBodyPart(
                         field_name="1",
                         content_type="application/json",
-                        body=user_serializer.serialize("test-string-arg"),
+                        body=user_serializer.serialize("test-string-arg", str),
                     ),
                     # arg2 is passed as second positional argument
                     HTTPBodyPart(
                         field_name="2",
                         content_type="application/json",
-                        body=user_serializer.serialize(777),
+                        body=user_serializer.serialize(777, int),
                     ),
                     # arg3 is passed as keyword argument
                     HTTPBodyPart(
                         field_name="arg3",
                         content_type="application/json",
-                        body=user_serializer.serialize(True),
+                        body=user_serializer.serialize(True, bool),
                     ),
                     # arg4 is passed as keyword argument
                     HTTPBodyPart(
                         field_name="arg4",
                         content_type="application/json",
-                        body=user_serializer.serialize(None),
+                        body=user_serializer.serialize(None, None),
                     ),
                 ]
                 serialized_http_request: bytes = create_multipart_invoke_http_request(
@@ -710,7 +713,7 @@ class TestRunAllocation(unittest.TestCase):
                 serialized_file_arg_metadata: bytes = serialize_metadata(
                     ValueMetadata(
                         id="file_arg_id",
-                        cls=File,
+                        type_hint=File,
                         serializer_name=None,
                         content_type="text/plain; charset=utf-8",
                     )
@@ -721,12 +724,12 @@ class TestRunAllocation(unittest.TestCase):
                 serialized_num_chunks_arg_metadata: bytes = serialize_metadata(
                     ValueMetadata(
                         id="num_chunks_arg_id",
-                        cls=int,
+                        type_hint=int,
                         serializer_name=user_serializer.name,
-                        content_type=None,
+                        content_type=user_serializer.content_type,
                     )
                 )
-                serialized_num_chunks_arg: bytes = user_serializer.serialize(5)
+                serialized_num_chunks_arg: bytes = user_serializer.serialize(5, int)
 
                 serialized_args: bytes = b"".join(
                     [
@@ -794,6 +797,8 @@ class TestRunAllocation(unittest.TestCase):
                                     FunctionCallMetadata(
                                         id="file_chunker_call",
                                         output_serializer_name_override=None,
+                                        output_type_hint_override=None,
+                                        has_output_type_hint_override=False,
                                         args=[
                                             FunctionCallArgumentMetadata(
                                                 value_id="file_arg_id", collection=None
@@ -912,13 +917,13 @@ class TestRunAllocation(unittest.TestCase):
                 user_serializer: PickleUserDataSerializer = PickleUserDataSerializer()
                 # 5 full chunks + 1 byte of output data out of 10 chunks
                 arg: bytes = os.urandom(5 * 1024 + 1)
-                serialized_arg: bytes = user_serializer.serialize(arg)
+                serialized_arg: bytes = user_serializer.serialize(arg, bytes)
                 serialized_arg_metadata: bytes = serialize_metadata(
                     ValueMetadata(
                         id="arg_id",
-                        cls=bytes,
+                        type_hint=bytes,
                         serializer_name=user_serializer.name,
-                        content_type=None,
+                        content_type=user_serializer.content_type,
                     )
                 )
 
@@ -963,6 +968,8 @@ class TestRunAllocation(unittest.TestCase):
                                     FunctionCallMetadata(
                                         id="returns_argument_call",
                                         output_serializer_name_override=None,
+                                        output_type_hint_override=None,
+                                        has_output_type_hint_override=False,
                                         args=[
                                             FunctionCallArgumentMetadata(
                                                 value_id="arg_id", collection=None
@@ -1087,7 +1094,7 @@ class TestRunAllocation(unittest.TestCase):
                             request_id="123",
                             function_call_id="test-function-call",
                             allocation_id=allocation_id,
-                            inputs=application_function_inputs(10),
+                            inputs=application_function_inputs(10, int),
                         ),
                     ),
                 )

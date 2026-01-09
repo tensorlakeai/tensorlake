@@ -281,6 +281,8 @@ class APIClient:
         # HTTP clients they only use multipart requests for multiple inputs. For 1 input they use
         # regular HTTP request with content type set to the input content type. And for 0 inputs
         # they use regular HTTP request with empty body. All these modes must be covered in tests.
+        #
+        # NB. Keep this code in sync with curl_command.example_application_curl_command().
         if len(inputs) == 0:
             # Empty body mode for no application function parameters.
             response: httpx.Response = self._run_request(
