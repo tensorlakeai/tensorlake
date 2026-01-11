@@ -5,7 +5,7 @@ import traceback
 from enum import Enum
 from typing import Any, Dict
 
-from .cloud_events import new_cloud_event
+from .cloud_events import event_time, new_cloud_event
 
 # Logger with interface similar to structlog library.
 # We need a separate logging library to make sure that no customer code is using it so
@@ -21,9 +21,17 @@ class InternalLogger:
 
     """Picklable internal logger for use in FE and SDK."""
 
-    def __init__(self, context: Dict[str, Any], destination: LOG_FILE):
+    def __init__(
+        self,
+        context: Dict[str, Any],
+        destination: LOG_FILE,
+        _dict_traceback: bool = False,
+        _as_cloud_event: bool = True,
+    ):
         self._context: Dict[str, Any] = context
         self._destination: InternalLogger.LOG_FILE = destination
+        self._dict_traceback: bool = _dict_traceback
+        self._as_cloud_event: bool = _as_cloud_event
         self._log_file: io.TextIOWrapper | None = None
 
         if destination == InternalLogger.LOG_FILE.STDOUT:
@@ -38,6 +46,8 @@ class InternalLogger:
         return {
             "context": self._context,
             "destination": self._destination,
+            "_dict_traceback": self._dict_traceback,
+            "_as_cloud_event": self._as_cloud_event,
         }
 
     def __setstate__(self, state: dict[str, Any]):
@@ -45,6 +55,8 @@ class InternalLogger:
         self.__init__(
             context=state["context"],
             destination=state["destination"],
+            _dict_traceback=state.get("_dict_traceback", False),
+            _as_cloud_event=state.get("_as_cloud_event", True),
         )
 
     @classmethod
@@ -65,7 +77,12 @@ class InternalLogger:
         """
         context = self._context.copy()
         context.update(kwargs)
-        return InternalLogger(context=context, destination=self._destination)
+        return InternalLogger(
+            context=context,
+            destination=self._destination,
+            _dict_traceback=self._dict_traceback,
+            _as_cloud_event=self._as_cloud_event,
+        )
 
     def info(self, message: str, **kwargs):
         """Logs an info level message.
@@ -135,9 +152,21 @@ class InternalLogger:
         context["event"] = message
 
         if "exc_info" in context:
-            context["exception"] = "".join(
-                traceback.format_exception(context["exc_info"])
-            )
+            exc_info = context["exc_info"]
+            # Handle exc_info=True (capture current exception from sys.exc_info())
+            if exc_info is True:
+                exc_info = sys.exc_info()
+            # Handle exc_info as an exception object
+            elif isinstance(exc_info, BaseException):
+                exc_info = (type(exc_info), exc_info, exc_info.__traceback__)
+
+            if exc_info and exc_info != (None, None, None):
+                if self._dict_traceback:
+                    context["exception"] = self._format_exception_dict(exc_info)
+                else:
+                    context["exception"] = "".join(
+                        traceback.format_exception(*exc_info)
+                    )
             del context["exc_info"]
 
         # Convert non json-serializable values to strings.
@@ -147,6 +176,44 @@ class InternalLogger:
             ):
                 context[key] = str(value)
 
-        return json.dumps(
-            new_cloud_event(context, source="/tensorlake/function_executor/logger")
-        )
+        if self._as_cloud_event:
+            return json.dumps(
+                new_cloud_event(context, source="/tensorlake/function_executor/logger")
+            )
+        else:
+            context["timestamp"] = event_time()
+            return json.dumps(context)
+
+    def _format_exception_dict(self, exc_info: tuple) -> Dict[str, Any]:
+        """Formats exception info as a structured dictionary.
+
+        Similar to structlog's dict_tracebacks processor, transforms exception
+        information into a machine-readable dictionary suitable for JSON output.
+        """
+        exc_type, exc_value, exc_tb = exc_info
+        if not exc_type:
+            return {}
+
+        frames = []
+        tb = exc_tb
+        while tb is not None:
+            frame = tb.tb_frame
+            frames.append(
+                {
+                    "filename": frame.f_code.co_filename,
+                    "lineno": tb.tb_lineno,
+                    "name": frame.f_code.co_name,
+                    "locals": {
+                        k: str(v)
+                        for k, v in frame.f_locals.items()
+                        if not k.startswith("_")
+                    },
+                }
+            )
+            tb = tb.tb_next
+
+        return {
+            "exc_type": exc_type.__name__ if exc_type else "Unknown",
+            "exc_value": str(exc_value) if exc_value else "",
+            "frames": frames,
+        }

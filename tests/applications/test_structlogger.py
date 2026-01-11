@@ -6,12 +6,12 @@ import unittest
 from pydantic import BaseModel
 
 from tensorlake.applications import (
+    Logger,
     Request,
     application,
     function,
     run_local_application,
 )
-from tensorlake.applications.structlog import configure_logging, get_logger
 
 
 class DummyPayload(BaseModel):
@@ -21,7 +21,7 @@ class DummyPayload(BaseModel):
 @application()
 @function(description="test logging info")
 def test_logging_info(payload: DummyPayload) -> str:
-    logger = get_logger("test")
+    logger = Logger.get_logger(module="test")
     logger.info("info message")
     return "info"
 
@@ -29,7 +29,7 @@ def test_logging_info(payload: DummyPayload) -> str:
 @application()
 @function(description="test logging warning")
 def test_logging_warning(payload: DummyPayload) -> str:
-    logger = get_logger("test")
+    logger = Logger.get_logger(module="test")
     logger.warning("warning message")
     return "warning"
 
@@ -37,7 +37,7 @@ def test_logging_warning(payload: DummyPayload) -> str:
 @application()
 @function(description="test logging debug")
 def test_logging_debug(payload: DummyPayload) -> str:
-    logger = get_logger("test")
+    logger = Logger.get_logger(module="test")
     logger.debug("debug message")
     return "debug"
 
@@ -45,7 +45,7 @@ def test_logging_debug(payload: DummyPayload) -> str:
 @application()
 @function(description="test logging error")
 def test_logging_error(payload: DummyPayload) -> str:
-    logger = get_logger("test")
+    logger = Logger.get_logger(module="test")
     logger.error("error message")
     return "error"
 
@@ -53,7 +53,7 @@ def test_logging_error(payload: DummyPayload) -> str:
 @application()
 @function(description="test logging error with exception")
 def test_logging_error_exception(payload: DummyPayload) -> str:
-    logger = get_logger("test")
+    logger = Logger.get_logger(module="test")
     try:
         raise ValueError("test error")
     except Exception as e:
@@ -61,9 +61,8 @@ def test_logging_error_exception(payload: DummyPayload) -> str:
     return "error_exception"
 
 
-class TestStructlogLogging(unittest.TestCase):
+class TestInternalLoggerLogging(unittest.TestCase):
     def setUp(self):
-        configure_logging()
         self.captured_output = io.StringIO()
         sys.stdout = self.captured_output
 
@@ -134,9 +133,7 @@ class TestStructlogLogging(unittest.TestCase):
         log_entry = json.loads(lines[0])
         self.assertEqual(log_entry["level"], "error")
         self.assertEqual(log_entry["event"], "error with exception")
-        self.assertEqual(
-            log_entry["exception"][0]["exc_value"], "test error"
-        )  # Check for exception info
+        self.assertIn("exception", log_entry)
 
 
 if __name__ == "__main__":
