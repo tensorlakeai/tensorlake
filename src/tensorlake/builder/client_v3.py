@@ -16,7 +16,7 @@
 import os
 from typing import AsyncGenerator
 from urllib.parse import quote
-from uuid import uuid7
+from uuid import uuid4 as uuid
 from dataclasses import dataclass
 
 import click
@@ -27,10 +27,14 @@ from pydantic import BaseModel
 from tensorlake.cli._common import ASYNC_HTTP_EVENT_HOOKS
 
 
+# ============================================================================
+# Public Request Models (Dataclasses)
+# ============================================================================
+
 @dataclass
-class ImageBuildRequest:
+class ImageBuildRequestV3:
     """
-    ImageBuildRequest represents an image to be built.
+    ImageBuildRequestV3 represents an image to be built.
 
     Attributes:
         key (str): The key of the image build request.
@@ -40,7 +44,7 @@ class ImageBuildRequest:
         function_names (list[str]): The names of the functions to be built for this image.
 
     Example:
-        req = ImageBuildRequest(
+        req = ImageBuildRequestV3(
             key="image_1",
             name="image_1",
             description="Image 1",
@@ -57,7 +61,7 @@ class ImageBuildRequest:
 
 
 @dataclass
-class ApplicationVersionBuildRequest:
+class ApplicationVersionBuildRequestV3:
     """
     Request for building an application version.
     This request contains information about the application, version,
@@ -66,12 +70,12 @@ class ApplicationVersionBuildRequest:
     Attributes:
         name (str): The name of the application to be built.
         version (str): The version of the application to be built.
-        images (list[]): The name of the function used in the build.
+        images (list[ImageBuildRequestV3]): List of ImageBuildRequestV3 instances.
 
     Example:
-        images = [...]  # List of ImageBuildRequest instances
+        images = [...]  # List of ImageBuildRequestV3 instances
 
-        req = ApplicationVersionBuildContext(
+        req = ApplicationVersionBuildRequestV3(
             name="example_app",
             version="v1.0",
             images=images
@@ -80,25 +84,19 @@ class ApplicationVersionBuildRequest:
 
     name: str
     version: str
-    images: list[ImageBuildRequest]
+    images: list[ImageBuildRequestV3]
 
 
-class _ImageBuildInfo(BaseModel):
-    id: str
-    app_version_id: str
-    name: str | None
-    description: str | None
-    status: str
-    error_message: str | None = None
-    created_at: str
-    updated_at: str
-    finished_at: str | None
+# ============================================================================
+# Public Response Models (Dataclasses)
+# ============================================================================
 
-
-class ImageBuildInfo:
+@dataclass
+class ImageBuildInfoV3:
     """
-    ImageBuildInfo model for the image builder service.
+    ImageBuildInfoV3 model for the image builder service.
     This model represents the information about an image build.
+    
     Attributes:
         id (str): The ID of the image build.
         application_version_id (str): The ID of the application version associated with the image build.
@@ -113,99 +111,51 @@ class ImageBuildInfo:
     id: str
     application_version_id: str
     name: str | None = None
-    status: str
-    created_at: str
-    updated_at: str
-    finished_at: str | None
+    status: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    finished_at: str | None = None
     error_message: str | None = None
 
-    def __init__(self, src: _ImageBuildInfo):
-        self.id = src.id
-        self.application_version_id = src.app_version_id
-        self.name = src.name
-        self.status = src.status
-        self.created_at = src.created_at
-        self.updated_at = src.updated_at
-        self.finished_at = src.finished_at
-        self.error_message = src.error_message
 
-
-class _ImageBuildRequest(BaseModel):
-    key: str
-    name: str | None
-    description: str | None
-    context_tar_part_name: str
-    function_names: list[str]
-
-    def __init__(self, req: ImageBuildRequest):
-        self.key = req.key
-        self.name = req.name
-        self.description = req.description
-        self.context_tar_part_name = uuid7().hex
-        self.function_names = req.function_names
-
-
-class _ApplicationVersionBuildRequest(BaseModel):
-    name: str
-    version: str
-    images: list[_ImageBuildRequest]
-
-    def __init__(self, req: ApplicationVersionBuildRequest):
-        self.name = req.name
-        self.version = req.version
-        self.images = [_ImageBuildRequest(i) for i in req.images]
-
-
-class _ApplicationVersionImageBuildInfo(_ImageBuildInfo):
-    key: str
-    function_names: list[str]
-
-
-class _ApplicationVersionBuildInfo(BaseModel):
-    id: str
-    organization_id: str
-    project_id: str
-    name: str
-    version: str
-    image_builds: list[_ApplicationVersionImageBuildInfo]
-
-
-class ApplicationVersionBuildInfo:
+@dataclass
+class ApplicationVersionBuildInfoV3:
     """
-    ApplicationVersionBuildInfo model for the image builder service.
+    ApplicationVersionBuildInfoV3 model for the image builder service.
     This model represents the information about an application version build.
+    
     Attributes:
         id (str): The ID of the application version build.
         name (str): The name of the application.
         version (str): The version of the application.
-        image_builds (dict[str, ImageBuildInfo]): A dictionary of ImageBuildInfo objects representing
-                                             the builds for each image in the application version. The key is the key of the image build request.
+        image_builds (dict[str, ImageBuildInfoV3]): A dictionary of ImageBuildInfoV3 objects representing
+                                             the builds for each image in the application version. 
+                                             The key is the key of the image build request.
     """
 
     id: str
     name: str
     version: str
-    image_builds: dict[str, ImageBuildInfo]
-
-    def __init__(self, src: _ApplicationVersionBuildInfo):
-        self.id = src.id
-        self.name = src.name
-        self.version = src.version
-        self.image_builds = {
-            image_build.key: ImageBuildInfo(image_build) for image_build in src.image_builds
-        }
+    image_builds: dict[str, ImageBuildInfoV3]
 
 
-class ImageBuildLogEvent(BaseModel):
+# ============================================================================
+# Public Event Models (Dataclasses)
+# ============================================================================
+
+@dataclass
+class ImageBuildLogEventV3:
     """
-    ImageBuildLogEvent model for the image builder service.
+    ImageBuildLogEventV3 model for the image builder service.
     This model represents a log event from the image builder service.
+    
     Attributes:
         image_build_id (str): The ID of the build associated with the log event.
         timestamp (str): The timestamp of the log event.
         stream (str): The stream from which the log event originated (stdout, stderr, info).
         message (str): The log message.
         sequence_number (int): The sequence number of the log event. Used for ordering.
+        build_status (str): The current status of the build.
     """
 
     image_build_id: str
@@ -215,7 +165,124 @@ class ImageBuildLogEvent(BaseModel):
     sequence_number: int
     build_status: str
 
-class ImageBuilderV3Client:
+
+# ============================================================================
+# Internal Pydantic Models (Payload)
+# ============================================================================
+
+class _ImageBuildInfoPayload(BaseModel):
+    """Internal Pydantic model for API deserialization."""
+    id: str
+    app_version_id: str
+    name: str | None
+    description: str | None
+    status: str
+    error_message: str | None = None
+    created_at: str
+    updated_at: str
+    finished_at: str | None
+
+
+class _ImageBuildRequestPayload(BaseModel):
+    """Internal Pydantic model for API serialization."""
+    key: str
+    name: str | None
+    description: str | None
+    context_tar_part_name: str
+    function_names: list[str]
+
+    @classmethod
+    def from_request(cls, req: ImageBuildRequestV3) -> "_ImageBuildRequestPayload":
+        """Create from public ImageBuildRequestV3."""
+        return cls(
+            key=req.key,
+            name=req.name,
+            description=req.description,
+            context_tar_part_name=uuid().hex,
+            function_names=req.function_names,
+        )
+
+
+class _ApplicationVersionBuildRequestPayload(BaseModel):
+    """Internal Pydantic model for API serialization."""
+    name: str
+    version: str
+    images: list[_ImageBuildRequestPayload]
+
+    @classmethod
+    def from_request(cls, req: ApplicationVersionBuildRequestV3) -> "_ApplicationVersionBuildRequestPayload":
+        """Create from public ApplicationVersionBuildRequestV3."""
+        return cls(
+            name=req.name,
+            version=req.version,
+            images=[_ImageBuildRequestPayload.from_request(img) for img in req.images],
+        )
+
+
+class _ApplicationVersionImageBuildInfoPayload(_ImageBuildInfoPayload):
+    """Internal Pydantic model for API deserialization."""
+    key: str
+    function_names: list[str]
+
+
+class _ApplicationVersionBuildInfoPayload(BaseModel):
+    """Internal Pydantic model for API deserialization."""
+    id: str
+    organization_id: str
+    project_id: str
+    name: str
+    version: str
+    image_builds: list[_ApplicationVersionImageBuildInfoPayload]
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def _image_build_info_from_payload(data: _ImageBuildInfoPayload) -> ImageBuildInfoV3:
+    """Convert internal API model to public dataclass."""
+    return ImageBuildInfoV3(
+        id=data.id,
+        application_version_id=data.app_version_id,
+        name=data.name,
+        status=data.status,
+        created_at=data.created_at,
+        updated_at=data.updated_at,
+        finished_at=data.finished_at,
+        error_message=data.error_message,
+    )
+
+
+def _application_version_build_info_from_payload(data: _ApplicationVersionBuildInfoPayload) -> ApplicationVersionBuildInfoV3:
+    """Convert internal API model to public dataclass."""
+    return ApplicationVersionBuildInfoV3(
+        id=data.id,
+        name=data.name,
+        version=data.version,
+        image_builds={
+            img.key: _image_build_info_from_payload(img)
+            for img in data.image_builds
+        },
+    )
+
+
+def _image_build_log_event_from_json(data: dict) -> ImageBuildLogEventV3:
+    """Parse JSON dict and create ImageBuildLogEventV3 dataclass."""
+    return ImageBuildLogEventV3(
+        image_build_id=data["image_build_id"],
+        timestamp=data["timestamp"],
+        stream=data["stream"],
+        message=data["message"],
+        sequence_number=data["sequence_number"],
+        build_status=data["build_status"],
+    )
+
+
+# ============================================================================
+# Client
+# ============================================================================
+
+class ImageBuilderClientV3:
     """
     Client for interacting with the image builder service.
     This client is used to build images, check the status of builds,
@@ -242,9 +309,9 @@ class ImageBuilderV3Client:
                 self._headers["X-Forwarded-Project-Id"] = project_id
 
     @classmethod
-    def from_env(cls) -> "ImageBuilderV3Client":
+    def from_env(cls) -> "ImageBuilderClientV3":
         """
-        Create an instance of the ImageBuilderV3Client using environment variables.
+        Create an instance of the ImageBuilderClientV3 using environment variables.
 
         The API key is retrieved from the TENSORLAKE_API_KEY environment variable.
         If no API key is set, PAT authentication is assumed and organization/project IDs
@@ -257,7 +324,7 @@ class ImageBuilderV3Client:
         a different build service URL, mainly for debugging or local testing.
 
         Returns:
-            ImageBuilderV3Client: An instance of the ImageBuilderV3Client.
+            ImageBuilderClientV3: An instance of the ImageBuilderClientV3.
         """
         api_key = os.getenv("TENSORLAKE_API_KEY")
         # For PAT authentication, get auth token and org/project IDs
@@ -271,27 +338,27 @@ class ImageBuilderV3Client:
         build_url = os.getenv("TENSORLAKE_BUILD_SERVICE", f"{server_url}/images/v3")
         return cls(build_url, api_key, organization_id, project_id)
 
-    async def build_app(self, req: ApplicationVersionBuildRequest) -> ApplicationVersionBuildInfo:
+    async def build_app(self, request: ApplicationVersionBuildRequestV3) -> ApplicationVersionBuildInfoV3:
         """
         Build an application version and its images using the provided request.
 
         Args:
-            req (ApplicationVersionBuildRequest): The application version build request.
+            request (ApplicationVersionBuildRequestV3): The application version build request.
         Returns:
-            ApplicationVersionBuildInfo: The response from the image builder service.
+            ApplicationVersionBuildInfoV3: The response from the image builder service.
         """
-        json_req = _ApplicationVersionBuildRequest(req)
+        request_payload = _ApplicationVersionBuildRequestPayload.from_request(request)
 
-        image_reqs_by_key = { r.key: r for r in req.images }
-        json_image_reqs_by_key = { r.key: r for r in json_req.images }
+        image_requests_by_key = {r.key: r for r in request.images}
+        image_request_payloads_by_key = {r.key: r for r in request_payload.images}
 
         files = {
-            "app_version": (None, json_req.model_dump_json().encode("utf-8"), "application/json")
+            "app_version": (None, request_payload.model_dump_json().encode("utf-8"), "application/json")
         }
 
-        for key, image_req in image_reqs_by_key.items():
-            json_image_req = json_image_reqs_by_key[key]
-            files[json_image_req.context_tar_part_name] = (None, image_req.context_tar_content, "application/gzip")
+        for key, image_request in image_requests_by_key.items():
+            image_request_payload = image_request_payloads_by_key[key]
+            files[image_request_payload.context_tar_part_name] = (None, image_request.context_tar_content, "application/gzip")
 
         res = await self._client.post(
             f"{self._build_service}/builds",
@@ -305,21 +372,19 @@ class ImageBuilderV3Client:
             click.secho(f"Error building application version: {error_message}", err=True, fg="red")
             raise RuntimeError(f"Error building application version: {error_message}")
 
-        info = _ApplicationVersionBuildInfo.model_validate(res.json())
-
-        return ApplicationVersionBuildInfo(info)
-
+        info = _ApplicationVersionBuildInfoPayload.model_validate(res.json())
+        return _application_version_build_info_from_payload(info)
 
     async def stream_image_build_logs(
         self, image_build_id: str
-    ) -> AsyncGenerator[ImageBuildLogEvent]:
+    ) -> AsyncGenerator[ImageBuildLogEventV3]:
         """
         Stream logs from the image builder service for the specified image build.
 
         Args:
             image_build_id (str): The build id to stream logs for.
         Returns:
-            AsyncGenerator[ImageBuildLogEvent]: A generator of log events.
+            AsyncGenerator[ImageBuildLogEventV3]: A generator of log events.
         """
         # Create a separate client for SSE streams to avoid blocking the main client
         # and to allow proper connection management for long-lived SSE connections
@@ -332,21 +397,20 @@ class ImageBuilderV3Client:
             ) as event_source:
                 async for sse in event_source.aiter_sse():
                     try:
-                        log_entry = ImageBuildLogEvent.model_validate(sse.json())
+                        log_entry = _image_build_log_event_from_json(sse.json())
                         yield log_entry
                     except Exception as e:
                         click.secho(f"Error parsing log event: {e}", err=True, fg="red")
                         continue
 
-
-    async def image_build_info(self, image_build_id: str) -> ImageBuildInfo:
+    async def image_build_info(self, image_build_id: str) -> ImageBuildInfoV3:
         """
         Get information about a build.
 
         Args:
             image_build_id (str): The build id to get information about.
         Returns:
-            ImageBuildInfo: Information about the build.
+            ImageBuildInfoV3: Information about the build.
         """
         res = await self._client.get(
             f"{self._build_service}/builds/{quote(image_build_id)}",
@@ -358,19 +422,17 @@ class ImageBuilderV3Client:
             click.secho(f"Error requesting image build info: {error_message}", err=True, fg="red")
             raise RuntimeError(f"Error requesting image build info: {error_message}")
 
-        info = _ImageBuildInfo.model_validate(res.json())
+        info = _ImageBuildInfoPayload.model_validate(res.json())
+        return _image_build_info_from_payload(info)
 
-        return ImageBuildInfo(info)
-
-
-    async def cancel_image_build(self, image_build_id: str) -> ImageBuildInfo:
+    async def cancel_image_build(self, image_build_id: str) -> ImageBuildInfoV3:
         """
         Cancel an image build.
 
         Args:
             image_build_id (str): The build id to cancel.
         Returns:
-            ImageBuildInfo: Information about the build.
+            ImageBuildInfoV3: Information about the build.
         """
         res = await self._client.post(
             f"{self._build_service}/builds/{quote(image_build_id)}/cancel",
@@ -383,11 +445,9 @@ class ImageBuilderV3Client:
             click.secho(f"Error canceling image build {image_build_id}: {error_message}", err=True, fg="red")
             raise RuntimeError(f"Error canceling image build {image_build_id}: {error_message}")
 
-        info = await self.image_build_info(image_build_id)
+        return await self.image_build_info(image_build_id)
 
-        return info
-
-    async def __aenter__(self) -> "ImageBuilderV3Client":
+    async def __aenter__(self) -> "ImageBuilderClientV3":
         """Async context manager entry."""
         return self
 

@@ -7,7 +7,7 @@ import httpx
 from typing import AsyncGenerator
 from uuid import uuid7
 
-from tensorlake.builder.client_v3 import ImageBuilderV3Client, ApplicationVersionBuildRequest as ApplicationVersionBuildRequestV3, ApplicationVersionBuildInfo as ApplicationVersionBuildInfoV3, ImageBuildLogEvent as ImageBuildLogEventV3, ImageBuildRequest as ImageBuildRequestV3, ImageBuildInfo as ImageBuildInfoV3
+from tensorlake.builder.client_v3 import ImageBuilderClientV3, ApplicationVersionBuildRequestV3, ApplicationVersionBuildInfoV3, ImageBuildLogEventV3, ImageBuildRequestV3, ImageBuildInfoV3
 from tensorlake.applications import Image
 from tensorlake.applications.image import create_image_context_file
 
@@ -391,7 +391,7 @@ class ApplicationVersionBuilder:
     This builder manages the process of building these images when you deploy
     an application.
     
-    The builder uses an ImageBuilderV3Client to communicate with the Tensorlake
+    The builder uses an ImageBuilderClientV3 to communicate with the Tensorlake
     build service. It manages the build process, including:
     - Submitting build requests for all images in an application version
     - Streaming real-time build logs for all images concurrently
@@ -402,15 +402,15 @@ class ApplicationVersionBuilder:
     https://docs.tensorlake.ai/applications/images
     
     Attributes:
-        _client: The ImageBuilderV3Client used to communicate with the build service.
+        _client: The ImageBuilderClientV3 used to communicate with the build service.
             This is set during initialization and should not be modified.
     
     Example:
-        >>> from tensorlake.builder.client_v3 import ImageBuilderV3Client
+        >>> from tensorlake.builder.client_v3 import ImageBuilderClientV3
         >>> from tensorlake.builder.builder import ApplicationVersionBuilder
         >>> from tensorlake.applications import Image
         >>> 
-        >>> client = ImageBuilderV3Client.from_env()
+        >>> client = ImageBuilderClientV3.from_env()
         >>> builder = ApplicationVersionBuilder(client)
         >>> 
         >>> # Create build request
@@ -427,13 +427,13 @@ class ApplicationVersionBuilder:
         >>> # Build the application version
         >>> await builder.build(req)
     """
-    _client: ImageBuilderV3Client
+    _client: ImageBuilderClientV3
 
-    def __init__(self, client: ImageBuilderV3Client):
+    def __init__(self, client: ImageBuilderClientV3):
         """Initialize an ApplicationVersionBuilder.
         
         Args:
-            client: An ImageBuilderV3Client instance configured with the
+            client: An ImageBuilderClientV3 instance configured with the
                 appropriate build service URL and authentication credentials.
                 This client will be used for all build operations.
         
@@ -441,8 +441,8 @@ class ApplicationVersionBuilder:
             ValueError: If client is None or invalid.
         
         Example:
-            >>> from tensorlake.builder.client_v3 import ImageBuilderV3Client
-            >>> client = ImageBuilderV3Client.from_env()
+            >>> from tensorlake.builder.client_v3 import ImageBuilderClientV3
+            >>> client = ImageBuilderClientV3.from_env()
             >>> builder = ApplicationVersionBuilder(client)
         """
         if client is None:
@@ -496,11 +496,11 @@ class ApplicationVersionBuilder:
             the exception.
         
         Example:
-            >>> from tensorlake.builder.client_v3 import ImageBuilderV3Client
-            >>> from tensorlake.builder.builder import ApplicationVersionBuilder
+            >>> from tensorlake.builder.client_v3 import ImageBuilderClientV3
+            >>> from tensorlake.builder.builder import ApplicationVersionBuilder, ApplicationVersionBuildRequest
             >>> from tensorlake.applications import Image
             >>> 
-            >>> client = ImageBuilderV3Client.from_env()
+            >>> client = ImageBuilderClientV3.from_env()
             >>> builder = ApplicationVersionBuilder(client)
             >>> 
             >>> # Create build request
