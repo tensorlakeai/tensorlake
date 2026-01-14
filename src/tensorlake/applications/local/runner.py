@@ -907,6 +907,8 @@ class LocalRunner:
                 request_id=_LOCAL_REQUEST_ID,
                 allocation_id=awaitable.id,
                 function_name=awaitable.function_name,
+                # In local mode, the allocation id and the function run id are the same.
+                function_run_id=awaitable.id,
                 server_base_url=self._request_context_http_server.base_url,
                 http_client=self._request_context_http_client,
                 blob_store=self._blob_store,
