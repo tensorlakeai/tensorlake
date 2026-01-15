@@ -158,6 +158,17 @@ class Function:
         """Returns function factory for creating awaitables."""
         return self._awaitables_factory
 
+    @property
+    def function_name(self) -> str:
+        """Returns the function name.
+
+        Returns the configured function name if available, otherwise falls back
+        to the original function's qualname or '<unknown>' if not available.
+        """
+        if self._function_config is None:
+            return getattr(self._original_function, "__qualname__", "<unknown>")
+        return self._function_config.function_name
+
     def __repr__(self) -> str:
         # Shows exact structure of the Function. Used for debug logging.
         return (
@@ -170,12 +181,7 @@ class Function:
 
     def __str__(self) -> str:
         # Shows a simple human readable representation of the Function. Used in error messages.
-        function_name: str = (
-            getattr(self._original_function, "__qualname__", "<unknown>")
-            if self._function_config is None
-            else self._function_config.function_name
-        )
-        return f"Tensorlake Function '{function_name}'"
+        return f"Tensorlake Function '{self.function_name}'"
 
     def __get__(self, instance: Any | None, cls: Any) -> "Function":
         # Called when the Function is called as an `instance` method of class `cls`.

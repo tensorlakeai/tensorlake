@@ -3,7 +3,7 @@
 # This code is part of the TensorLake SDK for Python.
 # It provides a client for interacting with the image builder service.
 
-# It is designed to interact with the /images/v3 API endpoint.
+# It is designed to interact with the /images/v3 API endpoints.
 # The client allows users to build images, check the status of builds,
 # and stream logs from the image builder service.
 
@@ -13,11 +13,12 @@
 # and stream logs from a build.
 """
 
+import logging
 import os
-from typing import AsyncGenerator
+from dataclasses import dataclass, field
+from typing import Any, AsyncGenerator
 from urllib.parse import quote
 from uuid import uuid4 as uuid
-from dataclasses import dataclass
 
 import click
 import httpx
@@ -26,10 +27,281 @@ from pydantic import BaseModel
 
 from tensorlake.cli._common import ASYNC_HTTP_EVENT_HOOKS
 
+# Enable httpx debug logging if requested via environment variable
+if os.getenv("TENSORLAKE_HTTPX_DEBUG", "").lower() in ("1", "true", "yes"):
+    # Configure logging for httpx and httpcore
+    httpx_logger = logging.getLogger("httpx")
+    httpcore_logger = logging.getLogger("httpcore")
+
+    # Set log level to DEBUG
+    httpx_logger.setLevel(logging.DEBUG)
+    httpcore_logger.setLevel(logging.DEBUG)
+
+    # Ensure there's a handler to output the logs
+    if not httpx_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        )
+        httpx_logger.addHandler(handler)
+
+    if not httpcore_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        )
+        httpcore_logger.addHandler(handler)
+
+# ============================================================================
+# Options
+# ============================================================================
+
+
+# Sentinel object to distinguish between "not provided" and "explicitly None"
+class _NotProvided:
+    pass
+
+
+_NOT_PROVIDED = _NotProvided()
+
+
+@dataclass
+class ImageBuilderClientV3Options:
+    """
+    Options for configuring the ImageBuilderClientV3.
+
+    Attributes:
+        base_url (str): The base URL of the build service.
+        api_key (str | None): The API key for authentication (readonly via property).
+        pat (str | None): The Personal Access Token (PAT) for authentication (readonly via property).
+        organization_id (str | None): The organization ID (readonly via property, only available for PAT auth).
+        project_id (str | None): The project ID (readonly via property, only available for PAT auth).
+
+    Authentication Modes:
+        - API Key: api_key is provided, pat is None. organization_id and project_id return None.
+          API keys already contain org/project info via introspection.
+        - PAT: pat is provided, api_key is None. organization_id and project_id are available.
+          PAT tokens don't contain org/project info, so X-Forwarded headers are needed.
+
+    Note:
+        Validation is not performed in __init__. Call validate() to validate the configuration.
+    """
+
+    _base_url: str = field(init=False)
+    _api_key: str | None = field(default=None, init=False)
+    _pat: str | None = field(default=None, init=False)
+    _organization_id: str | None = field(default=None, init=False)
+    _project_id: str | None = field(default=None, init=False)
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str | None = None,
+        pat: str | None = None,
+        organization_id: str | None = None,
+        project_id: str | None = None,
+    ):
+        """
+        Initialize ImageBuilderClientV3Options.
+
+        Args:
+            base_url: The base URL of the build service.
+            api_key: The API key for authentication (mutually exclusive with pat).
+            pat: The Personal Access Token for authentication (mutually exclusive with api_key).
+            organization_id: The organization ID (required if using PAT).
+            project_id: The project ID (required if using PAT).
+
+        Note:
+            Validation is not performed in __init__. Call validate() to validate the configuration.
+        """
+        self._base_url = base_url
+        self._api_key = api_key
+        self._pat = pat
+        self._organization_id = organization_id
+        self._project_id = project_id
+
+    @property
+    def base_url(self) -> str:
+        """The base URL of the build service."""
+        return self._base_url
+
+    @property
+    def api_key(self) -> str | None:
+        """The API key for authentication. Returns None if using PAT."""
+        return self._api_key
+
+    @property
+    def pat(self) -> str | None:
+        """The Personal Access Token for authentication. Returns None if using API key."""
+        return self._pat
+
+    def replace(
+        self,
+        *,
+        base_url: str | None | Any = _NOT_PROVIDED,
+        api_key: str | None | Any = _NOT_PROVIDED,
+        pat: str | None | Any = _NOT_PROVIDED,
+        organization_id: str | None | Any = _NOT_PROVIDED,
+        project_id: str | None | Any = _NOT_PROVIDED,
+    ) -> "ImageBuilderClientV3Options":
+        """
+        Create a new instance with updated values.
+
+        This method returns a new ImageBuilderClientV3Options instance with the
+        specified fields updated. Fields not provided will keep their current values.
+        This maintains immutability by not modifying the original instance.
+
+        Args:
+            base_url: The base URL to use (uses current value if not provided).
+            api_key: The API key to use (uses current value if not provided). Can be None to clear.
+            pat: The PAT to use (uses current value if not provided). Can be None to clear.
+            organization_id: The organization ID to use (uses current value if not provided). Can be None to clear.
+            project_id: The project ID to use (uses current value if not provided). Can be None to clear.
+
+        Returns:
+            A new ImageBuilderClientV3Options instance with updated values.
+        """
+        return ImageBuilderClientV3Options(
+            base_url=base_url if base_url is not _NOT_PROVIDED else self._base_url,
+            api_key=api_key if api_key is not _NOT_PROVIDED else self._api_key,
+            pat=pat if pat is not _NOT_PROVIDED else self._pat,
+            organization_id=(
+                organization_id
+                if organization_id is not _NOT_PROVIDED
+                else self._organization_id
+            ),
+            project_id=(
+                project_id if project_id is not _NOT_PROVIDED else self._project_id
+            ),
+        )
+
+    def validate(self) -> None:
+        """
+        Validate the options configuration.
+
+        Raises:
+            ValueError: If the configuration is invalid.
+        """
+        # Access underlying private fields for validation
+        api_key = self._api_key
+        pat = self._pat
+        organization_id = self._organization_id
+        project_id = self._project_id
+
+        # Must provide exactly one authentication method
+        has_api_key = api_key is not None
+        has_pat = pat is not None
+
+        if not has_api_key and not has_pat:
+            raise ValueError(
+                "Either api_key or pat must be provided for authentication"
+            )
+
+        if has_api_key and has_pat:
+            raise ValueError(
+                "Cannot provide both api_key and pat. Use one authentication method."
+            )
+
+        # Check if org/project IDs are both None or both provided (not mixed)
+        org_id_is_none = organization_id is None
+        project_id_is_none = project_id is None
+
+        if org_id_is_none != project_id_is_none:
+            # Mixed state: one is None, one is not
+            raise ValueError(
+                "organization_id and project_id must both be None (API key auth) "
+                "or both be provided (PAT auth). Cannot mix None and non-None values."
+            )
+
+        if has_api_key:
+            # API key authentication: org/project IDs must be None
+            if not org_id_is_none:
+                raise ValueError(
+                    "When using API key authentication, both organization_id and project_id "
+                    "must be None. API keys already contain org/project info via introspection."
+                )
+        else:
+            # PAT authentication: org/project IDs must be provided
+            if org_id_is_none:
+                raise ValueError(
+                    "When using PAT authentication, both organization_id and project_id "
+                    "must be provided (non-empty strings)."
+                )
+            if not organization_id or not project_id:
+                raise ValueError(
+                    "When using PAT authentication, both organization_id and project_id "
+                    "must be non-empty strings."
+                )
+
+    @property
+    def bearer_token(self) -> str:
+        """The bearer token for authentication (either API key or PAT)."""
+        # Validation should be called before accessing this property
+        token = self._api_key or self._pat
+        assert (
+            token is not None
+        ), "bearer_token should always be set (call validate() first)"
+        return token
+
+    @property
+    def organization_id(self) -> str | None:
+        """The organization ID. Returns None if using API key authentication."""
+        # Hide org_id when using API key (not needed, API key contains this info)
+        if self._api_key is not None:
+            return None
+        return self._organization_id
+
+    @property
+    def project_id(self) -> str | None:
+        """The project ID. Returns None if using API key authentication."""
+        # Hide project_id when using API key (not needed, API key contains this info)
+        if self._api_key is not None:
+            return None
+        return self._project_id
+
+    @classmethod
+    def from_env(cls) -> "ImageBuilderClientV3Options":
+        """
+        Create an instance of ImageBuilderClientV3Options using environment variables.
+
+        The API key is retrieved from the TENSORLAKE_API_KEY environment variable.
+        If no API key is set, PAT authentication is assumed and the PAT token is retrieved
+        from TENSORLAKE_PAT, and organization/project IDs are retrieved from
+        TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID.
+
+        The base URL is retrieved from the TENSORLAKE_API_URL environment variable,
+        defaulting to "https://api.tensorlake.ai" if not set.
+
+        The TENSORLAKE_BUILD_SERVICE environment variable can be used to specify
+        a different base URL, mainly for debugging or local testing.
+
+        Returns:
+            ImageBuilderClientV3Options: An instance of the options.
+        """
+        api_key = os.getenv("TENSORLAKE_API_KEY")
+        pat = None
+        organization_id = os.getenv("TENSORLAKE_ORGANIZATION_ID")
+        project_id = os.getenv("TENSORLAKE_PROJECT_ID")
+
+        # If no API key, try PAT
+        if not api_key:
+            pat = os.getenv("TENSORLAKE_PAT")
+
+        server_url = os.getenv("TENSORLAKE_API_URL", "https://api.tensorlake.ai")
+        base_url = os.getenv("TENSORLAKE_BUILD_SERVICE", f"{server_url}/images/v3")
+        return cls(
+            base_url=base_url,
+            api_key=api_key,
+            pat=pat,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+
 
 # ============================================================================
 # Public Request Models (Dataclasses)
 # ============================================================================
+
 
 @dataclass
 class ImageBuildRequestV3:
@@ -52,7 +324,7 @@ class ImageBuildRequestV3:
             function_names=["func1", "func2"]
         )
     """
-    
+
     key: str
     name: str | None
     description: str | None
@@ -91,12 +363,13 @@ class ApplicationVersionBuildRequestV3:
 # Public Response Models (Dataclasses)
 # ============================================================================
 
+
 @dataclass
 class ImageBuildInfoV3:
     """
     ImageBuildInfoV3 model for the image builder service.
     This model represents the information about an image build.
-    
+
     Attributes:
         id (str): The ID of the image build.
         application_version_id (str): The ID of the application version associated with the image build.
@@ -123,13 +396,13 @@ class ApplicationVersionBuildInfoV3:
     """
     ApplicationVersionBuildInfoV3 model for the image builder service.
     This model represents the information about an application version build.
-    
+
     Attributes:
         id (str): The ID of the application version build.
         name (str): The name of the application.
         version (str): The version of the application.
         image_builds (dict[str, ImageBuildInfoV3]): A dictionary of ImageBuildInfoV3 objects representing
-                                             the builds for each image in the application version. 
+                                             the builds for each image in the application version.
                                              The key is the key of the image build request.
     """
 
@@ -143,12 +416,13 @@ class ApplicationVersionBuildInfoV3:
 # Public Event Models (Dataclasses)
 # ============================================================================
 
+
 @dataclass
 class ImageBuildLogEventV3:
     """
     ImageBuildLogEventV3 model for the image builder service.
     This model represents a log event from the image builder service.
-    
+
     Attributes:
         image_build_id (str): The ID of the build associated with the log event.
         timestamp (str): The timestamp of the log event.
@@ -170,12 +444,14 @@ class ImageBuildLogEventV3:
 # Internal Pydantic Models (Payload)
 # ============================================================================
 
+
 class _ImageBuildInfoPayload(BaseModel):
     """Internal Pydantic model for API deserialization."""
+
     id: str
     app_version_id: str
     name: str | None
-    description: str | None
+    description: str | None = None
     status: str
     error_message: str | None = None
     created_at: str
@@ -185,6 +461,7 @@ class _ImageBuildInfoPayload(BaseModel):
 
 class _ImageBuildRequestPayload(BaseModel):
     """Internal Pydantic model for API serialization."""
+
     key: str
     name: str | None
     description: str | None
@@ -205,12 +482,15 @@ class _ImageBuildRequestPayload(BaseModel):
 
 class _ApplicationVersionBuildRequestPayload(BaseModel):
     """Internal Pydantic model for API serialization."""
+
     name: str
     version: str
     images: list[_ImageBuildRequestPayload]
 
     @classmethod
-    def from_request(cls, req: ApplicationVersionBuildRequestV3) -> "_ApplicationVersionBuildRequestPayload":
+    def from_request(
+        cls, req: ApplicationVersionBuildRequestV3
+    ) -> "_ApplicationVersionBuildRequestPayload":
         """Create from public ApplicationVersionBuildRequestV3."""
         return cls(
             name=req.name,
@@ -221,12 +501,14 @@ class _ApplicationVersionBuildRequestPayload(BaseModel):
 
 class _ApplicationVersionImageBuildInfoPayload(_ImageBuildInfoPayload):
     """Internal Pydantic model for API deserialization."""
+
     key: str
     function_names: list[str]
 
 
 class _ApplicationVersionBuildInfoPayload(BaseModel):
     """Internal Pydantic model for API deserialization."""
+
     id: str
     organization_id: str
     project_id: str
@@ -238,6 +520,7 @@ class _ApplicationVersionBuildInfoPayload(BaseModel):
 # ============================================================================
 # Helper Functions
 # ============================================================================
+
 
 def _image_build_info_from_payload(data: _ImageBuildInfoPayload) -> ImageBuildInfoV3:
     """Convert internal API model to public dataclass."""
@@ -253,15 +536,16 @@ def _image_build_info_from_payload(data: _ImageBuildInfoPayload) -> ImageBuildIn
     )
 
 
-def _application_version_build_info_from_payload(data: _ApplicationVersionBuildInfoPayload) -> ApplicationVersionBuildInfoV3:
+def _application_version_build_info_from_payload(
+    data: _ApplicationVersionBuildInfoPayload,
+) -> ApplicationVersionBuildInfoV3:
     """Convert internal API model to public dataclass."""
     return ApplicationVersionBuildInfoV3(
         id=data.id,
         name=data.name,
         version=data.version,
         image_builds={
-            img.key: _image_build_info_from_payload(img)
-            for img in data.image_builds
+            img.key: _image_build_info_from_payload(img) for img in data.image_builds
         },
     )
 
@@ -282,6 +566,7 @@ def _image_build_log_event_from_json(data: dict) -> ImageBuildLogEventV3:
 # Client
 # ============================================================================
 
+
 class ImageBuilderClientV3:
     """
     Client for interacting with the image builder service.
@@ -289,56 +574,33 @@ class ImageBuilderClientV3:
     and stream logs from the image builder service.
     """
 
-    def __init__(
-        self,
-        build_service: str,
-        api_key: str | None = None,
-        organization_id: str | None = None,
-        project_id: str | None = None,
-    ):
-        self._client = httpx.AsyncClient(event_hooks=ASYNC_HTTP_EVENT_HOOKS)
-        self._build_service = build_service
+    def __init__(self, options: ImageBuilderClientV3Options):
+        """
+        Initialize the ImageBuilderClientV3.
+
+        Args:
+            options (ImageBuilderClientV3Options): Options object containing configuration
+                for the build service URL and authentication credentials.
+        """
+        # Validate the options
+        options.validate()
+
+        self._client = httpx.AsyncClient(
+            base_url=options.base_url, event_hooks=ASYNC_HTTP_EVENT_HOOKS
+        )
         self._headers = {}
-        if api_key:
-            self._headers["Authorization"] = f"Bearer {api_key}"
-            # Add X-Forwarded headers when not using an API key (i.e., using PAT)
-            # API keys already contain org/project info via introspection
-            if organization_id:
-                self._headers["X-Forwarded-Organization-Id"] = organization_id
-            if project_id:
-                self._headers["X-Forwarded-Project-Id"] = project_id
 
-    @classmethod
-    def from_env(cls) -> "ImageBuilderClientV3":
-        """
-        Create an instance of the ImageBuilderClientV3 using environment variables.
+        # Set Authorization header with bearer token
+        if options.bearer_token:
+            self._headers["Authorization"] = f"Bearer {options.bearer_token}"
+        if options.organization_id:
+            self._headers["X-Forwarded-Organization-Id"] = options.organization_id
+        if options.project_id:
+            self._headers["X-Forwarded-Project-Id"] = options.project_id
 
-        The API key is retrieved from the TENSORLAKE_API_KEY environment variable.
-        If no API key is set, PAT authentication is assumed and organization/project IDs
-        are retrieved from TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID.
-
-        The build service URL is retrieved from the TENSORLAKE_API_URL environment variable,
-        defaulting to "https://api.tensorlake.ai" if not set.
-
-        The TENSORLAKE_BUILD_SERVICE environment variable can be used to specify
-        a different build service URL, mainly for debugging or local testing.
-
-        Returns:
-            ImageBuilderClientV3: An instance of the ImageBuilderClientV3.
-        """
-        api_key = os.getenv("TENSORLAKE_API_KEY")
-        # For PAT authentication, get auth token and org/project IDs
-        if not api_key:
-            api_key = os.getenv("TENSORLAKE_PAT")
-
-        organization_id = os.getenv("TENSORLAKE_ORGANIZATION_ID")
-        project_id = os.getenv("TENSORLAKE_PROJECT_ID")
-
-        server_url = os.getenv("TENSORLAKE_API_URL", "https://api.tensorlake.ai")
-        build_url = os.getenv("TENSORLAKE_BUILD_SERVICE", f"{server_url}/images/v3")
-        return cls(build_url, api_key, organization_id, project_id)
-
-    async def build_app(self, request: ApplicationVersionBuildRequestV3) -> ApplicationVersionBuildInfoV3:
+    async def build_app(
+        self, request: ApplicationVersionBuildRequestV3
+    ) -> ApplicationVersionBuildInfoV3:
         """
         Build an application version and its images using the provided request.
 
@@ -353,24 +615,63 @@ class ImageBuilderClientV3:
         image_request_payloads_by_key = {r.key: r for r in request_payload.images}
 
         files = {
-            "app_version": (None, request_payload.model_dump_json().encode("utf-8"), "application/json")
+            "app_version": (
+                "app_version",
+                request_payload.model_dump_json().encode("utf-8"),
+                "application/json",
+            )
         }
 
         for key, image_request in image_requests_by_key.items():
             image_request_payload = image_request_payloads_by_key[key]
-            files[image_request_payload.context_tar_part_name] = (None, image_request.context_tar_content, "application/gzip")
+            files[image_request_payload.context_tar_part_name] = (
+                image_request_payload.context_tar_part_name,
+                image_request.context_tar_content,
+                "application/gzip",
+            )
 
         res = await self._client.post(
-            f"{self._build_service}/builds",
-            files,
+            "applications",
+            files=files,
             headers=self._headers,
             timeout=120,
         )
 
         if not res.is_success:
-            error_message = res.text
-            click.secho(f"Error building application version: {error_message}", err=True, fg="red")
-            raise RuntimeError(f"Error building application version: {error_message}")
+            # Try to extract error message from response
+            error_message = ""
+            try:
+                # Try to parse JSON error response
+                error_json = res.json()
+                if isinstance(error_json, dict):
+                    error_message = error_json.get(
+                        "message", error_json.get("error", "")
+                    )
+                    if not error_message:
+                        error_message = str(error_json)
+                else:
+                    error_message = str(error_json)
+            except Exception:
+                # If JSON parsing fails, try text
+                error_message = res.text or ""
+
+            # Build a comprehensive error message
+            status_info = f"HTTP {res.status_code} {res.reason_phrase}"
+            url_info = ""
+            if res.request:
+                url_info = f" | URL: {res.request.method} {res.request.url}"
+
+            if error_message:
+                full_error = f"{status_info}{url_info}: {error_message}"
+            else:
+                full_error = f"{status_info}{url_info} (no error message in response)"
+
+            click.secho(
+                f"Error building application version: {full_error}",
+                err=True,
+                fg="red",
+            )
+            raise RuntimeError(f"Error building application version: {full_error}")
 
         info = _ApplicationVersionBuildInfoPayload.model_validate(res.json())
         return _application_version_build_info_from_payload(info)
@@ -388,11 +689,13 @@ class ImageBuilderClientV3:
         """
         # Create a separate client for SSE streams to avoid blocking the main client
         # and to allow proper connection management for long-lived SSE connections
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(
+            base_url=self._client.base_url, timeout=120
+        ) as client:
             async with aconnect_sse(
                 client,
                 "GET",
-                f"{self._build_service}/builds/{quote(image_build_id)}/logs",
+                f"builds/{quote(image_build_id)}/logs",
                 headers=self._headers,
             ) as event_source:
                 async for sse in event_source.aiter_sse():
@@ -413,13 +716,17 @@ class ImageBuilderClientV3:
             ImageBuildInfoV3: Information about the build.
         """
         res = await self._client.get(
-            f"{self._build_service}/builds/{quote(image_build_id)}",
+            f"builds/{quote(image_build_id)}",
             headers=self._headers,
             timeout=60,
         )
         if not res.is_success:
             error_message = res.text
-            click.secho(f"Error requesting image build info: {error_message}", err=True, fg="red")
+            click.secho(
+                f"Error requesting image build info: {error_message}",
+                err=True,
+                fg="red",
+            )
             raise RuntimeError(f"Error requesting image build info: {error_message}")
 
         info = _ImageBuildInfoPayload.model_validate(res.json())
@@ -435,15 +742,21 @@ class ImageBuilderClientV3:
             ImageBuildInfoV3: Information about the build.
         """
         res = await self._client.post(
-            f"{self._build_service}/builds/{quote(image_build_id)}/cancel",
+            f"builds/{quote(image_build_id)}/cancel",
             headers=self._headers,
             timeout=60,
         )
 
         if not res.is_success:
             error_message = res.text
-            click.secho(f"Error canceling image build {image_build_id}: {error_message}", err=True, fg="red")
-            raise RuntimeError(f"Error canceling image build {image_build_id}: {error_message}")
+            click.secho(
+                f"Error canceling image build {image_build_id}: {error_message}",
+                err=True,
+                fg="red",
+            )
+            raise RuntimeError(
+                f"Error canceling image build {image_build_id}: {error_message}"
+            )
 
         return await self.image_build_info(image_build_id)
 

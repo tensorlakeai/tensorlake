@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 import traceback
 from typing import Dict, List
 
@@ -26,7 +27,14 @@ from tensorlake.applications.validation import (
     print_validation_messages,
     validate_loaded_applications,
 )
-from tensorlake.builder.client_v2 import BuildContext, ImageBuilderV2Client
+from tensorlake.builder.builder import (
+    ApplicationVersionBuilder,
+    ApplicationVersionBuildRequest,
+)
+from tensorlake.builder.client_v3 import (
+    ImageBuilderClientV3,
+    ImageBuilderClientV3Options,
+)
 from tensorlake.cli._common import Context, require_auth_and_project
 from tensorlake.cli.secrets import warning_missing_secrets
 
@@ -34,7 +42,6 @@ from tensorlake.cli.secrets import warning_missing_secrets
 @click.command(
     short_help="Deploys applications defined in <application-file-path> .py file to Tensorlake Cloud"
 )
-@click.option("-p", "--parallel-builds", is_flag=True, default=False)
 @click.option(
     "-u",
     "--upgrade-running-requests",
@@ -50,24 +57,30 @@ from tensorlake.cli.secrets import warning_missing_secrets
 def deploy(
     auth: Context,
     application_file_path: str,
-    # TODO: implement with image builder v2
-    parallel_builds: bool,
     upgrade_running_requests: bool,
 ):
     """Deploys applications to Tensorlake Cloud."""
-    click.echo(f"⚙️  Preparing deployment for applications from {application_file_path}")
-
-    # Create builder client with proper authentication
-    # If using API key, don't pass org/project IDs (they come from introspection)
-    # If using PAT, pass org/project IDs for X-Forwarded headers
-    bearer_token = auth.api_key or auth.personal_access_token
-    builder_v2 = ImageBuilderV2Client(
-        build_service=os.getenv("TENSORLAKE_BUILD_SERVICE")
-        or f"{auth.api_url}/images/v2",
-        api_key=bearer_token,
-        organization_id=auth.organization_id if not auth.api_key else None,
-        project_id=auth.project_id if not auth.api_key else None,
+    click.echo(
+        f"⚙️  Preparing deployment for application(s) from {application_file_path}"
     )
+
+    opts = ImageBuilderClientV3Options.from_env()
+    # Use API key if available, otherwise use PAT (matching Context.client logic)
+    if auth.api_key:
+        opts = opts.replace(
+            api_key=auth.api_key, pat=None, organization_id=None, project_id=None
+        )
+    elif auth.personal_access_token:
+        opts = opts.replace(
+            api_key=None,
+            pat=auth.personal_access_token,
+            organization_id=auth.organization_id,
+            project_id=auth.project_id,
+        )
+
+    client = ImageBuilderClientV3(opts)
+
+    builder = ApplicationVersionBuilder(client)
 
     try:
         application_file_path: str = os.path.abspath(application_file_path)
@@ -92,7 +105,7 @@ def deploy(
     warning_missing_secrets(auth, list(list_secret_names()))
 
     functions: List[Function] = get_functions()
-    asyncio.run(_prepare_images_v2(builder_v2, functions))
+    asyncio.run(_build_applications(builder, functions))
 
     _deploy_applications(
         auth=auth,
@@ -102,40 +115,48 @@ def deploy(
     )
 
 
-async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: List[Function]):
+async def _build_applications(
+    builder: ApplicationVersionBuilder, functions: List[Function]
+):
     images: Dict[Image, ImageInformation] = image_infos()
     for application in filter_applications(functions):
         fn_config: _FunctionConfiguration = application._function_config
         app_config: _ApplicationConfiguration = application._application_config
 
-        for image_info in images.values():
-            image_info: ImageInformation
-            for function in image_info.functions:
-                click.echo(
-                    f"📦 Building `{image_info.image.name}` image...",
-                )
-                try:
-                    await builder.build(
-                        BuildContext(
-                            application_name=fn_config.function_name,
-                            application_version=app_config.version,
-                            function_name=function._function_config.function_name,
-                        ),
-                        image_info.image,
-                    )
-                except (
-                    asyncio.CancelledError,
-                    KeyboardInterrupt,
-                    click.Abort,
-                    click.UsageError,
-                ) as error:
-                    # Re-raise cancellation errors. Return early to skip printing the success message
-                    raise error
-                except Exception as error:
-                    click.echo(error, err=True)
-                    raise click.Abort
+        try:
+            build_req = ApplicationVersionBuildRequest(
+                name=fn_config.function_name,
+                version=app_config.version,
+            )
 
-    click.secho("\n✅ All images built successfully")
+            for image_info in images.values():
+                build_req.add_image(image_info)
+
+            if not build_req.images:
+                click.secho(
+                    f"❌ No images found for application '{fn_config.function_name}'. "
+                    "Each function must be associated with an Image.",
+                    err=True,
+                    fg="red",
+                )
+                raise click.Abort
+
+            await builder.build(build_req)
+        except (
+            asyncio.CancelledError,
+            KeyboardInterrupt,
+            click.Abort,
+            click.UsageError,
+        ) as error:
+            raise error
+        except Exception:
+            # Error message and summary are already printed by builder.build()
+            # Print final error message
+            click.secho("\n❌ Image build(s) failed", err=True, fg="red")
+            # Exit without showing traceback or "Aborted!" message
+            sys.exit(1)
+
+    click.secho("\n✅ All image(s) built successfully")
 
 
 def _deploy_applications(
@@ -144,7 +165,7 @@ def _deploy_applications(
     upgrade_running_requests: bool,
     functions: List[Function],
 ):
-    click.echo("⚙️  Deploying applications...\n")
+    click.echo("⚙️  Deploying application(s)...\n")
 
     try:
         deploy_applications(
