@@ -348,26 +348,27 @@ class _ImageBuildReporter:
         image_build_id = self._info.id
         status = info.status if info else self._last_seen_status
         error_message = info.error_message if info else None
+        single_reporter = _ImageBuildReporter._instance_count == 1
+        build_id_suffix = f" ({image_build_id})" if single_reporter else ""
 
         match status:
             case "succeeded":
-                msg = f"✅ Image build ({image_build_id}) complete."
+                msg = f"✅ Image build{build_id_suffix} succeeded."
             case "failed":
                 err = True
                 show_logs = True
                 msg = (
-                    f"❌ Image build ({image_build_id}) failed."
+                    f"❌ Image build{build_id_suffix} failed."
                     if not error_message
-                    else f"❌ Image build ({image_build_id}) failed: {error_message}"
+                    else f"❌ Image build{build_id_suffix} failed: {error_message}"
                 )
             case "canceled":
-                msg = f"🚫 Image build ({image_build_id}) canceled."
+                msg = f"🚫 Image build{build_id_suffix} canceled."
             case "canceling":
-                msg = f"🔄 Image build ({image_build_id}) canceling..."
+                msg = f"🔄 Image build{build_id_suffix} canceling..."
             case _:
-                msg = f"❓Unexpected image build ({image_build_id}) status: {status}"
+                msg = f"⚠️ Unexpected image build{build_id_suffix} status: {status}"
 
-        click.echo()
         self._print_prefix(err)
         click.secho(msg, err=err)
 
@@ -375,6 +376,7 @@ class _ImageBuildReporter:
             self._event_cache.sort(key=lambda event: event.sequence_number)
             for event in self._event_cache:
                 self._print_log_event(event, err=err)
+            click.echo()
 
 
 class ApplicationVersionBuilder:
@@ -560,6 +562,8 @@ class ApplicationVersionBuilder:
                 self._client.stream_image_build_logs(image_build_info.id)
                 for image_build_info in info.image_builds.values()
             ]
+            click.echo()
+            click.secho("🏭 Image build logs:", bold=True)
             process_log_events_tasks = [
                 asyncio.create_task(reporter.process_log_events(log_stream))
                 for reporter, log_stream in zip(
@@ -607,36 +611,70 @@ class ApplicationVersionBuilder:
         """Print a compiler-style summary of build results.
 
         Args:
-            summary: Dictionary with counts for total, succeeded, failed, and canceled.
+            summary: Dictionary with counts for total, succeeded, failed, canceled, and unknown.
         """
         total = summary["total"]
         succeeded = summary["succeeded"]
         failed = summary["failed"]
         canceled = summary["canceled"]
+        unknown = summary.get("unknown", 0)
 
         click.echo()  # Empty line before summary
-        click.secho("Build summary:", bold=True)
+        click.secho("📊 Image build summary:", bold=True)
 
-        # Show total
-        click.secho(f"  📦 {total} image(s) total", fg="blue")
+        click.secho(f"  📦 {total} image(s) total")
 
-        # Show succeeded count
         if succeeded > 0:
             click.secho(f"  ✅ {succeeded} succeeded", fg="green")
         else:
             click.secho(f"  ✅ {succeeded} succeeded", fg="white", dim=True)
 
-        # Show failed count
         if failed > 0:
             click.secho(f"  ❌ {failed} failed", fg="red", err=True)
         else:
             click.secho(f"  ❌ {failed} failed", fg="white", dim=True)
 
-        # Show canceled count
         if canceled > 0:
             click.secho(f"  🚫 {canceled} canceled", fg="yellow")
+
+        if unknown > 0:
+            click.secho(f"  ⚠️ {unknown} unknown", fg="yellow")
+
+        click.echo()
+
+    def _update_summary_from_status(self, summary: dict[str, int], status: str) -> None:
+        """Update summary dictionary based on build status.
+
+        Args:
+            summary: Dictionary to update with status counts.
+            status: The build status to categorize.
+        """
+        if status == "succeeded":
+            summary["succeeded"] += 1
+        elif status == "failed":
+            summary["failed"] += 1
+        elif status == "canceled":
+            summary["canceled"] += 1
         else:
-            click.secho(f"  🚫 {canceled} canceled", fg="white", dim=True)
+            # Unknown or unexpected status
+            summary["unknown"] += 1
+
+    def _handle_build_info_error(
+        self,
+        reporter: _ImageBuildReporter,
+        summary: dict[str, int],
+        error_message: str,
+    ) -> None:
+        """Handle error when getting build info by printing error and updating summary from last seen status.
+
+        Args:
+            reporter: The reporter for the build.
+            summary: Dictionary to update with status counts.
+            error_message: The error message to display.
+        """
+        click.secho(error_message, err=True, fg="red")
+        reporter.print_final_result(None)
+        self._update_summary_from_status(summary, reporter.last_seen_status)
 
     async def _print_final_results_for_reporters(
         self, reporters: dict[str, _ImageBuildReporter]
@@ -647,65 +685,44 @@ class ApplicationVersionBuilder:
             reporters: Dictionary mapping image build IDs to their reporters.
 
         Returns:
-            Dictionary with counts: {"total": int, "succeeded": int, "failed": int, "canceled": int}
+            Dictionary with counts: {"total": int, "succeeded": int, "failed": int, "canceled": int, "unknown": int}
         """
-        summary = {"total": len(reporters), "succeeded": 0, "failed": 0, "canceled": 0}
+        summary = {
+            "total": len(reporters),
+            "succeeded": 0,
+            "failed": 0,
+            "canceled": 0,
+            "unknown": 0,
+        }
 
         click.echo()
-        click.secho("Build details:", bold=True)
+        click.secho("🎉 Image build details:", bold=True)
 
         for reporter in reporters.values():
             try:
                 info = await self._client.image_build_info(reporter.image_build_id)
                 reporter.print_final_result(info)
-                status = info.status
-                if status == "succeeded":
-                    summary["succeeded"] += 1
-                elif status == "failed":
-                    summary["failed"] += 1
-                elif status == "canceled":
-                    summary["canceled"] += 1
+                status = info.status if info is not None else reporter.last_seen_status
+                self._update_summary_from_status(summary, status)
             except httpx.HTTPError as e:
                 error_details = _format_http_error(e)
-                click.secho(
+                self._handle_build_info_error(
+                    reporter,
+                    summary,
                     f"Network error getting final build info for {reporter.image_build_id}: {error_details}",
-                    err=True,
-                    fg="red",
                 )
-                reporter.print_final_result(None)
-                # If we can't get status, check the last seen status from logs
-                status = reporter.last_seen_status
-                if status == "failed":
-                    summary["failed"] += 1
-                elif status == "canceled":
-                    summary["canceled"] += 1
             except RuntimeError as e:
-                click.secho(
+                self._handle_build_info_error(
+                    reporter,
+                    summary,
                     f"Build service error getting final build info for {reporter.image_build_id}: {e}",
-                    err=True,
-                    fg="red",
                 )
-                reporter.print_final_result(None)
-                # If we can't get status, check the last seen status from logs
-                status = reporter.last_seen_status
-                if status == "failed":
-                    summary["failed"] += 1
-                elif status == "canceled":
-                    summary["canceled"] += 1
             except Exception as e:  # pylint: disable=broad-except
-                # Fallback handler for any other unexpected errors when getting final build info
-                click.secho(
+                self._handle_build_info_error(
+                    reporter,
+                    summary,
                     f"Unexpected error getting final build info for {reporter.image_build_id}: {e}",
-                    err=True,
-                    fg="red",
                 )
-                reporter.print_final_result(None)
-                # If we can't get status, check the last seen status from logs
-                status = reporter.last_seen_status
-                if status == "failed":
-                    summary["failed"] += 1
-                elif status == "canceled":
-                    summary["canceled"] += 1
 
         return summary
 
@@ -727,12 +744,10 @@ class ApplicationVersionBuilder:
                 build_info = await self._client.image_build_info(
                     reporter.image_build_id
                 )
-                if build_info.status == "failed":
+                if build_info is not None and build_info.status == "failed":
                     failed_build_ids.add(reporter.image_build_id)
             except Exception:
-                # If we can't get status, check the last seen status from logs
-                if reporter.last_seen_status == "failed":
-                    failed_build_ids.add(reporter.image_build_id)
+                pass
 
         # If any build failed, cancel other builds that are still in progress
         if failed_build_ids:
@@ -741,6 +756,34 @@ class ApplicationVersionBuilder:
                     await self._try_cancel_build(
                         image_build_info.id, suppress_errors=True
                     )
+
+    def _is_build_in_terminal_state(self, build_info: ImageBuildInfoV3 | None) -> bool:
+        """Check if a build is in a terminal (non-cancelable) state.
+
+        Args:
+            build_info: The build info to check, or None if the build doesn't exist.
+
+        Returns:
+            True if the build is in a terminal state or doesn't exist, False otherwise.
+        """
+        if build_info is None:
+            return True
+        return build_info.status in ("succeeded", "failed", "canceled", "canceling")
+
+    def _is_error_non_cancelable(self, error: Exception) -> bool:
+        """Check if an error indicates the build is not in a cancelable state.
+
+        Args:
+            error: The exception to check.
+
+        Returns:
+            True if the error indicates the build is not cancelable, False otherwise.
+        """
+        error_text = str(error).lower()
+        return (
+            "not in a cancelable state" in error_text
+            or "cannot be canceled" in error_text
+        )
 
     async def _try_cancel_build(
         self, image_build_id: str, suppress_errors: bool = False
@@ -752,42 +795,24 @@ class ApplicationVersionBuilder:
             suppress_errors: If True, suppress errors when build is not in a cancelable state.
         """
         # Check build status first to avoid attempting to cancel builds in terminal states
-        # This prevents error messages from being printed by cancel_image_build
-        try:
-            build_info = await self._client.image_build_info(image_build_id)
-            # Only attempt to cancel if build is in a cancelable state
-            if build_info.status in ("succeeded", "failed", "canceled", "canceling"):
-                # Build is already in a terminal state, no need to cancel
-                return
-        except Exception:
-            # If we can't get the status, proceed with cancellation attempt
-            # The error handling below will catch any issues
-            pass
+        build_info = await self._client.image_build_info(image_build_id)
+        if self._is_build_in_terminal_state(build_info):
+            # Build is already in a terminal state or doesn't exist, no need to cancel
+            return
 
         try:
             await self._client.cancel_image_build(image_build_id)
         except httpx.HTTPError as e:
-            error_details = _format_http_error(e)
-            # Check if the error indicates the build is not in a cancelable state
-            error_text = str(e).lower()
-            if suppress_errors and (
-                "not in a cancelable state" in error_text
-                or "cannot be canceled" in error_text
-            ):
-                # Silently ignore - build is already in a terminal state
+            if suppress_errors and self._is_error_non_cancelable(e):
                 return
+            error_details = _format_http_error(e)
             click.secho(
                 f"Network error while canceling build {image_build_id}: {error_details}",
                 err=True,
                 fg="red",
             )
         except RuntimeError as e:
-            error_text = str(e).lower()
-            if suppress_errors and (
-                "not in a cancelable state" in error_text
-                or "cannot be canceled" in error_text
-            ):
-                # Silently ignore - build is already in a terminal state
+            if suppress_errors and self._is_error_non_cancelable(e):
                 return
             click.secho(
                 f"Error canceling build {image_build_id}: {e}",
@@ -795,12 +820,7 @@ class ApplicationVersionBuilder:
                 fg="red",
             )
         except Exception as e:  # pylint: disable=broad-except
-            error_text = str(e).lower()
-            if suppress_errors and (
-                "not in a cancelable state" in error_text
-                or "cannot be canceled" in error_text
-            ):
-                # Silently ignore - build is already in a terminal state
+            if suppress_errors and self._is_error_non_cancelable(e):
                 return
             click.secho(
                 f"Unexpected error while canceling build {image_build_id}: {e}",
