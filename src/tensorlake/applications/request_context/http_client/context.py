@@ -30,6 +30,7 @@ class RequestContextHTTPClient(RequestContext):
         request_id: str,
         allocation_id: str,
         function_name: str,
+        function_run_id: str,
         server_base_url: str,
         http_client: httpx.Client,
         blob_store: BLOBStore,
@@ -38,6 +39,7 @@ class RequestContextHTTPClient(RequestContext):
         self._request_id: str = request_id
         self._allocation_id: str = allocation_id
         self._function_name: str = function_name
+        self._function_run_id: str = function_run_id
         self._server_base_url: str = server_base_url
         self._blob_store: BLOBStore = blob_store
         self._logger: InternalLogger = logger.bind(module=__name__)
@@ -53,6 +55,7 @@ class RequestContextHTTPClient(RequestContext):
             request_id=request_id,
             allocation_id=allocation_id,
             function_name=function_name,
+            function_run_id=function_run_id,
             http_client=http_client,
         )
         self._metrics: RequestMetricsHTTPClient = RequestMetricsHTTPClient(
@@ -79,6 +82,7 @@ class RequestContextHTTPClient(RequestContext):
             "request_id": self._request_id,
             "allocation_id": self._allocation_id,
             "function_name": self._function_name,
+            "function_run_id": self._function_run_id,
             "server_base_url": self._server_base_url,
             "blob_store": self._blob_store,
             "logger": self._logger,
@@ -92,6 +96,7 @@ class RequestContextHTTPClient(RequestContext):
             request_id=state["request_id"],
             allocation_id=state["allocation_id"],
             function_name=state["function_name"],
+            function_run_id=state["function_run_id"],
             server_base_url=state["server_base_url"],
             http_client=RequestContextHTTPClient.create_http_client(
                 state["server_base_url"]

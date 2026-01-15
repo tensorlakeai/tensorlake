@@ -266,6 +266,7 @@ class Service(FunctionExecutorServicer):
                 request_id=allocation.request_id,
                 allocation_id=allocation.allocation_id,
                 function_name=self._function_ref.function_name,
+                function_run_id=allocation.function_call_id,
                 server_base_url=self._request_context_http_server.base_url,
                 http_client=self._request_context_http_client,
                 blob_store=self._blob_store,

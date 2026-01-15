@@ -10,6 +10,7 @@ class FunctionProgressUpdateRequest(BaseModel):
     request_id: str
     allocation_id: str
     function_name: str
+    function_run_id: str
     current: float
     total: float
     message: str | None

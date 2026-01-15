@@ -6,6 +6,8 @@ from tensorlake.applications.cloud_events import event_time, print_cloud_event
 def print_progress_update(
     request_id: str,
     function_name: str,
+    function_run_id: str,
+    allocation_id: str,
     current: float,
     total: float,
     message: str | None,
@@ -17,20 +19,22 @@ def print_progress_update(
     Uses human-readable format in local mode, and Cloud Events format otherwise (remote/FE mode).
     Doesn't raise any exceptions.
     """
-    current: float | int = _maybe_int(current)
-    total: float | int = _maybe_int(total)
+    current_f: float | int = _maybe_int(current)
+    total_f: float | int = _maybe_int(total)
     event_message: str = (
         message
         if message is not None
-        else f"{function_name}: executing step {current} of {total}"
+        else f"{function_name}: executing step {current_f} of {total_f}"
     )
 
     event: dict[str, Any] = {
         "request_id": request_id,
         "function_name": function_name,
+        "function_run_id": function_run_id,
+        "allocation_id": allocation_id,
         "message": event_message,
-        "step": current,
-        "total": total,
+        "step": current_f,
+        "total": total_f,
         "attributes": attributes,
         "created_at": event_time(),
     }
