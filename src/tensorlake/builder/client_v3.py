@@ -706,20 +706,22 @@ class ImageBuilderClientV3:
                         click.secho(f"Error parsing log event: {e}", err=True, fg="red")
                         continue
 
-    async def image_build_info(self, image_build_id: str) -> ImageBuildInfoV3:
+    async def image_build_info(self, image_build_id: str) -> ImageBuildInfoV3 | None:
         """
         Get information about a build.
 
         Args:
             image_build_id (str): The build id to get information about.
         Returns:
-            ImageBuildInfoV3: Information about the build.
+            ImageBuildInfoV3 | None: Information about the build, or None if the build doesn't exist (404).
         """
         res = await self._client.get(
             f"builds/{quote(image_build_id)}",
             headers=self._headers,
             timeout=60,
         )
+        if res.status_code == 404:
+            return None
         if not res.is_success:
             error_message = res.text
             click.secho(

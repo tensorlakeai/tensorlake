@@ -156,8 +156,6 @@ async def _build_applications(
             # Exit without showing traceback or "Aborted!" message
             sys.exit(1)
 
-    click.secho("\n✅ All image(s) built successfully")
-
 
 def _deploy_applications(
     auth: Context,
