@@ -8,17 +8,18 @@ of image builds, streaming build logs, and managing the build lifecycle.
 import asyncio
 import tempfile
 from typing import AsyncGenerator
-from uuid import uuid7
+from uuid import uuid4 as uuid
 
 import click
 import httpx
 
-from tensorlake.applications import Image
 from tensorlake.applications.image import ImageInformation, create_image_context_file
-from tensorlake.builder.client_v3 import (
+from tensorlake.applications.image_builder.client_v3 import (
     ApplicationVersionBuildInfoV3,
     ApplicationVersionBuildRequestV3,
     ImageBuilderClientV3,
+    ImageBuilderClientV3Error,
+    ImageBuilderClientV3NotFoundError,
     ImageBuildInfoV3,
     ImageBuildLogEventV3,
     ImageBuildRequestV3,
@@ -95,7 +96,7 @@ class ImageBuildRequest:
             context_tar_content = await asyncio.to_thread(read_file)
 
         return ImageBuildRequestV3(
-            key=uuid7().hex,
+            key=uuid().hex,
             name=image.name,
             description=None,
             context_tar_content=context_tar_content,
@@ -103,12 +104,12 @@ class ImageBuildRequest:
         )
 
 
-class ApplicationVersionBuildRequest:
-    """Represents a request to build an application version with multiple container images.
+class BuildRequest:
+    """Represents a request to build an application with multiple container images.
 
-    This class is used to construct a build request for an entire application
-    version, which may consist of multiple container images. Each image can
-    contain different sets of functions and their dependencies.
+    This class is used to construct a build request for an application, which
+    may consist of multiple container images. Each image can contain different
+    sets of functions and their dependencies.
 
     Tensorlake applications can use multiple images to separate functions with
     different dependency requirements. For example, you might have one image
@@ -122,12 +123,12 @@ class ApplicationVersionBuildRequest:
             "latest", "dev-2024-01-01"). Used to identify and track different
             builds of the same application.
         images: List of ImageBuildRequest objects, each representing a container
-            image to be built as part of this application version. Each image
-            can have different base images, dependencies, and associated functions.
+            image to be built as part of this application. Each image can have
+            different base images, dependencies, and associated functions.
 
     Example:
         >>> from tensorlake.applications import Image
-        >>> req = ApplicationVersionBuildRequest("my-app", "v1.0.0")
+        >>> req = BuildRequest("my-app", "v1.0.0")
         >>>
         >>> # Create an image for PDF processing functions
         >>> pdf_image = (
@@ -149,14 +150,14 @@ class ApplicationVersionBuildRequest:
     """
 
     def __init__(self, name: str, version: str):
-        """Initialize an ApplicationVersionBuildRequest.
+        """Initialize a BuildRequest.
 
         Args:
             name: The name of the application. This should match the application
                 name in your Tensorlake project.
-            version: The version identifier for this build. This can be any
-                string (e.g., "v1.0.0", "latest", "dev-2024-01-01"). The
-                version is used to identify and track different builds of the
+            version: The version identifier for this application build.
+                This can be any string (e.g., "v1.0.0", "latest", "dev-2024-01-01").
+                The version is used to identify and track different builds of the
                 same application.
 
         Raises:
@@ -200,7 +201,7 @@ class ApplicationVersionBuildRequest:
         Example:
             >>> from tensorlake.applications import Image
             >>> from tensorlake.applications.image import ImageInformation
-            >>> req = ApplicationVersionBuildRequest("my-app", "v1.0.0")
+            >>> req = BuildRequest("my-app", "v1.0.0")
             >>>
             >>> # Define image with dependencies
             >>> image = (
@@ -229,8 +230,9 @@ class ApplicationVersionBuildRequest:
             name=self.name,
             version=self.version,
             images=[
-                await image_req._synthesize_v3_request() for image_req in self.images
-            ],  # pylint: disable=protected-access
+                await image_req._synthesize_v3_request()
+                for image_req in self.images  # pylint: disable=protected-access
+            ],
         )
 
 
@@ -284,7 +286,9 @@ class _ImageBuildReporter:
         """Get the last seen build status from log events."""
         return self._last_seen_status
 
-    async def process_log_events(self, stream: AsyncGenerator[ImageBuildLogEventV3]):
+    async def process_log_events(
+        self, stream: AsyncGenerator[ImageBuildLogEventV3, None]
+    ):
         """Process and display log events from the build stream.
 
         Args:
@@ -353,19 +357,19 @@ class _ImageBuildReporter:
 
         match status:
             case "succeeded":
-                msg = f"✅ Image build{build_id_suffix} succeeded."
+                msg = f"✅ Image build{build_id_suffix} succeeded"
             case "failed":
                 err = True
                 show_logs = True
                 msg = (
-                    f"❌ Image build{build_id_suffix} failed."
+                    f"❌ Image build{build_id_suffix} failed"
                     if not error_message
                     else f"❌ Image build{build_id_suffix} failed: {error_message}"
                 )
             case "canceled":
-                msg = f"🚫 Image build{build_id_suffix} canceled."
+                msg = f"🚫 Image build{build_id_suffix} cancele."
             case "canceling":
-                msg = f"🔄 Image build{build_id_suffix} canceling..."
+                msg = f"🔄 Image build{build_id_suffix} canceling"
             case _:
                 msg = f"⚠️ Unexpected image build{build_id_suffix} status: {status}"
 
@@ -379,10 +383,10 @@ class _ImageBuildReporter:
             click.echo()
 
 
-class ApplicationVersionBuilder:
-    """Builder for application versions and their associated container images.
+class ImageBuilder:
+    """Builder for images and their associated container images.
 
-    This class provides the main interface for building application versions
+    This class provides the main interface for building images
     in Tensorlake. It handles the orchestration of building multiple container
     images, streaming build logs, and managing build lifecycle.
 
@@ -406,16 +410,16 @@ class ApplicationVersionBuilder:
             This is set during initialization and should not be modified.
 
     Example:
-        >>> from tensorlake.builder.client_v3 import ImageBuilderClientV3, ImageBuilderClientV3Options
-        >>> from tensorlake.builder.builder import ApplicationVersionBuilder
+        >>> from tensorlake.applications.image_builder.client_v3 import ImageBuilderClientV3, ImageBuilderClientV3Options
+        >>> from tensorlake.applications.image_builder import ImageBuilder
         >>> from tensorlake.applications import Image
         >>>
         >>> options = ImageBuilderClientV3Options.from_env()
         >>> client = ImageBuilderClientV3(options)
-        >>> builder = ApplicationVersionBuilder(client)
+        >>> builder = ImageBuilder(client)
         >>>
         >>> # Create build request
-        >>> req = ApplicationVersionBuildRequest("my-app", "v1.0.0")
+        >>> req = BuildRequest("my-app", "v1.0.0")
         >>>
         >>> # Define image with dependencies
         >>> image = (
@@ -432,7 +436,7 @@ class ApplicationVersionBuilder:
     _client: ImageBuilderClientV3
 
     def __init__(self, client: ImageBuilderClientV3):
-        """Initialize an ApplicationVersionBuilder.
+        """Initialize an ImageBuilder.
 
         Args:
             client: An ImageBuilderClientV3 instance configured with the
@@ -443,20 +447,20 @@ class ApplicationVersionBuilder:
             ValueError: If client is None or invalid.
 
         Example:
-            >>> from tensorlake.builder.client_v3 import ImageBuilderClientV3, ImageBuilderClientV3Options
+            >>> from tensorlake.applications.image_builder.client_v3 import ImageBuilderClientV3, ImageBuilderClientV3Options
             >>> options = ImageBuilderClientV3Options.from_env()
             >>> client = ImageBuilderClientV3(options)
-            >>> builder = ApplicationVersionBuilder(client)
+            >>> builder = ImageBuilder(client)
         """
         if client is None:
             raise ValueError("client cannot be None")
         self._client = client
 
-    async def build(self, req: ApplicationVersionBuildRequest) -> None:
-        """Build an application version and all its associated images.
+    async def build(self, req: BuildRequest) -> None:
+        """Build images and all their associated container images.
 
         This method orchestrates the complete build process:
-        1. Synthesizes the build request from the provided ApplicationVersionBuildRequest
+        1. Synthesizes the build request from the provided BuildRequest
         2. Submits the build request to the Tensorlake build service
         3. Streams real-time build logs for all images concurrently
         4. Retrieves and displays final build results for each image
@@ -471,18 +475,16 @@ class ApplicationVersionBuilder:
         all build information is displayed via console output.
 
         Args:
-            req: The ApplicationVersionBuildRequest containing the application
-                name, version, and list of images to build. Each image should
-                have been added via `add_image()` with the appropriate Image
-                and function names.
+            req: The BuildRequest containing the application name, version,
+                and list of images to build. Each image should have been added
+                via `add_image()` with the appropriate Image and function names.
 
         Returns:
             None. Build progress and results are printed to the console.
 
         Raises:
-            httpx.HTTPError: If a network error occurs during the build request
-                or log streaming. The error message includes HTTP status codes,
-                URLs, and response details.
+            ImageBuilderClientV3Error: If a network error or build service error occurs.
+                The error message includes HTTP status codes, URLs, response details, and request ID.
             OSError: If a file system error occurs while preparing the build
                 request (e.g., reading Dockerfile or context files).
             RuntimeError: If the build service returns an error response.
@@ -496,16 +498,16 @@ class ApplicationVersionBuilder:
             the exception.
 
         Example:
-            >>> from tensorlake.builder.client_v3 import ImageBuilderClientV3, ImageBuilderClientV3Options
-            >>> from tensorlake.builder.builder import ApplicationVersionBuilder, ApplicationVersionBuildRequest
+            >>> from tensorlake.applications.image_builder.client_v3 import ImageBuilderClientV3, ImageBuilderClientV3Options
+            >>> from tensorlake.applications.image_builder import ImageBuilder, BuildRequest
             >>> from tensorlake.applications import Image
             >>>
             >>> options = ImageBuilderClientV3Options.from_env()
             >>> client = ImageBuilderClientV3(options)
-            >>> builder = ApplicationVersionBuilder(client)
+            >>> builder = ImageBuilder(client)
             >>>
             >>> # Create build request
-            >>> req = ApplicationVersionBuildRequest("my-app", "v1.0.0")
+            >>> req = BuildRequest("my-app", "v1.0.0")
             >>>
             >>> # Define image with dependencies
             >>> image = (
@@ -515,30 +517,25 @@ class ApplicationVersionBuilder:
             ... )
             >>> req.add_image(image, ["parse_pdf", "extract_text"])
             >>>
-            >>> # Build the application version (logs streamed to console)
+            >>> # Build the application images (logs streamed to console)
             >>> try:
             ...     await builder.build(req)
             ...     print("Build completed successfully")
-            ... except httpx.HTTPError as e:
-            ...     print(f"Network error: {e}")
+            ... except ImageBuilderClientV3Error as e:
+            ...     print(f"Build error: {e}")
         """
 
         try:
             v3_req = (
-                await req._synthesize_v3_request()
-            )  # pylint: disable=protected-access
+                await req._synthesize_v3_request()  # pylint: disable=protected-access
+            )
             info = await self._client.build_app(v3_req)
             reporters = {
                 image_build_info.id: _ImageBuildReporter(image_build_info)
                 for image_build_info in info.image_builds.values()
             }
-        except httpx.HTTPError as e:
-            error_details = _format_http_error(e)
-            click.secho(
-                f"Network error while building application version: {error_details}",
-                err=True,
-                fg="red",
-            )
+        except ImageBuilderClientV3Error as e:
+            click.secho(str(e), err=True, fg="red")
             raise
         except OSError as e:
             click.secho(
@@ -558,7 +555,7 @@ class ApplicationVersionBuilder:
 
         process_log_events_tasks: list[asyncio.Task[None]] | None = None
         try:
-            log_streams: list[AsyncGenerator[ImageBuildLogEventV3]] = [
+            log_streams: list[AsyncGenerator[ImageBuildLogEventV3, None]] = [
                 self._client.stream_image_build_logs(image_build_info.id)
                 for image_build_info in info.image_builds.values()
             ]
@@ -581,13 +578,8 @@ class ApplicationVersionBuilder:
             await self._print_final_results_for_reporters(reporters)
             raise
 
-        except httpx.HTTPError as e:
-            error_details = _format_http_error(e)
-            click.secho(
-                f"Network error while streaming build logs: {error_details}",
-                err=True,
-                fg="red",
-            )
+        except ImageBuilderClientV3Error as e:
+            click.secho(str(e), err=True, fg="red")
             await self._cancel_builds(info, process_log_events_tasks)
             await self._print_final_results_for_reporters(reporters)
             raise
@@ -704,12 +696,11 @@ class ApplicationVersionBuilder:
                 reporter.print_final_result(info)
                 status = info.status if info is not None else reporter.last_seen_status
                 self._update_summary_from_status(summary, status)
-            except httpx.HTTPError as e:
-                error_details = _format_http_error(e)
+            except ImageBuilderClientV3Error as e:
                 self._handle_build_info_error(
                     reporter,
                     summary,
-                    f"Network error getting final build info for {reporter.image_build_id}: {error_details}",
+                    f"Error getting final build info for {reporter.image_build_id}: {e}",
                 )
             except RuntimeError as e:
                 self._handle_build_info_error(
@@ -746,7 +737,8 @@ class ApplicationVersionBuilder:
                 )
                 if build_info is not None and build_info.status == "failed":
                     failed_build_ids.add(reporter.image_build_id)
-            except Exception:
+            except (ImageBuilderClientV3Error, Exception):
+                # Ignore errors when checking build status
                 pass
 
         # If any build failed, cancel other builds that are still in progress
@@ -794,23 +786,22 @@ class ApplicationVersionBuilder:
             image_build_id: The ID of the build to cancel.
             suppress_errors: If True, suppress errors when build is not in a cancelable state.
         """
-        # Check build status first to avoid attempting to cancel builds in terminal states
-        build_info = await self._client.image_build_info(image_build_id)
+        try:
+            build_info = await self._client.image_build_info(image_build_id)
+        except ImageBuilderClientV3NotFoundError:
+            build_info = None
+        except (ImageBuilderClientV3Error, Exception):
+            build_info = None
+
         if self._is_build_in_terminal_state(build_info):
-            # Build is already in a terminal state or doesn't exist, no need to cancel
             return
 
         try:
             await self._client.cancel_image_build(image_build_id)
-        except httpx.HTTPError as e:
+        except ImageBuilderClientV3Error as e:
             if suppress_errors and self._is_error_non_cancelable(e):
                 return
-            error_details = _format_http_error(e)
-            click.secho(
-                f"Network error while canceling build {image_build_id}: {error_details}",
-                err=True,
-                fg="red",
-            )
+            click.secho(str(e), err=True, fg="red")
         except RuntimeError as e:
             if suppress_errors and self._is_error_non_cancelable(e):
                 return
@@ -863,49 +854,3 @@ class ApplicationVersionBuilder:
 
         for image_build_info in info.image_builds.values():
             await self._try_cancel_build(image_build_info.id, suppress_errors=True)
-
-
-def _format_http_error(e: httpx.HTTPError) -> str:
-    """
-    Format an httpx.HTTPError with detailed information.
-
-    Args:
-        e: The HTTP error exception
-
-    Returns:
-        A formatted error message with HTTP details
-    """
-    error_parts = [str(e)]
-
-    # Handle HTTPStatusError (has response with status code)
-    if isinstance(e, httpx.HTTPStatusError):
-        response = e.response
-        request = e.request
-
-        error_parts.append(f"Status: {response.status_code} {response.reason_phrase}")
-        if request:
-            error_parts.append(f"URL: {request.method} {request.url}")
-
-        try:
-            response_text = response.text
-            if response_text:
-                # Truncate long responses
-                if len(response_text) > 500:
-                    response_text = response_text[:500] + "... (truncated)"
-                error_parts.append(f"Response: {response_text}")
-        except Exception:  # pylint: disable=broad-except
-            # response.text can fail in various ways (encoding errors, already read, streaming mode, etc.)
-            pass
-
-    # Handle TimeoutException
-    elif isinstance(e, httpx.TimeoutException):
-        error_parts.append("Request timed out")
-        if hasattr(e, "request") and e.request:
-            error_parts.append(f"URL: {e.request.method} {e.request.url}")
-
-    # Handle RequestError (network errors, etc.)
-    elif isinstance(e, httpx.RequestError):
-        if hasattr(e, "request") and e.request:
-            error_parts.append(f"URL: {e.request.method} {e.request.url}")
-
-    return " | ".join(error_parts)
