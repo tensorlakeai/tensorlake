@@ -18,6 +18,20 @@ def parameter_type_hints(parameter: inspect.Parameter) -> List[Any]:
     return _resolve_type_hint(parameter.annotation)
 
 
+def function_parameters(function: Function) -> List[inspect.Parameter]:
+    """Returns the list of function parameters for the provided Tensorlake Function.
+
+    The parameters are in the same order as in the function definition.
+    Self parameter for instance methods is not included.
+    Raises Exception if the signature cannot be obtained.
+    """
+    signature: inspect.Signature = function_signature(function)
+    # skip 'self'
+    first_arg_index: int = 0 if function._function_config.class_name is None else 1
+    # signature.parameters is an ordered mapping in parameters definition order.
+    return list(signature.parameters.values())[first_arg_index:]
+
+
 def type_hint_arguments(type_hint: Any) -> List[Any]:
     """Returns the type hints of arguments for the provided type hint.
 

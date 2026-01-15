@@ -249,7 +249,8 @@ class TestHealthCheck(unittest.TestCase):
                                     function_call_id="test-function-call",
                                     allocation_id="test-allocation-id",
                                     inputs=application_function_inputs(
-                                        "close_connections"
+                                        "close_connections",
+                                        str,
                                     ),
                                 ),
                             ),

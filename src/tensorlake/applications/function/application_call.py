@@ -5,7 +5,6 @@ from typing import Any
 from tensorlake.vendor.nanoid import generate as nanoid
 
 from ..interface import DeserializationError, File, Function, InternalError
-from ..metadata import ValueMetadata
 from ..user_data_serializer import UserDataSerializer
 from .type_hints import (
     function_arg_type_hint,
@@ -20,6 +19,12 @@ from .user_data_serializer import (
 
 
 @dataclass
+class ApplicationArgument:
+    value: Any | File
+    type_hints: list[Any]  # One or more type hint
+
+
+@dataclass
 class SerializedApplicationArgument:
     data: bytes | memoryview
     content_type: str
@@ -27,8 +32,8 @@ class SerializedApplicationArgument:
 
 def serialize_application_function_call_arguments(
     input_serializer: UserDataSerializer,
-    args: list[Any],
-    kwargs: dict[str, Any],
+    args: list[ApplicationArgument],
+    kwargs: dict[str, ApplicationArgument],
 ) -> tuple[
     list[SerializedApplicationArgument], dict[str, SerializedApplicationArgument]
 ]:
@@ -41,8 +46,12 @@ def serialize_application_function_call_arguments(
     # NB: We don't have access to Function here as we might be called from RemoteRunner.
     serialized_args: list[SerializedApplicationArgument] = []
     for arg in args:
+        arg: ApplicationArgument
         arg_data, arg_metadata = serialize_value(
-            value=arg, serializer=input_serializer, value_id=nanoid()
+            value=arg.value,
+            serializer=input_serializer,
+            value_id=nanoid(),
+            type_hints=arg.type_hints,
         )
         arg_content_type: str = (
             input_serializer.content_type
@@ -54,9 +63,13 @@ def serialize_application_function_call_arguments(
         )
 
     serialized_kwargs: dict[str, tuple[bytes, str | None]] = {}
-    for kwarg_key, kwarg_value in kwargs.items():
+    for kwarg_key, kwarg in kwargs.items():
+        kwarg: ApplicationArgument
         kwarg_data, kwarg_metadata = serialize_value(
-            value=kwarg_value, serializer=input_serializer, value_id=nanoid()
+            value=kwarg.value,
+            serializer=input_serializer,
+            value_id=nanoid(),
+            type_hints=kwarg.type_hints,
         )
         kwarg_content_type: str = (
             input_serializer.content_type
@@ -164,22 +177,9 @@ def _deserialize_application_function_call_arg(
     if len(arg_type_hints) == 0:
         raise InternalError("arg_type_hints must not be empty")
 
-    # We're using API function payload argument type hint to determine how to deserialize it properly.
-    last_error: DeserializationError | None = None
-
-    for type_hint in arg_type_hints:
-        try:
-            return deserialize_value(
-                serialized_value=serialized_arg.data,
-                metadata=ValueMetadata(
-                    id="fake_id",
-                    cls=type_hint,
-                    serializer_name=deserializer.name,
-                    content_type=serialized_arg.content_type,
-                ),
-            )
-        except DeserializationError as e:
-            last_error = e
-
-    # If all deserialization attempts failed, raise the last exception.
-    raise last_error
+    return deserialize_value(
+        serialized_value=serialized_arg.data,
+        serializer=deserializer,
+        content_type=serialized_arg.content_type,
+        type_hints=arg_type_hints,
+    )

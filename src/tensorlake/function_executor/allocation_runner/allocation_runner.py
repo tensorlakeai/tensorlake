@@ -24,7 +24,7 @@ from tensorlake.applications.algorithms.validate_user_object import validate_use
 from tensorlake.applications.blob_store import BLOBStore
 from tensorlake.applications.function.function_call import create_function_error
 from tensorlake.applications.function.user_data_serializer import (
-    deserialize_value,
+    deserialize_value_with_metadata,
     function_output_serializer,
 )
 from tensorlake.applications.interface.awaitables import (
@@ -546,7 +546,7 @@ class AllocationRunner:
                     raise InternalError(
                         "Function Call output SerializedValue is missing metadata."
                     )
-                output: Any = deserialize_value(
+                output: Any = deserialize_value_with_metadata(
                     serialized_output.data, serialized_output.metadata
                 )
                 future.set_result(output)

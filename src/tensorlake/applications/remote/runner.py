@@ -1,11 +1,22 @@
+import base64
 from typing import Any
 
-from ..function.application_call import serialize_application_function_call_arguments
+from tensorlake.applications.interface.exceptions import InternalError, SDKUsageError
+
+from ..function.application_call import (
+    ApplicationArgument,
+    serialize_application_function_call_arguments,
+)
+from ..function.type_hints import deserialize_type_hints
 from ..interface.request import Request
 from ..user_data_serializer import UserDataSerializer, serializer_by_name
 from .api_client import APIClient, RequestInput
 from .app_manifest_cache import get_app_manifest, has_app_manifest, set_app_manifest
-from .manifests.application import ApplicationManifest
+from .manifests.application import (
+    ApplicationManifest,
+    EntryPointInputManifest,
+    EntryPointManifest,
+)
 from .request import RemoteRequest
 
 
@@ -33,11 +44,12 @@ class RemoteRunner:
         input_serializer: UserDataSerializer = serializer_by_name(
             app_manifest.entrypoint.input_serializer
         )
+
         serialized_args, serialized_kwargs = (
             serialize_application_function_call_arguments(
                 input_serializer=input_serializer,
-                args=self._args,
-                kwargs=self._kwargs,
+                args=self._make_application_args(app_manifest.entrypoint),
+                kwargs=self._make_application_kwargs(app_manifest.entrypoint),
             )
         )
 
@@ -71,3 +83,60 @@ class RemoteRunner:
             request_id=request_id,
             client=self._client,
         )
+
+    def _make_application_args(
+        self, manifest: EntryPointManifest
+    ) -> list[ApplicationArgument]:
+        args: list[ApplicationArgument] = []
+        for arg_index, arg_value in enumerate(self._args):
+            if arg_index >= len(manifest.inputs):
+                raise SDKUsageError(
+                    f"Application '{self._application_name}' expects "
+                    f"{len(manifest.inputs)} arguments, "
+                    f"but got {len(self._args)}."
+                )
+
+            arg_manifest: EntryPointInputManifest = manifest.inputs[arg_index]
+            try:
+                serialized_type_hints: bytes = base64.decodebytes(
+                    arg_manifest.type_hints_base64.encode("utf-8")
+                )
+                type_hints: list[Any] = deserialize_type_hints(serialized_type_hints)
+            except Exception as e:
+                raise InternalError(
+                    f"Failed to deserialize application '{self._application_name}' argument '{arg_manifest.arg_name}' type hints"
+                ) from e
+            args.append(ApplicationArgument(value=arg_value, type_hints=type_hints))
+
+        return args
+
+    def _make_application_kwargs(
+        self, manifest: EntryPointManifest
+    ) -> dict[str, ApplicationArgument]:
+        kwargs: dict[str, ApplicationArgument] = {}
+        for kwarg_name, kwarg_value in self._kwargs.items():
+            arg_manifest: EntryPointInputManifest | None = None
+            for input_manifest in manifest.inputs:
+                if input_manifest.arg_name == kwarg_name:
+                    arg_manifest = input_manifest
+                    break
+
+            if arg_manifest is None:
+                raise SDKUsageError(
+                    f"Application '{self._application_name}' has no argument named '{kwarg_name}'."
+                )
+
+            try:
+                serialized_type_hints: bytes = base64.decodebytes(
+                    arg_manifest.type_hints_base64.encode("utf-8")
+                )
+                type_hints: list[Any] = deserialize_type_hints(serialized_type_hints)
+            except Exception as e:
+                raise InternalError(
+                    f"Failed to deserialize application '{self._application_name}' argument '{arg_manifest.arg_name}' type hints"
+                ) from e
+            kwargs[kwarg_name] = ApplicationArgument(
+                value=kwarg_value, type_hints=type_hints
+            )
+
+        return kwargs

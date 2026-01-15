@@ -1,4 +1,5 @@
 import pickle
+from dataclasses import dataclass
 from typing import Any
 
 import pydantic
@@ -23,6 +24,15 @@ from .interface.exceptions import (
 NON_API_FUNCTION_SERIALIZER_NAME: str = "pickle"
 
 
+@dataclass
+class SerializationResult:
+    data: bytes
+    # True if a type hint was used during serialization.
+    type_hint_set: bool
+    # Type hint used during serialization if type_hint_set is True.
+    type_hint: Any
+
+
 class UserDataSerializer:
     """A serializer used to serialize and deserialize user data.
 
@@ -45,13 +55,14 @@ class UserDataSerializer:
         """Returns the serialized object encoding of the serializer."""
         raise InternalError("Subclasses should implement this method.")
 
-    def serialize(self, object: Any, type_hints: list[Any]) -> bytes:
+    def serialize(self, object: Any, type_hints: list[Any]) -> SerializationResult:
         """Serializes the given object into bytes.
 
         The `type_hints` parameter specifies possible types of the serialized object.
         type(object) is not the same as type_hints[0], i.e.
         type(object) is list, type_hints[0] is List[int].
 
+        Returns SerializationResult containing serialized bytes, and details about performed serialization.
         Raises SerializationError on failure.
         """
         raise InternalError("Subclasses should implement this method.")
@@ -97,38 +108,34 @@ class JSONUserDataSerializer(UserDataSerializer):
     def serialized_object_encoding(self) -> SerializedObjectEncoding:
         return SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON
 
-    def serialize(self, object: Any, type_hints: list[Any]) -> bytes:
-        if isinstance(object, pydantic.BaseModel):
-            try:
-                return object.model_dump_json().encode("utf-8")
-            except Exception as e:
-                raise SerializationError(
-                    f"Failed to serialize Pydantic model {object} to json: {e}"
-                )
+    def serialize(self, object: Any, type_hints: list[Any]) -> SerializationResult:
+        if len(type_hints) == 0:
+            raise SerializationError(
+                "Failed to serialize object to json: no type hints were provided."
+            )
 
         # Serialization heuristic: try each possible type hint one by one until one succeeds.
         # This is similar to how FastAPI works, see
         # https://fastapi.tiangolo.com/tutorial/extra-models/#union-or-anyof.
-        last_exception: SerializationError | None = None
+        last_exception: SerializationError = SerializationError(
+            "Failed to serialize object to json: no type hints were provided."
+        )
         for type_hint in type_hints:
-            if is_pydantic_type_hint(type_hint):
-                continue  # handled above
             try:
-                return pydantic.TypeAdapter(type_hint).dump_json(
-                    object, warnings="error"
+                if is_pydantic_type_hint(type_hint):
+                    data: bytes = object.model_dump_json().encode("utf-8")
+                else:
+                    data: bytes = pydantic.TypeAdapter(type_hint).dump_json(
+                        object, warnings="error"
+                    )
+                return SerializationResult(
+                    data=data, type_hint_set=True, type_hint=type_hint
                 )
             except Exception as e:
                 last_exception = SerializationError(
                     f"Failed to serialize {object} as {type_hint} to json: {e}"
                 )
                 continue
-
-        if last_exception is None:
-            # Only create the default exception when needed to avoid rendering potentially large object as str.
-            last_exception = SerializationError(
-                f"Failed to serialize {object} to json: the provided type hints are "
-                "Pydantic models but the object is not a Pydantic model."
-            )
 
         raise last_exception
 
@@ -196,9 +203,13 @@ class PickleUserDataSerializer(UserDataSerializer):
     def serialized_object_encoding(self) -> SerializedObjectEncoding:
         return SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE
 
-    def serialize(self, object: Any, type_hints: list[Any]) -> bytes:
+    def serialize(self, object: Any, type_hints: list[Any]) -> SerializationResult:
         try:
-            return pickle.dumps(object, protocol=self._PROTOCOL_LEVEL)
+            return SerializationResult(
+                data=pickle.dumps(object, protocol=self._PROTOCOL_LEVEL),
+                type_hint_set=False,
+                type_hint=None,
+            )
         except Exception as e:
             raise SerializationError(
                 f"Failed to serialize data with pickle serializer: {e}"

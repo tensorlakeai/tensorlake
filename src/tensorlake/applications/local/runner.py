@@ -21,11 +21,13 @@ from tensorlake.applications.multiprocessing import setup_multiprocessing
 
 from ..algorithms.validate_user_object import validate_user_object
 from ..function.application_call import (
+    ApplicationArgument,
     deserialize_application_function_call_arguments,
     serialize_application_function_call_arguments,
 )
+from ..function.type_hints import function_arg_type_hint, function_kwarg_type_hint
 from ..function.user_data_serializer import (
-    deserialize_value,
+    deserialize_value_with_metadata,
     function_input_serializer,
     function_output_serializer,
     serialize_value,
@@ -208,13 +210,30 @@ class LocalRunner:
         setup_multiprocessing()
 
         try:
+            app_args: list[ApplicationArgument] = []
+            for arg_index, arg_value in enumerate(self._app_args):
+                app_args.append(
+                    ApplicationArgument(
+                        value=arg_value,
+                        type_hints=function_arg_type_hint(
+                            self._app, arg_index=arg_index
+                        ),
+                    )
+                )
+            app_kwargs: dict[str, ApplicationArgument] = {}
+            for kwarg_key, kwarg_value in self._app_kwargs.items():
+                app_kwargs[kwarg_key] = ApplicationArgument(
+                    value=kwarg_value,
+                    type_hints=function_kwarg_type_hint(self._app, key=kwarg_key),
+                )
+
             # Serialize application payload the same way as in remote mode.
             input_serializer: UserDataSerializer = function_input_serializer(self._app)
             serialized_app_args, serialized_app_kwargs = (
                 serialize_application_function_call_arguments(
                     input_serializer=input_serializer,
-                    args=self._app_args,
-                    kwargs=self._app_kwargs,
+                    args=app_args,
+                    kwargs=app_kwargs,
                 )
             )
             deserialized_app_args, deserialized_app_kwargs = (
@@ -1046,7 +1065,7 @@ class LocalRunner:
 
 
 def _deserialize_value(ser_value: SerializedValue) -> Any | File:
-    return deserialize_value(
+    return deserialize_value_with_metadata(
         serialized_value=ser_value.data,
         metadata=ser_value.metadata,
     )
@@ -1055,6 +1074,7 @@ def _deserialize_value(ser_value: SerializedValue) -> Any | File:
 def _to_serialized_value(
     value_id: str, value: Any, value_serializer: UserDataSerializer
 ) -> SerializedValue:
+    TODO
     serialized_value, metadata = serialize_value(
         value, value_serializer, value_id=value_id
     )

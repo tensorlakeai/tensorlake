@@ -170,7 +170,9 @@ class TestRunAllocation(unittest.TestCase):
                             request_id="123",
                             function_call_id="test-function-call",
                             allocation_id=allocation_id,
-                            inputs=application_function_inputs("https://example.com"),
+                            inputs=application_function_inputs(
+                                "https://example.com", str
+                            ),
                         ),
                     ),
                 )
@@ -290,7 +292,7 @@ class TestRunAllocation(unittest.TestCase):
                             function_call_id="test-function-call",
                             allocation_id=allocation_id,
                             inputs=application_function_inputs(
-                                "https://blocking-example.com"
+                                "https://blocking-example.com", str
                             ),
                         ),
                     ),
@@ -436,7 +438,8 @@ class TestRunAllocation(unittest.TestCase):
                 serialized_function_call_output_metadata: bytes = serialize_metadata(
                     ValueMetadata(
                         id="function-call-output-id",
-                        cls=list,
+                        type_hint=None,
+                        has_type_hint=False,
                         serializer_name=user_serializer.name,
                         content_type=None,
                     )
@@ -458,8 +461,9 @@ class TestRunAllocation(unittest.TestCase):
                             start=2,
                             end=3,
                         ),
-                    ]
-                )
+                    ],
+                    type_hints=[list[FileChunk]],
+                ).data
 
                 function_call_output_blob_data: bytes = b"".join(
                     [
@@ -596,25 +600,27 @@ class TestRunAllocation(unittest.TestCase):
                     HTTPBodyPart(
                         field_name="1",
                         content_type="application/json",
-                        body=user_serializer.serialize("test-string-arg"),
+                        body=user_serializer.serialize(
+                            "test-string-arg", type_hints=[str]
+                        ).data,
                     ),
                     # arg2 is passed as second positional argument
                     HTTPBodyPart(
                         field_name="2",
                         content_type="application/json",
-                        body=user_serializer.serialize(777),
+                        body=user_serializer.serialize(777, type_hints=[int]).data,
                     ),
                     # arg3 is passed as keyword argument
                     HTTPBodyPart(
                         field_name="arg3",
                         content_type="application/json",
-                        body=user_serializer.serialize(True),
+                        body=user_serializer.serialize(True, type_hints=[bool]).data,
                     ),
                     # arg4 is passed as keyword argument
                     HTTPBodyPart(
                         field_name="arg4",
                         content_type="application/json",
-                        body=user_serializer.serialize(None),
+                        body=user_serializer.serialize(None, type_hints=[None]).data,
                     ),
                 ]
                 serialized_http_request: bytes = create_multipart_invoke_http_request(
@@ -710,7 +716,8 @@ class TestRunAllocation(unittest.TestCase):
                 serialized_file_arg_metadata: bytes = serialize_metadata(
                     ValueMetadata(
                         id="file_arg_id",
-                        cls=File,
+                        type_hint=None,
+                        has_type_hint=False,
                         serializer_name=None,
                         content_type="text/plain; charset=utf-8",
                     )
@@ -721,12 +728,15 @@ class TestRunAllocation(unittest.TestCase):
                 serialized_num_chunks_arg_metadata: bytes = serialize_metadata(
                     ValueMetadata(
                         id="num_chunks_arg_id",
-                        cls=int,
+                        type_hint=None,
+                        has_type_hint=False,
                         serializer_name=user_serializer.name,
                         content_type=None,
                     )
                 )
-                serialized_num_chunks_arg: bytes = user_serializer.serialize(5)
+                serialized_num_chunks_arg: bytes = user_serializer.serialize(
+                    5, type_hints=[int]
+                ).data
 
                 serialized_args: bytes = b"".join(
                     [
@@ -912,11 +922,14 @@ class TestRunAllocation(unittest.TestCase):
                 user_serializer: PickleUserDataSerializer = PickleUserDataSerializer()
                 # 5 full chunks + 1 byte of output data out of 10 chunks
                 arg: bytes = os.urandom(5 * 1024 + 1)
-                serialized_arg: bytes = user_serializer.serialize(arg)
+                serialized_arg: bytes = user_serializer.serialize(
+                    arg, type_hints=[bytes]
+                ).data
                 serialized_arg_metadata: bytes = serialize_metadata(
                     ValueMetadata(
                         id="arg_id",
-                        cls=bytes,
+                        type_hint=None,
+                        has_type_hint=False,
                         serializer_name=user_serializer.name,
                         content_type=None,
                     )
@@ -1087,7 +1100,7 @@ class TestRunAllocation(unittest.TestCase):
                             request_id="123",
                             function_call_id="test-function-call",
                             allocation_id=allocation_id,
-                            inputs=application_function_inputs(10),
+                            inputs=application_function_inputs(10, int),
                         ),
                     ),
                 )

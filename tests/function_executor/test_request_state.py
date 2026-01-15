@@ -97,7 +97,7 @@ class TestSetRequestState(unittest.TestCase):
                             request_id="123",
                             function_call_id="test-function-call",
                             allocation_id=allocation_id,
-                            inputs=application_function_inputs(42),
+                            inputs=application_function_inputs(42, int),
                         ),
                     ),
                 )
@@ -223,7 +223,7 @@ class TestSetRequestState(unittest.TestCase):
                     StructuredState
                 ) = PickleUserDataSerializer().deserialize(
                     serialized_request_state,
-                    possible_types=[StructuredState],
+                    type_hints=[StructuredState],
                 )
                 self.assertEqual(
                     StructuredState(
@@ -391,16 +391,19 @@ class TestGetRequestState(unittest.TestCase):
                             operation.state_key,
                             "test_state_key",
                         )
-                        request_state_read_result: (
-                            bytes
-                        ) = PickleUserDataSerializer().serialize(
-                            StructuredState(
-                                string="hello",
-                                integer=33,
-                                structured=StructuredField(
-                                    list=[1, 2, 3], dictionary={"a": 1, "b": 2}
+                        request_state_read_result: bytes = (
+                            PickleUserDataSerializer()
+                            .serialize(
+                                StructuredState(
+                                    string="hello",
+                                    integer=33,
+                                    structured=StructuredField(
+                                        list=[1, 2, 3], dictionary={"a": 1, "b": 2}
+                                    ),
                                 ),
+                                type_hints=[StructuredState],
                             )
+                            .data
                         )
                         request_state_blob: BLOB = create_tmp_blob(
                             id=f"request_state/{operation.state_key}",

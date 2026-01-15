@@ -13,7 +13,7 @@ from tensorlake.applications.function.function_call import (
     set_self_arg,
 )
 from tensorlake.applications.function.user_data_serializer import (
-    deserialize_value,
+    deserialize_value_with_metadata,
     function_input_serializer,
     serialize_value,
 )
@@ -217,6 +217,7 @@ def serialize_values_in_awaitable_tree(
             value=root,
             serializer=value_serializer,
             value_id=_request_scoped_id(),
+            type_hints=[TODO],
         )
         serialized_values[metadata.id] = SerializedValue(
             metadata=metadata,
@@ -645,7 +646,7 @@ def deserialize_sdk_function_call_args(
 
         args[serialized_arg.metadata.id] = Value(
             metadata=serialized_arg.metadata,
-            object=deserialize_value(
+            object=deserialize_value_with_metadata(
                 serialized_value=serialized_arg.data,
                 metadata=serialized_arg.metadata,
             ),

@@ -10,7 +10,7 @@ from ..function.introspect import (
     is_module_level_function_or_class,
 )
 from ..function.type_hints import (
-    function_arg_type_hint,
+    function_parameters,
     function_return_type_hint,
     function_signature,
     parameter_type_hints,
@@ -453,7 +453,7 @@ def _validate_application_function(
         )
 
     try:
-        signature: inspect.Signature = function_signature(function)
+        function_signature(function)
     except Exception as e:
         messages.append(
             ValidationMessage(
@@ -466,14 +466,11 @@ def _validate_application_function(
         # Return immediately because rest of validations don't make sense.
         return messages
 
-    # skip 'self'
-    first_arg_index: int = 0 if function_details.class_name is None else 1
-    # signature.parameters is an ordered mapping in parameters definition order.
-    parameters_in_definition_order: list[inspect.Parameter] = list(
-        signature.parameters.values()
+    parameters_in_definition_order: list[inspect.Parameter] = function_parameters(
+        function
     )
-    for i in range(first_arg_index, len(signature.parameters)):
-        parameter: inspect.Parameter = parameters_in_definition_order[i]
+    for parameter in parameters_in_definition_order:
+        parameter: inspect.Parameter
         if len(parameter_type_hints(parameter)) == 0:
             messages.append(
                 ValidationMessage(
