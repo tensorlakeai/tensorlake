@@ -9,6 +9,14 @@ import click
 from tensorlake.applications import Function, Image, SDKUsageError, TensorlakeError
 from tensorlake.applications.applications import filter_applications
 from tensorlake.applications.image import ImageInformation, image_infos
+from tensorlake.applications.image_builder import (
+    BuildRequest,
+    ImageBuilder,
+)
+from tensorlake.applications.image_builder.client_v3 import (
+    ImageBuilderClientV3,
+    ImageBuilderClientV3Options,
+)
 from tensorlake.applications.interface.function import (
     _ApplicationConfiguration,
     _FunctionConfiguration,
@@ -26,14 +34,6 @@ from tensorlake.applications.validation import (
     has_error_message,
     print_validation_messages,
     validate_loaded_applications,
-)
-from tensorlake.builder.builder import (
-    ApplicationVersionBuilder,
-    ApplicationVersionBuildRequest,
-)
-from tensorlake.builder.client_v3 import (
-    ImageBuilderClientV3,
-    ImageBuilderClientV3Options,
 )
 from tensorlake.cli._common import Context, require_auth_and_project
 from tensorlake.cli.secrets import warning_missing_secrets
@@ -80,7 +80,7 @@ def deploy(
 
     client = ImageBuilderClientV3(opts)
 
-    builder = ApplicationVersionBuilder(client)
+    builder = ImageBuilder(client)
 
     try:
         application_file_path: str = os.path.abspath(application_file_path)
@@ -115,16 +115,14 @@ def deploy(
     )
 
 
-async def _build_applications(
-    builder: ApplicationVersionBuilder, functions: List[Function]
-):
+async def _build_applications(builder: ImageBuilder, functions: List[Function]):
     images: Dict[Image, ImageInformation] = image_infos()
     for application in filter_applications(functions):
         fn_config: _FunctionConfiguration = application._function_config
         app_config: _ApplicationConfiguration = application._application_config
 
         try:
-            build_req = ApplicationVersionBuildRequest(
+            build_req = BuildRequest(
                 name=fn_config.function_name,
                 version=app_config.version,
             )

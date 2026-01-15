@@ -518,6 +518,89 @@ class _ApplicationVersionBuildInfoPayload(BaseModel):
 
 
 # ============================================================================
+# Custom Exceptions
+# ============================================================================
+
+
+class ImageBuilderClientV3Error(Exception):
+    """Base exception for image builder v3 client errors that includes request ID for tracing."""
+
+    request_id: str | None
+
+    def __init__(self, message: str, request_id: str | None = None):
+        """
+        Initialize ImageBuilderClientV3Error.
+
+        Args:
+            message: The error message.
+            request_id: The X-Request-Id header value used for the request, if available.
+                Must be a string (UUID is an implementation detail).
+        """
+        super().__init__(message)
+        self.message = message
+        self.request_id = request_id
+
+    def __str__(self) -> str:
+        """Return error message with request ID if available."""
+        if self.request_id:
+            return f"{self.message} (Request ID: {self.request_id})"
+        return self.message
+
+
+class ImageBuilderClientV3NetworkError(ImageBuilderClientV3Error):
+    """Exception for network errors when communicating with the image builder service."""
+
+    def __init__(self, original_error: Exception, request_id: str | None = None):
+        """
+        Initialize ImageBuilderClientV3NetworkError.
+
+        Args:
+            original_error: The original network error that occurred.
+            request_id: The X-Request-Id header value used for the request, if available.
+                Must be a string (UUID is an implementation detail).
+        """
+        message = f"Network error while communicating with image builder service: {original_error}"
+        super().__init__(message, request_id=request_id)
+        self.original_error = original_error
+
+
+class ImageBuilderClientV3NotFoundError(ImageBuilderClientV3Error):
+    """Exception for when a requested resource is not found (404)."""
+
+    def __init__(
+        self, resource_type: str, resource_id: str, request_id: str | None = None
+    ):
+        """
+        Initialize ImageBuilderClientV3NotFoundError.
+
+        Args:
+            resource_type: The type of resource that was not found (e.g., "image build").
+            resource_id: The ID of the resource that was not found.
+            request_id: The X-Request-Id header value used for the request, if available.
+                Must be a string (UUID is an implementation detail).
+        """
+        message = f"{resource_type} not found: {resource_id}"
+        super().__init__(message, request_id=request_id)
+        self.resource_type = resource_type
+        self.resource_id = resource_id
+
+
+class ImageBuilderClientV3BadRequestError(ImageBuilderClientV3Error):
+    """Exception for when the request is invalid (400)."""
+
+    def __init__(self, message: str, request_id: str | None = None):
+        """
+        Initialize ImageBuilderClientV3BadRequestError.
+
+        Args:
+            message: The error message describing what was wrong with the request.
+            request_id: The X-Request-Id header value used for the request, if available.
+                Must be a string (UUID is an implementation detail).
+        """
+        super().__init__(message, request_id=request_id)
+
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 
@@ -588,15 +671,36 @@ class ImageBuilderClientV3:
         self._client = httpx.AsyncClient(
             base_url=options.base_url, event_hooks=ASYNC_HTTP_EVENT_HOOKS
         )
-        self._headers = {}
+        self._base_headers = {}
 
         # Set Authorization header with bearer token
         if options.bearer_token:
-            self._headers["Authorization"] = f"Bearer {options.bearer_token}"
+            self._base_headers["Authorization"] = f"Bearer {options.bearer_token}"
         if options.organization_id:
-            self._headers["X-Forwarded-Organization-Id"] = options.organization_id
+            self._base_headers["X-Forwarded-Organization-Id"] = options.organization_id
         if options.project_id:
-            self._headers["X-Forwarded-Project-Id"] = options.project_id
+            self._base_headers["X-Forwarded-Project-Id"] = options.project_id
+
+    def _generate_request_id(self) -> str:
+        """Generate a new request ID as a string.
+
+        Returns:
+            A string representation of a UUID to use as a request ID.
+        """
+        return str(uuid())
+
+    def _get_headers_with_request_id(self, request_id: str) -> dict[str, str]:
+        """Get headers with the provided X-Request-Id.
+
+        Args:
+            request_id: The request ID to include in headers.
+
+        Returns:
+            Dictionary of headers including X-Request-Id.
+        """
+        headers = self._base_headers.copy()
+        headers["X-Request-Id"] = request_id
+        return headers
 
     async def build_app(
         self, request: ApplicationVersionBuildRequestV3
@@ -630,18 +734,22 @@ class ImageBuilderClientV3:
                 "application/gzip",
             )
 
-        res = await self._client.post(
-            "applications",
-            files=files,
-            headers=self._headers,
-            timeout=120,
-        )
+        request_id = self._generate_request_id()
+        headers = self._get_headers_with_request_id(request_id)
+
+        try:
+            res = await self._client.post(
+                "applications",
+                files=files,
+                headers=headers,
+                timeout=120,
+            )
+        except httpx.HTTPError as e:
+            raise ImageBuilderClientV3NetworkError(e, request_id=request_id) from e
 
         if not res.is_success:
-            # Try to extract error message from response
             error_message = ""
             try:
-                # Try to parse JSON error response
                 error_json = res.json()
                 if isinstance(error_json, dict):
                     error_message = error_json.get(
@@ -652,10 +760,8 @@ class ImageBuilderClientV3:
                 else:
                     error_message = str(error_json)
             except Exception:
-                # If JSON parsing fails, try text
                 error_message = res.text or ""
 
-            # Build a comprehensive error message
             status_info = f"HTTP {res.status_code} {res.reason_phrase}"
             url_info = ""
             if res.request:
@@ -666,101 +772,130 @@ class ImageBuilderClientV3:
             else:
                 full_error = f"{status_info}{url_info} (no error message in response)"
 
-            click.secho(
-                f"Error building application version: {full_error}",
-                err=True,
-                fg="red",
-            )
-            raise RuntimeError(f"Error building application version: {full_error}")
+            error_msg = f"Error building application version: {full_error}"
+            if res.status_code == 400:
+                raise ImageBuilderClientV3BadRequestError(
+                    error_msg, request_id=request_id
+                )
+            raise ImageBuilderClientV3Error(error_msg, request_id=request_id)
 
         info = _ApplicationVersionBuildInfoPayload.model_validate(res.json())
         return _application_version_build_info_from_payload(info)
 
     async def stream_image_build_logs(
         self, image_build_id: str
-    ) -> AsyncGenerator[ImageBuildLogEventV3]:
+    ) -> AsyncGenerator[ImageBuildLogEventV3, None]:
         """
         Stream logs from the image builder service for the specified image build.
 
         Args:
             image_build_id (str): The build id to stream logs for.
         Returns:
-            AsyncGenerator[ImageBuildLogEventV3]: A generator of log events.
+            AsyncGenerator[ImageBuildLogEventV3, None]: A generator of log events.
         """
+        request_id = self._generate_request_id()
+        headers = self._get_headers_with_request_id(request_id)
+
         # Create a separate client for SSE streams to avoid blocking the main client
         # and to allow proper connection management for long-lived SSE connections
-        async with httpx.AsyncClient(
-            base_url=self._client.base_url, timeout=120
-        ) as client:
-            async with aconnect_sse(
-                client,
-                "GET",
-                f"builds/{quote(image_build_id)}/logs",
-                headers=self._headers,
-            ) as event_source:
-                async for sse in event_source.aiter_sse():
-                    try:
-                        log_entry = _image_build_log_event_from_json(sse.json())
-                        yield log_entry
-                    except Exception as e:
-                        click.secho(f"Error parsing log event: {e}", err=True, fg="red")
-                        continue
+        try:
+            async with httpx.AsyncClient(
+                base_url=self._client.base_url, timeout=120
+            ) as client:
+                async with aconnect_sse(
+                    client,
+                    "GET",
+                    f"builds/{quote(image_build_id)}/logs",
+                    headers=headers,
+                ) as event_source:
+                    async for sse in event_source.aiter_sse():
+                        try:
+                            log_entry = _image_build_log_event_from_json(sse.json())
+                            yield log_entry
+                        except Exception as e:
+                            click.secho(
+                                f"Error parsing log event: {e}", err=True, fg="red"
+                            )
+                            continue
+        except httpx.HTTPError as e:
+            raise ImageBuilderClientV3NetworkError(e, request_id=request_id) from e
 
-    async def image_build_info(self, image_build_id: str) -> ImageBuildInfoV3 | None:
+    async def image_build_info(self, image_build_id: str) -> ImageBuildInfoV3:
         """
         Get information about a build.
 
         Args:
             image_build_id (str): The build id to get information about.
         Returns:
-            ImageBuildInfoV3 | None: Information about the build, or None if the build doesn't exist (404).
+            ImageBuildInfoV3: Information about the build.
+
+        Raises:
+            ImageBuilderClientV3NotFoundError: If the build doesn't exist (404).
+            ImageBuilderClientV3NetworkError: If a network error occurs.
+            ImageBuilderClientV3Error: If the build service returns an error response.
         """
-        res = await self._client.get(
-            f"builds/{quote(image_build_id)}",
-            headers=self._headers,
-            timeout=60,
-        )
+        request_id = self._generate_request_id()
+        headers = self._get_headers_with_request_id(request_id)
+
+        try:
+            res = await self._client.get(
+                f"builds/{quote(image_build_id)}",
+                headers=headers,
+                timeout=60,
+            )
+        except httpx.HTTPError as e:
+            raise ImageBuilderClientV3NetworkError(e, request_id=request_id) from e
+
         if res.status_code == 404:
-            return None
+            raise ImageBuilderClientV3NotFoundError(
+                "Image build", image_build_id, request_id=request_id
+            )
         if not res.is_success:
             error_message = res.text
-            click.secho(
-                f"Error requesting image build info: {error_message}",
-                err=True,
-                fg="red",
-            )
-            raise RuntimeError(f"Error requesting image build info: {error_message}")
+            error_msg = f"Error requesting image build info: {error_message}"
+            if res.status_code == 400:
+                raise ImageBuilderClientV3BadRequestError(
+                    error_msg, request_id=request_id
+                )
+            raise ImageBuilderClientV3Error(error_msg, request_id=request_id)
 
         info = _ImageBuildInfoPayload.model_validate(res.json())
         return _image_build_info_from_payload(info)
 
-    async def cancel_image_build(self, image_build_id: str) -> ImageBuildInfoV3:
+    async def cancel_image_build(self, image_build_id: str) -> ImageBuildInfoV3 | None:
         """
         Cancel an image build.
 
         Args:
             image_build_id (str): The build id to cancel.
         Returns:
-            ImageBuildInfoV3: Information about the build.
+            ImageBuildInfoV3 | None: Information about the build, or None if the build doesn't exist.
         """
-        res = await self._client.post(
-            f"builds/{quote(image_build_id)}/cancel",
-            headers=self._headers,
-            timeout=60,
-        )
+        request_id = self._generate_request_id()
+        headers = self._get_headers_with_request_id(request_id)
+
+        try:
+            res = await self._client.post(
+                f"builds/{quote(image_build_id)}/cancel",
+                headers=headers,
+                timeout=60,
+            )
+        except httpx.HTTPError as e:
+            raise ImageBuilderClientV3NetworkError(e, request_id=request_id) from e
 
         if not res.is_success:
             error_message = res.text
-            click.secho(
-                f"Error canceling image build {image_build_id}: {error_message}",
-                err=True,
-                fg="red",
-            )
-            raise RuntimeError(
-                f"Error canceling image build {image_build_id}: {error_message}"
-            )
+            error_msg = f"Error canceling image build {image_build_id}: {error_message}"
+            if res.status_code == 400:
+                raise ImageBuilderClientV3BadRequestError(
+                    error_msg, request_id=request_id
+                )
+            raise ImageBuilderClientV3Error(error_msg, request_id=request_id)
 
-        return await self.image_build_info(image_build_id)
+        try:
+            return await self.image_build_info(image_build_id)
+        except ImageBuilderClientV3NotFoundError:
+            return None
 
     async def __aenter__(self) -> "ImageBuilderClientV3":
         """Async context manager entry."""
