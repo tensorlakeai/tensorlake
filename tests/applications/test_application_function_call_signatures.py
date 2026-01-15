@@ -39,6 +39,28 @@ def test_mixed_args_api(a: int, b: str, /, c: float, *, d: bool) -> str:
     return f"a={a},b={b},c={c},d={d}"
 
 
+@function()
+@application()
+def test_tuple_arg_and_return_value_api(
+    arg: tuple[str, str, str, str],
+) -> tuple[str, str, str, str]:
+    if not isinstance(arg, tuple):
+        raise RequestError(f"Tuple type mismatch: {type(arg)}")
+    if arg != ("apple", "banana", "cherry", "cherry"):
+        raise RequestError(f"Tuple content mismatch: {arg}")
+    return arg
+
+
+@function()
+@application()
+def test_set_arg_and_return_value_api(arg: set[str]) -> set[str]:
+    if not isinstance(arg, set):
+        raise RequestError(f"Set type mismatch: {type(arg)}")
+    if arg != {"apple", "banana", "cherry"}:
+        raise RequestError(f"Set content mismatch: {arg}")
+    return arg
+
+
 @application()
 @function()
 def test_default_args_api(
@@ -210,6 +232,34 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
             d=False,
         )
         self.assertEqual(request1.output(), "a=1,b=x,c=2.71,d=False")
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_tuple_arg_and_return_value(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+
+        request: Request = run_application(
+            test_tuple_arg_and_return_value_api,
+            is_remote,
+            ("apple", "banana", "cherry", "cherry"),
+        )
+        output_tuple: tuple[str, str, str, str] = request.output()
+        self.assertIsInstance(output_tuple, tuple)
+        self.assertEqual(output_tuple, ("apple", "banana", "cherry", "cherry"))
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_set_arg_and_return_value(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+
+        request: Request = run_application(
+            test_set_arg_and_return_value_api,
+            is_remote,
+            {"apple", "banana", "cherry"},
+        )
+        output_set: set[str] = request.output()
+        self.assertIsInstance(output_set, set)
+        self.assertEqual(output_set, {"apple", "banana", "cherry"})
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_default_args(self, _: str, is_remote: bool):
