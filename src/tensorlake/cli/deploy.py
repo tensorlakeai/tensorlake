@@ -146,6 +146,8 @@ async def _build_applications(builder: ImageBuilder, functions: List[Function]):
             click.Abort,
             click.UsageError,
         ) as error:
+            # Re-raise cancellation exceptions so they can be handled at asyncio.run() level
+            # This avoids calling sys.exit() from within async function which causes cleanup issues
             raise error
         except Exception:
             # Error message and summary are already printed by builder.build()

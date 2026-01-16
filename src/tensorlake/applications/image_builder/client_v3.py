@@ -299,6 +299,191 @@ class ImageBuilderClientV3Options:
 
 
 # ============================================================================
+# Type Aliases (for documentation purposes)
+# ============================================================================
+
+# Type aliases for clarity (these are just str at runtime)
+ImageBuildId = str
+ClientKey = str
+ApplicationVersionId = str
+
+
+# ============================================================================
+# Public Response Models (Dataclasses)
+# ============================================================================
+
+
+@dataclass
+class ImageBuildInfoV3:
+    """
+    ImageBuildInfoV3 model for the image builder service.
+    This model represents the information about an image build.
+
+    Attributes:
+        id (str): The ID of the image build.
+        application_version_id (str): The ID of the application version associated with the image build.
+        key (str): The key of the image build request.
+        name (str | None): The name of the image.
+        status (str): The status of the build (e.g., "pending", "in_progress", "completed").
+        created_at (str): The timestamp when the image build was created.
+        updated_at (str): The timestamp when the image build was last updated.
+        finished_at (str | None): The timestamp when the build was finished.
+        error_message (str | None): An optional error message if the build failed.
+    """
+
+    id: ImageBuildId
+    application_version_id: ApplicationVersionId
+    key: ClientKey | None = None
+    name: str | None = None
+    function_names: list[str] = field(default_factory=list)
+    status: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    finished_at: str | None = None
+    error_message: str | None = None
+
+
+class ImageBuildsMap:
+    """A dictionary-like container that allows access to image builds by both ID and client key.
+
+    This class maintains two internal mappings:
+    - By image build ID (always available)
+    - By client key (optional, only if the build has a key)
+
+    Attributes:
+        _by_id: Dictionary mapping image build IDs to ImageBuildInfoV3 objects.
+        _by_key: Dictionary mapping client keys to ImageBuildInfoV3 objects (only for builds with keys).
+    """
+
+    def __init__(self, builds: list[ImageBuildInfoV3]):
+        """Initialize the ImageBuildsMap from a list of builds.
+
+        Args:
+            builds: List of ImageBuildInfoV3 objects to index.
+        """
+        self._by_id: dict[ImageBuildId, ImageBuildInfoV3] = {}
+        self._by_key: dict[ClientKey, ImageBuildInfoV3] = {}
+
+        for build in builds:
+            self._by_id[build.id] = build
+            if build.key is not None:
+                self._by_key[build.key] = build
+
+    def get_by_id(self, build_id: ImageBuildId | str) -> ImageBuildInfoV3 | None:
+        """Get a build by its image build ID.
+
+        Args:
+            build_id: The image build ID.
+
+        Returns:
+            The ImageBuildInfoV3 if found, None otherwise.
+        """
+        return self._by_id.get(build_id)
+
+    def get_by_key(self, key: ClientKey | str) -> ImageBuildInfoV3 | None:
+        """Get a build by its client key.
+
+        Args:
+            key: The client key.
+
+        Returns:
+            The ImageBuildInfoV3 if found, None otherwise.
+        """
+        return self._by_key.get(key)
+
+    def get(
+        self, identifier: ImageBuildId | ClientKey | str | None
+    ) -> ImageBuildInfoV3 | None:
+        """Get a build by either ID or key.
+
+        Tries to find the build by ID first, then by key if not found.
+
+        Args:
+            identifier: Either an image build ID or client key (or None).
+
+        Returns:
+            The ImageBuildInfoV3 if found, None otherwise.
+        """
+        if identifier is None:
+            return None
+        # Try ID first (more specific)
+        if identifier in self._by_id:
+            return self._by_id[identifier]
+        # Then try key
+        if identifier in self._by_key:
+            return self._by_key.get(identifier)
+        return None
+
+    def values(self):
+        """Return all image builds.
+
+        Returns:
+            A view of all ImageBuildInfoV3 values.
+        """
+        return self._by_id.values()
+
+    def items(self):
+        """Return all image builds as (id, build) pairs.
+
+        Returns:
+            A view of all (id, ImageBuildInfoV3) items.
+        """
+        return self._by_id.items()
+
+    def __getitem__(
+        self, identifier: ImageBuildId | ClientKey | str
+    ) -> ImageBuildInfoV3:
+        """Get a build by either ID or key using dictionary syntax.
+
+        Args:
+            identifier: Either an image build ID or client key.
+
+        Returns:
+            The ImageBuildInfoV3.
+
+        Raises:
+            KeyError: If the identifier is not found.
+        """
+        result = self.get(identifier)
+        if result is None:
+            raise KeyError(f"Image build not found: {identifier}")
+        return result
+
+    def __contains__(self, identifier: ImageBuildId | ClientKey | str) -> bool:
+        """Check if a build exists with the given identifier.
+
+        Args:
+            identifier: Either an image build ID or client key.
+
+        Returns:
+            True if found, False otherwise.
+        """
+        # Try ID first
+        if identifier in self._by_id:
+            return True
+        # Then try key
+        if identifier in self._by_key:
+            return True
+        return False
+
+    def __len__(self) -> int:
+        """Return the number of builds.
+
+        Returns:
+            The number of image builds.
+        """
+        return len(self._by_id)
+
+    def __iter__(self):
+        """Iterate over image build IDs.
+
+        Returns:
+            An iterator over image build IDs.
+        """
+        return iter(self._by_id)
+
+
+# ============================================================================
 # Public Request Models (Dataclasses)
 # ============================================================================
 
@@ -365,33 +550,6 @@ class ApplicationVersionBuildRequestV3:
 
 
 @dataclass
-class ImageBuildInfoV3:
-    """
-    ImageBuildInfoV3 model for the image builder service.
-    This model represents the information about an image build.
-
-    Attributes:
-        id (str): The ID of the image build.
-        application_version_id (str): The ID of the application version associated with the image build.
-        name (str | None): The name of the image.
-        status (str): The status of the build (e.g., "pending", "in_progress", "completed").
-        created_at (str): The timestamp when the image build was created.
-        updated_at (str): The timestamp when the image build was last updated.
-        finished_at (str | None): The timestamp when the build was finished.
-        error_message (str | None): An optional error message if the build failed.
-    """
-
-    id: str
-    application_version_id: str
-    name: str | None = None
-    status: str = ""
-    created_at: str = ""
-    updated_at: str = ""
-    finished_at: str | None = None
-    error_message: str | None = None
-
-
-@dataclass
 class ApplicationVersionBuildInfoV3:
     """
     ApplicationVersionBuildInfoV3 model for the image builder service.
@@ -401,15 +559,14 @@ class ApplicationVersionBuildInfoV3:
         id (str): The ID of the application version build.
         name (str): The name of the application.
         version (str): The version of the application.
-        image_builds (dict[str, ImageBuildInfoV3]): A dictionary of ImageBuildInfoV3 objects representing
-                                             the builds for each image in the application version.
-                                             The key is the key of the image build request.
+        image_builds (ImageBuildsMap): A map of ImageBuildInfoV3 objects that can be accessed
+                                       by both image build ID and client key (if available).
     """
 
-    id: str
+    id: ApplicationVersionId
     name: str
     version: str
-    image_builds: dict[str, ImageBuildInfoV3]
+    image_builds: ImageBuildsMap
 
 
 # ============================================================================
@@ -432,7 +589,7 @@ class ImageBuildLogEventV3:
         build_status (str): The current status of the build.
     """
 
-    image_build_id: str
+    image_build_id: ImageBuildId
     timestamp: str
     stream: str
     message: str
@@ -449,9 +606,11 @@ class _ImageBuildInfoPayload(BaseModel):
     """Internal Pydantic model for API deserialization."""
 
     id: str
-    app_version_id: str
+    app_version_id: str | None = None
     name: str | None
     description: str | None = None
+    key: str | None = None
+    function_names: list[str]
     status: str
     error_message: str | None = None
     created_at: str
@@ -499,13 +658,6 @@ class _ApplicationVersionBuildRequestPayload(BaseModel):
         )
 
 
-class _ApplicationVersionImageBuildInfoPayload(_ImageBuildInfoPayload):
-    """Internal Pydantic model for API deserialization."""
-
-    key: str
-    function_names: list[str]
-
-
 class _ApplicationVersionBuildInfoPayload(BaseModel):
     """Internal Pydantic model for API deserialization."""
 
@@ -514,7 +666,7 @@ class _ApplicationVersionBuildInfoPayload(BaseModel):
     project_id: str
     name: str
     version: str
-    image_builds: list[_ApplicationVersionImageBuildInfoPayload]
+    image_builds: list[_ImageBuildInfoPayload]
 
 
 # ============================================================================
@@ -605,13 +757,32 @@ class ImageBuilderClientV3BadRequestError(ImageBuilderClientV3Error):
 # ============================================================================
 
 
-def _image_build_info_from_payload(data: _ImageBuildInfoPayload) -> ImageBuildInfoV3:
-    """Convert internal API model to public dataclass."""
+def _image_build_info_from_payload(
+    data: _ImageBuildInfoPayload,
+    key: str | None = None,
+    app_version_id: str | None = None,
+) -> ImageBuildInfoV3:
+    """Convert internal API model to public dataclass.
+
+    Args:
+        data: The payload data from the API.
+        key: Optional key override (used when key comes from parent context).
+        app_version_id: Optional app version ID override (used when app_version_id is missing from payload).
+    """
+    # Use app_version_id from parameter if provided, otherwise from payload, or raise if neither
+    version_id = app_version_id or data.app_version_id
+    if version_id is None:
+        raise ValueError(
+            "app_version_id must be provided either in payload or as parameter"
+        )
+
     return ImageBuildInfoV3(
         id=data.id,
-        application_version_id=data.app_version_id,
+        application_version_id=version_id,
+        key=key if key else None,
         name=data.name,
         status=data.status,
+        function_names=data.function_names,
         created_at=data.created_at,
         updated_at=data.updated_at,
         finished_at=data.finished_at,
@@ -623,13 +794,15 @@ def _application_version_build_info_from_payload(
     data: _ApplicationVersionBuildInfoPayload,
 ) -> ApplicationVersionBuildInfoV3:
     """Convert internal API model to public dataclass."""
+    builds = [
+        _image_build_info_from_payload(img, key=img.key, app_version_id=data.id)
+        for img in data.image_builds
+    ]
     return ApplicationVersionBuildInfoV3(
         id=data.id,
         name=data.name,
         version=data.version,
-        image_builds={
-            img.key: _image_build_info_from_payload(img) for img in data.image_builds
-        },
+        image_builds=ImageBuildsMap(builds),
     )
 
 
@@ -783,18 +956,19 @@ class ImageBuilderClientV3:
         return _application_version_build_info_from_payload(info)
 
     async def stream_image_build_logs(
-        self, image_build_id: str
+        self, image_build_id: ImageBuildId | str
     ) -> AsyncGenerator[ImageBuildLogEventV3, None]:
         """
         Stream logs from the image builder service for the specified image build.
 
         Args:
-            image_build_id (str): The build id to stream logs for.
+            image_build_id: The build id to stream logs for (can be branded ImageBuildId or plain str).
         Returns:
             AsyncGenerator[ImageBuildLogEventV3, None]: A generator of log events.
         """
         request_id = self._generate_request_id()
         headers = self._get_headers_with_request_id(request_id)
+        build_id_str = str(image_build_id)
 
         # Create a separate client for SSE streams to avoid blocking the main client
         # and to allow proper connection management for long-lived SSE connections
@@ -805,7 +979,7 @@ class ImageBuilderClientV3:
                 async with aconnect_sse(
                     client,
                     "GET",
-                    f"builds/{quote(image_build_id)}/logs",
+                    f"builds/{quote(build_id_str)}/logs",
                     headers=headers,
                 ) as event_source:
                     async for sse in event_source.aiter_sse():
@@ -820,12 +994,14 @@ class ImageBuilderClientV3:
         except httpx.HTTPError as e:
             raise ImageBuilderClientV3NetworkError(e, request_id=request_id) from e
 
-    async def image_build_info(self, image_build_id: str) -> ImageBuildInfoV3:
+    async def image_build_info(
+        self, image_build_id: ImageBuildId | str
+    ) -> ImageBuildInfoV3:
         """
         Get information about a build.
 
         Args:
-            image_build_id (str): The build id to get information about.
+            image_build_id: The build id to get information about (can be branded ImageBuildId or plain str).
         Returns:
             ImageBuildInfoV3: Information about the build.
 
@@ -836,10 +1012,11 @@ class ImageBuilderClientV3:
         """
         request_id = self._generate_request_id()
         headers = self._get_headers_with_request_id(request_id)
+        build_id_str = str(image_build_id)
 
         try:
             res = await self._client.get(
-                f"builds/{quote(image_build_id)}",
+                f"builds/{quote(build_id_str)}",
                 headers=headers,
                 timeout=60,
             )
@@ -848,7 +1025,7 @@ class ImageBuilderClientV3:
 
         if res.status_code == 404:
             raise ImageBuilderClientV3NotFoundError(
-                "Image build", image_build_id, request_id=request_id
+                "Image build", build_id_str, request_id=request_id
             )
         if not res.is_success:
             error_message = res.text
@@ -862,21 +1039,24 @@ class ImageBuilderClientV3:
         info = _ImageBuildInfoPayload.model_validate(res.json())
         return _image_build_info_from_payload(info)
 
-    async def cancel_image_build(self, image_build_id: str) -> ImageBuildInfoV3 | None:
+    async def cancel_app_build(
+        self, app_version_id: ApplicationVersionId | str
+    ) -> ApplicationVersionBuildInfoV3 | None:
         """
-        Cancel an image build.
+        Cancel an application version build.
 
         Args:
-            image_build_id (str): The build id to cancel.
+            app_version_id: The application version id to cancel (can be branded ApplicationVersionId or plain str).
         Returns:
-            ImageBuildInfoV3 | None: Information about the build, or None if the build doesn't exist.
+            ApplicationVersionBuildInfoV3 | None: Information about the application version build, or None if the build doesn't exist.
         """
         request_id = self._generate_request_id()
         headers = self._get_headers_with_request_id(request_id)
+        app_version_id_str = str(app_version_id)
 
         try:
             res = await self._client.post(
-                f"builds/{quote(image_build_id)}/cancel",
+                f"applications/{quote(app_version_id_str)}/cancel",
                 headers=headers,
                 timeout=60,
             )
@@ -885,7 +1065,43 @@ class ImageBuilderClientV3:
 
         if not res.is_success:
             error_message = res.text
-            error_msg = f"Error canceling image build {image_build_id}: {error_message}"
+            error_msg = f"Error canceling application version build {app_version_id_str}: {error_message}"
+            if res.status_code == 400:
+                raise ImageBuilderClientV3BadRequestError(
+                    error_msg, request_id=request_id
+                )
+            raise ImageBuilderClientV3Error(error_msg, request_id=request_id)
+
+        info = _ApplicationVersionBuildInfoPayload.model_validate(res.json())
+        return _application_version_build_info_from_payload(info)
+
+    async def cancel_image_build(
+        self, image_build_id: ImageBuildId | str
+    ) -> ImageBuildInfoV3 | None:
+        """
+        Cancel an image build.
+
+        Args:
+            image_build_id: The build id to cancel (can be branded ImageBuildId or plain str).
+        Returns:
+            ImageBuildInfoV3 | None: Information about the build, or None if the build doesn't exist.
+        """
+        request_id = self._generate_request_id()
+        headers = self._get_headers_with_request_id(request_id)
+        build_id_str = str(image_build_id)
+
+        try:
+            res = await self._client.post(
+                f"builds/{quote(build_id_str)}/cancel",
+                headers=headers,
+                timeout=60,
+            )
+        except httpx.HTTPError as e:
+            raise ImageBuilderClientV3NetworkError(e, request_id=request_id) from e
+
+        if not res.is_success:
+            error_message = res.text
+            error_msg = f"Error canceling image build {build_id_str}: {error_message}"
             if res.status_code == 400:
                 raise ImageBuilderClientV3BadRequestError(
                     error_msg, request_id=request_id
@@ -893,7 +1109,7 @@ class ImageBuilderClientV3:
             raise ImageBuilderClientV3Error(error_msg, request_id=request_id)
 
         try:
-            return await self.image_build_info(image_build_id)
+            return await self.image_build_info(build_id_str)
         except ImageBuilderClientV3NotFoundError:
             return None
 

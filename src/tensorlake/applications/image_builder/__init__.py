@@ -6,6 +6,8 @@ of image builds, streaming build logs, and managing the build lifecycle.
 """
 
 import asyncio
+import os
+import sys
 import tempfile
 from typing import AsyncGenerator
 from uuid import uuid4 as uuid
@@ -17,9 +19,10 @@ from tensorlake.applications.image import ImageInformation, create_image_context
 from tensorlake.applications.image_builder.client_v3 import (
     ApplicationVersionBuildInfoV3,
     ApplicationVersionBuildRequestV3,
+    ClientKey,
     ImageBuilderClientV3,
     ImageBuilderClientV3Error,
-    ImageBuilderClientV3NotFoundError,
+    ImageBuildId,
     ImageBuildInfoV3,
     ImageBuildLogEventV3,
     ImageBuildRequestV3,
@@ -277,7 +280,12 @@ class _ImageBuildReporter:
         self._finished = False
 
     @property
-    def image_build_id(self) -> str:
+    def key(self) -> ClientKey | None:
+        """Get the image build request key."""
+        return self._info.key
+
+    @property
+    def image_build_id(self) -> ImageBuildId:
         """Get the image build ID."""
         return self._info.id
 
@@ -366,10 +374,8 @@ class _ImageBuildReporter:
                     if not error_message
                     else f"❌ Image build{build_id_suffix} failed: {error_message}"
                 )
-            case "canceled":
-                msg = f"🚫 Image build{build_id_suffix} cancele."
-            case "canceling":
-                msg = f"🔄 Image build{build_id_suffix} canceling"
+            case "canceled" | "canceling":
+                msg = f"🚫 Image build{build_id_suffix} canceled"
             case _:
                 msg = f"⚠️ Unexpected image build{build_id_suffix} status: {status}"
 
@@ -569,27 +575,27 @@ class ImageBuilder:
             ]
             _ = await asyncio.gather(*process_log_events_tasks, return_exceptions=True)
 
-            # Check if any builds failed, and if so, cancel other builds that are still in progress
-            await self._cancel_other_builds_on_failure(info, reporters)
-
         except (asyncio.CancelledError, KeyboardInterrupt, click.Abort):
-            await self._cancel_builds(info, process_log_events_tasks)
-            # Print final results for all reporters after cancellation
-            await self._print_final_results_for_reporters(reporters)
-            raise
-
-        except ImageBuilderClientV3Error as e:
-            click.secho(str(e), err=True, fg="red")
-            await self._cancel_builds(info, process_log_events_tasks)
-            await self._print_final_results_for_reporters(reporters)
-            raise
-        except Exception as e:  # pylint: disable=broad-except
-            # Fallback handler for any other unexpected errors during log streaming
-            click.secho(
-                f"Unexpected error while streaming build logs: {e}", err=True, fg="red"
+            # User-initiated cancellation - cancel builds and print final results
+            canceled_app_version_info = await self._cancel_builds(
+                info, process_log_events_tasks
             )
-            await self._cancel_builds(info, process_log_events_tasks)
-            await self._print_final_results_for_reporters(reporters)
+            summary = await self._print_final_results_for_reporters(
+                reporters, canceled_app_version_info
+            )
+            self._print_build_summary(summary)
+            # Use os._exit() to bypass asyncio cleanup and avoid "unhandled exception" errors
+            # This exits immediately without triggering asyncio.run() cleanup issues
+            os._exit(0)
+        except Exception as e:  # pylint: disable=broad-except
+            # Handle all other exceptions (ImageBuilderClientV3Error and unexpected errors)
+            click.secho(str(e), err=True, fg="red")
+            canceled_app_version_info = await self._cancel_builds(
+                info, process_log_events_tasks
+            )
+            await self._print_final_results_for_reporters(
+                reporters, canceled_app_version_info
+            )
             raise
 
         summary = await self._print_final_results_for_reporters(reporters)
@@ -641,15 +647,16 @@ class ImageBuilder:
             summary: Dictionary to update with status counts.
             status: The build status to categorize.
         """
-        if status == "succeeded":
-            summary["succeeded"] += 1
-        elif status == "failed":
-            summary["failed"] += 1
-        elif status == "canceled":
-            summary["canceled"] += 1
-        else:
-            # Unknown or unexpected status
-            summary["unknown"] += 1
+        match status:
+            case "succeeded":
+                summary["succeeded"] += 1
+            case "failed":
+                summary["failed"] += 1
+            case "canceled" | "canceling":
+                summary["canceled"] += 1
+            case _:
+                # Unknown or unexpected status
+                summary["unknown"] += 1
 
     def _handle_build_info_error(
         self,
@@ -669,12 +676,16 @@ class ImageBuilder:
         self._update_summary_from_status(summary, reporter.last_seen_status)
 
     async def _print_final_results_for_reporters(
-        self, reporters: dict[str, _ImageBuildReporter]
+        self,
+        reporters: dict[str, _ImageBuildReporter],
+        app_version_info: ApplicationVersionBuildInfoV3 | None = None,
     ) -> dict[str, int]:
         """Print final results for all reporters.
 
         Args:
             reporters: Dictionary mapping image build IDs to their reporters.
+            app_version_info: Optional application version build info to use instead of
+                making individual API calls for each build.
 
         Returns:
             Dictionary with counts: {"total": int, "succeeded": int, "failed": int, "canceled": int, "unknown": int}
@@ -692,7 +703,12 @@ class ImageBuilder:
 
         for reporter in reporters.values():
             try:
-                info = await self._client.image_build_info(reporter.image_build_id)
+                # Use info from app_version_info if available, otherwise fetch individually
+                if app_version_info is not None:
+                    image_build_info = app_version_info.image_builds.get(reporter.key)
+                    info = image_build_info if image_build_info else None
+                else:
+                    info = await self._client.image_build_info(reporter.image_build_id)
                 reporter.print_final_result(info)
                 status = info.status if info is not None else reporter.last_seen_status
                 self._update_summary_from_status(summary, status)
@@ -717,118 +733,22 @@ class ImageBuilder:
 
         return summary
 
-    async def _cancel_other_builds_on_failure(
-        self,
-        info: ApplicationVersionBuildInfoV3,
-        reporters: dict[str, _ImageBuildReporter],
-    ):
-        """Cancel other builds if any build has failed.
-
-        Args:
-            info: The application version build information.
-            reporters: Dictionary mapping image build IDs to their reporters.
-        """
-        # Check current status of all builds to see if any failed
-        failed_build_ids: set[str] = set()
-        for reporter in reporters.values():
-            try:
-                build_info = await self._client.image_build_info(
-                    reporter.image_build_id
-                )
-                if build_info is not None and build_info.status == "failed":
-                    failed_build_ids.add(reporter.image_build_id)
-            except (ImageBuilderClientV3Error, Exception):
-                # Ignore errors when checking build status
-                pass
-
-        # If any build failed, cancel other builds that are still in progress
-        if failed_build_ids:
-            for image_build_info in info.image_builds.values():
-                if image_build_info.id not in failed_build_ids:
-                    await self._try_cancel_build(
-                        image_build_info.id, suppress_errors=True
-                    )
-
-    def _is_build_in_terminal_state(self, build_info: ImageBuildInfoV3 | None) -> bool:
-        """Check if a build is in a terminal (non-cancelable) state.
-
-        Args:
-            build_info: The build info to check, or None if the build doesn't exist.
-
-        Returns:
-            True if the build is in a terminal state or doesn't exist, False otherwise.
-        """
-        if build_info is None:
-            return True
-        return build_info.status in ("succeeded", "failed", "canceled", "canceling")
-
-    def _is_error_non_cancelable(self, error: Exception) -> bool:
-        """Check if an error indicates the build is not in a cancelable state.
-
-        Args:
-            error: The exception to check.
-
-        Returns:
-            True if the error indicates the build is not cancelable, False otherwise.
-        """
-        error_text = str(error).lower()
-        return (
-            "not in a cancelable state" in error_text
-            or "cannot be canceled" in error_text
-        )
-
-    async def _try_cancel_build(
-        self, image_build_id: str, suppress_errors: bool = False
-    ):
-        """Try to cancel a build, optionally suppressing errors for non-cancelable states.
-
-        Args:
-            image_build_id: The ID of the build to cancel.
-            suppress_errors: If True, suppress errors when build is not in a cancelable state.
-        """
-        try:
-            build_info = await self._client.image_build_info(image_build_id)
-        except ImageBuilderClientV3NotFoundError:
-            build_info = None
-        except (ImageBuilderClientV3Error, Exception):
-            build_info = None
-
-        if self._is_build_in_terminal_state(build_info):
-            return
-
-        try:
-            await self._client.cancel_image_build(image_build_id)
-        except ImageBuilderClientV3Error as e:
-            if suppress_errors and self._is_error_non_cancelable(e):
-                return
-            click.secho(str(e), err=True, fg="red")
-        except RuntimeError as e:
-            if suppress_errors and self._is_error_non_cancelable(e):
-                return
-            click.secho(
-                f"Error canceling build {image_build_id}: {e}",
-                err=True,
-                fg="red",
-            )
-        except Exception as e:  # pylint: disable=broad-except
-            if suppress_errors and self._is_error_non_cancelable(e):
-                return
-            click.secho(
-                f"Unexpected error while canceling build {image_build_id}: {e}",
-                err=True,
-                fg="red",
-            )
-
     async def _cancel_builds(
         self,
         info: ApplicationVersionBuildInfoV3,
         process_log_events_tasks: list[asyncio.Task[None]] | None = None,
-    ):
+    ) -> ApplicationVersionBuildInfoV3:
         """Cancel all in-flight builds and log streaming tasks.
 
         Args:
             info: The application version build information.
             process_log_events_tasks: Optional list of log streaming tasks to cancel.
+
+        Returns:
+            ApplicationVersionBuildInfoV3: Information about the canceled application version build.
+
+        Raises:
+            ImageBuilderClientV3Error: If cancellation fails (network error, build service error, etc.).
         """
         if process_log_events_tasks:
             for task in process_log_events_tasks:
@@ -852,5 +772,6 @@ class ImageBuilder:
 
             _ = await asyncio.gather(*process_log_events_tasks, return_exceptions=True)
 
-        for image_build_info in info.image_builds.values():
-            await self._try_cancel_build(image_build_info.id, suppress_errors=True)
+        # Cancel all builds at once using cancel_app_build
+        # This will raise ImageBuilderClientV3Error if cancellation fails
+        return await self._client.cancel_app_build(info.id)
