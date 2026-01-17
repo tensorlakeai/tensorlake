@@ -4183,6 +4183,12 @@ components:
             **None** - one structured data object for the entire document.
             **Page** - one structured data object for each page.
           default: null
+        merged_tables:
+          type: array
+          items:
+            $ref: "#/components/schemas/MergedTable"
+          description: "Merged tables extracted from the document.\n\nThis is a list of `MergedTable` objects containing the merged tables extracted from the document. Tables are merged if they are part of the same logical table."
+          default: []
         page_classes:
           type:
             - array
@@ -4466,6 +4472,47 @@ components:
         detectStrikethrough:
           type: boolean
           default: false
+    MergeTableActions:
+      type: object
+      required:
+        - pages
+      properties:
+        pages:
+          type: array
+          items:
+            type: integer
+        target_columns:
+          type:
+            - integer
+            - "null"
+          default: ~
+    MergedTable:
+      type: object
+      required:
+        - merged_table_id
+        - merged_table_html
+        - start_page
+        - end_page
+        - pages_merged
+        - merge_actions
+      properties:
+        merged_table_id:
+          type: string
+        merged_table_html:
+          type: string
+        start_page:
+          type: integer
+        end_page:
+          type: integer
+        pages_merged:
+          type: integer
+        summary:
+          type:
+            - string
+            - "null"
+          default: ~
+        merge_actions:
+          $ref: "#/components/schemas/MergeTableActions"
     StructuredData:
       type: object
       required:

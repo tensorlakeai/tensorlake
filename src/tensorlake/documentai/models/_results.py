@@ -125,6 +125,21 @@ class StructuredData(BaseModel):
     schema_name: Optional[str] = Field(default=None)
 
 
+class MergeTableActions(BaseModel):
+    pages: List[int]
+    target_columns: Optional[int] = None
+
+
+class MergedTable(BaseModel):
+    merged_table_id: str
+    merged_table_html: str
+    start_page: int
+    end_page: int
+    pages_merged: int
+    summary: Optional[str] = None
+    merge_actions: MergeTableActions
+
+
 class Chunk(BaseModel):
     """
     Chunk of a Page in a Document.
@@ -156,6 +171,10 @@ class ParseResult(BaseModel):
     structured_data: Optional[List[StructuredData]] = Field(
         default=None,
         description="Structured data extracted from the document. The structured data is a list of `StructuredData` objects containing the structured data extracted from the document; formatted according to the schema. This is used to extract structured information from the document, such as tables, forms, or other structured content.",
+    )
+    merged_tables: Optional[List[MergedTable]] = Field(
+        default=None,
+        description="Merged tables extracted from the document. This is a list of `MergedTable` objects containing the merged tables extracted from the document. Tables are merged if they are part of the same logical table.",
     )
 
     # ParseResult specific fields
