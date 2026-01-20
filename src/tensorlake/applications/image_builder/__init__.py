@@ -9,6 +9,7 @@ import asyncio
 import os
 import sys
 import tempfile
+from datetime import datetime
 from typing import AsyncGenerator
 from uuid import uuid4 as uuid
 
@@ -267,7 +268,6 @@ class _ImageBuildReporter:
             info: The image build information to report on.
         """
         self._info = info
-        self._event_cache = []
         self._last_seen_status = info.status
         self._display_name = info.name if info.name != "default" else info.id[:12]
         prefix_fg_index = _ImageBuildReporter._instance_count % len(
@@ -275,7 +275,9 @@ class _ImageBuildReporter:
         )
         self._color = _IMAGE_NAME_PREFIX_COLORS[prefix_fg_index]
         _ImageBuildReporter._instance_count += 1
+        self._event_cache = []
         self._finished = False
+        self._status_message_task: asyncio.Task[None] | None = None
 
     @property
     def key(self) -> ClientKey | None:
@@ -303,11 +305,25 @@ class _ImageBuildReporter:
         if self._finished:
             return
 
+        # Start the periodic status message loop
+        self._status_message_task = asyncio.create_task(
+            self._periodic_status_message_loop()
+        )
+
         try:
             async for event in stream:
                 self._event_cache.append(event)
                 self._print_log_event(event)
         finally:
+            # Cancel the periodic status message task
+            if self._status_message_task is not None:
+                self._status_message_task.cancel()
+                try:
+                    await self._status_message_task
+                except asyncio.CancelledError:
+                    pass
+                self._status_message_task = None
+
             # Ensure the generator is properly closed to clean up async with blocks
             # This is important for proper resource cleanup when tasks are cancelled
             # aclose() is safe to call even if the generator is already closed
@@ -326,6 +342,11 @@ class _ImageBuildReporter:
         if self._finished:
             return
 
+        # Cancel the periodic status message task if it exists
+        if self._status_message_task is not None:
+            self._status_message_task.cancel()
+            self._status_message_task = None
+
         self._finished = True
         self._print_trailer(info)
 
@@ -333,12 +354,42 @@ class _ImageBuildReporter:
         if _ImageBuildReporter._instance_count > 1:
             click.secho(f"{self._display_name}: ", nl=False, err=err, fg=self._color)
 
+    def _print_waiting_message(self):
+        """Print the waiting in queue message."""
+        self._print_prefix(False)
+        click.secho("Build waiting in queue")
+
+    async def _periodic_status_message_loop(self):
+        """Periodically print status messages while build is pending or enqueued.
+
+        Prints the first message immediately, then continues every 15 seconds
+        until the status changes or the reporter is finished.
+        """
+        # Print first message immediately if status is pending/enqueued
+        if self._last_seen_status in ("pending", "enqueued"):
+            self._print_waiting_message()
+
+        # Continue printing every 15 seconds while status remains pending/enqueued
+        while not self._finished:
+            try:
+                await asyncio.sleep(15)
+            except asyncio.CancelledError:
+                break
+
+            # Check status after each sleep
+            if self._last_seen_status in ("pending", "enqueued"):
+                self._print_waiting_message()
+            else:
+                # Status changed, exit the loop
+                break
+
     def _print_log_event(self, event: ImageBuildLogEventV3, err: bool = False):
         self._last_seen_status = event.build_status
         msg = event.message.strip()
 
-        if event.build_status == "pending":
-            msg = "🔄 Build waiting in queue."
+        # Skip printing events with pending/enqueued status since the periodic loop handles those
+        if event.build_status in ("pending", "enqueued"):
+            return
 
         match event.stream:
             case "stdout":
