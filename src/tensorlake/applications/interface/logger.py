@@ -4,35 +4,33 @@ from ..internal_logger import InternalLogger
 
 
 class Logger:
-    """Public logger for applications with dict_traceback support enabled.
+    """Public logger for applications with structured exception output.
 
-    This logger automatically transforms exception tracebacks into a structured,
-    machine-readable dictionary format suitable for JSON output and log aggregators.
+    This logger outputs the message in a plain JSON object, alongside level,
+    timestamp, and any other key/value pairs added to the logger's context.
 
-    Outputs plain JSON without CloudEvent wrapping.
+    It also transforms exception tracebacks into a structured, machine-readable
+    dictionary format suitable for JSON output and log aggregators.
+
+    The output is formatted to put all the attributes in the root of the JSON
+    object to differentiate them from the internal CloudEvent wrapped messages
+    that Tensorlake produces through the application's lifecycle.
     """
 
     def __init__(
         self,
         context: dict,
-        destination=None,
     ):
         """Initialize Logger.
 
         Args:
             context: Dictionary of context variables to include in logs
-            destination: Log file destination (internal use)
         """
-        if destination is None:
-            destination = InternalLogger.LOG_FILE.STDOUT
-
         self._logger = InternalLogger(
-            context, destination, _dict_traceback=True, _as_cloud_event=False
+            context,
+            InternalLogger.LOG_FILE.STDOUT,
+            as_cloud_event=False,
         )
-
-    def __getattr__(self, name):
-        """Delegate all attribute access to the underlying logger."""
-        return getattr(self._logger, name)
 
     @classmethod
     def get_logger(cls, **kwargs) -> "Logger":
