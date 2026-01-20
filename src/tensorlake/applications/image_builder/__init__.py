@@ -269,9 +269,7 @@ class _ImageBuildReporter:
         self._info = info
         self._event_cache = []
         self._last_seen_status = info.status
-        self._display_name = (
-            f"{info.name} ({info.id})" if info.name != "default" else info.id
-        )
+        self._display_name = info.name if info.name != "default" else info.id[:12]
         prefix_fg_index = _ImageBuildReporter._instance_count % len(
             _IMAGE_NAME_PREFIX_COLORS
         )
