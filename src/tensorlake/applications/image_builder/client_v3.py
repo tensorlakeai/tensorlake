@@ -1,17 +1,4 @@
-"""
-# TensorLake Image Builder Client
-# This code is part of the TensorLake SDK for Python.
-# It provides a client for interacting with the image builder service.
-
-# It is designed to interact with the /images/v3 API endpoints.
-# The client allows users to build images, check the status of builds,
-# and stream logs from the image builder service.
-
-# The client is initialized with the build service URL and an optional API key.
-# The API key is used for authentication when making requests to the service.
-# The client provides methods to get build information, check if a build exists,
-# and stream logs from a build.
-"""
+"""Client for interacting with the image builder service."""
 
 import logging
 import os
@@ -67,25 +54,7 @@ _NOT_PROVIDED = _NotProvided()
 
 @dataclass
 class ImageBuilderClientV3Options:
-    """
-    Options for configuring the ImageBuilderClientV3.
-
-    Attributes:
-        base_url (str): The base URL of the build service.
-        api_key (str | None): The API key for authentication (readonly via property).
-        pat (str | None): The Personal Access Token (PAT) for authentication (readonly via property).
-        organization_id (str | None): The organization ID (readonly via property, only available for PAT auth).
-        project_id (str | None): The project ID (readonly via property, only available for PAT auth).
-
-    Authentication Modes:
-        - API Key: api_key is provided, pat is None. organization_id and project_id return None.
-          API keys already contain org/project info via introspection.
-        - PAT: pat is provided, api_key is None. organization_id and project_id are available.
-          PAT tokens don't contain org/project info, so X-Forwarded headers are needed.
-
-    Note:
-        Validation is not performed in __init__. Call validate() to validate the configuration.
-    """
+    """Options for configuring the ImageBuilderClientV3."""
 
     _base_url: str = field(init=False)
     _api_key: str | None = field(default=None, init=False)
@@ -101,19 +70,7 @@ class ImageBuilderClientV3Options:
         organization_id: str | None = None,
         project_id: str | None = None,
     ):
-        """
-        Initialize ImageBuilderClientV3Options.
-
-        Args:
-            base_url: The base URL of the build service.
-            api_key: The API key for authentication (mutually exclusive with pat).
-            pat: The Personal Access Token for authentication (mutually exclusive with api_key).
-            organization_id: The organization ID (required if using PAT).
-            project_id: The project ID (required if using PAT).
-
-        Note:
-            Validation is not performed in __init__. Call validate() to validate the configuration.
-        """
+        """Initialize ImageBuilderClientV3Options."""
         self._base_url = base_url
         self._api_key = api_key
         self._pat = pat
@@ -127,12 +84,12 @@ class ImageBuilderClientV3Options:
 
     @property
     def api_key(self) -> str | None:
-        """The API key for authentication. Returns None if using PAT."""
+        """The API key for authentication."""
         return self._api_key
 
     @property
     def pat(self) -> str | None:
-        """The Personal Access Token for authentication. Returns None if using API key."""
+        """The Personal Access Token for authentication."""
         return self._pat
 
     def replace(
@@ -144,23 +101,7 @@ class ImageBuilderClientV3Options:
         organization_id: str | None | Any = _NOT_PROVIDED,
         project_id: str | None | Any = _NOT_PROVIDED,
     ) -> "ImageBuilderClientV3Options":
-        """
-        Create a new instance with updated values.
-
-        This method returns a new ImageBuilderClientV3Options instance with the
-        specified fields updated. Fields not provided will keep their current values.
-        This maintains immutability by not modifying the original instance.
-
-        Args:
-            base_url: The base URL to use (uses current value if not provided).
-            api_key: The API key to use (uses current value if not provided). Can be None to clear.
-            pat: The PAT to use (uses current value if not provided). Can be None to clear.
-            organization_id: The organization ID to use (uses current value if not provided). Can be None to clear.
-            project_id: The project ID to use (uses current value if not provided). Can be None to clear.
-
-        Returns:
-            A new ImageBuilderClientV3Options instance with updated values.
-        """
+        """Create a new instance with updated values."""
         return ImageBuilderClientV3Options(
             base_url=base_url if base_url is not _NOT_PROVIDED else self._base_url,
             api_key=api_key if api_key is not _NOT_PROVIDED else self._api_key,
@@ -176,12 +117,7 @@ class ImageBuilderClientV3Options:
         )
 
     def validate(self) -> None:
-        """
-        Validate the options configuration.
-
-        Raises:
-            ValueError: If the configuration is invalid.
-        """
+        """Validate the options configuration."""
         # Access underlying private fields for validation
         api_key = self._api_key
         pat = self._pat
@@ -235,8 +171,7 @@ class ImageBuilderClientV3Options:
 
     @property
     def bearer_token(self) -> str:
-        """The bearer token for authentication (either API key or PAT)."""
-        # Validation should be called before accessing this property
+        """The bearer token for authentication."""
         token = self._api_key or self._pat
         assert (
             token is not None
@@ -245,39 +180,21 @@ class ImageBuilderClientV3Options:
 
     @property
     def organization_id(self) -> str | None:
-        """The organization ID. Returns None if using API key authentication."""
-        # Hide org_id when using API key (not needed, API key contains this info)
+        """The organization ID."""
         if self._api_key is not None:
             return None
         return self._organization_id
 
     @property
     def project_id(self) -> str | None:
-        """The project ID. Returns None if using API key authentication."""
-        # Hide project_id when using API key (not needed, API key contains this info)
+        """The project ID."""
         if self._api_key is not None:
             return None
         return self._project_id
 
     @classmethod
     def from_env(cls) -> "ImageBuilderClientV3Options":
-        """
-        Create an instance of ImageBuilderClientV3Options using environment variables.
-
-        The API key is retrieved from the TENSORLAKE_API_KEY environment variable.
-        If no API key is set, PAT authentication is assumed and the PAT token is retrieved
-        from TENSORLAKE_PAT, and organization/project IDs are retrieved from
-        TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID.
-
-        The base URL is retrieved from the TENSORLAKE_API_URL environment variable,
-        defaulting to "https://api.tensorlake.ai" if not set.
-
-        The TENSORLAKE_BUILD_SERVICE environment variable can be used to specify
-        a different base URL, mainly for debugging or local testing.
-
-        Returns:
-            ImageBuilderClientV3Options: An instance of the options.
-        """
+        """Create an instance from environment variables."""
         api_key = os.getenv("TENSORLAKE_API_KEY")
         pat = None
         organization_id = os.getenv("TENSORLAKE_ORGANIZATION_ID")
@@ -301,39 +218,17 @@ class ImageBuilderClientV3Options:
 # ============================================================================
 # Type Aliases (for documentation purposes)
 # ============================================================================
-
-# Type aliases for clarity (these are just str at runtime)
-ImageBuildId = str
-ClientKey = str
-ApplicationVersionId = str
-
-
-# ============================================================================
 # Public Response Models (Dataclasses)
 # ============================================================================
 
 
 @dataclass
 class ImageBuildInfoV3:
-    """
-    ImageBuildInfoV3 model for the image builder service.
-    This model represents the information about an image build.
+    """Image build information."""
 
-    Attributes:
-        id (str): The ID of the image build.
-        application_version_id (str): The ID of the application version associated with the image build.
-        key (str): The key of the image build request.
-        name (str | None): The name of the image.
-        status (str): The status of the build (e.g., "pending", "in_progress", "completed").
-        created_at (str): The timestamp when the image build was created.
-        updated_at (str): The timestamp when the image build was last updated.
-        finished_at (str | None): The timestamp when the build was finished.
-        error_message (str | None): An optional error message if the build failed.
-    """
-
-    id: ImageBuildId
-    application_version_id: ApplicationVersionId
-    key: ClientKey | None = None
+    id: str
+    application_version_id: str
+    key: str | None = None
     name: str | None = None
     function_names: list[str] = field(default_factory=list)
     status: str = ""
@@ -344,66 +239,30 @@ class ImageBuildInfoV3:
 
 
 class ImageBuildsMap:
-    """A dictionary-like container that allows access to image builds by both ID and client key.
-
-    This class maintains two internal mappings:
-    - By image build ID (always available)
-    - By client key (optional, only if the build has a key)
-
-    Attributes:
-        _by_id: Dictionary mapping image build IDs to ImageBuildInfoV3 objects.
-        _by_key: Dictionary mapping client keys to ImageBuildInfoV3 objects (only for builds with keys).
-    """
+    """Dictionary-like container for image builds accessible by ID or client key."""
 
     def __init__(self, builds: list[ImageBuildInfoV3]):
-        """Initialize the ImageBuildsMap from a list of builds.
-
-        Args:
-            builds: List of ImageBuildInfoV3 objects to index.
-        """
-        self._by_id: dict[ImageBuildId, ImageBuildInfoV3] = {}
-        self._by_key: dict[ClientKey, ImageBuildInfoV3] = {}
+        """Initialize the ImageBuildsMap from a list of builds."""
+        self._by_id: dict[str, ImageBuildInfoV3] = {}
+        self._by_key: dict[str, ImageBuildInfoV3] = {}
 
         for build in builds:
             self._by_id[build.id] = build
             if build.key is not None:
                 self._by_key[build.key] = build
 
-    def get_by_id(self, build_id: ImageBuildId | str) -> ImageBuildInfoV3 | None:
-        """Get a build by its image build ID.
-
-        Args:
-            build_id: The image build ID.
-
-        Returns:
-            The ImageBuildInfoV3 if found, None otherwise.
-        """
+    def get_by_id(self, build_id: str) -> ImageBuildInfoV3 | None:
+        """Get a build by its image build ID."""
         return self._by_id.get(build_id)
 
-    def get_by_key(self, key: ClientKey | str) -> ImageBuildInfoV3 | None:
-        """Get a build by its client key.
-
-        Args:
-            key: The client key.
-
-        Returns:
-            The ImageBuildInfoV3 if found, None otherwise.
-        """
+    def get_by_key(self, key: str) -> ImageBuildInfoV3 | None:
+        """Get a build by its client key."""
         return self._by_key.get(key)
 
     def get(
-        self, identifier: ImageBuildId | ClientKey | str | None
+        self, identifier: str | None
     ) -> ImageBuildInfoV3 | None:
-        """Get a build by either ID or key.
-
-        Tries to find the build by ID first, then by key if not found.
-
-        Args:
-            identifier: Either an image build ID or client key (or None).
-
-        Returns:
-            The ImageBuildInfoV3 if found, None otherwise.
-        """
+        """Get a build by either ID or key."""
         if identifier is None:
             return None
         # Try ID first (more specific)
@@ -415,71 +274,36 @@ class ImageBuildsMap:
         return None
 
     def values(self):
-        """Return all image builds.
-
-        Returns:
-            A view of all ImageBuildInfoV3 values.
-        """
+        """Return all image builds."""
         return self._by_id.values()
 
     def items(self):
-        """Return all image builds as (id, build) pairs.
-
-        Returns:
-            A view of all (id, ImageBuildInfoV3) items.
-        """
+        """Return all image builds as (id, build) pairs."""
         return self._by_id.items()
 
     def __getitem__(
-        self, identifier: ImageBuildId | ClientKey | str
+        self, identifier: str
     ) -> ImageBuildInfoV3:
-        """Get a build by either ID or key using dictionary syntax.
-
-        Args:
-            identifier: Either an image build ID or client key.
-
-        Returns:
-            The ImageBuildInfoV3.
-
-        Raises:
-            KeyError: If the identifier is not found.
-        """
+        """Get a build by either ID or key using dictionary syntax."""
         result = self.get(identifier)
         if result is None:
             raise KeyError(f"Image build not found: {identifier}")
         return result
 
-    def __contains__(self, identifier: ImageBuildId | ClientKey | str) -> bool:
-        """Check if a build exists with the given identifier.
-
-        Args:
-            identifier: Either an image build ID or client key.
-
-        Returns:
-            True if found, False otherwise.
-        """
-        # Try ID first
+    def __contains__(self, identifier: str) -> bool:
+        """Check if a build exists with the given identifier."""
         if identifier in self._by_id:
             return True
-        # Then try key
         if identifier in self._by_key:
             return True
         return False
 
     def __len__(self) -> int:
-        """Return the number of builds.
-
-        Returns:
-            The number of image builds.
-        """
+        """Return the number of builds."""
         return len(self._by_id)
 
     def __iter__(self):
-        """Iterate over image build IDs.
-
-        Returns:
-            An iterator over image build IDs.
-        """
+        """Iterate over image build IDs."""
         return iter(self._by_id)
 
 
@@ -490,25 +314,7 @@ class ImageBuildsMap:
 
 @dataclass
 class ImageBuildRequestV3:
-    """
-    ImageBuildRequestV3 represents an image to be built.
-
-    Attributes:
-        key (str): The key of the image build request.
-        name (str | None): The name of the image.
-        description (str | None): The description of the image.
-        context_tar_content (bytes): The content of the context tar file.
-        function_names (list[str]): The names of the functions to be built for this image.
-
-    Example:
-        req = ImageBuildRequestV3(
-            key="image_1",
-            name="image_1",
-            description="Image 1",
-            context_tar_content=b"context_tar_content",
-            function_names=["func1", "func2"]
-        )
-    """
+    """Request to build an image."""
 
     key: str
     name: str | None
@@ -519,25 +325,7 @@ class ImageBuildRequestV3:
 
 @dataclass
 class ApplicationVersionBuildRequestV3:
-    """
-    Request for building an application version.
-    This request contains information about the application, version,
-    and the various images to be built.
-
-    Attributes:
-        name (str): The name of the application to be built.
-        version (str): The version of the application to be built.
-        images (list[ImageBuildRequestV3]): List of ImageBuildRequestV3 instances.
-
-    Example:
-        images = [...]  # List of ImageBuildRequestV3 instances
-
-        req = ApplicationVersionBuildRequestV3(
-            name="example_app",
-            version="v1.0",
-            images=images
-        )
-    """
+    """Request for building an application version."""
 
     name: str
     version: str
@@ -551,19 +339,9 @@ class ApplicationVersionBuildRequestV3:
 
 @dataclass
 class ApplicationVersionBuildInfoV3:
-    """
-    ApplicationVersionBuildInfoV3 model for the image builder service.
-    This model represents the information about an application version build.
+    """Application version build information."""
 
-    Attributes:
-        id (str): The ID of the application version build.
-        name (str): The name of the application.
-        version (str): The version of the application.
-        image_builds (ImageBuildsMap): A map of ImageBuildInfoV3 objects that can be accessed
-                                       by both image build ID and client key (if available).
-    """
-
-    id: ApplicationVersionId
+    id: str
     name: str
     version: str
     image_builds: ImageBuildsMap
@@ -576,20 +354,9 @@ class ApplicationVersionBuildInfoV3:
 
 @dataclass
 class ImageBuildLogEventV3:
-    """
-    ImageBuildLogEventV3 model for the image builder service.
-    This model represents a log event from the image builder service.
+    """Log event from the image builder service."""
 
-    Attributes:
-        image_build_id (str): The ID of the build associated with the log event.
-        timestamp (str): The timestamp of the log event.
-        stream (str): The stream from which the log event originated (stdout, stderr, info).
-        message (str): The log message.
-        sequence_number (int): The sequence number of the log event. Used for ordering.
-        build_status (str): The current status of the build.
-    """
-
-    image_build_id: ImageBuildId
+    image_build_id: str
     timestamp: str
     stream: str
     message: str
@@ -675,19 +442,12 @@ class _ApplicationVersionBuildInfoPayload(BaseModel):
 
 
 class ImageBuilderClientV3Error(Exception):
-    """Base exception for image builder v3 client errors that includes request ID for tracing."""
+    """Base exception for image builder v3 client errors."""
 
     request_id: str | None
 
     def __init__(self, message: str, request_id: str | None = None):
-        """
-        Initialize ImageBuilderClientV3Error.
-
-        Args:
-            message: The error message.
-            request_id: The X-Request-Id header value used for the request, if available.
-                Must be a string (UUID is an implementation detail).
-        """
+        """Initialize ImageBuilderClientV3Error."""
         super().__init__(message)
         self.message = message
         self.request_id = request_id
@@ -700,37 +460,22 @@ class ImageBuilderClientV3Error(Exception):
 
 
 class ImageBuilderClientV3NetworkError(ImageBuilderClientV3Error):
-    """Exception for network errors when communicating with the image builder service."""
+    """Exception for network errors."""
 
     def __init__(self, original_error: Exception, request_id: str | None = None):
-        """
-        Initialize ImageBuilderClientV3NetworkError.
-
-        Args:
-            original_error: The original network error that occurred.
-            request_id: The X-Request-Id header value used for the request, if available.
-                Must be a string (UUID is an implementation detail).
-        """
+        """Initialize ImageBuilderClientV3NetworkError."""
         message = f"Network error while communicating with image builder service: {original_error}"
         super().__init__(message, request_id=request_id)
         self.original_error = original_error
 
 
 class ImageBuilderClientV3NotFoundError(ImageBuilderClientV3Error):
-    """Exception for when a requested resource is not found (404)."""
+    """Exception for when a requested resource is not found."""
 
     def __init__(
         self, resource_type: str, resource_id: str, request_id: str | None = None
     ):
-        """
-        Initialize ImageBuilderClientV3NotFoundError.
-
-        Args:
-            resource_type: The type of resource that was not found (e.g., "image build").
-            resource_id: The ID of the resource that was not found.
-            request_id: The X-Request-Id header value used for the request, if available.
-                Must be a string (UUID is an implementation detail).
-        """
+        """Initialize ImageBuilderClientV3NotFoundError."""
         message = f"{resource_type} not found: {resource_id}"
         super().__init__(message, request_id=request_id)
         self.resource_type = resource_type
@@ -738,17 +483,10 @@ class ImageBuilderClientV3NotFoundError(ImageBuilderClientV3Error):
 
 
 class ImageBuilderClientV3BadRequestError(ImageBuilderClientV3Error):
-    """Exception for when the request is invalid (400)."""
+    """Exception for when the request is invalid."""
 
     def __init__(self, message: str, request_id: str | None = None):
-        """
-        Initialize ImageBuilderClientV3BadRequestError.
-
-        Args:
-            message: The error message describing what was wrong with the request.
-            request_id: The X-Request-Id header value used for the request, if available.
-                Must be a string (UUID is an implementation detail).
-        """
+        """Initialize ImageBuilderClientV3BadRequestError."""
         super().__init__(message, request_id=request_id)
 
 
@@ -762,13 +500,7 @@ def _image_build_info_from_payload(
     key: str | None = None,
     app_version_id: str | None = None,
 ) -> ImageBuildInfoV3:
-    """Convert internal API model to public dataclass.
-
-    Args:
-        data: The payload data from the API.
-        key: Optional key override (used when key comes from parent context).
-        app_version_id: Optional app version ID override (used when app_version_id is missing from payload).
-    """
+    """Convert internal API model to public dataclass."""
     # Use app_version_id from parameter if provided, otherwise from payload, or raise if neither
     version_id = app_version_id or data.app_version_id
     if version_id is None:
@@ -824,20 +556,10 @@ def _image_build_log_event_from_json(data: dict) -> ImageBuildLogEventV3:
 
 
 class ImageBuilderClientV3:
-    """
-    Client for interacting with the image builder service.
-    This client is used to build images, check the status of builds,
-    and stream logs from the image builder service.
-    """
+    """Client for interacting with the image builder service."""
 
     def __init__(self, options: ImageBuilderClientV3Options):
-        """
-        Initialize the ImageBuilderClientV3.
-
-        Args:
-            options (ImageBuilderClientV3Options): Options object containing configuration
-                for the build service URL and authentication credentials.
-        """
+        """Initialize the ImageBuilderClientV3."""
         # Validate the options
         options.validate()
 
@@ -855,22 +577,11 @@ class ImageBuilderClientV3:
             self._base_headers["X-Forwarded-Project-Id"] = options.project_id
 
     def _generate_request_id(self) -> str:
-        """Generate a new request ID as a string.
-
-        Returns:
-            A string representation of a UUID to use as a request ID.
-        """
-        return str(uuid())
+        """Generate a new request ID."""
+        return nanoid_generate()
 
     def _get_headers_with_request_id(self, request_id: str) -> dict[str, str]:
-        """Get headers with the provided X-Request-Id.
-
-        Args:
-            request_id: The request ID to include in headers.
-
-        Returns:
-            Dictionary of headers including X-Request-Id.
-        """
+        """Get headers with the provided X-Request-Id."""
         headers = self._base_headers.copy()
         headers["X-Request-Id"] = request_id
         return headers
@@ -878,14 +589,7 @@ class ImageBuilderClientV3:
     async def build_app(
         self, request: ApplicationVersionBuildRequestV3
     ) -> ApplicationVersionBuildInfoV3:
-        """
-        Build an application version and its images using the provided request.
-
-        Args:
-            request (ApplicationVersionBuildRequestV3): The application version build request.
-        Returns:
-            ApplicationVersionBuildInfoV3: The response from the image builder service.
-        """
+        """Build an application version and its images."""
         request_payload = _ApplicationVersionBuildRequestPayload.from_request(request)
 
         image_requests_by_key = {r.key: r for r in request.images}
@@ -956,16 +660,9 @@ class ImageBuilderClientV3:
         return _application_version_build_info_from_payload(info)
 
     async def stream_image_build_logs(
-        self, image_build_id: ImageBuildId | str
+        self, image_build_id: str
     ) -> AsyncGenerator[ImageBuildLogEventV3, None]:
-        """
-        Stream logs from the image builder service for the specified image build.
-
-        Args:
-            image_build_id: The build id to stream logs for (can be branded ImageBuildId or plain str).
-        Returns:
-            AsyncGenerator[ImageBuildLogEventV3, None]: A generator of log events.
-        """
+        """Stream logs from the image builder service."""
         request_id = self._generate_request_id()
         headers = self._get_headers_with_request_id(request_id)
         build_id_str = str(image_build_id)
@@ -995,21 +692,9 @@ class ImageBuilderClientV3:
             raise ImageBuilderClientV3NetworkError(e, request_id=request_id) from e
 
     async def image_build_info(
-        self, image_build_id: ImageBuildId | str
+        self, image_build_id: str
     ) -> ImageBuildInfoV3:
-        """
-        Get information about a build.
-
-        Args:
-            image_build_id: The build id to get information about (can be branded ImageBuildId or plain str).
-        Returns:
-            ImageBuildInfoV3: Information about the build.
-
-        Raises:
-            ImageBuilderClientV3NotFoundError: If the build doesn't exist (404).
-            ImageBuilderClientV3NetworkError: If a network error occurs.
-            ImageBuilderClientV3Error: If the build service returns an error response.
-        """
+        """Get information about a build."""
         request_id = self._generate_request_id()
         headers = self._get_headers_with_request_id(request_id)
         build_id_str = str(image_build_id)
@@ -1040,16 +725,9 @@ class ImageBuilderClientV3:
         return _image_build_info_from_payload(info)
 
     async def cancel_app_build(
-        self, app_version_id: ApplicationVersionId | str
+        self, app_version_id: str
     ) -> ApplicationVersionBuildInfoV3 | None:
-        """
-        Cancel an application version build.
-
-        Args:
-            app_version_id: The application version id to cancel (can be branded ApplicationVersionId or plain str).
-        Returns:
-            ApplicationVersionBuildInfoV3 | None: Information about the application version build, or None if the build doesn't exist.
-        """
+        """Cancel an application version build."""
         request_id = self._generate_request_id()
         headers = self._get_headers_with_request_id(request_id)
         app_version_id_str = str(app_version_id)
@@ -1076,16 +754,9 @@ class ImageBuilderClientV3:
         return _application_version_build_info_from_payload(info)
 
     async def cancel_image_build(
-        self, image_build_id: ImageBuildId | str
+        self, image_build_id: str
     ) -> ImageBuildInfoV3 | None:
-        """
-        Cancel an image build.
-
-        Args:
-            image_build_id: The build id to cancel (can be branded ImageBuildId or plain str).
-        Returns:
-            ImageBuildInfoV3 | None: Information about the build, or None if the build doesn't exist.
-        """
+        """Cancel an image build."""
         request_id = self._generate_request_id()
         headers = self._get_headers_with_request_id(request_id)
         build_id_str = str(image_build_id)
@@ -1118,5 +789,5 @@ class ImageBuilderClientV3:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit. Closes the HTTP client."""
+        """Async context manager exit."""
         await self._client.aclose()
