@@ -18,8 +18,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator
 from urllib.parse import quote
-from uuid import uuid4 as uuid
 
+from nanoid import generate as nanoid_generate
 import click
 import httpx
 from httpx_sse import aconnect_sse
@@ -634,7 +634,7 @@ class _ImageBuildRequestPayload(BaseModel):
             key=req.key,
             name=req.name,
             description=req.description,
-            context_tar_part_name=uuid().hex,
+            context_tar_part_name=nanoid_generate(),
             function_names=req.function_names,
         )
 

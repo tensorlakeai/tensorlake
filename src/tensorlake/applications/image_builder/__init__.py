@@ -9,10 +9,11 @@ import asyncio
 import os
 import sys
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime
 from typing import AsyncGenerator
-from uuid import uuid4 as uuid
 
+from nanoid import generate as nanoid_generate
 import click
 import httpx
 
@@ -100,7 +101,7 @@ class ImageBuildRequest:
             context_tar_content = await asyncio.to_thread(read_file)
 
         return ImageBuildRequestV3(
-            key=uuid().hex,
+            key=nanoid_generate(),
             name=image.name,
             description=None,
             context_tar_content=context_tar_content,
@@ -256,6 +257,25 @@ _IMAGE_NAME_PREFIX_COLORS: list[str] = [
     "bright_white",
     "bright_red",
 ]
+
+
+@dataclass
+class BuildSummary:
+    """Summary of image build results.
+
+    Attributes:
+        total: Total number of image builds.
+        succeeded: Number of successful builds.
+        failed: Number of failed builds.
+        canceled: Number of canceled builds.
+        unknown: Number of builds with unknown status.
+    """
+
+    total: int
+    succeeded: int
+    failed: int
+    canceled: int
+    unknown: int = 0
 
 
 class _ImageBuildReporter:
@@ -651,73 +671,65 @@ class ImageBuilder:
         self._print_build_summary(summary)
 
         # Raise an exception if any builds failed
-        if summary["failed"] > 0:
+        if summary.failed > 0:
             raise RuntimeError("Image build(s) failed")
 
-    def _print_build_summary(self, summary: dict[str, int]):
+    def _print_build_summary(self, summary: BuildSummary):
         """Print a compiler-style summary of build results.
 
         Args:
-            summary: Dictionary with counts for total, succeeded, failed, canceled, and unknown.
+            summary: BuildSummary with counts for total, succeeded, failed, canceled, and unknown.
         """
-        total = summary["total"]
-        succeeded = summary["succeeded"]
-        failed = summary["failed"]
-        canceled = summary["canceled"]
-        unknown = summary.get("unknown", 0)
-
         click.echo()  # Empty line before summary
         click.secho("📊 Image build summary:", bold=True)
 
-        click.secho(f"  📦 {total} image(s) total")
+        click.secho(f"  📦 {summary.total} image(s) total")
 
-        if succeeded > 0:
-            click.secho(f"  ✅ {succeeded} succeeded", fg="green")
+        if summary.succeeded > 0:
+            click.secho(f"  ✅ {summary.succeeded} succeeded", fg="green")
         else:
-            click.secho(f"  ✅ {succeeded} succeeded", fg="white", dim=True)
+            click.secho(f"  ✅ {summary.succeeded} succeeded", fg="white", dim=True)
 
-        if failed > 0:
-            click.secho(f"  ❌ {failed} failed", fg="red", err=True)
-        else:
-            click.secho(f"  ❌ {failed} failed", fg="white", dim=True)
+        if summary.failed > 0:
+            click.secho(f"  ❌ {summary.failed} failed", fg="red", err=True)
 
-        if canceled > 0:
-            click.secho(f"  🚫 {canceled} canceled", fg="yellow")
+        if summary.canceled > 0:
+            click.secho(f"  🚫 {summary.canceled} canceled", fg="yellow")
 
-        if unknown > 0:
-            click.secho(f"  ⚠️ {unknown} unknown", fg="yellow")
+        if summary.unknown > 0:
+            click.secho(f"  ⚠️ {summary.unknown} unknown", fg="yellow")
 
         click.echo()
 
-    def _update_summary_from_status(self, summary: dict[str, int], status: str) -> None:
-        """Update summary dictionary based on build status.
+    def _update_summary_from_status(self, summary: BuildSummary, status: str) -> None:
+        """Update summary based on build status.
 
         Args:
-            summary: Dictionary to update with status counts.
+            summary: BuildSummary to update with status counts.
             status: The build status to categorize.
         """
         match status:
             case "succeeded":
-                summary["succeeded"] += 1
+                summary.succeeded += 1
             case "failed":
-                summary["failed"] += 1
+                summary.failed += 1
             case "canceled" | "canceling":
-                summary["canceled"] += 1
+                summary.canceled += 1
             case _:
                 # Unknown or unexpected status
-                summary["unknown"] += 1
+                summary.unknown += 1
 
     def _handle_build_info_error(
         self,
         reporter: _ImageBuildReporter,
-        summary: dict[str, int],
+        summary: BuildSummary,
         error_message: str,
     ) -> None:
         """Handle error when getting build info by printing error and updating summary from last seen status.
 
         Args:
             reporter: The reporter for the build.
-            summary: Dictionary to update with status counts.
+            summary: BuildSummary to update with status counts.
             error_message: The error message to display.
         """
         click.secho(error_message, err=True, fg="red")
@@ -728,7 +740,7 @@ class ImageBuilder:
         self,
         reporters: dict[str, _ImageBuildReporter],
         app_version_info: ApplicationVersionBuildInfoV3 | None = None,
-    ) -> dict[str, int]:
+    ) -> BuildSummary:
         """Print final results for all reporters.
 
         Args:
@@ -737,15 +749,15 @@ class ImageBuilder:
                 making individual API calls for each build.
 
         Returns:
-            Dictionary with counts: {"total": int, "succeeded": int, "failed": int, "canceled": int, "unknown": int}
+            BuildSummary with counts for total, succeeded, failed, canceled, and unknown.
         """
-        summary = {
-            "total": len(reporters),
-            "succeeded": 0,
-            "failed": 0,
-            "canceled": 0,
-            "unknown": 0,
-        }
+        summary = BuildSummary(
+            total=len(reporters),
+            succeeded=0,
+            failed=0,
+            canceled=0,
+            unknown=0,
+        )
 
         click.echo()
         click.secho("🎉 Image build details:", bold=True)
