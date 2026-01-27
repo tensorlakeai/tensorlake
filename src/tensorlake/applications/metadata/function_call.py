@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -17,10 +17,14 @@ class FunctionCallMetadata(BaseModel):
     # ID of the function call, uniquness guarantees depend on how the field is set.
     id: str
     # Not None if output serialization format is overridden for this function call.
-    # This is used when the output of this function call is consumed by another function call
+    # This is used when the output of this function call is used as output of another function call
     # with a different output serializer.
     output_serializer_name_override: str | None
+    # This is used when the output of this function call is used as output of another function call.
+    # In this case the type hint of the outer function call are applied to the inner function call output.
+    output_type_hint_override: Any
+    has_output_type_hint_override: bool
     # Positional arg ix -> Arg metadata.
-    args: List[FunctionCallArgumentMetadata]
+    args: list[FunctionCallArgumentMetadata]
     # Keyword Arg name -> Arg metadata.
-    kwargs: Dict[str, FunctionCallArgumentMetadata]
+    kwargs: dict[str, FunctionCallArgumentMetadata]

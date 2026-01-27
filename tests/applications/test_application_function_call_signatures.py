@@ -1,47 +1,61 @@
 import unittest
+from typing import Any
 
 import parameterized
+import validate_all_applications
 from models import DirModel, FileModel
 
 from tensorlake.applications import File, Request, RequestError, application, function
 from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
-from tensorlake.applications.validation import validate_loaded_applications
+
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
 
 
 @application()
 @function()
-def test_function_with_no_args_api() -> str:
+def function_with_no_args() -> str:
     return "success"
 
 
 @application()
 @function()
-def test_function_returning_nothing_api() -> None:
+def function_returning_nothing() -> None:
     pass
 
 
 @application()
 @function()
-def test_only_positional_args_api(a: int, b: str, c: float, d: bool, /) -> str:
+def function_mixed_args(a: int, b: str, c: float, d: bool) -> str:
     return f"a={a},b={b},c={c},d={d}"
+
+
+@function()
+@application()
+def function_tuple_arg_and_return_value(
+    arg: tuple[str, str, str, str],
+) -> tuple[str, str, str, str]:
+    if not isinstance(arg, tuple):
+        raise RequestError(f"Tuple type mismatch: {type(arg)}")
+    if arg != ("apple", "banana", "cherry", "cherry"):
+        raise RequestError(f"Tuple content mismatch: {arg}")
+    return arg
+
+
+@function()
+@application()
+def function_set_arg_and_return_value(arg: set[str]) -> set[str]:
+    if not isinstance(arg, set):
+        raise RequestError(f"Set type mismatch: {type(arg)}")
+    if arg != {"apple", "banana", "cherry"}:
+        raise RequestError(f"Set content mismatch: {arg}")
+    return arg
 
 
 @application()
 @function()
-def test_only_kwargs_api(*, a: int, b: str, c: float, d: bool) -> str:
-    return f"a={a},b={b},c={c},d={d}"
-
-
-@application()
-@function()
-def test_mixed_args_api(a: int, b: str, /, c: float, *, d: bool) -> str:
-    return f"a={a},b={b},c={c},d={d}"
-
-
-@application()
-@function()
-def test_default_args_api(
+def function_default_args(
     x: list[int] = [1, 2, 3], foo: int = 42, bar: str = "default"
 ) -> str:
     if x != [1, 2, 3]:
@@ -55,7 +69,7 @@ def test_default_args_api(
 
 @application()
 @function()
-def test_file_args_api(file1: File, file2: File) -> str:
+def function_file_args(file1: File, file2: File) -> str:
     # Don't return File objects because we're testing passing of File arguments,
     # not returning them.
     if file1.content != b"file_content_1":
@@ -75,13 +89,13 @@ def test_file_args_api(file1: File, file2: File) -> str:
 
 @application()
 @function()
-def test_file_return_value_api() -> File:
+def function_file_return_value() -> File:
     return File(content=b"file_return_content", content_type="text/plain")
 
 
 @application()
 @function()
-def test_pydantic_args_api(dir: DirModel, file: FileModel) -> str:
+def function_pydantic_args(dir: DirModel, file: FileModel) -> str:
     if dir.path != "/test/dir":
         raise RequestError(f"Dir path mismatch: {dir.path}")
     if len(dir.files) != 2:
@@ -109,7 +123,7 @@ def test_pydantic_args_api(dir: DirModel, file: FileModel) -> str:
 
 @application()
 @function()
-def test_pydantic_return_value_api() -> DirModel:
+def function_pydantic_return_value() -> DirModel:
     dir = DirModel(
         path="/returned/dir",
         files=[
@@ -120,38 +134,22 @@ def test_pydantic_return_value_api() -> DirModel:
     return dir
 
 
-@function()
+# With Any type hints, Pydantic falls back to standard python JSON
+# serialization/deserialization logic (json.dumps and json.loads)
+# See json to Python conversion table: https://docs.python.org/3/library/json.html#py-to-json-table
 @application()
-def test_set_arg_and_return_value_api(arg: set[str]) -> set[str]:
-    if not isinstance(arg, set):
-        raise RequestError(f"Set type mismatch: {type(arg)}")
-    if arg != {"apple", "banana", "cherry"}:
-        raise RequestError(f"Set content mismatch: {arg}")
-    return arg
-
-
 @function()
-@application()
-def test_tuple_arg_and_return_value_api(
-    arg: tuple[str, str, str, str],
-) -> tuple[str, str, str, str]:
-    if not isinstance(arg, tuple):
-        raise RequestError(f"Tuple type mismatch: {type(arg)}")
-    if arg != ("apple", "banana", "cherry", "cherry"):
-        raise RequestError(f"Tuple content mismatch: {arg}")
+def function_any_arg_and_return_value(arg: Any) -> Any:
     return arg
 
 
 class TestApplicationFunctionCallSignatures(unittest.TestCase):
-    def test_applications_are_valid(self):
-        self.assertEqual(validate_loaded_applications(), [])
-
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_function_with_no_args(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(test_function_with_no_args_api, is_remote)
+        request: Request = run_application(function_with_no_args, is_remote)
         self.assertEqual(request.output(), "success")
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
@@ -161,7 +159,7 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
             deploy_applications(__file__)
 
         request: Request = run_application(
-            test_function_with_no_args_api, is_remote, "extra_arg"
+            function_with_no_args, is_remote, "extra_arg"
         )
         self.assertEqual(request.output(), "success")
 
@@ -174,7 +172,7 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
             deploy_applications(__file__)
 
         request: Request = run_application(
-            test_function_with_no_args_api, is_remote, extra_kwarg="extra_kwarg"
+            function_with_no_args, is_remote, extra_kwarg="extra_kwarg"
         )
         self.assertEqual(request.output(), "success")
 
@@ -183,18 +181,16 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(
-            test_function_returning_nothing_api, is_remote
-        )
+        request: Request = run_application(function_returning_nothing, is_remote)
         self.assertEqual(request.output(), None)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_only_positional_args(self, _: str, is_remote: bool):
+    def test_call_with_only_positional_args(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
 
         request: Request = run_application(
-            test_only_positional_args_api,
+            function_mixed_args,
             is_remote,
             42,
             "hello",
@@ -204,12 +200,12 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
         self.assertEqual(request.output(), "a=42,b=hello,c=3.14,d=True")
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_only_kwargs(self, _: str, is_remote: bool):
+    def test_call_with_only_kwargs(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
 
         request: Request = run_application(
-            test_only_kwargs_api,
+            function_mixed_args,
             is_remote,
             a=42,
             b="hello",
@@ -224,7 +220,7 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
             deploy_applications(__file__)
 
         request1: Request = run_application(
-            test_mixed_args_api,
+            function_mixed_args,
             is_remote,
             1,
             "x",
@@ -234,12 +230,40 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
         self.assertEqual(request1.output(), "a=1,b=x,c=2.71,d=False")
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_tuple_arg_and_return_value(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+
+        request: Request = run_application(
+            function_tuple_arg_and_return_value,
+            is_remote,
+            ("apple", "banana", "cherry", "cherry"),
+        )
+        output_tuple: tuple[str, str, str, str] = request.output()
+        self.assertIsInstance(output_tuple, tuple)
+        self.assertEqual(output_tuple, ("apple", "banana", "cherry", "cherry"))
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_set_arg_and_return_value(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+
+        request: Request = run_application(
+            function_set_arg_and_return_value,
+            is_remote,
+            {"apple", "banana", "cherry"},
+        )
+        output_set: set[str] = request.output()
+        self.assertIsInstance(output_set, set)
+        self.assertEqual(output_set, {"apple", "banana", "cherry"})
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_default_args(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
 
         request: Request = run_application(
-            test_default_args_api,
+            function_default_args,
             is_remote,
             foo=100,
         )
@@ -251,7 +275,7 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
             deploy_applications(__file__)
 
         request: Request = run_application(
-            test_file_args_api,
+            function_file_args,
             is_remote,
             File(content=b"file_content_1", content_type="text/plain"),
             File(content=b"file_content_2", content_type="application/octet-stream"),
@@ -264,7 +288,7 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
             deploy_applications(__file__)
 
         request: Request = run_application(
-            test_file_return_value_api,
+            function_file_return_value,
             is_remote,
         )
         output_file: File = request.output()
@@ -290,7 +314,7 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
         )
 
         request: Request = run_application(
-            test_pydantic_args_api,
+            function_pydantic_args,
             is_remote,
             dir=dir_model,
             file=file_model,
@@ -303,7 +327,7 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
             deploy_applications(__file__)
 
         request: Request = run_application(
-            test_pydantic_return_value_api,
+            function_pydantic_return_value,
             is_remote,
         )
         output_dir: DirModel = request.output()
@@ -318,32 +342,63 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
         self.assertTrue(output_dir.files[1].is_read_only)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_set_arg_and_return_value(self, _: str, is_remote: bool):
+    def test_any_arg_and_value_str(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
 
         request: Request = run_application(
-            test_set_arg_and_return_value_api,
+            function_any_arg_and_return_value,
             is_remote,
-            {"apple", "banana", "cherry"},
+            "test_string",
         )
-        output_set: set[str] = request.output()
-        self.assertIsInstance(output_set, set)
-        self.assertEqual(output_set, {"apple", "banana", "cherry"})
+        self.assertEqual(request.output(), "test_string")
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_tuple_arg_and_return_value(self, _: str, is_remote: bool):
+    def test_any_arg_and_value_int_list(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
 
         request: Request = run_application(
-            test_tuple_arg_and_return_value_api,
+            function_any_arg_and_return_value,
             is_remote,
-            ("apple", "banana", "cherry", "cherry"),
+            [1, 2, 3, 4, 5],
         )
-        output_tuple: tuple[str, str, str, str] = request.output()
-        self.assertIsInstance(output_tuple, tuple)
-        self.assertEqual(output_tuple, ("apple", "banana", "cherry", "cherry"))
+        self.assertEqual(request.output(), [1, 2, 3, 4, 5])
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_any_arg_and_value_int_set(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+
+        request: Request = run_application(
+            function_any_arg_and_return_value,
+            is_remote,
+            {1, 2, 3, 4, 5},
+        )
+        # Sets are converted to lists during JSON serialization/deserialization when type hint is Any.
+        self.assertEqual(request.output(), [1, 2, 3, 4, 5])
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_any_arg_and_value_list_of_pydantic_models(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+
+        request: Request = run_application(
+            function_any_arg_and_return_value,
+            is_remote,
+            [
+                FileModel(path="/file1.txt", size=100, is_read_only=True),
+                FileModel(path="/file2.txt", size=200, is_read_only=False),
+            ],
+        )
+        # JSON objects are converted to dicts during JSON serialization/deserialization when type hint is Any.
+        self.assertEqual(
+            request.output(),
+            [
+                {"path": "/file1.txt", "size": 100, "is_read_only": True},
+                {"path": "/file2.txt", "size": 200, "is_read_only": False},
+            ],
+        )
 
 
 if __name__ == "__main__":

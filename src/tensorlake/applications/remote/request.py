@@ -1,10 +1,10 @@
 import base64
 from typing import Any
 
-from ..function.type_hints import deserialize_type_hints
+from ..function.type_hints import deserialize_type_hint
 from ..function.user_data_serializer import deserialize_value
-from ..interface import DeserializationError, Request, RequestFailed
-from ..metadata import ValueMetadata
+from ..interface import DeserializationError, Request
+from ..user_data_serializer import UserDataSerializer, serializer_by_name
 from .api_client import APIClient, RequestOutput
 from .manifests.application import ApplicationManifest
 
@@ -35,45 +35,26 @@ class RemoteRequest(Request):
             application_name=self._application_name,
             request_id=self._request_id,
         )
-        # When deserializing API function inputs we use its payload type hints to
-        # deserialize the output correctly. Here we're doing a symmetric operation.
-        # We use API function return value type hint. This is a consistent UX for API functions.
+
         try:
             output_type_hints_base64: str = (
                 self._application_manifest.entrypoint.output_type_hints_base64
             )
-            serialized_output_type_hints: bytes = base64.decodebytes(
+            serialized_output_type_hint: bytes = base64.decodebytes(
                 output_type_hints_base64.encode("utf-8")
             )
-            return_type_hints: list[Any] = deserialize_type_hints(
-                serialized_output_type_hints
-            )
-        except Exception:
-            # If we can't deserialize type hints, we just assume no type hints.
-            # This usually happens when the application function return types are not loaded into current process.
-            return_type_hints: list[Any] = []
-
-        if len(return_type_hints) == 0:
+            return_type_hint: Any = deserialize_type_hint(serialized_output_type_hint)
+        except Exception as e:
             raise DeserializationError(
-                "Can't deserialize request output. Please add a return type hint to the application function "
-                f"'{self._application_name}' to enable deserialization of the request output."
-            )
+                "Can't deserialize request output type hints."
+            ) from e
 
-        last_deserialize_error: DeserializationError | None = None
-
-        for type_hint in return_type_hints:
-            try:
-                return deserialize_value(
-                    serialized_value=request_output.serialized_value,
-                    metadata=ValueMetadata(
-                        id="fake_id",
-                        cls=type_hint,
-                        serializer_name=self._application_manifest.entrypoint.output_serializer,
-                        content_type=request_output.content_type,
-                    ),
-                )
-            except DeserializationError as e:
-                last_deserialize_error = e
-
-        # last_exception is Never None here if return_type_hints is not empty.
-        raise last_deserialize_error
+        output_deserializer: UserDataSerializer = serializer_by_name(
+            self._application_manifest.entrypoint.output_serializer
+        )
+        return deserialize_value(
+            serialized_value=request_output.serialized_value,
+            serializer=output_deserializer,
+            content_type=request_output.content_type,
+            type_hint=return_type_hint,
+        )

@@ -2,6 +2,7 @@ import unittest
 from typing import Any, List
 
 import parameterized
+import validate_all_applications
 from pydantic import BaseModel
 
 from tensorlake.applications import (
@@ -12,7 +13,9 @@ from tensorlake.applications import (
 )
 from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
-from tensorlake.applications.validation import validate_loaded_applications
+
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
 
 
 class AccumulatedState(BaseModel):
@@ -153,9 +156,6 @@ def int_to_str(x: int) -> str:
 
 
 class TestReduce(unittest.TestCase):
-    def test_applications_are_valid(self):
-        self.assertEqual(validate_loaded_applications(), [])
-
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success_function_call_collection(self, _: str, is_remote: bool):
         if is_remote:

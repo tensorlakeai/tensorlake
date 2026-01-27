@@ -1,6 +1,6 @@
 from typing import Any
 
-from ..interface.exceptions import RequestFailed
+from ..interface.exceptions import TensorlakeError
 from ..interface.request import Request
 
 
@@ -9,7 +9,7 @@ class LocalRequest(Request):
         self,
         id: str,
         output: Any | None,
-        error: RequestFailed | None,
+        error: TensorlakeError | None,
     ):
         """A local request that has completed running.
 
@@ -17,7 +17,7 @@ class LocalRequest(Request):
         """
         super().__init__(id)
         self._output: Any | None = output
-        self._error: RequestFailed | None = error
+        self._error: TensorlakeError | None = error
 
     def output(self) -> Any:
         if self._error is not None:

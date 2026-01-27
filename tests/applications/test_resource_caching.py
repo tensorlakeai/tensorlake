@@ -1,6 +1,8 @@
 import os
 import unittest
 
+import validate_all_applications
+
 from tensorlake.applications import (
     Request,
     application,
@@ -9,6 +11,9 @@ from tensorlake.applications import (
     run_remote_application,
 )
 from tensorlake.applications.remote.deploy import deploy_applications
+
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
 
 # The tests in this file verify publicly stated performance critical behaviors of Tensorlake Applications.
 

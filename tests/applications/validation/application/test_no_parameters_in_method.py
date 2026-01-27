@@ -16,8 +16,8 @@ class MyApplicationClass:
 
 
 class TestNoParametersInMethod(unittest.TestCase):
-    def test_passes_validation(self):
-        # Keep tests that validate that we don't create false positive validation errors.
+    def test_all_applications_pass_validation(self):
+        # Validate all test applications to ensure no false positive validation errors.
         validation_messages: list[ValidationMessage] = validate_loaded_applications()
         self.assertEqual(len(validation_messages), 0)
 
