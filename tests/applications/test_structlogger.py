@@ -61,6 +61,15 @@ def test_logging_error_exception(payload: DummyPayload) -> str:
     return "error_exception"
 
 
+@application()
+@function(description="test logging with bind")
+def test_logging_bind(payload: DummyPayload) -> str:
+    logger = Logger.get_logger(module="test")
+    bound_logger = logger.bind(request_id="123", user="test_user")
+    bound_logger.info("info with bound context")
+    return "bind"
+
+
 class TestInternalLoggerLogging(unittest.TestCase):
     def setUp(self):
         self.captured_output = io.StringIO()
@@ -134,6 +143,22 @@ class TestInternalLoggerLogging(unittest.TestCase):
         self.assertEqual(log_entry["level"], "error")
         self.assertEqual(log_entry["event"], "error with exception")
         self.assertIn("exception", log_entry)
+
+    def test_bind_log(self):
+        request: Request = run_local_application(
+            test_logging_bind,
+            DummyPayload(),
+        )
+        self.assertEqual(request.output(), "bind")
+        output = self.captured_output.getvalue()
+        lines = output.strip().split("\n")
+        self.assertEqual(len(lines), 1)
+        log_entry = json.loads(lines[0])
+        self.assertEqual(log_entry["level"], "info")
+        self.assertEqual(log_entry["event"], "info with bound context")
+        self.assertEqual(log_entry["module"], "test")
+        self.assertEqual(log_entry["request_id"], "123")
+        self.assertEqual(log_entry["user"], "test_user")
 
 
 if __name__ == "__main__":

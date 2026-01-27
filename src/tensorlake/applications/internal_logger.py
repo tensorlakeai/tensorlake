@@ -25,7 +25,7 @@ class InternalLogger:
         self,
         context: Dict[str, Any],
         destination: LOG_FILE,
-        as_cloud_event: bool = True,
+        as_cloud_event: bool,
     ):
         self._context: Dict[str, Any] = context
         self._destination: InternalLogger.LOG_FILE = destination
@@ -52,7 +52,7 @@ class InternalLogger:
         self.__init__(
             context=state["context"],
             destination=state["destination"],
-            as_cloud_event=state.get("as_cloud_event", True),
+            as_cloud_event=state["as_cloud_event"],
         )
 
     @classmethod
@@ -64,6 +64,7 @@ class InternalLogger:
         return InternalLogger(
             context=kwargs,
             destination=InternalLogger.LOG_FILE.STDOUT,
+            as_cloud_event=True,
         )
 
     def bind(self, **kwargs) -> "InternalLogger":
@@ -147,7 +148,12 @@ class InternalLogger:
         context["event"] = message
 
         if "exc_info" in context:
-            exc_info: tuple | None = context["exc_info"]
+            exc_info: (
+                tuple[type[BaseException], BaseException, Any]
+                | BaseException
+                | bool
+                | None
+            ) = context["exc_info"]
             # Handle exc_info=True (capture current exception from sys.exc_info())
             if exc_info is True:
                 exc_info = sys.exc_info()
