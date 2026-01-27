@@ -20,6 +20,7 @@ from .exceptions import (
 from .file import File
 from .function import Function
 from .image import Image
+from .logger import Logger
 from .request import Request
 from .request_context import (
     FunctionProgress,
@@ -59,6 +60,7 @@ __all__ = [
     "RETURN_WHEN",
     "SDKUsageError",
     "SerializationError",
+    "Logger",
     "TensorlakeException",
     "TensorlakeError",
 ]

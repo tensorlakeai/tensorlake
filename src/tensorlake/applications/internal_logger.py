@@ -5,7 +5,7 @@ import traceback
 from enum import Enum
 from typing import Any, Dict
 
-from .cloud_events import new_cloud_event
+from .cloud_events import event_time, new_cloud_event
 
 # Logger with interface similar to structlog library.
 # We need a separate logging library to make sure that no customer code is using it so
@@ -21,9 +21,15 @@ class InternalLogger:
 
     """Picklable internal logger for use in FE and SDK."""
 
-    def __init__(self, context: Dict[str, Any], destination: LOG_FILE):
+    def __init__(
+        self,
+        context: Dict[str, Any],
+        destination: LOG_FILE,
+        as_cloud_event: bool,
+    ):
         self._context: Dict[str, Any] = context
         self._destination: InternalLogger.LOG_FILE = destination
+        self._as_cloud_event: bool = as_cloud_event
         self._log_file: io.TextIOWrapper | None = None
 
         if destination == InternalLogger.LOG_FILE.STDOUT:
@@ -38,6 +44,7 @@ class InternalLogger:
         return {
             "context": self._context,
             "destination": self._destination,
+            "as_cloud_event": self._as_cloud_event,
         }
 
     def __setstate__(self, state: dict[str, Any]):
@@ -45,6 +52,7 @@ class InternalLogger:
         self.__init__(
             context=state["context"],
             destination=state["destination"],
+            as_cloud_event=state["as_cloud_event"],
         )
 
     @classmethod
@@ -56,6 +64,7 @@ class InternalLogger:
         return InternalLogger(
             context=kwargs,
             destination=InternalLogger.LOG_FILE.STDOUT,
+            as_cloud_event=True,
         )
 
     def bind(self, **kwargs) -> "InternalLogger":
@@ -65,7 +74,11 @@ class InternalLogger:
         """
         context = self._context.copy()
         context.update(kwargs)
-        return InternalLogger(context=context, destination=self._destination)
+        return InternalLogger(
+            context=context,
+            destination=self._destination,
+            as_cloud_event=self._as_cloud_event,
+        )
 
     def info(self, message: str, **kwargs):
         """Logs an info level message.
@@ -135,9 +148,21 @@ class InternalLogger:
         context["event"] = message
 
         if "exc_info" in context:
-            context["exception"] = "".join(
-                traceback.format_exception(context["exc_info"])
-            )
+            exc_info: (
+                tuple[type[BaseException], BaseException, Any]
+                | BaseException
+                | bool
+                | None
+            ) = context["exc_info"]
+            # Handle exc_info=True (capture current exception from sys.exc_info())
+            if exc_info is True:
+                exc_info = sys.exc_info()
+            # Handle exc_info as an exception object
+            elif isinstance(exc_info, BaseException):
+                exc_info = (type(exc_info), exc_info, exc_info.__traceback__)
+
+            if exc_info and exc_info != (None, None, None):
+                context["exception"] = "".join(traceback.format_exception(*exc_info))
             del context["exc_info"]
 
         # Convert non json-serializable values to strings.
@@ -147,6 +172,10 @@ class InternalLogger:
             ):
                 context[key] = str(value)
 
-        return json.dumps(
-            new_cloud_event(context, source="/tensorlake/function_executor/logger")
-        )
+        if self._as_cloud_event:
+            return json.dumps(
+                new_cloud_event(context, source="/tensorlake/function_executor/logger")
+            )
+        else:
+            context["timestamp"] = event_time()
+            return json.dumps(context)
