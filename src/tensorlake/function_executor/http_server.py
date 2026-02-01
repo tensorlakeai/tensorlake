@@ -9,7 +9,7 @@ import json
 import re
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from google.protobuf.json_format import MessageToDict, ParseDict
@@ -40,13 +40,13 @@ class FunctionExecutorHTTPServer:
         self._port = port
         self._service = service
         self._logger = logger.bind(module=__name__)
-        self._server: Optional[HTTPServer] = None
+        self._server: Optional[ThreadingHTTPServer] = None
         self._shutdown_event = threading.Event()
 
     def start(self) -> None:
         """Start the HTTP server (blocking)."""
         handler = self._create_handler()
-        self._server = HTTPServer(("127.0.0.1", self._port), handler)
+        self._server = ThreadingHTTPServer(("127.0.0.1", self._port), handler)
         self._logger.info("HTTP server starting", port=self._port)
 
         try:
