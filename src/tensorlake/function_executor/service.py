@@ -1,5 +1,6 @@
 import importlib
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -95,85 +96,27 @@ class Service(FunctionExecutorServicer):
     def initialize(
         self, request: InitializeRequest, context: grpc.ServicerContext
     ) -> InitializeResponse:
+        """Initialize from gRPC request with zipped code."""
         start_time = time.monotonic()
         self._logger.info("initializing function executor service")
 
         InitializeRequestValidator(request).check()
 
-        event_details: InitializationEventDetails = InitializationEventDetails(
-            namespace=request.function.namespace,
-            application_name=request.function.application_name,
-            application_version=request.function.application_version,
-            function_name=request.function.function_name,
-        )
+        function_ref = request.function
+        event_details = self._create_event_details(function_ref)
         log_user_event_initialization_started(event_details)
 
-        self._function_ref = request.function
-        self._logger = self._logger.bind(
-            namespace=request.function.namespace,
-            app=request.function.application_name,
-            app_version=request.function.application_version,
-            fn=request.function.function_name,
-        )
-        set_run_futures_hook(self._run_futures_runtime_hook)
-        set_wait_futures_hook(self._wait_futures_runtime_hook)
-        setup_multiprocessing()
+        # Set up function ref and logger
+        self._setup_function_ref_and_logger(function_ref)
 
-        app_modules_zip_fd, app_modules_zip_path = tempfile.mkstemp(suffix=".zip")
-        with open(app_modules_zip_fd, "wb") as graph_modules_zip_file:
-            graph_modules_zip_file.write(request.application_code.data)
-        sys.path.insert(
-            0, app_modules_zip_path
-        )  # Add as the first entry so user modules have highest priority
-
+        # Load function from zip
         try:
-            # Process user controlled input in a try-except block to not treat errors here as our
-            # internal platform errors.
-            with zipfile.ZipFile(app_modules_zip_path, "r") as zf:
-                with zf.open(CODE_ZIP_MANIFEST_FILE_NAME) as code_zip_manifest_file:
-                    code_zip_manifest: CodeZIPManifest = CodeZIPManifest.model_validate(
-                        json.load(code_zip_manifest_file)
-                    )
-
-            if request.function.function_name not in code_zip_manifest.functions:
-                raise ValueError(
-                    (
-                        f"Function '{request.function.function_name}' not found in ZIP manifest of application '{request.function.application_name}'. "
-                        f"Available functions: {list(code_zip_manifest.functions.keys())}"
-                    )
-                )
-
-            # Load the function module so that the function is available in the registry.
-            function_zip_manifest: FunctionZIPManifest = code_zip_manifest.functions[
-                request.function.function_name
-            ]
-            importlib.import_module(function_zip_manifest.module_import_name)
-
-            # Verify that the function exists in the registry now.
-            if not has_function(request.function.function_name):
-                raise ValueError(
-                    (
-                        f"Function '{request.function.function_name}' not found in the application '{request.function.application_name}'. "
-                        f"Available functions: {repr(get_functions())}"
-                    )
-                )
-
-            self._function = get_function(request.function.function_name)
-            # The function is only loaded once per Function Executor. It's important to use a single
-            # loaded function so all the allocations when executed are sharing the same memory. This allows
-            # implementing smart caching in customer code. E.g. load a model into GPU only once and
-            # share the model's file descriptor between all allocs or download function configuration
-            # only once.
-            if self._function._function_config.class_name is not None:
-                self._function_instance_arg = create_self_instance(
-                    self._function._function_config.class_name
-                )
+            self._load_function_from_zip(request.application_code.data, function_ref.function_name)
         except BaseException as e:
             self._logger.error(
                 "function executor service initialization failed",
                 reason="failed to load customer function",
                 duration_sec=f"{time.monotonic() - start_time:.3f}",
-                # Don't log the exception to FE log as it contains customer data
             )
             log_user_event_initialization_failed(event_details, error=e)
             return InitializeResponse(
@@ -181,6 +124,150 @@ class Service(FunctionExecutorServicer):
                 failure_reason=InitializationFailureReason.INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR,
             )
 
+        # Complete initialization
+        self._complete_initialization()
+        self._logger.info(
+            "initialized function executor service",
+            duration_sec=f"{time.monotonic() - start_time:.3f}",
+        )
+        log_user_event_initialization_finished(event_details)
+        return InitializeResponse(
+            outcome_code=InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
+        )
+
+    def initialize_from_code_path(
+        self,
+        code_path: str,
+        namespace: str,
+        app_name: str,
+        app_version: str,
+        function_name: str,
+    ) -> bool:
+        """Initialize from a local code path (for container entrypoint mode).
+
+        Args:
+            code_path: Path to the function code directory.
+            namespace: Function namespace.
+            app_name: Application name.
+            app_version: Application version.
+            function_name: Function name.
+
+        Returns:
+            True if initialization succeeded, False otherwise.
+        """
+        start_time = time.monotonic()
+        self._logger.info(
+            "initializing function executor service from code path",
+            code_path=code_path,
+        )
+
+        function_ref = FunctionRef(
+            namespace=namespace,
+            application_name=app_name,
+            application_version=app_version,
+            function_name=function_name,
+        )
+        event_details = self._create_event_details(function_ref)
+        log_user_event_initialization_started(event_details)
+
+        # Set up function ref and logger
+        self._setup_function_ref_and_logger(function_ref)
+
+        # Load function from code path
+        try:
+            self._load_function_from_code_path(code_path, function_name)
+        except BaseException as e:
+            self._logger.error(
+                "function executor service initialization failed",
+                reason="failed to load customer function",
+                duration_sec=f"{time.monotonic() - start_time:.3f}",
+            )
+            log_user_event_initialization_failed(event_details, error=e)
+            return False
+
+        # Complete initialization
+        self._complete_initialization()
+        self._logger.info(
+            "initialized function executor service from code path",
+            duration_sec=f"{time.monotonic() - start_time:.3f}",
+        )
+        log_user_event_initialization_finished(event_details)
+        return True
+
+    def _create_event_details(self, function_ref: FunctionRef) -> InitializationEventDetails:
+        """Create event details for logging."""
+        return InitializationEventDetails(
+            namespace=function_ref.namespace,
+            application_name=function_ref.application_name,
+            application_version=function_ref.application_version,
+            function_name=function_ref.function_name,
+        )
+
+    def _setup_function_ref_and_logger(self, function_ref: FunctionRef) -> None:
+        """Set up function reference, logger bindings, and runtime hooks."""
+        self._function_ref = function_ref
+        self._logger = self._logger.bind(
+            namespace=function_ref.namespace,
+            app=function_ref.application_name,
+            app_version=function_ref.application_version,
+            fn=function_ref.function_name,
+        )
+        set_run_futures_hook(self._run_futures_runtime_hook)
+        set_wait_futures_hook(self._wait_futures_runtime_hook)
+        setup_multiprocessing()
+
+    def _load_function_from_zip(self, zip_data: bytes, function_name: str) -> None:
+        """Load function from zipped code bytes."""
+        app_modules_zip_fd, app_modules_zip_path = tempfile.mkstemp(suffix=".zip")
+        with open(app_modules_zip_fd, "wb") as graph_modules_zip_file:
+            graph_modules_zip_file.write(zip_data)
+        sys.path.insert(0, app_modules_zip_path)
+
+        with zipfile.ZipFile(app_modules_zip_path, "r") as zf:
+            with zf.open(CODE_ZIP_MANIFEST_FILE_NAME) as code_zip_manifest_file:
+                code_zip_manifest: CodeZIPManifest = CodeZIPManifest.model_validate(
+                    json.load(code_zip_manifest_file)
+                )
+
+        if function_name not in code_zip_manifest.functions:
+            raise ValueError(
+                f"Function '{function_name}' not found in ZIP manifest. "
+                f"Available functions: {list(code_zip_manifest.functions.keys())}"
+            )
+
+        function_zip_manifest: FunctionZIPManifest = code_zip_manifest.functions[function_name]
+        importlib.import_module(function_zip_manifest.module_import_name)
+
+        self._load_function_from_registry(function_name)
+
+    def _load_function_from_code_path(self, code_path: str, function_name: str) -> None:
+        """Load function from a local code directory."""
+        code_path = os.path.abspath(code_path)
+        if code_path not in sys.path:
+            sys.path.insert(0, code_path)
+
+        # Import all Python modules to register functions
+        self._import_modules_from_path(code_path)
+
+        self._load_function_from_registry(function_name)
+
+    def _load_function_from_registry(self, function_name: str) -> None:
+        """Load function from registry and create instance if needed."""
+        if not has_function(function_name):
+            raise ValueError(
+                f"Function '{function_name}' not found. "
+                f"Available functions: {repr(get_functions())}"
+            )
+
+        self._function = get_function(function_name)
+        # Create instance for class-based functions
+        if self._function._function_config.class_name is not None:
+            self._function_instance_arg = create_self_instance(
+                self._function._function_config.class_name
+            )
+
+    def _complete_initialization(self) -> None:
+        """Complete initialization by setting up blob store, HTTP server, and health check."""
         available_cpu_count: int = int(self._function._function_config.cpu)
         self._blob_store = BLOBStore(available_cpu_count=available_cpu_count)
 
@@ -200,16 +287,30 @@ class Service(FunctionExecutorServicer):
             server_base_url=self._request_context_http_server.base_url
         )
 
-        # Only pass health checks if FE was initialized successfully.
         self._health_check_handler = HealthCheckHandler(self._logger)
-        self._logger.info(
-            "initialized function executor service",
-            duration_sec=f"{time.monotonic() - start_time:.3f}",
-        )
-        log_user_event_initialization_finished(event_details)
-        return InitializeResponse(
-            outcome_code=InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
-        )
+
+    def _import_modules_from_path(self, code_path: str) -> None:
+        """Import all Python modules from the given path to register functions."""
+        for root, dirs, files in os.walk(code_path):
+            # Skip __pycache__ and hidden directories
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d != "__pycache__"]
+
+            for file in files:
+                if not file.endswith(".py") or file.startswith("."):
+                    continue
+
+                file_path = os.path.join(root, file)
+                rel_path = os.path.relpath(file_path, code_path)
+                module_name = os.path.splitext(rel_path)[0].replace(os.sep, ".")
+
+                try:
+                    importlib.import_module(module_name)
+                except Exception as e:
+                    self._logger.debug(
+                        "failed to import module",
+                        module=module_name,
+                        error=str(e),
+                    )
 
     def check_health(
         self, request: HealthCheckRequest, context: grpc.ServicerContext

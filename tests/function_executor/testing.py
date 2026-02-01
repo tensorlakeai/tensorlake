@@ -46,11 +46,13 @@ class FunctionExecutorProcessContextManager:
     def __init__(
         self,
         port: int = 60000,
+        http_port: int | None = None,
         extra_args: List[str] = [],
         extra_env: Dict[str, str] = {},
         capture_std_outputs: bool = False,
     ):
         self.port = port
+        self.http_port = http_port
         self._args = [
             "function-executor",
             "--address",
@@ -60,6 +62,8 @@ class FunctionExecutorProcessContextManager:
             "--function-executor-id",
             "test-function-executor",
         ]
+        if http_port is not None:
+            self._args.extend(["--http-port", str(http_port)])
         self._args.extend(extra_args)
         self._extra_env = extra_env
         self._capture_std_outputs = capture_std_outputs

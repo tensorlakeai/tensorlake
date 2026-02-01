@@ -207,10 +207,19 @@ class AllocationRunner:
         self._output_blob_requests: Dict[str, _OutputBLOBRequestInfo] = {}
 
     def wait_allocation_state_update(
-        self, last_seen_hash: str | None
+        self, last_seen_hash: str | None, timeout: float | None = None
     ) -> AllocationState:
-        """Returns copy of the current allocation state when it's updated."""
-        return self._allocation_state.wait_for_update(last_seen_hash)
+        """Returns copy of the current allocation state when it's updated.
+
+        Args:
+            last_seen_hash: If provided, blocks until state hash differs from this value.
+            timeout: Maximum time to wait in seconds. If None, blocks indefinitely.
+                     If 0 or negative, returns immediately with current state.
+
+        Returns:
+            Copy of the current allocation state.
+        """
+        return self._allocation_state.wait_for_update(last_seen_hash, timeout=timeout)
 
     def run(self) -> None:
         """Runs the allocation in a separate thread.
@@ -252,6 +261,22 @@ class AllocationRunner:
             function_call_creation_info.result = update.function_call_creation_result
             function_call_creation_info.result_available.set()
         elif update.HasField("function_call_result"):
+            # Ignore Unknown outcomes - server sends these before the real result is ready.
+            # The waiting code will continue until a real Success/Failure result arrives.
+            if (
+                update.function_call_result.outcome_code
+                == AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_UNKNOWN
+            ):
+                self._logger.debug(
+                    "ignoring function call result with Unknown outcome, waiting for real result",
+                    watcher_id=(
+                        update.function_call_result.watcher_id
+                        if update.function_call_result.HasField("watcher_id")
+                        else update.function_call_result.function_call_id
+                    ),
+                )
+                return
+
             watcher_id: str = (
                 update.function_call_result.watcher_id
                 if update.function_call_result.HasField("watcher_id")

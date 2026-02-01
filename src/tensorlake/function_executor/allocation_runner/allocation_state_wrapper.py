@@ -132,9 +132,24 @@ class AllocationStateWrapper:
             self._update_hash()
             self._allocation_state_update_lock.notify_all()
 
-    def wait_for_update(self, last_seen_hash: str | None) -> AllocationState:
-        """Returns copy of the current allocation state when it's updated."""
+    def wait_for_update(
+        self, last_seen_hash: str | None, timeout: float | None = None
+    ) -> AllocationState:
+        """Returns copy of the current allocation state when it's updated.
+
+        Args:
+            last_seen_hash: If provided, blocks until state hash differs from this value.
+            timeout: Maximum time to wait in seconds. If None, blocks indefinitely.
+                     If 0 or negative, returns immediately with current state.
+
+        Returns:
+            Copy of the current allocation state.
+        """
         with self._allocation_state_update_lock:
+            # If timeout is 0 or negative, return immediately
+            if timeout is not None and timeout <= 0:
+                return self._copy_state_locked()
+
             while True:
                 if last_seen_hash != self._allocation_state.sha256_hash:
                     return self._copy_state_locked()
@@ -142,7 +157,10 @@ class AllocationStateWrapper:
                     # No more state updates will happen if the result field is set.
                     # Return to avoid deadlock in wait() below.
                     return self._copy_state_locked()
-                self._allocation_state_update_lock.wait()
+                # wait() returns False if timeout expired
+                if not self._allocation_state_update_lock.wait(timeout=timeout):
+                    # Timeout expired, return current state
+                    return self._copy_state_locked()
 
     def _copy_state_locked(self) -> AllocationState:
         allocation_state_copy = AllocationState()
