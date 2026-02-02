@@ -16,7 +16,7 @@ from .progress import FunctionProgressHTTPClient
 from .state import RequestStateHTTPClient
 
 # No long running HTTP requests are done in request context HTTP client.
-_DEFAULT_HTTP_REQUEST_TIMEOUT_SEC: float = 30.0
+_DEFAULT_HTTP_REQUEST_TIMEOUT_SEC: float = 5.0
 
 
 class RequestContextHTTPClient(RequestContext):

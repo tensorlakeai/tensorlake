@@ -1,13 +1,13 @@
 import inspect
 import unittest
-from typing import Dict, Any
+from typing import Any, Dict
 
 from pydantic import BaseModel
 
 from tensorlake.applications import application, function
 from tensorlake.applications.function.application_call import (
-    _coerce_to_type,
     _coerce_payload_to_kwargs,
+    _coerce_to_type,
     _get_application_param_count,
 )
 

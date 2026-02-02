@@ -158,9 +158,12 @@ class FunctionExecutorHTTPServer:
                 """Handle GET /health."""
                 # Check if service is initialized
                 initialized = service._health_check_handler is not None
-                self._send_json_response(200, {
-                    "healthy": initialized,
-                })
+                self._send_json_response(
+                    200,
+                    {
+                        "healthy": initialized,
+                    },
+                )
 
             def _handle_info(self) -> None:
                 """Handle GET /info."""
@@ -178,11 +181,13 @@ class FunctionExecutorHTTPServer:
                 """Handle GET /allocations."""
                 allocations = []
                 for alloc_id, alloc_info in service._allocation_infos.items():
-                    allocations.append({
-                        "allocation_id": alloc_info.allocation.allocation_id,
-                        "request_id": alloc_info.allocation.request_id,
-                        "function_call_id": alloc_info.allocation.function_call_id,
-                    })
+                    allocations.append(
+                        {
+                            "allocation_id": alloc_info.allocation.allocation_id,
+                            "request_id": alloc_info.allocation.request_id,
+                            "function_call_id": alloc_info.allocation.function_call_id,
+                        }
+                    )
                 self._send_json_response(200, {"allocations": allocations})
 
             def _handle_create_allocation(self) -> None:
@@ -199,18 +204,21 @@ class FunctionExecutorHTTPServer:
 
                     # Check if allocation already exists
                     if allocation.allocation_id in service._allocation_infos:
-                        self._send_error_response(409, f"Allocation {allocation.allocation_id} already exists")
+                        self._send_error_response(
+                            409, f"Allocation {allocation.allocation_id} already exists"
+                        )
                         return
 
                     # Create the allocation using a mock context
                     request = CreateAllocationRequest(allocation=allocation)
 
                     # Call service method directly (simplified)
-                    from .allocation_runner.allocation_runner import AllocationRunner
-                    from .allocation_info import AllocationInfo
                     from tensorlake.applications.request_context.http_client.context import (
                         RequestContextHTTPClient,
                     )
+
+                    from .allocation_info import AllocationInfo
+                    from .allocation_runner.allocation_runner import AllocationRunner
 
                     allocation_logger = logger.bind(
                         request_id=allocation.request_id,
@@ -235,9 +243,11 @@ class FunctionExecutorHTTPServer:
                         ),
                         logger=allocation_logger,
                     )
-                    service._allocation_infos[allocation.allocation_id] = AllocationInfo(
-                        allocation=allocation,
-                        runner=allocation_runner,
+                    service._allocation_infos[allocation.allocation_id] = (
+                        AllocationInfo(
+                            allocation=allocation,
+                            runner=allocation_runner,
+                        )
                     )
                     allocation_runner.run()
 
@@ -249,7 +259,9 @@ class FunctionExecutorHTTPServer:
             def _handle_get_allocation_state(self, allocation_id: str) -> None:
                 """Handle GET /allocations/{allocation_id}."""
                 if allocation_id not in service._allocation_infos:
-                    self._send_error_response(404, f"Allocation {allocation_id} not found")
+                    self._send_error_response(
+                        404, f"Allocation {allocation_id} not found"
+                    )
                     return
 
                 allocation_info = service._allocation_infos[allocation_id]
@@ -261,13 +273,17 @@ class FunctionExecutorHTTPServer:
 
                 if last_hash and timeout:
                     # Long-polling: wait for state change or timeout
-                    allocation_state = allocation_info.runner.wait_allocation_state_update(
-                        last_hash, timeout=timeout
+                    allocation_state = (
+                        allocation_info.runner.wait_allocation_state_update(
+                            last_hash, timeout=timeout
+                        )
                     )
                 else:
                     # Immediate response - use timeout=0 to get current state
-                    allocation_state = allocation_info.runner.wait_allocation_state_update(
-                        None, timeout=0
+                    allocation_state = (
+                        allocation_info.runner.wait_allocation_state_update(
+                            None, timeout=0
+                        )
                     )
 
                 # Convert protobuf to dict
@@ -285,12 +301,16 @@ class FunctionExecutorHTTPServer:
             def _handle_send_allocation_update(self, allocation_id: str) -> None:
                 """Handle POST /allocations/{allocation_id}/updates."""
                 if allocation_id not in service._allocation_infos:
-                    self._send_error_response(404, f"Allocation {allocation_id} not found")
+                    self._send_error_response(
+                        404, f"Allocation {allocation_id} not found"
+                    )
                     return
 
                 allocation_info = service._allocation_infos[allocation_id]
                 if allocation_info.runner.finished:
-                    self._send_error_response(409, f"Allocation {allocation_id} is already finished")
+                    self._send_error_response(
+                        409, f"Allocation {allocation_id} is already finished"
+                    )
                     return
 
                 try:
@@ -310,12 +330,16 @@ class FunctionExecutorHTTPServer:
             def _handle_delete_allocation(self, allocation_id: str) -> None:
                 """Handle DELETE /allocations/{allocation_id}."""
                 if allocation_id not in service._allocation_infos:
-                    self._send_error_response(404, f"Allocation {allocation_id} not found")
+                    self._send_error_response(
+                        404, f"Allocation {allocation_id} not found"
+                    )
                     return
 
                 allocation_info = service._allocation_infos[allocation_id]
                 if not allocation_info.runner.finished:
-                    self._send_error_response(409, f"Allocation {allocation_id} is still running")
+                    self._send_error_response(
+                        409, f"Allocation {allocation_id} is still running"
+                    )
                     return
 
                 del service._allocation_infos[allocation_id]

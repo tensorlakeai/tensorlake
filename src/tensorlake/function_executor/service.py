@@ -111,7 +111,9 @@ class Service(FunctionExecutorServicer):
 
         # Load function from zip
         try:
-            self._load_function_from_zip(request.application_code.data, function_ref.function_name)
+            self._load_function_from_zip(
+                request.application_code.data, function_ref.function_name
+            )
         except BaseException as e:
             self._logger.error(
                 "function executor service initialization failed",
@@ -194,7 +196,9 @@ class Service(FunctionExecutorServicer):
         log_user_event_initialization_finished(event_details)
         return True
 
-    def _create_event_details(self, function_ref: FunctionRef) -> InitializationEventDetails:
+    def _create_event_details(
+        self, function_ref: FunctionRef
+    ) -> InitializationEventDetails:
         """Create event details for logging."""
         return InitializationEventDetails(
             namespace=function_ref.namespace,
@@ -244,7 +248,9 @@ class Service(FunctionExecutorServicer):
                 f"Available functions: {list(code_zip_manifest.functions.keys())}"
             )
 
-        function_zip_manifest: FunctionZIPManifest = code_zip_manifest.functions[function_name]
+        function_zip_manifest: FunctionZIPManifest = code_zip_manifest.functions[
+            function_name
+        ]
         self._logger.info(
             "Importing module from ZIP manifest",
             module=function_zip_manifest.module_import_name,
@@ -281,11 +287,18 @@ class Service(FunctionExecutorServicer):
             # Check if manifest file exists (from extracted ZIP)
             manifest_path = os.path.join(code_path, CODE_ZIP_MANIFEST_FILE_NAME)
             if os.path.exists(manifest_path):
-                self._logger.info("Found code manifest, using manifest-based loading", manifest_path=manifest_path)
-                self._load_function_from_manifest(code_path, manifest_path, function_name)
+                self._logger.info(
+                    "Found code manifest, using manifest-based loading",
+                    manifest_path=manifest_path,
+                )
+                self._load_function_from_manifest(
+                    code_path, manifest_path, function_name
+                )
             else:
                 # Fallback: Import all Python modules to register functions
-                self._logger.info("No manifest found, using directory walk", code_path=code_path)
+                self._logger.info(
+                    "No manifest found, using directory walk", code_path=code_path
+                )
                 self._import_modules_from_path(code_path)
                 self._load_function_from_registry(function_name)
         else:
@@ -293,7 +306,9 @@ class Service(FunctionExecutorServicer):
                 f"code_path must be a ZIP file or directory, got: {code_path}"
             )
 
-    def _load_function_from_manifest(self, code_path: str, manifest_path: str, function_name: str) -> None:
+    def _load_function_from_manifest(
+        self, code_path: str, manifest_path: str, function_name: str
+    ) -> None:
         """Load function using the manifest file from an extracted ZIP."""
         with open(manifest_path, "r") as f:
             code_zip_manifest: CodeZIPManifest = CodeZIPManifest.model_validate(
@@ -306,7 +321,9 @@ class Service(FunctionExecutorServicer):
                 f"Available functions: {list(code_zip_manifest.functions.keys())}"
             )
 
-        function_zip_manifest: FunctionZIPManifest = code_zip_manifest.functions[function_name]
+        function_zip_manifest: FunctionZIPManifest = code_zip_manifest.functions[
+            function_name
+        ]
         self._logger.info(
             "Importing module from manifest",
             module=function_zip_manifest.module_import_name,

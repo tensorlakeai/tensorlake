@@ -86,9 +86,7 @@ class HTTPClient:
         finally:
             conn.close()
 
-    def get(
-        self, path: str, headers: dict | None = None
-    ) -> tuple[int, dict | None]:
+    def get(self, path: str, headers: dict | None = None) -> tuple[int, dict | None]:
         return self._request("GET", path, headers=headers)
 
     def post(
@@ -96,9 +94,7 @@ class HTTPClient:
     ) -> tuple[int, dict | None]:
         return self._request("POST", path, body=body, headers=headers)
 
-    def delete(
-        self, path: str, headers: dict | None = None
-    ) -> tuple[int, dict | None]:
+    def delete(self, path: str, headers: dict | None = None) -> tuple[int, dict | None]:
         return self._request("DELETE", path, headers=headers)
 
 
@@ -597,21 +593,28 @@ class TestAutoInitialization(unittest.TestCase):
     def test_auto_init_http_only_mode(self):
         """Test FE starts in HTTP-only mode with auto-initialization."""
         # Start FE with auto-init args (no gRPC address, HTTP only)
-        import subprocess
         import os
+        import subprocess
 
         code_path = APPLICATION_CODE_DIR_PATH
         http_port = 60002
 
         args = [
             "function-executor",
-            "--http-port", str(http_port),
-            "--code-path", code_path,
-            "--namespace", "test",
-            "--app-name", "simple_function",
-            "--app-version", "0.1",
-            "--function-name", "simple_function",
-            "--executor-id", "test-executor",
+            "--http-port",
+            str(http_port),
+            "--code-path",
+            code_path,
+            "--namespace",
+            "test",
+            "--app-name",
+            "simple_function",
+            "--app-version",
+            "0.1",
+            "--function-name",
+            "simple_function",
+            "--executor-id",
+            "test-executor",
         ]
 
         process = subprocess.Popen(args)

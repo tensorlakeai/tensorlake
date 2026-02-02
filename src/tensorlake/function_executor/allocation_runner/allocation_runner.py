@@ -261,22 +261,6 @@ class AllocationRunner:
             function_call_creation_info.result = update.function_call_creation_result
             function_call_creation_info.result_available.set()
         elif update.HasField("function_call_result"):
-            # Ignore Unknown outcomes - server sends these before the real result is ready.
-            # The waiting code will continue until a real Success/Failure result arrives.
-            if (
-                update.function_call_result.outcome_code
-                == AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_UNKNOWN
-            ):
-                self._logger.debug(
-                    "ignoring function call result with Unknown outcome, waiting for real result",
-                    watcher_id=(
-                        update.function_call_result.watcher_id
-                        if update.function_call_result.HasField("watcher_id")
-                        else update.function_call_result.function_call_id
-                    ),
-                )
-                return
-
             watcher_id: str = (
                 update.function_call_result.watcher_id
                 if update.function_call_result.HasField("watcher_id")
