@@ -124,14 +124,25 @@ def function_pydantic_args(dir: DirModel, file: FileModel) -> str:
 @application()
 @function()
 def function_pydantic_return_value() -> DirModel:
-    dir = DirModel(
+    return DirModel(
         path="/returned/dir",
         files=[
             FileModel(path="/returned/dir/fileA.txt", size=111, is_read_only=False),
             FileModel(path="/returned/dir/fileB.txt", size=222, is_read_only=True),
         ],
     )
-    return dir
+
+
+@application()
+@function()
+def function_pydantic_return_value_dict() -> DirModel:
+    return {
+        "path": "/returned/dir",
+        "files": [
+            {"path": "/returned/dir/fileA.txt", "size": 111, "is_read_only": False},
+            {"path": "/returned/dir/fileB.txt", "size": 222, "is_read_only": True},
+        ],
+    }
 
 
 # With Any type hints, Pydantic falls back to standard python JSON
@@ -328,6 +339,27 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
 
         request: Request = run_application(
             function_pydantic_return_value,
+            is_remote,
+        )
+        output_dir: DirModel = request.output()
+        self.assertIsInstance(output_dir, DirModel)
+        self.assertEqual(output_dir.path, "/returned/dir")
+        self.assertEqual(len(output_dir.files), 2)
+        self.assertEqual(output_dir.files[0].path, "/returned/dir/fileA.txt")
+        self.assertEqual(output_dir.files[0].size, 111)
+        self.assertFalse(output_dir.files[0].is_read_only)
+        self.assertEqual(output_dir.files[1].path, "/returned/dir/fileB.txt")
+        self.assertEqual(output_dir.files[1].size, 222)
+        self.assertTrue(output_dir.files[1].is_read_only)
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_pydantic_return_value_dict(self, _: str, is_remote: bool):
+        is_remote: bool = True
+        if is_remote:
+            deploy_applications(__file__)
+
+        request: Request = run_application(
+            function_pydantic_return_value_dict,
             is_remote,
         )
         output_dir: DirModel = request.output()

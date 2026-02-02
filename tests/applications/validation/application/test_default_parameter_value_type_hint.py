@@ -17,7 +17,9 @@ def function_with_default_parameter_value(factor: float = 1.0) -> str:
 
 @application()
 @function()
-def function_with_mismatched_default_parameter_value(factor2: float = "1.0") -> str:
+def function_with_mismatched_default_parameter_value(
+    factor2: float = {"key": "value"},
+) -> str:
     # The default value type (str) doesn't match the type hint (float).
     return f"Factor is {factor2}"
 
@@ -33,11 +35,10 @@ class TestDefaultParameterValueTypeHint(unittest.TestCase):
             ValidationMessageSeverity.ERROR,
         )
         self.assertEqual(
-            "Application function parameter 'factor2' has a default value that can't be serialized with "
-            f"the type hint of the parameter {float}. Please follow Pydantic documentation and the following SerializationError to "
-            "make the default value serializable to JSON format:\nFailed to serialize '1.0' as '<class 'float'>' to json: Pydantic "
-            "serializer warnings:\n  PydanticSerializationUnexpectedValue(Expected `float` - serialized value may not be as expected "
-            "[input_value='1.0', input_type=str])\n",
+            "Application function parameter 'factor2' has a default value that can't be serialized with the type hint of the parameter "
+            "<class 'float'>. Please follow Pydantic documentation and the following SerializationError to make the default value serializable "
+            "to JSON format:\nFailed to serialize '{'key': 'value'}' as '<class 'float'>' to json: 1 validation error for float\n  Input should "
+            "be a valid number [type=float_type, input_value={'key': 'value'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.12/v/float_type\n",
             validation_message.message,
         )
 
