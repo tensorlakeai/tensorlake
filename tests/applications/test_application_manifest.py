@@ -523,15 +523,21 @@ class TestFunctionManifestContainerLimits(unittest.TestCase):
         )
 
         self.assertEqual(
-            app_manifest.functions["function_with_warm_containers_and_limits"].warm_containers,
+            app_manifest.functions[
+                "function_with_warm_containers_and_limits"
+            ].warm_containers,
             2,
         )
         self.assertEqual(
-            app_manifest.functions["function_with_warm_containers_and_limits"].min_containers,
+            app_manifest.functions[
+                "function_with_warm_containers_and_limits"
+            ].min_containers,
             1,
         )
         self.assertEqual(
-            app_manifest.functions["function_with_warm_containers_and_limits"].max_containers,
+            app_manifest.functions[
+                "function_with_warm_containers_and_limits"
+            ].max_containers,
             10,
         )
 
