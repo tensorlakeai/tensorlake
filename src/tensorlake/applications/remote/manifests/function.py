@@ -9,6 +9,8 @@ from tensorlake.applications.function.type_hints import (
     function_parameters,
     function_signature,
     is_file_type_hint,
+    parameter_type_hint,
+    return_type_hint,
 )
 from tensorlake.applications.interface import File, InternalError
 from tensorlake.applications.interface.function import (
@@ -151,14 +153,14 @@ def _function_parameter_manifests(
         param_has_default: bool = param.default != inspect.Parameter.empty
         # Application function is already validated to have non-empty type hints for each parameter.
         param_schema: JSONSchema = _json_schema(
-            type_hint=param.annotation,
+            type_hint=parameter_type_hint(param),
             fields=_JSONSchemaOptionalFields(
                 title=param.name,
                 description=param_to_docstring.get(param.name, None),
                 parameter_kind=param.kind.name,
                 has_default_value=param_has_default,
                 default_value=param.default,
-                default_value_type_hint=param.annotation,
+                default_value_type_hint=parameter_type_hint(param),
             ),
         )
 
@@ -192,14 +194,14 @@ def _function_return_type_schema(
     # Application function is already validated to have non-empty return type hints.
     signature: inspect.Signature = function_signature(function)
     return _json_schema(
-        type_hint=signature.return_annotation,
+        type_hint=return_type_hint(signature.return_annotation),
         fields=_JSONSchemaOptionalFields(
             title="Return value",
             description=description,
             parameter_kind=None,
             has_default_value=False,
             default_value=None,
-            default_value_type_hint=signature.return_annotation,
+            default_value_type_hint=return_type_hint(signature.return_annotation),
         ),
     )
 

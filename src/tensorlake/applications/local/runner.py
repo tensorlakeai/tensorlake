@@ -29,6 +29,8 @@ from ..function.application_call import (
 from ..function.type_hints import (
     function_parameters,
     function_signature,
+    parameter_type_hint,
+    return_type_hint,
 )
 from ..function.user_data_serializer import (
     deserialize_value_with_metadata,
@@ -179,8 +181,9 @@ class LocalRunner:
         Raises TensorlakeError on error.
         """
         validation_messages: list[ValidationMessage] = validate_loaded_applications()
-        print_validation_messages(validation_messages)
         if has_error_message(validation_messages):
+            # Don't print non-error messages for now to reduce noise for users.
+            print_validation_messages(validation_messages)
             raise SDKUsageError(
                 "Local application run aborted due to code validation errors, "
                 "please address them before running the application."
@@ -221,14 +224,7 @@ class LocalRunner:
                 # Allow users to pass unknown args, this gives them more flexibility
                 # i.e. when they change their code but not request payload yet.
                 continue
-            arg_type_hint: Any = app_parameters[i].annotation
-            if arg_type_hint is inspect.Parameter.empty:
-                # This should never happen as we do pre-deployment validation for this.
-                raise SDKUsageError(
-                    f"Cannot run application '{self._app}': "
-                    f"positional argument at index {i} is missing type hint."
-                )
-
+            arg_type_hint: Any = parameter_type_hint(app_parameters[i])
             app_args.append(
                 ApplicationArgument(
                     value=arg_value,
@@ -244,14 +240,9 @@ class LocalRunner:
                 # i.e. when they change their code but not request payload yet.
                 continue
 
-            kwarg_type_hint: Any = app_signature.parameters[kwarg_key].annotation
-            if kwarg_type_hint is inspect.Parameter.empty:
-                # This should never happen as we do pre-deployment validation for this.
-                raise SDKUsageError(
-                    f"Cannot run application '{self._app}': "
-                    f"keyword argument '{kwarg_key}' is missing type hint."
-                )
-
+            kwarg_type_hint: Any = parameter_type_hint(
+                app_signature.parameters[kwarg_key]
+            )
             app_kwargs[kwarg_key] = ApplicationArgument(
                 value=kwarg_value,
                 type_hint=kwarg_type_hint,
@@ -309,7 +300,9 @@ class LocalRunner:
                 output_consumer_future_id=None,
                 output_serializer_name_override=app_output_serializer.name,
                 has_output_type_hint_override=True,
-                output_type_hint_override=app_signature.return_annotation,
+                output_type_hint_override=return_type_hint(
+                    app_signature.return_annotation
+                ),
             )
         except TensorlakeError as e:
             # Handle exceptions that depend on user inputs. All other exceptions are

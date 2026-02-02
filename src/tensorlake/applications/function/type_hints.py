@@ -47,3 +47,27 @@ def is_file_type_hint(type_hint: Any) -> bool:
 def is_awaitable_type_hint(type_hint: Any) -> bool:
     """Returns True if the provided type hint is for an SDK Awaitable."""
     return inspect.isclass(type_hint) and issubclass(type_hint, Awaitable)
+
+
+def parameter_type_hint(parameter: inspect.Parameter) -> Any:
+    """Returns the type hint for the provided function parameter.
+
+    If the parameter has no type hint, returns `Any`.
+    """
+    if parameter.annotation is inspect.Parameter.empty:
+        # Supporting Application functions without type hints.
+        return Any
+    else:
+        return parameter.annotation
+
+
+def return_type_hint(return_annotation: Any) -> Any:
+    """Returns the return type hint for the provided function return_annotation.
+
+    If the annotation has no return type hint, returns `Any`.
+    """
+    if return_annotation is inspect.Signature.empty:
+        # Supporting Application functions without type hints.
+        return Any
+    else:
+        return return_annotation

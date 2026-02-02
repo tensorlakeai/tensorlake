@@ -8,6 +8,8 @@ from pydantic import BaseModel
 from ...function.type_hints import (
     function_parameters,
     function_signature,
+    parameter_type_hint,
+    return_type_hint,
     serialize_type_hint,
 )
 from ...function.user_data_serializer import (
@@ -83,7 +85,7 @@ def create_application_manifest(
     )
 
     output_type_hint_base64: str = base64.encodebytes(
-        serialize_type_hint(app_signature.return_annotation)
+        serialize_type_hint(return_type_hint(app_signature.return_annotation))
     ).decode("utf-8")
 
     return ApplicationManifest(
@@ -117,7 +119,7 @@ def _input_manifests(application_function: Function) -> list[EntryPointInputMani
 
         input_manifests.append(
             EntryPointInputManifest(
-                arg_name=parameter.name, type_hint=parameter.annotation
+                arg_name=parameter.name, type_hint=parameter_type_hint(parameter)
             )
         )
 
