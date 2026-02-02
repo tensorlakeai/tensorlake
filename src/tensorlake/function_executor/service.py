@@ -103,7 +103,12 @@ class Service(FunctionExecutorServicer):
         InitializeRequestValidator(request).check()
 
         function_ref = request.function
-        event_details = self._create_event_details(function_ref)
+        event_details = InitializationEventDetails(
+            namespace=function_ref.namespace,
+            application_name=function_ref.application_name,
+            application_version=function_ref.application_version,
+            function_name=function_ref.function_name,
+        )
         log_user_event_initialization_started(event_details)
 
         # Set up function ref and logger
@@ -111,8 +116,11 @@ class Service(FunctionExecutorServicer):
 
         # Load function from zip
         try:
-            self._load_function_from_zip(
-                request.application_code.data, function_ref.function_name
+            app_modules_zip_fd, app_modules_zip_path = tempfile.mkstemp(suffix=".zip")
+            with open(app_modules_zip_fd, "wb") as graph_modules_zip_file:
+                graph_modules_zip_file.write(request.application_code.data)
+            self._load_function_from_zip_path(
+                app_modules_zip_path, function_ref.function_name
             )
         except BaseException as e:
             self._logger.error(
@@ -169,7 +177,12 @@ class Service(FunctionExecutorServicer):
             application_version=app_version,
             function_name=function_name,
         )
-        event_details = self._create_event_details(function_ref)
+        event_details = InitializationEventDetails(
+            namespace=function_ref.namespace,
+            application_name=function_ref.application_name,
+            application_version=function_ref.application_version,
+            function_name=function_ref.function_name,
+        )
         log_user_event_initialization_started(event_details)
 
         # Set up function ref and logger
@@ -196,17 +209,6 @@ class Service(FunctionExecutorServicer):
         log_user_event_initialization_finished(event_details)
         return True
 
-    def _create_event_details(
-        self, function_ref: FunctionRef
-    ) -> InitializationEventDetails:
-        """Create event details for logging."""
-        return InitializationEventDetails(
-            namespace=function_ref.namespace,
-            application_name=function_ref.application_name,
-            application_version=function_ref.application_version,
-            function_name=function_ref.function_name,
-        )
-
     def _setup_function_ref_and_logger(self, function_ref: FunctionRef) -> None:
         """Set up function reference, logger bindings, and runtime hooks."""
         self._function_ref = function_ref
@@ -219,13 +221,6 @@ class Service(FunctionExecutorServicer):
         set_run_futures_hook(self._run_futures_runtime_hook)
         set_wait_futures_hook(self._wait_futures_runtime_hook)
         setup_multiprocessing()
-
-    def _load_function_from_zip(self, zip_data: bytes, function_name: str) -> None:
-        """Load function from zipped code bytes."""
-        app_modules_zip_fd, app_modules_zip_path = tempfile.mkstemp(suffix=".zip")
-        with open(app_modules_zip_fd, "wb") as graph_modules_zip_file:
-            graph_modules_zip_file.write(zip_data)
-        self._load_function_from_zip_path(app_modules_zip_path, function_name)
 
     def _load_function_from_zip_path(self, zip_path: str, function_name: str) -> None:
         """Load function from a ZIP file path using Python's zipimport.
