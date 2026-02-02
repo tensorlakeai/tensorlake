@@ -158,12 +158,21 @@ class FunctionExecutorHTTPServer:
                 """Handle GET /health."""
                 # Check if service is initialized
                 initialized = service._health_check_handler is not None
-                self._send_json_response(
-                    200,
-                    {
-                        "healthy": initialized,
-                    },
-                )
+                if not initialized:
+                    self._send_json_response(
+                        503,
+                        {
+                            "healthy": False,
+                            "error": "Service not initialized",
+                        },
+                    )
+                else:
+                    self._send_json_response(
+                        200,
+                        {
+                            "healthy": True,
+                        },
+                    )
 
             def _handle_info(self) -> None:
                 """Handle GET /info."""
@@ -204,8 +213,12 @@ class FunctionExecutorHTTPServer:
 
                     # Check if allocation already exists
                     if allocation.allocation_id in service._allocation_infos:
-                        self._send_error_response(
-                            409, f"Allocation {allocation.allocation_id} already exists"
+                        self._send_json_response(
+                            409,
+                            {
+                                "code": "ALREADY_EXISTS",
+                                "error": f"Allocation {allocation.allocation_id} already exists",
+                            },
                         )
                         return
 
@@ -251,7 +264,7 @@ class FunctionExecutorHTTPServer:
                     )
                     allocation_runner.run()
 
-                    self._send_json_response(200, {"success": True})
+                    self._send_json_response(201, {"status": "created"})
                 except Exception as e:
                     logger.error("Failed to create allocation", error=str(e))
                     self._send_error_response(500, str(e))
