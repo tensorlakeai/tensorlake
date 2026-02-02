@@ -221,9 +221,18 @@ class Service(FunctionExecutorServicer):
         app_modules_zip_fd, app_modules_zip_path = tempfile.mkstemp(suffix=".zip")
         with open(app_modules_zip_fd, "wb") as graph_modules_zip_file:
             graph_modules_zip_file.write(zip_data)
-        sys.path.insert(0, app_modules_zip_path)
+        self._load_function_from_zip_path(app_modules_zip_path, function_name)
 
-        with zipfile.ZipFile(app_modules_zip_path, "r") as zf:
+    def _load_function_from_zip_path(self, zip_path: str, function_name: str) -> None:
+        """Load function from a ZIP file path using Python's zipimport.
+
+        This adds the ZIP file to sys.path and reads the manifest to import
+        the specific module for the function.
+        """
+        zip_path = os.path.abspath(zip_path)
+        sys.path.insert(0, zip_path)
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
             with zf.open(CODE_ZIP_MANIFEST_FILE_NAME) as code_zip_manifest_file:
                 code_zip_manifest: CodeZIPManifest = CodeZIPManifest.model_validate(
                     json.load(code_zip_manifest_file)
@@ -236,18 +245,74 @@ class Service(FunctionExecutorServicer):
             )
 
         function_zip_manifest: FunctionZIPManifest = code_zip_manifest.functions[function_name]
+        self._logger.info(
+            "Importing module from ZIP manifest",
+            module=function_zip_manifest.module_import_name,
+            function=function_name,
+            zip_path=zip_path,
+        )
         importlib.import_module(function_zip_manifest.module_import_name)
 
         self._load_function_from_registry(function_name)
 
     def _load_function_from_code_path(self, code_path: str, function_name: str) -> None:
-        """Load function from a local code directory."""
-        code_path = os.path.abspath(code_path)
-        if code_path not in sys.path:
-            sys.path.insert(0, code_path)
+        """Load function from a local code path (ZIP file or directory).
 
-        # Import all Python modules to register functions
-        self._import_modules_from_path(code_path)
+        - If code_path is a ZIP file, load directly from it using zipimport
+          (same as the gRPC initialize path).
+        - If code_path is a directory with a manifest file, use manifest-based loading.
+        - If code_path is a directory without a manifest, walk and import all .py files.
+        """
+        code_path = os.path.abspath(code_path)
+
+        # Check if code_path is a ZIP file
+        if os.path.isfile(code_path) and zipfile.is_zipfile(code_path):
+            self._logger.info(
+                "Loading function from ZIP file",
+                code_path=code_path,
+                function_name=function_name,
+            )
+            self._load_function_from_zip_path(code_path, function_name)
+        elif os.path.isdir(code_path):
+            # It's a directory
+            if code_path not in sys.path:
+                sys.path.insert(0, code_path)
+
+            # Check if manifest file exists (from extracted ZIP)
+            manifest_path = os.path.join(code_path, CODE_ZIP_MANIFEST_FILE_NAME)
+            if os.path.exists(manifest_path):
+                self._logger.info("Found code manifest, using manifest-based loading", manifest_path=manifest_path)
+                self._load_function_from_manifest(code_path, manifest_path, function_name)
+            else:
+                # Fallback: Import all Python modules to register functions
+                self._logger.info("No manifest found, using directory walk", code_path=code_path)
+                self._import_modules_from_path(code_path)
+                self._load_function_from_registry(function_name)
+        else:
+            raise ValueError(
+                f"code_path must be a ZIP file or directory, got: {code_path}"
+            )
+
+    def _load_function_from_manifest(self, code_path: str, manifest_path: str, function_name: str) -> None:
+        """Load function using the manifest file from an extracted ZIP."""
+        with open(manifest_path, "r") as f:
+            code_zip_manifest: CodeZIPManifest = CodeZIPManifest.model_validate(
+                json.load(f)
+            )
+
+        if function_name not in code_zip_manifest.functions:
+            raise ValueError(
+                f"Function '{function_name}' not found in manifest. "
+                f"Available functions: {list(code_zip_manifest.functions.keys())}"
+            )
+
+        function_zip_manifest: FunctionZIPManifest = code_zip_manifest.functions[function_name]
+        self._logger.info(
+            "Importing module from manifest",
+            module=function_zip_manifest.module_import_name,
+            function=function_name,
+        )
+        importlib.import_module(function_zip_manifest.module_import_name)
 
         self._load_function_from_registry(function_name)
 
