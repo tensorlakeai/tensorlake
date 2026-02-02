@@ -424,6 +424,16 @@ def function_with_only_max_containers(x: int) -> str:
     return "success"
 
 
+@function(warm_containers=3)
+def function_with_warm_containers(x: int) -> str:
+    return "success"
+
+
+@function(warm_containers=2, min_containers=1, max_containers=10)
+def function_with_warm_containers_and_limits(x: int) -> str:
+    return "success"
+
+
 class TestFunctionManifestContainerLimits(unittest.TestCase):
     def test_default_container_limits(self):
         app_manifest: ApplicationManifest = create_application_manifest(
@@ -487,6 +497,42 @@ class TestFunctionManifestContainerLimits(unittest.TestCase):
         self.assertEqual(
             app_manifest.functions["function_with_only_max_containers"].max_containers,
             5,
+        )
+
+    def test_function_with_warm_containers(self):
+        app_manifest: ApplicationManifest = create_application_manifest(
+            application_function=default_application_function,
+            all_functions=get_functions(),
+        )
+
+        self.assertEqual(
+            app_manifest.functions["function_with_warm_containers"].warm_containers,
+            3,
+        )
+        self.assertIsNone(
+            app_manifest.functions["function_with_warm_containers"].min_containers,
+        )
+        self.assertIsNone(
+            app_manifest.functions["function_with_warm_containers"].max_containers,
+        )
+
+    def test_function_with_warm_containers_and_limits(self):
+        app_manifest: ApplicationManifest = create_application_manifest(
+            application_function=default_application_function,
+            all_functions=get_functions(),
+        )
+
+        self.assertEqual(
+            app_manifest.functions["function_with_warm_containers_and_limits"].warm_containers,
+            2,
+        )
+        self.assertEqual(
+            app_manifest.functions["function_with_warm_containers_and_limits"].min_containers,
+            1,
+        )
+        self.assertEqual(
+            app_manifest.functions["function_with_warm_containers_and_limits"].max_containers,
+            10,
         )
 
 

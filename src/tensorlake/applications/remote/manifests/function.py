@@ -42,6 +42,7 @@ class FunctionManifest(BaseModel):
     return_type: Dict[str, Any] | None  # JSON Schema object
     placement_constraints: PlacementConstraintsManifest
     max_concurrency: int
+    warm_containers: int | None = None
     min_containers: int | None = None
     max_containers: int | None = None
 
@@ -281,6 +282,7 @@ def create_function_manifest(
         return_type=return_type_json_schema,
         placement_constraints=placement_constraints,
         max_concurrency=function._function_config.max_concurrency,
+        warm_containers=function._function_config.warm_containers,
         min_containers=function._function_config.min_containers,
         max_containers=function._function_config.max_containers,
     )
