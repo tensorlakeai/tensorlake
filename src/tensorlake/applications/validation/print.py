@@ -26,6 +26,7 @@ def _print_validation_message(message: ValidationMessage) -> None:
         color = "bright_yellow"
     elif message.severity == ValidationMessageSeverity.INFO:
         severity = "ℹ️  Info: "
+        color = "cyan"
 
     location: str = ""
     if isinstance(message.details, FunctionDetails):
