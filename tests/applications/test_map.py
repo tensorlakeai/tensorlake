@@ -2,6 +2,7 @@ import unittest
 from typing import List
 
 import parameterized
+import validate_all_applications
 
 from tensorlake.applications import (
     Future,
@@ -12,25 +13,27 @@ from tensorlake.applications import (
 )
 from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
-from tensorlake.applications.validation import validate_loaded_applications
+
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
 
 
 @application()
 @function()
-def api_function_recursive_blocking_map(numbers: List[int]) -> str:
+def api_function_recursive_blocking_map(numbers: list[int]) -> list[int]:
     return to_int.map(to_string.map(numbers))
 
 
 @application()
 @function()
-def api_function_recursive_non_blocking_map(numbers: List[int]) -> str:
+def api_function_recursive_non_blocking_map(numbers: list[int]) -> list[int]:
     future: Future = to_int.awaitable.map(to_string.awaitable.map(numbers)).run()
     return future.result()
 
 
 @application()
 @function()
-def api_function_recursive_tail_call_map(numbers: List[int]) -> str:
+def api_function_recursive_tail_call_map(numbers: list[int]) -> list[int]:
     return to_int.awaitable.map(to_string.awaitable.map(numbers))
 
 
@@ -45,9 +48,6 @@ def to_int(value: str) -> int:
 
 
 class TestRecursiveMaps(unittest.TestCase):
-    def test_applications_are_valid(self):
-        self.assertEqual(validate_loaded_applications(), [])
-
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_blocking(self, _: str, is_remote: bool):
         if is_remote:

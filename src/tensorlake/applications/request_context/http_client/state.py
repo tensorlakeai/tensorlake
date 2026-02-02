@@ -58,7 +58,9 @@ class RequestStateHTTPClient(RequestState):
         if not isinstance(key, str):
             raise SDKUsageError(f"State key must be a string, got: {key}")
         # Raises SerializationError to customer code on failure.
-        serialized_value: bytes = REQUEST_STATE_USER_DATA_SERIALIZER.serialize(value)
+        serialized_value: bytes = REQUEST_STATE_USER_DATA_SERIALIZER.serialize(
+            value, type_hint=None  # Type hint is not used with pickle
+        )
 
         try:
             blob: BLOB = self._get_writeable_blob(key=key, size=len(serialized_value))
@@ -103,9 +105,9 @@ class RequestStateHTTPClient(RequestState):
             raise InternalError(f"Failed to get request state for key '{key}'.")
 
         # Raises SerializationError to customer code on failure.
-        # possible_types=[] because pickle deserializer knows the target type already.
+        # Just pass some type hint because pickle doesn't use it anyway.
         return REQUEST_STATE_USER_DATA_SERIALIZER.deserialize(
-            serialized_value, possible_types=[]
+            serialized_value, type_hint=type(default)
         )
 
     def _get_read_only_blob(self, key: str) -> BLOB | None:

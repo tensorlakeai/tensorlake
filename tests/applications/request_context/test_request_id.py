@@ -4,6 +4,7 @@ import threading
 import unittest
 
 import parameterized
+import validate_all_applications
 
 from tensorlake.applications import (
     Request,
@@ -13,6 +14,9 @@ from tensorlake.applications import (
 )
 from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
+
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
 
 
 def get_request_id_worker(ctx: RequestContext, q) -> None:

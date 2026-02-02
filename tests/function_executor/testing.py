@@ -8,7 +8,9 @@ from typing import Any, Dict, Iterator, List
 
 import grpc
 
-from tensorlake.applications.function.user_data_serializer import deserialize_value
+from tensorlake.applications.function.user_data_serializer import (
+    deserialize_value_with_metadata,
+)
 from tensorlake.applications.metadata import ValueMetadata, deserialize_metadata
 from tensorlake.applications.registry import get_functions
 from tensorlake.applications.remote.code.zip import zip_code
@@ -250,9 +252,9 @@ def delete_allocation(
     )
 
 
-def application_function_inputs(payload: Any) -> FunctionInputs:
+def application_function_inputs(payload: Any, type_hint: Any) -> FunctionInputs:
     user_serializer: JSONUserDataSerializer = JSONUserDataSerializer()
-    serialized_payload: bytes = user_serializer.serialize(payload)
+    serialized_payload: bytes = user_serializer.serialize(payload, type_hint)
     payload_blob: BLOB = write_new_application_payload_blob(serialized_payload)
 
     return FunctionInputs(
@@ -307,7 +309,9 @@ def download_and_deserialize_so(
     )
 
     metadata: ValueMetadata = deserialize_metadata(serialized_value_metadata)
-    return deserialize_value(serialized_value=serialized_data, metadata=metadata)
+    return deserialize_value_with_metadata(
+        serialized_value=serialized_data, metadata=metadata
+    )
 
 
 def read_so_metadata(

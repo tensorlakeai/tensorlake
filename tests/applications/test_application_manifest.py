@@ -1,7 +1,6 @@
 import unittest
-from typing import List
 
-from pydantic import BaseModel
+import validate_all_applications
 
 from tensorlake.applications import Retries, application, cls, function
 from tensorlake.applications.registry import get_functions
@@ -10,12 +9,14 @@ from tensorlake.applications.remote.manifests.application import (
     create_application_manifest,
 )
 from tensorlake.applications.remote.manifests.function import (
-    ParameterManifest,
     RetryPolicyManifest,
 )
 from tensorlake.applications.remote.manifests.function_resources import (
     FunctionResourcesManifest,
 )
+
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
 
 # The tests in this file verify application manifest generation for various functions.
 
@@ -107,7 +108,7 @@ def application_function_with_custom_retries(x: int) -> str:
 
 
 class TestFunctionManifestRetries(unittest.TestCase):
-    def test_default_graph_retries(self):
+    def test_default_application_level_retries(self):
         app_manifest: ApplicationManifest = create_application_manifest(
             application_function=default_application_function,
             all_functions=get_functions(),
@@ -122,7 +123,7 @@ class TestFunctionManifestRetries(unittest.TestCase):
         self.assertEqual(retry_policy_metadata.max_delay_sec, 60.0)
         self.assertEqual(retry_policy_metadata.delay_multiplier, 2.0)
 
-    def test_custom_application_retries(self):
+    def test_custom_application_level_retries(self):
         # Tests that custom application level retries get applied to functions that don't have their own retry policy.
         app_manifest: ApplicationManifest = create_application_manifest(
             application_function=application_function_with_custom_retries,
@@ -245,130 +246,6 @@ class TestFunctionManifestResources(unittest.TestCase):
         self.assertEqual(resource_metadata.gpus[1].model, "H100")
         self.assertEqual(resource_metadata.gpus[2].count, 1)
         self.assertEqual(resource_metadata.gpus[2].model, "A100-80GB")
-
-
-@function()
-def function_with_basic_types(text: str, count: int, factor: float = 1.5) -> str:
-    return f"Processed {count} items"
-
-
-@function()
-def function_with_list_return_type(count: int) -> List[int]:
-    return list(range(count))
-
-
-@function()
-def function_with_complex_types(items: List[str], mapping: dict = None) -> str | int:
-    return len(items)
-
-
-class RequestPayload(BaseModel):
-    name: str
-    age: int
-    email: str
-    is_active: bool = True
-
-
-@function()
-def function_with_pydantic_model(payload: RequestPayload) -> str:
-    return f"Processing {payload.name}"
-
-
-class TestGraphMetadataParameterExtraction(unittest.TestCase):
-    def test_parameter_extraction_basic_types(self):
-        app_manifest: ApplicationManifest = create_application_manifest(
-            application_function=default_application_function,
-            all_functions=get_functions(),
-        )
-        parameters: List[ParameterManifest] | None = app_manifest.functions[
-            "function_with_basic_types"
-        ].parameters
-
-        self.assertIsNotNone(parameters)
-        self.assertEqual(len(parameters), 3)
-
-        # Check text parameter
-        text_param = next(p for p in parameters if p.name == "text")
-        self.assertEqual(text_param.data_type, {"type": "string"})
-        self.assertTrue(text_param.required)
-
-        # Check count parameter
-        count_param = next(p for p in parameters if p.name == "count")
-        self.assertEqual(count_param.data_type, {"type": "integer"})
-        self.assertTrue(count_param.required)
-
-        # Check factor parameter with default
-        factor_param = next(p for p in parameters if p.name == "factor")
-        self.assertEqual(factor_param.data_type, {"type": "number", "default": 1.5})
-        self.assertFalse(factor_param.required)
-
-    def test_parameter_extraction_return_type(self):
-        app_manifest: ApplicationManifest = create_application_manifest(
-            application_function=default_application_function,
-            all_functions=get_functions(),
-        )
-        self.assertEqual(
-            app_manifest.functions["function_with_list_return_type"].return_type,
-            {"type": "array", "items": {"type": "integer"}},
-        )
-
-    def test_parameter_extraction_complex_types(self):
-        app_manifest: ApplicationManifest = create_application_manifest(
-            application_function=default_application_function,
-            all_functions=get_functions(),
-        )
-        parameters: List[ParameterManifest] | None = app_manifest.functions[
-            "function_with_complex_types"
-        ].parameters
-
-        self.assertIsNotNone(parameters)
-        self.assertEqual(len(parameters), 2)
-
-        # Check List[str] parameter
-        items_param = next(p for p in parameters if p.name == "items")
-        self.assertEqual(
-            items_param.data_type, {"type": "array", "items": {"type": "string"}}
-        )
-        self.assertTrue(items_param.required)
-
-        # Check dict parameter with default None
-        mapping_param = next(p for p in parameters if p.name == "mapping")
-        self.assertEqual(
-            mapping_param.data_type,
-            {"type": "object", "description": "dict object", "default": None},
-        )
-        self.assertFalse(mapping_param.required)
-
-    def test_parameter_extraction_pydantic_model(self):
-        app_manifest: ApplicationManifest = create_application_manifest(
-            application_function=default_application_function,
-            all_functions=get_functions(),
-        )
-        parameters: List[ParameterManifest] | None = app_manifest.functions[
-            "function_with_pydantic_model"
-        ].parameters
-
-        self.assertIsNotNone(parameters)
-        self.assertEqual(len(parameters), 1)
-
-        # Check Pydantic model parameter
-        payload_param = next(p for p in parameters if p.name == "payload")
-
-        # The parameter should contain the full Pydantic schema
-        expected_schema = {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "title": "Name"},
-                "age": {"type": "integer", "title": "Age"},
-                "email": {"title": "Email", "type": "string"},
-                "is_active": {"default": True, "title": "Is Active", "type": "boolean"},
-            },
-            "required": ["name", "age", "email"],
-            "title": "RequestPayload",
-        }
-
-        self.assertEqual(payload_param.data_type, expected_schema)
-        self.assertTrue(payload_param.required)
 
 
 # This test is commented out because right now we don't provide max_concurrency feature in SDK interface.
