@@ -231,7 +231,8 @@ def create_function_manifest(
     try:
         docstring_style: DocstringStyle = detect_docstring_style(docstring)
     except Exception as e:
-        pass  # Not a critical error, either docstring is malformed or our parser could be wrong.
+        # Not a critical error, either docstring is malformed or our parser could be wrong.
+        docstring_style: DocstringStyle = DocstringStyle.UNKNOWN
 
     # parameters and return type json schemas are only set for application functions
     # because this is only functions that use JSON serializable parameters and return

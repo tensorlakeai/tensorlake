@@ -17,7 +17,7 @@ from ..function.type_hints import (
     is_file_type_hint,
 )
 from ..function.user_data_serializer import function_input_serializer
-from ..interface import Awaitable, File, Function, InternalError
+from ..interface import Awaitable, File, Function, InternalError, SerializationError
 from ..interface.decorators import (
     _ApplicationDecorator,
     _class_name,
@@ -530,13 +530,13 @@ def _validate_application_function(
                         default_arg_value_serializer.serialize(
                             parameter.default, parameter.annotation
                         )
-                    except Exception as e:
+                    except SerializationError as e:
                         messages.append(
                             ValidationMessage(
                                 message=f"Application function parameter '{parameter.name}' has a default value that can't be serialized with "
                                 f"the type hint of the parameter {parameter.annotation}. "
-                                f"Please follow Pydantic documentation and the following Pydantic error message to make the default value serializable "
-                                "to JSON format.\nPydantic error message:\n{e}\n",
+                                f"Please follow Pydantic documentation and the following SerializationError to make the default value serializable "
+                                f"to JSON format:\n{e}\n",
                                 severity=ValidationMessageSeverity.ERROR,
                                 details=function_details,
                             )

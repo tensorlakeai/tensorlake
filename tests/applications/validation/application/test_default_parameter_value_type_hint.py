@@ -33,10 +33,11 @@ class TestDefaultParameterValueTypeHint(unittest.TestCase):
             ValidationMessageSeverity.ERROR,
         )
         self.assertEqual(
-            f"Application function parameter 'factor2' has a default value that can't be serialized with "
-            f"the type hint of the parameter {float}. "
-            f"Please follow Pydantic documentation and the following Pydantic error message to make the default value serializable "
-            "to JSON format.\nPydantic error message:\n{e}\n",
+            "Application function parameter 'factor2' has a default value that can't be serialized with "
+            f"the type hint of the parameter {float}. Please follow Pydantic documentation and the following SerializationError to "
+            "make the default value serializable to JSON format:\nFailed to serialize '1.0' as '<class 'float'>' to json: Pydantic "
+            "serializer warnings:\n  PydanticSerializationUnexpectedValue(Expected `float` - serialized value may not be as expected "
+            "[input_value='1.0', input_type=str])\n",
             validation_message.message,
         )
 
