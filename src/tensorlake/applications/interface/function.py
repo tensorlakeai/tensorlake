@@ -37,6 +37,7 @@ class _FunctionConfiguration:
     region: str | None
     cacheable: bool
     max_concurrency: int
+    warm_containers: int | None
     min_containers: int | None
     max_containers: int | None
 

@@ -109,6 +109,7 @@ class _FunctionDecorator(_Decorator):
         secrets: List[str],
         retries: Retries | None,
         region: str | None,
+        warm_containers: int | None,
         min_containers: int | None,
         max_containers: int | None,
     ):
@@ -123,6 +124,7 @@ class _FunctionDecorator(_Decorator):
         self._secrets: List[str] = secrets
         self._retries: Retries | None = retries
         self._region: str | None = region
+        self._warm_containers: int | None = warm_containers
         self._min_containers: int | None = min_containers
         self._max_containers: int | None = max_containers
 
@@ -152,6 +154,7 @@ class _FunctionDecorator(_Decorator):
             cacheable=False,
             # Hidden from users because not implemented in Telemetry yet.
             max_concurrency=_DEFAULT_MAX_CONCURRENCY,
+            warm_containers=self._warm_containers,
             min_containers=self._min_containers,
             max_containers=self._max_containers,
         )
@@ -185,6 +188,7 @@ def function(
     secrets: List[str] = [],
     retries: Retries | None = None,
     region: Literal["us-east-1", "eu-west-1"] | None = None,
+    warm_containers: int | None = None,
     min_containers: int | None = None,
     max_containers: int | None = None,
 ) -> _FunctionDecorator:
@@ -205,6 +209,7 @@ def function(
         secrets=secrets,
         retries=retries,
         region=region,
+        warm_containers=warm_containers,
         min_containers=min_containers,
         max_containers=max_containers,
     )
