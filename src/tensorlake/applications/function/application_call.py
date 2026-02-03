@@ -4,11 +4,12 @@ from typing import Any
 
 from tensorlake.vendor.nanoid import generate as nanoid
 
-from ..interface import DeserializationError, File, Function, InternalError
+from ..interface import File, Function
 from ..user_data_serializer import UserDataSerializer
 from .type_hints import (
     function_parameters,
     function_signature,
+    parameter_type_hint,
 )
 from .user_data_serializer import (
     deserialize_value,
@@ -101,15 +102,10 @@ def deserialize_application_function_call_arguments(
             continue
 
         parameter: inspect.Parameter = signature.parameters[key]
-        if parameter.annotation is inspect.Parameter.empty:
-            # We are now doing pre-deployment validation for this so this is never supposed to happen.
-            raise DeserializationError(
-                f"Cannot deserialize application function '{application}' keyword argument '{key}': argument is missing type hint."
-            )
-
+        param_type_hint: Any = parameter_type_hint(parameter)
         deserialized_kwargs[key] = _deserialize_application_function_call_arg(
             deserializer=input_serializer,
-            arg_type_hint=parameter.annotation,
+            arg_type_hint=param_type_hint,
             serialized_arg=serialized_kwarg,
         )
 
@@ -132,16 +128,11 @@ def deserialize_application_function_call_arguments(
             # argument is used.
             continue
 
-        if parameter.annotation is inspect.Parameter.empty:
-            # This should never happen as we do pre-deployment validation for this.
-            raise DeserializationError(
-                f"Cannot deserialize positional argument {i} of application function '{application}' because the argument has no type hint."
-            )
-
+        param_type_hint: Any = parameter_type_hint(parameter)
         deserialized_args.append(
             _deserialize_application_function_call_arg(
                 deserializer=input_serializer,
-                arg_type_hint=parameter.annotation,
+                arg_type_hint=param_type_hint,
                 serialized_arg=serialized_arg,
             )
         )

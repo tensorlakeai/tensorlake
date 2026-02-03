@@ -23,10 +23,12 @@ class TestMissingRequestInputParameterTypeHint(unittest.TestCase):
         validation_message: ValidationMessage = validation_messages[0]
         self.assertEqual(
             validation_message.severity,
-            ValidationMessageSeverity.ERROR,
+            ValidationMessageSeverity.INFO,
         )
         self.assertEqual(
-            "Application function parameter 'bar' requires a type hint. Please add a type hint to the parameter.",
+            "It is recommended to add a type hint for application function parameter 'bar'. "
+            "This ensures that the parameter value is properly deserialized from JSON or File request inputs. "
+            "This also helps generating a JSON schema for the parameter and an example curl command for running the application.",
             validation_message.message,
         )
 

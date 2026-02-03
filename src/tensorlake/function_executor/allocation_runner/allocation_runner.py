@@ -23,7 +23,10 @@ from tensorlake.applications import (
 from tensorlake.applications.algorithms.validate_user_object import validate_user_object
 from tensorlake.applications.blob_store import BLOBStore
 from tensorlake.applications.function.function_call import create_function_error
-from tensorlake.applications.function.type_hints import function_signature
+from tensorlake.applications.function.type_hints import (
+    function_signature,
+    return_type_hint,
+)
 from tensorlake.applications.function.user_data_serializer import (
     deserialize_value_with_metadata,
     function_output_serializer,
@@ -828,9 +831,9 @@ class AllocationRunner:
                 output_serializer_override=None,
             )
             # We validate application functions to have return type hints.
-            output_value_type_hint_override = function_signature(
-                self._function
-            ).return_annotation
+            output_value_type_hint_override = return_type_hint(
+                function_signature(self._function).return_annotation
+            )
             has_output_value_type_hint_override = True
             if len(serialized_args) == 0:
                 # We expect exactly one argument but support more for any future FE protocol migrations.

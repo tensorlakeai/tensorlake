@@ -10,7 +10,9 @@ from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
 
 # Makes the test case discoverable by unittest framework.
-ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
+ValidateAllApplicationsTest: unittest.TestCase = (
+    validate_all_applications.define_no_validation_errors_test()
+)
 
 
 @application()
@@ -124,14 +126,25 @@ def function_pydantic_args(dir: DirModel, file: FileModel) -> str:
 @application()
 @function()
 def function_pydantic_return_value() -> DirModel:
-    dir = DirModel(
+    return DirModel(
         path="/returned/dir",
         files=[
             FileModel(path="/returned/dir/fileA.txt", size=111, is_read_only=False),
             FileModel(path="/returned/dir/fileB.txt", size=222, is_read_only=True),
         ],
     )
-    return dir
+
+
+@application()
+@function()
+def function_pydantic_return_value_dict() -> DirModel:
+    return {
+        "path": "/returned/dir",
+        "files": [
+            {"path": "/returned/dir/fileA.txt", "size": 111, "is_read_only": False},
+            {"path": "/returned/dir/fileB.txt", "size": 222, "is_read_only": True},
+        ],
+    }
 
 
 # With Any type hints, Pydantic falls back to standard python JSON
@@ -143,21 +156,28 @@ def function_any_arg_and_return_value(arg: Any) -> Any:
     return arg
 
 
+# We fallback to Any type hint when function has no type hints.
+@application()
+@function()
+def function_with_no_type_hints(arg):
+    return arg
+
+
 class TestApplicationFunctionCallSignatures(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Deploy all applications before running tests.
+        deploy_applications(__file__)
+        return super().setUpClass()
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_function_with_no_args(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(function_with_no_args, is_remote)
         self.assertEqual(request.output(), "success")
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_function_with_no_args_and_extra_arg_passed(self, _: str, is_remote: bool):
         # Validate that we allow extra positional args passed to application functions and ignore them.
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             function_with_no_args, is_remote, "extra_arg"
         )
@@ -168,9 +188,6 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
         self, _: str, is_remote: bool
     ):
         # Validate that we allow extra keyword args passed to application functions and ignore them.
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             function_with_no_args, is_remote, extra_kwarg="extra_kwarg"
         )
@@ -178,17 +195,11 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_function_returning_nothing(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(function_returning_nothing, is_remote)
         self.assertEqual(request.output(), None)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_call_with_only_positional_args(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             function_mixed_args,
             is_remote,
@@ -201,9 +212,6 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_call_with_only_kwargs(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             function_mixed_args,
             is_remote,
@@ -216,9 +224,6 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_mixed_args(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request1: Request = run_application(
             function_mixed_args,
             is_remote,
@@ -231,9 +236,6 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_tuple_arg_and_return_value(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             function_tuple_arg_and_return_value,
             is_remote,
@@ -245,9 +247,6 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_set_arg_and_return_value(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             function_set_arg_and_return_value,
             is_remote,
@@ -259,9 +258,6 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_default_args(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             function_default_args,
             is_remote,
@@ -271,9 +267,6 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_file_args(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             function_file_args,
             is_remote,
@@ -284,9 +277,6 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_file_return_value(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             function_file_return_value,
             is_remote,
@@ -299,9 +289,6 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_pydantic_args(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         dir_model: DirModel = DirModel(
             path="/test/dir",
             files=[
@@ -323,9 +310,6 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_pydantic_return_value(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             function_pydantic_return_value,
             is_remote,
@@ -342,49 +326,84 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
         self.assertTrue(output_dir.files[1].is_read_only)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_any_arg_and_value_str(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
+    def test_pydantic_return_value_dict(self, _: str, is_remote: bool):
         request: Request = run_application(
-            function_any_arg_and_return_value,
+            function_pydantic_return_value_dict,
+            is_remote,
+        )
+        output_dir: DirModel = request.output()
+        self.assertIsInstance(output_dir, DirModel)
+        self.assertEqual(output_dir.path, "/returned/dir")
+        self.assertEqual(len(output_dir.files), 2)
+        self.assertEqual(output_dir.files[0].path, "/returned/dir/fileA.txt")
+        self.assertEqual(output_dir.files[0].size, 111)
+        self.assertFalse(output_dir.files[0].is_read_only)
+        self.assertEqual(output_dir.files[1].path, "/returned/dir/fileB.txt")
+        self.assertEqual(output_dir.files[1].size, 222)
+        self.assertTrue(output_dir.files[1].is_read_only)
+
+    @parameterized.parameterized.expand(
+        [
+            ("remote", True, "function_any_arg_and_return_value"),
+            ("local", False, "function_any_arg_and_return_value"),
+            ("remote_no_type_hints", True, "function_with_no_type_hints"),
+            ("local_no_type_hints", False, "function_with_no_type_hints"),
+        ]
+    )
+    def test_any_arg_and_value_str(self, _: str, is_remote: bool, function: str):
+        request: Request = run_application(
+            function,
             is_remote,
             "test_string",
         )
         self.assertEqual(request.output(), "test_string")
 
-    @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_any_arg_and_value_int_list(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
+    @parameterized.parameterized.expand(
+        [
+            ("remote", True, "function_any_arg_and_return_value"),
+            ("local", False, "function_any_arg_and_return_value"),
+            ("remote_no_type_hints", True, "function_with_no_type_hints"),
+            ("local_no_type_hints", False, "function_with_no_type_hints"),
+        ]
+    )
+    def test_any_arg_and_value_int_list(self, _: str, is_remote: bool, function: str):
         request: Request = run_application(
-            function_any_arg_and_return_value,
+            function,
             is_remote,
             [1, 2, 3, 4, 5],
         )
         self.assertEqual(request.output(), [1, 2, 3, 4, 5])
 
-    @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_any_arg_and_value_int_set(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
+    @parameterized.parameterized.expand(
+        [
+            ("remote", True, "function_any_arg_and_return_value"),
+            ("local", False, "function_any_arg_and_return_value"),
+            ("remote_no_type_hints", True, "function_with_no_type_hints"),
+            ("local_no_type_hints", False, "function_with_no_type_hints"),
+        ]
+    )
+    def test_any_arg_and_value_int_set(self, _: str, is_remote: bool, function: str):
         request: Request = run_application(
-            function_any_arg_and_return_value,
+            function,
             is_remote,
             {1, 2, 3, 4, 5},
         )
         # Sets are converted to lists during JSON serialization/deserialization when type hint is Any.
         self.assertEqual(request.output(), [1, 2, 3, 4, 5])
 
-    @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_any_arg_and_value_list_of_pydantic_models(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
+    @parameterized.parameterized.expand(
+        [
+            ("remote", True, "function_any_arg_and_return_value"),
+            ("local", False, "function_any_arg_and_return_value"),
+            ("remote_no_type_hints", True, "function_with_no_type_hints"),
+            ("local_no_type_hints", False, "function_with_no_type_hints"),
+        ]
+    )
+    def test_any_arg_and_value_list_of_pydantic_models(
+        self, _: str, is_remote: bool, function: str
+    ):
         request: Request = run_application(
-            function_any_arg_and_return_value,
+            function,
             is_remote,
             [
                 FileModel(path="/file1.txt", size=100, is_read_only=True),

@@ -13,13 +13,21 @@ from tensorlake.applications.remote.manifests.function import (
 )
 
 # Makes the test case discoverable by unittest framework.
-ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
+ValidateAllApplicationsTest: unittest.TestCase = (
+    validate_all_applications.define_no_validation_errors_test()
+)
 
 
 @application()
 @function()
 def application_function_with_nothing() -> None:
     pass
+
+
+@application()
+@function()
+def application_function_with_no_type_hints(arg):
+    return arg
 
 
 @application()
@@ -254,6 +262,33 @@ class TestApplicationJSONSchemas(unittest.TestCase):
             JSONSchema(
                 title="Return value",
                 type="null",
+            ),
+        )
+
+    def test_application_function_with_no_type_hints(self):
+        func_manifest: FunctionManifest = create_function_manifest(
+            application_function_with_no_type_hints,
+            "test_app_version",
+            application_function_with_no_type_hints,
+        )
+        self.assertEqual(len(func_manifest.parameters), 1)
+        parameter: ParameterManifest = func_manifest.parameters[0]
+        self.assertEqual(parameter.name, "arg")
+        self.assertIsNone(parameter.description)
+        self.assertEqual(
+            parameter.data_type,
+            JSONSchema(
+                title="arg",
+                parameter_kind="POSITIONAL_OR_KEYWORD",
+            ),
+        )
+        self.assertTrue(parameter.required)
+
+        return_schema: JSONSchema = func_manifest.return_type
+        self.assertEqual(
+            return_schema,
+            JSONSchema(
+                title="Return value",
             ),
         )
 

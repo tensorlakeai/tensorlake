@@ -3,6 +3,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from ast import arg
 from typing import Annotated, Any, List, Union
 
 import validate_all_applications
@@ -18,7 +19,9 @@ from tensorlake.applications.remote.manifests.application import (
 from tensorlake.applications.remote.request import RemoteRequest
 
 # Makes the test case discoverable by unittest framework.
-ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
+ValidateAllApplicationsTest: unittest.TestCase = (
+    validate_all_applications.define_no_validation_errors_test()
+)
 
 
 @application()
@@ -31,6 +34,18 @@ def application_function_with_nothing() -> None:
 @function()
 def application_function_with_any(arg: Any) -> Any:
     return arg
+
+
+@application()
+@function()
+def application_function_with_no_type_hints(arg):
+    return arg
+
+
+@application()
+@function()
+def application_function_with_default_values_and_no_type_hints(arg1=10, arg2="default"):
+    return arg1, arg2
 
 
 @application()
@@ -231,6 +246,24 @@ class TestApplicationCURLCommand(unittest.TestCase):
             file_paths=None,
         )
         self.run_curl_request(application_function_with_any, curl_command)
+
+    def test_application_function_with_no_type_hints(self):
+        curl_command: str | None = example_application_curl_command(
+            api_url=self._api_url,
+            application=application_function_with_no_type_hints,
+            file_paths=None,
+        )
+        self.assertIsNone(curl_command)
+
+    def test_application_function_with_default_values_and_no_type_hints(self):
+        curl_command: str = example_application_curl_command(
+            api_url=self._api_url,
+            application=application_function_with_default_values_and_no_type_hints,
+            file_paths=None,
+        )
+        self.run_curl_request(
+            application_function_with_default_values_and_no_type_hints, curl_command
+        )
 
     def test_application_function_with_str(self):
         curl_command: str = example_application_curl_command(

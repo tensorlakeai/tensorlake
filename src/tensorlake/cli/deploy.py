@@ -155,14 +155,15 @@ def _deploy_applications(
             click.echo(
                 f"🚀 Application `{application_function._name}` deployed successfully\n"
             )
-            curl_command: str = example_application_curl_command(
+            curl_command: str | None = example_application_curl_command(
                 api_url=auth.api_url,
                 application=application_function,
                 file_paths=None,
             )
-            click.echo(
-                f"💡 To invoke it, you can use the following cURL command:\n\n{curl_command}"
-            )
+            if curl_command is not None:
+                click.echo(
+                    f"💡 To invoke it, you can use the following cURL command:\n\n{curl_command}"
+                )
     except SDKUsageError as e:
         raise click.UsageError(str(e)) from None
     except TensorlakeError as e:

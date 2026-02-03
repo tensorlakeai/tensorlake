@@ -118,7 +118,11 @@ class JSONUserDataSerializer(UserDataSerializer):
 
     def serialize(self, object: Any, type_hint: Any) -> bytes:
         try:
-            return create_type_adapter(type_hint).dump_json(object, warnings="error")
+            adapter: pydantic.TypeAdapter = create_type_adapter(type_hint)
+            # i.e. converts a dict into a Pydantic model instance if type_hint includes
+            # a Pydantic model that matches the dict.
+            validated_obj: Any = adapter.validate_python(object)
+            return adapter.dump_json(validated_obj, warnings="error")
         except Exception as e:
             raise SerializationError(
                 f"Failed to serialize '{object}' as '{type_hint}' to json: {e}"

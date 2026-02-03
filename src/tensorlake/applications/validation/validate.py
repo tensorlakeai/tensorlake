@@ -473,8 +473,10 @@ def _validate_application_function(
         if parameter.annotation is inspect.Parameter.empty:
             messages.append(
                 ValidationMessage(
-                    message=f"Application function parameter '{parameter.name}' requires a type hint. Please add a type hint to the parameter.",
-                    severity=ValidationMessageSeverity.ERROR,
+                    message=f"It is recommended to add a type hint for application function parameter '{parameter.name}'. "
+                    "This ensures that the parameter value is properly deserialized from JSON or File request inputs. "
+                    "This also helps generating a JSON schema for the parameter and an example curl command for running the application.",
+                    severity=ValidationMessageSeverity.INFO,
                     details=function_details,
                 )
             )
@@ -545,8 +547,10 @@ def _validate_application_function(
     if signature.return_annotation is inspect.Signature.empty:
         messages.append(
             ValidationMessage(
-                message="Application function requires a return type hint. Please add a return type hint to the function.",
-                severity=ValidationMessageSeverity.ERROR,
+                message="It is recommended to add a return type hint for the application function. "
+                "This helps to ensure that the returned value is properly serialized and that it matches the type hint. "
+                "This also helps generating a JSON schema for the return type of the function.",
+                severity=ValidationMessageSeverity.INFO,
                 details=function_details,
             )
         )

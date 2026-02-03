@@ -5,6 +5,7 @@ from tensorlake.applications import Function
 from tensorlake.applications.function.type_hints import (
     function_parameters,
     is_file_type_hint,
+    parameter_type_hint,
 )
 
 from .fake_json import fake_json
@@ -16,13 +17,14 @@ def example_application_curl_command(
     api_url: str,
     application: Function,
     file_paths: dict[str, str] | None,
-) -> str:
+) -> str | None:
     """Generates an example cURL command to call the deployed application function.
 
     The file_paths dict maps parameter names to file paths for File type hint parameters.
     If None then the example command will generate placeholder file paths. The dict is
     mainly used for testing at the moment.
 
+    Returns None if the application function has unsupported parameter type hints.
     Raises TensorlakeError on error.
     """
     curl_param_definition_lines: list[str] = []
@@ -44,12 +46,16 @@ def example_application_curl_command(
     if len(parameters) == 0:
         # No application function parameters: empty body.
         curl_command_lines.append("--json ''")
-    elif len(parameters) == 1 and not is_file_type_hint(parameters[0].annotation):
+    elif len(parameters) == 1 and not is_file_type_hint(
+        parameter_type_hint(parameters[0])
+    ):
         # Use simple JSON body calling convention for single non-File parameter.
         # This is easier to use for users.
-        param_value: str = _render_parameter_value(
+        param_value: str | None = _render_parameter_value(
             parameters[0], app_func_manifest.parameters[0], file_paths
         )
+        if param_value is None:
+            return None
         curl_command_lines.append(f"--json '{param_value}'")
     else:
         # Note: curl guesses file content type automatically when used in multi-part form.
@@ -60,9 +66,12 @@ def example_application_curl_command(
             param: inspect.Parameter = parameters[param_ix]
             param_manifest: ParameterManifest = app_func_manifest.parameters[param_ix]
 
-            param_definition, param_reference = _render_multipart_parameter(
+            rendered_param: tuple[str, str] | None = _render_multipart_parameter(
                 param, param_manifest, file_paths
             )
+            if rendered_param is None:
+                return None
+            param_definition, param_reference = rendered_param
             curl_param_definition_lines.append(param_definition)
             curl_command_lines.append(param_reference)
 
@@ -77,7 +86,7 @@ def _render_multipart_parameter(
     param: inspect.Parameter,
     param_manifest: ParameterManifest,
     file_paths: dict[str, str] | None,
-) -> tuple[str, str]:
+) -> tuple[str, str] | None:
     """Renders parameter value for inclusion in cURL command.
 
     returns a tuple of (parameter_definition, parameter_reference).
@@ -87,10 +96,13 @@ def _render_multipart_parameter(
     Raises TensorlakeError on error.
     """
     param_definition_name: str = f"{param.name}_value"
-    param_value: str = _render_parameter_value(param, param_manifest, file_paths)
+    param_value: str | None = _render_parameter_value(param, param_manifest, file_paths)
+    if param_value is None:
+        return None
+
     # We do pre-deployment validation that ensures that File type hint
     # is always used in a simple foo: File form.
-    if is_file_type_hint(param.annotation):
+    if is_file_type_hint(parameter_type_hint(param)):
         # Note: curl guesses file content type automatically.
         return (
             f"{param_definition_name}='{param_value}'",
@@ -110,11 +122,12 @@ def _render_parameter_value(
 ) -> str:
     """Renders parameter value for inclusion in cURL command.
 
+    Returns None if the parameter has unsupported type hint.
     Raises TensorlakeError on error.
     """
     # We do pre-deployment validation that ensures that File type hint
     # is always used in a simple foo: File form.
-    if is_file_type_hint(param.annotation):
+    if is_file_type_hint(parameter_type_hint(param)):
         if file_paths is not None and param.name in file_paths:
             return f"@{file_paths[param.name]}"
         else:
@@ -124,7 +137,11 @@ def _render_parameter_value(
             return "@FILE_PATH"
     else:
         if param_manifest.required:
-            return fake_json(param.annotation)
+            if param.annotation is inspect.Parameter.empty:
+                # Cannot generate example value if no type hint is provided.
+                return None
+            else:
+                return fake_json(parameter_type_hint(param))
         else:
             # Use default parameter value as example value. This is the most accurate for user.
             return json.dumps(param_manifest.data_type.default)

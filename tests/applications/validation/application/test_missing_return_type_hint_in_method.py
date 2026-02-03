@@ -25,10 +25,12 @@ class TestMissingReturnTypeHintInMethod(unittest.TestCase):
         validation_message: ValidationMessage = validation_messages[0]
         self.assertEqual(
             validation_message.severity,
-            ValidationMessageSeverity.ERROR,
+            ValidationMessageSeverity.INFO,
         )
         self.assertEqual(
-            "Application function requires a return type hint. Please add a return type hint to the function.",
+            "It is recommended to add a return type hint for the application function. "
+            "This helps to ensure that the returned value is properly serialized and that it matches the type hint. "
+            "This also helps generating a JSON schema for the return type of the function.",
             validation_message.message,
         )
 
