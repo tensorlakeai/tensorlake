@@ -1,5 +1,6 @@
 import unittest
 
+from tensorlake.applications import function
 from tensorlake.applications.interface.awaitables import (
     AwaitableList,
     FunctionCallAwaitable,
@@ -11,6 +12,26 @@ from tensorlake.function_executor.allocation_runner.sdk_algorithms import (
     _sha256_hash_strings,
     to_durable_awaitable_tree,
 )
+
+
+@function()
+def reduce_func(x, y):
+    return x + y
+
+
+@function()
+def reduce_func_1(x, y):
+    return x + y
+
+
+@function()
+def reduce_func_2(x, y):
+    return x + y
+
+
+@function()
+def reduce_func_3(x, y):
+    return x + y
 
 
 class TestToDurableAwaitableTree(unittest.TestCase):
@@ -46,21 +67,22 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                 "node": ReduceOperationAwaitable(
                     id="awaitable_1",
                     function_name="reduce_func",
-                    inputs=[1, 2, 3],
+                    inputs=[1, 2],
                 ),
                 "parent_function_call_id": "parent_function_call_id_123",
                 "awaitable_sequence_number": 199,
-                "expected_node": ReduceOperationAwaitable(
+                "expected_node": FunctionCallAwaitable(
                     id=_sha256_hash_strings(
                         [
                             "parent_function_call_id_123",
                             "199",
-                            "ReduceOperation",
+                            "FunctionCall",
                             "reduce_func",
                         ]
                     ),
                     function_name="reduce_func",
-                    inputs=[1, 2, 3],
+                    args=[1, 2],
+                    kwargs={},
                 ),
                 "expected_awaitable_sequence_number": 200,
             },
@@ -339,138 +361,104 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                         ReduceOperationAwaitable(
                             id="reduce_op_2",
                             function_name="reduce_func_2",
-                            inputs=[
-                                ReduceOperationAwaitable(
-                                    id="reduce_op_3",
-                                    function_name="reduce_func_3",
-                                    inputs=[],
-                                ),
-                                ReduceOperationAwaitable(
-                                    id="reduce_op_4",
-                                    function_name="reduce_func_4",
-                                    inputs=[],
-                                ),
-                            ],
+                            inputs=[1, 2, 3],
                         ),
                         ReduceOperationAwaitable(
-                            id="reduce_op_5",
-                            function_name="reduce_func_5",
-                            inputs=[],
+                            id="reduce_op_3",
+                            function_name="reduce_func_3",
+                            inputs=[5, 6],
                         ),
                     ],
                 ),
                 "parent_function_call_id": "parent_function_call_id_327",
                 "awaitable_sequence_number": 1,
-                "expected_awaitable_sequence_number": 6,
-                "expected_node": ReduceOperationAwaitable(
+                "expected_awaitable_sequence_number": 5,
+                "expected_node": FunctionCallAwaitable(
                     id=_sha256_hash_strings(
                         [
                             "parent_function_call_id_327",
                             "1",
-                            "ReduceOperation",
+                            "FunctionCall",
                             "reduce_func_1",
                             _sha256_hash_strings(
                                 [
                                     "parent_function_call_id_327",
                                     "2",
-                                    "ReduceOperation",
+                                    "FunctionCall",
                                     "reduce_func_2",
                                     _sha256_hash_strings(
                                         [
                                             "parent_function_call_id_327",
                                             "3",
-                                            "ReduceOperation",
-                                            "reduce_func_3",
+                                            "FunctionCall",
+                                            "reduce_func_2",
                                         ]
                                     ),
-                                    _sha256_hash_strings(
-                                        [
-                                            "parent_function_call_id_327",
-                                            "4",
-                                            "ReduceOperation",
-                                            "reduce_func_4",
-                                        ]
-                                    ),
-                                ]
+                                ],
                             ),
                             _sha256_hash_strings(
                                 [
                                     "parent_function_call_id_327",
-                                    "5",
-                                    "ReduceOperation",
-                                    "reduce_func_5",
+                                    "4",
+                                    "FunctionCall",
+                                    "reduce_func_3",
                                 ]
                             ),
                         ]
                     ),
                     function_name="reduce_func_1",
-                    inputs=[
-                        ReduceOperationAwaitable(
+                    args=[
+                        FunctionCallAwaitable(
                             id=_sha256_hash_strings(
                                 [
                                     "parent_function_call_id_327",
                                     "2",
-                                    "ReduceOperation",
+                                    "FunctionCall",
                                     "reduce_func_2",
                                     _sha256_hash_strings(
                                         [
                                             "parent_function_call_id_327",
                                             "3",
-                                            "ReduceOperation",
-                                            "reduce_func_3",
+                                            "FunctionCall",
+                                            "reduce_func_2",
                                         ]
                                     ),
-                                    _sha256_hash_strings(
-                                        [
-                                            "parent_function_call_id_327",
-                                            "4",
-                                            "ReduceOperation",
-                                            "reduce_func_4",
-                                        ]
-                                    ),
-                                ]
+                                ],
                             ),
                             function_name="reduce_func_2",
-                            inputs=[
-                                ReduceOperationAwaitable(
+                            args=[
+                                FunctionCallAwaitable(
                                     id=_sha256_hash_strings(
                                         [
                                             "parent_function_call_id_327",
                                             "3",
-                                            "ReduceOperation",
-                                            "reduce_func_3",
+                                            "FunctionCall",
+                                            "reduce_func_2",
                                         ]
                                     ),
-                                    function_name="reduce_func_3",
-                                    inputs=[],
+                                    function_name="reduce_func_2",
+                                    args=[1, 2],
+                                    kwargs={},
                                 ),
-                                ReduceOperationAwaitable(
-                                    id=_sha256_hash_strings(
-                                        [
-                                            "parent_function_call_id_327",
-                                            "4",
-                                            "ReduceOperation",
-                                            "reduce_func_4",
-                                        ]
-                                    ),
-                                    function_name="reduce_func_4",
-                                    inputs=[],
-                                ),
+                                3,
                             ],
+                            kwargs={},
                         ),
-                        ReduceOperationAwaitable(
+                        FunctionCallAwaitable(
                             id=_sha256_hash_strings(
                                 [
                                     "parent_function_call_id_327",
-                                    "5",
-                                    "ReduceOperation",
-                                    "reduce_func_5",
+                                    "4",
+                                    "FunctionCall",
+                                    "reduce_func_3",
                                 ]
                             ),
-                            function_name="reduce_func_5",
-                            inputs=[],
+                            function_name="reduce_func_3",
+                            args=[5, 6],
+                            kwargs={},
                         ),
                     ],
+                    kwargs={},
                 ),
             },
             {
@@ -481,7 +469,7 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                         ReduceOperationAwaitable(
                             id="2",
                             function_name="reduce_func_1",
-                            inputs=["123", "125", "127"],
+                            inputs=["123", "125"],
                         ),
                         AwaitableList(
                             id="3",
@@ -496,6 +484,7 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                             args=[],
                                             kwargs={},
                                         ),
+                                        100500,
                                     ],
                                 ),
                             ],
@@ -522,7 +511,7 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                 [
                                     "parent_function_call_id_111",
                                     "51",
-                                    "ReduceOperation",
+                                    "FunctionCall",
                                     "reduce_func_1",
                                 ]
                             ),
@@ -535,7 +524,7 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                         [
                                             "parent_function_call_id_111",
                                             "53",
-                                            "ReduceOperation",
+                                            "FunctionCall",
                                             "reduce_func_2",
                                             _sha256_hash_strings(
                                                 [
@@ -552,17 +541,18 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                         ]
                     ),
                     items=[
-                        ReduceOperationAwaitable(
+                        FunctionCallAwaitable(
                             id=_sha256_hash_strings(
                                 [
                                     "parent_function_call_id_111",
                                     "51",
-                                    "ReduceOperation",
+                                    "FunctionCall",
                                     "reduce_func_1",
                                 ]
                             ),
                             function_name="reduce_func_1",
-                            inputs=["123", "125", "127"],
+                            args=["123", "125"],
+                            kwargs={},
                         ),
                         AwaitableList(
                             id=_sha256_hash_strings(
@@ -574,7 +564,7 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                         [
                                             "parent_function_call_id_111",
                                             "53",
-                                            "ReduceOperation",
+                                            "FunctionCall",
                                             "reduce_func_2",
                                             _sha256_hash_strings(
                                                 [
@@ -589,12 +579,12 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                 ]
                             ),
                             items=[
-                                ReduceOperationAwaitable(
+                                FunctionCallAwaitable(
                                     id=_sha256_hash_strings(
                                         [
                                             "parent_function_call_id_111",
                                             "53",
-                                            "ReduceOperation",
+                                            "FunctionCall",
                                             "reduce_func_2",
                                             _sha256_hash_strings(
                                                 [
@@ -607,7 +597,7 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                         ]
                                     ),
                                     function_name="reduce_func_2",
-                                    inputs=[
+                                    args=[
                                         FunctionCallAwaitable(
                                             id=_sha256_hash_strings(
                                                 [
@@ -621,7 +611,9 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                             args=[],
                                             kwargs={},
                                         ),
+                                        100500,
                                     ],
+                                    kwargs={},
                                 ),
                             ],
                             metadata=_AwaitableListMetadata(

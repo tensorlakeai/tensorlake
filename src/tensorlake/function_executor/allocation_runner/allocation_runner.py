@@ -20,7 +20,7 @@ from tensorlake.applications import (
     TensorlakeError,
     TimeoutError,
 )
-from tensorlake.applications.algorithms.validate_user_object import validate_user_object
+from tensorlake.applications.algorithms import validate_user_object
 from tensorlake.applications.blob_store import BLOBStore
 from tensorlake.applications.function.function_call import create_function_error
 from tensorlake.applications.function.type_hints import (

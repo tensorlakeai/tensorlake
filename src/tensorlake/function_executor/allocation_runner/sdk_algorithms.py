@@ -5,6 +5,7 @@ from tensorlake.applications import (
     Function,
     InternalError,
 )
+from tensorlake.applications.algorithms import reduce_operation_to_function_call_chain
 from tensorlake.applications.function.application_call import (
     SerializedApplicationArgument,
     deserialize_application_function_call_arguments,
@@ -62,10 +63,14 @@ def to_durable_awaitable_tree(
     parent_function_call_id: str,
     awaitable_sequence_number: int,
 ) -> tuple[Awaitable, int]:
-    """Returns a shallow copy of the supplied Awaitable tree with Awaitable IDs supporting durable execution.
+    """Returns a semantically equivalent shallow copy of the supplied Awaitable tree with Awaitable IDs supporting durable execution.
 
-    The shallow copy has the same structure as the original tree, but each Awaitable in the tree
-    has its ID replaced with a durable ID. User provided values are kept in the returned tree as is.
+    Also returns the last unused awaitable_sequence_number after processing the entire tree.
+
+    The shallow copy has a semantically equivalent structure as the original tree, but:
+    1. Each Awaitable in the tree has its ID replaced with a durable ID.
+    2. All ReduceOperationAwaitables are replaced with chains of FunctionCallAwaitables.
+    User provided values are kept in the returned tree as is.
 
     parent_function_call_id is ID of the function call that created the awaitable tree.
     awaitable_sequence_number is the last unused sequential number of awaitables created by the parent function call.
@@ -118,6 +123,13 @@ def _to_durable_awaitable_tree(
     if not isinstance(root, Awaitable):
         return root, awaitable_sequence_number  # Return user-provided value as is.
 
+    # FIXME: sequence number is good for use inside each awaitable tree but as sequence number doesn't
+    # change when any previous child awaitables of the same parent function call change, this may lead to
+    # collisions, i.e.:
+    # - In original parent function call: call foo(1, 2) then bar(3, 4).
+    # - In replayed parent function call: call buzz(1, 2) then bar(10, 15).
+    # In this example both bar calls get the same sequence number 2 leading to same durable IDs for both calls while the parent
+    # function call took a different execution path and function call outputs of its original run should not be reused.
     awaitable: Awaitable = root
     durable_id_attrs: list[str] = [
         parent_function_call_id,
@@ -149,26 +161,14 @@ def _to_durable_awaitable_tree(
         )
 
     elif isinstance(awaitable, ReduceOperationAwaitable):
-        awaitable: ReduceOperationAwaitable
-        # Awaitable specific metadata, part of durable ID.
-        durable_id_attrs.extend(["ReduceOperation", awaitable.function_name])
-        durable_inputs: list[Awaitable | Any] = []
-        for input in awaitable.inputs:
-            durable_input, awaitable_sequence_number = _to_durable_awaitable_tree(
-                root=input,
-                parent_function_call_id=parent_function_call_id,
-                awaitable_sequence_number=awaitable_sequence_number,
-            )
-            durable_inputs.append(durable_input)
-            _add_durable_id_attr(durable_inputs[-1], durable_id_attrs)
-
-        return (
-            ReduceOperationAwaitable(
-                id=_sha256_hash_strings(durable_id_attrs),
-                function_name=awaitable.function_name,
-                inputs=durable_inputs,
-            ),
-            awaitable_sequence_number,
+        awaitable: FunctionCallAwaitable = reduce_operation_to_function_call_chain(
+            awaitable
+        )
+        return _to_durable_awaitable_tree(
+            root=awaitable,
+            parent_function_call_id=parent_function_call_id,
+            # We didn't create a new awaitable here. So don't inc the sequence number in current call.
+            awaitable_sequence_number=awaitable_sequence_number - 1,
         )
 
     elif isinstance(awaitable, FunctionCallAwaitable):

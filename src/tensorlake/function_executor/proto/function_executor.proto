@@ -243,6 +243,7 @@ message FunctionCall {
     optional bytes call_metadata = 4;
 }
 
+// Deprecated: SDK now generates an equivalent chain of function calls for a reduce operation.
 message ReduceOp {
     optional string id = 1;
     // Contains at least two items.
@@ -255,6 +256,7 @@ message ReduceOp {
 message ExecutionPlanUpdate {
   oneof op {
     FunctionCall function_call = 10;
+    // Deprecated, see ReduceOp message.
     ReduceOp     reduce        = 12;
   }
 }

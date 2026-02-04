@@ -176,6 +176,8 @@ def pass_map_awaitable_as_reduced_item(_: str) -> str:
             "them into `other_function_reduce.reduce(...)`."
         )
         return "success"
+    else:
+        return "failure"
 
 
 @function()
