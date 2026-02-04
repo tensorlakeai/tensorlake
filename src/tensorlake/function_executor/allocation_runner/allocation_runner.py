@@ -199,10 +199,8 @@ class AllocationRunner:
         # Futures that were created (started) by user code during this allocation.
         # Future Awaitable ID -> _UserFutureInfo.
         self._user_futures: Dict[str, _UserFutureInfo] = {}
-        # A sequence number is assigned to each Awaitable created during allocation run.
-        # Each Awaitable from a Future's Awaitable tree gets a sequence number assigned when the Future runs.
-        # Each Awaitable from a tail call Awaitable tree gets a sequence number assigned on return from user function.
-        self._awaitable_sequence_number: int = 0  # Unlimited due to transparent BigInt.
+        # ID of the previous awaitable started by this allocation.
+        self._previous_awaitable_id: str = allocation.function_call_id
         # Allocation Function Call ID -> FunctionCallCreationInfo.
         # Allocation Function Call ID is different from Function Call ID in ExecutionPlanUpdates.
         self._function_call_creations: Dict[str, FunctionCallCreationInfo] = {}
@@ -641,12 +639,12 @@ class AllocationRunner:
     def _run_user_future(
         self, future_info: _UserFutureInfo, start_delay: float | None
     ) -> None:
-        durable_awaitable: Awaitable
-        durable_awaitable, self._awaitable_sequence_number = to_durable_awaitable_tree(
+        durable_awaitable: Awaitable = to_durable_awaitable_tree(
             root=future_info.user_future.awaitable,
             parent_function_call_id=self._allocation.function_call_id,
-            awaitable_sequence_number=self._awaitable_sequence_number,
+            previous_awaitable_id=self._previous_awaitable_id,
         )
+        self._previous_awaitable_id = durable_awaitable.id
         future_info.durable_awaitable_id = durable_awaitable.id
         serialized_values: Dict[str, SerializedValue] = {}
         serialize_values_in_awaitable_tree(
@@ -937,13 +935,12 @@ class AllocationRunner:
         tail_call_durable_awaitable: Awaitable | None = None
         # This is internal FE code.
         if isinstance(output, Awaitable):
-            tail_call_durable_awaitable, self._awaitable_sequence_number = (
-                to_durable_awaitable_tree(
-                    root=output,
-                    parent_function_call_id=self._allocation.function_call_id,
-                    awaitable_sequence_number=self._awaitable_sequence_number,
-                )
+            tail_call_durable_awaitable = to_durable_awaitable_tree(
+                root=output,
+                parent_function_call_id=self._allocation.function_call_id,
+                previous_awaitable_id=self._previous_awaitable_id,
             )
+            self._previous_awaitable_id = tail_call_durable_awaitable.id
 
         # This is user code.
         try:

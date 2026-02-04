@@ -61,11 +61,9 @@ from .value import SerializedValue, Value
 def to_durable_awaitable_tree(
     root: Awaitable,
     parent_function_call_id: str,
-    awaitable_sequence_number: int,
-) -> tuple[Awaitable, int]:
+    previous_awaitable_id: str,
+) -> Awaitable:
     """Returns a semantically equivalent shallow copy of the supplied Awaitable tree with Awaitable IDs supporting durable execution.
-
-    Also returns the last unused awaitable_sequence_number after processing the entire tree.
 
     The shallow copy has a semantically equivalent structure as the original tree, but:
     1. Each Awaitable in the tree has its ID replaced with a durable ID.
@@ -73,7 +71,7 @@ def to_durable_awaitable_tree(
     User provided values are kept in the returned tree as is.
 
     parent_function_call_id is ID of the function call that created the awaitable tree.
-    awaitable_sequence_number is the last unused sequential number of awaitables created by the parent function call.
+    previous_awaitable_id is ID of the previous awaitable created by the parent function call.
 
     Durable Awaitable IDs are the same across different executions (allocations) of the same parent function call
     if the parent function call is deterministic, i.e. it creates the same awaitable trees in the same order each
@@ -81,12 +79,18 @@ def to_durable_awaitable_tree(
     lead to re-execution of some function calls even if their inputs are the same as in a previous execution.
 
     To produce a durable Awaitable ID, we compute it as a hash of:
-    - parent_function_call_id in the tree
-    - awaitable_sequence_number (unique per Awaitable in the tree). This ensures that any two Awaitables created by
-      the same parent function call get different durable IDs even if the Awaitables are otherwise identical
-      (i.e. two calls of the same function with same parameters). This also ensures that each durable ID is unique
-      per each execution of parent function call.
-    - Awaitable-specific metadata. This ensures that we detect changes in Awaitable tree nodes, i.e. change of called function name.
+    - parent_function_call_id, this scopes each durable ID to its parent function call and allows to generate them locally while running
+      the parent function call.
+    - previous_awaitable_id, this ties each durable ID in the awaitable tree to the previous awaitable created by the parent function call.
+      If while replaying the parent function call it follows a different execution path (i.e. running a different function call) then this new
+      function call and all next function calls won't be replayed because their durable IDs will be different due to different previous_awaitable_id
+      in their durable ID hash. This ensures that any drift in the execution path gets detected and gets handled according to the replay mode used.
+    - next_awaitable_sequence_number, this ensures that any two Awaitables created inside the same awaitable tree get different durable IDs even
+      if the Awaitables are otherwise identical (i.e. two calls of the same function with same parameters). If we didn't do this then every call
+      of the same function (with any parameters) in the same awaitable tree will have the same durable ID which leads to function output caching
+      while also ignoring function parameter values. This is very wrong. In the end, this ensures that each durable ID inside the same awaitable tree
+      is unique.
+    - Awaitable-specific metadata. This ensures that we detect changes inside each Awaitable tree node, i.e. a change of called function name.
     - Deterministically ordered durable IDs of all immediate child Awaitables.
       This ensures that changes in the structure of the awaitable tree leads to different durable IDs of its nodes
       starting from root so it's easy to detect a drift on Server side just by comparing durable ID of root.
@@ -107,35 +111,31 @@ def to_durable_awaitable_tree(
     if not isinstance(root, Awaitable):
         raise InternalError("Root of the awaitable tree must be an Awaitable.")
     return _to_durable_awaitable_tree(
-        root=root,
+        node=root,
         parent_function_call_id=parent_function_call_id,
-        awaitable_sequence_number=awaitable_sequence_number,
-    )
+        previous_awaitable_id=previous_awaitable_id,
+        next_awaitable_sequence_number=0,
+    )[0]
 
 
 def _to_durable_awaitable_tree(
-    root: Awaitable | Any,
+    node: Awaitable | Any,
     parent_function_call_id: str,
-    awaitable_sequence_number: int,
+    previous_awaitable_id: str,
+    next_awaitable_sequence_number: int,
 ) -> tuple[Awaitable | Any, int]:
     # NB: Any change to ordering of operations in this function results in change of durable IDs for all durable Awaitables
     # which would lead to previously computed IDs not being replayable anymore.
-    if not isinstance(root, Awaitable):
-        return root, awaitable_sequence_number  # Return user-provided value as is.
+    if not isinstance(node, Awaitable):
+        return node, next_awaitable_sequence_number  # Return user-provided value as is.
 
-    # FIXME: sequence number is good for use inside each awaitable tree but as sequence number doesn't
-    # change when any previous child awaitables of the same parent function call change, this may lead to
-    # collisions, i.e.:
-    # - In original parent function call: call foo(1, 2) then bar(3, 4).
-    # - In replayed parent function call: call buzz(1, 2) then bar(10, 15).
-    # In this example both bar calls get the same sequence number 2 leading to same durable IDs for both calls while the parent
-    # function call took a different execution path and function call outputs of its original run should not be reused.
-    awaitable: Awaitable = root
+    awaitable: Awaitable = node
     durable_id_attrs: list[str] = [
         parent_function_call_id,
-        str(awaitable_sequence_number),
+        previous_awaitable_id,
+        str(next_awaitable_sequence_number),
     ]
-    awaitable_sequence_number += 1
+    next_awaitable_sequence_number += 1
 
     if isinstance(awaitable, AwaitableList):
         awaitable: AwaitableList
@@ -143,13 +143,15 @@ def _to_durable_awaitable_tree(
         durable_id_attrs.append(awaitable.metadata.durability_key)
         durable_items: list[Awaitable | Any] = []
         for item in awaitable.items:
-            durable_item, awaitable_sequence_number = _to_durable_awaitable_tree(
-                root=item,
+            durable_item: Awaitable | Any
+            durable_item, next_awaitable_sequence_number = _to_durable_awaitable_tree(
+                node=item,
                 parent_function_call_id=parent_function_call_id,
-                awaitable_sequence_number=awaitable_sequence_number,
+                previous_awaitable_id=previous_awaitable_id,
+                next_awaitable_sequence_number=next_awaitable_sequence_number,
             )
             durable_items.append(durable_item)
-            _add_durable_id_attr(durable_items[-1], durable_id_attrs)
+            _add_durable_id_attr(durable_item, durable_id_attrs)
 
         return (
             AwaitableList(
@@ -157,7 +159,7 @@ def _to_durable_awaitable_tree(
                 items=durable_items,
                 metadata=awaitable.metadata,
             ),
-            awaitable_sequence_number,
+            next_awaitable_sequence_number,
         )
 
     elif isinstance(awaitable, ReduceOperationAwaitable):
@@ -165,10 +167,11 @@ def _to_durable_awaitable_tree(
             awaitable
         )
         return _to_durable_awaitable_tree(
-            root=awaitable,
+            node=awaitable,
             parent_function_call_id=parent_function_call_id,
+            previous_awaitable_id=previous_awaitable_id,
             # We didn't create a new awaitable here. So don't inc the sequence number in current call.
-            awaitable_sequence_number=awaitable_sequence_number - 1,
+            next_awaitable_sequence_number=next_awaitable_sequence_number - 1,
         )
 
     elif isinstance(awaitable, FunctionCallAwaitable):
@@ -177,23 +180,27 @@ def _to_durable_awaitable_tree(
         durable_id_attrs.extend(["FunctionCall", awaitable.function_name])
         durable_args: list[Awaitable | Any] = []
         for arg in awaitable.args:
-            durable_arg, awaitable_sequence_number = _to_durable_awaitable_tree(
-                root=arg,
+            durable_arg: Awaitable | Any
+            durable_arg, next_awaitable_sequence_number = _to_durable_awaitable_tree(
+                node=arg,
                 parent_function_call_id=parent_function_call_id,
-                awaitable_sequence_number=awaitable_sequence_number,
+                previous_awaitable_id=previous_awaitable_id,
+                next_awaitable_sequence_number=next_awaitable_sequence_number,
             )
             durable_args.append(durable_arg)
-            _add_durable_id_attr(durable_args[-1], durable_id_attrs)
+            _add_durable_id_attr(durable_arg, durable_id_attrs)
 
         durable_kwargs: dict[str, Awaitable | Any] = {}
         # Iterate over sorted dict keys to ensure deterministic hash key order.
         sorted_kwarg_keys: list[str] = sorted(awaitable.kwargs.keys())
         for kwarg_name in sorted_kwarg_keys:
             kwarg_value: Awaitable | Any = awaitable.kwargs[kwarg_name]
-            durable_kwarg, awaitable_sequence_number = _to_durable_awaitable_tree(
-                root=kwarg_value,
+            durable_kwarg: Awaitable | Any
+            durable_kwarg, next_awaitable_sequence_number = _to_durable_awaitable_tree(
+                node=kwarg_value,
                 parent_function_call_id=parent_function_call_id,
-                awaitable_sequence_number=awaitable_sequence_number,
+                previous_awaitable_id=previous_awaitable_id,
+                next_awaitable_sequence_number=next_awaitable_sequence_number,
             )
             durable_kwargs[kwarg_name] = durable_kwarg
             _add_durable_id_attr(durable_kwargs[kwarg_name], durable_id_attrs)
@@ -205,7 +212,7 @@ def _to_durable_awaitable_tree(
                 args=durable_args,
                 kwargs=durable_kwargs,
             ),
-            awaitable_sequence_number,
+            next_awaitable_sequence_number,
         )
     else:
         raise InternalError(f"Unexpected Awaitable subclass: {type(awaitable)}")
