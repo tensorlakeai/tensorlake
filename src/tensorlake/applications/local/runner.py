@@ -20,7 +20,7 @@ from tensorlake.applications.blob_store import BLOBStore
 from tensorlake.applications.internal_logger import InternalLogger
 from tensorlake.applications.multiprocessing import setup_multiprocessing
 
-from ..algorithms.validate_user_object import validate_user_object
+from ..algorithms import reduce_operation_to_function_call_chain, validate_user_object
 from ..function.application_call import (
     ApplicationArgument,
     deserialize_application_function_call_arguments,
@@ -1122,25 +1122,14 @@ class LocalRunner:
         has_output_type_hint_override: bool,
         output_type_hint_override: Any,
     ) -> None:
-        """Creates LocalReduceOperationFutureRun for the supplied awaitable.
+        """Creates ReturnOutputFutureRun that returns an awaitable tree equivalent to the supplied reduce operation.
 
         Raises TensorlakeError on error.
         """
-        # inputs have at least two items.
-        function: Function = get_function(awaitable.function_name)
-        # Create a chain of function calls to reduce all inputs one by one.
-        # Ordering of calls is important here. We should reduce ["a", "b", "c", "d"]
-        # using string concat function into "abcd".
-        previous_function_call_awaitable: FunctionCallAwaitable = function.awaitable(
-            awaitable.inputs[0], awaitable.inputs[1]
+        reduce_operation_result: FunctionCallAwaitable = (
+            reduce_operation_to_function_call_chain(awaitable)
         )
-        for input_item in awaitable.inputs[2:]:
-            previous_function_call_awaitable = function.awaitable(
-                previous_function_call_awaitable, input_item
-            )
-        reduce_operation_result = previous_function_call_awaitable
-
-        # Don't create future runs for the function calls chain because we're
+        # Don't create future runs for awaitables in the function calls chain because we're
         # going to return it from ReturnOutputFutureRun as a tail call.
         user_future: ReduceOperationFuture = (
             ReduceOperationFuture(awaitable)
