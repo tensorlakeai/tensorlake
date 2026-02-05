@@ -65,30 +65,6 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                 ),
             },
             {
-                "name": "Single ReduceOperationAwaitable",
-                "node": ReduceOperationAwaitable(
-                    id="awaitable_1",
-                    function_name="reduce_func",
-                    inputs=[1, 2],
-                ),
-                "parent_function_call_id": "parent_function_call_id_123",
-                "previous_awaitable_id": "previous_awaitable_id_456",
-                "expected_node": FunctionCallAwaitable(
-                    id=_sha256_hash_strings(
-                        [
-                            "parent_function_call_id_123",
-                            "previous_awaitable_id_456",
-                            "0",
-                            "FunctionCall",
-                            "reduce_func",
-                        ]
-                    ),
-                    function_name="reduce_func",
-                    args=[1, 2],
-                    kwargs={},
-                ),
-            },
-            {
                 "name": "Single Map Operation AwaitableList",
                 "node": AwaitableList(
                     id="awaitable_list_1",
@@ -111,13 +87,13 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                         [
                             "parent_function_call_id_123",
                             "previous_awaitable_id_456",
-                            "0",
+                            "1",
                             "MAP_OPERATION:map_func",
                             _sha256_hash_strings(
                                 [
                                     "parent_function_call_id_123",
                                     "previous_awaitable_id_456",
-                                    "1",
+                                    "0",
                                     "FunctionCall",
                                     "map_func",
                                 ]
@@ -130,7 +106,7 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                 [
                                     "parent_function_call_id_123",
                                     "previous_awaitable_id_456",
-                                    "1",
+                                    "0",
                                     "FunctionCall",
                                     "map_func",
                                 ]
@@ -194,14 +170,14 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                         [
                             "parent_function_call_id_123",
                             "previous_awaitable_id_456",
-                            "0",
+                            "5",
                             "FunctionCall",
                             "func_1",
                             _sha256_hash_strings(
                                 [
                                     "parent_function_call_id_123",
                                     "previous_awaitable_id_456",
-                                    "1",
+                                    "0",
                                     "FunctionCall",
                                     "func_2",
                                 ]
@@ -210,7 +186,7 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                 [
                                     "parent_function_call_id_123",
                                     "previous_awaitable_id_456",
-                                    "2",
+                                    "4",
                                     "FunctionCall",
                                     "func_3",
                                     _sha256_hash_strings(
@@ -220,12 +196,12 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                             "3",
                                             "FunctionCall",
                                             "func_4",
-                                            # "a" kwarg key first due to alphabetical order
+                                            # "a" kwarg key is before "c" due alphabetical traversal order
                                             _sha256_hash_strings(
                                                 [
                                                     "parent_function_call_id_123",
                                                     "previous_awaitable_id_456",
-                                                    "4",
+                                                    "1",
                                                     "FunctionCall",
                                                     "func_6",
                                                 ]
@@ -234,7 +210,7 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                                 [
                                                     "parent_function_call_id_123",
                                                     "previous_awaitable_id_456",
-                                                    "5",
+                                                    "2",
                                                     "FunctionCall",
                                                     "func_5",
                                                 ]
@@ -252,7 +228,7 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                 [
                                     "parent_function_call_id_123",
                                     "previous_awaitable_id_456",
-                                    "1",
+                                    "0",
                                     "FunctionCall",
                                     "func_2",
                                 ]
@@ -267,7 +243,7 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                 [
                                     "parent_function_call_id_123",
                                     "previous_awaitable_id_456",
-                                    "2",
+                                    "4",
                                     "FunctionCall",
                                     "func_3",
                                     _sha256_hash_strings(
@@ -277,12 +253,12 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                             "3",
                                             "FunctionCall",
                                             "func_4",
-                                            # "a" kwarg key first due to alphabetical order
+                                            # "a" kwarg key is before "c" due alphabetical traversal order
                                             _sha256_hash_strings(
                                                 [
                                                     "parent_function_call_id_123",
                                                     "previous_awaitable_id_456",
-                                                    "4",
+                                                    "1",
                                                     "FunctionCall",
                                                     "func_6",
                                                 ]
@@ -291,7 +267,7 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                                 [
                                                     "parent_function_call_id_123",
                                                     "previous_awaitable_id_456",
-                                                    "5",
+                                                    "2",
                                                     "FunctionCall",
                                                     "func_5",
                                                 ]
@@ -311,12 +287,12 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                             "3",
                                             "FunctionCall",
                                             "func_4",
-                                            # "a" kwarg key first due to alphabetical order
+                                            # "a" kwarg key is after "c" due to reverse alphabetical traversal order
                                             _sha256_hash_strings(
                                                 [
                                                     "parent_function_call_id_123",
                                                     "previous_awaitable_id_456",
-                                                    "4",
+                                                    "1",
                                                     "FunctionCall",
                                                     "func_6",
                                                 ]
@@ -325,7 +301,7 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                                 [
                                                     "parent_function_call_id_123",
                                                     "previous_awaitable_id_456",
-                                                    "5",
+                                                    "2",
                                                     "FunctionCall",
                                                     "func_5",
                                                 ]
@@ -335,12 +311,13 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                     function_name="func_4",
                                     args=[4],
                                     kwargs={
+                                        # "a" kwarg key is before "c" due alphabetical traversal order
                                         "c": FunctionCallAwaitable(
                                             id=_sha256_hash_strings(
                                                 [
                                                     "parent_function_call_id_123",
                                                     "previous_awaitable_id_456",
-                                                    "5",
+                                                    "2",
                                                     "FunctionCall",
                                                     "func_5",
                                                 ]
@@ -354,7 +331,7 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                                 [
                                                     "parent_function_call_id_123",
                                                     "previous_awaitable_id_456",
-                                                    "4",
+                                                    "1",
                                                     "FunctionCall",
                                                     "func_6",
                                                 ]
@@ -372,138 +349,23 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                 ),
             },
             {
-                "name": "Nested Reduce Operations",
-                "node": ReduceOperationAwaitable(
-                    id="reduce_op_1",
-                    function_name="reduce_func_1",
-                    inputs=[
-                        ReduceOperationAwaitable(
-                            id="reduce_op_2",
-                            function_name="reduce_func_2",
-                            inputs=[1, 2, 3],
-                        ),
-                        ReduceOperationAwaitable(
-                            id="reduce_op_3",
-                            function_name="reduce_func_3",
-                            inputs=[5, 6],
-                        ),
-                    ],
-                ),
-                "parent_function_call_id": "parent_function_call_id_327",
-                "previous_awaitable_id": "previous_awaitable_id_456",
-                "expected_node": FunctionCallAwaitable(
-                    id=_sha256_hash_strings(
-                        [
-                            "parent_function_call_id_327",
-                            "previous_awaitable_id_456",
-                            "0",
-                            "FunctionCall",
-                            "reduce_func_1",
-                            _sha256_hash_strings(
-                                [
-                                    "parent_function_call_id_327",
-                                    "previous_awaitable_id_456",
-                                    "1",
-                                    "FunctionCall",
-                                    "reduce_func_2",
-                                    _sha256_hash_strings(
-                                        [
-                                            "parent_function_call_id_327",
-                                            "previous_awaitable_id_456",
-                                            "2",
-                                            "FunctionCall",
-                                            "reduce_func_2",
-                                        ]
-                                    ),
-                                ],
-                            ),
-                            _sha256_hash_strings(
-                                [
-                                    "parent_function_call_id_327",
-                                    "previous_awaitable_id_456",
-                                    "3",
-                                    "FunctionCall",
-                                    "reduce_func_3",
-                                ]
-                            ),
-                        ]
-                    ),
-                    function_name="reduce_func_1",
-                    args=[
-                        FunctionCallAwaitable(
-                            id=_sha256_hash_strings(
-                                [
-                                    "parent_function_call_id_327",
-                                    "previous_awaitable_id_456",
-                                    "1",
-                                    "FunctionCall",
-                                    "reduce_func_2",
-                                    _sha256_hash_strings(
-                                        [
-                                            "parent_function_call_id_327",
-                                            "previous_awaitable_id_456",
-                                            "2",
-                                            "FunctionCall",
-                                            "reduce_func_2",
-                                        ]
-                                    ),
-                                ],
-                            ),
-                            function_name="reduce_func_2",
-                            args=[
-                                FunctionCallAwaitable(
-                                    id=_sha256_hash_strings(
-                                        [
-                                            "parent_function_call_id_327",
-                                            "previous_awaitable_id_456",
-                                            "2",
-                                            "FunctionCall",
-                                            "reduce_func_2",
-                                        ]
-                                    ),
-                                    function_name="reduce_func_2",
-                                    args=[1, 2],
-                                    kwargs={},
-                                ),
-                                3,
-                            ],
-                            kwargs={},
-                        ),
-                        FunctionCallAwaitable(
-                            id=_sha256_hash_strings(
-                                [
-                                    "parent_function_call_id_327",
-                                    "previous_awaitable_id_456",
-                                    "3",
-                                    "FunctionCall",
-                                    "reduce_func_3",
-                                ]
-                            ),
-                            function_name="reduce_func_3",
-                            args=[5, 6],
-                            kwargs={},
-                        ),
-                    ],
-                    kwargs={},
-                ),
-            },
-            {
                 "name": "Mixed Awaitable Tree",
                 "node": AwaitableList(
                     id="1",
                     items=[
-                        ReduceOperationAwaitable(
+                        FunctionCallAwaitable(
                             id="2",
                             function_name="reduce_func_1",
-                            inputs=["123", "125"],
+                            args=["123", "125"],
+                            kwargs={},
                         ),
                         AwaitableList(
                             id="3",
                             items=[
-                                ReduceOperationAwaitable(
+                                FunctionCallAwaitable(
                                     id="4",
                                     function_name="reduce_func_2",
-                                    inputs=[
+                                    args=[
                                         FunctionCallAwaitable(
                                             id="5",
                                             function_name="func_map_1",
@@ -512,6 +374,7 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                         ),
                                         100500,
                                     ],
+                                    kwargs={},
                                 ),
                             ],
                             metadata=_AwaitableListMetadata(
@@ -531,13 +394,13 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                         [
                             "parent_function_call_id_111",
                             "previous_awaitable_id_456",
-                            "0",
+                            "4",
                             "MAP_OPERATION:func_map2",
                             _sha256_hash_strings(
                                 [
                                     "parent_function_call_id_111",
                                     "previous_awaitable_id_456",
-                                    "1",
+                                    "0",
                                     "FunctionCall",
                                     "reduce_func_1",
                                 ]
@@ -546,20 +409,20 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                 [
                                     "parent_function_call_id_111",
                                     "previous_awaitable_id_456",
-                                    "2",
+                                    "3",
                                     "MAP_OPERATION:func_map_1",
                                     _sha256_hash_strings(
                                         [
                                             "parent_function_call_id_111",
                                             "previous_awaitable_id_456",
-                                            "3",
+                                            "2",
                                             "FunctionCall",
                                             "reduce_func_2",
                                             _sha256_hash_strings(
                                                 [
                                                     "parent_function_call_id_111",
                                                     "previous_awaitable_id_456",
-                                                    "4",
+                                                    "1",
                                                     "FunctionCall",
                                                     "func_map_1",
                                                 ]
@@ -576,7 +439,7 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                 [
                                     "parent_function_call_id_111",
                                     "previous_awaitable_id_456",
-                                    "1",
+                                    "0",
                                     "FunctionCall",
                                     "reduce_func_1",
                                 ]
@@ -590,20 +453,20 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                 [
                                     "parent_function_call_id_111",
                                     "previous_awaitable_id_456",
-                                    "2",
+                                    "3",
                                     "MAP_OPERATION:func_map_1",
                                     _sha256_hash_strings(
                                         [
                                             "parent_function_call_id_111",
                                             "previous_awaitable_id_456",
-                                            "3",
+                                            "2",
                                             "FunctionCall",
                                             "reduce_func_2",
                                             _sha256_hash_strings(
                                                 [
                                                     "parent_function_call_id_111",
                                                     "previous_awaitable_id_456",
-                                                    "4",
+                                                    "1",
                                                     "FunctionCall",
                                                     "func_map_1",
                                                 ]
@@ -618,14 +481,14 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                         [
                                             "parent_function_call_id_111",
                                             "previous_awaitable_id_456",
-                                            "3",
+                                            "2",
                                             "FunctionCall",
                                             "reduce_func_2",
                                             _sha256_hash_strings(
                                                 [
                                                     "parent_function_call_id_111",
                                                     "previous_awaitable_id_456",
-                                                    "4",
+                                                    "1",
                                                     "FunctionCall",
                                                     "func_map_1",
                                                 ]
@@ -639,7 +502,7 @@ class TestToDurableAwaitableTree(unittest.TestCase):
                                                 [
                                                     "parent_function_call_id_111",
                                                     "previous_awaitable_id_456",
-                                                    "4",
+                                                    "1",
                                                     "FunctionCall",
                                                     "func_map_1",
                                                 ]

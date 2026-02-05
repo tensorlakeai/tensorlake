@@ -1,11 +1,15 @@
 import hashlib
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 from tensorlake.applications import (
     Function,
     InternalError,
 )
-from tensorlake.applications.algorithms import reduce_operation_to_function_call_chain
+from tensorlake.applications.algorithms import (
+    copy_awaitable_tree,
+    dfs_bottom_up,
+    reduce_operation_to_function_call_chain,
+)
 from tensorlake.applications.function.application_call import (
     SerializedApplicationArgument,
     deserialize_application_function_call_arguments,
@@ -47,7 +51,6 @@ from ..proto.function_executor_pb2 import (
     FunctionArg,
     FunctionCall,
     FunctionRef,
-    ReduceOp,
     SerializedObjectInsideBLOB,
 )
 from .http_request_parse import (
@@ -58,6 +61,51 @@ from .http_request_parse import (
 from .value import SerializedValue, Value
 
 
+def to_runnable_awaitable_tree(root: Awaitable) -> Awaitable:
+    """Returns a new awaitable tree semantically equivalent to the supplied tree but that can run on Server.
+
+    The tree must be validated already.
+    Raises InternalError on error.
+    """
+    new_root: Awaitable = _to_runnable(copy_awaitable_tree(root))
+    stack: list[Awaitable] = [new_root]
+
+    while len(stack) > 0:
+        node: Awaitable = stack.pop()
+
+        if isinstance(node, AwaitableList):
+            for i in range(len(node.items)):
+                runnable_item: Awaitable | Any = _to_runnable(node.items[i])
+                if isinstance(runnable_item, Awaitable):
+                    node.items[i] = runnable_item
+                    stack.append(runnable_item)
+
+        elif isinstance(node, FunctionCallAwaitable):
+            for i in range(len(node.args)):
+                runnable_arg: Awaitable | Any = _to_runnable(node.args[i])
+                if isinstance(runnable_arg, Awaitable):
+                    node.args[i] = runnable_arg
+                    stack.append(runnable_arg)
+            for kwarg_key in node.kwargs.keys():
+                kwarg: Awaitable | Any = _to_runnable(node.kwargs[kwarg_key])
+                if isinstance(kwarg, Awaitable):
+                    node.kwargs[kwarg_key] = kwarg
+                    stack.append(kwarg)
+
+        # ReduceOperationAwaitable should have been already converted into FunctionCallAwaitable chain.
+        else:
+            raise InternalError(f"Unexpected Awaitable subclass: {type(node)}")
+
+    return new_root
+
+
+def _to_runnable(node: Awaitable | Any) -> Awaitable | Any:
+    if isinstance(node, ReduceOperationAwaitable):
+        return reduce_operation_to_function_call_chain(node)
+    else:
+        return node
+
+
 def to_durable_awaitable_tree(
     root: Awaitable,
     parent_function_call_id: str,
@@ -65,10 +113,8 @@ def to_durable_awaitable_tree(
 ) -> Awaitable:
     """Returns a semantically equivalent shallow copy of the supplied Awaitable tree with Awaitable IDs supporting durable execution.
 
-    The shallow copy has a semantically equivalent structure as the original tree, but:
-    1. Each Awaitable in the tree has its ID replaced with a durable ID.
-    2. All ReduceOperationAwaitables are replaced with chains of FunctionCallAwaitables.
-    User provided values are kept in the returned tree as is.
+    The shallow copy has a semantically equivalent structure as the original tree, but each Awaitable in the tree has its ID replaced
+    with a durable ID. User provided values are kept in the returned tree as is.
 
     parent_function_call_id is ID of the function call that created the awaitable tree.
     previous_awaitable_id is ID of the previous awaitable created by the parent function call.
@@ -108,28 +154,39 @@ def to_durable_awaitable_tree(
 
     Raises TensorlakeError on error.
     """
-    if not isinstance(root, Awaitable):
-        raise InternalError("Root of the awaitable tree must be an Awaitable.")
-    return _to_durable_awaitable_tree(
-        node=root,
-        parent_function_call_id=parent_function_call_id,
-        previous_awaitable_id=previous_awaitable_id,
-        next_awaitable_sequence_number=0,
-    )[0]
+    # Warning: any change of ordering of operations in this function may lead to different durable IDs being generated
+    # which may lead to re-execution of function calls on Server side even if nothing changed in the awaitable tree.
+    awaitable_id_to_durable_awaitable: Dict[str, Awaitable] = {}
+    next_awaitable_sequence_number: int = 0
+
+    for awaitable in dfs_bottom_up(root, leaf_awaitable_types=()):
+        awaitable: Awaitable
+        durable_awaitable, next_awaitable_sequence_number = _to_durable_awaitable(
+            awaitable=awaitable,
+            parent_function_call_id=parent_function_call_id,
+            previous_awaitable_id=previous_awaitable_id,
+            next_awaitable_sequence_number=next_awaitable_sequence_number,
+            awaitable_id_to_durable_awaitable=awaitable_id_to_durable_awaitable,
+        )
+        awaitable_id_to_durable_awaitable[awaitable.id] = durable_awaitable
+
+    return awaitable_id_to_durable_awaitable[root.id]
 
 
-def _to_durable_awaitable_tree(
-    node: Awaitable | Any,
+def _to_durable_awaitable(
+    awaitable: Awaitable,
     parent_function_call_id: str,
     previous_awaitable_id: str,
     next_awaitable_sequence_number: int,
-) -> tuple[Awaitable | Any, int]:
-    # NB: Any change to ordering of operations in this function results in change of durable IDs for all durable Awaitables
-    # which would lead to previously computed IDs not being replayable anymore.
-    if not isinstance(node, Awaitable):
-        return node, next_awaitable_sequence_number  # Return user-provided value as is.
+    awaitable_id_to_durable_awaitable: Dict[str, Awaitable],
+) -> tuple[Awaitable, int]:
+    """Returns a durable version of the given awaitable.
 
-    awaitable: Awaitable = node
+    This function assumes that all child awaitables of the given awaitable have been already converted into
+    durable versions and are present in awaitable_id_to_durable_awaitable.
+    """
+    # Warning: any change of ordering of operations in this function may lead to different durable IDs being generated
+    # which may lead to re-execution of function calls on Server side even if nothing changed in the awaitable tree.
     durable_id_attrs: list[str] = [
         parent_function_call_id,
         previous_awaitable_id,
@@ -144,12 +201,10 @@ def _to_durable_awaitable_tree(
         durable_items: list[Awaitable | Any] = []
         for item in awaitable.items:
             durable_item: Awaitable | Any
-            durable_item, next_awaitable_sequence_number = _to_durable_awaitable_tree(
-                node=item,
-                parent_function_call_id=parent_function_call_id,
-                previous_awaitable_id=previous_awaitable_id,
-                next_awaitable_sequence_number=next_awaitable_sequence_number,
-            )
+            if isinstance(item, Awaitable):
+                durable_item = awaitable_id_to_durable_awaitable[item.id]
+            else:
+                durable_item = item
             durable_items.append(durable_item)
             _add_durable_id_attr(durable_item, durable_id_attrs)
 
@@ -162,18 +217,6 @@ def _to_durable_awaitable_tree(
             next_awaitable_sequence_number,
         )
 
-    elif isinstance(awaitable, ReduceOperationAwaitable):
-        awaitable: FunctionCallAwaitable = reduce_operation_to_function_call_chain(
-            awaitable
-        )
-        return _to_durable_awaitable_tree(
-            node=awaitable,
-            parent_function_call_id=parent_function_call_id,
-            previous_awaitable_id=previous_awaitable_id,
-            # We didn't create a new awaitable here. So don't inc the sequence number in current call.
-            next_awaitable_sequence_number=next_awaitable_sequence_number - 1,
-        )
-
     elif isinstance(awaitable, FunctionCallAwaitable):
         awaitable: FunctionCallAwaitable
         # Awaitable specific metadata, part of durable ID.
@@ -181,12 +224,10 @@ def _to_durable_awaitable_tree(
         durable_args: list[Awaitable | Any] = []
         for arg in awaitable.args:
             durable_arg: Awaitable | Any
-            durable_arg, next_awaitable_sequence_number = _to_durable_awaitable_tree(
-                node=arg,
-                parent_function_call_id=parent_function_call_id,
-                previous_awaitable_id=previous_awaitable_id,
-                next_awaitable_sequence_number=next_awaitable_sequence_number,
-            )
+            if isinstance(arg, Awaitable):
+                durable_arg = awaitable_id_to_durable_awaitable[arg.id]
+            else:
+                durable_arg = arg
             durable_args.append(durable_arg)
             _add_durable_id_attr(durable_arg, durable_id_attrs)
 
@@ -196,12 +237,10 @@ def _to_durable_awaitable_tree(
         for kwarg_name in sorted_kwarg_keys:
             kwarg_value: Awaitable | Any = awaitable.kwargs[kwarg_name]
             durable_kwarg: Awaitable | Any
-            durable_kwarg, next_awaitable_sequence_number = _to_durable_awaitable_tree(
-                node=kwarg_value,
-                parent_function_call_id=parent_function_call_id,
-                previous_awaitable_id=previous_awaitable_id,
-                next_awaitable_sequence_number=next_awaitable_sequence_number,
-            )
+            if isinstance(kwarg_value, Awaitable):
+                durable_kwarg = awaitable_id_to_durable_awaitable[kwarg_value.id]
+            else:
+                durable_kwarg = kwarg_value
             durable_kwargs[kwarg_name] = durable_kwarg
             _add_durable_id_attr(durable_kwargs[kwarg_name], durable_id_attrs)
 
@@ -214,32 +253,10 @@ def _to_durable_awaitable_tree(
             ),
             next_awaitable_sequence_number,
         )
+    # ReduceOperationAwaitable should have been already converted into FunctionCallAwaitable chain
+    # by reduce_operation_to_function_call_chain before calling this function.
     else:
         raise InternalError(f"Unexpected Awaitable subclass: {type(awaitable)}")
-
-
-def serialize_values_in_awaitable_tree(
-    root: Awaitable,
-    value_serializer: UserDataSerializer,
-    serialized_values: Dict[str, SerializedValue],
-) -> Awaitable:
-    """Converts values in the given Awaitable tree into SerializedValues.
-
-    The provided Awaitable tree is modified in-place with each user supplied value being
-    SerializedValue instead of the original user object. Updates serialized_values with
-    each SerializedValue created from concrete values. serialized_values is mapping from
-    value ID to SerializedValue.
-
-    Raises SerializationError if serialization of any value fails.
-    Raises TensorlakeError for other errors.
-    """
-    if not isinstance(root, Awaitable):
-        raise InternalError("Root of the awaitable tree must be an Awaitable.")
-    return _serialize_values_in_awaitable_tree(
-        root=root,
-        value_serializer=value_serializer,
-        serialized_values=serialized_values,
-    )
 
 
 def serialize_user_value(
@@ -261,67 +278,75 @@ def serialize_user_value(
     )
 
 
-def _serialize_values_in_awaitable_tree(
-    root: Awaitable | Any,
-    value_serializer: UserDataSerializer,
-    serialized_values: Dict[str, SerializedValue],
-) -> Awaitable | SerializedValue:
-    # NB: This code needs to be in sync with LocalRunner where it's doing a similar thing.
-    if not isinstance(root, Awaitable):
+def replace_user_values_with_serialized_values(
+    root: Awaitable,
+    root_serializer: UserDataSerializer,
+) -> Dict[str, SerializedValue]:
+    """Replaces user values in the given Awaitable tree with their SerializedValues.
+
+    The provided Awaitable tree is modified in-place with each user supplied value being
+    SerializedValue instead of the original user object.
+
+    Returns a mapping from value ID to SerializedValue for all serialized user values in the tree.
+
+    Raises SerializationError if serialization of any value fails.
+    Raises TensorlakeError for other errors.
+    """
+    serialized_values: Dict[str, SerializedValue] = {}
+
+    def to_serialized_value(
+        value: Any, value_serializer: UserDataSerializer
+    ) -> SerializedValue:
         serialized_value: SerializedValue = serialize_user_value(
-            value=root,
+            value=value,
             serializer=value_serializer,
-            type_hint=type(root),
+            type_hint=type(value),
         )
         serialized_values[serialized_value.metadata.id] = serialized_value
         return serialized_value
 
-    awaitable: Awaitable = root
-    if isinstance(awaitable, AwaitableList):
-        awaitable: AwaitableList
-        for index, item in enumerate(list(awaitable.items)):
+    # NB: This code needs to be in sync with LocalRunner where it's doing a similar thing.
+    stack: list[tuple[Awaitable, UserDataSerializer]] = [(root, root_serializer)]
+    while len(stack) > 0:
+        awaitable: Awaitable
+        awaitable_serializer: UserDataSerializer
+        awaitable, awaitable_serializer = stack.pop()
+
+        if isinstance(awaitable, AwaitableList):
             # Iterating over list copy to allow modifying the original list.
-            awaitable.items[index] = _serialize_values_in_awaitable_tree(
-                root=item,
-                value_serializer=value_serializer,
-                serialized_values=serialized_values,
+            for index, item in enumerate(list(awaitable.items)):
+                if isinstance(item, Awaitable):
+                    stack.append((item, awaitable_serializer))
+                else:
+                    awaitable.items[index] = to_serialized_value(
+                        value=item, value_serializer=awaitable_serializer
+                    )
+        elif isinstance(awaitable, FunctionCallAwaitable):
+            args_serializer: UserDataSerializer = function_input_serializer(
+                get_function(awaitable.function_name), app_call=False
             )
-        return awaitable
-    elif isinstance(awaitable, ReduceOperationAwaitable):
-        awaitable: ReduceOperationAwaitable
-        args_serializer: UserDataSerializer = function_input_serializer(
-            get_function(awaitable.function_name), app_call=False
-        )
-        for index, item in enumerate(list(awaitable.inputs)):
             # Iterating over list copy to allow modifying the original list.
-            awaitable.inputs[index] = _serialize_values_in_awaitable_tree(
-                root=item,
-                value_serializer=args_serializer,
-                serialized_values=serialized_values,
-            )
-        return awaitable
-    elif isinstance(awaitable, FunctionCallAwaitable):
-        awaitable: FunctionCallAwaitable
-        args_serializer: UserDataSerializer = function_input_serializer(
-            get_function(awaitable.function_name), app_call=False
-        )
-        for index, arg in enumerate(list(awaitable.args)):
-            # Iterating over list copy to allow modifying the original list.
-            awaitable.args[index] = _serialize_values_in_awaitable_tree(
-                root=arg,
-                value_serializer=args_serializer,
-                serialized_values=serialized_values,
-            )
-        for kwarg_name, kwarg_value in dict(awaitable.kwargs).items():
+            for index, arg in enumerate(list(awaitable.args)):
+                if isinstance(arg, Awaitable):
+                    stack.append((arg, args_serializer))
+                else:
+                    awaitable.args[index] = to_serialized_value(
+                        value=arg, value_serializer=args_serializer
+                    )
             # Iterating over dict copy to allow modifying the original list.
-            awaitable.kwargs[kwarg_name] = _serialize_values_in_awaitable_tree(
-                root=kwarg_value,
-                value_serializer=args_serializer,
-                serialized_values=serialized_values,
-            )
-        return awaitable
-    else:
-        raise InternalError(f"Unexpected Awaitable subclass: {type(awaitable)}")
+            for kwarg_name, kwarg_value in dict(awaitable.kwargs).items():
+                if isinstance(kwarg_value, Awaitable):
+                    stack.append((kwarg_value, args_serializer))
+                else:
+                    awaitable.kwargs[kwarg_name] = to_serialized_value(
+                        value=kwarg_value, value_serializer=args_serializer
+                    )
+        # ReduceOperationAwaitable should have been already converted into FunctionCallAwaitable
+        # by to_durable_awaitable_tree before calling this function.
+        else:
+            raise InternalError(f"Unexpected Awaitable subclass: {type(awaitable)}")
+
+    return serialized_values
 
 
 def to_execution_plan_updates(
@@ -331,7 +356,6 @@ def to_execution_plan_updates(
     has_output_type_hint_override: bool,
     output_type_hint_override: Any,
     function_ref: FunctionRef,
-    logger: InternalLogger,
 ) -> ExecutionPlanUpdates:
     """Traverses the awaitable tree and constructs ExecutionPlanUpdates proto.
 
@@ -343,14 +367,13 @@ def to_execution_plan_updates(
     """
     updates: List[ExecutionPlanUpdate] = []
     _fill_execution_plan_updates(
-        awaitable=awaitable,
+        root=awaitable,
         uploaded_serialized_objects=uploaded_serialized_objects,
         output_serializer_name_override=output_serializer_name_override,
         has_output_type_hint_override=has_output_type_hint_override,
         output_type_hint_override=output_type_hint_override,
         destination=updates,
         function_ref=function_ref,
-        logger=logger,
     )
     return ExecutionPlanUpdates(
         updates=updates,
@@ -359,224 +382,200 @@ def to_execution_plan_updates(
 
 
 def _fill_execution_plan_updates(
-    awaitable: Awaitable,
+    root: Awaitable,
     uploaded_serialized_objects: Dict[str, SerializedObjectInsideBLOB],
     output_serializer_name_override: str | None,
     has_output_type_hint_override: bool,
     output_type_hint_override: Any,
     destination: List[ExecutionPlanUpdate],
     function_ref: FunctionRef,
-    logger: InternalLogger,
 ) -> None:
-    if isinstance(awaitable, FunctionCallAwaitable):
-        metadata: FunctionCallMetadata = FunctionCallMetadata(
-            id=awaitable.id,
-            output_serializer_name_override=output_serializer_name_override,
-            output_type_hint_override=output_type_hint_override,
-            has_output_type_hint_override=has_output_type_hint_override,
-            args=[],
-            kwargs={},
+    stack: list[Awaitable] = [root]
+    while len(stack) > 0:
+        node: Awaitable = stack.pop()
+        # Only override at root function call.
+        node_output_serializer_name_override = (
+            output_serializer_name_override if node is root else None
         )
-        function_pb_args: List[FunctionArg] = []
+        node_has_output_type_hint_override = (
+            has_output_type_hint_override if node is root else False
+        )
+        node_output_type_hint_override = (
+            output_type_hint_override if node is root else None
+        )
 
-        def process_function_call_argument(arg: Any) -> FunctionCallArgumentMetadata:
-            if isinstance(arg, SerializedValue):
-                function_pb_args.append(
-                    FunctionArg(
-                        value=uploaded_serialized_objects[arg.metadata.id],
-                    )
-                )
-                return FunctionCallArgumentMetadata(
-                    value_id=arg.metadata.id,
-                    collection=None,
-                )
-            elif isinstance(arg, AwaitableList):
-                _embed_collection_into_function_pb_args(
-                    awaitable=arg,
+        if isinstance(node, FunctionCallAwaitable):
+            destination.append(
+                _function_call_execution_plan_update(
+                    awaitable=node,
                     uploaded_serialized_objects=uploaded_serialized_objects,
-                    function_pb_args=function_pb_args,
-                    logger=logger,
-                )
-                # Collection is fully embedded now into function call args but its function
-                # calls are not in the execution plan yet.
-                for item in arg.items:
-                    if isinstance(
-                        item, (FunctionCallAwaitable, ReduceOperationAwaitable)
-                    ):
-                        _fill_execution_plan_updates(
-                            awaitable=item,
-                            uploaded_serialized_objects=uploaded_serialized_objects,
-                            output_serializer_name_override=None,  # Only override at root function call.
-                            has_output_type_hint_override=False,  # Only override at root function call.
-                            output_type_hint_override=None,  # Only override at root function call.
-                            destination=destination,
-                            function_ref=function_ref,
-                            logger=logger,
-                        )
-                return FunctionCallArgumentMetadata(
-                    value_id=None,
-                    collection=_to_collection_metadata(arg, logger),
-                )
-            elif isinstance(arg, (FunctionCallAwaitable, ReduceOperationAwaitable)):
-                _fill_execution_plan_updates(
-                    awaitable=arg,
-                    uploaded_serialized_objects=uploaded_serialized_objects,
-                    output_serializer_name_override=None,  # Only override at root function call.
-                    has_output_type_hint_override=False,  # Only override at root function call.
-                    output_type_hint_override=None,  # Only override at root function call.
-                    destination=destination,
+                    output_serializer_name_override=node_output_serializer_name_override,
+                    has_output_type_hint_override=node_has_output_type_hint_override,
+                    output_type_hint_override=node_output_type_hint_override,
                     function_ref=function_ref,
-                    logger=logger,
                 )
-                function_pb_args.append(
-                    FunctionArg(
-                        function_call_id=arg.id,
-                    )
-                )
-                return FunctionCallArgumentMetadata(
-                    value_id=arg.id,
-                    collection=None,
-                )
-            else:
-                raise InternalError(
-                    f"Unexpected type of function call argument: {type(arg)}"
-                )
-
-        for arg in awaitable.args:
-            metadata.args.append(process_function_call_argument(arg))
-
-        for kwarg_name, kwarg_value in awaitable.kwargs.items():
-            metadata.kwargs[kwarg_name] = process_function_call_argument(kwarg_value)
-
-        update = ExecutionPlanUpdate(
-            function_call=FunctionCall(
-                id=awaitable.id,
-                target=FunctionRef(
-                    namespace=function_ref.namespace,
-                    application_name=function_ref.application_name,
-                    function_name=awaitable.function_name,
-                    application_version=function_ref.application_version,
-                ),
-                args=function_pb_args,
-                call_metadata=serialize_metadata(metadata),
             )
-        )
-        destination.append(update)
+            for arg_value in node.args:
+                if isinstance(arg_value, Awaitable):
+                    stack.append(arg_value)
 
-    elif isinstance(awaitable, ReduceOperationAwaitable):
-        metadata: ReduceOperationMetadata = ReduceOperationMetadata(
-            id=awaitable.id,
-            output_serializer_name_override=output_serializer_name_override,
-            output_type_hint_override=output_type_hint_override,
-            has_output_type_hint_override=has_output_type_hint_override,
-        )
-        collection: List[FunctionArg] = []
+            for kwarg_value in node.kwargs.values():
+                if isinstance(kwarg_value, Awaitable):
+                    stack.append(kwarg_value)
 
-        for item in awaitable.inputs:
-            if isinstance(item, SerializedValue):
-                collection.append(
-                    FunctionArg(
-                        value=uploaded_serialized_objects[item.metadata.id],
-                    )
-                )
-            # AwaitableList inside ReduceOperation inputs is not supported. We checked for this during user object validation.
-            elif isinstance(item, (FunctionCallAwaitable, ReduceOperationAwaitable)):
-                _fill_execution_plan_updates(
-                    awaitable=item,
-                    uploaded_serialized_objects=uploaded_serialized_objects,
-                    output_serializer_name_override=None,  # Only override at root function call.
-                    has_output_type_hint_override=False,  # Only override at root function call.
-                    output_type_hint_override=None,  # Only override at root function call.
-                    destination=destination,
-                    function_ref=function_ref,
-                    logger=logger,
-                )
-                collection.append(
-                    FunctionArg(
-                        function_call_id=item.id,
-                    )
-                )
-            else:
-                raise InternalError(
-                    f"Unexpected type of reduce operation input item: {type(item)}"
-                )
+        elif isinstance(node, AwaitableList):
+            # This collection is fully embedded now into function call args but its function
+            # calls are not in the execution plan yet.
+            for item in node.items:
+                if isinstance(item, Awaitable):
+                    stack.append(item)
 
-        update = ExecutionPlanUpdate(
-            reduce=ReduceOp(
-                id=awaitable.id,
-                reducer=FunctionRef(
-                    namespace=function_ref.namespace,
-                    application_name=function_ref.application_name,
-                    function_name=awaitable.function_name,
-                    application_version=function_ref.application_version,
-                ),
-                collection=collection,
-                call_metadata=serialize_metadata(metadata),
-            )
-        )
-        destination.append(update)
-    else:
-        raise InternalError(f"Unexpected Awaitable subclass: {type(awaitable)}")
+        else:
+            raise InternalError(f"Unexpected Awaitable subclass: {type(node)}")
 
 
-def _to_collection_metadata(
-    awaitable: AwaitableList, logger: InternalLogger
-) -> CollectionMetadata:
-    collection_metadata: CollectionMetadata = CollectionMetadata(
-        items=[],
+def _function_call_execution_plan_update(
+    awaitable: FunctionCallAwaitable,
+    uploaded_serialized_objects: Dict[str, SerializedObjectInsideBLOB],
+    output_serializer_name_override: str | None,
+    has_output_type_hint_override: bool,
+    output_type_hint_override: Any,
+    function_ref: FunctionRef,
+) -> ExecutionPlanUpdate:
+    metadata: FunctionCallMetadata = FunctionCallMetadata(
+        id=awaitable.id,
+        output_serializer_name_override=output_serializer_name_override,
+        output_type_hint_override=output_type_hint_override,
+        has_output_type_hint_override=has_output_type_hint_override,
+        args=[],
+        kwargs={},
     )
-    for item in awaitable.items:
-        if isinstance(item, SerializedValue):
-            collection_metadata.items.append(
-                CollectionItemMetadata(
-                    value_id=item.metadata.id,
-                    collection=None,
+    function_pb_args: List[FunctionArg] = []
+
+    def process_function_call_argument(arg: Any) -> FunctionCallArgumentMetadata:
+        if isinstance(arg, SerializedValue):
+            function_pb_args.append(
+                FunctionArg(
+                    value=uploaded_serialized_objects[arg.metadata.id],
                 )
             )
-        elif isinstance(item, AwaitableList):
-            collection_metadata.items.append(
-                CollectionItemMetadata(
-                    value_id=None,
-                    collection=_to_collection_metadata(item, logger),
+            return FunctionCallArgumentMetadata(
+                value_id=arg.metadata.id,
+                collection=None,
+            )
+        elif isinstance(arg, AwaitableList):
+            _embed_collection_into_function_pb_args(
+                awaitable=arg,
+                uploaded_serialized_objects=uploaded_serialized_objects,
+                function_pb_args=function_pb_args,
+            )
+            return FunctionCallArgumentMetadata(
+                value_id=None,
+                collection=_to_collection_metadata(arg),
+            )
+        elif isinstance(arg, (FunctionCallAwaitable, ReduceOperationAwaitable)):
+            function_pb_args.append(
+                FunctionArg(
+                    function_call_id=arg.id,
                 )
             )
-        elif isinstance(item, (FunctionCallAwaitable, ReduceOperationAwaitable)):
-            collection_metadata.items.append(
-                CollectionItemMetadata(
-                    value_id=item.id,
-                    collection=None,
-                )
+            return FunctionCallArgumentMetadata(
+                value_id=arg.id,
+                collection=None,
             )
         else:
-            raise InternalError(f"Unexpected type of AwaitableList item: {type(item)}")
-    return collection_metadata
+            raise InternalError(
+                f"Unexpected type of function call argument: {type(arg)}"
+            )
+
+    for arg in awaitable.args:
+        metadata.args.append(process_function_call_argument(arg))
+
+    for kwarg_name, kwarg_value in awaitable.kwargs.items():
+        metadata.kwargs[kwarg_name] = process_function_call_argument(kwarg_value)
+
+    return ExecutionPlanUpdate(
+        function_call=FunctionCall(
+            id=awaitable.id,
+            target=FunctionRef(
+                namespace=function_ref.namespace,
+                application_name=function_ref.application_name,
+                function_name=awaitable.function_name,
+                application_version=function_ref.application_version,
+            ),
+            args=function_pb_args,
+            call_metadata=serialize_metadata(metadata),
+        )
+    )
+
+
+def _to_collection_metadata(awaitable: AwaitableList) -> CollectionMetadata:
+    result: CollectionMetadata = CollectionMetadata(items=[])
+    stack: list[(AwaitableList, CollectionMetadata)] = [(awaitable, result)]
+    while len(stack) > 0:
+        awaitable, collection_metadata = stack.pop()
+        awaitable: AwaitableList
+        collection_metadata: CollectionMetadata
+
+        for item in awaitable.items:
+            if isinstance(item, SerializedValue):
+                collection_metadata.items.append(
+                    CollectionItemMetadata(
+                        value_id=item.metadata.id,
+                        collection=None,
+                    )
+                )
+            elif isinstance(item, AwaitableList):
+                item_collection_metadata = CollectionMetadata(items=[])
+                stack.append((item, item_collection_metadata))
+                collection_metadata.items.append(
+                    CollectionItemMetadata(
+                        value_id=None,
+                        collection=item_collection_metadata,
+                    )
+                )
+            elif isinstance(item, (FunctionCallAwaitable, ReduceOperationAwaitable)):
+                collection_metadata.items.append(
+                    CollectionItemMetadata(
+                        value_id=item.id,
+                        collection=None,
+                    )
+                )
+            else:
+                raise InternalError(
+                    f"Unexpected type of AwaitableList item: {type(item)}"
+                )
+
+    return result
 
 
 def _embed_collection_into_function_pb_args(
     awaitable: AwaitableList,
     uploaded_serialized_objects: Dict[str, SerializedObjectInsideBLOB],
     function_pb_args: List[FunctionArg],
-    logger: InternalLogger,
 ) -> None:
-    for item in awaitable.items:
-        if isinstance(item, SerializedValue):
-            function_pb_args.append(
-                FunctionArg(
-                    value=uploaded_serialized_objects[item.metadata.id],
+    stack: list[list[Awaitable | Any]] = [awaitable.items]
+    while len(stack) > 0:
+        collection = stack.pop()
+        for item in collection:
+            if isinstance(item, SerializedValue):
+                function_pb_args.append(
+                    FunctionArg(
+                        value=uploaded_serialized_objects[item.metadata.id],
+                    )
                 )
-            )
-        elif isinstance(item, AwaitableList):
-            _embed_collection_into_function_pb_args(
-                item, uploaded_serialized_objects, function_pb_args, logger
-            )
-        elif isinstance(item, (FunctionCallAwaitable, ReduceOperationAwaitable)):
-            function_pb_args.append(
-                FunctionArg(
-                    function_call_id=item.id,
+            elif isinstance(item, AwaitableList):
+                stack.append(item.items)
+            elif isinstance(item, (FunctionCallAwaitable, ReduceOperationAwaitable)):
+                function_pb_args.append(
+                    FunctionArg(
+                        function_call_id=item.id,
+                    )
                 )
-            )
-        else:
-            raise InternalError(f"Unexpected type of AwaitableList item: {type(item)}")
+            else:
+                raise InternalError(
+                    f"Unexpected type of AwaitableList item: {type(item)}"
+                )
 
 
 def deserialize_application_function_call_args(
@@ -783,13 +782,20 @@ def _reconstruct_collection_value(
 ) -> List[Any]:
     """Reconstructs the original values from the supplied collection metadata."""
     # NB: This code needs to be in sync with LocalRunner where it's doing a similar thing.
-    values: List[Any] = []
-    for item in collection_metadata.items:
-        if item.collection is None:
-            values.append(arg_values[item.value_id].object)
-        else:
-            values.append(_reconstruct_collection_value(item.collection, arg_values))
-    return values
+    result: list[Any] = []
+    stack: list[tuple[CollectionMetadata, list[Any]]] = [(collection_metadata, result)]
+    while len(stack) > 0:
+        collection_metadata, collection_values = stack.pop()
+
+        for item in collection_metadata.items:
+            if item.collection is None:
+                collection_values.append(arg_values[item.value_id].object)
+            else:
+                item_collection: list[Any] = []
+                stack.append((item.collection, item_collection))
+                collection_values.append(item_collection)
+
+    return result
 
 
 def _add_durable_id_attr(node: Awaitable | Any, durable_attrs: list[str]) -> None:
