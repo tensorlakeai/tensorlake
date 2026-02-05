@@ -7,7 +7,9 @@ import grpc
 from models import FileChunk
 from testing import (
     FunctionExecutorProcessContextManager,
+    HTTPBodyPart,
     application_function_inputs,
+    create_multipart_invoke_http_request,
     create_request_error_blob,
     create_tmp_blob,
     download_and_deserialize_so,
@@ -100,6 +102,14 @@ def api_function_blocking_call(url: str) -> FileChunk:
     )[1]
 
 
+@application()
+@function()
+def api_function_stringify_multiple_args(
+    arg1: str, arg2: int, arg3: bool, arg4: None
+) -> str:
+    return f"arg1: {arg1}, arg2: {arg2}, arg3: {arg3}, arg4: {arg4}"
+
+
 @function()
 def file_chunker(file: File, num_chunks: int) -> List[FileChunk]:
     print(f"file_chunker called with file data: {file.content.decode()}")
@@ -151,14 +161,6 @@ class TestRunAllocation(unittest.TestCase):
                     InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
                 )
 
-                user_serializer: JSONUserDataSerializer = JSONUserDataSerializer()
-                serialized_api_payload: bytes = user_serializer.serialize(
-                    "https://example.com"
-                )
-                api_payload_blob: BLOB = write_new_application_payload_blob(
-                    serialized_api_payload
-                )
-
                 allocation_id: str = "test-allocation-id"
                 alloc_result: AllocationResult = run_allocation_that_returns_output(
                     self,
@@ -168,24 +170,8 @@ class TestRunAllocation(unittest.TestCase):
                             request_id="123",
                             function_call_id="test-function-call",
                             allocation_id=allocation_id,
-                            inputs=FunctionInputs(
-                                args=[
-                                    SerializedObjectInsideBLOB(
-                                        manifest=SerializedObjectManifest(
-                                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON,
-                                            encoding_version=0,
-                                            size=len(serialized_api_payload),
-                                            metadata_size=0,  # No metadata for API function calls.
-                                            sha256_hash=hashlib.sha256(
-                                                serialized_api_payload
-                                            ).hexdigest(),
-                                        ),
-                                        offset=0,
-                                    )
-                                ],
-                                arg_blobs=[api_payload_blob],
-                                request_error_blob=create_request_error_blob(),
-                                function_call_metadata=b"",
+                            inputs=application_function_inputs(
+                                "https://example.com", str
                             ),
                         ),
                     ),
@@ -297,14 +283,6 @@ class TestRunAllocation(unittest.TestCase):
                     InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
                 )
 
-                user_serializer: JSONUserDataSerializer = JSONUserDataSerializer()
-                serialized_api_payload: bytes = user_serializer.serialize(
-                    "https://blocking-example.com"
-                )
-                api_payload_blob: BLOB = write_new_application_payload_blob(
-                    serialized_api_payload
-                )
-
                 allocation_id: str = "test-allocation-id"
                 allocation_states: Iterator[AllocationState] = run_allocation(
                     stub,
@@ -313,24 +291,8 @@ class TestRunAllocation(unittest.TestCase):
                             request_id="123",
                             function_call_id="test-function-call",
                             allocation_id=allocation_id,
-                            inputs=FunctionInputs(
-                                args=[
-                                    SerializedObjectInsideBLOB(
-                                        manifest=SerializedObjectManifest(
-                                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON,
-                                            encoding_version=0,
-                                            size=len(serialized_api_payload),
-                                            metadata_size=0,  # No metadata for API function calls.
-                                            sha256_hash=hashlib.sha256(
-                                                serialized_api_payload
-                                            ).hexdigest(),
-                                        ),
-                                        offset=0,
-                                    )
-                                ],
-                                arg_blobs=[api_payload_blob],
-                                request_error_blob=create_request_error_blob(),
-                                function_call_metadata=b"",
+                            inputs=application_function_inputs(
+                                "https://blocking-example.com", str
                             ),
                         ),
                     ),
@@ -476,9 +438,9 @@ class TestRunAllocation(unittest.TestCase):
                 serialized_function_call_output_metadata: bytes = serialize_metadata(
                     ValueMetadata(
                         id="function-call-output-id",
-                        cls=list,
+                        type_hint=list[FileChunk],
                         serializer_name=user_serializer.name,
-                        content_type=None,
+                        content_type=user_serializer.content_type,
                     )
                 )
                 serialized_function_call_output: bytes = user_serializer.serialize(
@@ -498,7 +460,8 @@ class TestRunAllocation(unittest.TestCase):
                             start=2,
                             end=3,
                         ),
-                    ]
+                    ],
+                    type_hint=list[FileChunk],
                 )
 
                 function_call_output_blob_data: bytes = b"".join(
@@ -609,6 +572,125 @@ class TestRunAllocation(unittest.TestCase):
             fe_stdout,
         )
 
+    def test_api_function_call_via_http_request_forwarding(self):
+        # This mode is not currently used by Server so it's very important
+        # to have a test for it to make sure that this mode works in all FEs
+        # once we enable it in Server.
+        with FunctionExecutorProcessContextManager(
+            capture_std_outputs=True,
+        ) as process:
+            with rpc_channel(process) as channel:
+                stub: FunctionExecutorStub = FunctionExecutorStub(channel)
+                initialize_response: InitializeResponse = initialize(
+                    stub,
+                    app_name="api_function_stringify_multiple_args",
+                    app_version="0.1",
+                    app_code_dir_path=APPLICATION_CODE_DIR_PATH,
+                    function_name="api_function_stringify_multiple_args",
+                )
+                self.assertEqual(
+                    initialize_response.outcome_code,
+                    InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
+                )
+
+                user_serializer: JSONUserDataSerializer = JSONUserDataSerializer()
+                http_request_parts: List[HTTPBodyPart] = [
+                    # arg1 is passed as first positional argument
+                    HTTPBodyPart(
+                        field_name="1",
+                        content_type="application/json",
+                        body=user_serializer.serialize("test-string-arg", str),
+                    ),
+                    # arg2 is passed as second positional argument
+                    HTTPBodyPart(
+                        field_name="2",
+                        content_type="application/json",
+                        body=user_serializer.serialize(777, int),
+                    ),
+                    # arg3 is passed as keyword argument
+                    HTTPBodyPart(
+                        field_name="arg3",
+                        content_type="application/json",
+                        body=user_serializer.serialize(True, bool),
+                    ),
+                    # arg4 is passed as keyword argument
+                    HTTPBodyPart(
+                        field_name="arg4",
+                        content_type="application/json",
+                        body=user_serializer.serialize(None, None),
+                    ),
+                ]
+                serialized_http_request: bytes = create_multipart_invoke_http_request(
+                    http_request_parts, boundary="magic-boundary-string"
+                )
+                api_payload_blob: BLOB = write_new_application_payload_blob(
+                    serialized_http_request
+                )
+
+                allocation_id: str = "test-allocation-id"
+                alloc_result: AllocationResult = run_allocation_that_returns_output(
+                    self,
+                    stub,
+                    request=CreateAllocationRequest(
+                        allocation=Allocation(
+                            request_id="123",
+                            function_call_id="test-function-call",
+                            allocation_id=allocation_id,
+                            inputs=FunctionInputs(
+                                args=[
+                                    SerializedObjectInsideBLOB(
+                                        manifest=SerializedObjectManifest(
+                                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_RAW,
+                                            encoding_version=0,
+                                            size=len(serialized_http_request),
+                                            metadata_size=0,  # No metadata for API function calls.
+                                            sha256_hash=hashlib.sha256(
+                                                serialized_http_request
+                                            ).hexdigest(),
+                                            content_type="message/http",
+                                        ),
+                                        offset=0,
+                                    )
+                                ],
+                                arg_blobs=[api_payload_blob],
+                                request_error_blob=create_request_error_blob(),
+                                function_call_metadata=b"",
+                            ),
+                        ),
+                    ),
+                )
+
+                self.assertEqual(
+                    alloc_result.outcome_code,
+                    AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
+                )
+                self.assertFalse(alloc_result.HasField("request_error_output"))
+                self.assertTrue(alloc_result.HasField("value"))
+                self.assertTrue(alloc_result.HasField("uploaded_function_outputs_blob"))
+                output: str = download_and_deserialize_so(
+                    self,
+                    alloc_result.value,
+                    alloc_result.uploaded_function_outputs_blob,
+                )
+                self.assertEqual(
+                    output,
+                    "arg1: test-string-arg, arg2: 777, arg3: True, arg4: None",
+                )
+
+                # Cleanup.
+                stub.delete_allocation(
+                    DeleteAllocationRequest(
+                        allocation_id=allocation_id,
+                    )
+                )
+
+        fe_stdout = process.read_stdout()
+        # Check FE events in stdout
+        self.assertIn("function_executor_initialization_started", fe_stdout)
+        self.assertIn("function_executor_initialization_finished", fe_stdout)
+        self.assertIn("allocations_started", fe_stdout)
+        self.assertIn("allocations_finished", fe_stdout)
+
     def test_regular_function_call_with_multiple_chunks(self):
         with FunctionExecutorProcessContextManager(
             capture_std_outputs=True,
@@ -631,7 +713,7 @@ class TestRunAllocation(unittest.TestCase):
                 serialized_file_arg_metadata: bytes = serialize_metadata(
                     ValueMetadata(
                         id="file_arg_id",
-                        cls=File,
+                        type_hint=File,
                         serializer_name=None,
                         content_type="text/plain; charset=utf-8",
                     )
@@ -642,12 +724,12 @@ class TestRunAllocation(unittest.TestCase):
                 serialized_num_chunks_arg_metadata: bytes = serialize_metadata(
                     ValueMetadata(
                         id="num_chunks_arg_id",
-                        cls=int,
+                        type_hint=int,
                         serializer_name=user_serializer.name,
-                        content_type=None,
+                        content_type=user_serializer.content_type,
                     )
                 )
-                serialized_num_chunks_arg: bytes = user_serializer.serialize(5)
+                serialized_num_chunks_arg: bytes = user_serializer.serialize(5, int)
 
                 serialized_args: bytes = b"".join(
                     [
@@ -715,6 +797,8 @@ class TestRunAllocation(unittest.TestCase):
                                     FunctionCallMetadata(
                                         id="file_chunker_call",
                                         output_serializer_name_override=None,
+                                        output_type_hint_override=None,
+                                        has_output_type_hint_override=False,
                                         args=[
                                             FunctionCallArgumentMetadata(
                                                 value_id="file_arg_id", collection=None
@@ -833,13 +917,13 @@ class TestRunAllocation(unittest.TestCase):
                 user_serializer: PickleUserDataSerializer = PickleUserDataSerializer()
                 # 5 full chunks + 1 byte of output data out of 10 chunks
                 arg: bytes = os.urandom(5 * 1024 + 1)
-                serialized_arg: bytes = user_serializer.serialize(arg)
+                serialized_arg: bytes = user_serializer.serialize(arg, bytes)
                 serialized_arg_metadata: bytes = serialize_metadata(
                     ValueMetadata(
                         id="arg_id",
-                        cls=bytes,
+                        type_hint=bytes,
                         serializer_name=user_serializer.name,
-                        content_type=None,
+                        content_type=user_serializer.content_type,
                     )
                 )
 
@@ -884,6 +968,8 @@ class TestRunAllocation(unittest.TestCase):
                                     FunctionCallMetadata(
                                         id="returns_argument_call",
                                         output_serializer_name_override=None,
+                                        output_type_hint_override=None,
+                                        has_output_type_hint_override=False,
                                         args=[
                                             FunctionCallArgumentMetadata(
                                                 value_id="arg_id", collection=None
@@ -1008,7 +1094,7 @@ class TestRunAllocation(unittest.TestCase):
                             request_id="123",
                             function_call_id="test-function-call",
                             allocation_id=allocation_id,
-                            inputs=application_function_inputs(10),
+                            inputs=application_function_inputs(10, int),
                         ),
                     ),
                 )

@@ -3,6 +3,7 @@ import sys
 import unittest
 
 import parameterized
+import validate_all_applications
 
 from tensorlake.applications import (
     Request,
@@ -12,6 +13,9 @@ from tensorlake.applications import (
 )
 from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
+
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
 
 
 @application()
@@ -28,8 +32,8 @@ class TestRequestFailedRaisedOnFunctionError(unittest.TestCase):
 
         request: Request = run_application(
             application_function,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         try:
             request.output()
@@ -48,8 +52,8 @@ class TestRequestFailedRaisedOnFunctionError(unittest.TestCase):
         try:
             request: Request = run_application(
                 application_function,
+                False,
                 "magic_string",
-                remote=False,
             )
             self.assertRaises(RequestFailed, request.output)
         finally:

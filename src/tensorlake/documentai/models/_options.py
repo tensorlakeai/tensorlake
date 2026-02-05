@@ -119,6 +119,10 @@ class ParsingOptions(BaseModel):
         None,
         description="Flag to enable barcode detection in the document. This flag incurs additional billing costs. The default is `false`.",
     )
+    table_merging: Optional[bool] = Field(
+        None,
+        description="Flag to enable table merging. When set to `true`, adjacent tables that are part of the same logical table will be merged into a single table. The default is `false`.",
+    )
 
     @field_serializer("ignore_sections")
     def serialize_ignore_sections(

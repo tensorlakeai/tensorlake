@@ -4,6 +4,7 @@ import threading
 import unittest
 
 import parameterized
+import validate_all_applications
 
 from tensorlake.applications import (
     Request,
@@ -13,6 +14,9 @@ from tensorlake.applications import (
 )
 from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
+
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
 
 
 def update_progress_worker(ctx: RequestContext, values: tuple[int, int], q) -> None:
@@ -39,9 +43,7 @@ class TestUseProgressFromFunction(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(
-            func_update_progress, (10, 100), remote=is_remote
-        )
+        request: Request = run_application(func_update_progress, is_remote, (10, 100))
         self.assertEqual(request.output(), "success")
 
 
@@ -64,9 +66,7 @@ class TestUseProgressFromChildThread(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(
-            mt_update_progress, (10, 100), remote=is_remote
-        )
+        request: Request = run_application(mt_update_progress, is_remote, (10, 100))
         self.assertEqual(request.output(), "success")
 
 
@@ -89,9 +89,7 @@ class TestUseProgressFromChildProcess(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(
-            mp_update_progress, (10, 100), remote=is_remote
-        )
+        request: Request = run_application(mp_update_progress, is_remote, (10, 100))
         self.assertEqual("success", request.output())
         self.assertEqual(request.output(), "success")
 

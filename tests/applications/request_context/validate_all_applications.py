@@ -1,0 +1,1 @@
+../validate_all_applications.py

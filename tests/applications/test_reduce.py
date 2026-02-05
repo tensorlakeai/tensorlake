@@ -2,6 +2,7 @@ import unittest
 from typing import Any, List
 
 import parameterized
+import validate_all_applications
 from pydantic import BaseModel
 
 from tensorlake.applications import (
@@ -12,7 +13,9 @@ from tensorlake.applications import (
 )
 from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
-from tensorlake.applications.validation import validate_loaded_applications
+
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
 
 
 class AccumulatedState(BaseModel):
@@ -153,16 +156,13 @@ def int_to_str(x: int) -> str:
 
 
 class TestReduce(unittest.TestCase):
-    def test_applications_are_valid(self):
-        self.assertEqual(validate_loaded_applications(), [])
-
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success_function_call_collection(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
 
         request: Request = run_application(
-            success_api_function_awaitable_collection, 6, remote=is_remote
+            success_api_function_awaitable_collection, is_remote, 6
         )
         result: AccumulatedState = request.output()
         self.assertEqual(result.sum, 15)  # 0 + 1 + 2 + 3 + 4 + 5
@@ -173,7 +173,7 @@ class TestReduce(unittest.TestCase):
             deploy_applications(__file__)
 
         request: Request = run_application(
-            success_api_function_value_collection, 6, remote=is_remote
+            success_api_function_value_collection, is_remote, 6
         )
         result: AccumulatedState = request.output()
         self.assertEqual(result.sum, 15)  # 0 + 1 + 2 + 3 + 4 + 5
@@ -183,7 +183,7 @@ class TestReduce(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(fail_api_function, 6, remote=is_remote)
+        request: Request = run_application(fail_api_function, is_remote, 6)
         self.assertRaises(RequestFailed, request.output)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
@@ -192,7 +192,7 @@ class TestReduce(unittest.TestCase):
             deploy_applications(__file__)
 
         request: Request = run_application(
-            api_reduce_no_items_no_initial, None, remote=is_remote
+            api_reduce_no_items_no_initial, is_remote, None
         )
         self.assertRaises(RequestFailed, request.output)
 
@@ -203,8 +203,8 @@ class TestReduce(unittest.TestCase):
 
         request: Request = run_application(
             api_reduce_no_items_with_initial,
+            is_remote,
             None,
-            remote=is_remote,
         )
         result: AccumulatedState = request.output()
         self.assertEqual(result.sum, 10)
@@ -216,8 +216,8 @@ class TestReduce(unittest.TestCase):
 
         request: Request = run_application(
             api_reduce_one_value_item,
+            is_remote,
             None,
-            remote=is_remote,
         )
         result: AccumulatedState = request.output()
         self.assertEqual(result.sum, 10)
@@ -229,8 +229,8 @@ class TestReduce(unittest.TestCase):
 
         request: Request = run_application(
             api_reduce_one_awaitable_item,
+            is_remote,
             None,
-            remote=is_remote,
         )
         result: AccumulatedState = request.output()
         self.assertEqual(result.sum, 7)
@@ -242,8 +242,8 @@ class TestReduce(unittest.TestCase):
 
         request: Request = run_application(
             api_reduce_mapped_collection_nonblocking,
+            is_remote,
             None,
-            remote=is_remote,
         )
         result: AccumulatedState = request.output()
         self.assertEqual(result.sum, 7)
@@ -255,8 +255,8 @@ class TestReduce(unittest.TestCase):
 
         request: Request = run_application(
             api_reduce_mapped_collection_tailcall,
+            is_remote,
             None,
-            remote=is_remote,
         )
         result: AccumulatedState = request.output()
         self.assertEqual(result.sum, 7)
@@ -268,8 +268,8 @@ class TestReduce(unittest.TestCase):
 
         request: Request = run_application(
             api_reduce_of_reduced_list,
+            is_remote,
             None,
-            remote=is_remote,
         )
         self.assertEqual(
             request.output(),
@@ -283,8 +283,8 @@ class TestReduce(unittest.TestCase):
 
         request: Request = run_application(
             api_reduce_of_mapped_collections,
+            is_remote,
             None,
-            remote=is_remote,
         )
         self.assertEqual(
             request.output(),

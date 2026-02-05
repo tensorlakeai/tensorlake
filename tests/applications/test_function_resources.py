@@ -1,10 +1,14 @@
 import unittest
 
 import parameterized
+import validate_all_applications
 
 from tensorlake.applications import Request, application, function
 from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
+
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
 
 
 @application()
@@ -18,9 +22,7 @@ class TestFunctionResources(unittest.TestCase):
     def test_function_with_custom_resources_succeeds(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
-        request: Request = run_application(
-            function_with_custom_resources, 1, remote=is_remote
-        )
+        request: Request = run_application(function_with_custom_resources, is_remote, 1)
         self.assertEqual(request.output(), "success")
 
 

@@ -32,7 +32,7 @@ class TestRedefineFunctionInSameFile(unittest.TestCase):
     def test_function_redefined_successfully(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
-        request: Request = run_application("function_1", 1, remote=is_remote)
+        request: Request = run_application("function_1", is_remote, "1")
         self.assertEqual(request.output(), "function_1_redefined")
 
 

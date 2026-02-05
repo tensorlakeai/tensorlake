@@ -6,6 +6,7 @@ import threading
 import unittest
 
 import parameterized
+import validate_all_applications
 
 from tensorlake.applications import (
     Request,
@@ -15,6 +16,9 @@ from tensorlake.applications import (
 )
 from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
+
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
 
 
 def emit_metrics_worker(ctx: RequestContext, q) -> None:
@@ -42,13 +46,13 @@ class TestUseMetricsFromFunction(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(func_emit_metrics, 1, remote=is_remote)
+        request: Request = run_application(func_emit_metrics, is_remote, 1)
         self.assertEqual(request.output(), "success")
 
     def test_emit_local_metrics_output(self):
         stdout: io.StringIO = io.StringIO()
         with contextlib.redirect_stdout(stdout):
-            request: Request = run_application(func_emit_metrics, 1, remote=False)
+            request: Request = run_application(func_emit_metrics, False, 1)
             self.assertEqual("success", request.output())
 
         output: str = stdout.getvalue().strip()
@@ -105,7 +109,7 @@ class TestUseMetricsFromChildThread(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(mt_emit_metrics, 1, remote=is_remote)
+        request: Request = run_application(mt_emit_metrics, is_remote, 1)
         self.assertEqual(request.output(), "success")
 
         # No verification of metrics values yet because SDK doesn't yet provide an interface
@@ -129,7 +133,7 @@ class TestUseMetricsFromChildProcess(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(mp_emit_metrics, 1, remote=is_remote)
+        request: Request = run_application(mp_emit_metrics, is_remote, 1)
         self.assertEqual(request.output(), "success")
 
         # No verification of metrics values yet because SDK doesn't yet provide an interface

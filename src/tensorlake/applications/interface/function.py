@@ -37,6 +37,7 @@ class _FunctionConfiguration:
     region: str | None
     cacheable: bool
     max_concurrency: int
+    warm_containers: int | None
     min_containers: int | None
     max_containers: int | None
 
@@ -46,8 +47,6 @@ class _ApplicationConfiguration:
     tags: Dict[str, str]
     retries: Retries
     region: str | None
-    input_deserializer: str
-    output_serializer: str
     version: str
 
 
@@ -170,6 +169,7 @@ class Function:
 
     def __str__(self) -> str:
         # Shows a simple human readable representation of the Function. Used in error messages.
+        # Works for invalid/inconsistent functions that fail validation.
         function_name: str = (
             getattr(self._original_function, "__qualname__", "<unknown>")
             if self._function_config is None
@@ -191,6 +191,17 @@ class Function:
         raise SDKUsageError(
             f"Attempt to pickle {self}. It cannot be passed as a function parameter or returned from a Tensorlake Function."
         )
+
+    @property
+    def _name(self) -> str:
+        """Returns function name of the Tensorlake Function in its Tensorlake Application.
+
+        This is a private getter not exposed in SDK interface to users.
+        """
+        if self._function_config is not None:
+            return self._function_config.function_name
+        else:
+            return _function_name(self._original_function)
 
 
 class FunctionAwaitablesFactory:

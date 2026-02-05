@@ -18,6 +18,8 @@ class LocalProgressUpdateHandler(BaseProgressUpdateHandler):
         print_progress_update(
             request_id=request.request_id,
             function_name=request.function_name,
+            function_run_id=request.function_run_id,
+            allocation_id=request.allocation_id,
             current=request.current,
             total=request.total,
             message=request.message,

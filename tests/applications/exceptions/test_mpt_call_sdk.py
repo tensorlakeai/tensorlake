@@ -4,6 +4,7 @@ import threading
 import unittest
 
 import parameterized
+import validate_all_applications
 
 from tensorlake.applications import (
     Future,
@@ -15,6 +16,9 @@ from tensorlake.applications import (
 )
 from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
+
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
 
 
 def get_context_worker(q) -> None:
@@ -107,8 +111,8 @@ class TestCallSDKFromChildThread(unittest.TestCase):
 
         request: Request = run_application(
             application_mt_get_context,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 
@@ -119,8 +123,8 @@ class TestCallSDKFromChildThread(unittest.TestCase):
 
         request: Request = run_application(
             application_mt_run_future,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 
@@ -131,8 +135,8 @@ class TestCallSDKFromChildThread(unittest.TestCase):
 
         request: Request = run_application(
             application_mt_wait_future,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 
@@ -184,8 +188,8 @@ class TestCallSDKFromChildProcess(unittest.TestCase):
 
         request: Request = run_application(
             application_mp_get_context,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 
@@ -196,8 +200,8 @@ class TestCallSDKFromChildProcess(unittest.TestCase):
 
         request: Request = run_application(
             application_mp_run_future,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 

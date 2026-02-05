@@ -3,6 +3,7 @@ import sys
 import unittest
 
 import parameterized
+import validate_all_applications
 
 from tensorlake.applications import (
     Request,
@@ -14,10 +15,13 @@ from tensorlake.applications.applications import run_application
 from tensorlake.applications.interface.exceptions import SDKUsageError
 from tensorlake.applications.remote.deploy import deploy_applications
 
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
+
 
 @application()
 @function()
-def test_update_progress(values: tuple[int, int]) -> str:
+def test_update_progress(values: tuple[int | float, int | float]) -> str:
     ctx: RequestContext = RequestContext.get()
     ctx.progress.update(current=values[0], total=values[1])
     return "success"
@@ -25,7 +29,9 @@ def test_update_progress(values: tuple[int, int]) -> str:
 
 @application()
 @function()
-def test_update_progress_with_parameters(values: tuple[int, int]) -> str:
+def test_update_progress_with_parameters(
+    values: tuple[int | float, int | float],
+) -> str:
     ctx: RequestContext = RequestContext.get()
     ctx.progress.update(
         current=values[0],
@@ -51,15 +57,11 @@ class TestProgress(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(
-            test_update_progress, (10, 100), remote=is_remote
-        )
+        request: Request = run_application(test_update_progress, is_remote, (10, 100))
         self.assertEqual("success", request.output())
 
     def test_update_progress_local_default_message(self):
-        request: Request = run_application(
-            test_update_progress, (12.3, 20), remote=False
-        )
+        request: Request = run_application(test_update_progress, False, (12.3, 20))
         self.assertEqual("success", request.output())
 
         output = self.captured_output.getvalue().strip()
@@ -86,7 +88,7 @@ class TestProgress(unittest.TestCase):
 
     def test_update_progress_local_custom_message(self):
         request: Request = run_application(
-            test_update_progress_with_parameters, (10, 100), remote=False
+            test_update_progress_with_parameters, False, (10, 100)
         )
         self.assertEqual("success", request.output())
 
@@ -138,7 +140,7 @@ class TestProgressRaisesError(unittest.TestCase):
             deploy_applications(__file__)
 
         request: Request = run_application(
-            test_update_progress_raises_expected_error, (10, 100), remote=is_remote
+            test_update_progress_raises_expected_error, is_remote, (10, 100)
         )
         self.assertEqual(request.output(), "success")
 

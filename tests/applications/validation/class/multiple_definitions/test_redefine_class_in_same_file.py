@@ -17,7 +17,7 @@ from tensorlake.applications.validation import validate_loaded_applications
 class Class1:
     @application()
     @function()
-    def method(self, _: str) -> str:
+    def method(self) -> str:
         return "Class1.method"
 
 
@@ -25,7 +25,7 @@ class Class1:
 class Class1:
     @application()
     @function()
-    def method(self, _: str) -> str:
+    def method(self) -> str:
         return "Class1.method_redefined"
 
 
@@ -39,7 +39,7 @@ class TestMultipleClassDefinitions(unittest.TestCase):
     ):
         if is_remote:
             deploy_applications(__file__)
-        request: Request = run_application("Class1.method", 1, remote=is_remote)
+        request: Request = run_application("Class1.method", is_remote)
         self.assertEqual(request.output(), "Class1.method_redefined")
 
 

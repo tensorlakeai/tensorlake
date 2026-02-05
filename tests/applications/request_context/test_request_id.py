@@ -4,6 +4,7 @@ import threading
 import unittest
 
 import parameterized
+import validate_all_applications
 
 from tensorlake.applications import (
     Request,
@@ -13,6 +14,9 @@ from tensorlake.applications import (
 )
 from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
+
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
 
 
 def get_request_id_worker(ctx: RequestContext, q) -> None:
@@ -39,7 +43,7 @@ class TestUseRequestIdFromFunction(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(func_get_request_id, 11, remote=is_remote)
+        request: Request = run_application(func_get_request_id, is_remote, 11)
         self.assertEqual(request.id, request.output())
 
 
@@ -62,7 +66,7 @@ class TestUseRequestIdFromChildThread(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(mt_get_request_id, 11, remote=is_remote)
+        request: Request = run_application(mt_get_request_id, is_remote, 11)
         self.assertEqual(request.id, request.output())
 
 
@@ -83,7 +87,7 @@ class TestUseRequestIdFromChildProcess(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
 
-        request: Request = run_application(mp_get_request_id, 11, remote=is_remote)
+        request: Request = run_application(mp_get_request_id, is_remote, 11)
         self.assertEqual(request.id, request.output())
 
 

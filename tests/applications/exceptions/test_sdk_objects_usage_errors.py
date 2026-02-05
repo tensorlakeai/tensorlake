@@ -1,10 +1,11 @@
 import unittest
+from typing import Any
 
 import parameterized
+import validate_all_applications
 
 from tensorlake.applications import (
     Awaitable,
-    Function,
     Future,
     Request,
     RequestFailed,
@@ -15,6 +16,9 @@ from tensorlake.applications import (
 )
 from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
+
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
 
 
 @application()
@@ -37,11 +41,26 @@ def other_function(arg) -> None:
     return None
 
 
-# Future is obviously not json serializable, so this will always fail.
-# Check that it's not picklable in this test.
-@application(output_serializer="pickle")
+# Check that returning a list of Awaitables doesn't work because
+# runtime attempts to json serialize them and Awaitables are not json serializable.
+@application()
 @function()
-def return_list_of_function_calls(_: str) -> str:
+def application_return_list_of_function_calls() -> str:
+    awaitable1: Awaitable = other_function.awaitable(1)
+    awaitable2: Awaitable = other_function.awaitable(2)
+    return [awaitable1, awaitable2]
+
+
+@application()
+@function()
+def application_call_return_list_of_function_calls() -> str:
+    return return_list_of_function_calls()
+
+
+# Check that returning a list of Awaitables doesn't work because
+# runtime attempts to pickle them and Awaitables are not picklable.
+@function()
+def return_list_of_function_calls() -> list[Awaitable]:
     awaitable1: Awaitable = other_function.awaitable(1)
     awaitable2: Awaitable = other_function.awaitable(2)
     return [awaitable1, awaitable2]
@@ -57,11 +76,26 @@ def future_list_as_function_argument(_: str) -> str:
         return "success"
 
 
-# Future is obviously not json serializable, so this will always fail.
-# Check that it's not picklable in this test.
-@application(output_serializer="pickle")
+# Check that returning a list of Futures doesn't work because
+# runtime attempts to json serialize them and Futures are not json serializable.
+@application()
 @function()
-def return_list_of_futures(_: str) -> str:
+def application_return_list_of_futures() -> str:
+    future1: Future = other_function.awaitable(1).run()
+    future2: Future = other_function.awaitable(2).run()
+    return [future1, future2]
+
+
+@application()
+@function()
+def application_call_return_list_of_futures() -> str:
+    return return_list_of_futures()
+
+
+# Check that returning a list of Futures doesn't work because
+# runtime attempts to pickle them and Futures are not picklable.
+@function()
+def return_list_of_futures() -> str:
     future1: Future = other_function.awaitable(1).run()
     future2: Future = other_function.awaitable(2).run()
     return [future1, future2]
@@ -80,11 +114,24 @@ def function_as_function_argument(_: str) -> str:
         return "success"
 
 
-# Awaitable is obviously not json serializable, so this will always fail.
-# Check that it's not picklable in this test.
-@application(output_serializer="pickle")
+# Check that returning a Function doesn't work because
+# runtime attempts to json serialize them and Functions are not json serializable.
+@application()
 @function()
-def return_function(_: str) -> Function:
+def application_return_function() -> Any:
+    return other_function
+
+
+@application()
+@function()
+def application_call_return_function() -> Any:
+    return return_function()
+
+
+# Check that returning a Function doesn't work because
+# runtime attempts to pickle it and Functions are not picklable.
+@function()
+def return_function() -> Any:
     return other_function
 
 
@@ -129,6 +176,8 @@ def pass_map_awaitable_as_reduced_item(_: str) -> str:
             "them into `other_function_reduce.reduce(...)`."
         )
         return "success"
+    else:
+        return "failure"
 
 
 @function()
@@ -138,14 +187,14 @@ def other_function_reduce(arg1, arg2):
 
 @application()
 @function()
-def return_future(_: str) -> Future:
+def return_future(_: str) -> Any:
     future: Future = other_function.awaitable(1).run()
     return future
 
 
 @application()
 @function()
-def return_running_awaitable(_: str) -> Awaitable:
+def return_running_awaitable(_: str) -> Any:
     awaitable: Awaitable = other_function.awaitable(1)
     future: Future = awaitable.run()
     return awaitable
@@ -159,20 +208,38 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
         request: Request = run_application(
             function_call_list_as_function_argument,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_return_list_of_function_calls(self, _, is_remote: bool):
+    def test_return_list_of_function_calls_from_application(self, _, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
 
         request: Request = run_application(
-            return_list_of_function_calls,
-            "whatever",
-            remote=is_remote,
+            application_return_list_of_function_calls,
+            is_remote,
+        )
+        with self.assertRaises(RequestFailed) as context:
+            request.output()
+
+        self.assertEqual(
+            str(context.exception),
+            "function_error",
+        )
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_return_list_of_function_calls_from_regular_function(
+        self, _, is_remote: bool
+    ):
+        if is_remote:
+            deploy_applications(__file__)
+
+        request: Request = run_application(
+            application_call_return_list_of_function_calls,
+            is_remote,
         )
         with self.assertRaises(RequestFailed) as context:
             request.output()
@@ -189,20 +256,36 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
         request: Request = run_application(
             future_list_as_function_argument,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_return_list_of_futures(self, _, is_remote: bool):
+    def test_return_list_of_futures_from_application(self, _, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
 
         request: Request = run_application(
-            return_list_of_futures,
-            "whatever",
-            remote=is_remote,
+            application_return_list_of_futures,
+            is_remote,
+        )
+        with self.assertRaises(RequestFailed) as context:
+            request.output()
+
+        self.assertEqual(
+            str(context.exception),
+            "function_error",
+        )
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_return_list_of_futures_from_regular_function(self, _, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+
+        request: Request = run_application(
+            application_call_return_list_of_futures,
+            is_remote,
         )
         with self.assertRaises(RequestFailed) as context:
             request.output()
@@ -219,20 +302,38 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
         request: Request = run_application(
             function_as_function_argument,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_return_function(self, _, is_remote: bool):
+    def test_return_function_from_application(self, _, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
 
         request: Request = run_application(
-            return_function,
+            application_return_function,
+            is_remote,
             "whatever",
-            remote=is_remote,
+        )
+        with self.assertRaises(RequestFailed) as context:
+            request.output()
+
+        self.assertEqual(
+            str(context.exception),
+            "function_error",
+        )
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_return_function_from_regular_function(self, _, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+
+        request: Request = run_application(
+            application_call_return_function,
+            is_remote,
+            "whatever",
         )
         with self.assertRaises(RequestFailed) as context:
             request.output()
@@ -249,8 +350,8 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
         request: Request = run_application(
             future_wait_wrong_return_when,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 
@@ -261,8 +362,8 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
         request: Request = run_application(
             return_map_awaitable,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         with self.assertRaises(RequestFailed) as context:
             request.output()
@@ -279,8 +380,8 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
         request: Request = run_application(
             pass_map_awaitable_as_reduced_item,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         self.assertEqual(request.output(), "success")
 
@@ -291,8 +392,8 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
         request: Request = run_application(
             return_future,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         with self.assertRaises(RequestFailed) as context:
             request.output()
@@ -309,8 +410,8 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
         request: Request = run_application(
             return_running_awaitable,
+            is_remote,
             "whatever",
-            remote=is_remote,
         )
         with self.assertRaises(RequestFailed) as context:
             request.output()

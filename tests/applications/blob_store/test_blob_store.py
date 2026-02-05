@@ -37,7 +37,7 @@ class TestBLOBStore(unittest.TestCase):
             blob=blob,
             data=expect_blob_data,
         )
-        got_blob_data: bytes = self.blob_store.get(
+        got_blob_data: bytearray = self.blob_store.get(
             blob=blob, offset=0, size=blob_size, logger=self.logger
         )
         self.assertEqual(got_blob_data, expect_blob_data)
@@ -55,7 +55,7 @@ class TestBLOBStore(unittest.TestCase):
             blob=blob,
             data=expect_blob_data,
         )
-        got_blob_data: bytes = self.blob_store.get(
+        got_blob_data: bytearray = self.blob_store.get(
             blob=blob,
             offset=0,
             size=blob_size // 2,
@@ -76,7 +76,7 @@ class TestBLOBStore(unittest.TestCase):
             blob=blob,
             data=expect_blob_data,
         )
-        got_blob_data: bytes = self.blob_store.get(
+        got_blob_data: bytearray = self.blob_store.get(
             blob=blob,
             offset=blob_size // 2,
             size=blob_size // 2 + (blob_size % 2),

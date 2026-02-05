@@ -5,14 +5,16 @@ from tensorlake.applications import (
     Function,
     InternalError,
 )
+from tensorlake.applications.algorithms import reduce_operation_to_function_call_chain
 from tensorlake.applications.function.application_call import (
-    deserialize_application_function_call_payload,
+    SerializedApplicationArgument,
+    deserialize_application_function_call_arguments,
 )
 from tensorlake.applications.function.function_call import (
     set_self_arg,
 )
 from tensorlake.applications.function.user_data_serializer import (
-    deserialize_value,
+    deserialize_value_with_metadata,
     function_input_serializer,
     serialize_value,
 )
@@ -29,6 +31,7 @@ from tensorlake.applications.metadata import (
     FunctionCallArgumentMetadata,
     FunctionCallMetadata,
     ReduceOperationMetadata,
+    ValueMetadata,
     deserialize_metadata,
     serialize_metadata,
 )
@@ -47,21 +50,28 @@ from ..proto.function_executor_pb2 import (
     ReduceOp,
     SerializedObjectInsideBLOB,
 )
+from .http_request_parse import (
+    parse_application_function_call_arg_from_single_payload,
+    parse_application_function_call_args_from_http_request,
+    parse_application_function_call_args_from_multipart_form_data,
+)
 from .value import SerializedValue, Value
 
 
 def to_durable_awaitable_tree(
-    root: Awaitable | Any,
+    root: Awaitable,
     parent_function_call_id: str,
-    awaitable_sequence_number: int,
-) -> tuple[Awaitable | Any, int]:
-    """Returns a shallow copy of the supplied Awaitable tree with Awaitable IDs supporting durable execution.
+    previous_awaitable_id: str,
+) -> Awaitable:
+    """Returns a semantically equivalent shallow copy of the supplied Awaitable tree with Awaitable IDs supporting durable execution.
 
-    The shallow copy has the same structure as the original tree, but each Awaitable in the tree
-    has its ID replaced with a durable ID. User provided values are kept in the returned tree as is.
+    The shallow copy has a semantically equivalent structure as the original tree, but:
+    1. Each Awaitable in the tree has its ID replaced with a durable ID.
+    2. All ReduceOperationAwaitables are replaced with chains of FunctionCallAwaitables.
+    User provided values are kept in the returned tree as is.
 
     parent_function_call_id is ID of the function call that created the awaitable tree.
-    awaitable_sequence_number is the last unused sequential number of awaitables created by the parent function call.
+    previous_awaitable_id is ID of the previous awaitable created by the parent function call.
 
     Durable Awaitable IDs are the same across different executions (allocations) of the same parent function call
     if the parent function call is deterministic, i.e. it creates the same awaitable trees in the same order each
@@ -69,12 +79,18 @@ def to_durable_awaitable_tree(
     lead to re-execution of some function calls even if their inputs are the same as in a previous execution.
 
     To produce a durable Awaitable ID, we compute it as a hash of:
-    - parent_function_call_id in the tree
-    - awaitable_sequence_number (unique per Awaitable in the tree). This ensures that any two Awaitables created by
-      the same parent function call get different durable IDs even if the Awaitables are otherwise identical
-      (i.e. two calls of the same function with same parameters). This also ensures that each durable ID is unique
-      per each execution of parent function call.
-    - Awaitable-specific metadata. This ensures that we detect changes in Awaitable tree nodes, i.e. change of called function name.
+    - parent_function_call_id, this scopes each durable ID to its parent function call and allows to generate them locally while running
+      the parent function call.
+    - previous_awaitable_id, this ties each durable ID in the awaitable tree to the previous awaitable created by the parent function call.
+      If while replaying the parent function call it follows a different execution path (i.e. running a different function call) then this new
+      function call and all next function calls won't be replayed because their durable IDs will be different due to different previous_awaitable_id
+      in their durable ID hash. This ensures that any drift in the execution path gets detected and gets handled according to the replay mode used.
+    - next_awaitable_sequence_number, this ensures that any two Awaitables created inside the same awaitable tree get different durable IDs even
+      if the Awaitables are otherwise identical (i.e. two calls of the same function with same parameters). If we didn't do this then every call
+      of the same function (with any parameters) in the same awaitable tree will have the same durable ID which leads to function output caching
+      while also ignoring function parameter values. This is very wrong. In the end, this ensures that each durable ID inside the same awaitable tree
+      is unique.
+    - Awaitable-specific metadata. This ensures that we detect changes inside each Awaitable tree node, i.e. a change of called function name.
     - Deterministically ordered durable IDs of all immediate child Awaitables.
       This ensures that changes in the structure of the awaitable tree leads to different durable IDs of its nodes
       starting from root so it's easy to detect a drift on Server side just by comparing durable ID of root.
@@ -92,17 +108,34 @@ def to_durable_awaitable_tree(
 
     Raises TensorlakeError on error.
     """
+    if not isinstance(root, Awaitable):
+        raise InternalError("Root of the awaitable tree must be an Awaitable.")
+    return _to_durable_awaitable_tree(
+        node=root,
+        parent_function_call_id=parent_function_call_id,
+        previous_awaitable_id=previous_awaitable_id,
+        next_awaitable_sequence_number=0,
+    )[0]
+
+
+def _to_durable_awaitable_tree(
+    node: Awaitable | Any,
+    parent_function_call_id: str,
+    previous_awaitable_id: str,
+    next_awaitable_sequence_number: int,
+) -> tuple[Awaitable | Any, int]:
     # NB: Any change to ordering of operations in this function results in change of durable IDs for all durable Awaitables
     # which would lead to previously computed IDs not being replayable anymore.
-    if not isinstance(root, Awaitable):
-        return root, awaitable_sequence_number  # Return user-provided value as is.
+    if not isinstance(node, Awaitable):
+        return node, next_awaitable_sequence_number  # Return user-provided value as is.
 
-    awaitable: Awaitable = root
+    awaitable: Awaitable = node
     durable_id_attrs: list[str] = [
         parent_function_call_id,
-        str(awaitable_sequence_number),
+        previous_awaitable_id,
+        str(next_awaitable_sequence_number),
     ]
-    awaitable_sequence_number += 1
+    next_awaitable_sequence_number += 1
 
     if isinstance(awaitable, AwaitableList):
         awaitable: AwaitableList
@@ -110,13 +143,15 @@ def to_durable_awaitable_tree(
         durable_id_attrs.append(awaitable.metadata.durability_key)
         durable_items: list[Awaitable | Any] = []
         for item in awaitable.items:
-            durable_item, awaitable_sequence_number = to_durable_awaitable_tree(
-                root=item,
+            durable_item: Awaitable | Any
+            durable_item, next_awaitable_sequence_number = _to_durable_awaitable_tree(
+                node=item,
                 parent_function_call_id=parent_function_call_id,
-                awaitable_sequence_number=awaitable_sequence_number,
+                previous_awaitable_id=previous_awaitable_id,
+                next_awaitable_sequence_number=next_awaitable_sequence_number,
             )
             durable_items.append(durable_item)
-            _add_durable_id_attr(durable_items[-1], durable_id_attrs)
+            _add_durable_id_attr(durable_item, durable_id_attrs)
 
         return (
             AwaitableList(
@@ -124,30 +159,19 @@ def to_durable_awaitable_tree(
                 items=durable_items,
                 metadata=awaitable.metadata,
             ),
-            awaitable_sequence_number,
+            next_awaitable_sequence_number,
         )
 
     elif isinstance(awaitable, ReduceOperationAwaitable):
-        awaitable: ReduceOperationAwaitable
-        # Awaitable specific metadata, part of durable ID.
-        durable_id_attrs.extend(["ReduceOperation", awaitable.function_name])
-        durable_inputs: list[Awaitable | Any] = []
-        for input in awaitable.inputs:
-            durable_input, awaitable_sequence_number = to_durable_awaitable_tree(
-                root=input,
-                parent_function_call_id=parent_function_call_id,
-                awaitable_sequence_number=awaitable_sequence_number,
-            )
-            durable_inputs.append(durable_input)
-            _add_durable_id_attr(durable_inputs[-1], durable_id_attrs)
-
-        return (
-            ReduceOperationAwaitable(
-                id=_sha256_hash_strings(durable_id_attrs),
-                function_name=awaitable.function_name,
-                inputs=durable_inputs,
-            ),
-            awaitable_sequence_number,
+        awaitable: FunctionCallAwaitable = reduce_operation_to_function_call_chain(
+            awaitable
+        )
+        return _to_durable_awaitable_tree(
+            node=awaitable,
+            parent_function_call_id=parent_function_call_id,
+            previous_awaitable_id=previous_awaitable_id,
+            # We didn't create a new awaitable here. So don't inc the sequence number in current call.
+            next_awaitable_sequence_number=next_awaitable_sequence_number - 1,
         )
 
     elif isinstance(awaitable, FunctionCallAwaitable):
@@ -156,23 +180,27 @@ def to_durable_awaitable_tree(
         durable_id_attrs.extend(["FunctionCall", awaitable.function_name])
         durable_args: list[Awaitable | Any] = []
         for arg in awaitable.args:
-            durable_arg, awaitable_sequence_number = to_durable_awaitable_tree(
-                root=arg,
+            durable_arg: Awaitable | Any
+            durable_arg, next_awaitable_sequence_number = _to_durable_awaitable_tree(
+                node=arg,
                 parent_function_call_id=parent_function_call_id,
-                awaitable_sequence_number=awaitable_sequence_number,
+                previous_awaitable_id=previous_awaitable_id,
+                next_awaitable_sequence_number=next_awaitable_sequence_number,
             )
             durable_args.append(durable_arg)
-            _add_durable_id_attr(durable_args[-1], durable_id_attrs)
+            _add_durable_id_attr(durable_arg, durable_id_attrs)
 
         durable_kwargs: dict[str, Awaitable | Any] = {}
         # Iterate over sorted dict keys to ensure deterministic hash key order.
         sorted_kwarg_keys: list[str] = sorted(awaitable.kwargs.keys())
         for kwarg_name in sorted_kwarg_keys:
             kwarg_value: Awaitable | Any = awaitable.kwargs[kwarg_name]
-            durable_kwarg, awaitable_sequence_number = to_durable_awaitable_tree(
-                root=kwarg_value,
+            durable_kwarg: Awaitable | Any
+            durable_kwarg, next_awaitable_sequence_number = _to_durable_awaitable_tree(
+                node=kwarg_value,
                 parent_function_call_id=parent_function_call_id,
-                awaitable_sequence_number=awaitable_sequence_number,
+                previous_awaitable_id=previous_awaitable_id,
+                next_awaitable_sequence_number=next_awaitable_sequence_number,
             )
             durable_kwargs[kwarg_name] = durable_kwarg
             _add_durable_id_attr(durable_kwargs[kwarg_name], durable_id_attrs)
@@ -184,17 +212,17 @@ def to_durable_awaitable_tree(
                 args=durable_args,
                 kwargs=durable_kwargs,
             ),
-            awaitable_sequence_number,
+            next_awaitable_sequence_number,
         )
     else:
         raise InternalError(f"Unexpected Awaitable subclass: {type(awaitable)}")
 
 
 def serialize_values_in_awaitable_tree(
-    root: Awaitable | Any,
+    root: Awaitable,
     value_serializer: UserDataSerializer,
     serialized_values: Dict[str, SerializedValue],
-) -> SerializedValue | Awaitable:
+) -> Awaitable:
     """Converts values in the given Awaitable tree into SerializedValues.
 
     The provided Awaitable tree is modified in-place with each user supplied value being
@@ -205,26 +233,55 @@ def serialize_values_in_awaitable_tree(
     Raises SerializationError if serialization of any value fails.
     Raises TensorlakeError for other errors.
     """
+    if not isinstance(root, Awaitable):
+        raise InternalError("Root of the awaitable tree must be an Awaitable.")
+    return _serialize_values_in_awaitable_tree(
+        root=root,
+        value_serializer=value_serializer,
+        serialized_values=serialized_values,
+    )
+
+
+def serialize_user_value(
+    value: Any, serializer: UserDataSerializer, type_hint: Any
+) -> SerializedValue:
+    """Serializes a user value into SerializedValue."""
+    data: bytes
+    metadata: ValueMetadata
+    data, metadata = serialize_value(
+        value=value,
+        serializer=serializer,
+        value_id=_request_scoped_id(),
+        type_hint=type_hint,
+    )
+    return SerializedValue(
+        metadata=metadata,
+        data=data,
+        content_type=metadata.content_type,
+    )
+
+
+def _serialize_values_in_awaitable_tree(
+    root: Awaitable | Any,
+    value_serializer: UserDataSerializer,
+    serialized_values: Dict[str, SerializedValue],
+) -> Awaitable | SerializedValue:
     # NB: This code needs to be in sync with LocalRunner where it's doing a similar thing.
     if not isinstance(root, Awaitable):
-        data, metadata = serialize_value(
+        serialized_value: SerializedValue = serialize_user_value(
             value=root,
             serializer=value_serializer,
-            value_id=_request_scoped_id(),
+            type_hint=type(root),
         )
-        serialized_values[metadata.id] = SerializedValue(
-            metadata=metadata,
-            data=data,
-            content_type=metadata.content_type,
-        )
-        return serialized_values[metadata.id]
+        serialized_values[serialized_value.metadata.id] = serialized_value
+        return serialized_value
 
     awaitable: Awaitable = root
     if isinstance(awaitable, AwaitableList):
         awaitable: AwaitableList
         for index, item in enumerate(list(awaitable.items)):
             # Iterating over list copy to allow modifying the original list.
-            awaitable.items[index] = serialize_values_in_awaitable_tree(
+            awaitable.items[index] = _serialize_values_in_awaitable_tree(
                 root=item,
                 value_serializer=value_serializer,
                 serialized_values=serialized_values,
@@ -233,11 +290,11 @@ def serialize_values_in_awaitable_tree(
     elif isinstance(awaitable, ReduceOperationAwaitable):
         awaitable: ReduceOperationAwaitable
         args_serializer: UserDataSerializer = function_input_serializer(
-            get_function(awaitable.function_name)
+            get_function(awaitable.function_name), app_call=False
         )
         for index, item in enumerate(list(awaitable.inputs)):
             # Iterating over list copy to allow modifying the original list.
-            awaitable.inputs[index] = serialize_values_in_awaitable_tree(
+            awaitable.inputs[index] = _serialize_values_in_awaitable_tree(
                 root=item,
                 value_serializer=args_serializer,
                 serialized_values=serialized_values,
@@ -246,18 +303,18 @@ def serialize_values_in_awaitable_tree(
     elif isinstance(awaitable, FunctionCallAwaitable):
         awaitable: FunctionCallAwaitable
         args_serializer: UserDataSerializer = function_input_serializer(
-            get_function(awaitable.function_name)
+            get_function(awaitable.function_name), app_call=False
         )
         for index, arg in enumerate(list(awaitable.args)):
             # Iterating over list copy to allow modifying the original list.
-            awaitable.args[index] = serialize_values_in_awaitable_tree(
+            awaitable.args[index] = _serialize_values_in_awaitable_tree(
                 root=arg,
                 value_serializer=args_serializer,
                 serialized_values=serialized_values,
             )
         for kwarg_name, kwarg_value in dict(awaitable.kwargs).items():
             # Iterating over dict copy to allow modifying the original list.
-            awaitable.kwargs[kwarg_name] = serialize_values_in_awaitable_tree(
+            awaitable.kwargs[kwarg_name] = _serialize_values_in_awaitable_tree(
                 root=kwarg_value,
                 value_serializer=args_serializer,
                 serialized_values=serialized_values,
@@ -271,6 +328,8 @@ def to_execution_plan_updates(
     awaitable: Awaitable,
     uploaded_serialized_objects: Dict[str, SerializedObjectInsideBLOB],
     output_serializer_name_override: str,
+    has_output_type_hint_override: bool,
+    output_type_hint_override: Any,
     function_ref: FunctionRef,
     logger: InternalLogger,
 ) -> ExecutionPlanUpdates:
@@ -287,6 +346,8 @@ def to_execution_plan_updates(
         awaitable=awaitable,
         uploaded_serialized_objects=uploaded_serialized_objects,
         output_serializer_name_override=output_serializer_name_override,
+        has_output_type_hint_override=has_output_type_hint_override,
+        output_type_hint_override=output_type_hint_override,
         destination=updates,
         function_ref=function_ref,
         logger=logger,
@@ -301,6 +362,8 @@ def _fill_execution_plan_updates(
     awaitable: Awaitable,
     uploaded_serialized_objects: Dict[str, SerializedObjectInsideBLOB],
     output_serializer_name_override: str | None,
+    has_output_type_hint_override: bool,
+    output_type_hint_override: Any,
     destination: List[ExecutionPlanUpdate],
     function_ref: FunctionRef,
     logger: InternalLogger,
@@ -309,6 +372,8 @@ def _fill_execution_plan_updates(
         metadata: FunctionCallMetadata = FunctionCallMetadata(
             id=awaitable.id,
             output_serializer_name_override=output_serializer_name_override,
+            output_type_hint_override=output_type_hint_override,
+            has_output_type_hint_override=has_output_type_hint_override,
             args=[],
             kwargs={},
         )
@@ -342,6 +407,8 @@ def _fill_execution_plan_updates(
                             awaitable=item,
                             uploaded_serialized_objects=uploaded_serialized_objects,
                             output_serializer_name_override=None,  # Only override at root function call.
+                            has_output_type_hint_override=False,  # Only override at root function call.
+                            output_type_hint_override=None,  # Only override at root function call.
                             destination=destination,
                             function_ref=function_ref,
                             logger=logger,
@@ -355,6 +422,8 @@ def _fill_execution_plan_updates(
                     awaitable=arg,
                     uploaded_serialized_objects=uploaded_serialized_objects,
                     output_serializer_name_override=None,  # Only override at root function call.
+                    has_output_type_hint_override=False,  # Only override at root function call.
+                    output_type_hint_override=None,  # Only override at root function call.
                     destination=destination,
                     function_ref=function_ref,
                     logger=logger,
@@ -398,6 +467,8 @@ def _fill_execution_plan_updates(
         metadata: ReduceOperationMetadata = ReduceOperationMetadata(
             id=awaitable.id,
             output_serializer_name_override=output_serializer_name_override,
+            output_type_hint_override=output_type_hint_override,
+            has_output_type_hint_override=has_output_type_hint_override,
         )
         collection: List[FunctionArg] = []
 
@@ -414,6 +485,8 @@ def _fill_execution_plan_updates(
                     awaitable=item,
                     uploaded_serialized_objects=uploaded_serialized_objects,
                     output_serializer_name_override=None,  # Only override at root function call.
+                    has_output_type_hint_override=False,  # Only override at root function call.
+                    output_type_hint_override=None,  # Only override at root function call.
                     destination=destination,
                     function_ref=function_ref,
                     logger=logger,
@@ -506,33 +579,69 @@ def _embed_collection_into_function_pb_args(
             raise InternalError(f"Unexpected type of AwaitableList item: {type(item)}")
 
 
-def deserialize_function_arguments(
-    function: Function, serialized_args: List[SerializedValue]
-) -> Dict[str, Value]:
-    args: Dict[str, Value] = {}
-    for ix, serialized_arg in enumerate(serialized_args):
-        if serialized_arg.metadata is None:
-            # Application payload argument. It's allready validated to be only one argument.
-            args["application_payload"] = Value(
-                metadata=None,
-                object=deserialize_application_function_call_payload(
-                    application=function,
-                    payload=serialized_arg.data,
-                    payload_content_type=serialized_arg.content_type,
-                ),
-                input_ix=ix,
-            )
-        else:
-            args[serialized_arg.metadata.id] = Value(
-                metadata=serialized_arg.metadata,
-                object=deserialize_value(
-                    serialized_value=serialized_arg.data,
-                    metadata=serialized_arg.metadata,
-                ),
-                input_ix=ix,
-            )
+def deserialize_application_function_call_args(
+    function: Function,
+    payload: SerializedValue,
+    function_instance_arg: Any | None,
+) -> tuple[List[Any], Dict[str, Any]]:
+    """Returns a mapping from application function positional argument index or keyword to its deserialized Value.
 
-    return args
+    Raises DeserializationError if deserialization of any argument fails.
+    Raises InternalError on other errors.
+    """
+    input_serializer: UserDataSerializer = function_input_serializer(
+        function, app_call=True
+    )
+    serialized_args: list[SerializedApplicationArgument]
+    serialized_kwargs: dict[str, SerializedApplicationArgument]
+
+    if payload.content_type == "message/http":
+        # Future mode for application function calls where the HTTP request is forwarded from Server.
+        # Server will start doing this only once all users migrated to FE version 1.2+.
+        serialized_args, serialized_kwargs = (
+            parse_application_function_call_args_from_http_request(payload.data)
+        )
+    elif payload.content_type is not None and payload.content_type.startswith(
+        "multipart/form-data"
+    ):
+        # Current mode for multi-parameter application function calls (>1 parameter).
+        # Legacy mode for multi-parameter application function calls (>1 parameter).
+        serialized_args, serialized_kwargs = (
+            parse_application_function_call_args_from_multipart_form_data(
+                body_buffer=payload.data,
+                body_offset=0,
+                content_type=payload.content_type,
+            )
+        )
+    else:
+        # Current mode for application function calls with a single argument.
+        content_type: str = (
+            input_serializer.content_type
+            if payload.content_type is None
+            else payload.content_type
+        )
+        serialized_arg: SerializedApplicationArgument = (
+            parse_application_function_call_arg_from_single_payload(
+                body_buffer=payload.data,
+                body_offset=0,
+                body_end_offset=len(payload.data),
+                content_type=content_type,
+            )
+        )
+        # Single payload is always mapped to the first positional application function argument.
+        serialized_args = [serialized_arg]
+        serialized_kwargs = {}
+
+    args, kwargs = deserialize_application_function_call_arguments(
+        application=function,
+        serialized_args=serialized_args,
+        serialized_kwargs=serialized_kwargs,
+    )
+
+    if function_instance_arg is not None:
+        set_self_arg(args, function_instance_arg)
+
+    return args, kwargs
 
 
 def validate_and_deserialize_function_call_metadata(
@@ -591,23 +700,40 @@ def validate_and_deserialize_function_call_metadata(
         return None
 
 
-def reconstruct_function_call_args(
-    function_call_metadata: FunctionCallMetadata | ReduceOperationMetadata | None,
+def deserialize_sdk_function_call_args(
+    serialized_args: List[SerializedValue],
+) -> Dict[str, Value]:
+    """Returns a mapping from serialized argument IDs to their deserialized Values.
+
+    Raises TensorlakeError on error.
+    """
+    args: Dict[str, Value] = {}
+    for ix, serialized_arg in enumerate(serialized_args):
+        if serialized_arg.metadata is None:
+            raise InternalError("SDK function call arguments must have metadata.")
+
+        args[serialized_arg.metadata.id] = Value(
+            metadata=serialized_arg.metadata,
+            object=deserialize_value_with_metadata(
+                serialized_value=serialized_arg.data,
+                metadata=serialized_arg.metadata,
+            ),
+            input_ix=ix,
+        )
+
+    return args
+
+
+def reconstruct_sdk_function_call_args(
+    function_call_metadata: FunctionCallMetadata | ReduceOperationMetadata,
     arg_values: Dict[str, Value],
     function_instance_arg: Any | None,
 ) -> tuple[List[Any], Dict[str, Any]]:
     """Returns function call args and kwargs reconstructed from arg_values."""
-    if function_call_metadata is None:
-        # Application function call created by Server.
-        payload_arg: Value = arg_values["application_payload"]
-        args: List[Any] = [payload_arg.object]
-        kwargs: Dict[str, Any] = {}
-    else:
-        # SDK-created function call.
-        args, kwargs = _reconstruct_sdk_function_call_args(
-            function_call_metadata=function_call_metadata,
-            arg_values=arg_values,
-        )
+    args, kwargs = _reconstruct_sdk_function_call_args(
+        function_call_metadata=function_call_metadata,
+        arg_values=arg_values,
+    )
 
     if function_instance_arg is not None:
         set_self_arg(args, function_instance_arg)

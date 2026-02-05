@@ -81,7 +81,6 @@ class TestPrintProgressUpdates(unittest.TestCase):
                     InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
                 )
 
-                allocation_id: str = "test-allocation-id"
                 alloc_result: AllocationResult = run_allocation_that_returns_output(
                     self,
                     stub,
@@ -89,8 +88,8 @@ class TestPrintProgressUpdates(unittest.TestCase):
                         allocation=Allocation(
                             request_id="123",
                             function_call_id="test-function-call",
-                            allocation_id=allocation_id,
-                            inputs=application_function_inputs(arg),
+                            allocation_id="test-allocation-id",
+                            inputs=application_function_inputs(arg, int),
                         ),
                     ),
                 )
@@ -110,6 +109,8 @@ class TestPrintProgressUpdates(unittest.TestCase):
             data = {
                 "request_id": "123",
                 "function_name": "prints_progress_updates",
+                "function_run_id": "test-function-call",
+                "allocation_id": "test-allocation-id",
                 "message": f"prints_progress_updates: executing step {num} of {arg}",
                 "step": num,
                 "total": arg,
@@ -143,7 +144,6 @@ class TestPrintProgressUpdates(unittest.TestCase):
                     InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
                 )
 
-                allocation_id: str = "test-allocation-id"
                 alloc_result: AllocationResult = run_allocation_that_returns_output(
                     self,
                     stub,
@@ -151,8 +151,8 @@ class TestPrintProgressUpdates(unittest.TestCase):
                         allocation=Allocation(
                             request_id="123",
                             function_call_id="test-function-call",
-                            allocation_id=allocation_id,
-                            inputs=application_function_inputs(arg),
+                            allocation_id="test-allocation-id",
+                            inputs=application_function_inputs(arg, int),
                         ),
                     ),
                 )
@@ -172,6 +172,8 @@ class TestPrintProgressUpdates(unittest.TestCase):
             data = {
                 "request_id": "123",
                 "function_name": "prints_progress_updates_with_message",
+                "function_run_id": "test-function-call",
+                "allocation_id": "test-allocation-id",
                 "message": f"this is step {num} of {arg} steps in this function",
                 "step": num,
                 "total": arg,

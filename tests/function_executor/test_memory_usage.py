@@ -71,7 +71,7 @@ class TestMemoryUsage(unittest.TestCase):
                             request_id="123",
                             function_call_id="test-function-call",
                             allocation_id="test-allocation-id",
-                            inputs=application_function_inputs(0),
+                            inputs=application_function_inputs(0, int),
                         ),
                     ),
                 )

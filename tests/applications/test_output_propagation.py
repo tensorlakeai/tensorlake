@@ -1,6 +1,7 @@
 import unittest
 
 import parameterized
+import validate_all_applications
 
 from tensorlake.applications import (
     Request,
@@ -9,7 +10,9 @@ from tensorlake.applications import (
 )
 from tensorlake.applications.applications import run_application
 from tensorlake.applications.remote.deploy import deploy_applications
-from tensorlake.applications.validation import validate_loaded_applications
+
+# Makes the test case discoverable by unittest framework.
+ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
 
 
 # The call chain starting from this API function goes through multiple functions
@@ -48,7 +51,7 @@ class TestFunctionOutputPropagation(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(
-            api_function_output_propagation, "test", remote=is_remote
+            api_function_output_propagation, is_remote, "test"
         )
         self.assertEqual(request.output(), "buzz")
 
@@ -85,7 +88,7 @@ class TestReducerValueOutputPropagation(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(
-            api_reducer_value_output_propagation, "test", remote=is_remote
+            api_reducer_value_output_propagation, is_remote, "test"
         )
         self.assertEqual(request.output(), "buzz_reducer_value")
 
@@ -122,15 +125,12 @@ def concat_strings_actually(a: str, b: str) -> str:
 
 
 class TestReducerSubcallOutputPropagation(unittest.TestCase):
-    def test_applications_are_valid(self):
-        self.assertEqual(validate_loaded_applications(), [])
-
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(
-            "api_reducer_subcall_output_propagation", "test", remote=is_remote
+            "api_reducer_subcall_output_propagation", is_remote, "test"
         )
         self.assertEqual(request.output(), "buzz_reducer_subcall")
 

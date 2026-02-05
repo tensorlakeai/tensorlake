@@ -213,12 +213,17 @@ message AllocationState {
 
 // FunctionInputs contains the input data for allocation execution
 message FunctionInputs {
+    // Values for function call arguments of function calls created by SDK.
+    // For application function calls, always only one arg which is oneof:
+    // - HTTP request body (SerializedObject content_type is original content-type of the body from HTTP request header).
+    // - HTTP request in HTTP 1.1 format (SerializedObject content_type is "message/http").
     repeated SerializedObjectInsideBLOB args = 1;
     // Each arg has a matching BLOB.
     repeated BLOB arg_blobs = 2;
     // BLOB where to upload request error message if allocation fails with request error.
     optional BLOB request_error_blob = 3;
-    // Always set. An empty bytes array if no metadata, e.g. for API function call.
+    // SDK metadata for function calls created by SDK.
+    // Empty byte array for application function calls.
     optional bytes function_call_metadata = 4;
 }
 
@@ -238,6 +243,7 @@ message FunctionCall {
     optional bytes call_metadata = 4;
 }
 
+// Deprecated: SDK now generates an equivalent chain of function calls for a reduce operation.
 message ReduceOp {
     optional string id = 1;
     // Contains at least two items.
@@ -250,6 +256,7 @@ message ReduceOp {
 message ExecutionPlanUpdate {
   oneof op {
     FunctionCall function_call = 10;
+    // Deprecated, see ReduceOp message.
     ReduceOp     reduce        = 12;
   }
 }
@@ -284,7 +291,6 @@ message Allocation {
     optional string request_id = 1;
     optional string function_call_id = 2;
     optional string allocation_id = 3;
-    // Original allocation inputs.
     optional FunctionInputs inputs = 4;
     // Set when allocation finishes.
     optional AllocationResult result = 5;

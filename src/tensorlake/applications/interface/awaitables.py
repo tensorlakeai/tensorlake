@@ -450,6 +450,10 @@ class ReduceOperationAwaitable(Awaitable):
         function_name: str,
         inputs: List[Any | Awaitable],
     ):
+        """Returns a ReduceOperationAwaitable with the supplied parameters.
+
+        The inputs must have at least two items.
+        """
         super().__init__(id=id)
         self._function_name: str = function_name
         # Contains at least two items due to prior validations.
@@ -540,8 +544,8 @@ def make_reduce_operation_awaitable(
     )
     reduce_op._validate_inputs()
 
-    # Squash reduce operation into a single Awaitable if it's only one thing
-    # in collection. Server and Local Runner require at least two items to perform reduce.
+    # Squash reduce operation into a single Awaitable | Any if it's only one thing in collection.
+    # Squashing here simplifies the Awaitable tree processing algorithms later on.
     if len(inputs) == 1:
         return inputs[0]
     else:

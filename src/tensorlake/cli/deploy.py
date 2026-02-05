@@ -1,7 +1,6 @@
 import asyncio
 import os
 import traceback
-from typing import Dict, List
 
 import click
 
@@ -14,11 +13,8 @@ from tensorlake.applications.interface.function import (
 )
 from tensorlake.applications.registry import get_functions
 from tensorlake.applications.remote.code.loader import load_code
+from tensorlake.applications.remote.curl_command import example_application_curl_command
 from tensorlake.applications.remote.deploy import deploy_applications
-from tensorlake.applications.remote.manifests.function import (
-    FunctionManifest,
-    create_function_manifest,
-)
 from tensorlake.applications.secrets import list_secret_names
 from tensorlake.applications.validation import (
     ValidationMessage,
@@ -91,7 +87,7 @@ def deploy(
 
     warning_missing_secrets(auth, list(list_secret_names()))
 
-    functions: List[Function] = get_functions()
+    functions: list[Function] = get_functions()
     asyncio.run(_prepare_images_v2(builder_v2, functions))
 
     _deploy_applications(
@@ -102,8 +98,8 @@ def deploy(
     )
 
 
-async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: List[Function]):
-    images: Dict[Image, ImageInformation] = image_infos()
+async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: list[Function]):
+    images: dict[Image, ImageInformation] = image_infos()
     for application in filter_applications(functions):
         fn_config: _FunctionConfiguration = application._function_config
         app_config: _ApplicationConfiguration = application._application_config
@@ -142,7 +138,7 @@ def _deploy_applications(
     auth: Context,
     application_file_path: str,
     upgrade_running_requests: bool,
-    functions: List[Function],
+    functions: list[Function],
 ):
     click.echo("⚙️  Deploying applications...\n")
 
@@ -155,33 +151,19 @@ def _deploy_applications(
         )
 
         for application_function in filter_applications(functions):
-            app_func_manifest: FunctionManifest = create_function_manifest(
-                application_function,
-                application_function._application_config.version,
-                application_function,
+            application_function: Function
+            click.echo(
+                f"🚀 Application `{application_function._name}` deployed successfully\n"
             )
-            func_name = app_func_manifest.name
-            click.echo(f"🚀 Application `{func_name}` deployed successfully\n")
-            # TODO: update after parameterless function support
-            if len(app_func_manifest.parameters) > 0:
-                param_type = app_func_manifest.parameters[0].data_type
-                type = (
-                    param_type["type"]
-                    if param_type["type"] != "string"
-                    else f'"{param_type["type"]}"'
-                )
+            curl_command: str | None = example_application_curl_command(
+                api_url=auth.api_url,
+                application=application_function,
+                file_paths=None,
+            )
+            if curl_command is not None:
                 click.echo(
-                    f"""💡 To invoke it, you can use the following cURL command:
-```
-curl {auth.api_url}/applications/{func_name} \\
--H "Authorization: Bearer $TENSORLAKE_API_KEY" \\
---json '{type}'
-```
-
-📚 Visit or documentation if you need more information about invoking applications: https://docs.tensorlake.ai/applications/quickstart#calling-applications
-""",
+                    f"💡 To invoke it, you can use the following cURL command:\n\n{curl_command}"
                 )
-        return
     except SDKUsageError as e:
         raise click.UsageError(str(e)) from None
     except TensorlakeError as e:
@@ -193,3 +175,8 @@ curl {auth.api_url}/applications/{func_name} \\
         )
         traceback.print_exception(e)
         raise click.Abort
+
+    click.echo(
+        "\n📚 Visit our documentation if you need more information about invoking applications: "
+        "https://docs.tensorlake.ai/applications/quickstart#calling-applications\n\n"
+    )

@@ -1,5 +1,3 @@
-import json
-
 import httpx
 
 from ...interface.exceptions import InternalError, SDKUsageError
@@ -22,11 +20,13 @@ class FunctionProgressHTTPClient(FunctionProgress):
         request_id: str,
         allocation_id: str,
         function_name: str,
+        function_run_id: str,
         http_client: httpx.Client,
     ):
         self._request_id: str = request_id
         self._allocation_id: str = allocation_id
         self._function_name: str = function_name
+        self._function_run_id: str = function_run_id
         self._http_client: httpx.Client = http_client
 
     def update(
@@ -64,6 +64,7 @@ class FunctionProgressHTTPClient(FunctionProgress):
                     request_id=self._request_id,
                     allocation_id=self._allocation_id,
                     function_name=self._function_name,
+                    function_run_id=self._function_run_id,
                     current=current,
                     total=total,
                     message=message,

@@ -1,3 +1,4 @@
+import inspect
 import shutil
 import tempfile
 import threading
@@ -19,12 +20,20 @@ from tensorlake.applications.blob_store import BLOBStore
 from tensorlake.applications.internal_logger import InternalLogger
 from tensorlake.applications.multiprocessing import setup_multiprocessing
 
-from ..algorithms.validate_user_object import validate_user_object
+from ..algorithms import reduce_operation_to_function_call_chain, validate_user_object
 from ..function.application_call import (
-    deserialize_application_function_call_payload,
+    ApplicationArgument,
+    deserialize_application_function_call_arguments,
+    serialize_application_function_call_arguments,
+)
+from ..function.type_hints import (
+    function_parameters,
+    function_signature,
+    parameter_type_hint,
+    return_type_hint,
 )
 from ..function.user_data_serializer import (
-    deserialize_value,
+    deserialize_value_with_metadata,
     function_input_serializer,
     function_output_serializer,
     serialize_value,
@@ -32,6 +41,7 @@ from ..function.user_data_serializer import (
 from ..interface import (
     RETURN_WHEN,
     Awaitable,
+    DeserializationError,
     File,
     Function,
     Future,
@@ -40,6 +50,7 @@ from ..interface import (
     RequestError,
     RequestFailed,
     SDKUsageError,
+    SerializationError,
     TensorlakeError,
 )
 from ..interface.awaitables import (
@@ -106,9 +117,10 @@ _SLEEP_POLL_INTERVAL_SECONDS = 0.002
 
 
 class LocalRunner:
-    def __init__(self, app: Function, app_payload: Any):
+    def __init__(self, app: Function, app_args: list[Any], app_kwargs: dict[str, Any]):
         self._app: Function = app
-        self._app_payload: Any = app_payload
+        self._app_args: list[Any] = app_args
+        self._app_kwargs: dict[str, Any] = app_kwargs
 
         self._logger: InternalLogger = InternalLogger.get_logger().bind(module=__name__)
         self._blob_store_dir_path: str = tempfile.mkdtemp(
@@ -164,22 +176,24 @@ class LocalRunner:
         )
 
     def run(self) -> Request:
-        try:
-            validation_messages: list[ValidationMessage] = (
-                validate_loaded_applications()
-            )
-            print_validation_messages(validation_messages)
-            if has_error_message(validation_messages):
-                return LocalRequest(
-                    id=_LOCAL_REQUEST_ID,
-                    output=None,
-                    error=RequestFailed(
-                        "Local application run aborted due to code validation errors, "
-                        "please address them before running the application."
-                    ),
-                )
+        """Creates and runs the local request.
 
-            return self._run()
+        Raises TensorlakeError on error.
+        """
+        validation_messages: list[ValidationMessage] = validate_loaded_applications()
+        if has_error_message(validation_messages):
+            # Don't print non-error messages for now to reduce noise for users.
+            print_validation_messages(validation_messages)
+            raise SDKUsageError(
+                "Local application run aborted due to code validation errors, "
+                "please address them before running the application."
+            )
+
+        self._serialize_and_deserialize_application_arguments()
+
+        # All work that is logically done before the request is created in remote mode must be done by this point.
+        try:
+            return self._run_request()
         except BaseException as e:
             # This is an unexpected exception in LocalRunner code itself.
             # The function run exception is stored in self._request_failed_exception and handled above.
@@ -194,10 +208,76 @@ class LocalRunner:
                 ),
             )
 
-    def _run(self) -> LocalRequest:
+    def _serialize_and_deserialize_application_arguments(
+        self,
+    ) -> None:
+        """Serializes and deserializes application arguments.
+
+        This is required to bring local mode UX closer to remote mode UX.
+        Doesn't raise any exceptions unless there's a bug in our code.
+        Raises SerializationError or DeserializationError if serialization/deserialization failed.
+        """
+        app_parameters: list[inspect.Parameter] = function_parameters(self._app)
+        app_args: list[ApplicationArgument] = []
+        for i, arg_value in enumerate(self._app_args):
+            if i >= len(app_parameters):
+                # Allow users to pass unknown args, this gives them more flexibility
+                # i.e. when they change their code but not request payload yet.
+                continue
+            arg_type_hint: Any = parameter_type_hint(app_parameters[i])
+            app_args.append(
+                ApplicationArgument(
+                    value=arg_value,
+                    type_hint=arg_type_hint,
+                )
+            )
+
+        app_signature: inspect.Signature = function_signature(self._app)
+        app_kwargs: dict[str, ApplicationArgument] = {}
+        for kwarg_key, kwarg_value in self._app_kwargs.items():
+            if kwarg_key not in app_signature.parameters:
+                # Allow users to pass unknown args, this gives them more flexibility
+                # i.e. when they change their code but not request payload yet.
+                continue
+
+            kwarg_type_hint: Any = parameter_type_hint(
+                app_signature.parameters[kwarg_key]
+            )
+            app_kwargs[kwarg_key] = ApplicationArgument(
+                value=kwarg_value,
+                type_hint=kwarg_type_hint,
+            )
+
+        # Serialize application payload the same way as in remote mode.
+        input_serializer: UserDataSerializer = function_input_serializer(
+            self._app, app_call=True
+        )
+        try:
+            serialized_app_args, serialized_app_kwargs = (
+                serialize_application_function_call_arguments(
+                    input_serializer=input_serializer,
+                    args=app_args,
+                    kwargs=app_kwargs,
+                )
+            )
+            deserialized_app_args, deserialized_app_kwargs = (
+                deserialize_application_function_call_arguments(
+                    application=self._app,
+                    serialized_args=serialized_app_args,
+                    serialized_kwargs=serialized_app_kwargs,
+                )
+            )
+        except (SerializationError, DeserializationError):
+            raise  # All other exception raised by this function are bugs in our code.
+
+        # Use copies of the deserialized args/kwargs, this is consisntent with remote mode UX.
+        self._app_args = deserialized_app_args
+        self._app_kwargs = deserialized_app_kwargs
+
+    def _run_request(self) -> LocalRequest:
         """Runs the request.
 
-        Doesn't raise any exceptions unless there's a coding bug.
+        Doesn't raise any exceptions unless there's a bug in our code.
         """
         self._request_context_http_server_thread.start()
 
@@ -205,27 +285,24 @@ class LocalRunner:
         set_wait_futures_hook(self._wait_futures_runtime_hook)
         setup_multiprocessing()
 
-        # Serialize application payload the same way as in remote mode.
-        input_serializer: UserDataSerializer = function_input_serializer(self._app)
-
         try:
-            serialized_payload, payload_metadata = serialize_value(
-                value=self._app_payload, serializer=input_serializer, value_id="fake_id"
-            )
-            payload: Any = deserialize_application_function_call_payload(
-                application=self._app,
-                payload=serialized_payload,
-                payload_content_type=payload_metadata.content_type,
-            )
+            app_signature: inspect.Signature = function_signature(self._app)
             app_function_call_awaitable: FunctionCallAwaitable = self._app.awaitable(
-                payload
+                *self._app_args, **self._app_kwargs
+            )
+            app_output_serializer: UserDataSerializer = function_output_serializer(
+                self._app, None
             )
             self._create_future_run_for_awaitable(
                 awaitable=app_function_call_awaitable,
                 existing_awaitable_future=None,
                 start_delay=None,
                 output_consumer_future_id=None,
-                output_serializer_name_override=None,
+                output_serializer_name_override=app_output_serializer.name,
+                has_output_type_hint_override=True,
+                output_type_hint_override=return_type_hint(
+                    app_signature.return_annotation
+                ),
             )
         except TensorlakeError as e:
             # Handle exceptions that depend on user inputs. All other exceptions are
@@ -324,6 +401,8 @@ class LocalRunner:
                     start_delay=start_delay,
                     output_consumer_future_id=None,
                     output_serializer_name_override=None,
+                    has_output_type_hint_override=False,
+                    output_type_hint_override=None,
                 )
         except TensorlakeError:
             raise
@@ -475,18 +554,26 @@ class LocalRunner:
 
         function_name: str = "<unknown>"
         output_blob_serializer: UserDataSerializer | None = None
+        has_output_type_hint_override: bool = False
+        output_type_hint_override: Any = None
         if isinstance(future_run, FunctionCallFutureRun):
             function_name = user_future.awaitable.function_name
             output_blob_serializer = function_output_serializer(
                 get_function(function_name),
                 metadata.output_serializer_name_override,
             )
+            if metadata.has_output_type_hint_override:
+                has_output_type_hint_override = True
+                output_type_hint_override = metadata.output_type_hint_override
         elif isinstance(future_run, ReturnOutputFutureRun):
             function_name = user_future.awaitable.function_name
             output_blob_serializer = function_output_serializer(
                 get_function(function_name),
                 metadata.output_serializer_name_override,
             )
+            if metadata.has_output_type_hint_override:
+                has_output_type_hint_override = True
+                output_type_hint_override = metadata.output_type_hint_override
         elif isinstance(future_run, ListFutureRun):
             function_name = "Assembly awaitable list"
             # In remote mode we assemble the list locally and only store its individual items in BLOB store.
@@ -521,6 +608,8 @@ class LocalRunner:
                 start_delay=None,
                 output_consumer_future_id=user_future.awaitable.id,
                 output_serializer_name_override=output_blob_serializer.name,
+                has_output_type_hint_override=has_output_type_hint_override,
+                output_type_hint_override=output_type_hint_override,
             )
         else:
             ser_value: SerializedValue | None = None
@@ -529,6 +618,11 @@ class LocalRunner:
                     value_id=user_future.awaitable.id,
                     value=result.output,
                     value_serializer=output_blob_serializer,
+                    type_hint=(
+                        output_type_hint_override
+                        if has_output_type_hint_override
+                        else type(result.output)
+                    ),
                 )
                 self._value_store.put(ser_value)
                 self._handle_future_run_final_output(
@@ -733,6 +827,8 @@ class LocalRunner:
         start_delay: float | None,
         output_consumer_future_id: str | None,
         output_serializer_name_override: str | None,
+        has_output_type_hint_override: bool,
+        output_type_hint_override: Any,
     ) -> None:
         """Creates future run for the supplied user object if it's an Awaitable.
 
@@ -746,6 +842,8 @@ class LocalRunner:
                 start_delay=start_delay,
                 output_consumer_future_id=output_consumer_future_id,
                 output_serializer_name_override=output_serializer_name_override,
+                has_output_type_hint_override=has_output_type_hint_override,
+                output_type_hint_override=output_type_hint_override,
             )
 
     def _create_future_run_for_awaitable(
@@ -755,6 +853,8 @@ class LocalRunner:
         start_delay: float | None,
         output_consumer_future_id: str | None,
         output_serializer_name_override: str | None,
+        has_output_type_hint_override: bool,
+        output_type_hint_override: Any,
     ) -> None:
         """Creates future run for the supplied Awaitable.
 
@@ -780,6 +880,8 @@ class LocalRunner:
                 start_delay=start_delay,
                 output_consumer_future_id=output_consumer_future_id,
                 output_serializer_name_override=output_serializer_name_override,
+                has_output_type_hint_override=has_output_type_hint_override,
+                output_type_hint_override=output_type_hint_override,
             )
         elif isinstance(awaitable, FunctionCallAwaitable):
             self._create_future_run_for_function_call_awaitable(
@@ -788,6 +890,8 @@ class LocalRunner:
                 start_delay=start_delay,
                 output_consumer_future_id=output_consumer_future_id,
                 output_serializer_name_override=output_serializer_name_override,
+                has_output_type_hint_override=has_output_type_hint_override,
+                output_type_hint_override=output_type_hint_override,
             )
 
     def _create_future_run_for_awaitable_list(
@@ -831,6 +935,8 @@ class LocalRunner:
                 start_delay,
                 output_consumer_future_id=None,
                 output_serializer_name_override=None,
+                has_output_type_hint_override=False,
+                output_type_hint_override=None,
             )
 
         self._future_runs[awaitable.id] = ListFutureRun(
@@ -851,13 +957,17 @@ class LocalRunner:
         start_delay: float | None,
         output_consumer_future_id: str | None,
         output_serializer_name_override: str | None,
+        has_output_type_hint_override: bool,
+        output_type_hint_override: Any,
     ) -> None:
         """Creates LocalFunctionCallFutureRun for the supplied awaitable.
 
         Raises TensorlakeError on error.
         """
         function: Function = get_function(awaitable.function_name)
-        user_input_serializer: UserDataSerializer = function_input_serializer(function)
+        user_input_serializer: UserDataSerializer = function_input_serializer(
+            function, app_call=False
+        )
         user_future: FunctionCallFuture = (
             FunctionCallFuture(awaitable)
             if existing_awaitable_future is None
@@ -867,6 +977,8 @@ class LocalRunner:
         metadata: FunctionCallMetadata = FunctionCallMetadata(
             id=awaitable.id,
             output_serializer_name_override=output_serializer_name_override,
+            output_type_hint_override=output_type_hint_override,
+            has_output_type_hint_override=has_output_type_hint_override,
             args=[],
             kwargs={},
         )
@@ -880,6 +992,8 @@ class LocalRunner:
                 start_delay,
                 output_consumer_future_id=None,
                 output_serializer_name_override=None,
+                has_output_type_hint_override=False,
+                output_type_hint_override=None,
             )
             metadata.args.append(
                 self._function_arg_metadata(arg, user_input_serializer)
@@ -890,6 +1004,8 @@ class LocalRunner:
                 start_delay,
                 output_consumer_future_id=None,
                 output_serializer_name_override=None,
+                has_output_type_hint_override=False,
+                output_type_hint_override=None,
             )
             metadata.kwargs[key] = self._function_arg_metadata(
                 arg, user_input_serializer
@@ -900,6 +1016,8 @@ class LocalRunner:
                 request_id=_LOCAL_REQUEST_ID,
                 allocation_id=awaitable.id,
                 function_name=awaitable.function_name,
+                # In local mode, the allocation id and the function run id are the same.
+                function_run_id=awaitable.id,
                 server_base_url=self._request_context_http_server.base_url,
                 http_client=self._request_context_http_client,
                 blob_store=self._blob_store,
@@ -940,7 +1058,10 @@ class LocalRunner:
             value_id: str = _request_scoped_id()
             self._value_store.put(
                 _to_serialized_value(
-                    value_id=value_id, value=arg, value_serializer=value_serializer
+                    value_id=value_id,
+                    value=arg,
+                    value_serializer=value_serializer,
+                    type_hint=type(arg),
                 )
             )
             return FunctionCallArgumentMetadata(
@@ -949,7 +1070,9 @@ class LocalRunner:
             )
 
     def _collection_metadata(
-        self, collection: AwaitableList, value_serializer: UserDataSerializer
+        self,
+        collection: AwaitableList,
+        value_serializer: UserDataSerializer,
     ) -> CollectionMetadata:
         """Builds recursive collection metadata for the supplied AwaitableList."""
         items_metadata: List[CollectionItemMetadata] = []
@@ -975,7 +1098,10 @@ class LocalRunner:
                 value_id: str = _request_scoped_id()
                 self._value_store.put(
                     _to_serialized_value(
-                        value_id=value_id, value=item, value_serializer=value_serializer
+                        value_id=value_id,
+                        value=item,
+                        value_serializer=value_serializer,
+                        type_hint=type(item),
                     )
                 )
                 items_metadata.append(
@@ -993,26 +1119,17 @@ class LocalRunner:
         start_delay: float | None,
         output_consumer_future_id: str | None,
         output_serializer_name_override: str | None,
+        has_output_type_hint_override: bool,
+        output_type_hint_override: Any,
     ) -> None:
-        """Creates LocalReduceOperationFutureRun for the supplied awaitable.
+        """Creates ReturnOutputFutureRun that returns an awaitable tree equivalent to the supplied reduce operation.
 
         Raises TensorlakeError on error.
         """
-        # inputs have at least two items.
-        function: Function = get_function(awaitable.function_name)
-        # Create a chain of function calls to reduce all inputs one by one.
-        # Ordering of calls is important here. We should reduce ["a", "b", "c", "d"]
-        # using string concat function into "abcd".
-        previous_function_call_awaitable: FunctionCallAwaitable = function.awaitable(
-            awaitable.inputs[0], awaitable.inputs[1]
+        reduce_operation_result: FunctionCallAwaitable = (
+            reduce_operation_to_function_call_chain(awaitable)
         )
-        for input_item in awaitable.inputs[2:]:
-            previous_function_call_awaitable = function.awaitable(
-                previous_function_call_awaitable, input_item
-            )
-        reduce_operation_result = previous_function_call_awaitable
-
-        # Don't create future runs for the function calls chain because we're
+        # Don't create future runs for awaitables in the function calls chain because we're
         # going to return it from ReturnOutputFutureRun as a tail call.
         user_future: ReduceOperationFuture = (
             ReduceOperationFuture(awaitable)
@@ -1023,6 +1140,8 @@ class LocalRunner:
         metadata: ReduceOperationMetadata = ReduceOperationMetadata(
             id=awaitable.id,
             output_serializer_name_override=output_serializer_name_override,
+            output_type_hint_override=output_type_hint_override,
+            has_output_type_hint_override=has_output_type_hint_override,
         )
 
         self._future_runs[awaitable.id] = ReturnOutputFutureRun(
@@ -1039,17 +1158,25 @@ class LocalRunner:
 
 
 def _deserialize_value(ser_value: SerializedValue) -> Any | File:
-    return deserialize_value(
+    return deserialize_value_with_metadata(
         serialized_value=ser_value.data,
         metadata=ser_value.metadata,
     )
 
 
 def _to_serialized_value(
-    value_id: str, value: Any, value_serializer: UserDataSerializer
+    value_id: str,
+    value: Any,
+    value_serializer: UserDataSerializer,
+    type_hint: Any,
 ) -> SerializedValue:
+    """Serializes the supplied value with the supplied serializer.
+
+    Raises SerializationError if value serialization fails.
+    Raises InternalError if type hints is empty.
+    """
     serialized_value, metadata = serialize_value(
-        value, value_serializer, value_id=value_id
+        value, value_serializer, value_id=value_id, type_hint=type_hint
     )
     return SerializedValue(
         data=serialized_value,
