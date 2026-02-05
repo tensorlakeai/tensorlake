@@ -25,6 +25,10 @@ class EnrichmentOptions(BaseModel):
     This includes summarization of tables and figures, which can help to provide a more comprehensive understanding of the document.
     """
 
+    chart_extraction: Optional[bool] = Field(
+        None,
+        description="Extract information from charts. The default is `false`.",
+    )
     figure_summarization: Optional[bool] = Field(
         None,
         description="Boolean flag to enable figure summarization. The default is `false`.",
@@ -33,6 +37,14 @@ class EnrichmentOptions(BaseModel):
         None,
         description="The prompt to guide the figure summarization. If not provided, a default prompt will be used. It is not required to provide a prompt. The prompt only has effect if `figure_summarization` is set to `true`.",
     )
+    include_full_page_image: Optional[bool] = Field(
+        None,
+        description="Use full page image in addition to the cropped table and figure images. This provides Language Models context about the table and figure they are summarizing in addition to the cropped images, and could improve the summarization quality. The default is `false`.",
+    )
+    key_value_extraction: Optional[bool] = Field(
+        None,
+        description="Extract information from forms. The default is `false`.",
+    )
     table_summarization: Optional[bool] = Field(
         None,
         description="Boolean flag to enable summary generation for parsed tables. The default is `false`.",
@@ -40,10 +52,6 @@ class EnrichmentOptions(BaseModel):
     table_summarization_prompt: Optional[str] = Field(
         None,
         description="The prompt to guide the table summarization. If not provided, a default prompt will be used. It is not required to provide a prompt. The prompt only has effect if `table_summarization` is set to `true`.",
-    )
-    include_full_page_image: Optional[bool] = Field(
-        None,
-        description="Use full page image in addition to the cropped table and figure images. This provides Language Models context about the table and figure they are summarizing in addition to the cropped images, and could improve the summarization quality. The default is `false`.",
     )
 
 
