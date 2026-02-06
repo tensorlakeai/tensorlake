@@ -2381,6 +2381,13 @@ components:
 
             The default is `false`.
           default: false
+        key_value_extraction:
+          type: boolean
+          description: |-
+            Extraction of key-value pairs from forms.
+
+            The default is `false`.
+          default: false
         table_summarization_prompt:
           type:
             - string

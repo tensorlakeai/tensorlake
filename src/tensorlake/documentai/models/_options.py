@@ -29,6 +29,10 @@ class EnrichmentOptions(BaseModel):
         None,
         description="Extract information from charts. The default is `false`.",
     )
+    key_value_extraction: Optional[bool] = Field(
+        None,
+        description="Extract of key/value pairs from forms. The default is `false`.",
+    )
     figure_summarization: Optional[bool] = Field(
         None,
         description="Boolean flag to enable figure summarization. The default is `false`.",
