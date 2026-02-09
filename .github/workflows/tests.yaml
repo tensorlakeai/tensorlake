@@ -58,7 +58,7 @@ jobs:
         run: |
           docker pull ${{ steps.login-ecr.outputs.registry }}/indexify-dataplane:latest
           container_id=$(docker create ${{ steps.login-ecr.outputs.registry }}/indexify-dataplane:latest)
-          docker cp $container_id:/usr/local/bin/indexify-dataplane /usr/local/bin/indexify-dataplane
+          docker cp $container_id:/indexify/indexify-dataplane /usr/local/bin/indexify-dataplane
           docker rm $container_id
           chmod +x /usr/local/bin/indexify-dataplane
 
