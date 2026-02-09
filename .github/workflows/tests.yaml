@@ -54,6 +54,14 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Install Indexify Dataplane
+        run: |
+          docker pull ${{ steps.login-ecr.outputs.registry }}/indexify-dataplane:latest
+          container_id=$(docker create ${{ steps.login-ecr.outputs.registry }}/indexify-dataplane:latest)
+          docker cp $container_id:/usr/local/bin/indexify-dataplane /usr/local/bin/indexify-dataplane
+          docker rm $container_id
+          chmod +x /usr/local/bin/indexify-dataplane
+
       - name: Start Background Indexify Server in Docker container
         uses: JarvusInnovations/background-action@v1
         with:
@@ -123,4 +131,5 @@ jobs:
       - name: Run tests
         env:
           TENSORLAKE_API_URL: http://127.0.0.1:8900
+          DATAPLANE_BIN: /usr/local/bin/indexify-dataplane
         run: make test

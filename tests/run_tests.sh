@@ -12,6 +12,7 @@ enable_applications_test_suite=false
 enable_cli_test_suite=false
 enable_utils_test_suite=false
 enable_document_ai_test_suite=false
+enable_sandbox_test_suite=false
 
 if [[ "$1" == "--function-executor" ]]; then
   enable_fe_test_suite=true
@@ -19,12 +20,15 @@ elif [ "$1" == "--applications" ]; then
   enable_applications_test_suite=true
 elif [ "$1" == "--document-ai" ]; then
   enable_document_ai_test_suite=true
+elif [ "$1" == "--sandbox" ]; then
+  enable_sandbox_test_suite=true
 else
   # All by default
   enable_fe_test_suite=true
   enable_applications_test_suite=true
   enable_cli_test_suite=true
   enable_utils_test_suite=true
+  enable_sandbox_test_suite=true
 fi
 
 tests_exit_code=0
@@ -59,6 +63,7 @@ applications_test_files=$(find ./applications -name 'test_*.py')
 cli_test_files=$(find ./cli -name 'test_*.py')
 utils_test_files=$(find ./utils -name 'test_*.py')
 document_ai_test_files=$(find ./document_ai -name 'test_*.py')
+sandbox_test_files=$(find ./sandbox -name 'test_lifecycle*.py')
 
 if [ "$enable_fe_test_suite" = true ]; then
   run_test_suite "$function_executor_test_files" "Function Executor"
@@ -74,6 +79,10 @@ fi
 
 if [ "$enable_document_ai_test_suite" = true ]; then
   run_test_suite "$document_ai_test_files" "Document AI"
+fi
+
+if [ "$enable_sandbox_test_suite" = true ]; then
+  run_test_suite "$sandbox_test_files" "Sandbox"
 fi
 
 
