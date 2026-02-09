@@ -185,9 +185,7 @@ class TestProcessManagement:
             return_value=httpx.Response(200, json=PROCESS_JSON)
         )
 
-        result = sandbox.start_process(
-            command="python", args=["-c", "print('hello')"]
-        )
+        result = sandbox.start_process(command="python", args=["-c", "print('hello')"])
         assert isinstance(result, ProcessInfo)
         assert result.pid == 42
         assert result.status == ProcessStatus.RUNNING
@@ -259,9 +257,7 @@ class TestProcessManagement:
 
     def test_kill_process(self, sandbox, mock_proxy):
         """Test killing a process."""
-        mock_proxy.delete("/api/v1/processes/42").mock(
-            return_value=httpx.Response(204)
-        )
+        mock_proxy.delete("/api/v1/processes/42").mock(return_value=httpx.Response(204))
         sandbox.kill_process(42)
 
     def test_send_signal(self, sandbox, mock_proxy):
@@ -369,9 +365,7 @@ class TestFileOperations:
 
     def test_write_file(self, sandbox, mock_proxy):
         """Test writing a file."""
-        route = mock_proxy.put("/api/v1/files").mock(
-            return_value=httpx.Response(204)
-        )
+        route = mock_proxy.put("/api/v1/files").mock(return_value=httpx.Response(204))
 
         sandbox.write_file("/app/script.py", b"print('hello')")
 
@@ -380,9 +374,7 @@ class TestFileOperations:
 
     def test_delete_file(self, sandbox, mock_proxy):
         """Test deleting a file."""
-        mock_proxy.delete("/api/v1/files").mock(
-            return_value=httpx.Response(204)
-        )
+        mock_proxy.delete("/api/v1/files").mock(return_value=httpx.Response(204))
         sandbox.delete_file("/app/temp.txt")
 
     def test_list_directory(self, sandbox, mock_proxy):
@@ -598,9 +590,7 @@ class TestRun:
         mock_proxy.get("/api/v1/processes/42").mock(
             return_value=httpx.Response(200, json=PROCESS_JSON)
         )
-        mock_proxy.delete("/api/v1/processes/42").mock(
-            return_value=httpx.Response(204)
-        )
+        mock_proxy.delete("/api/v1/processes/42").mock(return_value=httpx.Response(204))
 
         with pytest.raises(SandboxError, match="timed out"):
             sandbox.run("sleep", args=["999"], timeout=0.2)
@@ -620,9 +610,7 @@ class TestTerminate:
 
         # Mock the delete call on the lifecycle client
         with respx.mock(base_url="http://test.local") as mock_api:
-            mock_api.delete("/sandboxes/sb_123").mock(
-                return_value=httpx.Response(200)
-            )
+            mock_api.delete("/sandboxes/sb_123").mock(return_value=httpx.Response(200))
             sandbox.terminate()
 
         assert sandbox._lifecycle_client is None
@@ -754,9 +742,7 @@ class TestCreateAndConnect:
             )
 
             with pytest.raises(SandboxError, match="did not start"):
-                client.create_and_connect(
-                    image="python:3.11", startup_timeout=1
-                )
+                client.create_and_connect(image="python:3.11", startup_timeout=1)
 
             assert cleanup_route.called
 

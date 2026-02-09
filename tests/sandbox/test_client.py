@@ -80,7 +80,9 @@ class TestURLRouting:
     def test_remote_url(self):
         """Remote API uses flat paths."""
         client = SandboxClient(api_url="https://api.tensorlake.ai", namespace="test-ns")
-        assert client._endpoint_url("sandboxes") == "https://api.tensorlake.ai/sandboxes"
+        assert (
+            client._endpoint_url("sandboxes") == "https://api.tensorlake.ai/sandboxes"
+        )
         assert (
             client._endpoint_url("sandbox-pools")
             == "https://api.tensorlake.ai/sandbox-pools"
@@ -112,9 +114,7 @@ class TestAuthHeaders:
 
     def test_auth_headers_with_api_key(self):
         """Test that API key is added as Bearer token."""
-        client = SandboxClient(
-            api_url="https://api.tensorlake.ai", api_key="test-key"
-        )
+        client = SandboxClient(api_url="https://api.tensorlake.ai", api_key="test-key")
         headers = {}
         client._add_auth_headers(headers)
         assert headers["Authorization"] == "Bearer test-key"
@@ -337,9 +337,7 @@ class TestSandboxDelete:
 
     def test_delete_success(self, client, mock_api):
         """Test deleting a sandbox."""
-        mock_api.delete("/sandboxes/sb_123").mock(
-            return_value=httpx.Response(200)
-        )
+        mock_api.delete("/sandboxes/sb_123").mock(return_value=httpx.Response(200))
 
         client.delete("sb_123")
 

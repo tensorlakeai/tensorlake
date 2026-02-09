@@ -150,9 +150,7 @@ class Sandbox:
                 break
             if deadline and time.time() > deadline:
                 self.kill_process(proc.pid)
-                raise SandboxError(
-                    f"Command timed out after {timeout}s"
-                )
+                raise SandboxError(f"Command timed out after {timeout}s")
             time.sleep(0.1)
 
         stdout_resp = self.get_stdout(proc.pid)
@@ -224,9 +222,7 @@ class Sandbox:
 
     def get_process(self, pid: int) -> ProcessInfo:
         """Get information about a specific process."""
-        response = self._handle_response(
-            self._client.get(f"/api/v1/processes/{pid}")
-        )
+        response = self._handle_response(self._client.get(f"/api/v1/processes/{pid}"))
         return ProcessInfo(**response.json())
 
     def kill_process(self, pid: int) -> None:
@@ -257,9 +253,7 @@ class Sandbox:
 
     def close_stdin(self, pid: int) -> None:
         """Close a process's stdin."""
-        self._handle_response(
-            self._client.post(f"/api/v1/processes/{pid}/stdin/close")
-        )
+        self._handle_response(self._client.post(f"/api/v1/processes/{pid}/stdin/close"))
 
     def get_stdout(self, pid: int) -> OutputResponse:
         """Get all stdout output from a process."""
