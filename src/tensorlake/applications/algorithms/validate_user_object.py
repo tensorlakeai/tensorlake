@@ -1,69 +1,60 @@
 from typing import Any, Set
 
 from ..interface import (
-    InternalError,
     SDKUsageError,
 )
 from ..interface.awaitables import (
     Awaitable,
     AwaitableList,
-    FunctionCallAwaitable,
-    Future,
-    ReduceOperationAwaitable,
 )
+from .walk_awaitable_tree import dfs_bottom_up
 
 
-def validate_user_object(
-    user_object: Awaitable | Future | Any, running_awaitable_ids: Set[str]
+def validate_user_awaitable_before_running(
+    awaitable: Awaitable, running_awaitable_ids: Set[str]
 ) -> None:
-    """Validates the object produced by user function.
+    """Validates awaitable tree produced by a user function to check if it can be run.
 
-    An object can be produced by either returning it from a user function or passing it as
+    An awaitable can be produced by either returning it from a user function or passing it as
     an argument to a Future or a blocking operation.
 
-    function_call_ids is set of function call IDs that are already running or finished.
+    running_awaitable_ids is set of awaitable IDs that are already running or finished.
     Raises SDKUsageError if the object is invalid.
     Raises TensorlakeError for other errors.
     """
-    if not isinstance(user_object, (Awaitable, Future)):
-        return
+    for node in dfs_bottom_up(awaitable, leaf_awaitable_types=()):
+        if not isinstance(node, Awaitable):
+            raise SDKUsageError(
+                f"Cannot run {node}, please pass a not running Awaitable instead."
+            )
 
-    # TODO: Allow passing Futures that are already running. This makes our implementation
-    # more complex because each running Future can be used as argument in multiple other
-    # trees of Awaitables.
-    if isinstance(user_object, Future):
+        node: Awaitable
+        if node.id in running_awaitable_ids:
+            raise SDKUsageError(
+                f"{node} has an already running Future. "
+                "Only not running Awaitable can be passed as function argument or returned from a function."
+            )
+
+
+def validate_tail_call_user_object(
+    function_name: str, tail_call_user_object: Any
+) -> None:
+    """Validates the object that user expects to run as tail call.
+
+    Raises SDKUsageError on validation failure.
+    """
+    # i.e. we don't support Futures as tail calls.
+    if not isinstance(tail_call_user_object, Awaitable):
         raise SDKUsageError(
-            f"Cannot run {user_object}, please pass a not running Awaitable instead."
+            f"Function '{function_name}' returned {tail_call_user_object} which is not an Awaitable. "
+            f"Please return a not running Awaitable instead."
         )
 
-    awaitable: Awaitable = user_object
-    if awaitable.id in running_awaitable_ids:
+    # This is a very important check for our UX. We can await for AwaitableList
+    # in user code but we cannot return it from a function as tail call because
+    # there's no Python code to reassemble the list from individual resolved awaitables.
+    if isinstance(tail_call_user_object, AwaitableList):
         raise SDKUsageError(
-            f"{awaitable} has an already running Future. "
-            "Only not running Awaitable can be passed as function argument or returned from a function."
+            f"Function '{function_name}' returned {tail_call_user_object}. "
+            f"A {tail_call_user_object.kind_str} can only be used as a function argument, not returned from it."
         )
-
-    if isinstance(awaitable, AwaitableList):
-        awaitable: AwaitableList
-        for item in awaitable.items:
-            validate_user_object(
-                user_object=item, running_awaitable_ids=running_awaitable_ids
-            )
-    elif isinstance(awaitable, ReduceOperationAwaitable):
-        awaitable: ReduceOperationAwaitable
-        for item in awaitable.inputs:
-            validate_user_object(
-                user_object=item, running_awaitable_ids=running_awaitable_ids
-            )
-    elif isinstance(awaitable, FunctionCallAwaitable):
-        awaitable: FunctionCallAwaitable
-        for arg in awaitable.args:
-            validate_user_object(
-                user_object=arg, running_awaitable_ids=running_awaitable_ids
-            )
-        for arg in awaitable.kwargs.values():
-            validate_user_object(
-                user_object=arg, running_awaitable_ids=running_awaitable_ids
-            )
-    else:
-        raise InternalError(f"Unexpected Awaitable subclass: {type(awaitable)}")

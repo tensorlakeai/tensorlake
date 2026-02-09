@@ -20,7 +20,12 @@ from tensorlake.applications.blob_store import BLOBStore
 from tensorlake.applications.internal_logger import InternalLogger
 from tensorlake.applications.multiprocessing import setup_multiprocessing
 
-from ..algorithms import reduce_operation_to_function_call_chain, validate_user_object
+from ..algorithms import (
+    dfs_bottom_up,
+    reduce_operation_to_function_call_chain,
+    validate_tail_call_user_object,
+    validate_user_awaitable_before_running,
+)
 from ..function.application_call import (
     ApplicationArgument,
     deserialize_application_function_call_arguments,
@@ -293,9 +298,8 @@ class LocalRunner:
             app_output_serializer: UserDataSerializer = function_output_serializer(
                 self._app, None
             )
-            self._create_future_run_for_awaitable(
-                awaitable=app_function_call_awaitable,
-                existing_awaitable_future=None,
+            self._create_future_run(
+                future_or_awaitable=app_function_call_awaitable,
                 start_delay=None,
                 output_consumer_future_id=None,
                 output_serializer_name_override=app_output_serializer.name,
@@ -395,9 +399,12 @@ class LocalRunner:
         try:
             self._user_code_cancellation_point()
             for user_future in futures:
-                self._create_future_run_for_awaitable(
-                    awaitable=user_future.awaitable,
-                    existing_awaitable_future=user_future,
+                if not isinstance(user_future, Future):
+                    raise SDKUsageError(
+                        f"Cannot run a non-Future object {user_future}."
+                    )
+                self._create_future_run(
+                    future_or_awaitable=user_future,
                     start_delay=start_delay,
                     output_consumer_future_id=None,
                     output_serializer_name_override=None,
@@ -590,21 +597,19 @@ class LocalRunner:
             return
 
         if isinstance(result.output, (Awaitable, Future)):
-            # This is a very important check for our UX. We can await for AwaitableList
-            # in user code but we cannot return it from a function as tail call because
-            # there's no Python code to reassemble the list from individual resolved awaitables.
-            if isinstance(result.output, AwaitableList):
+            try:
+                validate_tail_call_user_object(
+                    function_name=function_name, tail_call_user_object=result.output
+                )
+            except SDKUsageError as e:
                 self._handle_future_run_failure(
                     future_run=future_run,
-                    error=SDKUsageError(
-                        f"Function '{function_name}' returned {result.output}. "
-                        f"A {result.output.kind_str} can only be used as a function argument, not returned from it."
-                    ),
+                    error=e,
                 )
                 return
 
-            self._create_future_run_for_user_object(
-                object=result.output,
+            self._create_future_run(
+                future_or_awaitable=result.output,
                 start_delay=None,
                 output_consumer_future_id=user_future.awaitable.id,
                 output_serializer_name_override=output_blob_serializer.name,
@@ -662,13 +667,15 @@ class LocalRunner:
             self._request_failed_exception = RequestFailed("function_error")
 
     def _collection_is_resolved(self, collection_metadata: CollectionMetadata) -> bool:
-        for item in collection_metadata.items:
-            if item.collection is not None:
-                if not self._collection_is_resolved(item.collection):
-                    return False
-            else:
-                if not self._value_store.has(item.value_id):
-                    return False
+        collections: list[CollectionMetadata] = [collection_metadata]
+        while len(collections) > 0:
+            checked_collection: CollectionMetadata = collections.pop()
+            for item in checked_collection.items:
+                if item.collection is not None:
+                    collections.append(item.collection)
+                else:
+                    if not self._value_store.has(item.value_id):
+                        return False
         return True
 
     def _function_arg_is_resolved(
@@ -724,41 +731,42 @@ class LocalRunner:
         Called after the future function finished and Awaitable tree that it returned
         is finished and its output is propagated as this future run's output.
         """
-        future: LocalFuture = future_run.local_future
+        future_runs: list[LocalFutureRun] = [future_run]
+        future_ser_values: list[SerializedValue | None] = [ser_value]
 
-        if error is not None:
-            future.user_future.set_exception(error)
-        else:
-            # Intentionally do serialize -> deserialize cycle to ensure the same UX as in remote mode.
-            future.user_future.set_result(_deserialize_value(ser_value))
+        while len(future_runs) > 0:
+            future_run = future_runs.pop()
+            ser_value = future_ser_values.pop()
+            future: LocalFuture = future_run.local_future
 
-        # Finish std future so wait hooks waiting on it unblock.
-        # Success/failure needs to be propagated to std future as well so std wait calls work correctly.
-        future_run.finish(is_exception=error is not None)
+            if error is not None:
+                future.user_future.set_exception(error)
+            else:
+                # Intentionally do serialize -> deserialize cycle to ensure the same UX as in remote mode.
+                future.user_future.set_result(_deserialize_value(ser_value))
 
-        # Propagate output to consumer future if any.
-        if future.output_consumer_future_id is None:
-            return
+            # Finish std future so wait hooks waiting on it unblock.
+            # Success/failure needs to be propagated to std future as well so std wait calls work correctly.
+            future_run.finish(is_exception=error is not None)
 
-        consumer_future_run: LocalFutureRun = self._future_runs[
-            future.output_consumer_future_id
-        ]
-        consumer_future: LocalFuture = consumer_future_run.local_future
-        consumer_future_output: SerializedValue | None = None
-        if error is None:
-            consumer_future_output = SerializedValue(
-                data=ser_value.data,
-                metadata=ser_value.metadata.model_copy(),
-            )
-            consumer_future_output.metadata.id = (
-                consumer_future.user_future.awaitable.id
-            )
-            self._value_store.put(consumer_future_output)
-        self._handle_future_run_final_output(
-            future_run=consumer_future_run,
-            ser_value=consumer_future_output,
-            error=error,
-        )
+            # Propagate output to consumer future if any.
+            if future.output_consumer_future_id is not None:
+                consumer_future_run: LocalFutureRun = self._future_runs[
+                    future.output_consumer_future_id
+                ]
+                consumer_future: LocalFuture = consumer_future_run.local_future
+                consumer_future_output: SerializedValue | None = None
+                if error is None:
+                    consumer_future_output = SerializedValue(
+                        data=ser_value.data,
+                        metadata=ser_value.metadata.model_copy(),
+                    )
+                    consumer_future_output.metadata.id = (
+                        consumer_future.user_future.awaitable.id
+                    )
+                    self._value_store.put(consumer_future_output)
+                future_runs.append(consumer_future_run)
+                future_ser_values.append(consumer_future_output)
 
     def _start_future_run(self, future_run: LocalFutureRun) -> None:
         """Starts the supplied future run.
@@ -813,113 +821,123 @@ class LocalRunner:
         self, collection_metadata: CollectionMetadata
     ) -> List[Any]:
         """Reconstructs the original values from the supplied collection metadata."""
-        values: List[Any] = []
-        for item in collection_metadata.items:
-            if item.collection is None:
-                values.append(_deserialize_value(self._value_store.get(item.value_id)))
-            else:
-                values.append(self._reconstruct_collection_value(item.collection))
-        return values
+        result: List[Any] = []
+        collections: list[tuple[CollectionMetadata, list[Any]]] = [
+            (collection_metadata, result)
+        ]
+        while len(collections) > 0:
+            collection, collection_values = collections.pop()
+            for item in collection.items:
+                if item.collection is None:
+                    collection_values.append(
+                        _deserialize_value(self._value_store.get(item.value_id))
+                    )
+                else:
+                    item_values: list[Any] = []
+                    collection_values.append(item_values)
+                    collections.append((item.collection, item_values))
 
-    def _create_future_run_for_user_object(
+        return result
+
+    def _create_future_run(
         self,
-        object: Any | Future | Awaitable,
+        future_or_awaitable: Future | Awaitable,
         start_delay: float | None,
         output_consumer_future_id: str | None,
         output_serializer_name_override: str | None,
         has_output_type_hint_override: bool,
         output_type_hint_override: Any,
     ) -> None:
-        """Creates future run for the supplied user object if it's an Awaitable.
+        """Creates future run for the supplied Future or Awaitable created by user.
 
-        Doesn't do anything if it's a concrete value. Raises TensorlakeError on error.
-        """
-        validate_user_object(object, running_awaitable_ids=self._future_runs.keys())
-        if isinstance(object, Awaitable):
-            return self._create_future_run_for_awaitable(
-                awaitable=object,
-                existing_awaitable_future=None,
-                start_delay=start_delay,
-                output_consumer_future_id=output_consumer_future_id,
-                output_serializer_name_override=output_serializer_name_override,
-                has_output_type_hint_override=has_output_type_hint_override,
-                output_type_hint_override=output_type_hint_override,
-            )
-
-    def _create_future_run_for_awaitable(
-        self,
-        awaitable: Awaitable,
-        existing_awaitable_future: Future | None,
-        start_delay: float | None,
-        output_consumer_future_id: str | None,
-        output_serializer_name_override: str | None,
-        has_output_type_hint_override: bool,
-        output_type_hint_override: Any,
-    ) -> None:
-        """Creates future run for the supplied Awaitable.
-
-        Doesn't create a user Future if existing_awaitable_future is supplied.
+        future_or_awaitable is an Awaitable that needs to run or Future.
         output_consumer_future_id is the ID of the Future that will consume the output of the future run.
         output_serializer_name_override is the name of the serializer to use for serializing
         the output of the future run. This is used when propagating output to consumer future when the
         consumer future expects a specific serialization format.
+
         Raises TensorlakeError on error.
         """
-        if isinstance(awaitable, AwaitableList):
-            self._create_future_run_for_awaitable_list(
-                awaitable=awaitable,
-                existing_awaitable_future=existing_awaitable_future,
-                start_delay=start_delay,
-                output_consumer_future_id=output_consumer_future_id,
-                output_serializer_name_override=output_serializer_name_override,
+        awaitable: Awaitable = (
+            future_or_awaitable.awaitable
+            if isinstance(future_or_awaitable, Future)
+            else future_or_awaitable
+        )
+        awaitable_future: Future | None = (
+            future_or_awaitable if isinstance(future_or_awaitable, Future) else None
+        )
+        validate_user_awaitable_before_running(
+            awaitable=awaitable, running_awaitable_ids=self._future_runs.keys()
+        )
+
+        # Bottom up traversal ensures that we create future runs for child nodes before
+        # creating them for parent node. This is required because parent node future runs
+        # depend on child nodes' future runs.
+        # When processing ReduceOperationAwaitable we're re-executing it separately, this is why
+        # we should not process its children here yet.
+        for node in dfs_bottom_up(
+            awaitable, leaf_awaitable_types=(ReduceOperationAwaitable,)
+        ):
+            node_future: Future | None = awaitable_future if node is awaitable else None
+            node_output_consumer_future_id: str | None = (
+                output_consumer_future_id if node is awaitable else None
             )
-        elif isinstance(awaitable, ReduceOperationAwaitable):
-            self._create_future_run_for_reduce_operation_awaitable(
-                awaitable=awaitable,
-                existing_awaitable_future=existing_awaitable_future,
-                start_delay=start_delay,
-                output_consumer_future_id=output_consumer_future_id,
-                output_serializer_name_override=output_serializer_name_override,
-                has_output_type_hint_override=has_output_type_hint_override,
-                output_type_hint_override=output_type_hint_override,
+            node_output_serializer_name_override: str | None = (
+                output_serializer_name_override if node is awaitable else None
             )
-        elif isinstance(awaitable, FunctionCallAwaitable):
-            self._create_future_run_for_function_call_awaitable(
-                awaitable=awaitable,
-                existing_awaitable_future=existing_awaitable_future,
-                start_delay=start_delay,
-                output_consumer_future_id=output_consumer_future_id,
-                output_serializer_name_override=output_serializer_name_override,
-                has_output_type_hint_override=has_output_type_hint_override,
-                output_type_hint_override=output_type_hint_override,
+            node_has_output_type_hint_override: bool = (
+                has_output_type_hint_override if node is awaitable else False
             )
+            node_output_type_hint_override: Any = (
+                output_type_hint_override if node is awaitable else None
+            )
+
+            if isinstance(node, AwaitableList):
+                self._create_future_run_for_awaitable_list(
+                    awaitable=node,
+                    awaitable_future=node_future,
+                    start_delay=start_delay,
+                )
+            elif isinstance(node, ReduceOperationAwaitable):
+                self._create_future_run_for_reduce_operation_awaitable(
+                    awaitable=node,
+                    awaitable_future=node_future,
+                    start_delay=start_delay,
+                    output_consumer_future_id=node_output_consumer_future_id,
+                    output_serializer_name_override=node_output_serializer_name_override,
+                    has_output_type_hint_override=node_has_output_type_hint_override,
+                    output_type_hint_override=node_output_type_hint_override,
+                )
+            elif isinstance(node, FunctionCallAwaitable):
+                self._create_future_run_for_function_call_awaitable(
+                    awaitable=node,
+                    awaitable_future=node_future,
+                    start_delay=start_delay,
+                    output_consumer_future_id=node_output_consumer_future_id,
+                    output_serializer_name_override=node_output_serializer_name_override,
+                    has_output_type_hint_override=node_has_output_type_hint_override,
+                    output_type_hint_override=node_output_type_hint_override,
+                )
+            else:
+                raise InternalError(
+                    f"Unexpected node type in awaitable tree: {type(node)}."
+                )
 
     def _create_future_run_for_awaitable_list(
         self,
         awaitable: AwaitableList,
-        existing_awaitable_future: ListFuture | None,
+        awaitable_future: ListFuture | None,
         start_delay: float | None,
-        output_consumer_future_id: str | None,
-        output_serializer_name_override: str | None,
     ) -> None:
         """Creates ListFutureRun for the supplied awaitable.
 
+        output_consumer_future_id and output_serializer_name_override are not in args because AwatableList
+        cannot be returned from a function.
+
         Raises TensorlakeError on error.
         """
-        # Checking for errors in our own logic.
-        if output_consumer_future_id is not None:
-            raise InternalError(
-                "Cannot set output consumer future ID on AwaitableList because it can't be returned from a function."
-            )
-        if output_serializer_name_override is not None:
-            raise InternalError(
-                "Cannot set output serializer name override on AwaitableList because it can't be returned from a function."
-            )
-
         user_future: ListFuture = (
-            ListFuture(awaitable)
-            if existing_awaitable_future is None
-            else existing_awaitable_future
+            ListFuture(awaitable) if awaitable_future is None else awaitable_future
         )
 
         metadata: CollectionMetadata = self._collection_metadata(
@@ -930,14 +948,7 @@ class LocalRunner:
         )
 
         for item in awaitable.items:
-            self._create_future_run_for_user_object(
-                item,
-                start_delay,
-                output_consumer_future_id=None,
-                output_serializer_name_override=None,
-                has_output_type_hint_override=False,
-                output_type_hint_override=None,
-            )
+            self._check_future_run_for_user_object_exists(item)
 
         self._future_runs[awaitable.id] = ListFutureRun(
             local_future=LocalFuture(
@@ -953,7 +964,7 @@ class LocalRunner:
     def _create_future_run_for_function_call_awaitable(
         self,
         awaitable: FunctionCallAwaitable,
-        existing_awaitable_future: FunctionCallFuture | None,
+        awaitable_future: FunctionCallFuture | None,
         start_delay: float | None,
         output_consumer_future_id: str | None,
         output_serializer_name_override: str | None,
@@ -970,8 +981,8 @@ class LocalRunner:
         )
         user_future: FunctionCallFuture = (
             FunctionCallFuture(awaitable)
-            if existing_awaitable_future is None
-            else existing_awaitable_future
+            if awaitable_future is None
+            else awaitable_future
         )
 
         metadata: FunctionCallMetadata = FunctionCallMetadata(
@@ -987,26 +998,12 @@ class LocalRunner:
         # root of the call tree needs to have its output serialized in a
         # specific way so its output consumer gets value in expected format.
         for arg in awaitable.args:
-            self._create_future_run_for_user_object(
-                arg,
-                start_delay,
-                output_consumer_future_id=None,
-                output_serializer_name_override=None,
-                has_output_type_hint_override=False,
-                output_type_hint_override=None,
-            )
+            self._check_future_run_for_user_object_exists(arg)
             metadata.args.append(
                 self._function_arg_metadata(arg, user_input_serializer)
             )
         for key, arg in awaitable.kwargs.items():
-            self._create_future_run_for_user_object(
-                arg,
-                start_delay,
-                output_consumer_future_id=None,
-                output_serializer_name_override=None,
-                has_output_type_hint_override=False,
-                output_type_hint_override=None,
-            )
+            self._check_future_run_for_user_object_exists(arg)
             metadata.kwargs[key] = self._function_arg_metadata(
                 arg, user_input_serializer
             )
@@ -1042,6 +1039,7 @@ class LocalRunner:
     def _function_arg_metadata(
         self, arg: Any | Awaitable, value_serializer: UserDataSerializer
     ) -> FunctionCallArgumentMetadata:
+        # Raises TensorlakeError on error.
         if isinstance(arg, Awaitable):
             # Embedding the awaitable list.
             if isinstance(arg, AwaitableList):
@@ -1074,48 +1072,66 @@ class LocalRunner:
         collection: AwaitableList,
         value_serializer: UserDataSerializer,
     ) -> CollectionMetadata:
-        """Builds recursive collection metadata for the supplied AwaitableList."""
-        items_metadata: List[CollectionItemMetadata] = []
-        for item in collection.items:
-            if isinstance(item, Awaitable):
-                if isinstance(item, AwaitableList):
-                    items_metadata.append(
-                        CollectionItemMetadata(
-                            value_id=None,
-                            collection=self._collection_metadata(
-                                item, value_serializer
-                            ),
+        """Builds collection metadata for the supplied AwaitableList.
+
+        Raises TensorlakeError on error.
+        """
+        result_metadata: CollectionMetadata = CollectionMetadata(items=[])
+        process_queue: list[tuple[AwaitableList, CollectionMetadata]] = [
+            (collection, result_metadata)
+        ]
+
+        while len(process_queue) > 0:
+            collection, collection_metadata = process_queue.pop()
+            for item in collection.items:
+                if isinstance(item, Awaitable):
+                    if isinstance(item, AwaitableList):
+                        item_collection_metadata: CollectionMetadata = (
+                            CollectionMetadata(items=[])
+                        )
+                        collection_metadata.items.append(
+                            CollectionItemMetadata(
+                                value_id=None,
+                                collection=item_collection_metadata,
+                            )
+                        )
+                        process_queue.append((item, item_collection_metadata))
+                    elif isinstance(
+                        item, (FunctionCallAwaitable, ReduceOperationAwaitable)
+                    ):
+                        collection_metadata.items.append(
+                            CollectionItemMetadata(
+                                value_id=item.id,
+                                collection=None,
+                            )
+                        )
+                    else:
+                        raise InternalError(
+                            f"Unexpected type of AwaitableList item: {type(item)}"
+                        )
+                else:
+                    value_id: str = _request_scoped_id()
+                    self._value_store.put(
+                        _to_serialized_value(
+                            value_id=value_id,
+                            value=item,
+                            value_serializer=value_serializer,
+                            type_hint=type(item),
                         )
                     )
-                else:
-                    items_metadata.append(
+                    collection_metadata.items.append(
                         CollectionItemMetadata(
-                            value_id=item.id,
+                            value_id=value_id,
                             collection=None,
                         )
                     )
-            else:
-                value_id: str = _request_scoped_id()
-                self._value_store.put(
-                    _to_serialized_value(
-                        value_id=value_id,
-                        value=item,
-                        value_serializer=value_serializer,
-                        type_hint=type(item),
-                    )
-                )
-                items_metadata.append(
-                    CollectionItemMetadata(
-                        value_id=value_id,
-                        collection=None,
-                    )
-                )
-        return CollectionMetadata(items=items_metadata)
+
+        return result_metadata
 
     def _create_future_run_for_reduce_operation_awaitable(
         self,
         awaitable: ReduceOperationAwaitable,
-        existing_awaitable_future: ReduceOperationFuture | None,
+        awaitable_future: ReduceOperationFuture | None,
         start_delay: float | None,
         output_consumer_future_id: str | None,
         output_serializer_name_override: str | None,
@@ -1133,8 +1149,8 @@ class LocalRunner:
         # going to return it from ReturnOutputFutureRun as a tail call.
         user_future: ReduceOperationFuture = (
             ReduceOperationFuture(awaitable)
-            if existing_awaitable_future is None
-            else existing_awaitable_future
+            if awaitable_future is None
+            else awaitable_future
         )
 
         metadata: ReduceOperationMetadata = ReduceOperationMetadata(
@@ -1155,6 +1171,18 @@ class LocalRunner:
             thread_pool=self._future_run_thread_pool,
             output=reduce_operation_result,
         )
+
+    def _check_future_run_for_user_object_exists(self, user_object: Any) -> None:
+        if isinstance(user_object, Awaitable):
+            if user_object.id not in self._future_runs:
+                raise InternalError(
+                    f"Awaitable with ID {user_object.id} has no future run."
+                )
+        elif isinstance(user_object, Future):
+            if user_object.awaitable.id not in self._future_runs:
+                raise InternalError(
+                    f"Future with Awaitable ID {user_object.awaitable.id} has no future run."
+                )
 
 
 def _deserialize_value(ser_value: SerializedValue) -> Any | File:

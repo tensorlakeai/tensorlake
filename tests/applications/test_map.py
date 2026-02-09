@@ -1,5 +1,4 @@
 import unittest
-from typing import List
 
 import parameterized
 import validate_all_applications

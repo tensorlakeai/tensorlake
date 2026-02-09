@@ -20,7 +20,11 @@ from tensorlake.applications import (
     TensorlakeError,
     TimeoutError,
 )
-from tensorlake.applications.algorithms import validate_user_object
+from tensorlake.applications.algorithms import (
+    dfs_bottom_up,
+    validate_tail_call_user_object,
+    validate_user_awaitable_before_running,
+)
 from tensorlake.applications.blob_store import BLOBStore
 from tensorlake.applications.function.function_call import create_function_error
 from tensorlake.applications.function.type_hints import (
@@ -94,10 +98,11 @@ from .sdk_algorithms import (
     deserialize_application_function_call_args,
     deserialize_sdk_function_call_args,
     reconstruct_sdk_function_call_args,
+    replace_user_values_with_serialized_values,
     serialize_user_value,
-    serialize_values_in_awaitable_tree,
     to_durable_awaitable_tree,
     to_execution_plan_updates,
+    to_runnable_awaitable_tree,
     validate_and_deserialize_function_call_metadata,
 )
 from .upload import (
@@ -363,41 +368,49 @@ class AllocationRunner:
         # NB: To support durability, ordering of running the Futures must be deterministic.
         # This is because self._awaitable_tree_sequence_number is used to generate durable
         # Awaitable IDs and it gets incremented after every use.
-        for future in futures:
-            if not isinstance(future, Future):
-                raise SDKUsageError(f"Cannot run a non-Future object {future}.")
-            future_info: _UserFutureInfo = _UserFutureInfo(
-                user_future=future,
-                durable_awaitable_id=None,
-                collection=None,
+        for user_future in futures:
+            if not isinstance(user_future, Future):
+                raise SDKUsageError(f"Cannot run a non-Future object {user_future}.")
+            validate_user_awaitable_before_running(
+                awaitable=user_future.awaitable,
+                running_awaitable_ids=self._user_futures.keys(),
             )
-            # Server can't run AwaitableList, we need to run each item separately.
-            if isinstance(future.awaitable, AwaitableList):
-                future_info.collection = []
-                for item in future.awaitable.items:
-                    validate_user_object(
-                        user_object=item,
-                        running_awaitable_ids=self._user_futures.keys(),
-                    )
-                    if isinstance(item, Awaitable):
-                        # Calls run_futures_runtime_hook recursively.
-                        # Also creates _FutureInfo entries for nested futures.
-                        if start_delay is None:
-                            future_info.collection.append(item.run())
-                        else:
-                            future_info.collection.append(
-                                item.run_later(start_delay=start_delay)
-                            )
-                    else:
-                        future_info.collection.append(item)
-            else:
-                validate_user_object(
-                    user_object=future.awaitable,
-                    running_awaitable_ids=self._user_futures.keys(),
-                )
-                self._run_user_future(future_info, start_delay)
 
-            self._user_futures[future.awaitable.id] = future_info
+            for node in dfs_bottom_up(user_future.awaitable, leaf_awaitable_types=()):
+                node: Awaitable
+                node_future: Future = (
+                    user_future
+                    if node is user_future.awaitable
+                    else node._create_future()
+                )
+                node_future_info: _UserFutureInfo = _UserFutureInfo(
+                    user_future=node_future,
+                    durable_awaitable_id=None,
+                    collection=None,
+                )
+                # Server can't run AwaitableList, we need to run each list item separately as a new
+                # internal (not user visible) Future. dfs_bottom_up guarantees that all the items futures
+                # have their _UserFutureInfo created already.
+                if isinstance(node, AwaitableList):
+                    node_future_info.collection = []
+                    for item in node_future.awaitable.items:
+                        if isinstance(item, Awaitable):
+                            try:
+                                item_future_info: _UserFutureInfo = self._user_futures[
+                                    item.id
+                                ]
+                            except Exception:
+                                raise InternalError(
+                                    f"Future for Awaitable with id {item.id} is not found in user futures. This should never happen."
+                                )
+                            node_future_info.collection.append(
+                                item_future_info.user_future
+                            )
+                        else:
+                            node_future_info.collection.append(item)
+
+                self._run_user_future(node_future_info, start_delay)
+                self._user_futures[node_future.awaitable.id] = node_future_info
 
     def wait_futures_runtime_hook(
         self, futures: List[Future], timeout: float | None, return_when: RETURN_WHEN
@@ -639,19 +652,22 @@ class AllocationRunner:
     def _run_user_future(
         self, future_info: _UserFutureInfo, start_delay: float | None
     ) -> None:
+        runnable_awaitable: Awaitable = to_runnable_awaitable_tree(
+            future_info.user_future.awaitable
+        )
         durable_awaitable: Awaitable = to_durable_awaitable_tree(
-            root=future_info.user_future.awaitable,
+            root=runnable_awaitable,
             parent_function_call_id=self._allocation.function_call_id,
             previous_awaitable_id=self._previous_awaitable_id,
         )
         self._previous_awaitable_id = durable_awaitable.id
         future_info.durable_awaitable_id = durable_awaitable.id
-        serialized_values: Dict[str, SerializedValue] = {}
-        serialize_values_in_awaitable_tree(
-            root=durable_awaitable,
-            # Use pickle because we only serialize inputs, not outputs.
-            value_serializer=PickleUserDataSerializer(),
-            serialized_values=serialized_values,
+        serialized_values: Dict[str, SerializedValue] = (
+            replace_user_values_with_serialized_values(
+                root=durable_awaitable,
+                # Use pickle because we only serialize inputs, not outputs.
+                root_serializer=PickleUserDataSerializer(),
+            )
         )
 
         serialized_objects: Dict[str, SerializedObjectInsideBLOB] = {}
@@ -681,7 +697,6 @@ class AllocationRunner:
             output_type_hint_override=None,
             has_output_type_hint_override=False,
             function_ref=self._function_ref,
-            logger=self._logger,
         )
         if start_delay is not None:
             start_at: Timestamp = Timestamp()
@@ -884,14 +899,6 @@ class AllocationRunner:
         # This is user code.
         try:
             output: Any = self._call_user_function(args, kwargs)
-            # This is a very important check for our UX. We can await for map operation
-            # in user code but we cannot return it from a function as a tail call because
-            # there's no Python code to reassemble the list from individual resolved awaitables.
-            if isinstance(output, AwaitableList):
-                raise SDKUsageError(
-                    f"Function '{self._function_ref.function_name}' returned a map operation {output}. "
-                    f"A {output.kind_str} can only be used as a function argument, not returned from it."
-                )
         except RequestError as e:
             # This is user code.
             try:
@@ -920,33 +927,51 @@ class AllocationRunner:
                 self._allocation_event_details, e
             )
 
-        # This is user code.
-        try:
-            validate_user_object(
-                user_object=output,
-                running_awaitable_ids=self._user_futures.keys(),
-            )
-        except BaseException as e:
-            # This is internal FE code.
-            return self._result_helper.from_user_exception(
-                self._allocation_event_details, e
-            )
+        serialized_output: SerializedValue | Awaitable
+        serialized_values: Dict[str, SerializedValue]
+        if isinstance(output, (Awaitable, Future)):
+            # Function returned tail call. This is user code.
+            try:
+                # Fails if output is Future.
+                validate_tail_call_user_object(
+                    function_name=self._function_ref.function_name,
+                    tail_call_user_object=output,
+                )
+                validate_user_awaitable_before_running(
+                    awaitable=output,
+                    running_awaitable_ids=self._user_futures.keys(),
+                )
+            except BaseException as e:
+                # This is internal FE code.
+                return self._result_helper.from_user_exception(
+                    self._allocation_event_details, e
+                )
 
-        tail_call_durable_awaitable: Awaitable | None = None
-        # This is internal FE code.
-        if isinstance(output, Awaitable):
-            tail_call_durable_awaitable = to_durable_awaitable_tree(
-                root=output,
+            # This is internal FE code.
+            tail_call_durable_awaitable: Awaitable = to_durable_awaitable_tree(
+                root=to_runnable_awaitable_tree(output),
                 parent_function_call_id=self._allocation.function_call_id,
                 previous_awaitable_id=self._previous_awaitable_id,
             )
             self._previous_awaitable_id = tail_call_durable_awaitable.id
 
-        # This is user code.
-        try:
-            serialized_output: SerializedValue | Awaitable
-            serialized_values: Dict[str, SerializedValue] = {}
-            if tail_call_durable_awaitable is None:
+            # This is user code.
+            try:
+                # Use Pickle serializer because we're only serializing inputs for SDK
+                # generated function calls, not their outputs.
+                serialized_values = replace_user_values_with_serialized_values(
+                    root=tail_call_durable_awaitable,
+                    root_serializer=PickleUserDataSerializer(),
+                )
+                serialized_output = tail_call_durable_awaitable
+            except BaseException as e:
+                # This is internal FE code.
+                return self._result_helper.from_user_exception(
+                    self._allocation_event_details, e
+                )
+        else:
+            # Function returned regular value. This is user code.
+            try:
                 serialized_output = serialize_user_value(
                     value=output,
                     serializer=output_value_serializer,
@@ -956,20 +981,12 @@ class AllocationRunner:
                         else type(output)
                     ),
                 )
-                serialized_values[serialized_output.metadata.id] = serialized_output
-            else:
-                # Use Pickle serializer because we're only serializing inputs for SDK
-                # generated function calls, not their outputs.
-                serialized_output = serialize_values_in_awaitable_tree(
-                    root=tail_call_durable_awaitable,
-                    value_serializer=PickleUserDataSerializer(),
-                    serialized_values=serialized_values,
+                serialized_values = {serialized_output.metadata.id: serialized_output}
+            except BaseException as e:
+                # This is internal FE code.
+                return self._result_helper.from_user_exception(
+                    self._allocation_event_details, e
                 )
-        except BaseException as e:
-            # This is internal FE code.
-            return self._result_helper.from_user_exception(
-                self._allocation_event_details, e
-            )
 
         # This is internal FE code.
         serialized_objects: Dict[str, SerializedObjectInsideBLOB] = {}
@@ -1001,7 +1018,6 @@ class AllocationRunner:
                     has_output_type_hint_override=has_output_value_type_hint_override,
                     output_type_hint_override=output_value_type_hint_override,
                     function_ref=self._function_ref,
-                    logger=self._logger,
                 )
             else:
                 output_pb = serialized_objects[serialized_output.metadata.id]
