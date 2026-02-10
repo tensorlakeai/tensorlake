@@ -246,21 +246,22 @@ class TestMinContainerBehavior(unittest.TestCase):
             print(f"  Request times with min=2: {[f'{t:.3f}s' for t in times]}")
             print(f"  Expected: Consistent times (min containers always running)")
 
-    @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_min_warm_starts_with_correct_count(self, _: str, is_remote: bool):
+    def test_min_warm_starts_with_correct_count(self):
         """Verify function with min + warm starts with (min + warm) containers.
 
         Expected behavior:
         - Function with min=2, warm=4: System creates 6 containers initially
         - Can handle 6 concurrent requests without scaling
+
+        Only runs remote: concurrent local execution doesn't support shared
+        runtime hooks from multiple threads.
         """
-        if is_remote:
-            deploy_applications(__file__)
+        deploy_applications(__file__)
 
         # Should handle multiple concurrent requests immediately
         with ThreadPoolExecutor(max_workers=6) as executor:
             futures = [
-                executor.submit(run_application, min_warm_function, is_remote, i)
+                executor.submit(run_application, min_warm_function, True, i)
                 for i in range(6)
             ]
             results = [f.result().output() for f in as_completed(futures)]
@@ -268,10 +269,9 @@ class TestMinContainerBehavior(unittest.TestCase):
         expected = [i * 7 for i in range(6)]
         self.assertEqual(sorted(results), sorted(expected))
 
-        if is_remote:
-            print(f"\n[Min + Warm Initial Allocation]")
-            print(f"  Successfully handled 6 concurrent requests")
-            print(f"  Expected: min=2 + warm=4 = 6 containers pre-allocated")
+        print(f"\n[Min + Warm Initial Allocation]")
+        print(f"  Successfully handled 6 concurrent requests")
+        print(f"  Expected: min=2 + warm=4 = 6 containers pre-allocated")
 
 
 class TestMaxContainerBehavior(unittest.TestCase):
@@ -345,22 +345,23 @@ class TestMaxContainerBehavior(unittest.TestCase):
 class TestAutoscalingCombinations(unittest.TestCase):
     """Test combinations of min, max, and warm parameters."""
 
-    @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_all_parameters_work_together(self, _: str, is_remote: bool):
+    def test_all_parameters_work_together(self):
         """Verify min + max + warm work together correctly.
 
         Expected behavior:
         - min=2, max=10, warm=3: Starts with 5 containers (min + warm)
         - Can scale up to 10 total
         - Maintains warm buffer above current demand
+
+        Only runs remote: concurrent local execution doesn't support shared
+        runtime hooks from multiple threads.
         """
-        if is_remote:
-            deploy_applications(__file__)
+        deploy_applications(__file__)
 
         # Should handle 5 concurrent requests immediately (min + warm)
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = [
-                executor.submit(run_application, all_params_function, is_remote, i)
+                executor.submit(run_application, all_params_function, True, i)
                 for i in range(5)
             ]
             results = [f.result().output() for f in as_completed(futures)]
@@ -368,27 +369,27 @@ class TestAutoscalingCombinations(unittest.TestCase):
         expected = [i * 9 for i in range(5)]
         self.assertEqual(sorted(results), sorted(expected))
 
-        if is_remote:
-            print(f"\n[Combined Parameters]")
-            print(f"  Successfully handled 5 concurrent requests immediately")
-            print(f"  Config: min=2, max=10, warm=3")
-            print(f"  Expected: 5 containers pre-allocated (min + warm)")
+        print(f"\n[Combined Parameters]")
+        print(f"  Successfully handled 5 concurrent requests immediately")
+        print(f"  Config: min=2, max=10, warm=3")
+        print(f"  Expected: 5 containers pre-allocated (min + warm)")
 
-    @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_min_max_bounds_scaling(self, _: str, is_remote: bool):
+    def test_min_max_bounds_scaling(self):
         """Verify scaling respects min and max bounds.
 
         Expected behavior:
         - min=2, max=10: Always >= 2, never > 10 containers
         - On-demand scaling within bounds
+
+        Only runs remote: concurrent local execution doesn't support shared
+        runtime hooks from multiple threads.
         """
-        if is_remote:
-            deploy_applications(__file__)
+        deploy_applications(__file__)
 
         # Test scaling up to max
         with ThreadPoolExecutor(max_workers=10) as executor:
             futures = [
-                executor.submit(run_application, min_max_function, is_remote, i)
+                executor.submit(run_application, min_max_function, True, i)
                 for i in range(10)
             ]
             results = [f.result().output() for f in as_completed(futures)]
