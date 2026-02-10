@@ -14,6 +14,8 @@ import sys
 import time
 import unittest
 
+from testing import DataplaneProcessContextManager
+
 from tensorlake.sandbox import (
     PoolInUseError,
     PoolNotFoundError,
@@ -21,8 +23,6 @@ from tensorlake.sandbox import (
     SandboxNotFoundError,
     SandboxStatus,
 )
-
-from .testing import DataplaneProcessContextManager
 
 # ---------------------------------------------------------------------------
 # Module-level setup / teardown
