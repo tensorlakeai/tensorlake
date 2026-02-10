@@ -119,7 +119,7 @@ class TestSandboxInfo:
             entrypoint=["/bin/bash", "-c", "python main.py"],
             network=NetworkConfig(allow_internet_access=True),
             pool_id="pool_456",
-            created_at="2024-01-01T00:00:00Z",
+            created_at=1704067200000,
         )
         assert info.image == "python:3.11"
         assert info.resources.cpus == 2.0
@@ -206,8 +206,8 @@ class TestSandboxPoolInfo:
             entrypoint=["/bin/bash"],
             max_containers=10,
             warm_containers=2,
-            created_at="2024-01-01T00:00:00Z",
-            updated_at="2024-01-02T00:00:00Z",
+            created_at=1704067200000,
+            updated_at=1704153600000,
         )
         assert info.image == "python:3.11"
         assert info.resources.cpus == 2.0

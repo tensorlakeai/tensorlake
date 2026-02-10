@@ -40,7 +40,7 @@ class CreateSandboxResponse(BaseModel):
 class SandboxInfo(BaseModel):
     """Full sandbox information."""
 
-    sandbox_id: str
+    sandbox_id: str = Field(alias="id")
     namespace: str
     status: SandboxStatus
     image: Optional[str] = None
@@ -50,8 +50,10 @@ class SandboxInfo(BaseModel):
     entrypoint: Optional[List[str]] = None
     network: Optional[NetworkConfig] = None
     pool_id: Optional[str] = None
-    created_at: Optional[str] = None
-    terminated_at: Optional[str] = None
+    created_at: Optional[int] = None
+    terminated_at: Optional[int] = None
+
+    model_config = {"populate_by_name": True}
 
 
 class ListSandboxesResponse(BaseModel):
@@ -70,7 +72,7 @@ class CreateSandboxPoolResponse(BaseModel):
 class SandboxPoolInfo(BaseModel):
     """Full sandbox pool information."""
 
-    pool_id: str
+    pool_id: str = Field(alias="id")
     namespace: str
     image: str
     resources: ContainerResourcesInfo
@@ -79,8 +81,10 @@ class SandboxPoolInfo(BaseModel):
     entrypoint: Optional[List[str]] = None
     max_containers: Optional[int] = None
     warm_containers: Optional[int] = None
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
+    created_at: Optional[int] = None
+    updated_at: Optional[int] = None
+
+    model_config = {"populate_by_name": True}
 
 
 class ListSandboxPoolsResponse(BaseModel):

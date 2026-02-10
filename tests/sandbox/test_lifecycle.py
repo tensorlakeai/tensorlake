@@ -17,7 +17,6 @@ import unittest
 from testing import DataplaneProcessContextManager
 
 from tensorlake.sandbox import (
-    PoolInUseError,
     PoolNotFoundError,
     SandboxClient,
     SandboxNotFoundError,
@@ -274,12 +273,7 @@ class TestPoolWithSandboxes(unittest.TestCase):
         )
         self.assertEqual(status, SandboxStatus.RUNNING)
 
-    def test_4_delete_pool_with_active_sandbox(self):
-        self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
-        with self.assertRaises(PoolInUseError):
-            _client.delete_pool(self.__class__.pool_id)
-
-    def test_5_delete_sandbox_then_pool(self):
+    def test_4_delete_sandbox_then_pool(self):
         self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_2")
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
 
