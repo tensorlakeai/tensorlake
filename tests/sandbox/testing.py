@@ -100,7 +100,7 @@ class DataplaneProcessContextManager:
         print(f"Starting dataplane: {binary} --config {config_path}", flush=True)
 
         self._process = subprocess.Popen(
-            [binary, "--config-path", config_path],
+            [binary, "--config", config_path],
             stdout=sys.stdout,
             stderr=sys.stderr,
             preexec_fn=os.setsid,
