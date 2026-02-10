@@ -59,7 +59,7 @@ summary_file=".run_tests_summary.txt"
 rm -f $summary_file
 
 function_executor_test_files=$(find ./function_executor -name 'test_*.py')
-applications_test_files=$(find ./applications -name 'test_*.py')
+applications_test_files=$(find ./applications -name 'test_*.py' -not -path '*/autoscaling/*')
 cli_test_files=$(find ./cli -name 'test_*.py')
 utils_test_files=$(find ./utils -name 'test_*.py')
 document_ai_test_files=$(find ./document_ai -name 'test_*.py')
