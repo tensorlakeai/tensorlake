@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tensorlake"
-version = "0.3.10"
+version = "0.3.11"
 description = "Tensorlake SDK for Document Ingestion API and Serverless Applications"
 readme = "README.md"
 authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
@@ -22,6 +22,7 @@ tomlkit = "^0.14.0"
 # when developing with poetry, the version
 # from dev.dependencies is used.
 grpcio = ">=1.40.0,<2.0.0"
+grpcio-tools = ">=1.40.0,<2.0.0"
 
 [tool.poetry.scripts]
 tensorlake = "tensorlake.cli:cli"
