@@ -1,7 +1,6 @@
-import datetime
-from collections.abc import Iterable as _Iterable
-from collections.abc import Mapping as _Mapping
 from typing import ClassVar as _ClassVar
+from typing import Iterable as _Iterable
+from typing import Mapping as _Mapping
 from typing import Optional as _Optional
 from typing import Union as _Union
 
@@ -463,9 +462,7 @@ class ExecutionPlanUpdates(_message.Message):
         self,
         updates: _Optional[_Iterable[_Union[ExecutionPlanUpdate, _Mapping]]] = ...,
         root_function_call_id: _Optional[str] = ...,
-        start_at: _Optional[
-            _Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]
-        ] = ...,
+        start_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ...,
     ) -> None: ...
 
 class AllocationResult(_message.Message):
