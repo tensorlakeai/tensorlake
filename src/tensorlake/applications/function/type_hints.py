@@ -2,7 +2,8 @@ import inspect
 import pickle
 from typing import Any
 
-from ..interface import Awaitable, File, Function
+from ..interface import File, Function
+from ..interface.futures import Future
 
 
 def function_parameters(function: Function) -> list[inspect.Parameter]:
@@ -44,9 +45,9 @@ def is_file_type_hint(type_hint: Any) -> bool:
     return inspect.isclass(type_hint) and issubclass(type_hint, File)
 
 
-def is_awaitable_type_hint(type_hint: Any) -> bool:
-    """Returns True if the provided type hint is for an SDK Awaitable."""
-    return inspect.isclass(type_hint) and issubclass(type_hint, Awaitable)
+def is_future_type_hint(type_hint: Any) -> bool:
+    """Returns True if the provided type hint is for an SDK Future."""
+    return inspect.isclass(type_hint) and issubclass(type_hint, Future)
 
 
 def parameter_type_hint(parameter: inspect.Parameter) -> Any:

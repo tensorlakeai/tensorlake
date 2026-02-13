@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 import grpc
 
-from tensorlake.applications.interface.awaitables import (
+from tensorlake.applications.interface.futures import (
     _request_scoped_id,
 )
 from tensorlake.applications.internal_logger import InternalLogger

@@ -1,14 +1,10 @@
 import hashlib
-from typing import Any, Callable, Dict, List
+from dataclasses import dataclass
+from typing import Any, Dict, List
 
 from tensorlake.applications import (
     Function,
     InternalError,
-)
-from tensorlake.applications.algorithms import (
-    copy_awaitable_tree,
-    dfs_bottom_up,
-    reduce_operation_to_function_call_chain,
 )
 from tensorlake.applications.function.application_call import (
     SerializedApplicationArgument,
@@ -22,11 +18,11 @@ from tensorlake.applications.function.user_data_serializer import (
     function_input_serializer,
     serialize_value,
 )
-from tensorlake.applications.interface.awaitables import (
-    Awaitable,
-    AwaitableList,
-    FunctionCallAwaitable,
-    ReduceOperationAwaitable,
+from tensorlake.applications.interface.futures import (
+    FunctionCallFuture,
+    Future,
+    ListFuture,
+    ReduceOperationFuture,
     _request_scoped_id,
 )
 from tensorlake.applications.metadata import (
@@ -34,7 +30,6 @@ from tensorlake.applications.metadata import (
     CollectionMetadata,
     FunctionCallArgumentMetadata,
     FunctionCallMetadata,
-    ReduceOperationMetadata,
     ValueMetadata,
     deserialize_metadata,
     serialize_metadata,
@@ -61,87 +56,52 @@ from .http_request_parse import (
 from .value import SerializedValue, Value
 
 
-def to_runnable_awaitable_tree(root: Awaitable) -> Awaitable:
-    """Returns a new awaitable tree semantically equivalent to the supplied tree but that can run on Server.
-
-    The tree must be validated already.
-    Raises InternalError on error.
-    """
-    new_root: Awaitable = _to_runnable(copy_awaitable_tree(root))
-    stack: list[Awaitable] = [new_root]
-
-    while len(stack) > 0:
-        node: Awaitable = stack.pop()
-
-        if isinstance(node, AwaitableList):
-            for i in range(len(node.items)):
-                runnable_item: Awaitable | Any = _to_runnable(node.items[i])
-                if isinstance(runnable_item, Awaitable):
-                    node.items[i] = runnable_item
-                    stack.append(runnable_item)
-
-        elif isinstance(node, FunctionCallAwaitable):
-            for i in range(len(node.args)):
-                runnable_arg: Awaitable | Any = _to_runnable(node.args[i])
-                if isinstance(runnable_arg, Awaitable):
-                    node.args[i] = runnable_arg
-                    stack.append(runnable_arg)
-            for kwarg_key in node.kwargs.keys():
-                kwarg: Awaitable | Any = _to_runnable(node.kwargs[kwarg_key])
-                if isinstance(kwarg, Awaitable):
-                    node.kwargs[kwarg_key] = kwarg
-                    stack.append(kwarg)
-
-        # ReduceOperationAwaitable should have been already converted into FunctionCallAwaitable chain.
-        else:
-            raise InternalError(f"Unexpected Awaitable subclass: {type(node)}")
-
-    return new_root
+@dataclass
+class FutureInfo:
+    # Original Future created by user code or internal Future created by SDK i.e.
+    # a future per map function call, or a future per reduce operation step.
+    future: Future
+    # The future's durable ID.
+    # ReduceOp and ListFuture are not visible to Server but we still
+    # compute durable IDs because this allows to detect changes not visible
+    # to Server and also avoids us using a recursive durable ID compute algorithm.
+    durable_id: str
+    # Set if this future is ListFuture.
+    map_future_output: List[FunctionCallFuture] | None
+    # Set if this is reduce operation future. None can be a valid output.
+    reduce_future_output: Future | Any | None
 
 
-def _to_runnable(node: Awaitable | Any) -> Awaitable | Any:
-    if isinstance(node, ReduceOperationAwaitable):
-        return reduce_operation_to_function_call_chain(node)
-    else:
-        return node
-
-
-def to_durable_awaitable_tree(
-    root: Awaitable,
+def future_durable_id(
+    future: Future,
     parent_function_call_id: str,
-    previous_awaitable_id: str,
-) -> Awaitable:
-    """Returns a semantically equivalent shallow copy of the supplied Awaitable tree with Awaitable IDs supporting durable execution.
+    previous_future_durable_id: str,
+    future_infos: dict[str, FutureInfo],
+) -> str:
+    """Return durable ID for the supplied Future.
 
-    The shallow copy has a semantically equivalent structure as the original tree, but each Awaitable in the tree has its ID replaced
-    with a durable ID. User provided values are kept in the returned tree as is.
+    parent_function_call_id is durable ID of the function call that created the Future.
+    previous_durable_id is durable ID of the previous Future created by the parent function call.
+    future_infos is a mapping from Future IDs to their FutureInfo.
 
-    parent_function_call_id is ID of the function call that created the awaitable tree.
-    previous_awaitable_id is ID of the previous awaitable created by the parent function call.
-
-    Durable Awaitable IDs are the same across different executions (allocations) of the same parent function call
-    if the parent function call is deterministic, i.e. it creates the same awaitable trees in the same order each
-    time it's executed. If this is not the case then the Awaitable IDs will differ between executions, which may
+    Durable Future IDs are the same across different executions (allocations) of the same parent function call
+    if the parent function call is deterministic, i.e. it creates the same Futures in the same order each
+    time it's executed. If this is not the case then the durable Future IDs will differ between executions, which may
     lead to re-execution of some function calls even if their inputs are the same as in a previous execution.
 
-    To produce a durable Awaitable ID, we compute it as a hash of:
+    To produce a durable Future ID, we compute it as a hash of:
     - parent_function_call_id, this scopes each durable ID to its parent function call and allows to generate them locally while running
       the parent function call.
-    - previous_awaitable_id, this ties each durable ID in the awaitable tree to the previous awaitable created by the parent function call.
+    - previous_durable_id, this ties each Future durable ID to the previous Future created by the parent function call.
       If while replaying the parent function call it follows a different execution path (i.e. running a different function call) then this new
-      function call and all next function calls won't be replayed because their durable IDs will be different due to different previous_awaitable_id
+      function call and all next function calls won't be replayed because their durable IDs will be different due to different previous_durable_id
       in their durable ID hash. This ensures that any drift in the execution path gets detected and gets handled according to the replay mode used.
-    - next_awaitable_sequence_number, this ensures that any two Awaitables created inside the same awaitable tree get different durable IDs even
-      if the Awaitables are otherwise identical (i.e. two calls of the same function with same parameters). If we didn't do this then every call
-      of the same function (with any parameters) in the same awaitable tree will have the same durable ID which leads to function output caching
-      while also ignoring function parameter values. This is very wrong. In the end, this ensures that each durable ID inside the same awaitable tree
-      is unique.
-    - Awaitable-specific metadata. This ensures that we detect changes inside each Awaitable tree node, i.e. a change of called function name.
-    - Deterministically ordered durable IDs of all immediate child Awaitables.
-      This ensures that changes in the structure of the awaitable tree leads to different durable IDs of its nodes
+    - Future-specific metadata. This ensures that we detect changes inside each Future, i.e. a change of called function name.
+    - Deterministically ordered durable IDs of all immediate child Futures.
+      This ensures that changes in the structure of the Future tree leads to different durable IDs of its nodes
       starting from root so it's easy to detect a drift on Server side just by comparing durable ID of root.
 
-    We're deliberately not hashing entire awaitables to produce their durable IDs. This is because hashing entire awaitables
+    We're deliberately not hashing entire user values (i.e. function call args) to produce their durable IDs. This is because hashing entire user values
     is an expensive operation (i.e. hashing gigabytes of arbitrary user supplied objects which are function call parameters).
     This also results in better UX, i.e. this allows:
     - Seamless Schema Evolution: Users may want to change the schema of function parameters (e.g. add a new field with a default value
@@ -155,108 +115,107 @@ def to_durable_awaitable_tree(
     Raises TensorlakeError on error.
     """
     # Warning: any change of ordering of operations in this function may lead to different durable IDs being generated
-    # which may lead to re-execution of function calls on Server side even if nothing changed in the awaitable tree.
-    awaitable_id_to_durable_awaitable: Dict[str, Awaitable] = {}
-    next_awaitable_sequence_number: int = 0
-
-    for awaitable in dfs_bottom_up(root, leaf_awaitable_types=()):
-        awaitable: Awaitable
-        durable_awaitable, next_awaitable_sequence_number = _to_durable_awaitable(
-            awaitable=awaitable,
-            parent_function_call_id=parent_function_call_id,
-            previous_awaitable_id=previous_awaitable_id,
-            next_awaitable_sequence_number=next_awaitable_sequence_number,
-            awaitable_id_to_durable_awaitable=awaitable_id_to_durable_awaitable,
-        )
-        awaitable_id_to_durable_awaitable[awaitable.id] = durable_awaitable
-
-    return awaitable_id_to_durable_awaitable[root.id]
-
-
-def _to_durable_awaitable(
-    awaitable: Awaitable,
-    parent_function_call_id: str,
-    previous_awaitable_id: str,
-    next_awaitable_sequence_number: int,
-    awaitable_id_to_durable_awaitable: Dict[str, Awaitable],
-) -> tuple[Awaitable, int]:
-    """Returns a durable version of the given awaitable.
-
-    This function assumes that all child awaitables of the given awaitable have been already converted into
-    durable versions and are present in awaitable_id_to_durable_awaitable.
-    """
-    # Warning: any change of ordering of operations in this function may lead to different durable IDs being generated
-    # which may lead to re-execution of function calls on Server side even if nothing changed in the awaitable tree.
+    # which may lead to re-execution of function calls on Server side even if nothing changed in the future tree.
     durable_id_attrs: list[str] = [
         parent_function_call_id,
-        previous_awaitable_id,
-        str(next_awaitable_sequence_number),
+        previous_future_durable_id,
     ]
-    next_awaitable_sequence_number += 1
 
-    if isinstance(awaitable, AwaitableList):
-        awaitable: AwaitableList
-        # Awaitable specific metadata, part of durable ID.
-        durable_id_attrs.append(awaitable.metadata.durability_key)
-        durable_items: list[Awaitable | Any] = []
-        for item in awaitable.items:
-            durable_item: Awaitable | Any
-            if isinstance(item, Awaitable):
-                durable_item = awaitable_id_to_durable_awaitable[item.id]
-            else:
-                durable_item = item
-            durable_items.append(durable_item)
-            _add_durable_id_attr(durable_item, durable_id_attrs)
+    if isinstance(future, FunctionCallFuture):
+        # Future specific metadata, part of durable ID.
+        durable_id_attrs.extend(["FunctionCall", future._function_name])
+        for arg in future._args:
+            _add_future_durable_id(
+                value=arg,
+                future_infos=future_infos,
+                durable_id_attrs=durable_id_attrs,
+            )
 
-        return (
-            AwaitableList(
-                id=_sha256_hash_strings(durable_id_attrs),
-                items=durable_items,
-                metadata=awaitable.metadata,
-            ),
-            next_awaitable_sequence_number,
-        )
-
-    elif isinstance(awaitable, FunctionCallAwaitable):
-        awaitable: FunctionCallAwaitable
-        # Awaitable specific metadata, part of durable ID.
-        durable_id_attrs.extend(["FunctionCall", awaitable.function_name])
-        durable_args: list[Awaitable | Any] = []
-        for arg in awaitable.args:
-            durable_arg: Awaitable | Any
-            if isinstance(arg, Awaitable):
-                durable_arg = awaitable_id_to_durable_awaitable[arg.id]
-            else:
-                durable_arg = arg
-            durable_args.append(durable_arg)
-            _add_durable_id_attr(durable_arg, durable_id_attrs)
-
-        durable_kwargs: dict[str, Awaitable | Any] = {}
         # Iterate over sorted dict keys to ensure deterministic hash key order.
-        sorted_kwarg_keys: list[str] = sorted(awaitable.kwargs.keys())
+        sorted_kwarg_keys: list[str] = sorted(future._kwargs.keys())
         for kwarg_name in sorted_kwarg_keys:
-            kwarg_value: Awaitable | Any = awaitable.kwargs[kwarg_name]
-            durable_kwarg: Awaitable | Any
-            if isinstance(kwarg_value, Awaitable):
-                durable_kwarg = awaitable_id_to_durable_awaitable[kwarg_value.id]
-            else:
-                durable_kwarg = kwarg_value
-            durable_kwargs[kwarg_name] = durable_kwarg
-            _add_durable_id_attr(durable_kwargs[kwarg_name], durable_id_attrs)
+            kwarg_value: Future | Any = future._kwargs[kwarg_name]
+            _add_future_durable_id(
+                value=kwarg_value,
+                future_infos=future_infos,
+                durable_id_attrs=durable_id_attrs,
+            )
+    elif isinstance(future, ListFuture):
+        # Future specific metadata, part of durable ID.
+        durable_id_attrs.append(future._metadata.durability_key)
+        if isinstance(future._items, ListFuture):
+            _add_future_durable_id(
+                value=future._items,
+                future_infos=future_infos,
+                durable_id_attrs=durable_id_attrs,
+            )
+        else:
+            for item in future._items:
+                _add_future_durable_id(
+                    value=item,
+                    future_infos=future_infos,
+                    durable_id_attrs=durable_id_attrs,
+                )
 
-        return (
-            FunctionCallAwaitable(
-                id=_sha256_hash_strings(durable_id_attrs),
-                function_name=awaitable.function_name,
-                args=durable_args,
-                kwargs=durable_kwargs,
-            ),
-            next_awaitable_sequence_number,
+    elif isinstance(future, ReduceOperationFuture):
+        # Future specific metadata, part of durable ID.
+        durable_id_attrs.extend(["ReduceOperation", future._function_name])
+
+        _add_future_durable_id(
+            value=future._initial,
+            future_infos=future_infos,
+            durable_id_attrs=durable_id_attrs,
         )
-    # ReduceOperationAwaitable should have been already converted into FunctionCallAwaitable chain
-    # by reduce_operation_to_function_call_chain before calling this function.
+
+        if isinstance(future._items, ListFuture):
+            _add_future_durable_id(
+                value=future._items,
+                future_infos=future_infos,
+                durable_id_attrs=durable_id_attrs,
+            )
+        else:
+            for item in future._items:
+                _add_future_durable_id(
+                    value=item,
+                    future_infos=future_infos,
+                    durable_id_attrs=durable_id_attrs,
+                )
     else:
-        raise InternalError(f"Unexpected Awaitable subclass: {type(awaitable)}")
+        raise InternalError(f"Unexpected Future type: {type(future)}")
+
+    return _sha256_hash_strings(durable_id_attrs)
+
+
+def _add_future_durable_id(
+    value: Future | Any,
+    future_infos: dict[str, FutureInfo],
+    durable_id_attrs: list[str],
+) -> None:
+    """Adds durable ID of the given Future to durable_attrs if the value is a Future. Does nothing otherwise.
+
+    Raises InternalError if the value is a Future but its durable ID is not found in future_durable_ids.
+    """
+    # We don't hash user provided values. Only hash Futures to verify tree structure.
+    if isinstance(value, Future):
+        value_future_info: FutureInfo | None = future_infos.get(value._id, None)
+        if value_future_info is None:
+            raise InternalError(
+                f"FutureInfo for Future with id {value._id} not found in future_infos."
+            )
+        durable_id_attrs.append(value_future_info.durable_id)
+
+
+def _sha256_hash_strings(strings: list[str]) -> str:
+    """Returns sha256 hash of the concatenation of strings in the given list.
+
+    If the strings are sha256 hashes, the result is also a high quality sha256 hash
+    of the original hashed values. See https://en.wikipedia.org/wiki/Merkle_tree.
+    """
+    sha256 = hashlib.sha256()
+    for s in strings:
+        sha256.update(s.encode("utf-8"))
+        sha256.update(b"|")  # Separator to avoid collisions of neighbouring strings.
+    return sha256.hexdigest()
 
 
 def serialize_user_value(
@@ -279,12 +238,12 @@ def serialize_user_value(
 
 
 def replace_user_values_with_serialized_values(
-    root: Awaitable,
-    root_serializer: UserDataSerializer,
+    future: FunctionCallFuture,
+    future_infos: dict[str, FutureInfo],
 ) -> Dict[str, SerializedValue]:
-    """Replaces user values in the given Awaitable tree with their SerializedValues.
+    """Replaces user values in the given FunctionCallFuture with their SerializedValues.
 
-    The provided Awaitable tree is modified in-place with each user supplied value being
+    The provided future is modified in-place with each user supplied value being
     SerializedValue instead of the original user object.
 
     Returns a mapping from value ID to SerializedValue for all serialized user values in the tree.
@@ -295,155 +254,94 @@ def replace_user_values_with_serialized_values(
     serialized_values: Dict[str, SerializedValue] = {}
 
     def to_serialized_value(
-        value: Any, value_serializer: UserDataSerializer
-    ) -> SerializedValue:
+        future_or_value: Future | Any, value_serializer: UserDataSerializer
+    ) -> Any | SerializedValue:
+        if isinstance(future_or_value, ReduceOperationFuture):
+            future_info: FutureInfo = future_infos[future_or_value._id]
+            if not isinstance(future_info.reduce_future_output, Future):
+                # Replace the ReduceOperationFuture with its output value and upload.
+                # This simplifies execution plan update generation.
+                future_or_value = future_info.reduce_future_output
+            else:
+                return future_or_value
+        elif isinstance(future_or_value, Future):
+            return future_or_value
+
+        # This is user supplied value now, need to serialize it.
+        future_or_value: Any
         serialized_value: SerializedValue = serialize_user_value(
-            value=value,
+            value=future_or_value,
             serializer=value_serializer,
-            type_hint=type(value),
+            type_hint=type(future_or_value),
         )
         serialized_values[serialized_value.metadata.id] = serialized_value
         return serialized_value
 
-    # NB: This code needs to be in sync with LocalRunner where it's doing a similar thing.
-    stack: list[tuple[Awaitable, UserDataSerializer]] = [(root, root_serializer)]
-    while len(stack) > 0:
-        awaitable: Awaitable
-        awaitable_serializer: UserDataSerializer
-        awaitable, awaitable_serializer = stack.pop()
-
-        if isinstance(awaitable, AwaitableList):
-            # Iterating over list copy to allow modifying the original list.
-            for index, item in enumerate(list(awaitable.items)):
-                if isinstance(item, Awaitable):
-                    stack.append((item, awaitable_serializer))
-                else:
-                    awaitable.items[index] = to_serialized_value(
-                        value=item, value_serializer=awaitable_serializer
-                    )
-        elif isinstance(awaitable, FunctionCallAwaitable):
-            args_serializer: UserDataSerializer = function_input_serializer(
-                get_function(awaitable.function_name), app_call=False
-            )
-            # Iterating over list copy to allow modifying the original list.
-            for index, arg in enumerate(list(awaitable.args)):
-                if isinstance(arg, Awaitable):
-                    stack.append((arg, args_serializer))
-                else:
-                    awaitable.args[index] = to_serialized_value(
-                        value=arg, value_serializer=args_serializer
-                    )
-            # Iterating over dict copy to allow modifying the original list.
-            for kwarg_name, kwarg_value in dict(awaitable.kwargs).items():
-                if isinstance(kwarg_value, Awaitable):
-                    stack.append((kwarg_value, args_serializer))
-                else:
-                    awaitable.kwargs[kwarg_name] = to_serialized_value(
-                        value=kwarg_value, value_serializer=args_serializer
-                    )
-        # ReduceOperationAwaitable should have been already converted into FunctionCallAwaitable
-        # by to_durable_awaitable_tree before calling this function.
-        else:
-            raise InternalError(f"Unexpected Awaitable subclass: {type(awaitable)}")
+    args_serializer: UserDataSerializer = function_input_serializer(
+        get_function(future._function_name), app_call=False
+    )
+    # Iterating over list copy to allow modifying the original list.
+    for index, arg in enumerate(list(future._args)):
+        future._args[index] = to_serialized_value(
+            future_or_value=arg, value_serializer=args_serializer
+        )
+    # Iterating over dict copy to allow modifying the original list.
+    for kwarg_name, kwarg_value in dict(future._kwargs).items():
+        future._kwargs[kwarg_name] = to_serialized_value(
+            future_or_value=kwarg_value, value_serializer=args_serializer
+        )
 
     return serialized_values
 
 
 def to_execution_plan_updates(
-    awaitable: Awaitable,
+    future: FunctionCallFuture,
     uploaded_serialized_objects: Dict[str, SerializedObjectInsideBLOB],
-    output_serializer_name_override: str,
+    output_serializer_name_override: str | None,
     has_output_type_hint_override: bool,
     output_type_hint_override: Any,
     function_ref: FunctionRef,
+    future_infos: dict[str, FutureInfo],
 ) -> ExecutionPlanUpdates:
-    """Traverses the awaitable tree and constructs ExecutionPlanUpdates proto.
+    """Constructs ExecutionPlanUpdates proto for the supplied function call future.
 
-    The awaitable must be validated already. The root awaitable must not be an AwaitableList.
-    Caller must call this function for each item in the AwaitableList separately instead.
-    Each value in the awaitable tree must be a SerializedValue present in uploaded_serialized_objects.
+    Each user supplied value in the args must be a SerializedValue present in uploaded_serialized_objects.
+    function_call_ids is a mapping from FunctionCallFuture IDs to their durable IDs for all FunctionCallFutures
+    in the tree rooted at function_call_future.
 
     Raises TensorlakeError on error.
     """
     updates: List[ExecutionPlanUpdate] = []
-    _fill_execution_plan_updates(
-        root=awaitable,
-        uploaded_serialized_objects=uploaded_serialized_objects,
-        output_serializer_name_override=output_serializer_name_override,
-        has_output_type_hint_override=has_output_type_hint_override,
-        output_type_hint_override=output_type_hint_override,
-        destination=updates,
-        function_ref=function_ref,
+
+    updates.append(
+        _function_call_execution_plan_update(
+            function_call_future=future,
+            uploaded_serialized_objects=uploaded_serialized_objects,
+            output_serializer_name_override=output_serializer_name_override,
+            has_output_type_hint_override=has_output_type_hint_override,
+            output_type_hint_override=output_type_hint_override,
+            function_ref=function_ref,
+            future_infos=future_infos,
+        )
     )
+
     return ExecutionPlanUpdates(
         updates=updates,
-        root_function_call_id=awaitable.id,
+        root_function_call_id=future._id,
     )
-
-
-def _fill_execution_plan_updates(
-    root: Awaitable,
-    uploaded_serialized_objects: Dict[str, SerializedObjectInsideBLOB],
-    output_serializer_name_override: str | None,
-    has_output_type_hint_override: bool,
-    output_type_hint_override: Any,
-    destination: List[ExecutionPlanUpdate],
-    function_ref: FunctionRef,
-) -> None:
-    stack: list[Awaitable] = [root]
-    while len(stack) > 0:
-        node: Awaitable = stack.pop()
-        # Only override at root function call.
-        node_output_serializer_name_override = (
-            output_serializer_name_override if node is root else None
-        )
-        node_has_output_type_hint_override = (
-            has_output_type_hint_override if node is root else False
-        )
-        node_output_type_hint_override = (
-            output_type_hint_override if node is root else None
-        )
-
-        if isinstance(node, FunctionCallAwaitable):
-            destination.append(
-                _function_call_execution_plan_update(
-                    awaitable=node,
-                    uploaded_serialized_objects=uploaded_serialized_objects,
-                    output_serializer_name_override=node_output_serializer_name_override,
-                    has_output_type_hint_override=node_has_output_type_hint_override,
-                    output_type_hint_override=node_output_type_hint_override,
-                    function_ref=function_ref,
-                )
-            )
-            for arg_value in node.args:
-                if isinstance(arg_value, Awaitable):
-                    stack.append(arg_value)
-
-            for kwarg_value in node.kwargs.values():
-                if isinstance(kwarg_value, Awaitable):
-                    stack.append(kwarg_value)
-
-        elif isinstance(node, AwaitableList):
-            # This collection is fully embedded now into function call args but its function
-            # calls are not in the execution plan yet.
-            for item in node.items:
-                if isinstance(item, Awaitable):
-                    stack.append(item)
-
-        else:
-            raise InternalError(f"Unexpected Awaitable subclass: {type(node)}")
 
 
 def _function_call_execution_plan_update(
-    awaitable: FunctionCallAwaitable,
+    function_call_future: FunctionCallFuture,
     uploaded_serialized_objects: Dict[str, SerializedObjectInsideBLOB],
     output_serializer_name_override: str | None,
     has_output_type_hint_override: bool,
     output_type_hint_override: Any,
     function_ref: FunctionRef,
+    future_infos: dict[str, FutureInfo],
 ) -> ExecutionPlanUpdate:
     metadata: FunctionCallMetadata = FunctionCallMetadata(
-        id=awaitable.id,
+        id=function_call_future._id,
         output_serializer_name_override=output_serializer_name_override,
         output_type_hint_override=output_type_hint_override,
         has_output_type_hint_override=has_output_type_hint_override,
@@ -452,7 +350,9 @@ def _function_call_execution_plan_update(
     )
     function_pb_args: List[FunctionArg] = []
 
-    def process_function_call_argument(arg: Any) -> FunctionCallArgumentMetadata:
+    def process_function_call_argument(
+        arg: SerializedValue | Future,
+    ) -> FunctionCallArgumentMetadata:
         if isinstance(arg, SerializedValue):
             function_pb_args.append(
                 FunctionArg(
@@ -463,44 +363,54 @@ def _function_call_execution_plan_update(
                 value_id=arg.metadata.id,
                 collection=None,
             )
-        elif isinstance(arg, AwaitableList):
+        elif isinstance(arg, ListFuture):
             _embed_collection_into_function_pb_args(
-                awaitable=arg,
-                uploaded_serialized_objects=uploaded_serialized_objects,
+                future=arg,
                 function_pb_args=function_pb_args,
+                future_infos=future_infos,
             )
             return FunctionCallArgumentMetadata(
                 value_id=None,
-                collection=_to_collection_metadata(arg),
+                collection=_to_collection_metadata(arg, future_infos),
             )
-        elif isinstance(arg, (FunctionCallAwaitable, ReduceOperationAwaitable)):
+        elif isinstance(arg, FunctionCallFuture):
+            arg_durable_id: str = future_infos[arg._id].durable_id
             function_pb_args.append(
                 FunctionArg(
-                    function_call_id=arg.id,
+                    function_call_id=arg_durable_id,
                 )
             )
             return FunctionCallArgumentMetadata(
-                value_id=arg.id,
+                value_id=arg_durable_id,
                 collection=None,
             )
+        elif isinstance(arg, ReduceOperationFuture):
+            future_info: FutureInfo = future_infos[arg._id]
+            if isinstance(future_info.reduce_future_output, Future):
+                # FIXME: recursion, should be an iterative algorithm.
+                return process_function_call_argument(future_info.reduce_future_output)
+            else:
+                raise InternalError(
+                    "ReduceOperationFuture with value output should have been replaced by its output value by now."
+                )
         else:
             raise InternalError(
                 f"Unexpected type of function call argument: {type(arg)}"
             )
 
-    for arg in awaitable.args:
+    for arg in function_call_future._args:
         metadata.args.append(process_function_call_argument(arg))
 
-    for kwarg_name, kwarg_value in awaitable.kwargs.items():
+    for kwarg_name, kwarg_value in function_call_future._kwargs.items():
         metadata.kwargs[kwarg_name] = process_function_call_argument(kwarg_value)
 
     return ExecutionPlanUpdate(
         function_call=FunctionCall(
-            id=awaitable.id,
+            id=function_call_future._id,
             target=FunctionRef(
                 namespace=function_ref.namespace,
                 application_name=function_ref.application_name,
-                function_name=awaitable.function_name,
+                function_name=function_call_future._function_name,
                 application_version=function_ref.application_version,
             ),
             args=function_pb_args,
@@ -509,73 +419,36 @@ def _function_call_execution_plan_update(
     )
 
 
-def _to_collection_metadata(awaitable: AwaitableList) -> CollectionMetadata:
-    result: CollectionMetadata = CollectionMetadata(items=[])
-    stack: list[(AwaitableList, CollectionMetadata)] = [(awaitable, result)]
-    while len(stack) > 0:
-        awaitable, collection_metadata = stack.pop()
-        awaitable: AwaitableList
-        collection_metadata: CollectionMetadata
+def _to_collection_metadata(
+    future: ListFuture, future_infos: dict[str, FutureInfo]
+) -> CollectionMetadata:
+    collection_metadata: CollectionMetadata = CollectionMetadata(items=[])
+    future_info: FutureInfo = future_infos[future._id]
 
-        for item in awaitable.items:
-            if isinstance(item, SerializedValue):
-                collection_metadata.items.append(
-                    CollectionItemMetadata(
-                        value_id=item.metadata.id,
-                        collection=None,
-                    )
-                )
-            elif isinstance(item, AwaitableList):
-                item_collection_metadata = CollectionMetadata(items=[])
-                stack.append((item, item_collection_metadata))
-                collection_metadata.items.append(
-                    CollectionItemMetadata(
-                        value_id=None,
-                        collection=item_collection_metadata,
-                    )
-                )
-            elif isinstance(item, (FunctionCallAwaitable, ReduceOperationAwaitable)):
-                collection_metadata.items.append(
-                    CollectionItemMetadata(
-                        value_id=item.id,
-                        collection=None,
-                    )
-                )
-            else:
-                raise InternalError(
-                    f"Unexpected type of AwaitableList item: {type(item)}"
-                )
+    for mapped_item in future_info.map_future_output:
+        mapped_item: FunctionCallFuture
+        collection_metadata.items.append(
+            CollectionItemMetadata(
+                value_id=future_infos[mapped_item._id].durable_id,
+                collection=None,
+            )
+        )
 
-    return result
+    return collection_metadata
 
 
 def _embed_collection_into_function_pb_args(
-    awaitable: AwaitableList,
-    uploaded_serialized_objects: Dict[str, SerializedObjectInsideBLOB],
+    future: ListFuture,
     function_pb_args: List[FunctionArg],
+    future_infos: dict[str, FutureInfo],
 ) -> None:
-    stack: list[list[Awaitable | Any]] = [awaitable.items]
-    while len(stack) > 0:
-        collection = stack.pop()
-        for item in collection:
-            if isinstance(item, SerializedValue):
-                function_pb_args.append(
-                    FunctionArg(
-                        value=uploaded_serialized_objects[item.metadata.id],
-                    )
-                )
-            elif isinstance(item, AwaitableList):
-                stack.append(item.items)
-            elif isinstance(item, (FunctionCallAwaitable, ReduceOperationAwaitable)):
-                function_pb_args.append(
-                    FunctionArg(
-                        function_call_id=item.id,
-                    )
-                )
-            else:
-                raise InternalError(
-                    f"Unexpected type of AwaitableList item: {type(item)}"
-                )
+    for output_item in future_infos[future._id].map_future_output:
+        output_item: FunctionCallFuture
+        function_pb_args.append(
+            FunctionArg(
+                function_call_id=future_infos[output_item._id].durable_id,
+            )
+        )
 
 
 def deserialize_application_function_call_args(
@@ -648,7 +521,7 @@ def validate_and_deserialize_function_call_metadata(
     serialized_args: List[SerializedValue],
     function: Function,
     logger: InternalLogger,
-) -> FunctionCallMetadata | ReduceOperationMetadata | None:
+) -> FunctionCallMetadata | None:
     if len(serialized_function_call_metadata) > 0:
         # Function call created by SDK.
         for serialized_arg in serialized_args:
@@ -659,23 +532,13 @@ def validate_and_deserialize_function_call_metadata(
                 raise InternalError("Function argument is missing metadata.")
 
         function_call_metadata = deserialize_metadata(serialized_function_call_metadata)
-        if not isinstance(
-            function_call_metadata, (FunctionCallMetadata, ReduceOperationMetadata)
-        ):
+        if not isinstance(function_call_metadata, FunctionCallMetadata):
             logger.error(
                 "unexpected function call metadata type",
                 metadata_type=type(function_call_metadata),
             )
             raise InternalError(
                 f"Unexpected function call metadata type: {type(function_call_metadata)}"
-            )
-
-        if (
-            isinstance(function_call_metadata, ReduceOperationMetadata)
-            and len(serialized_args) != 2
-        ):
-            raise InternalError(
-                f"Expected 2 arguments for reducer function call, got {len(serialized_args)}"
             )
 
         return function_call_metadata
@@ -724,7 +587,7 @@ def deserialize_sdk_function_call_args(
 
 
 def reconstruct_sdk_function_call_args(
-    function_call_metadata: FunctionCallMetadata | ReduceOperationMetadata,
+    function_call_metadata: FunctionCallMetadata,
     arg_values: Dict[str, Value],
     function_instance_arg: Any | None,
 ) -> tuple[List[Any], Dict[str, Any]]:
@@ -741,29 +604,17 @@ def reconstruct_sdk_function_call_args(
 
 
 def _reconstruct_sdk_function_call_args(
-    function_call_metadata: FunctionCallMetadata | ReduceOperationMetadata,
+    function_call_metadata: FunctionCallMetadata,
     arg_values: Dict[str, Value],
 ) -> tuple[List[Any], Dict[str, Any]]:
-    if isinstance(function_call_metadata, FunctionCallMetadata):
-        args: List[Any] = []
-        kwargs: Dict[str, Any] = {}
+    args: List[Any] = []
+    kwargs: Dict[str, Any] = {}
 
-        for arg_metadata in function_call_metadata.args:
-            args.append(_reconstruct_function_arg_value(arg_metadata, arg_values))
-        for kwarg_key, kwarg_metadata in function_call_metadata.kwargs.items():
-            kwargs[kwarg_key] = _reconstruct_function_arg_value(
-                kwarg_metadata, arg_values
-            )
-        return args, kwargs
-    elif isinstance(function_call_metadata, ReduceOperationMetadata):
-        if len(arg_values) != 2:
-            raise InternalError(
-                f"Expected exactly 2 argument values for reducer function call, got {len(arg_values)}"
-            )
-        args: List[Value] = list(arg_values.values())
-        # Server provides accumulator first, item second
-        args.sort(key=lambda arg: arg.input_ix)
-        return [arg.object for arg in args], {}
+    for arg_metadata in function_call_metadata.args:
+        args.append(_reconstruct_function_arg_value(arg_metadata, arg_values))
+    for kwarg_key, kwarg_metadata in function_call_metadata.kwargs.items():
+        kwargs[kwarg_key] = _reconstruct_function_arg_value(kwarg_metadata, arg_values)
+    return args, kwargs
 
 
 def _reconstruct_function_arg_value(
@@ -796,22 +647,3 @@ def _reconstruct_collection_value(
                 collection_values.append(item_collection)
 
     return result
-
-
-def _add_durable_id_attr(node: Awaitable | Any, durable_attrs: list[str]) -> None:
-    # We don't hash user provided values. Only hash Awaitables to verify tree structure.
-    if isinstance(node, Awaitable):
-        durable_attrs.append(node.id)
-
-
-def _sha256_hash_strings(strings: list[str]) -> str:
-    """Returns sha256 hash of the concatenation of strings in the given list.
-
-    If the strings are sha256 hashes, the result is also a high quality sha256 hash
-    of the original hashed values. See https://en.wikipedia.org/wiki/Merkle_tree.
-    """
-    sha256 = hashlib.sha256()
-    for s in strings:
-        sha256.update(s.encode("utf-8"))
-        sha256.update(b"|")  # Separator to avoid collisions of neighbouring strings.
-    return sha256.hexdigest()

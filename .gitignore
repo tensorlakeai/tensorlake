@@ -164,3 +164,4 @@ cython_debug/
 
 .envrc.secrets
 .vscode
+CLAUDE.md

@@ -3,6 +3,7 @@ from typing import Any
 from pydantic import BaseModel
 
 
+# TODO: Only used by LocalRunner. Delete after cleaning up LocalRunner.
 class ReduceOperationMetadata(BaseModel):
     # ID of the reduce operation, uniquness guarantees depend on how the field is set.
     id: str

@@ -6,8 +6,8 @@ from queue import SimpleQueue
 from threading import Event
 from typing import Any
 
-from ...interface.awaitables import Awaitable
 from ...interface.exceptions import InternalError, TensorlakeError
+from ...interface.futures import Future
 from ..future import LocalFuture
 
 
@@ -15,7 +15,7 @@ from ..future import LocalFuture
 class LocalFutureRunResult:
     id: str
     # Either output or error are set.
-    output: Any | Awaitable | None
+    output: Any | Future | None
     error: TensorlakeError | None
 
 
@@ -45,7 +45,7 @@ class LocalFutureRun:
         # Queue to put LocalFutureRunResult into when finished.
         self._result_queue: SimpleQueue = result_queue
         self._thread_pool: ThreadPoolExecutor = thread_pool
-        # Future run waits on this event until all data dependencies in its Awaitable are resolved.
+        # Future run waits on this event until all data dependencies in its Future are resolved.
         self._start_event: Event = Event()
         # Future run waits on this event until it can exit.
         self._finish_event: Event = Event()

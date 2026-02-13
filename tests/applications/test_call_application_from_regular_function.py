@@ -47,3 +47,7 @@ class TestCallApplicationFromRegularFunction(unittest.TestCase):
             request.output()
         )
         self.assertEqual(output, (1, "test", (2, 3, "four"), {"five": [6, 7]}))
+
+
+if __name__ == "__main__":
+    unittest.main()

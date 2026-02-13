@@ -68,9 +68,7 @@ class _EditMixin(_BaseClient):
                 "raw_text": raw_text,
                 "labels": labels,
                 "mime_type": mime_type.value if mime_type else None,
-                "form_filling": form_filling_options.model_dump(
-                    exclude_none=True
-                ),
+                "form_filling": form_filling_options.model_dump(exclude_none=True),
             }
         )
 
@@ -140,9 +138,7 @@ class _EditMixin(_BaseClient):
                 "raw_text": raw_text,
                 "labels": labels,
                 "mime_type": mime_type.value if mime_type else None,
-                "form_filling": form_filling_options.model_dump(
-                    exclude_none=True
-                ),
+                "form_filling": form_filling_options.model_dump(exclude_none=True),
             }
         )
 

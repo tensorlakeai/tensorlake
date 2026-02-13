@@ -5,7 +5,6 @@ import parameterized
 import validate_all_applications
 
 from tensorlake.applications import (
-    Awaitable,
     Future,
     Request,
     RequestFailed,
@@ -23,16 +22,11 @@ ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.defin
 
 @application()
 @function()
-def function_call_list_as_function_argument(_: str) -> str:
-    awaitable: Awaitable = other_function.awaitable(1)
+def function_call_future_list_as_function_argument(_: str) -> str:
+    future: Future = other_function.future(1)
     try:
-        return other_function([awaitable])
+        return other_function([future])
     except SerializationError as e:
-        assert str(e) == (
-            "Failed to serialize data with pickle serializer: Attempt to pickle Tensorlake Function Call other_function(\n"
-            "  1,\n"
-            "). It cannot be stored inside an object which is a function argument or returned from a function."
-        )
         return "success"
 
 
@@ -41,48 +35,13 @@ def other_function(arg) -> None:
     return None
 
 
-# Check that returning a list of Awaitables doesn't work because
-# runtime attempts to json serialize them and Awaitables are not json serializable.
-@application()
-@function()
-def application_return_list_of_function_calls() -> str:
-    awaitable1: Awaitable = other_function.awaitable(1)
-    awaitable2: Awaitable = other_function.awaitable(2)
-    return [awaitable1, awaitable2]
-
-
-@application()
-@function()
-def application_call_return_list_of_function_calls() -> str:
-    return return_list_of_function_calls()
-
-
-# Check that returning a list of Awaitables doesn't work because
-# runtime attempts to pickle them and Awaitables are not picklable.
-@function()
-def return_list_of_function_calls() -> list[Awaitable]:
-    awaitable1: Awaitable = other_function.awaitable(1)
-    awaitable2: Awaitable = other_function.awaitable(2)
-    return [awaitable1, awaitable2]
-
-
-@application()
-@function()
-def future_list_as_function_argument(_: str) -> str:
-    future: Future = other_function.awaitable(1).run()
-    try:
-        return other_function([future])
-    except SerializationError as e:
-        return "success"
-
-
 # Check that returning a list of Futures doesn't work because
 # runtime attempts to json serialize them and Futures are not json serializable.
 @application()
 @function()
 def application_return_list_of_futures() -> str:
-    future1: Future = other_function.awaitable(1).run()
-    future2: Future = other_function.awaitable(2).run()
+    future1: Future = other_function.future(1)
+    future2: Future = other_function.future(2)
     return [future1, future2]
 
 
@@ -96,8 +55,8 @@ def application_call_return_list_of_futures() -> str:
 # runtime attempts to pickle them and Futures are not picklable.
 @function()
 def return_list_of_futures() -> str:
-    future1: Future = other_function.awaitable(1).run()
-    future2: Future = other_function.awaitable(2).run()
+    future1: Future = other_function.future(1)
+    future2: Future = other_function.future(2)
     return [future1, future2]
 
 
@@ -138,7 +97,7 @@ def return_function() -> Any:
 @application()
 @function()
 def future_wait_wrong_return_when(_: str) -> str:
-    future: Future = other_function.awaitable(1).run()
+    future: Future = other_function.future(1)
     try:
         Future.wait([future, future], return_when="wrong_value")
     except SDKUsageError as e:
@@ -148,36 +107,16 @@ def future_wait_wrong_return_when(_: str) -> str:
 
 @application()
 @function()
-def return_map_awaitable(_: str) -> str:
-    return other_function.awaitable.map([1, 2, 3])
+def return_map_future(_: str) -> list:
+    # With the new API, .future.map() returns a ListFuture (a valid tail call).
+    return other_function.future.map([1, 2, 3])
 
 
 @application()
 @function()
-def pass_map_awaitable_as_reduced_item(_: str) -> str:
-    map_awaitable: Awaitable = other_function.awaitable.map([1, 2, 3])
-    try:
-        other_function_reduce.reduce([map_awaitable])
-    except SDKUsageError as e:
-        assert str(e) == (
-            "A Tensorlake Map Operation cannot be used as an input item for Tensorlake Reduce Operation of 'other_function_reduce' over [\n"
-            "  Tensorlake Map Operation [\n"
-            "    Tensorlake Function Call other_function(\n"
-            "      1,\n"
-            "    ),\n"
-            "    Tensorlake Function Call other_function(\n"
-            "      2,\n"
-            "    ),\n"
-            "    Tensorlake Function Call other_function(\n"
-            "      3,\n"
-            "    ),\n"
-            "  ],\n"
-            "]. You can work this around by creating function call awaitables using `other_function.awaitable(...)` and then passing "
-            "them into `other_function_reduce.reduce(...)`."
-        )
-        return "success"
-    else:
-        return "failure"
+def return_non_tail_call_future() -> None:
+    # Check that returning a non-tail-call Future fails the function.
+    return other_function.future(1)
 
 
 @function()
@@ -185,77 +124,14 @@ def other_function_reduce(arg1, arg2):
     return arg1
 
 
-@application()
-@function()
-def return_future(_: str) -> Any:
-    future: Future = other_function.awaitable(1).run()
-    return future
-
-
-@application()
-@function()
-def return_running_awaitable(_: str) -> Any:
-    awaitable: Awaitable = other_function.awaitable(1)
-    future: Future = awaitable.run()
-    return awaitable
-
-
 class TestSDKObjectsUsageErrors(unittest.TestCase):
-    @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_function_call_list_as_function_argument(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
-        request: Request = run_application(
-            function_call_list_as_function_argument,
-            is_remote,
-            "whatever",
-        )
-        self.assertEqual(request.output(), "success")
-
-    @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_return_list_of_function_calls_from_application(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
-        request: Request = run_application(
-            application_return_list_of_function_calls,
-            is_remote,
-        )
-        with self.assertRaises(RequestFailed) as context:
-            request.output()
-
-        self.assertEqual(
-            str(context.exception),
-            "function_error",
-        )
-
-    @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_return_list_of_function_calls_from_regular_function(
-        self, _, is_remote: bool
-    ):
-        if is_remote:
-            deploy_applications(__file__)
-
-        request: Request = run_application(
-            application_call_return_list_of_function_calls,
-            is_remote,
-        )
-        with self.assertRaises(RequestFailed) as context:
-            request.output()
-
-        self.assertEqual(
-            str(context.exception),
-            "function_error",
-        )
-
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_future_list_as_function_argument(self, _, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
 
         request: Request = run_application(
-            future_list_as_function_argument,
+            function_call_future_list_as_function_argument,
             is_remote,
             "whatever",
         )
@@ -356,70 +232,33 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
         self.assertEqual(request.output(), "success")
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_return_map_awaitable(self, _, is_remote: bool):
+    def test_return_map_future(self, _, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
 
         request: Request = run_application(
-            return_map_awaitable,
+            return_map_future,
             is_remote,
             "whatever",
         )
+        # ListFuture cannot be returned as a tail call.
         with self.assertRaises(RequestFailed) as context:
             request.output()
-
-        self.assertEqual(
-            str(context.exception),
-            "function_error",
-        )
+        self.assertEqual(str(context.exception), "function_error")
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_pass_map_awaitable_as_reduced_item(self, _, is_remote: bool):
+    def test_return_non_tail_call_future(self, _, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
 
         request: Request = run_application(
-            pass_map_awaitable_as_reduced_item,
+            return_non_tail_call_future,
             is_remote,
-            "whatever",
         )
-        self.assertEqual(request.output(), "success")
-
-    @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_return_future(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
-        request: Request = run_application(
-            return_future,
-            is_remote,
-            "whatever",
-        )
+        # Future not created using function.tail_call cannot be returned as a tail call.
         with self.assertRaises(RequestFailed) as context:
             request.output()
-
-        self.assertEqual(
-            str(context.exception),
-            "function_error",
-        )
-
-    @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_return_running_awaitable(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
-        request: Request = run_application(
-            return_running_awaitable,
-            is_remote,
-            "whatever",
-        )
-        with self.assertRaises(RequestFailed) as context:
-            request.output()
-
-        self.assertEqual(
-            str(context.exception),
-            "function_error",
-        )
+        self.assertEqual(str(context.exception), "function_error")
 
 
 if __name__ == "__main__":
