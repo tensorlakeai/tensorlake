@@ -17,10 +17,32 @@ from tensorlake.applications.image_builder.client_v3 import (
     ApplicationVersionBuildInfoV3,
     ApplicationVersionBuildRequestV3,
     ImageBuilderClientV3,
-    ImageBuilderClientV3Error,
     ImageBuildInfoV3,
     ImageBuildLogEventV3,
     ImageBuildRequestV3,
+)
+
+# Export factory functions
+from tensorlake.applications.image_builder.factory import (
+    ImageBuilderVersion,
+    create_image_builder_from_context,
+    get_image_builder_version,
+)
+
+# Export unified exceptions
+from tensorlake.applications.image_builder.exceptions import (
+    ImageBuilderBuildError,
+    ImageBuilderClientV3BadRequestError,
+    ImageBuilderClientV3Error,
+    ImageBuilderClientV3InternalError,
+    ImageBuilderClientV3NetworkError,
+    ImageBuilderClientV3NotFoundError,
+    ImageBuilderConfigError,
+    ImageBuilderError,
+    ImageBuilderNetworkError,
+    ImageBuilderV2BuildError,
+    ImageBuilderV2Error,
+    ImageBuilderV2NetworkError,
 )
 
 
@@ -497,3 +519,38 @@ class ImageBuilder:
         # Cancel all builds at once using cancel_app_build
         # This will raise ImageBuilderClientV3Error if cancellation fails
         return await self._client.cancel_app_build(info.id)
+
+
+__all__ = [
+    # Core classes
+    "ImageBuilder",
+    "BuildRequest",
+    "ImageBuildRequest",
+    "BuildSummary",
+    # V3 client classes
+    "ImageBuilderClientV3",
+    "ApplicationVersionBuildInfoV3",
+    "ApplicationVersionBuildRequestV3",
+    "ImageBuildInfoV3",
+    "ImageBuildLogEventV3",
+    "ImageBuildRequestV3",
+    # Factory functions
+    "create_image_builder_from_context",
+    "get_image_builder_version",
+    "ImageBuilderVersion",
+    # Unified exceptions
+    "ImageBuilderError",
+    "ImageBuilderBuildError",
+    "ImageBuilderNetworkError",
+    "ImageBuilderConfigError",
+    # V3-specific exceptions
+    "ImageBuilderClientV3Error",
+    "ImageBuilderClientV3NetworkError",
+    "ImageBuilderClientV3NotFoundError",
+    "ImageBuilderClientV3BadRequestError",
+    "ImageBuilderClientV3InternalError",
+    # V2-specific exceptions
+    "ImageBuilderV2Error",
+    "ImageBuilderV2NetworkError",
+    "ImageBuilderV2BuildError",
+]

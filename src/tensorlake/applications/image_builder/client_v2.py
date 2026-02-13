@@ -1,10 +1,5 @@
 """
-# TensorLake Image Builder Client V2 (DEPRECATED)
-#
-# DEPRECATION WARNING: This module has been moved to tensorlake.applications.image_builder.client_v2
-# Please update your imports to use the new location.
-# This compatibility shim will be removed in a future version.
-#
+# TensorLake Image Builder Client
 # This code is part of the TensorLake SDK for Python.
 # It provides a client for interacting with the image builder service.
 
@@ -20,15 +15,6 @@
 """
 
 import asyncio
-import warnings
-
-# Issue deprecation warning when this module is imported
-warnings.warn(
-    "Importing from tensorlake.builder.client_v2 is deprecated. "
-    "Please use tensorlake.applications.image_builder.client_v2 instead.",
-    DeprecationWarning,
-    stacklevel=2,
-)
 import os
 import tempfile
 from dataclasses import dataclass

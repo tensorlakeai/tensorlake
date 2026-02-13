@@ -2,21 +2,13 @@ import asyncio
 import os
 import sys
 import traceback
-from typing import Dict, List
+from typing import TYPE_CHECKING, Dict, List
 
 import click
 
 from tensorlake.applications import Function, Image, SDKUsageError, TensorlakeError
 from tensorlake.applications.applications import filter_applications
 from tensorlake.applications.image import ImageInformation, image_infos
-from tensorlake.applications.image_builder import (
-    BuildRequest,
-    ImageBuilder,
-)
-from tensorlake.applications.image_builder.client_v3 import (
-    ImageBuilderClientV3,
-    ImageBuilderClientV3Options,
-)
 from tensorlake.applications.interface.function import (
     _ApplicationConfiguration,
     _FunctionConfiguration,
@@ -38,6 +30,17 @@ from tensorlake.applications.validation import (
 from tensorlake.cli._common import Context, require_auth_and_project
 from tensorlake.cli.secrets import warning_missing_secrets
 
+if TYPE_CHECKING:
+    from tensorlake.applications.image_builder import (
+        BuildRequest,
+        ImageBuilder,
+        ImageBuilderConfigError,
+    )
+    from tensorlake.applications.image_builder.factory import (
+        create_image_builder_from_context,
+        get_image_builder_version,
+    )
+
 
 @click.command(
     short_help="Deploys applications defined in <application-file-path> .py file to Tensorlake Cloud"
@@ -49,6 +52,11 @@ from tensorlake.cli.secrets import warning_missing_secrets
     default=False,
     help="Upgrade requests that are already queued or running to use the new deployed version of the applications",
 )
+@click.option(
+    "--image-builder-version",
+    type=click.Choice(["v2", "v3"], case_sensitive=False),
+    help="Image builder version to use (default: v2)",
+)
 @click.argument(
     "application-file-path",
     type=click.Path(exists=True, file_okay=True, dir_okay=False),
@@ -58,29 +66,36 @@ def deploy(
     auth: Context,
     application_file_path: str,
     upgrade_running_requests: bool,
+    image_builder_version: str | None,
 ):
     """Deploys applications to Tensorlake Cloud."""
+    # Import here to avoid circular dependency
+    from tensorlake.applications.image_builder import ImageBuilderConfigError
+    from tensorlake.applications.image_builder.factory import (
+        create_image_builder_from_context,
+        get_image_builder_version,
+    )
+
     click.echo(
         f"⚙️  Preparing deployment for application(s) from {application_file_path}"
     )
 
-    opts = ImageBuilderClientV3Options.from_env()
-    # Use API key if available, otherwise use PAT (matching Context.client logic)
-    if auth.api_key:
-        opts = opts.replace(
-            api_key=auth.api_key, pat=None, organization_id=None, project_id=None
-        )
-    elif auth.personal_access_token:
-        opts = opts.replace(
-            api_key=None,
-            pat=auth.personal_access_token,
-            organization_id=auth.organization_id,
-            project_id=auth.project_id,
-        )
+    # Detect and display version early
+    try:
+        version = get_image_builder_version(override=image_builder_version)
+        click.echo(f"🔧 Using ImageBuilder {version}")
+    except ImageBuilderConfigError as e:
+        click.secho(str(e), err=True, fg="red")
+        raise click.Abort
 
-    client = ImageBuilderClientV3(opts)
-
-    builder = ImageBuilder(client)
+    # Create appropriate builder using factory
+    builder = create_image_builder_from_context(
+        api_key=auth.api_key,
+        pat=auth.personal_access_token,
+        organization_id=auth.organization_id,
+        project_id=auth.project_id,
+        version=version,
+    )
 
     try:
         application_file_path: str = os.path.abspath(application_file_path)
@@ -115,7 +130,10 @@ def deploy(
     )
 
 
-async def _build_applications(builder: ImageBuilder, functions: List[Function]):
+async def _build_applications(builder, functions: List[Function]):
+    # Import here to avoid circular dependency
+    from tensorlake.applications.image_builder import BuildRequest
+
     images: Dict[Image, ImageInformation] = image_infos()
     for application in filter_applications(functions):
         fn_config: _FunctionConfiguration = application._function_config

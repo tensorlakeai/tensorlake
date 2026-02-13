@@ -439,55 +439,51 @@ class _ApplicationVersionBuildInfoPayload(BaseModel):
 # ============================================================================
 # Custom Exceptions
 # ============================================================================
+# Import unified exceptions from exceptions.py
+from .exceptions import (
+    ImageBuilderClientV3BadRequestError,
+    ImageBuilderClientV3Error,
+    ImageBuilderClientV3InternalError,
+    ImageBuilderClientV3NetworkError,
+    ImageBuilderClientV3NotFoundError,
+)
 
 
-class ImageBuilderClientV3Error(Exception):
-    """Base exception for image builder v3 client errors."""
-
-    request_id: str | None
-
-    def __init__(self, message: str, request_id: str | None = None):
-        """Initialize ImageBuilderClientV3Error."""
-        super().__init__(message)
-        self.message = message
-        self.request_id = request_id
-
-    def __str__(self) -> str:
-        """Return error message with request ID if available."""
-        if self.request_id:
-            return f"{self.message} (Request ID: {self.request_id})"
-        return self.message
-
-
-class ImageBuilderClientV3NetworkError(ImageBuilderClientV3Error):
-    """Exception for network errors."""
+# Keep backward compatibility wrapper for NetworkError constructor
+class _ImageBuilderClientV3NetworkErrorCompat(ImageBuilderClientV3NetworkError):
+    """Compatibility wrapper for NetworkError with original_error attribute."""
 
     def __init__(self, original_error: Exception, request_id: str | None = None):
-        """Initialize ImageBuilderClientV3NetworkError."""
+        """Initialize with original_error attribute for backward compatibility."""
         message = f"Network error while communicating with image builder service: {original_error}"
         super().__init__(message, request_id=request_id)
         self.original_error = original_error
 
 
-class ImageBuilderClientV3NotFoundError(ImageBuilderClientV3Error):
-    """Exception for when a requested resource is not found."""
+# Use the compat wrapper
+ImageBuilderClientV3NetworkError = _ImageBuilderClientV3NetworkErrorCompat  # type: ignore
+
+
+# Keep backward compatibility wrapper for NotFoundError constructor
+class _ImageBuilderClientV3NotFoundErrorCompat(ImageBuilderClientV3NotFoundError):
+    """Compatibility wrapper for NotFoundError with resource attributes."""
 
     def __init__(
         self, resource_type: str, resource_id: str, request_id: str | None = None
     ):
-        """Initialize ImageBuilderClientV3NotFoundError."""
+        """Initialize with resource attributes for backward compatibility."""
         message = f"{resource_type} not found: {resource_id}"
         super().__init__(message, request_id=request_id)
         self.resource_type = resource_type
         self.resource_id = resource_id
 
 
-class ImageBuilderClientV3BadRequestError(ImageBuilderClientV3Error):
-    """Exception for when the request is invalid."""
+# Use the compat wrapper
+ImageBuilderClientV3NotFoundError = _ImageBuilderClientV3NotFoundErrorCompat  # type: ignore
 
-    def __init__(self, message: str, request_id: str | None = None):
-        """Initialize ImageBuilderClientV3BadRequestError."""
-        super().__init__(message, request_id=request_id)
+
+# Use the compat wrapper
+ImageBuilderClientV3BadRequestError = ImageBuilderClientV3BadRequestError  # type: ignore
 
 
 # ============================================================================
