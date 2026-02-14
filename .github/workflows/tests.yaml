@@ -191,7 +191,9 @@ jobs:
         env:
           TENSORLAKE_API_URL: http://127.0.0.1:8900
           DATAPLANE_BIN: /usr/local/bin/indexify-dataplane
-        run: make test_sandbox 2>&1 | tee /tmp/sandbox-tests.log
+        run: |
+          set -o pipefail
+          make test_sandbox 2>&1 | tee /tmp/sandbox-tests.log
 
       - name: Dump logs on failure
         if: failure()
