@@ -3,35 +3,34 @@
 from __future__ import annotations
 
 import json
-import os
 import time
-from typing import TYPE_CHECKING, Dict, Iterator, List, Optional
+from typing import TYPE_CHECKING, Iterator
 from urllib.parse import urlparse
 
 import httpx
 
+from . import _defaults
 from .exceptions import RemoteAPIError, SandboxError
 from .models import (
     CommandResult,
     DaemonInfo,
-    DirectoryEntry,
     HealthResponse,
     ListDirectoryResponse,
     ListProcessesResponse,
     OutputEvent,
+    OutputMode,
     OutputResponse,
     ProcessInfo,
     ProcessStatus,
     SendSignalResponse,
+    StdinMode,
 )
 
+# Avoid circular import: sandbox.py ↔ client.py.  With ``from __future__
+# import annotations`` the type string is never evaluated at runtime, but
+# the import itself would still execute and trigger a cycle.
 if TYPE_CHECKING:
     from .client import SandboxClient
-
-_SANDBOX_PROXY_URL_FROM_ENV: str = os.getenv(
-    "TENSORLAKE_SANDBOX_PROXY_URL", "https://sandbox.tensorlake.ai"
-)
-_API_KEY_FROM_ENV: str | None = os.getenv("TENSORLAKE_API_KEY")
 
 
 class Sandbox:
@@ -41,19 +40,21 @@ class Sandbox:
     through the sandbox proxy.
 
     Can be used as a context manager. If created via
-    SandboxClient.create_and_connect(), exiting the context manager
-    automatically terminates the sandbox.
+    ``SandboxClient.create_and_connect()``, exiting the context manager
+    automatically terminates the sandbox. Otherwise, it only closes the
+    HTTP connection while the sandbox continues running.
     """
 
     def __init__(
         self,
         sandbox_id: str,
-        proxy_url: str = _SANDBOX_PROXY_URL_FROM_ENV,
-        api_key: str | None = _API_KEY_FROM_ENV,
+        proxy_url: str = _defaults.SANDBOX_PROXY_URL,
+        api_key: str | None = _defaults.API_KEY,
         organization_id: str | None = None,
         project_id: str | None = None,
     ):
         self._sandbox_id = sandbox_id
+        self._owns_sandbox: bool = False
         self._lifecycle_client: SandboxClient | None = None
 
         headers: dict[str, str] = {}
@@ -72,10 +73,14 @@ class Sandbox:
             port_part = f":{parsed.port}" if parsed.port else ""
             base_url = f"{parsed.scheme}://{sandbox_id}.{parsed.hostname}{port_part}"
 
+        # Each Sandbox connects to a different proxy endpoint (subdomain per
+        # sandbox), so it needs its own httpx.Client with a unique base_url.
         self._client: httpx.Client = httpx.Client(
             base_url=base_url,
             headers=headers,
-            timeout=30.0,
+            # Sandbox proxy operations (process start, file I/O) are generally
+            # fast, but container startup or large file transfers can take time.
+            timeout=_defaults.DEFAULT_HTTP_TIMEOUT_SEC,
         )
 
     @property
@@ -86,7 +91,13 @@ class Sandbox:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self._lifecycle_client is not None:
+        """Exit context manager.
+
+        If this sandbox was created via ``create_and_connect()``, the
+        sandbox is terminated (deleted from the server). Otherwise only
+        the HTTP connection is closed and the sandbox keeps running.
+        """
+        if self._owns_sandbox:
             self.terminate()
         else:
             self.close()
@@ -97,12 +108,12 @@ class Sandbox:
 
     def terminate(self):
         """Terminate the sandbox and close the connection."""
-        sandbox_id = self._sandbox_id
         lifecycle_client = self._lifecycle_client
+        self._owns_sandbox = False
         self._lifecycle_client = None
         self.close()
         if lifecycle_client is not None:
-            lifecycle_client.delete(sandbox_id)
+            lifecycle_client.delete(self._sandbox_id)
 
     def _handle_response(self, response: httpx.Response) -> httpx.Response:
         if response.is_success:
@@ -119,10 +130,10 @@ class Sandbox:
     def run(
         self,
         command: str,
-        args: Optional[List[str]] = None,
-        env: Optional[Dict[str, str]] = None,
-        working_dir: Optional[str] = None,
-        timeout: Optional[float] = None,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        working_dir: str | None = None,
+        timeout: float | None = None,
     ) -> CommandResult:
         """Run a command to completion and return its output.
 
@@ -151,6 +162,8 @@ class Sandbox:
             if deadline and time.time() > deadline:
                 self.kill_process(proc.pid)
                 raise SandboxError(f"Command timed out after {timeout}s")
+            # Poll at 100ms — fast enough for interactive commands while
+            # keeping overhead low for longer-running processes.
             time.sleep(0.1)
 
         stdout_resp = self.get_stdout(proc.pid)
@@ -174,12 +187,12 @@ class Sandbox:
     def start_process(
         self,
         command: str,
-        args: Optional[List[str]] = None,
-        env: Optional[Dict[str, str]] = None,
-        working_dir: Optional[str] = None,
-        stdin_mode: str = "closed",
-        stdout_mode: str = "capture",
-        stderr_mode: str = "capture",
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        working_dir: str | None = None,
+        stdin_mode: StdinMode = StdinMode.CLOSED,
+        stdout_mode: OutputMode = OutputMode.CAPTURE,
+        stderr_mode: OutputMode = OutputMode.CAPTURE,
     ) -> ProcessInfo:
         """Start a new process in the sandbox.
 
@@ -188,42 +201,42 @@ class Sandbox:
             args: Command arguments
             env: Environment variables
             working_dir: Working directory
-            stdin_mode: "closed" or "pipe"
-            stdout_mode: "capture" or "discard"
-            stderr_mode: "capture" or "discard"
+            stdin_mode: StdinMode.CLOSED or StdinMode.PIPE
+            stdout_mode: OutputMode.CAPTURE or OutputMode.DISCARD
+            stderr_mode: OutputMode.CAPTURE or OutputMode.DISCARD
 
         Returns:
             ProcessInfo with pid and status
         """
         payload: dict = {"command": command}
-        if args:
+        if args is not None:
             payload["args"] = args
-        if env:
+        if env is not None:
             payload["env"] = env
         if working_dir is not None:
             payload["working_dir"] = working_dir
-        if stdin_mode != "closed":
+        if stdin_mode != StdinMode.CLOSED:
             payload["stdin_mode"] = stdin_mode
-        if stdout_mode != "capture":
+        if stdout_mode != OutputMode.CAPTURE:
             payload["stdout_mode"] = stdout_mode
-        if stderr_mode != "capture":
+        if stderr_mode != OutputMode.CAPTURE:
             payload["stderr_mode"] = stderr_mode
 
         response = self._handle_response(
             self._client.post("/api/v1/processes", json=payload)
         )
-        return ProcessInfo(**response.json())
+        return ProcessInfo.model_validate(response.json())
 
-    def list_processes(self) -> List[ProcessInfo]:
+    def list_processes(self) -> list[ProcessInfo]:
         """List all processes in the sandbox."""
         response = self._handle_response(self._client.get("/api/v1/processes"))
-        data = ListProcessesResponse(**response.json())
+        data = ListProcessesResponse.model_validate(response.json())
         return data.processes
 
     def get_process(self, pid: int) -> ProcessInfo:
         """Get information about a specific process."""
         response = self._handle_response(self._client.get(f"/api/v1/processes/{pid}"))
-        return ProcessInfo(**response.json())
+        return ProcessInfo.model_validate(response.json())
 
     def kill_process(self, pid: int) -> None:
         """Kill a process."""
@@ -241,7 +254,7 @@ class Sandbox:
                 f"/api/v1/processes/{pid}/signal", json={"signal": signal}
             )
         )
-        return SendSignalResponse(**response.json())
+        return SendSignalResponse.model_validate(response.json())
 
     # --- Process I/O ---
 
@@ -260,21 +273,21 @@ class Sandbox:
         response = self._handle_response(
             self._client.get(f"/api/v1/processes/{pid}/stdout")
         )
-        return OutputResponse(**response.json())
+        return OutputResponse.model_validate(response.json())
 
     def get_stderr(self, pid: int) -> OutputResponse:
         """Get all stderr output from a process."""
         response = self._handle_response(
             self._client.get(f"/api/v1/processes/{pid}/stderr")
         )
-        return OutputResponse(**response.json())
+        return OutputResponse.model_validate(response.json())
 
     def get_output(self, pid: int) -> OutputResponse:
         """Get all combined output from a process."""
         response = self._handle_response(
             self._client.get(f"/api/v1/processes/{pid}/output")
         )
-        return OutputResponse(**response.json())
+        return OutputResponse.model_validate(response.json())
 
     def follow_stdout(self, pid: int) -> Iterator[OutputEvent]:
         """Stream stdout from a process via SSE. Replays existing output then streams live."""
@@ -302,7 +315,7 @@ class Sandbox:
             for line in response.iter_lines():
                 if line.startswith("data: "):
                     data = json.loads(line[6:])
-                    yield OutputEvent(**data)
+                    yield OutputEvent.model_validate(data)
 
     # --- File operations ---
 
@@ -353,16 +366,16 @@ class Sandbox:
         response = self._handle_response(
             self._client.get("/api/v1/files/list", params={"path": path})
         )
-        return ListDirectoryResponse(**response.json())
+        return ListDirectoryResponse.model_validate(response.json())
 
     # --- Health and info ---
 
     def health(self) -> HealthResponse:
         """Check the container daemon health."""
         response = self._handle_response(self._client.get("/api/v1/health"))
-        return HealthResponse(**response.json())
+        return HealthResponse.model_validate(response.json())
 
     def info(self) -> DaemonInfo:
         """Get container daemon info (version, uptime, process counts)."""
         response = self._handle_response(self._client.get("/api/v1/info"))
-        return DaemonInfo(**response.json())
+        return DaemonInfo.model_validate(response.json())

@@ -5,6 +5,7 @@ from .exceptions import (
     PoolInUseError,
     PoolNotFoundError,
     RemoteAPIError,
+    SandboxConnectionError,
     SandboxError,
     SandboxException,
     SandboxNotFoundError,
@@ -18,6 +19,7 @@ from .models import (
     DirectoryEntry,
     HealthResponse,
     ListDirectoryResponse,
+    NetworkConfig,
     OutputEvent,
     OutputMode,
     OutputResponse,
@@ -43,6 +45,7 @@ __all__ = [
     "SandboxPoolInfo",
     "CreateSandboxPoolResponse",
     "ContainerResourcesInfo",
+    "NetworkConfig",
     # Command result
     "CommandResult",
     # Process models
@@ -62,6 +65,7 @@ __all__ = [
     # Exceptions
     "SandboxException",
     "SandboxError",
+    "SandboxConnectionError",
     "SandboxNotFoundError",
     "PoolNotFoundError",
     "PoolInUseError",

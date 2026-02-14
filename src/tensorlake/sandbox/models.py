@@ -1,9 +1,33 @@
 """Pydantic models for sandbox operations."""
 
+from datetime import datetime, timezone
 from enum import Enum
-from typing import List, Optional
+from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
+
+
+def _parse_timestamp(v: int | float | datetime | None) -> datetime | None:
+    """Convert a numeric timestamp to a UTC datetime.
+
+    Handles seconds, milliseconds, and microseconds by checking magnitude.
+    """
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v
+    ts = float(v)
+    if ts > 1e15:
+        # Microseconds
+        ts = ts / 1_000_000
+    elif ts > 1e12:
+        # Milliseconds
+        ts = ts / 1_000
+    return datetime.fromtimestamp(ts, tz=timezone.utc)
+
+
+OptionalTimestamp = Annotated[datetime | None, BeforeValidator(_parse_timestamp)]
+Timestamp = Annotated[datetime, BeforeValidator(_parse_timestamp)]
 
 
 class SandboxStatus(str, Enum):
@@ -23,11 +47,46 @@ class ContainerResourcesInfo(BaseModel):
 
 
 class NetworkConfig(BaseModel):
-    """Network configuration for sandbox."""
+    """Network configuration for sandbox.
+
+    Controls outbound network access for the sandbox container.
+    ``allow_out`` and ``deny_out`` accept host or host:port strings
+    (e.g. ``"api.example.com"`` or ``"10.0.0.1:443"``).
+    """
 
     allow_internet_access: bool = True
-    allow_out: List[str] = Field(default_factory=list)
-    deny_out: List[str] = Field(default_factory=list)
+    allow_out: list[str] = Field(default_factory=list)
+    deny_out: list[str] = Field(default_factory=list)
+
+
+# --- Request models ---
+
+
+class CreateSandboxRequest(BaseModel):
+    """Request payload for creating a sandbox."""
+
+    image: str | None = None
+    resources: ContainerResourcesInfo
+    secret_names: list[str] | None = None
+    timeout_secs: int | None = None
+    entrypoint: list[str] | None = None
+    network: NetworkConfig | None = None
+    pool_id: str | None = None
+
+
+class SandboxPoolRequest(BaseModel):
+    """Request payload for creating or updating a sandbox pool."""
+
+    image: str
+    resources: ContainerResourcesInfo
+    secret_names: list[str] | None = None
+    timeout_secs: int = 0
+    entrypoint: list[str] | None = None
+    max_containers: int | None = None
+    warm_containers: int | None = None
+
+
+# --- Response models ---
 
 
 class CreateSandboxResponse(BaseModel):
@@ -43,15 +102,15 @@ class SandboxInfo(BaseModel):
     sandbox_id: str = Field(alias="id")
     namespace: str
     status: SandboxStatus
-    image: Optional[str] = None
+    image: str | None = None
     resources: ContainerResourcesInfo
-    secret_names: List[str] = Field(default_factory=list)
-    timeout_secs: Optional[int] = None
-    entrypoint: Optional[List[str]] = None
-    network: Optional[NetworkConfig] = None
-    pool_id: Optional[str] = None
-    created_at: Optional[int] = None
-    terminated_at: Optional[int] = None
+    secret_names: list[str] = Field(default_factory=list)
+    timeout_secs: int | None = None
+    entrypoint: list[str] | None = None
+    network: NetworkConfig | None = None
+    pool_id: str | None = None
+    created_at: OptionalTimestamp = None
+    terminated_at: OptionalTimestamp = None
 
     model_config = {"populate_by_name": True}
 
@@ -59,7 +118,7 @@ class SandboxInfo(BaseModel):
 class ListSandboxesResponse(BaseModel):
     """Response from listing sandboxes (internal use)."""
 
-    sandboxes: List[SandboxInfo]
+    sandboxes: list[SandboxInfo]
 
 
 class CreateSandboxPoolResponse(BaseModel):
@@ -76,13 +135,13 @@ class SandboxPoolInfo(BaseModel):
     namespace: str
     image: str
     resources: ContainerResourcesInfo
-    secret_names: List[str] = Field(default_factory=list)
+    secret_names: list[str] = Field(default_factory=list)
     timeout_secs: int = 0
-    entrypoint: Optional[List[str]] = None
-    max_containers: Optional[int] = None
-    warm_containers: Optional[int] = None
-    created_at: Optional[int] = None
-    updated_at: Optional[int] = None
+    entrypoint: list[str] | None = None
+    max_containers: int | None = None
+    warm_containers: int | None = None
+    created_at: OptionalTimestamp = None
+    updated_at: OptionalTimestamp = None
 
     model_config = {"populate_by_name": True}
 
@@ -90,7 +149,7 @@ class SandboxPoolInfo(BaseModel):
 class ListSandboxPoolsResponse(BaseModel):
     """Response from listing sandbox pools (internal use)."""
 
-    pools: List[SandboxPoolInfo]
+    pools: list[SandboxPoolInfo]
 
 
 # --- Container daemon models (process management, file ops, I/O) ---
@@ -123,19 +182,19 @@ class ProcessInfo(BaseModel):
 
     pid: int
     status: ProcessStatus
-    exit_code: Optional[int] = None
-    signal: Optional[int] = None
+    exit_code: int | None = None
+    signal: int | None = None
     stdin_writable: bool = False
     command: str
-    args: List[str] = Field(default_factory=list)
-    started_at: int
-    ended_at: Optional[int] = None
+    args: list[str] = Field(default_factory=list)
+    started_at: Timestamp
+    ended_at: OptionalTimestamp = None
 
 
 class ListProcessesResponse(BaseModel):
     """Response from listing processes (internal use)."""
 
-    processes: List[ProcessInfo]
+    processes: list[ProcessInfo]
 
 
 class SendSignalResponse(BaseModel):
@@ -148,7 +207,7 @@ class OutputResponse(BaseModel):
     """Response containing process output lines."""
 
     pid: int
-    lines: List[str]
+    lines: list[str]
     line_count: int
 
 
@@ -156,8 +215,8 @@ class OutputEvent(BaseModel):
     """A single output event from an SSE stream."""
 
     line: str
-    timestamp: int
-    stream: Optional[str] = None
+    timestamp: Timestamp
+    stream: str | None = None
 
 
 class DaemonInfo(BaseModel):
@@ -180,15 +239,15 @@ class DirectoryEntry(BaseModel):
 
     name: str
     is_dir: bool
-    size: Optional[int] = None
-    modified_at: Optional[int] = None
+    size: int | None = None
+    modified_at: OptionalTimestamp = None
 
 
 class ListDirectoryResponse(BaseModel):
     """Response from listing a directory in a sandbox."""
 
     path: str
-    entries: List[DirectoryEntry]
+    entries: list[DirectoryEntry]
 
 
 class CommandResult(BaseModel):
