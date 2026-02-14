@@ -181,7 +181,7 @@ class SandboxClient:
 
     def create(
         self,
-        image: str | None = None,
+        image: str,
         cpus: float = 1.0,
         memory_mb: int = 512,
         ephemeral_disk_mb: int = 1024,
@@ -191,12 +191,11 @@ class SandboxClient:
         allow_internet_access: bool = True,
         allow_out: list[str] | None = None,
         deny_out: list[str] | None = None,
-        pool_id: str | None = None,
     ) -> CreateSandboxResponse:
-        """Create a new sandbox.
+        """Create a new standalone sandbox.
 
         Args:
-            image: Container image to use (optional if using pool)
+            image: Container image to use
             cpus: Number of CPUs to allocate
             memory_mb: Memory in megabytes
             ephemeral_disk_mb: Ephemeral disk space in megabytes
@@ -206,7 +205,6 @@ class SandboxClient:
             allow_internet_access: Allow internet access
             allow_out: Allowed outbound hosts (e.g. ``["api.example.com"]``)
             deny_out: Denied outbound hosts
-            pool_id: Pool ID to use for warm containers (optional)
 
         Returns:
             CreateSandboxResponse with sandbox_id and status
@@ -223,24 +221,51 @@ class SandboxClient:
                 deny_out=deny_out or [],
             )
 
-        request_model = CreateSandboxRequest(
-            image=image,
-            resources=ContainerResourcesInfo(
-                cpus=cpus, memory_mb=memory_mb, ephemeral_disk_mb=ephemeral_disk_mb
-            ),
-            secret_names=secret_names,
-            timeout_secs=timeout_secs,
-            entrypoint=entrypoint,
-            network=network,
-            pool_id=pool_id,
-        )
-
         try:
+            request_model = CreateSandboxRequest(
+                image=image,
+                resources=ContainerResourcesInfo(
+                    cpus=cpus,
+                    memory_mb=memory_mb,
+                    ephemeral_disk_mb=ephemeral_disk_mb,
+                ),
+                secret_names=secret_names,
+                timeout_secs=timeout_secs,
+                entrypoint=entrypoint,
+                network=network,
+            )
             response = self._run_request(
                 self._client.build_request(
                     "POST",
                     url=self._endpoint_url("sandboxes"),
                     json=request_model.model_dump(exclude_none=True),
+                )
+            )
+            return CreateSandboxResponse.model_validate(response.json())
+        except httpx.HTTPStatusError as e:
+            raise RemoteAPIError(e.response.status_code, e.response.text) from e
+
+    def claim(self, pool_id: str) -> CreateSandboxResponse:
+        """Claim a sandbox from a pool.
+
+        Claims a warm container from the pool, or creates a new one
+        if no warm containers are available (subject to max_containers).
+
+        Args:
+            pool_id: ID of the pool to claim from
+
+        Returns:
+            CreateSandboxResponse with sandbox_id and status
+
+        Raises:
+            RemoteAPIError: If the API request fails
+            SandboxConnectionError: If the server is unreachable
+        """
+        try:
+            response = self._run_request(
+                self._client.build_request(
+                    "POST",
+                    url=self._endpoint_url(f"sandbox-pools/{pool_id}/sandboxes"),
                 )
             )
             return CreateSandboxResponse.model_validate(response.json())

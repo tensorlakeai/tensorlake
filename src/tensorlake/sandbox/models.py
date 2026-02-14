@@ -71,7 +71,6 @@ class CreateSandboxRequest(BaseModel):
     timeout_secs: int | None = None
     entrypoint: list[str] | None = None
     network: NetworkConfig | None = None
-    pool_id: str | None = None
 
 
 class SandboxPoolRequest(BaseModel):
