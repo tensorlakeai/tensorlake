@@ -651,4 +651,18 @@ class TestPoolDeletion(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    unittest.main()
+    loader = unittest.TestLoader()
+    suite = unittest.TestSuite()
+    # Run simple tests first, complex tests last.
+    for cls in [
+        TestSandboxLifecycle,
+        TestPoolLifecycle,
+        TestPoolWithSandboxes,
+        TestWarmContainers,
+        TestMaxContainers,
+        TestPoolDeletion,
+    ]:
+        suite.addTests(loader.loadTestsFromTestCase(cls))
+    runner = unittest.TextTestRunner(verbosity=2 if "-v" in sys.argv else 1)
+    result = runner.run(suite)
+    sys.exit(0 if result.wasSuccessful() else 1)
