@@ -42,7 +42,6 @@ extend_skip = ["vendor"]
 [tool.poetry.group.dev.dependencies]
 black = "25.11.0"
 parameterized = "^0.9.0"
-pytest = "^8.0.0"
 respx = "^0.22.0"
 psutil = "^7.2.2"
 isort = "^7.0.0"
