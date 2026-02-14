@@ -174,11 +174,12 @@ jobs:
         uses: JarvusInnovations/background-action@v1
         with:
           run: |
-            docker run -i -a stdout -a stderr --rm \
+            docker run -i -a stdout -a stderr \
               -p 127.0.0.1:8900:8900/tcp \
               -p 127.0.0.1:8901:8901/tcp \
               --name indexify-server \
-              ${{ steps.login-ecr.outputs.registry }}/indexify-server:latest &
+              ${{ steps.login-ecr.outputs.registry }}/indexify-server:latest \
+              > /tmp/indexify-server.log 2>&1 &
           wait-on: |
             tcp:localhost:8900
           tail: true
@@ -190,16 +191,19 @@ jobs:
         env:
           TENSORLAKE_API_URL: http://127.0.0.1:8900
           DATAPLANE_BIN: /usr/local/bin/indexify-dataplane
-        run: make test_sandbox
+        run: make test_sandbox 2>&1 | tee /tmp/sandbox-tests.log
 
-      - name: Inspect server container on failure
+      - name: Dump logs on failure
         if: failure()
         run: |
-          echo "=== Docker container status ==="
-          docker inspect indexify-server --format='ExitCode={{.State.ExitCode}} OOMKilled={{.State.OOMKilled}} Status={{.State.Status}}' 2>/dev/null || echo "Container not found (already removed)"
+          echo "=== Server container status ==="
+          docker inspect indexify-server --format='ExitCode={{.State.ExitCode}} OOMKilled={{.State.OOMKilled}} Status={{.State.Status}}' 2>/dev/null || echo "Container already removed"
           echo ""
-          echo "=== Last 100 lines of server logs ==="
-          docker logs indexify-server --tail 100 2>&1 || echo "No logs available"
+          echo "=== Server logs ==="
+          cat /tmp/indexify-server.log 2>/dev/null || docker logs indexify-server 2>&1 || echo "No server logs available"
+          echo ""
+          echo "=== Sandbox test + dataplane logs ==="
+          cat /tmp/sandbox-tests.log 2>/dev/null || echo "No test logs available"
           echo ""
           echo "=== dmesg OOM check ==="
           sudo dmesg | grep -i "oom\|killed process" | tail -20 || true
