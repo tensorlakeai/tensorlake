@@ -17,6 +17,7 @@ import unittest
 from testing import DataplaneProcessContextManager
 
 from tensorlake.sandbox import (
+    PoolContainerInfo,
     PoolNotFoundError,
     SandboxClient,
     SandboxNotFoundError,
@@ -86,6 +87,28 @@ def _poll_sandbox_status(
     )
 
 
+def _poll_pool_containers(
+    client: SandboxClient,
+    pool_id: str,
+    min_count: int,
+    timeout: float = 60.0,
+    interval: float = 1.0,
+) -> list[PoolContainerInfo]:
+    """Poll until the pool has at least *min_count* containers or times out."""
+    deadline = time.time() + timeout
+    containers = []
+    while time.time() < deadline:
+        detail = client.get_pool(pool_id)
+        containers = detail.containers or []
+        if len(containers) >= min_count:
+            return containers
+        time.sleep(interval)
+    raise TimeoutError(
+        f"Pool {pool_id} did not reach {min_count} containers within {timeout}s "
+        f"(last count: {len(containers)})"
+    )
+
+
 # ---------------------------------------------------------------------------
 # TestSandboxLifecycle
 # ---------------------------------------------------------------------------
@@ -146,8 +169,10 @@ class TestSandboxLifecycle(unittest.TestCase):
 
     def test_6_get_terminated_sandbox(self):
         self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_5")
-        info = _client.get(self.__class__.sandbox_id)
-        self.assertEqual(info.status, SandboxStatus.TERMINATED)
+        status = _poll_sandbox_status(
+            _client, self.__class__.sandbox_id, SandboxStatus.TERMINATED, timeout=30
+        )
+        self.assertEqual(status, SandboxStatus.TERMINATED)
 
     def test_7_delete_nonexistent_sandbox(self):
         with self.assertRaises(SandboxNotFoundError):
@@ -282,6 +307,102 @@ class TestPoolWithSandboxes(unittest.TestCase):
 
         _client.delete_pool(self.__class__.pool_id)
         self.__class__.pool_id = None
+
+
+# ---------------------------------------------------------------------------
+# TestWarmContainers
+# ---------------------------------------------------------------------------
+
+
+class TestWarmContainers(unittest.TestCase):
+    """Verify warm container behaviour.
+
+    Creates a pool with warm_containers=1 and checks that:
+    1. One idle container is spun up automatically.
+    2. Creating a sandbox consumes the warm container.
+    3. A replacement warm container is created to maintain the target.
+    """
+
+    pool_id: str | None = None
+    sandbox_id: str | None = None
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.sandbox_id and _client:
+            try:
+                _client.delete(cls.sandbox_id)
+            except Exception:
+                pass
+        if cls.pool_id and _client:
+            try:
+                _client.delete_pool(cls.pool_id)
+            except Exception:
+                pass
+
+    def test_1_create_pool_with_one_warm_container(self):
+        resp = _client.create_pool(
+            image=_SANDBOX_IMAGE,
+            cpus=_SANDBOX_CPUS,
+            memory_mb=_SANDBOX_MEMORY_MB,
+            ephemeral_disk_mb=_SANDBOX_DISK_MB,
+            warm_containers=1,
+        )
+        self.assertIsNotNone(resp.pool_id)
+        self.__class__.pool_id = resp.pool_id
+
+    def test_2_warm_container_is_created(self):
+        self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
+        containers = _poll_pool_containers(
+            _client, self.__class__.pool_id, min_count=1, timeout=60
+        )
+        self.assertEqual(len(containers), 1)
+        # The warm container should not be assigned to any sandbox.
+        self.assertIsNone(containers[0].sandbox_id)
+
+    def test_3_create_sandbox_consumes_warm_container(self):
+        self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
+        resp = _client.create(
+            pool_id=self.__class__.pool_id,
+            cpus=_SANDBOX_CPUS,
+            memory_mb=_SANDBOX_MEMORY_MB,
+            ephemeral_disk_mb=_SANDBOX_DISK_MB,
+        )
+        self.assertIsNotNone(resp.sandbox_id)
+        self.__class__.sandbox_id = resp.sandbox_id
+
+        # Wait for the sandbox to be running.
+        status = _poll_sandbox_status(
+            _client, resp.sandbox_id, SandboxStatus.RUNNING, timeout=60
+        )
+        self.assertEqual(status, SandboxStatus.RUNNING)
+
+    def test_4_replacement_warm_container_is_created(self):
+        self.assertIsNotNone(self.__class__.pool_id, "Depends on test_3")
+        self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_3")
+
+        # The pool should eventually have 2 containers:
+        # one assigned to the sandbox and one new warm (idle) container.
+        containers = _poll_pool_containers(
+            _client, self.__class__.pool_id, min_count=2, timeout=60
+        )
+        self.assertEqual(len(containers), 2)
+
+        assigned = [c for c in containers if c.sandbox_id is not None]
+        idle = [c for c in containers if c.sandbox_id is None]
+
+        self.assertEqual(len(assigned), 1)
+        self.assertEqual(assigned[0].sandbox_id, self.__class__.sandbox_id)
+        self.assertEqual(len(idle), 1)
+
+    def test_5_cleanup(self):
+        if self.__class__.sandbox_id:
+            _client.delete(self.__class__.sandbox_id)
+            self.__class__.sandbox_id = None
+        if self.__class__.pool_id:
+            # Wait for sandbox termination so pool can be deleted.
+            time.sleep(2)
+            _client.delete_pool(self.__class__.pool_id)
+            self.__class__.pool_id = None
 
 
 # ---------------------------------------------------------------------------

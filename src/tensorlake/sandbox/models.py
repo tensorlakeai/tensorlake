@@ -128,8 +128,29 @@ class CreateSandboxPoolResponse(BaseModel):
     namespace: str
 
 
+class ContainerState(str, Enum):
+    """State of a container in a pool."""
+
+    IDLE = "Idle"
+    RUNNING = "Running"
+
+
+class PoolContainerInfo(BaseModel):
+    """Information about a container in a sandbox pool."""
+
+    id: str
+    state: str
+    sandbox_id: str | None = None
+    executor_id: str
+
+
 class SandboxPoolInfo(BaseModel):
-    """Full sandbox pool information."""
+    """Full sandbox pool information.
+
+    When retrieved via ``get_pool``, the ``containers`` field is populated
+    with the list of containers in the pool. It is ``None`` when returned
+    from ``list_pools`` or ``update_pool``.
+    """
 
     pool_id: str = Field(alias="id")
     namespace: str
@@ -140,6 +161,7 @@ class SandboxPoolInfo(BaseModel):
     entrypoint: list[str] | None = None
     max_containers: int | None = None
     warm_containers: int | None = None
+    containers: list[PoolContainerInfo] | None = None
     created_at: OptionalTimestamp = None
     updated_at: OptionalTimestamp = None
 
