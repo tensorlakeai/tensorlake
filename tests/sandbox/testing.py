@@ -86,6 +86,19 @@ class DataplaneProcessContextManager:
             f'state_file: "{state_path}"\n'
         )
 
+        # Add resource overrides from env vars (for simulating CI constraints)
+        cpu = os.environ.get("DATAPLANE_CPU_COUNT")
+        mem = os.environ.get("DATAPLANE_MEMORY_BYTES")
+        disk = os.environ.get("DATAPLANE_DISK_BYTES")
+        if cpu or mem or disk:
+            config += "resource_overrides:\n"
+            if cpu:
+                config += f"  cpu_count: {cpu}\n"
+            if mem:
+                config += f"  memory_bytes: {mem}\n"
+            if disk:
+                config += f"  disk_bytes: {disk}\n"
+
         with open(config_path, "w") as f:
             f.write(config)
 

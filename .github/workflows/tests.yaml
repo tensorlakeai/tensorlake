@@ -191,3 +191,15 @@ jobs:
           TENSORLAKE_API_URL: http://127.0.0.1:8900
           DATAPLANE_BIN: /usr/local/bin/indexify-dataplane
         run: make test_sandbox
+
+      - name: Inspect server container on failure
+        if: failure()
+        run: |
+          echo "=== Docker container status ==="
+          docker inspect indexify-server --format='ExitCode={{.State.ExitCode}} OOMKilled={{.State.OOMKilled}} Status={{.State.Status}}' 2>/dev/null || echo "Container not found (already removed)"
+          echo ""
+          echo "=== Last 100 lines of server logs ==="
+          docker logs indexify-server --tail 100 2>&1 || echo "No logs available"
+          echo ""
+          echo "=== dmesg OOM check ==="
+          sudo dmesg | grep -i "oom\|killed process" | tail -20 || true
