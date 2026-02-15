@@ -179,7 +179,7 @@ jobs:
               -p 127.0.0.1:8901:8901/tcp \
               --name indexify-server \
               ${{ steps.login-ecr.outputs.registry }}/indexify-server:latest \
-              > /tmp/indexify-server.log 2>&1 &
+              2>&1 | tee /tmp/indexify-server.log &
           wait-on: |
             tcp:localhost:8900
           tail: true
@@ -206,7 +206,7 @@ jobs:
             state_file: "/tmp/dataplane/state.json"
             YAML
             /usr/local/bin/indexify-dataplane --config /tmp/dataplane/config.yaml \
-              > /tmp/dataplane.log 2>&1 &
+              2>&1 | tee /tmp/dataplane.log &
           wait-on: |
             tcp:localhost:8902
           tail: true
