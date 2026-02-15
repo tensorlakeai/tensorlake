@@ -175,8 +175,7 @@ jobs:
         with:
           run: |
             docker run -i -a stdout -a stderr --rm \
-              -p 127.0.0.1:8900:8900/tcp \
-              -p 127.0.0.1:8901:8901/tcp \
+              --network host \
               --name indexify-server \
               ${{ steps.login-ecr.outputs.registry }}/indexify-server:latest  &
           wait-on: |
