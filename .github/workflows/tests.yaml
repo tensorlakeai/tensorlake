@@ -214,6 +214,23 @@ jobs:
           log-output: true
           log-output-if: true
 
+      - name: Verify infrastructure health
+        run: |
+          echo "=== Server health ==="
+          curl -sf http://127.0.0.1:8900/internal/executors | head -c 500
+          echo ""
+          echo "=== Dataplane process ==="
+          pgrep -a indexify-dataplane || echo "WARNING: dataplane process not found!"
+          echo ""
+          echo "=== Dataplane HTTP proxy ==="
+          curl -sf http://127.0.0.1:8902/ || echo "(expected error, port is open)"
+          echo ""
+          echo "=== Docker containers ==="
+          docker ps --format 'table {{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+          echo ""
+          echo "=== Dataplane log so far ==="
+          cat /tmp/dataplane.log 2>/dev/null | head -50 || echo "No dataplane logs yet"
+
       - name: Run Sandbox integration tests
         env:
           TENSORLAKE_API_URL: http://127.0.0.1:8900
@@ -227,10 +244,19 @@ jobs:
           echo "=== Server container status ==="
           docker inspect indexify-server --format='ExitCode={{.State.ExitCode}} OOMKilled={{.State.OOMKilled}} Status={{.State.Status}}' 2>/dev/null || echo "Container already removed"
           echo ""
-          echo "=== Server logs ==="
-          cat /tmp/indexify-server.log 2>/dev/null || docker logs indexify-server 2>&1 || echo "No server logs available"
+          echo "=== Dataplane process status ==="
+          pgrep -a indexify-dataplane || echo "WARNING: dataplane process not found!"
           echo ""
-          echo "=== Dataplane logs ==="
+          echo "=== Docker containers at failure ==="
+          docker ps -a --format 'table {{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Names}}'
+          echo ""
+          echo "=== Network connections to server ==="
+          ss -tnp 'sport = :8900 or dport = :8900' 2>/dev/null || netstat -tnp 2>/dev/null | grep 8900 || true
+          echo ""
+          echo "=== Server logs (last 100 lines) ==="
+          tail -100 /tmp/indexify-server.log 2>/dev/null || docker logs --tail 100 indexify-server 2>&1 || echo "No server logs available"
+          echo ""
+          echo "=== Full dataplane logs ==="
           cat /tmp/dataplane.log 2>/dev/null || echo "No dataplane logs available"
           echo ""
           echo "=== Sandbox test logs ==="
