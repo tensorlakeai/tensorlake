@@ -170,49 +170,42 @@ jobs:
           docker rm $container_id
           chmod +x /usr/local/bin/indexify-dataplane
 
-      - name: Start Background Indexify Server in Docker container
-        uses: JarvusInnovations/background-action@v1
-        with:
-          run: |
-            docker run -i -a stdout -a stderr \
-              -p 127.0.0.1:8900:8900/tcp \
-              -p 127.0.0.1:8901:8901/tcp \
-              --name indexify-server \
-              ${{ steps.login-ecr.outputs.registry }}/indexify-server:latest \
-              2>&1 | tee /tmp/indexify-server.log &
-          wait-on: |
-            tcp:localhost:8900
-          tail: true
-          wait-for: 30s
-          log-output: true
-          log-output-if: true
+      - name: Start Indexify Server
+        run: |
+          docker run -d \
+            -p 127.0.0.1:8900:8900/tcp \
+            -p 127.0.0.1:8901:8901/tcp \
+            --name indexify-server \
+            ${{ steps.login-ecr.outputs.registry }}/indexify-server:latest
 
-      - name: Start Background Indexify Dataplane
-        uses: JarvusInnovations/background-action@v1
-        with:
-          run: |
-            mkdir -p /tmp/dataplane
-            cat > /tmp/dataplane/config.yaml <<'YAML'
-            env: local
-            server_addr: "http://localhost:8901"
-            driver:
-              type: docker
-            http_proxy:
-              port: 8902
-              listen_addr: "0.0.0.0"
-              advertise_address: "127.0.0.1:8902"
-            monitoring:
-              port: 8903
-            state_file: "/tmp/dataplane/state.json"
-            YAML
-            /usr/local/bin/indexify-dataplane --config /tmp/dataplane/config.yaml \
-              2>&1 | tee /tmp/dataplane.log &
-          wait-on: |
-            tcp:localhost:8902
-          tail: true
-          wait-for: 30s
-          log-output: true
-          log-output-if: true
+          # Wait for server to be ready
+          timeout 30 bash -c 'until curl -sf http://127.0.0.1:8900/ >/dev/null 2>&1; do sleep 0.5; done'
+          echo "Indexify server is ready"
+
+      - name: Start Indexify Dataplane
+        run: |
+          mkdir -p /tmp/dataplane
+          cat > /tmp/dataplane/config.yaml <<'YAML'
+          env: local
+          server_addr: "http://localhost:8901"
+          driver:
+            type: docker
+          http_proxy:
+            port: 8902
+            listen_addr: "0.0.0.0"
+            advertise_address: "127.0.0.1:8902"
+          monitoring:
+            port: 8903
+          state_file: "/tmp/dataplane/state.json"
+          YAML
+          nohup /usr/local/bin/indexify-dataplane --config /tmp/dataplane/config.yaml \
+            > /tmp/dataplane.log 2>&1 &
+          echo $! > /tmp/dataplane.pid
+
+          # Wait for dataplane to be ready
+          timeout 30 bash -c 'until curl -sf http://127.0.0.1:8903/ >/dev/null 2>&1; do sleep 0.5; done' || \
+            timeout 30 bash -c 'until ss -tln | grep -q :8902; do sleep 0.5; done'
+          echo "Indexify dataplane is ready"
 
       - name: Verify infrastructure health
         run: |
@@ -220,7 +213,7 @@ jobs:
           curl -sf http://127.0.0.1:8900/internal/executors | head -c 500
           echo ""
           echo "=== Dataplane process ==="
-          pgrep -a indexify-dataplane || echo "WARNING: dataplane process not found!"
+          pgrep -fa indexify-dataplane || echo "WARNING: dataplane process not found!"
           echo ""
           echo "=== Dataplane HTTP proxy ==="
           curl -sf http://127.0.0.1:8902/ || echo "(expected error, port is open)"
@@ -245,7 +238,7 @@ jobs:
           docker inspect indexify-server --format='ExitCode={{.State.ExitCode}} OOMKilled={{.State.OOMKilled}} Status={{.State.Status}}' 2>/dev/null || echo "Container already removed"
           echo ""
           echo "=== Dataplane process status ==="
-          pgrep -a indexify-dataplane || echo "WARNING: dataplane process not found!"
+          pgrep -fa indexify-dataplane || echo "WARNING: dataplane process not found!"
           echo ""
           echo "=== Docker containers at failure ==="
           docker ps -a --format 'table {{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Names}}'
@@ -254,7 +247,7 @@ jobs:
           ss -tnp 'sport = :8900 or dport = :8900' 2>/dev/null || netstat -tnp 2>/dev/null | grep 8900 || true
           echo ""
           echo "=== Server logs (last 100 lines) ==="
-          tail -100 /tmp/indexify-server.log 2>/dev/null || docker logs --tail 100 indexify-server 2>&1 || echo "No server logs available"
+          docker logs --tail 100 indexify-server 2>&1 || echo "No server logs available"
           echo ""
           echo "=== Full dataplane logs ==="
           cat /tmp/dataplane.log 2>/dev/null || echo "No dataplane logs available"
