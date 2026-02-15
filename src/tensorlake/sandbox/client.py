@@ -202,9 +202,14 @@ class SandboxClient:
             secret_names: List of secret names to inject
             timeout_secs: Timeout in seconds (optional)
             entrypoint: Custom entrypoint command (optional)
-            allow_internet_access: Allow internet access
-            allow_out: Allowed outbound hosts (e.g. ``["api.example.com"]``)
-            deny_out: Denied outbound hosts
+            allow_internet_access: If True (default), outbound traffic is
+                allowed unless denied. If False, all outbound traffic is
+                blocked unless explicitly allowed.
+            allow_out: Destination IPs/CIDRs to allow
+                (e.g. ``["8.8.8.8", "10.0.0.0/8"]``). Takes precedence
+                over *deny_out*.
+            deny_out: Destination IPs/CIDRs to deny
+                (e.g. ``["192.168.1.0/24"]``).
 
         Returns:
             CreateSandboxResponse with sandbox_id and status
@@ -594,9 +599,14 @@ class SandboxClient:
             secret_names: List of secret names to inject
             timeout_secs: Timeout in seconds (optional)
             entrypoint: Custom entrypoint command (optional)
-            allow_internet_access: Allow internet access
-            allow_out: Allowed outbound hosts
-            deny_out: Denied outbound hosts
+            allow_internet_access: If True (default), outbound traffic is
+                allowed unless denied. If False, all outbound traffic is
+                blocked unless explicitly allowed.
+            allow_out: Destination IPs/CIDRs to allow
+                (e.g. ``["8.8.8.8", "10.0.0.0/8"]``). Takes precedence
+                over *deny_out*.
+            deny_out: Destination IPs/CIDRs to deny
+                (e.g. ``["192.168.1.0/24"]``).
             pool_id: Pool ID to use for warm containers (optional)
             proxy_url: Override the sandbox proxy URL
             startup_timeout: Max seconds to wait for Running status (default 60)

@@ -47,16 +47,39 @@ class ContainerResourcesInfo(BaseModel):
 
 
 class NetworkConfig(BaseModel):
-    """Network configuration for sandbox.
+    """Network access control policy for sandbox containers.
 
-    Controls outbound network access for the sandbox container.
-    ``allow_out`` and ``deny_out`` accept host or host:port strings
-    (e.g. ``"api.example.com"`` or ``"10.0.0.1:443"``).
+    Rules are enforced via host-level iptables on the DOCKER-USER chain.
+    Each container gets its own chain with rules applied before any user
+    code runs.
+
+    ``allow_out`` rules are evaluated before ``deny_out`` rules, so allow
+    takes precedence over deny.  Established/related connections are always
+    permitted (stateful firewall).
+
+    When ``allow_internet_access`` is ``True`` (the default), all outbound
+    traffic is allowed unless explicitly denied by ``deny_out``.  When
+    ``False``, all outbound traffic is blocked unless explicitly allowed by
+    ``allow_out``.
     """
 
     allow_internet_access: bool = True
-    allow_out: list[str] = Field(default_factory=list)
-    deny_out: list[str] = Field(default_factory=list)
+    allow_out: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Destination IPs or CIDRs to allow "
+            '(e.g. ["8.8.8.8", "10.0.0.0/8"]). '
+            "Evaluated before deny_out; takes precedence."
+        ),
+    )
+    deny_out: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Destination IPs or CIDRs to deny "
+            '(e.g. ["192.168.1.0/24"]). '
+            "Evaluated after allow_out."
+        ),
+    )
 
 
 # --- Request models ---
