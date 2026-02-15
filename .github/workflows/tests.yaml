@@ -187,10 +187,36 @@ jobs:
           log-output: true
           log-output-if: true
 
+      - name: Start Background Indexify Dataplane
+        uses: JarvusInnovations/background-action@v1
+        with:
+          run: |
+            mkdir -p /tmp/dataplane
+            cat > /tmp/dataplane/config.yaml <<'YAML'
+            env: local
+            server_addr: "http://localhost:8901"
+            driver:
+              type: docker
+            http_proxy:
+              port: 8902
+              listen_addr: "0.0.0.0"
+              advertise_address: "127.0.0.1:8902"
+            monitoring:
+              port: 8903
+            state_file: "/tmp/dataplane/state.json"
+            YAML
+            /usr/local/bin/indexify-dataplane --config /tmp/dataplane/config.yaml \
+              > /tmp/dataplane.log 2>&1 &
+          wait-on: |
+            tcp:localhost:8902
+          tail: true
+          wait-for: 30s
+          log-output: true
+          log-output-if: true
+
       - name: Run Sandbox integration tests
         env:
           TENSORLAKE_API_URL: http://127.0.0.1:8900
-          DATAPLANE_BIN: /usr/local/bin/indexify-dataplane
         run: |
           set -o pipefail
           make test_sandbox 2>&1 | tee /tmp/sandbox-tests.log
@@ -204,7 +230,10 @@ jobs:
           echo "=== Server logs ==="
           cat /tmp/indexify-server.log 2>/dev/null || docker logs indexify-server 2>&1 || echo "No server logs available"
           echo ""
-          echo "=== Sandbox test + dataplane logs ==="
+          echo "=== Dataplane logs ==="
+          cat /tmp/dataplane.log 2>/dev/null || echo "No dataplane logs available"
+          echo ""
+          echo "=== Sandbox test logs ==="
           cat /tmp/sandbox-tests.log 2>/dev/null || echo "No test logs available"
           echo ""
           echo "=== dmesg OOM check ==="

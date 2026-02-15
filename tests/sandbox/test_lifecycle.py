@@ -1,20 +1,16 @@
 """Integration tests for sandbox lifecycle management APIs.
 
-Requires a running Indexify server (localhost:8900/8901) and the
-indexify-dataplane binary (set DATAPLANE_BIN env var).
+Requires a running Indexify server (localhost:8900/8901) and a running
+indexify-dataplane process.
 
 Usage:
     export TENSORLAKE_API_URL=http://localhost:8900
-    export DATAPLANE_BIN=/path/to/indexify-dataplane
     poetry run python tests/sandbox/test_lifecycle.py
 """
 
 import os
-import sys
 import time
 import unittest
-
-from testing import DataplaneProcessContextManager
 
 from tensorlake.sandbox import (
     PoolContainerInfo,
@@ -29,7 +25,6 @@ from tensorlake.sandbox import (
 # Module-level setup / teardown
 # ---------------------------------------------------------------------------
 
-_dataplane: DataplaneProcessContextManager | None = None
 _client: SandboxClient | None = None
 
 _SANDBOX_IMAGE = "docker.io/library/alpine:latest"
@@ -39,27 +34,16 @@ _SANDBOX_DISK_MB = 1024
 
 
 def setUpModule():
-    global _dataplane, _client
-
+    global _client
     api_url = os.environ.get("TENSORLAKE_API_URL", "http://localhost:8900")
-
-    _dataplane = DataplaneProcessContextManager()
-    _dataplane.start()
-
     _client = SandboxClient(api_url=api_url)
 
 
 def tearDownModule():
-    global _dataplane, _client
-
+    global _client
     if _client is not None:
         _client.close()
         _client = None
-
-    if _dataplane is not None:
-        _dataplane.stop()
-        _dataplane = None
-
 
 # ---------------------------------------------------------------------------
 # Helpers
