@@ -21,29 +21,10 @@ from tensorlake.sandbox import (
     SandboxStatus,
 )
 
-# ---------------------------------------------------------------------------
-# Module-level setup / teardown
-# ---------------------------------------------------------------------------
-
-_client: SandboxClient | None = None
-
 _SANDBOX_IMAGE = "docker.io/library/alpine:latest"
 _SANDBOX_CPUS = 0.2
 _SANDBOX_MEMORY_MB = 100
 _SANDBOX_DISK_MB = 1024
-
-
-def setUpModule():
-    global _client
-    api_url = os.environ.get("TENSORLAKE_API_URL", "http://localhost:8900")
-    _client = SandboxClient(api_url=api_url)
-
-
-def tearDownModule():
-    global _client
-    if _client is not None:
-        _client.close()
-        _client = None
 
 
 # ---------------------------------------------------------------------------
@@ -114,30 +95,45 @@ def _claimed_containers(containers: list[PoolContainerInfo]) -> list[PoolContain
 
 
 # ---------------------------------------------------------------------------
+# Base Test Class
+# ---------------------------------------------------------------------------
+
+
+class BaseSandboxTest(unittest.TestCase):
+    client: SandboxClient
+
+    @classmethod
+    def setUpClass(cls):
+        api_url = os.environ.get("TENSORLAKE_API_URL", "http://localhost:8900")
+        cls.client = SandboxClient(api_url=api_url)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.client.close()
+
+
+# ---------------------------------------------------------------------------
 # TestSandboxLifecycle
 # ---------------------------------------------------------------------------
 
 
-class TestSandboxLifecycle(unittest.TestCase):
+class TestSandboxLifecycle(BaseSandboxTest):
     """Create a sandbox, verify it transitions to Running, delete it,
     verify it transitions to Terminated."""
 
     sandbox_id: str | None = None
 
     @classmethod
-    def setUpClass(cls):
-        assert _client is not None, "Module-level setup did not create client"
-
-    @classmethod
     def tearDownClass(cls):
-        if cls.sandbox_id and _client:
+        if cls.sandbox_id:
             try:
-                _client.delete(cls.sandbox_id)
+                cls.client.delete(cls.sandbox_id)
             except Exception:
                 pass
+        super().tearDownClass()
 
     def test_1_create_sandbox(self):
-        resp = _client.create(
+        resp = self.client.create(
             image=_SANDBOX_IMAGE,
             cpus=_SANDBOX_CPUS,
             memory_mb=_SANDBOX_MEMORY_MB,
@@ -150,37 +146,37 @@ class TestSandboxLifecycle(unittest.TestCase):
 
     def test_2_get_sandbox(self):
         self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_1")
-        info = _client.get(self.__class__.sandbox_id)
+        info = self.client.get(self.__class__.sandbox_id)
         self.assertEqual(info.sandbox_id, self.__class__.sandbox_id)
         self.assertIn(info.status, (SandboxStatus.PENDING, SandboxStatus.RUNNING))
 
     def test_3_list_sandboxes(self):
         self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_1")
-        sandboxes = _client.list()
+        sandboxes = self.client.list()
         ids = [s.sandbox_id for s in sandboxes]
         self.assertIn(self.__class__.sandbox_id, ids)
 
     def test_4_sandbox_transitions_to_running(self):
         self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_1")
         status = _poll_sandbox_status(
-            _client, self.__class__.sandbox_id, SandboxStatus.RUNNING, timeout=60
+            self.client, self.__class__.sandbox_id, SandboxStatus.RUNNING, timeout=60
         )
         self.assertEqual(status, SandboxStatus.RUNNING)
 
     def test_5_delete_sandbox(self):
         self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_1")
-        _client.delete(self.__class__.sandbox_id)
+        self.client.delete(self.__class__.sandbox_id)
 
     def test_6_sandbox_transitions_to_terminated(self):
         self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_5")
         status = _poll_sandbox_status(
-            _client, self.__class__.sandbox_id, SandboxStatus.TERMINATED, timeout=30
+            self.client, self.__class__.sandbox_id, SandboxStatus.TERMINATED, timeout=30
         )
         self.assertEqual(status, SandboxStatus.TERMINATED)
 
     def test_7_delete_nonexistent_sandbox(self):
         with self.assertRaises(SandboxNotFoundError):
-            _client.delete("nonexistent-sandbox-id-000")
+            self.client.delete("nonexistent-sandbox-id-000")
 
 
 # ---------------------------------------------------------------------------
@@ -188,21 +184,22 @@ class TestSandboxLifecycle(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class TestPoolLifecycle(unittest.TestCase):
+class TestPoolLifecycle(BaseSandboxTest):
     """CRUD lifecycle for sandbox pools."""
 
     pool_id: str | None = None
 
     @classmethod
     def tearDownClass(cls):
-        if cls.pool_id and _client:
+        if cls.pool_id:
             try:
-                _client.delete_pool(cls.pool_id)
+                cls.client.delete_pool(cls.pool_id)
             except Exception:
                 pass
+        super().tearDownClass()
 
     def test_1_create_pool(self):
-        resp = _client.create_pool(
+        resp = self.client.create_pool(
             image=_SANDBOX_IMAGE,
             cpus=_SANDBOX_CPUS,
             memory_mb=_SANDBOX_MEMORY_MB,
@@ -214,7 +211,7 @@ class TestPoolLifecycle(unittest.TestCase):
 
     def test_2_get_pool(self):
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
-        info = _client.get_pool(self.__class__.pool_id)
+        info = self.client.get_pool(self.__class__.pool_id)
         self.assertEqual(info.pool_id, self.__class__.pool_id)
         self.assertEqual(info.image, _SANDBOX_IMAGE)
         self.assertAlmostEqual(info.resources.cpus, _SANDBOX_CPUS, places=2)
@@ -222,13 +219,13 @@ class TestPoolLifecycle(unittest.TestCase):
 
     def test_3_list_pools(self):
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
-        pools = _client.list_pools()
+        pools = self.client.list_pools()
         ids = [p.pool_id for p in pools]
         self.assertIn(self.__class__.pool_id, ids)
 
     def test_4_update_pool(self):
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
-        updated = _client.update_pool(
+        updated = self.client.update_pool(
             pool_id=self.__class__.pool_id,
             image=_SANDBOX_IMAGE,
             cpus=_SANDBOX_CPUS,
@@ -241,12 +238,12 @@ class TestPoolLifecycle(unittest.TestCase):
 
     def test_5_delete_pool(self):
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
-        _client.delete_pool(self.__class__.pool_id)
+        self.client.delete_pool(self.__class__.pool_id)
         self.__class__.pool_id = None
 
     def test_6_delete_nonexistent_pool(self):
         with self.assertRaises(PoolNotFoundError):
-            _client.delete_pool("nonexistent-pool-id-000")
+            self.client.delete_pool("nonexistent-pool-id-000")
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +251,7 @@ class TestPoolLifecycle(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class TestPoolWithSandboxes(unittest.TestCase):
+class TestPoolWithSandboxes(BaseSandboxTest):
     """Create a sandbox from a pool, verify it runs, delete sandbox
     then pool."""
 
@@ -263,19 +260,20 @@ class TestPoolWithSandboxes(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        if cls.sandbox_id and _client:
+        if cls.sandbox_id:
             try:
-                _client.delete(cls.sandbox_id)
+                cls.client.delete(cls.sandbox_id)
             except Exception:
                 pass
-        if cls.pool_id and _client:
+        if cls.pool_id:
             try:
-                _client.delete_pool(cls.pool_id)
+                cls.client.delete_pool(cls.pool_id)
             except Exception:
                 pass
+        super().tearDownClass()
 
     def test_1_create_pool(self):
-        resp = _client.create_pool(
+        resp = self.client.create_pool(
             image=_SANDBOX_IMAGE,
             cpus=_SANDBOX_CPUS,
             memory_mb=_SANDBOX_MEMORY_MB,
@@ -288,7 +286,7 @@ class TestPoolWithSandboxes(unittest.TestCase):
 
     def test_2_create_sandbox_from_pool(self):
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
-        resp = _client.claim(self.__class__.pool_id)
+        resp = self.client.claim(self.__class__.pool_id)
         self.assertIsNotNone(resp.sandbox_id)
         self.assertIn(resp.status, (SandboxStatus.PENDING, SandboxStatus.RUNNING))
         self.__class__.sandbox_id = resp.sandbox_id
@@ -296,7 +294,7 @@ class TestPoolWithSandboxes(unittest.TestCase):
     def test_3_sandbox_from_pool_reaches_running(self):
         self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_2")
         status = _poll_sandbox_status(
-            _client, self.__class__.sandbox_id, SandboxStatus.RUNNING, timeout=60
+            self.client, self.__class__.sandbox_id, SandboxStatus.RUNNING, timeout=60
         )
         self.assertEqual(status, SandboxStatus.RUNNING)
 
@@ -305,19 +303,19 @@ class TestPoolWithSandboxes(unittest.TestCase):
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
         self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_2")
         with self.assertRaises(PoolInUseError):
-            _client.delete_pool(self.__class__.pool_id)
+            self.client.delete_pool(self.__class__.pool_id)
 
     def test_5_delete_sandbox_then_pool(self):
         self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_2")
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
 
-        _client.delete(self.__class__.sandbox_id)
+        self.client.delete(self.__class__.sandbox_id)
         _poll_sandbox_status(
-            _client, self.__class__.sandbox_id, SandboxStatus.TERMINATED, timeout=30
+            self.client, self.__class__.sandbox_id, SandboxStatus.TERMINATED, timeout=30
         )
         self.__class__.sandbox_id = None
 
-        _client.delete_pool(self.__class__.pool_id)
+        self.client.delete_pool(self.__class__.pool_id)
         self.__class__.pool_id = None
 
 
@@ -326,7 +324,7 @@ class TestPoolWithSandboxes(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class TestWarmContainers(unittest.TestCase):
+class TestWarmContainers(BaseSandboxTest):
     """Verify warm container behaviour.
 
     1. Pool with warm_containers=1 creates exactly one idle container.
@@ -341,19 +339,20 @@ class TestWarmContainers(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        if cls.sandbox_id and _client:
+        if cls.sandbox_id:
             try:
-                _client.delete(cls.sandbox_id)
+                cls.client.delete(cls.sandbox_id)
             except Exception:
                 pass
-        if cls.pool_id and _client:
+        if cls.pool_id:
             try:
-                _client.delete_pool(cls.pool_id)
+                cls.client.delete_pool(cls.pool_id)
             except Exception:
                 pass
+        super().tearDownClass()
 
     def test_1_create_pool_with_one_warm_container(self):
-        resp = _client.create_pool(
+        resp = self.client.create_pool(
             image=_SANDBOX_IMAGE,
             cpus=_SANDBOX_CPUS,
             memory_mb=_SANDBOX_MEMORY_MB,
@@ -368,7 +367,7 @@ class TestWarmContainers(unittest.TestCase):
         """Exactly one warm container should be spun up, unassigned."""
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
         containers = _poll_pool_containers(
-            _client, self.__class__.pool_id, min_count=1, timeout=60
+            self.client, self.__class__.pool_id, min_count=1, timeout=60
         )
         self.assertEqual(len(containers), 1)
         self.assertIsNone(containers[0].sandbox_id)
@@ -379,17 +378,17 @@ class TestWarmContainers(unittest.TestCase):
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
         self.assertIsNotNone(self.__class__.warm_container_id, "Depends on test_2")
 
-        resp = _client.claim(self.__class__.pool_id)
+        resp = self.client.claim(self.__class__.pool_id)
         self.assertIsNotNone(resp.sandbox_id)
         self.__class__.sandbox_id = resp.sandbox_id
 
         status = _poll_sandbox_status(
-            _client, resp.sandbox_id, SandboxStatus.RUNNING, timeout=60
+            self.client, resp.sandbox_id, SandboxStatus.RUNNING, timeout=60
         )
         self.assertEqual(status, SandboxStatus.RUNNING)
 
         # The original warm container should now have sandbox_id set.
-        detail = _client.get_pool(self.__class__.pool_id)
+        detail = self.client.get_pool(self.__class__.pool_id)
         claimed = [
             c
             for c in (detail.containers or [])
@@ -410,7 +409,7 @@ class TestWarmContainers(unittest.TestCase):
 
         # Pool should now have 2 containers: 1 claimed + 1 new warm.
         containers = _poll_pool_containers(
-            _client, self.__class__.pool_id, min_count=2, timeout=60
+            self.client, self.__class__.pool_id, min_count=2, timeout=60
         )
         warm = _warm_containers(containers)
         self.assertGreaterEqual(
@@ -423,9 +422,9 @@ class TestWarmContainers(unittest.TestCase):
         self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_3")
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
 
-        _client.delete(self.__class__.sandbox_id)
+        self.client.delete(self.__class__.sandbox_id)
         _poll_sandbox_status(
-            _client, self.__class__.sandbox_id, SandboxStatus.TERMINATED, timeout=30
+            self.client, self.__class__.sandbox_id, SandboxStatus.TERMINATED, timeout=30
         )
         self.__class__.sandbox_id = None
 
@@ -433,14 +432,14 @@ class TestWarmContainers(unittest.TestCase):
         # converge back to exactly 1 warm container (warm_containers=1).
         deadline = time.time() + 30
         while time.time() < deadline:
-            containers = _get_pool_containers(_client, self.__class__.pool_id)
+            containers = _get_pool_containers(self.client, self.__class__.pool_id)
             warm = _warm_containers(containers)
             claimed = _claimed_containers(containers)
             if len(claimed) == 0 and len(warm) == 1:
                 break
             time.sleep(1)
 
-        containers = _get_pool_containers(_client, self.__class__.pool_id)
+        containers = _get_pool_containers(self.client, self.__class__.pool_id)
         self.assertEqual(
             len(_claimed_containers(containers)),
             0,
@@ -454,11 +453,11 @@ class TestWarmContainers(unittest.TestCase):
 
     def test_6_cleanup(self):
         if self.__class__.sandbox_id:
-            _client.delete(self.__class__.sandbox_id)
+            self.client.delete(self.__class__.sandbox_id)
             self.__class__.sandbox_id = None
         if self.__class__.pool_id:
             time.sleep(2)
-            _client.delete_pool(self.__class__.pool_id)
+            self.client.delete_pool(self.__class__.pool_id)
             self.__class__.pool_id = None
 
 
@@ -467,7 +466,7 @@ class TestWarmContainers(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class TestMaxContainers(unittest.TestCase):
+class TestMaxContainers(BaseSandboxTest):
     """Verify max_containers is respected.
 
     Create a pool with warm_containers=1 and max_containers=2.
@@ -481,25 +480,27 @@ class TestMaxContainers(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        super().setUpClass()
         cls.sandbox_ids = []
 
     @classmethod
     def tearDownClass(cls):
         for sid in cls.sandbox_ids:
             try:
-                _client.delete(sid)
+                cls.client.delete(sid)
             except Exception:
                 pass
-        if cls.pool_id and _client:
+        if cls.pool_id:
             try:
                 # Wait for sandbox termination before deleting pool.
                 time.sleep(3)
-                _client.delete_pool(cls.pool_id)
+                cls.client.delete_pool(cls.pool_id)
             except Exception:
                 pass
+        super().tearDownClass()
 
     def test_1_create_pool_with_max(self):
-        resp = _client.create_pool(
+        resp = self.client.create_pool(
             image=_SANDBOX_IMAGE,
             cpus=_SANDBOX_CPUS,
             memory_mb=_SANDBOX_MEMORY_MB,
@@ -514,7 +515,7 @@ class TestMaxContainers(unittest.TestCase):
     def test_2_warm_container_created(self):
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
         containers = _poll_pool_containers(
-            _client, self.__class__.pool_id, min_count=1, timeout=60
+            self.client, self.__class__.pool_id, min_count=1, timeout=60
         )
         self.assertEqual(len(containers), 1)
         self.assertIsNone(containers[0].sandbox_id)
@@ -525,25 +526,25 @@ class TestMaxContainers(unittest.TestCase):
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
 
         # Sandbox 1 claims the initial warm container.
-        resp1 = _client.claim(self.__class__.pool_id)
+        resp1 = self.client.claim(self.__class__.pool_id)
         self.assertIsNotNone(resp1.sandbox_id)
         self.__class__.sandbox_ids.append(resp1.sandbox_id)
         status = _poll_sandbox_status(
-            _client, resp1.sandbox_id, SandboxStatus.RUNNING, timeout=60
+            self.client, resp1.sandbox_id, SandboxStatus.RUNNING, timeout=60
         )
         self.assertEqual(status, SandboxStatus.RUNNING)
 
         # Wait for the reconciler to create a replacement warm container
         # before creating sandbox 2, so it can claim the warm rather than
         # needing an on-demand container.
-        _poll_pool_containers(_client, self.__class__.pool_id, min_count=2, timeout=60)
+        _poll_pool_containers(self.client, self.__class__.pool_id, min_count=2, timeout=60)
 
         # Sandbox 2 claims the replacement warm container.
-        resp2 = _client.claim(self.__class__.pool_id)
+        resp2 = self.client.claim(self.__class__.pool_id)
         self.assertIsNotNone(resp2.sandbox_id)
         self.__class__.sandbox_ids.append(resp2.sandbox_id)
         status = _poll_sandbox_status(
-            _client, resp2.sandbox_id, SandboxStatus.RUNNING, timeout=60
+            self.client, resp2.sandbox_id, SandboxStatus.RUNNING, timeout=60
         )
         self.assertEqual(status, SandboxStatus.RUNNING)
 
@@ -555,7 +556,7 @@ class TestMaxContainers(unittest.TestCase):
         # Give the reconciler several cycles to stabilize.
         time.sleep(5)
 
-        containers = _get_pool_containers(_client, self.__class__.pool_id)
+        containers = _get_pool_containers(self.client, self.__class__.pool_id)
         self.assertEqual(
             len(containers),
             2,
@@ -570,12 +571,12 @@ class TestMaxContainers(unittest.TestCase):
 
     def test_5_cleanup(self):
         for sid in list(self.__class__.sandbox_ids):
-            _client.delete(sid)
+            self.client.delete(sid)
         self.__class__.sandbox_ids.clear()
         if self.__class__.pool_id:
             # Wait for sandbox containers to terminate.
             time.sleep(3)
-            _client.delete_pool(self.__class__.pool_id)
+            self.client.delete_pool(self.__class__.pool_id)
             self.__class__.pool_id = None
 
 
@@ -584,21 +585,22 @@ class TestMaxContainers(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class TestPoolDeletion(unittest.TestCase):
+class TestPoolDeletion(BaseSandboxTest):
     """Verify that deleting a pool cleans up its warm containers."""
 
     pool_id: str | None = None
 
     @classmethod
     def tearDownClass(cls):
-        if cls.pool_id and _client:
+        if cls.pool_id:
             try:
-                _client.delete_pool(cls.pool_id)
+                cls.client.delete_pool(cls.pool_id)
             except Exception:
                 pass
+        super().tearDownClass()
 
     def test_1_create_pool_with_warm_containers(self):
-        resp = _client.create_pool(
+        resp = self.client.create_pool(
             image=_SANDBOX_IMAGE,
             cpus=_SANDBOX_CPUS,
             memory_mb=_SANDBOX_MEMORY_MB,
@@ -612,7 +614,7 @@ class TestPoolDeletion(unittest.TestCase):
     def test_2_warm_containers_exist(self):
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
         containers = _poll_pool_containers(
-            _client, self.__class__.pool_id, min_count=2, timeout=60
+            self.client, self.__class__.pool_id, min_count=2, timeout=60
         )
         self.assertEqual(len(containers), 2)
         for c in containers:
@@ -623,10 +625,10 @@ class TestPoolDeletion(unittest.TestCase):
         exist."""
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
 
-        _client.delete_pool(self.__class__.pool_id)
+        self.client.delete_pool(self.__class__.pool_id)
 
         with self.assertRaises(PoolNotFoundError):
-            _client.get_pool(self.__class__.pool_id)
+            self.client.get_pool(self.__class__.pool_id)
 
         self.__class__.pool_id = None
 
