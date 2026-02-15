@@ -124,3 +124,134 @@ jobs:
         env:
           TENSORLAKE_API_URL: http://127.0.0.1:8900
         run: make test
+
+  test_sandbox:
+    name: Sandbox integration tests
+    runs-on: ubuntu-latest-xlarge
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: "pip"
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 2.0.0
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Build tensorlake
+        run: make build
+
+      - name: Set up Docker
+        uses: docker/setup-docker-action@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: github-actions-sandbox-tests
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Install Indexify Dataplane
+        run: |
+          docker pull ${{ steps.login-ecr.outputs.registry }}/indexify-dataplane:latest
+          container_id=$(docker create ${{ steps.login-ecr.outputs.registry }}/indexify-dataplane:latest)
+          docker cp $container_id:/indexify/indexify-dataplane /usr/local/bin/indexify-dataplane
+          docker rm $container_id
+          chmod +x /usr/local/bin/indexify-dataplane
+
+      - name: Start Background Indexify Server in Docker container
+        uses: JarvusInnovations/background-action@v1
+        with:
+          run: |
+            docker run -i -a stdout -a stderr --rm \
+              --network host \
+              --name indexify-server \
+              ${{ steps.login-ecr.outputs.registry }}/indexify-server:latest  &
+          wait-on: |
+            tcp:localhost:8900
+          tail: true
+          wait-for: 30s
+          log-output: true
+          log-output-if: true
+
+      - name: Create Dataplane config
+        run: |
+          mkdir -p /tmp/dataplane
+          cat > /tmp/dataplane/config.yaml <<'YAML'
+          env: local
+          server_addr: "http://localhost:8901"
+          driver:
+            type: docker
+          http_proxy:
+            port: 8902
+            listen_addr: "0.0.0.0"
+            advertise_address: "127.0.0.1:8902"
+          monitoring:
+            port: 8903
+          state_file: "/tmp/dataplane/state.json"
+          YAML
+
+      - name: Start Background Indexify Dataplane
+        uses: JarvusInnovations/background-action@v1
+        with:
+          run: |
+            /usr/local/bin/indexify-dataplane --config /tmp/dataplane/config.yaml &
+          wait-on: |
+            tcp:localhost:8902
+          tail: true
+          wait-for: 30s
+          log-output: true
+          log-output-if: true
+
+      - name: Wait for readiness
+        run: |
+          serverReady=false
+          counter=0
+          while [ "$serverReady" != true ]; do
+            output=$(curl --silent --fail http://localhost:8900/internal/executors | jq '. | length' 2>/dev/null)
+            if [[ $? -eq 0 && "$output" -ge 1 ]]; then
+                echo "Server ready with executors."
+                serverReady=true
+            else
+                echo 'Waiting for dataplane to join server...'
+                counter=$((counter+1))
+                if [ $counter -gt 6 ]; then
+                    echo "Timeout waiting for dataplane to join server."
+                    exit 1
+                fi
+                sleep 5
+            fi
+          done
+
+      - name: Run Sandbox integration tests
+        env:
+          TENSORLAKE_API_URL: http://127.0.0.1:8900
+        run: |
+          set -o pipefail
+          make test_sandbox 2>&1 | tee /tmp/sandbox-tests.log
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          echo "=== Docker containers at failure ==="
+          docker ps -a --format 'table {{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Names}}'
+          echo ""
+          echo "=== Network connections to server ==="
+          ss -tnp 'sport = :8900 or dport = :8900' 2>/dev/null || netstat -tnp 2>/dev/null | grep 8900 || true
+          echo ""
+          echo "=== Sandbox test logs ==="
+          cat /tmp/sandbox-tests.log 2>/dev/null || echo "No test logs available"
+          echo ""
+          echo "=== dmesg OOM check ==="
+          sudo dmesg | grep -i "oom\|killed process" | tail -20 || true

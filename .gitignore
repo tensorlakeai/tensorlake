@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+indexify_storage
 
 # C extensions
 *.so

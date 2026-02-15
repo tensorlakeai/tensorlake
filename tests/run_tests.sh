@@ -12,7 +12,6 @@ enable_applications_test_suite=false
 enable_cli_test_suite=false
 enable_utils_test_suite=false
 enable_document_ai_test_suite=false
-
 if [[ "$1" == "--function-executor" ]]; then
   enable_fe_test_suite=true
 elif [ "$1" == "--applications" ]; then

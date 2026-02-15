@@ -9,14 +9,12 @@ repository = "https://github.com/tensorlakeai/tensorlake"
 
 [tool.poetry.dependencies]
 python = "^3.10"
-python-magic = "^0.4.27"
 httpx = { version = ">=0.27.2, < 1.0", extras = ["http2"] }
 pydantic = ">=2.0, <3.0"
 httpx-sse = "^0.4.1"
 # TODO: Look into consolidating this with click
-rich = "14.3.2"
-pyyaml = "^6.0.3"
-click = "8.3.1"
+rich = ">=14.0.0"
+click = ">=8.1.0"
 tomlkit = "^0.14.0"
 # pip installs the latest grpcio <2.0.0
 # when developing with poetry, the version
