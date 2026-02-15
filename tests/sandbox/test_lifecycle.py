@@ -537,7 +537,9 @@ class TestMaxContainers(BaseSandboxTest):
         # Wait for the reconciler to create a replacement warm container
         # before creating sandbox 2, so it can claim the warm rather than
         # needing an on-demand container.
-        _poll_pool_containers(self.client, self.__class__.pool_id, min_count=2, timeout=60)
+        _poll_pool_containers(
+            self.client, self.__class__.pool_id, min_count=2, timeout=60
+        )
 
         # Sandbox 2 claims the replacement warm container.
         resp2 = self.client.claim(self.__class__.pool_id)
