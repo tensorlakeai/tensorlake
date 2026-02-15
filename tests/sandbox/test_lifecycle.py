@@ -635,6 +635,7 @@ class TestPoolDeletion(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import sys
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
     # Run simple tests first, complex tests last.
