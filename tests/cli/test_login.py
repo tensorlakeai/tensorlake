@@ -101,7 +101,7 @@ class TestLoginSuccessFlow(unittest.TestCase):
         self.assertIn(
             "URL: https://cloud.tensorlake.ai/cli/login", result.output
         )  # URL displayed
-        self.assertIn("Login successful", result.output)
+        self.assertIn("login successful", result.output)
 
         # Verify browser was opened
         mock_browser.assert_called_once_with("https://cloud.tensorlake.ai/cli/login")
@@ -172,7 +172,7 @@ class TestLoginSuccessFlow(unittest.TestCase):
             result = runner.invoke(cli, ["login"], prog_name="tensorlake")
 
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("Login successful", result.output)
+        self.assertIn("login successful", result.output)
         # Verify sleep was called for pending responses
         self.assertGreaterEqual(mock_sleep.call_count, 2)
 
@@ -219,7 +219,7 @@ class TestLoginErrorHandling(unittest.TestCase):
         result = runner.invoke(cli, ["login"], prog_name="tensorlake")
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("Failed to start login process", result.output)
+        self.assertIn("login service returned an error", result.output)
 
     @respx.mock
     def test_login_poll_failure(self):
@@ -241,7 +241,7 @@ class TestLoginErrorHandling(unittest.TestCase):
             result = runner.invoke(cli, ["login"], prog_name="tensorlake")
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("Failed to poll login status", result.output)
+        self.assertIn("login service returned an error", result.output)
 
     @respx.mock
     def test_login_exchange_failure(self):
@@ -267,7 +267,7 @@ class TestLoginErrorHandling(unittest.TestCase):
             result = runner.invoke(cli, ["login"], prog_name="tensorlake")
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("Failed to exchange token", result.output)
+        self.assertIn("login service returned an error", result.output)
 
     @respx.mock
     def test_login_expired(self):
@@ -289,8 +289,8 @@ class TestLoginErrorHandling(unittest.TestCase):
             result = runner.invoke(cli, ["login"], prog_name="tensorlake")
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("Login request has expired", result.output)
-        self.assertIn("Please try again", result.output)
+        self.assertIn("login request has expired", result.output)
+        self.assertIn("run 'tensorlake login'", result.output)
 
     @respx.mock
     def test_login_failed(self):
@@ -312,8 +312,8 @@ class TestLoginErrorHandling(unittest.TestCase):
             result = runner.invoke(cli, ["login"], prog_name="tensorlake")
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("Login request has failed", result.output)
-        self.assertIn("Please try again", result.output)
+        self.assertIn("login request was denied", result.output)
+        self.assertIn("run 'tensorlake login'", result.output)
 
     @respx.mock
     def test_login_unknown_status(self):
@@ -335,7 +335,7 @@ class TestLoginErrorHandling(unittest.TestCase):
             result = runner.invoke(cli, ["login"], prog_name="tensorlake")
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("Unknown status", result.output)
+        self.assertIn("got unexpected login status", result.output)
 
 
 class TestLoginBrowserHandling(unittest.TestCase):
@@ -402,7 +402,7 @@ class TestLoginBrowserHandling(unittest.TestCase):
         # URL should be displayed before browser open attempt
         self.assertIn("URL: https://cloud.tensorlake.ai/cli/login", result.output)
         # Error message should reference the URL above
-        self.assertIn("Failed to open web browser", result.output)
+        self.assertIn("failed to open web browser", result.output)
         self.assertIn("please open the url above manually", result.output.lower())
         self.assertIn("MANUAL-CODE", result.output)
 

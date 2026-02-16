@@ -295,7 +295,7 @@ class TestInitCommand(unittest.TestCase):
                 self.assertEqual(result.exit_code, 0, f"CLI failed: {result.output}")
                 self.assertIn("Test Organization", result.output)
                 self.assertIn("Test Project", result.output)
-                self.assertIn("Configuration saved to", result.output)
+                self.assertIn("configuration saved to", result.output)
 
                 # Verify file was created
                 self.assertTrue(local_config_path.exists())
@@ -429,7 +429,7 @@ class TestInitCommand(unittest.TestCase):
 
                 # Should fail with helpful message
                 self.assertNotEqual(result.exit_code, 0)
-                self.assertIn("No valid credentials found", result.output)
+                self.assertIn("no valid credentials found", result.output)
                 self.assertIn("tensorlake login", result.output)
             finally:
                 config_module.CONFIG_DIR = original_config_dir
@@ -484,7 +484,7 @@ class TestInitCommand(unittest.TestCase):
 
                 # Should fail with error message
                 self.assertNotEqual(result.exit_code, 0)
-                self.assertIn("Failed to fetch organizations", result.output)
+                self.assertIn("could not fetch organizations", result.output)
             finally:
                 config_module.CONFIG_DIR = original_config_dir
                 config_module.CREDENTIALS_PATH = original_credentials_path

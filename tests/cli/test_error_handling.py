@@ -225,7 +225,7 @@ class TestHTTPErrorHandling(unittest.TestCase):
         result = runner.invoke(cli, ["secrets", "list"], prog_name="tensorlake")
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("Permission denied", result.output)
+        self.assertIn("permission denied", result.output)
         self.assertIn("org_456", result.output)
         self.assertIn("proj_789", result.output)
         # Check that debug hint is shown
@@ -260,10 +260,10 @@ class TestHTTPErrorHandling(unittest.TestCase):
         )
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("Technical details", result.output)
-        self.assertIn("Stack trace", result.output)
+        self.assertIn("technical details", result.output)
+        self.assertIn("stack trace", result.output)
         # Debug hint should NOT be shown when already in debug mode
-        self.assertNotIn("For technical details and stack trace", result.output)
+        self.assertNotIn("for technical details and stack trace", result.output)
 
 
 if __name__ == "__main__":
