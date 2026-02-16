@@ -1,3 +1,4 @@
+import json
 import re
 
 from tensorlake.applications import DeserializationError
@@ -196,6 +197,35 @@ def parse_application_function_call_arg_from_single_payload(
         content_type=content_type,
     )
     return serialized_arg
+
+
+def parse_application_function_call_args_from_json_body(
+    body: bytes | memoryview,
+) -> tuple[
+    list[SerializedApplicationArgument], dict[str, SerializedApplicationArgument]
+]:
+    """Parse a JSON object body where keys are parameter names.
+
+    Each value is re-encoded as individual JSON bytes for per-param deserialization.
+    Falls back to single positional arg if body isn't a JSON object.
+    """
+    parsed = json.loads(body)
+    if not isinstance(parsed, dict):
+        # Not a dict — treat as single positional arg (backward compat).
+        body_bytes = bytes(body) if isinstance(body, memoryview) else body
+        return [
+            SerializedApplicationArgument(
+                data=body_bytes, content_type="application/json"
+            )
+        ], {}
+
+    serialized_kwargs: dict[str, SerializedApplicationArgument] = {}
+    for key, value in parsed.items():
+        serialized_kwargs[key] = SerializedApplicationArgument(
+            data=json.dumps(value).encode("utf-8"),
+            content_type="application/json",
+        )
+    return [], serialized_kwargs
 
 
 def _parse_lowercase_http_request_headers(

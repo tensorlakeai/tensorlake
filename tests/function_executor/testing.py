@@ -255,6 +255,12 @@ def delete_allocation(
 def application_function_inputs(payload: Any, type_hint: Any) -> FunctionInputs:
     user_serializer: JSONUserDataSerializer = JSONUserDataSerializer()
     serialized_payload: bytes = user_serializer.serialize(payload, type_hint)
+    return application_function_inputs_from_bytes(serialized_payload)
+
+
+def application_function_inputs_from_bytes(
+    serialized_payload: bytes,
+) -> FunctionInputs:
     payload_blob: BLOB = write_new_application_payload_blob(serialized_payload)
 
     return FunctionInputs(

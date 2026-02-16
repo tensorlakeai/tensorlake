@@ -633,6 +633,7 @@ class SandboxClient:
         )
 
         deadline = time.time() + startup_timeout
+        last_pending_reason: str | None = None
         while time.time() < deadline:
             info = self.get(result.sandbox_id)
             if info.status == SandboxStatus.RUNNING:
@@ -644,6 +645,7 @@ class SandboxClient:
                 raise SandboxError(
                     f"Sandbox {result.sandbox_id} terminated during startup"
                 )
+            last_pending_reason = info.pending_reason
             # Poll at 0.5s — balances responsiveness against API load.
             time.sleep(0.5)
 
@@ -652,6 +654,7 @@ class SandboxClient:
             self.delete(result.sandbox_id)
         except Exception:
             pass
-        raise SandboxError(
-            f"Sandbox {result.sandbox_id} did not start within {startup_timeout}s"
-        )
+        msg = f"Sandbox {result.sandbox_id} did not start within {startup_timeout}s"
+        if last_pending_reason:
+            msg += f" (reason: {last_pending_reason})"
+        raise SandboxError(msg)

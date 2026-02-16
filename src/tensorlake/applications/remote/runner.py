@@ -1,4 +1,5 @@
 import base64
+import json
 from typing import Any
 
 from tensorlake.applications.interface.exceptions import InternalError, SDKUsageError
@@ -7,6 +8,7 @@ from ..function.application_call import (
     ApplicationArgument,
     serialize_application_function_call_arguments,
 )
+from ..function.type_hints import is_file_type_hint
 from ..interface.request import Request
 from ..user_data_serializer import UserDataSerializer, serializer_by_name
 from .api_client import APIClient, RequestInput
@@ -55,24 +57,45 @@ class RemoteRunner:
             )
         )
 
-        inputs: list[RequestInput] = []
-        for idx, serialized_arg in enumerate(serialized_args):
-            inputs.append(
+        has_file_param = any(
+            is_file_type_hint(manifest.type_hint) for manifest in input_manifests
+        )
+
+        if not has_file_param and len(serialized_args) + len(serialized_kwargs) > 1:
+            body = {}
+            for idx, serialized_arg in enumerate(serialized_args):
+                param_name = input_manifests[idx].arg_name
+                body[param_name] = json.loads(serialized_arg.data)
+            for key, serialized_kwarg in serialized_kwargs.items():
+                body[key] = json.loads(serialized_kwarg.data)
+
+            json_bytes = json.dumps(body).encode("utf-8")
+            inputs = [
                 RequestInput(
-                    name=str(idx),
-                    data=serialized_arg.data,
-                    content_type=serialized_arg.content_type,
+                    name="0",
+                    data=json_bytes,
+                    content_type="application/json",
                 )
-            )
-        # kwarg key can't start with a digit so no confusion with args.
-        for key, serialized_kwarg in serialized_kwargs.items():
-            inputs.append(
-                RequestInput(
-                    name=key,
-                    data=serialized_kwarg.data,
-                    content_type=serialized_kwarg.content_type,
+            ]
+        else:
+            inputs: list[RequestInput] = []
+            for idx, serialized_arg in enumerate(serialized_args):
+                inputs.append(
+                    RequestInput(
+                        name=str(idx),
+                        data=serialized_arg.data,
+                        content_type=serialized_arg.content_type,
+                    )
                 )
-            )
+            # kwarg key can't start with a digit so no confusion with args.
+            for key, serialized_kwarg in serialized_kwargs.items():
+                inputs.append(
+                    RequestInput(
+                        name=key,
+                        data=serialized_kwarg.data,
+                        content_type=serialized_kwarg.content_type,
+                    )
+                )
 
         request_id: str = self._client.run_request(
             application_name=self._application_name,

@@ -130,6 +130,7 @@ class SandboxInfo(BaseModel):
     timeout_secs: int | None = None
     entrypoint: list[str] | None = None
     network: NetworkConfig | None = None
+    pending_reason: str | None = None
     pool_id: str | None = None
     created_at: OptionalTimestamp = None
     terminated_at: OptionalTimestamp = None

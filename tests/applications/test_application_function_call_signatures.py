@@ -1,13 +1,21 @@
+import json
+import os
 import unittest
 from typing import Any
 
+import httpx
 import parameterized
 import validate_all_applications
 from models import DirModel, FileModel
 
 from tensorlake.applications import File, Request, RequestError, application, function
 from tensorlake.applications.applications import run_application
+from tensorlake.applications.remote.api_client import APIClient
 from tensorlake.applications.remote.deploy import deploy_applications
+from tensorlake.applications.remote.manifests.application import (
+    create_application_manifest,
+)
+from tensorlake.applications.remote.request import RemoteRequest
 
 # Makes the test case discoverable by unittest framework.
 ValidateAllApplicationsTest: unittest.TestCase = (
@@ -168,6 +176,7 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
     def setUpClass(cls):
         # Deploy all applications before running tests.
         deploy_applications(__file__)
+        cls._api_client: APIClient = APIClient()
         return super().setUpClass()
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
@@ -418,6 +427,41 @@ class TestApplicationFunctionCallSignatures(unittest.TestCase):
                 {"path": "/file2.txt", "size": 200, "is_read_only": False},
             ],
         )
+
+
+    def test_call_with_json_body_via_http(self):
+        """Test calling a multi-param function directly via HTTP POST with a JSON body."""
+        api_url: str = os.environ["TENSORLAKE_API_URL"]
+        url: str = f"{api_url}/v1/namespaces/default/applications/function_mixed_args"
+
+        json_body: dict = {"a": 42, "b": "hello", "c": 3.14, "d": True}
+        headers: dict[str, str] = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        api_key: str | None = os.environ.get("TENSORLAKE_API_KEY")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        response: httpx.Response = httpx.post(
+            url,
+            content=json.dumps(json_body).encode("utf-8"),
+            headers=headers,
+        )
+        response.raise_for_status()
+        request_id: str = response.json()["request_id"]
+
+        app_manifest = create_application_manifest(
+            application_function=function_mixed_args,
+            all_functions=[function_mixed_args],
+        )
+        request: RemoteRequest = RemoteRequest(
+            application_name="function_mixed_args",
+            application_manifest=app_manifest,
+            request_id=request_id,
+            client=self._api_client,
+        )
+        self.assertEqual(request.output(), "a=42,b=hello,c=3.14,d=True")
 
 
 if __name__ == "__main__":

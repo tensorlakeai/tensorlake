@@ -17,6 +17,7 @@ from tensorlake.applications.function.application_call import (
 from tensorlake.applications.function.function_call import (
     set_self_arg,
 )
+from tensorlake.applications.function.type_hints import function_parameters
 from tensorlake.applications.function.user_data_serializer import (
     deserialize_value_with_metadata,
     function_input_serializer,
@@ -56,6 +57,7 @@ from ..proto.function_executor_pb2 import (
 from .http_request_parse import (
     parse_application_function_call_arg_from_single_payload,
     parse_application_function_call_args_from_http_request,
+    parse_application_function_call_args_from_json_body,
     parse_application_function_call_args_from_multipart_form_data,
 )
 from .value import SerializedValue, Value
@@ -613,23 +615,31 @@ def deserialize_application_function_call_args(
             )
         )
     else:
-        # Current mode for application function calls with a single argument.
         content_type: str = (
             input_serializer.content_type
             if payload.content_type is None
             else payload.content_type
         )
-        serialized_arg: SerializedApplicationArgument = (
-            parse_application_function_call_arg_from_single_payload(
-                body_buffer=payload.data,
-                body_offset=0,
-                body_end_offset=len(payload.data),
-                content_type=content_type,
+
+        # FastAPI-style: JSON body with param names as keys for multi-param functions.
+        num_params = len(function_parameters(function))
+        if content_type.startswith("application/json") and num_params > 1:
+            serialized_args, serialized_kwargs = (
+                parse_application_function_call_args_from_json_body(payload.data)
             )
-        )
-        # Single payload is always mapped to the first positional application function argument.
-        serialized_args = [serialized_arg]
-        serialized_kwargs = {}
+        else:
+            # Current mode for application function calls with a single argument.
+            serialized_arg: SerializedApplicationArgument = (
+                parse_application_function_call_arg_from_single_payload(
+                    body_buffer=payload.data,
+                    body_offset=0,
+                    body_end_offset=len(payload.data),
+                    content_type=content_type,
+                )
+            )
+            # Single payload is always mapped to the first positional application function argument.
+            serialized_args = [serialized_arg]
+            serialized_kwargs = {}
 
     args, kwargs = deserialize_application_function_call_arguments(
         application=function,

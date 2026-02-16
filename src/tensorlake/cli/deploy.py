@@ -51,7 +51,9 @@ def deploy(
     upgrade_running_requests: bool,
 ):
     """Deploys applications to Tensorlake Cloud."""
-    click.echo(f"⚙️  Preparing deployment for applications from {application_file_path}")
+    click.echo(
+        f"⚙️  Preparing deployment for applications from {application_file_path}"
+    )
 
     # Create builder client with proper authentication
     # If using API key, don't pass org/project IDs (they come from introspection)

@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import unittest
 from typing import Iterator, List
@@ -9,6 +10,7 @@ from testing import (
     FunctionExecutorProcessContextManager,
     HTTPBodyPart,
     application_function_inputs,
+    application_function_inputs_from_bytes,
     create_multipart_invoke_http_request,
     create_request_error_blob,
     create_tmp_blob,
@@ -571,6 +573,82 @@ class TestRunAllocation(unittest.TestCase):
             "api_function_blocking_call called with url: https://blocking-example.com",
             fe_stdout,
         )
+
+    def test_api_function_call_via_json_body(self):
+        """Test multi-param application function call with JSON body (FastAPI-style)."""
+        with FunctionExecutorProcessContextManager(
+            capture_std_outputs=True,
+        ) as process:
+            with rpc_channel(process) as channel:
+                stub: FunctionExecutorStub = FunctionExecutorStub(channel)
+                initialize_response: InitializeResponse = initialize(
+                    stub,
+                    app_name="api_function_stringify_multiple_args",
+                    app_version="0.1",
+                    app_code_dir_path=APPLICATION_CODE_DIR_PATH,
+                    function_name="api_function_stringify_multiple_args",
+                )
+                self.assertEqual(
+                    initialize_response.outcome_code,
+                    InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
+                )
+
+                # Create a JSON body with param names as keys (FastAPI-style).
+                json_body = json.dumps(
+                    {
+                        "arg1": "test-string-arg",
+                        "arg2": 777,
+                        "arg3": True,
+                        "arg4": None,
+                    }
+                ).encode("utf-8")
+
+                allocation_id: str = "test-allocation-id"
+                alloc_result: AllocationResult = run_allocation_that_returns_output(
+                    self,
+                    stub,
+                    request=CreateAllocationRequest(
+                        allocation=Allocation(
+                            request_id="123",
+                            function_call_id="test-function-call",
+                            allocation_id=allocation_id,
+                            inputs=application_function_inputs_from_bytes(
+                                json_body
+                            ),
+                        ),
+                    ),
+                )
+
+                self.assertEqual(
+                    alloc_result.outcome_code,
+                    AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
+                )
+                self.assertFalse(alloc_result.HasField("request_error_output"))
+                self.assertTrue(alloc_result.HasField("value"))
+                self.assertTrue(alloc_result.HasField("uploaded_function_outputs_blob"))
+                output: str = download_and_deserialize_so(
+                    self,
+                    alloc_result.value,
+                    alloc_result.uploaded_function_outputs_blob,
+                )
+                self.assertEqual(
+                    output,
+                    "arg1: test-string-arg, arg2: 777, arg3: True, arg4: None",
+                )
+
+                # Cleanup.
+                stub.delete_allocation(
+                    DeleteAllocationRequest(
+                        allocation_id=allocation_id,
+                    )
+                )
+
+        fe_stdout = process.read_stdout()
+        # Check FE events in stdout
+        self.assertIn("function_executor_initialization_started", fe_stdout)
+        self.assertIn("function_executor_initialization_finished", fe_stdout)
+        self.assertIn("allocations_started", fe_stdout)
+        self.assertIn("allocations_finished", fe_stdout)
 
     def test_api_function_call_via_http_request_forwarding(self):
         # This mode is not currently used by Server so it's very important
