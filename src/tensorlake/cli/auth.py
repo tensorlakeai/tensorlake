@@ -83,23 +83,31 @@ def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
     """
     login_start_url = f"{ctx.api_url}/platform/cli/login/start"
 
-    start_response = httpx.post(login_start_url)
+    try:
+        start_response = httpx.post(login_start_url)
+    except httpx.HTTPError as e:
+        raise click.ClickException(f"failed to connect to login service: {e}") from None
 
     if not start_response.is_success:
         raise click.ClickException(
-            f"Failed to start login process: {start_response.text}"
+            f"failed to start login process: {start_response.text}"
         )
 
-    start_response_body = start_response.json()
-    device_code = start_response_body["device_code"]
-    user_code = start_response_body["user_code"]
+    try:
+        start_response_body = start_response.json()
+        device_code = start_response_body["device_code"]
+        user_code = start_response_body["user_code"]
+    except (ValueError, KeyError) as e:
+        raise click.ClickException(
+            f"unexpected response from login service: {e}"
+        ) from None
 
-    click.echo("We're going to open a web browser for you to enter a one-time code.")
+    click.echo("we're going to open a web browser for you to enter a one-time code.")
     click.echo(f"Your code is: {user_code}")
 
     verification_uri = f"{ctx.cloud_url}/cli/login"
     click.echo(f"URL: {verification_uri}")
-    click.echo("Opening web browser...")
+    click.echo("opening web browser...")
 
     # Give people time to read the messages above
     time.sleep(5)
@@ -108,24 +116,32 @@ def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
         webbrowser.open(verification_uri)
     except webbrowser.Error:
         click.echo(
-            "Failed to open web browser. Please open the URL above manually and enter the code.",
+            "failed to open web browser. please open the URL above manually and enter the code.",
             err=True,
         )
 
-    click.echo("Waiting for the code to be processed...")
+    click.echo("waiting for the code to be processed...")
 
     poll_url = f"{ctx.api_url}/platform/cli/login/poll?device_code={device_code}"
 
     while True:
-        poll_response = httpx.get(poll_url)
+        try:
+            poll_response = httpx.get(poll_url)
+        except httpx.HTTPError as e:
+            raise click.ClickException(f"failed to poll login status: {e}") from None
 
         if not poll_response.is_success:
             raise click.ClickException(
-                f"Failed to poll login status: {poll_response.text}"
+                f"failed to poll login status: {poll_response.text}"
             )
 
-        poll_response_body = poll_response.json()
-        status = poll_response_body["status"]
+        try:
+            poll_response_body = poll_response.json()
+            status = poll_response_body["status"]
+        except (ValueError, KeyError) as e:
+            raise click.ClickException(
+                f"unexpected response while polling login status: {e}"
+            ) from None
 
         match status:
             case "pending":
@@ -137,36 +153,43 @@ def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
             case "approved":
                 wait_time = 0
             case _:
-                raise click.ClickException(f"Unknown status: {status}")
+                raise click.ClickException(f"unknown status: {status}")
 
         if wait_time > 0:
             time.sleep(wait_time)
 
         if status == "expired":
-            raise click.ClickException("Login request has expired. Please try again.")
+            raise click.ClickException("login request has expired. please try again.")
 
         if status == "failed":
-            raise click.ClickException("Login request has failed. Please try again.")
+            raise click.ClickException("login request has failed. please try again.")
 
         if status == "approved":
             break
 
     exchange_token_url = f"{ctx.api_url}/platform/cli/login/exchange"
 
-    exchange_response = httpx.post(
-        exchange_token_url, json={"device_code": device_code}
-    )
+    try:
+        exchange_response = httpx.post(
+            exchange_token_url, json={"device_code": device_code}
+        )
+    except httpx.HTTPError as e:
+        raise click.ClickException(f"failed to exchange token: {e}") from None
 
     if not exchange_response.is_success:
         raise click.ClickException(
-            f"Failed to exchange token: {exchange_response.text}"
+            f"failed to exchange token: {exchange_response.text}"
         )
 
-    exchange_response_body = exchange_response.json()
-
-    access_token = exchange_response_body["access_token"]
+    try:
+        exchange_response_body = exchange_response.json()
+        access_token = exchange_response_body["access_token"]
+    except (ValueError, KeyError) as e:
+        raise click.ClickException(
+            f"unexpected response during token exchange: {e}"
+        ) from None
     save_credentials(ctx.api_url, access_token)
-    click.echo("Login successful!")
+    click.echo("login successful!")
 
     if auto_init:
         # After successful login, check if we need to run init

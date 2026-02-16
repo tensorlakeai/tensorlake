@@ -116,13 +116,13 @@ def validate_app_name(name: str) -> tuple[bool, str]:
         tuple: (is_valid, error_message)
     """
     if not name:
-        return False, "Application name cannot be empty"
+        return False, "application name cannot be empty"
 
     # Check for invalid characters (before conversion)
     if not re.match(r"^[a-zA-Z0-9_\-\s]+$", name):
         return (
             False,
-            "Application name can only contain letters, numbers, hyphens, underscores, and spaces",
+            "application name can only contain letters, numbers, hyphens, underscores, and spaces",
         )
 
     # Convert to snake_case for validation
@@ -132,7 +132,7 @@ def validate_app_name(name: str) -> tuple[bool, str]:
     if not snake_name.isidentifier():
         return (
             False,
-            f"'{snake_name}' is not a valid Python identifier. Names must start with a letter or underscore.",
+            f"'{snake_name}' is not a valid Python identifier. names must start with a letter or underscore.",
         )
 
     # Check if it's a Python keyword
@@ -184,7 +184,7 @@ def new(name: str, force: bool):
     if not force:
         if python_file.exists():
             click.echo(
-                f"Error: {filename} already exists. Use --force to overwrite or choose a different name.",
+                f"error: {filename} already exists. use --force to overwrite or choose a different name.",
                 err=True,
             )
             raise click.Abort()
@@ -239,14 +239,20 @@ def new(name: str, force: bool):
 
         # Success message
         click.echo("\n" + "=" * 50)
-        click.echo("Application created successfully!")
+        click.echo("application created successfully!")
         click.echo("=" * 50)
         click.echo("\nNext steps:")
         click.echo(f"  Deploy: tensorlake deploy {filename}")
         click.echo("\nLearn more: https://docs.tensorlake.ai/quickstart")
 
+    except PermissionError as e:
+        raise click.ClickException(
+            f"permission denied while creating application: {e}. "
+            f"check write permissions for the target directory."
+        ) from None
+    except OSError as e:
+        raise click.ClickException(f"failed to create application files: {e}") from None
     except Exception as e:
-        click.echo(f"Error creating application: {e}", err=True)
-        if write_dir.exists():
-            click.echo(f"Application temporarily created in '{write_dir}'", err=True)
-        raise click.Abort()
+        raise click.ClickException(
+            f"failed to create application: {type(e).__name__}: {e}"
+        ) from None
