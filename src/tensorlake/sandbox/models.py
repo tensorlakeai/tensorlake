@@ -33,9 +33,9 @@ Timestamp = Annotated[datetime, BeforeValidator(_parse_timestamp)]
 class SandboxStatus(str, Enum):
     """Status of a sandbox."""
 
-    PENDING = "Pending"
-    RUNNING = "Running"
-    TERMINATED = "Terminated"
+    PENDING = "pending"
+    RUNNING = "running"
+    TERMINATED = "terminated"
 
 
 class ContainerResourcesInfo(BaseModel):
