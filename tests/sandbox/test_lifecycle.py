@@ -636,6 +636,103 @@ class TestPoolDeletion(BaseSandboxTest):
 
 
 # ---------------------------------------------------------------------------
+# TestSandboxTimeout
+# ---------------------------------------------------------------------------
+
+
+class TestSandboxTimeout(BaseSandboxTest):
+    """Verify that a sandbox claimed from a pool with a short timeout
+    is automatically terminated after the timeout elapses.
+
+    1. Create a pool with timeout_secs=30 and warm_containers=1.
+    2. Wait for the warm container, then claim a sandbox.
+    3. Verify the sandbox reaches Running.
+    4. Wait 35 seconds for the timeout to expire.
+    5. Verify the sandbox transitions to Terminated.
+    """
+
+    pool_id: str | None = None
+    sandbox_id: str | None = None
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.sandbox_id:
+            try:
+                cls.client.delete(cls.sandbox_id)
+            except Exception:
+                pass
+        if cls.pool_id:
+            try:
+                cls.client.delete_pool(cls.pool_id)
+            except Exception:
+                pass
+        super().tearDownClass()
+
+    def test_1_create_pool_with_timeout(self):
+        resp = self.client.create_pool(
+            image=_SANDBOX_IMAGE,
+            cpus=_SANDBOX_CPUS,
+            memory_mb=_SANDBOX_MEMORY_MB,
+            ephemeral_disk_mb=_SANDBOX_DISK_MB,
+            entrypoint=["sleep", "300"],
+            warm_containers=1,
+            timeout_secs=30,
+        )
+        self.assertIsNotNone(resp.pool_id)
+        self.__class__.pool_id = resp.pool_id
+
+    def test_2_claim_sandbox_from_pool(self):
+        """Wait for the warm container and claim a sandbox from the pool."""
+        self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
+
+        _poll_pool_containers(
+            self.client, self.__class__.pool_id, min_count=1, timeout=60
+        )
+
+        resp = self.client.claim(self.__class__.pool_id)
+        self.assertIsNotNone(resp.sandbox_id)
+        self.__class__.sandbox_id = resp.sandbox_id
+
+    def test_3_sandbox_reaches_running(self):
+        """The claimed sandbox should transition to Running."""
+        self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_2")
+        status = _poll_sandbox_status(
+            self.client, self.__class__.sandbox_id, SandboxStatus.RUNNING, timeout=60
+        )
+        self.assertEqual(status, SandboxStatus.RUNNING)
+
+    def test_4_sandbox_terminated_after_timeout(self):
+        """Wait beyond the 30s timeout and verify the sandbox is terminated
+        with a Success(Timeout) outcome."""
+        self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_3")
+
+        # Wait long enough for the 30s timeout to expire.
+        time.sleep(35)
+
+        status = _poll_sandbox_status(
+            self.client,
+            self.__class__.sandbox_id,
+            SandboxStatus.TERMINATED,
+            timeout=30,
+        )
+        self.assertEqual(status, SandboxStatus.TERMINATED)
+
+        info = self.client.get(self.__class__.sandbox_id)
+        self.assertEqual(
+            info.outcome,
+            "Success(Timeout)",
+            "Sandbox should be terminated due to timeout, not user deletion or failure",
+        )
+
+    def test_5_cleanup(self):
+        self.__class__.sandbox_id = None
+        if self.__class__.pool_id:
+            time.sleep(2)
+            self.client.delete_pool(self.__class__.pool_id)
+            self.__class__.pool_id = None
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -652,6 +749,7 @@ if __name__ == "__main__":
         TestWarmContainers,
         TestMaxContainers,
         TestPoolDeletion,
+        TestSandboxTimeout,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
     runner = unittest.TextTestRunner(verbosity=2 if "-v" in sys.argv else 1)
