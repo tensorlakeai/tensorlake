@@ -90,7 +90,7 @@ class TestAutoInitFlow(unittest.TestCase):
                 self.assertIn("Running initialization flow", result.output)
                 self.assertIn("Test Org", result.output)
                 self.assertIn("Test Project", result.output)
-                self.assertIn("Configuration saved", result.output)
+                self.assertIn("configuration saved", result.output)
 
                 # Verify local config was created
                 self.assertTrue(local_config_path.exists())
@@ -193,8 +193,8 @@ class TestAutoInitFlow(unittest.TestCase):
                 self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
                 self.assertIn("It seems like you're not logged in", result.output)
                 self.assertIn("Let's log you in", result.output)
-                self.assertIn("Login successful", result.output)
-                self.assertIn("Configuration saved", result.output)
+                self.assertIn("login successful", result.output)
+                self.assertIn("configuration saved", result.output)
 
                 # Verify credentials and local config were created
                 self.assertTrue(credentials_path.exists())
@@ -253,7 +253,7 @@ class TestAutoInitFlow(unittest.TestCase):
                 # Should succeed without init flow
                 self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
                 self.assertNotIn("Running initialization flow", result.output)
-                self.assertIn("No secrets found", result.output)
+                self.assertIn("no secrets found", result.output)
 
             finally:
                 config_module.CONFIG_DIR = original_config_dir
@@ -313,7 +313,7 @@ class TestAutoInitFlow(unittest.TestCase):
                 # Should succeed without init flow
                 self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
                 self.assertNotIn("Running initialization flow", result.output)
-                self.assertIn("No secrets found", result.output)
+                self.assertIn("no secrets found", result.output)
 
                 # Local config should NOT be created
                 self.assertFalse(local_config_path.exists())
@@ -387,7 +387,7 @@ class TestLoginInitChaining(unittest.TestCase):
 
                 # Should succeed without init flow
                 self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
-                self.assertIn("Login successful", result.output)
+                self.assertIn("login successful", result.output)
                 self.assertNotIn("Let's set up your project", result.output)
                 self.assertNotIn("Initializing TensorLake", result.output)
 
@@ -464,7 +464,7 @@ class TestLoginInitChaining(unittest.TestCase):
 
                 # Should succeed without init flow
                 self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
-                self.assertIn("Login successful", result.output)
+                self.assertIn("login successful", result.output)
                 self.assertNotIn("Let's set up your project", result.output)
                 self.assertNotIn("Initializing TensorLake", result.output)
 
@@ -549,13 +549,13 @@ class TestLoginInitChaining(unittest.TestCase):
 
                 # Should succeed and show both login and init messages
                 self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
-                self.assertIn("Login successful", result.output)
+                self.assertIn("login successful", result.output)
                 self.assertIn(
                     "No organization and project configuration found", result.output
                 )
                 self.assertIn("Auto Org", result.output)
                 self.assertIn("Auto Project", result.output)
-                self.assertIn("Configuration saved", result.output)
+                self.assertIn("configuration saved", result.output)
 
                 # Local config should be created
                 self.assertTrue(local_config_path.exists())
@@ -622,7 +622,7 @@ class TestLoginInitChaining(unittest.TestCase):
 
                 # Should succeed without init flow
                 self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
-                self.assertIn("Login successful", result.output)
+                self.assertIn("login successful", result.output)
                 self.assertNotIn("No local configuration found", result.output)
                 self.assertNotIn("Initializing TensorLake", result.output)
 

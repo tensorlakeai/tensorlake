@@ -131,6 +131,7 @@ class SandboxInfo(BaseModel):
     entrypoint: list[str] | None = None
     network: NetworkConfig | None = None
     pool_id: str | None = None
+    outcome: str | None = None
     created_at: OptionalTimestamp = None
     terminated_at: OptionalTimestamp = None
 

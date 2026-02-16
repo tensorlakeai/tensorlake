@@ -29,7 +29,7 @@ def list(ctx: Context):
 
     secrets = _get_all_existing_secrets(ctx)
     if len(secrets) == 0:
-        click.echo("No secrets found")
+        click.echo("no secrets found")
         return
 
     table = Table()
@@ -71,20 +71,20 @@ def set(ctx: Context, secrets: str):
     upsert_secrets: List[Dict] = []
     for set_str in secrets:
         if "=" not in set_str:
-            raise click.UsageError(f"Invalid secret format {set_str}, missing '='")
+            raise click.UsageError(f"invalid secret format {set_str}, missing '='")
 
         [name, value] = set_str.split("=", maxsplit=1)
 
         if not name or len(name) == 0:
-            raise click.UsageError(f"Invalid secret format {set_str}, missing name")
+            raise click.UsageError(f"invalid secret format {set_str}, missing name")
 
         if " " in name:
             raise click.UsageError(
-                f"Invalid secret name {name}, spaces are not allowed"
+                f"invalid secret name {name}, spaces are not allowed"
             )
 
         if name in [s["name"] for s in upsert_secrets]:
-            raise click.UsageError(f"Duplicate secret name: {name}")
+            raise click.UsageError(f"duplicate secret name: {name}")
 
         upsert_secrets.append({"name": name, "value": value})
 
@@ -93,11 +93,30 @@ def set(ctx: Context, secrets: str):
         f"/platform/v1/organizations/{ctx.organization_id}/projects/{ctx.project_id}/secrets",
         json=upsert_secrets,
     )
+    if resp.status_code == 401:
+        raise click.ClickException(
+            "authentication failed. set TENSORLAKE_API_KEY in your environment, "
+            "or run 'tensorlake login' to re-authenticate."
+        )
+    if resp.status_code == 403:
+        raise click.ClickException(
+            "permission denied. set TENSORLAKE_API_KEY to a key with the required permissions, "
+            "or run 'tensorlake init' to reconfigure your project."
+        )
     if resp.status_code >= 400 and resp.status_code < 500:
-        error_message = resp.json().get("message", "Unknown error")
-        click.echo(f"Error: {error_message}")
-        return
-    resp.raise_for_status()
+        try:
+            error_message = resp.json().get("message", "unknown error")
+        except (ValueError, AttributeError):
+            error_message = resp.text or "unknown error"
+        raise click.ClickException(
+            f"could not set secrets: {error_message}. check your input and try again."
+        )
+    try:
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise click.ClickException(
+            f"server error ({e.response.status_code}) while setting secrets. try again in a few moments."
+        ) from None
 
     if len(upsert_secrets) == 1:
         click.echo("1 secret set")
@@ -155,7 +174,7 @@ def warning_missing_secrets(
 
     if len(missing_secrets) > 0:
         click.echo(
-            f"Your Tensorlake project has missing secrets: {', '.join(missing_secrets)}. Application invocations may fail until these secrets are set.",
+            f"your Tensorlake project has missing secrets: {', '.join(missing_secrets)}. application invocations may fail until these secrets are set.",
         )
 
     return len(missing_secrets) == 0, missing_secrets

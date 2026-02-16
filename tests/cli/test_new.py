@@ -18,7 +18,7 @@ class TestNewCommandSuccess(unittest.TestCase):
             result = runner.invoke(cli, ["new", "my-test-app"])
 
             self.assertEqual(result.exit_code, 0, f"Failed: {result.output}")
-            self.assertIn("Application created successfully!", result.output)
+            self.assertIn("application created successfully!", result.output)
 
             # Check files were created
             app_dir = Path("my_test_app")

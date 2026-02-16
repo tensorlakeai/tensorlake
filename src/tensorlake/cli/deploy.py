@@ -1,6 +1,5 @@
 import asyncio
 import os
-import traceback
 
 import click
 
@@ -51,7 +50,9 @@ def deploy(
     upgrade_running_requests: bool,
 ):
     """Deploys applications to Tensorlake Cloud."""
-    click.echo(f"⚙️  Preparing deployment for applications from {application_file_path}")
+    click.echo(
+        f"⚙️  Preparing deployment for applications from {application_file_path}"
+    )
 
     # Create builder client with proper authentication
     # If using API key, don't pass org/project IDs (they come from introspection)
@@ -68,13 +69,19 @@ def deploy(
     try:
         application_file_path: str = os.path.abspath(application_file_path)
         load_code(application_file_path)
+    except SyntaxError as e:
+        raise click.ClickException(
+            f"syntax error in {e.filename}, line {e.lineno}: {e.msg}"
+        ) from None
+    except ImportError as e:
+        raise click.ClickException(
+            f"failed to import application file: {e}. "
+            f"make sure all dependencies are installed in your current environment."
+        ) from None
     except Exception as e:
-        click.echo(
-            f"‼️  Failed to load the application file, please check the error message: {e}",
-            err=True,
-        )
-        traceback.print_exception(e)
-        raise click.Abort
+        raise click.ClickException(
+            f"failed to load {application_file_path}: {type(e).__name__}: {e}"
+        ) from None
 
     validation_messages: list[ValidationMessage] = validate_loaded_applications()
     print_validation_messages(validation_messages)
@@ -128,8 +135,10 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: list[Func
                     # Re-raise cancellation errors. Return early to skip printing the success message
                     raise error
                 except Exception as error:
-                    click.echo(error, err=True)
-                    raise click.Abort
+                    raise click.ClickException(
+                        f"image '{image_info.image.name}' build failed: {error}. "
+                        f"check your Image() configuration and try again."
+                    ) from None
 
     click.secho("\n✅ All images built successfully")
 
@@ -167,14 +176,11 @@ def _deploy_applications(
     except SDKUsageError as e:
         raise click.UsageError(str(e)) from None
     except TensorlakeError as e:
-        raise click.ClickException(f"Failed to deploy applications: {e}") from e
+        raise click.ClickException(f"failed to deploy applications: {e}") from e
     except Exception as e:
-        click.echo(
-            f"Applications could not be deployed, please check the error message: {e}",
-            err=True,
-        )
-        traceback.print_exception(e)
-        raise click.Abort
+        raise click.ClickException(
+            f"failed to deploy applications: {type(e).__name__}: {e}"
+        ) from None
 
     click.echo(
         "\n📚 Visit our documentation if you need more information about invoking applications: "

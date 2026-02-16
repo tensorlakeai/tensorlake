@@ -37,18 +37,18 @@ def handle_http_error(
     # Show technical details in debug mode or hint about debug mode
     if ctx.debug:
         click.echo("", err=True)
-        click.echo("Technical details:", err=True)
+        click.echo("technical details:", err=True)
         click.echo(f"  Status: {status_code} {e.response.reason_phrase}", err=True)
         click.echo(f"  URL: {e.request.url}", err=True)
         if e.response.text:
             click.echo(f"  Response: {e.response.text}", err=True)
         click.echo("", err=True)
-        click.echo("Stack trace:", err=True)
+        click.echo("stack trace:", err=True)
         traceback.print_exception(type(e), e, e.__traceback__, file=sys.stderr)
     else:
         click.echo("", err=True)
         click.echo(
-            "For technical details and stack trace, run with --debug or set TENSORLAKE_DEBUG=1",
+            "for technical details and stack trace, run with --debug or set TENSORLAKE_DEBUG=1",
             err=True,
         )
 
@@ -58,68 +58,68 @@ def handle_http_error(
 def _handle_unauthorized_error(ctx: Context) -> None:
     """Handle 401 Unauthorized errors."""
     click.echo(
-        "Authentication failed: Your credentials are invalid or expired.", err=True
+        "authentication failed: your credentials are invalid or expired.", err=True
     )
     click.echo("", err=True)
 
     if ctx.api_key:
-        click.echo("You're using an API key that is no longer valid.", err=True)
+        click.echo("you're using an API key that is no longer valid.", err=True)
         click.echo(
-            "Please check your API key or use 'tensorlake login' instead.", err=True
+            "please check your API key or use 'tensorlake login' instead.", err=True
         )
     else:
-        click.echo("Please run 'tensorlake login' to re-authenticate.", err=True)
+        click.echo("please run 'tensorlake login' to re-authenticate.", err=True)
 
 
 def _handle_forbidden_error(ctx: Context, operation: str) -> None:
     """Handle 403 Forbidden errors."""
-    click.echo(f"Permission denied while {operation}.", err=True)
+    click.echo(f"permission denied while {operation}.", err=True)
     click.echo("", err=True)
 
     # Show current configuration
     show_current_config(ctx)
 
     click.echo("", err=True)
-    click.echo("This usually means:", err=True)
-    click.echo("  • Your account doesn't have access to this project", err=True)
-    click.echo("  • The organization or project ID is incorrect", err=True)
-    click.echo("  • Your API key or token has insufficient permissions", err=True)
+    click.echo("this usually means:", err=True)
+    click.echo("  • your account doesn't have access to this project", err=True)
+    click.echo("  • the organization or project ID is incorrect", err=True)
+    click.echo("  • your API key or token has insufficient permissions", err=True)
     click.echo("", err=True)
-    click.echo("To fix:", err=True)
-    click.echo("  1. Run 'tensorlake init' to reconfigure your project", err=True)
-    click.echo(f"  2. Or verify your permissions at {ctx.cloud_url}", err=True)
+    click.echo("to fix:", err=True)
+    click.echo("  1. run 'tensorlake init' to reconfigure your project", err=True)
+    click.echo(f"  2. or verify your permissions at {ctx.cloud_url}", err=True)
 
 
 def _handle_not_found_error(operation: str) -> None:
     """Handle 404 Not Found errors."""
-    click.echo(f"Resource not found while {operation}.", err=True)
+    click.echo(f"resource not found while {operation}.", err=True)
     click.echo("", err=True)
-    click.echo("The requested resource doesn't exist or has been deleted.", err=True)
-    click.echo("Please check your configuration and try again.", err=True)
+    click.echo("the requested resource doesn't exist or has been deleted.", err=True)
+    click.echo("please check your configuration and try again.", err=True)
 
 
 def _handle_server_error(e: httpx.HTTPStatusError, operation: str) -> None:
     """Handle 5xx server errors."""
-    click.echo(f"Service error while {operation}.", err=True)
+    click.echo(f"service error while {operation}.", err=True)
     click.echo("", err=True)
     click.echo(
-        f"The server returned an error: {e.response.status_code} {e.response.reason_phrase}",
+        f"the server returned an error: {e.response.status_code} {e.response.reason_phrase}",
         err=True,
     )
     click.echo(
-        "This is usually a temporary issue. Please try again in a few moments.",
+        "this is usually a temporary issue. please try again in a few moments.",
         err=True,
     )
     click.echo("", err=True)
-    click.echo("If the problem persists, please contact support.", err=True)
+    click.echo("if the problem persists, please contact support.", err=True)
 
 
 def _handle_generic_error(e: httpx.HTTPStatusError, operation: str) -> None:
     """Handle generic HTTP errors."""
-    click.echo(f"Request failed while {operation}.", err=True)
+    click.echo(f"request failed while {operation}.", err=True)
     click.echo("", err=True)
     click.echo(
-        f"The server returned: {e.response.status_code} {e.response.reason_phrase}",
+        f"the server returned: {e.response.status_code} {e.response.reason_phrase}",
         err=True,
     )
 
@@ -128,8 +128,10 @@ def _handle_generic_error(e: httpx.HTTPStatusError, operation: str) -> None:
         error_data = e.response.json()
         if "message" in error_data:
             click.echo(f"Error: {error_data['message']}", err=True)
-    except Exception:
-        pass
+    except (ValueError, KeyError):
+        # Response is not JSON or has unexpected structure — show raw text instead
+        if e.response.text:
+            click.echo(f"Response: {e.response.text[:500]}", err=True)
 
 
 def show_current_config(ctx: Context) -> None:
@@ -139,7 +141,7 @@ def show_current_config(ctx: Context) -> None:
     Args:
         ctx: The CLI context
     """
-    click.echo("Current configuration:", err=True)
+    click.echo("current configuration:", err=True)
     click.echo(f"  Endpoint: {ctx.api_url}", err=True)
 
     org_source = ctx.get_organization_source()
