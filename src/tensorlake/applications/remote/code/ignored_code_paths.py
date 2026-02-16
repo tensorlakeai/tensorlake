@@ -3,8 +3,6 @@ import subprocess
 from pathlib import Path
 from typing import Optional, Set
 
-import click
-
 
 def ignored_code_paths(root_dir: str) -> Set[str]:
     """Returns a set of absolute paths to be ignored when loading or zipping application code.
@@ -24,7 +22,6 @@ def ignored_code_paths(root_dir: str) -> Set[str]:
         try:
             venv_path.relative_to(root)
             exclude_paths.add(str(venv_path))
-            click.echo(f"skipping active virtualenv: {venv_path}")
         except ValueError:
             # venv is not inside root_dir, ignore
             pass
@@ -36,19 +33,13 @@ def ignored_code_paths(root_dir: str) -> Set[str]:
             abs_child = str(Path(os.path.abspath(child)))
             if abs_child not in exclude_paths:
                 exclude_paths.add(abs_child)
-                click.echo(f"skipping detected virtualenv: {abs_child}")
 
     gitignore_path = root / ".gitignore"
     if gitignore_path.exists():
-        click.echo("detected .gitignore, trying to resolve ignored paths using git")
         git_ignored = _git_ignored_paths(root)
         if git_ignored is not None:
             exclude_paths.update(git_ignored)
         else:
-            click.echo(
-                "git is not available or this is not a git repository, "
-                "falling back to manual .gitignore parsing"
-            )
             exclude_paths.update(_parse_gitignore(root, gitignore_path))
 
     return exclude_paths
@@ -85,14 +76,9 @@ def _git_ignored_paths(root: Path) -> Optional[Set[str]]:
         if not line:
             continue
         # git outputs paths relative to cwd, with optional trailing '/' for dirs
-        is_dir = line.endswith("/")
         line = line.rstrip("/")
         abs_path = os.path.abspath(root / line)
         paths.add(abs_path)
-        if is_dir:
-            click.echo(f"skipping directory: {abs_path}")
-        else:
-            click.echo(f"skipping file: {abs_path}")
     return paths
 
 
@@ -150,15 +136,8 @@ def _parse_gitignore(root: Path, gitignore_path: Path) -> Set[str]:
                 if match.exists():
                     abs_path = os.path.abspath(match)
                     exclude_paths.add(abs_path)
-                    if match.is_dir():
-                        click.echo(f"skipping directory: {abs_path}")
-                    else:
-                        click.echo(f"skipping file: {abs_path}")
-        except (NotImplementedError, ValueError) as e:
-            click.echo(
-                f"skipping unsupported .gitignore pattern '{pattern}': {e}. "
-                f"install git for full .gitignore support.",
-                err=True,
-            )
+        except (NotImplementedError, ValueError):
+            # Ignore unrecognized or unsupported patterns
+            continue
 
     return exclude_paths
