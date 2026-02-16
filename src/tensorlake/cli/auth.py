@@ -86,11 +86,13 @@ def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
     try:
         start_response = httpx.post(login_start_url)
     except httpx.HTTPError as e:
-        raise click.ClickException(f"failed to connect to login service: {e}") from None
+        raise click.ClickException(
+            f"cannot reach {ctx.api_url}: {e}"
+        ) from None
 
     if not start_response.is_success:
         raise click.ClickException(
-            f"failed to start login process: {start_response.text}"
+            f"login service returned an error ({start_response.status_code}): {start_response.text}"
         )
 
     try:
@@ -132,7 +134,7 @@ def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
 
         if not poll_response.is_success:
             raise click.ClickException(
-                f"failed to poll login status: {poll_response.text}"
+                f"login service returned an error ({poll_response.status_code}): {poll_response.text}"
             )
 
         try:
@@ -153,16 +155,22 @@ def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
             case "approved":
                 wait_time = 0
             case _:
-                raise click.ClickException(f"unknown status: {status}")
+                raise click.ClickException(
+                    f"got unexpected login status '{status}'. run 'tensorlake login' again."
+                )
 
         if wait_time > 0:
             time.sleep(wait_time)
 
         if status == "expired":
-            raise click.ClickException("login request has expired. please try again.")
+            raise click.ClickException(
+                "login request has expired. run 'tensorlake login' to start a new one."
+            )
 
         if status == "failed":
-            raise click.ClickException("login request has failed. please try again.")
+            raise click.ClickException(
+                "login request was denied. run 'tensorlake login' to try again."
+            )
 
         if status == "approved":
             break
@@ -178,7 +186,7 @@ def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
 
     if not exchange_response.is_success:
         raise click.ClickException(
-            f"failed to exchange token: {exchange_response.text}"
+            f"login service returned an error ({exchange_response.status_code}): {exchange_response.text}"
         )
 
     try:

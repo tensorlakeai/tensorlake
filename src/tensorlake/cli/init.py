@@ -69,7 +69,8 @@ def run_init_flow(
     if organizations_response.status_code != 200:
         if interactive:
             click.echo(
-                f"failed to fetch organizations: {organizations_response.text}",
+                f"could not fetch organizations (HTTP {organizations_response.status_code}). "
+                f"run 'tensorlake login' to re-authenticate and try again.",
                 err=True,
             )
         raise click.Abort()
@@ -80,13 +81,18 @@ def run_init_flow(
     except (ValueError, KeyError) as e:
         if interactive:
             click.echo(
-                f"unexpected response while fetching organizations: {e}", err=True
+                "got an unexpected response from the server. "
+                "run 'tensorlake login' to re-authenticate and try again.",
+                err=True,
             )
         raise click.Abort()
 
     if not organizations:
         if interactive:
-            click.echo("no organizations found for the provided token.", err=True)
+            click.echo(
+                "no organizations found. create one at your TensorLake dashboard first.",
+                err=True,
+            )
         raise click.Abort()
     if len(organizations) == 1:
         organization = organizations[0]
@@ -120,7 +126,11 @@ def run_init_flow(
 
     if projects_response.status_code != 200:
         if interactive:
-            click.echo(f"failed to fetch projects: {projects_response.text}", err=True)
+            click.echo(
+                f"could not fetch projects (HTTP {projects_response.status_code}). "
+                f"run 'tensorlake login' to re-authenticate and try again.",
+                err=True,
+            )
         raise click.Abort()
 
     try:
@@ -128,12 +138,19 @@ def run_init_flow(
         projects = projects_page["items"]
     except (ValueError, KeyError) as e:
         if interactive:
-            click.echo(f"unexpected response while fetching projects: {e}", err=True)
+            click.echo(
+                "got an unexpected response from the server. "
+                "run 'tensorlake login' to re-authenticate and try again.",
+                err=True,
+            )
         raise click.Abort()
 
     if not projects:
         if interactive:
-            click.echo("no projects found in the selected organization.", err=True)
+            click.echo(
+                "no projects found in this organization. create one at your TensorLake dashboard first.",
+                err=True,
+            )
         raise click.Abort()
     if len(projects) == 1:
         project = projects[0]

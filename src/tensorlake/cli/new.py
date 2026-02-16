@@ -184,7 +184,7 @@ def new(name: str, force: bool):
     if not force:
         if python_file.exists():
             click.echo(
-                f"error: {filename} already exists. use --force to overwrite or choose a different name.",
+                f"'{filename}' already exists. use --force to overwrite, or choose a different name.",
                 err=True,
             )
             raise click.Abort()
@@ -247,12 +247,15 @@ def new(name: str, force: bool):
 
     except PermissionError as e:
         raise click.ClickException(
-            f"permission denied while creating application: {e}. "
-            f"check write permissions for the target directory."
+            f"permission denied: cannot write to '{target_dir}'. "
+            f"run with sudo or choose a directory you have write access to."
         ) from None
     except OSError as e:
-        raise click.ClickException(f"failed to create application files: {e}") from None
+        raise click.ClickException(
+            f"cannot create '{target_dir}': {e}. "
+            f"check that the path is valid and the disk is not full."
+        ) from None
     except Exception as e:
         raise click.ClickException(
-            f"failed to create application: {type(e).__name__}: {e}"
+            f"cannot create application: {type(e).__name__}: {e}"
         ) from None

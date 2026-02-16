@@ -136,7 +136,8 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: list[Func
                     raise error
                 except Exception as error:
                     raise click.ClickException(
-                        f"failed to build image '{image_info.image.name}': {error}"
+                        f"image '{image_info.image.name}' build failed: {error}. "
+                        f"check your Image() configuration and try again."
                     ) from None
 
     click.secho("\n✅ All images built successfully")

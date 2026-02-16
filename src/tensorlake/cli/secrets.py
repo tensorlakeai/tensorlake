@@ -93,17 +93,29 @@ def set(ctx: Context, secrets: str):
         f"/platform/v1/organizations/{ctx.organization_id}/projects/{ctx.project_id}/secrets",
         json=upsert_secrets,
     )
+    if resp.status_code == 401:
+        raise click.ClickException(
+            "authentication failed. set TENSORLAKE_API_KEY in your environment, "
+            "or run 'tensorlake login' to re-authenticate."
+        )
+    if resp.status_code == 403:
+        raise click.ClickException(
+            "permission denied. set TENSORLAKE_API_KEY to a key with the required permissions, "
+            "or run 'tensorlake init' to reconfigure your project."
+        )
     if resp.status_code >= 400 and resp.status_code < 500:
         try:
             error_message = resp.json().get("message", "unknown error")
         except (ValueError, AttributeError):
             error_message = resp.text or "unknown error"
-        raise click.ClickException(f"failed to set secrets: {error_message}")
+        raise click.ClickException(
+            f"could not set secrets: {error_message}. check your input and try again."
+        )
     try:
         resp.raise_for_status()
     except httpx.HTTPStatusError as e:
         raise click.ClickException(
-            f"failed to set secrets: server returned {e.response.status_code}"
+            f"server error ({e.response.status_code}) while setting secrets. try again in a few moments."
         ) from None
 
     if len(upsert_secrets) == 1:

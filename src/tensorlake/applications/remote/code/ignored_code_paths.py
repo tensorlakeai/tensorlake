@@ -7,14 +7,20 @@ import click
 
 
 def ignored_code_paths(root_dir: str) -> Set[str]:
-    """Returns a set of absolute paths to be ignored when loading or zipping application code."""
-    root = Path(root_dir).resolve()
+    """Returns a set of absolute paths to be ignored when loading or zipping application code.
+
+    All returned paths use os.path.abspath (not Path.resolve) to stay consistent
+    with walk_code() which compares paths using os.path.join / os.path.abspath.
+    Using Path.resolve() would follow symlinks and produce different strings on
+    macOS where /var -> /private/var, causing exclusion checks to silently fail.
+    """
+    root = Path(os.path.abspath(root_dir))
     exclude_paths = set()
 
     # Exclude the active virtualenv if it's inside the root directory.
     venv_path = os.environ.get("VIRTUAL_ENV")
     if venv_path:
-        venv_path = Path(venv_path).resolve()
+        venv_path = Path(os.path.abspath(venv_path))
         try:
             venv_path.relative_to(root)
             exclude_paths.add(str(venv_path))
@@ -27,10 +33,10 @@ def ignored_code_paths(root_dir: str) -> Set[str]:
     # pyvenv.cfg — the standard marker file present in every Python venv.
     for child in root.iterdir():
         if child.is_dir() and (child / "pyvenv.cfg").exists():
-            resolved = str(child.resolve())
-            if resolved not in exclude_paths:
-                exclude_paths.add(resolved)
-                click.echo(f"skipping detected virtualenv: {resolved}")
+            abs_child = str(Path(os.path.abspath(child)))
+            if abs_child not in exclude_paths:
+                exclude_paths.add(abs_child)
+                click.echo(f"skipping detected virtualenv: {abs_child}")
 
     gitignore_path = root / ".gitignore"
     if gitignore_path.exists():
@@ -81,17 +87,25 @@ def _git_ignored_paths(root: Path) -> Optional[Set[str]]:
         # git outputs paths relative to cwd, with optional trailing '/' for dirs
         is_dir = line.endswith("/")
         line = line.rstrip("/")
-        resolved = str((root / line).resolve())
-        paths.add(resolved)
+        abs_path = os.path.abspath(root / line)
+        paths.add(abs_path)
         if is_dir:
-            click.echo(f"skipping directory: {resolved}")
+            click.echo(f"skipping directory: {abs_path}")
         else:
-            click.echo(f"skipping file: {resolved}")
+            click.echo(f"skipping file: {abs_path}")
     return paths
 
 
 def _parse_gitignore(root: Path, gitignore_path: Path) -> Set[str]:
-    """Fallback .gitignore parser when git is not available."""
+    """Fallback .gitignore parser when git is not available.
+
+    Handles the key .gitignore semantics:
+    - Leading '/' anchors to root (stripped since root.glob is already rooted)
+    - Trailing '/' means directory-only match
+    - Patterns without '/' match at any depth (prepend '**/')
+    - '!' negation patterns are skipped (unsupported)
+    - '#' lines are comments, blank lines are ignored
+    """
     exclude_paths = set()
     patterns = []
     with gitignore_path.open("r") as f:
@@ -106,6 +120,9 @@ def _parse_gitignore(root: Path, gitignore_path: Path) -> Set[str]:
         if pattern.startswith("!"):
             continue
 
+        # Track whether the original pattern was anchored to root (had leading '/')
+        anchored = pattern.startswith("/")
+
         # Strip leading '/' — in .gitignore it anchors the pattern to the
         # repo root, which is already what root.glob() does.
         pattern = pattern.lstrip("/")
@@ -113,23 +130,30 @@ def _parse_gitignore(root: Path, gitignore_path: Path) -> Set[str]:
         if not pattern:
             continue
 
+        # Determine if this is a directory-only pattern (trailing '/')
+        dir_only = pattern.endswith("/")
+        pattern = pattern.rstrip("/")
+
+        # In .gitignore, patterns without a '/' match at any depth.
+        # Anchored patterns (had leading '/') or patterns containing '/'
+        # only match relative to root. Prepend '**/' for unanchored,
+        # slash-free patterns so Path.glob searches recursively.
+        if not anchored and "/" not in pattern:
+            glob_pattern = f"**/{pattern}"
+        else:
+            glob_pattern = pattern
+
         try:
-            if pattern.endswith("/"):
-                pattern = pattern.rstrip("/")
-                for match in root.glob(pattern):
+            for match in root.glob(glob_pattern):
+                if dir_only and not match.is_dir():
+                    continue
+                if match.exists():
+                    abs_path = os.path.abspath(match)
+                    exclude_paths.add(abs_path)
                     if match.is_dir():
-                        resolved = str(match.resolve())
-                        exclude_paths.add(resolved)
-                        click.echo(f"skipping directory: {resolved}")
-            else:
-                for match in root.glob(pattern):
-                    if match.exists():
-                        resolved = str(match.resolve())
-                        exclude_paths.add(resolved)
-                        if match.is_dir():
-                            click.echo(f"skipping directory: {resolved}")
-                        else:
-                            click.echo(f"skipping file: {resolved}")
+                        click.echo(f"skipping directory: {abs_path}")
+                    else:
+                        click.echo(f"skipping file: {abs_path}")
         except (NotImplementedError, ValueError) as e:
             click.echo(
                 f"skipping unsupported .gitignore pattern '{pattern}': {e}. "
