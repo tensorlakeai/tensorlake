@@ -171,9 +171,7 @@ class TestRecursiveMatching(unittest.TestCase):
 
             result = _parse_gitignore(root, gitignore)
             self.assertIn(_abspath(root, "node_modules"), result)
-            self.assertIn(
-                _abspath(root, "packages/frontend/node_modules"), result
-            )
+            self.assertIn(_abspath(root, "packages/frontend/node_modules"), result)
 
     def test_dotenv_matches_nested(self):
         """'.env' without '/' should match at any depth."""
@@ -489,9 +487,7 @@ class TestWalkCodeEndToEnd(unittest.TestCase):
             self.assertIn(_abspath(root, "src/main.py"), walked_files)
 
             # Files inside venv (detected by pyvenv.cfg) must be skipped
-            self.assertNotIn(
-                _abspath(root, "venv/lib/site.py"), walked_files
-            )
+            self.assertNotIn(_abspath(root, "venv/lib/site.py"), walked_files)
 
     def test_walk_skips_gitignored_nested_pycache(self):
         """walk_code must skip __pycache__ at all depths when gitignored."""

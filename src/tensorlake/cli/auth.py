@@ -86,9 +86,7 @@ def run_login_flow(ctx: Context, auto_init: bool = True) -> str:
     try:
         start_response = httpx.post(login_start_url)
     except httpx.HTTPError as e:
-        raise click.ClickException(
-            f"cannot reach {ctx.api_url}: {e}"
-        ) from None
+        raise click.ClickException(f"cannot reach {ctx.api_url}: {e}") from None
 
     if not start_response.is_success:
         raise click.ClickException(
