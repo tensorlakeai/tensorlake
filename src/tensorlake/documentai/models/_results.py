@@ -176,6 +176,14 @@ class ParseResult(BaseModel):
         default=None,
         description="Merged tables extracted from the document. This is a list of `MergedTable` objects containing the merged tables extracted from the document. Tables are merged if they are part of the same logical table.",
     )
+    filled_pdf_base64: Optional[str] = Field(
+        default=None,
+        description="Base64 encoded string of the filled PDF. Only present if the operation was a form filling edit.",
+    )
+    form_filling_metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Metadata associated with the form filling operation.",
+    )
 
     # ParseResult specific fields
     parse_id: str = Field(description="The unique identifier for the parse job")

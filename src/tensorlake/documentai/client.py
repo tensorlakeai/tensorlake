@@ -9,6 +9,7 @@ from typing import Optional
 from ._base import _BaseClient
 from ._classify import _ClassifyMixin
 from ._datasets import _DatasetMixin
+from ._edit import _EditMixin
 from ._extract import _ExtractMixin
 from ._files import _FilesMixin
 from ._parse import _ParseMixin
@@ -23,6 +24,7 @@ class DocumentAI(
     _ReadMixin,
     _ExtractMixin,
     _ClassifyMixin,
+    _EditMixin,
     _BaseClient,
 ):
     """
