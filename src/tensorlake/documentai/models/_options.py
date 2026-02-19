@@ -53,6 +53,10 @@ class EnrichmentOptions(BaseModel):
         None,
         description="The prompt to guide the table summarization. If not provided, a default prompt will be used. It is not required to provide a prompt. The prompt only has effect if `table_summarization` is set to `true`.",
     )
+    table_cell_grounding: Optional[bool] = Field(
+        None,
+        description="Boolean flag to enable grounding of table cells to their corresponding coordinates in the document. The default is `false`.",
+    )
 
 
 class PageClassConfig(BaseModel):
@@ -235,6 +239,29 @@ class StructuredExtractionOptions(BaseModel):
             return SimplePartitionStrategy(strategy=v["strategy"])
 
         return v
+
+
+class FormFillingOptions(BaseModel):
+    """
+    Options for form filling.
+    """
+
+    fill_prompt: Optional[str] = Field(
+        None,
+        description="The prompt to guide the form filling process.",
+    )
+    ignore_source_values: Optional[bool] = Field(
+        False,
+        description="If true, ignores existing values in the source form.",
+    )
+    no_acroform: Optional[bool] = Field(
+        False,
+        description="If true, disables AcroForm detection.",
+    )
+    no_gemini_detection: Optional[bool] = Field(
+        False,
+        description="If true, disables Gemini detection.",
+    )
 
 
 class Options(BaseModel):

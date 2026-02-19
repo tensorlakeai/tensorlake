@@ -8,6 +8,7 @@ from tensorlake.documentai.models import (
     ChunkingStrategy,
     DatasetDataFilter,
     EnrichmentOptions,
+    FormFillingOptions,
     Figure,
     MergedTable,
     MimeType,
@@ -55,6 +56,7 @@ __all__ = [
     "SimplePartitionStrategy",
     "PatternConfig",
     # Options
+    "FormFillingOptions",
     "EnrichmentOptions",
     "Options",
     "PageClassConfig",

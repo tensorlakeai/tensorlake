@@ -119,7 +119,7 @@ def _deserialize_error_response(resp: httpx.Response) -> ErrorResponse:
     try:
         error_response = ErrorResponse.model_validate(resp.json())
         return error_response
-    except ValidationError as e:
+    except (ValidationError, ValueError) as e:
         print(f"Failed to deserialize error response: {e}", file=sys.stderr)
         return ErrorResponse(
             message=str(resp.text),

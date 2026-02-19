@@ -26,6 +26,7 @@ from ._filters import DatasetDataFilter
 # Options
 from ._options import (
     EnrichmentOptions,
+    FormFillingOptions,
     Options,
     PageClassConfig,
     ParsingOptions,
@@ -65,6 +66,7 @@ __all__ = [
     "SimplePartitionStrategy",
     "PatternConfig",
     # Options
+    "FormFillingOptions",
     "EnrichmentOptions",
     "Options",
     "PageClassConfig",
