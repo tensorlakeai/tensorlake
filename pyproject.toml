@@ -50,7 +50,7 @@ pre-commit = "^4.5.1"
 grpcio = "1.60.0"
 grpcio-tools = "1.60.0"
 # grpcio-tools implicit dependency, have to pin to an old version too.
-setuptools = "^69.0.0"
+setuptools = ">=69,<79"
 
 [tool.poetry.plugins."poetry.command"]
 postinstall = "scripts:install_deps"
