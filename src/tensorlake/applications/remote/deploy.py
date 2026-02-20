@@ -10,7 +10,7 @@ from ..remote.manifests.application import (
     ApplicationManifest,
     create_application_manifest,
 )
-from .code.ignored_code_paths import ignored_code_paths
+from .code.ignored_code_paths import CodePathsSummary, ignored_code_paths
 from .code.loader import load_code
 from .code.zip import zip_code
 
@@ -20,7 +20,7 @@ def deploy_applications(
     upgrade_running_requests: bool = True,
     load_source_dir_modules: bool = False,
     api_client: APIClient | None = None,
-) -> None:
+) -> CodePathsSummary:
     """Deploys all applications in the supplied .py file so they are runnable in remote mode (i.e. on Tensorlake Cloud).
 
     `application_file_path` is a path to the .py file where the applications are defined.
@@ -30,13 +30,16 @@ def deploy_applications(
                                because applications in test code are already loaded into registry.
     `api_client` is an optional APIClient to use for deployment. If not supplied, a new client will be created from environment.
 
+    Returns a CodePathsSummary with details about which paths were ignored, and which patterns were skipped.
+
     Raises SDKUsageError if the APIClient configuration is not valid for the operation.
     Raises TensorlakeError on other errors.
     """
     # Work with absolute paths to make sure that the path comparisons work correctly.
     applications_file_path: str = os.path.abspath(applications_file_path)
     applications_dir_path: str = os.path.dirname(applications_file_path)
-    ignored_absolute_paths: Set[str] = ignored_code_paths(applications_dir_path)
+    paths_summary: CodePathsSummary = ignored_code_paths(applications_dir_path)
+    ignored_absolute_paths: Set[str] = paths_summary.ignored_paths
 
     if load_source_dir_modules:
         load_code(applications_file_path)
@@ -59,3 +62,5 @@ def deploy_applications(
                 code_zip=app_code,
                 upgrade_running_requests=upgrade_running_requests,
             )
+
+    return paths_summary

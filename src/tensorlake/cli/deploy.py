@@ -11,6 +11,7 @@ from tensorlake.applications.interface.function import (
     _FunctionConfiguration,
 )
 from tensorlake.applications.registry import get_functions
+from tensorlake.applications.remote.code.ignored_code_paths import CodePathsSummary
 from tensorlake.applications.remote.code.loader import load_code
 from tensorlake.applications.remote.curl_command import example_application_curl_command
 from tensorlake.applications.remote.deploy import deploy_applications
@@ -43,27 +44,25 @@ from tensorlake.cli.secrets import warning_missing_secrets
 )
 @require_auth_and_project
 def deploy(
-    auth: Context,
+    ctx: Context,
     application_file_path: str,
     # TODO: implement with image builder v2
     parallel_builds: bool,
     upgrade_running_requests: bool,
 ):
     """Deploys applications to Tensorlake Cloud."""
-    click.echo(
-        f"⚙️  Preparing deployment for applications from {application_file_path}"
-    )
+    click.echo(f"⚙️  Preparing deployment for applications from {application_file_path}")
 
     # Create builder client with proper authentication
     # If using API key, don't pass org/project IDs (they come from introspection)
     # If using PAT, pass org/project IDs for X-Forwarded headers
-    bearer_token = auth.api_key or auth.personal_access_token
+    bearer_token = ctx.api_key or ctx.personal_access_token
     builder_v2 = ImageBuilderV2Client(
         build_service=os.getenv("TENSORLAKE_BUILD_SERVICE")
-        or f"{auth.api_url}/images/v2",
+        or f"{ctx.api_url}/images/v2",
         api_key=bearer_token,
-        organization_id=auth.organization_id if not auth.api_key else None,
-        project_id=auth.project_id if not auth.api_key else None,
+        organization_id=ctx.organization_id if not ctx.api_key else None,
+        project_id=ctx.project_id if not ctx.api_key else None,
     )
 
     try:
@@ -92,13 +91,13 @@ def deploy(
         )
         raise click.Abort
 
-    warning_missing_secrets(auth, list(list_secret_names()))
+    warning_missing_secrets(ctx, list(list_secret_names()))
 
     functions: list[Function] = get_functions()
     asyncio.run(_prepare_images_v2(builder_v2, functions))
 
     _deploy_applications(
-        auth=auth,
+        ctx=ctx,
         application_file_path=application_file_path,
         upgrade_running_requests=upgrade_running_requests,
         functions=functions,
@@ -144,7 +143,7 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: list[Func
 
 
 def _deploy_applications(
-    auth: Context,
+    ctx: Context,
     application_file_path: str,
     upgrade_running_requests: bool,
     functions: list[Function],
@@ -152,12 +151,19 @@ def _deploy_applications(
     click.echo("⚙️  Deploying applications...\n")
 
     try:
-        deploy_applications(
+        paths_summary = deploy_applications(
             applications_file_path=application_file_path,
             upgrade_running_requests=upgrade_running_requests,
             load_source_dir_modules=False,  # Already loaded
-            api_client=auth.api_client,  # Use the authenticated API client from context
+            api_client=ctx.api_client,  # Use the authenticated API client from context
         )
+
+        # Always show ignored paths
+        _print_ignored_paths(paths_summary)
+
+        # Show skipped patterns only in debug mode
+        if ctx.debug:
+            _print_skipped_patterns(paths_summary)
 
         for application_function in filter_applications(functions):
             application_function: Function
@@ -165,7 +171,7 @@ def _deploy_applications(
                 f"🚀 Application `{application_function._name}` deployed successfully\n"
             )
             curl_command: str | None = example_application_curl_command(
-                api_url=auth.api_url,
+                api_url=ctx.api_url,
                 application=application_function,
                 file_paths=None,
             )
@@ -186,3 +192,39 @@ def _deploy_applications(
         "\n📚 Visit our documentation if you need more information about invoking applications: "
         "https://docs.tensorlake.ai/applications/quickstart#calling-applications\n\n"
     )
+
+
+def _print_ignored_paths(summary: CodePathsSummary) -> None:
+    """Print ignored paths summary (always shown)."""
+    click.echo("\n" + "=" * 80)
+    click.echo("📋 Ignored Paths Summary")
+    click.echo("=" * 80)
+
+    click.echo(
+        f"\nThe following paths were excluded from the deployment ({len(summary.ignored_paths)} total):"
+    )
+    if summary.ignored_paths:
+        for path in sorted(summary.ignored_paths):
+            click.echo(f"  - {path}")
+    else:
+        click.echo("  (none)")
+
+    click.echo("\n" + "=" * 80 + "\n")
+
+
+def _print_skipped_patterns(summary: CodePathsSummary) -> None:
+    """Print skipped patterns (debug mode only)."""
+    if not summary.skipped_patterns:
+        return
+
+    click.echo("\n" + "=" * 80)
+    click.echo("🔍 DEBUG: Skipped .gitignore Patterns")
+    click.echo("=" * 80)
+
+    click.echo(
+        f"\nThe following patterns could not be processed ({len(summary.skipped_patterns)} total):"
+    )
+    for pattern, reason in summary.skipped_patterns:
+        click.echo(f"  - {pattern}: {reason}")
+
+    click.echo("\n" + "=" * 80 + "\n")
