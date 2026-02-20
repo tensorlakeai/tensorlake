@@ -84,7 +84,7 @@ def api_function_tail_call(url: str) -> List[FileChunk]:
     print(f"api_function_tail_call called with url: {url}")
     assert url == "https://example.com"
     assert isinstance(url, str)
-    return file_chunker.awaitable(
+    return file_chunker.tail_call(
         File(content=bytes(b"hello"), content_type="text/plain"),
         num_chunks=3,
     )
@@ -162,8 +162,7 @@ class TestRunAllocation(unittest.TestCase):
                 )
 
                 allocation_id: str = "test-allocation-id"
-                alloc_result: AllocationResult = run_allocation_that_returns_output(
-                    self,
+                allocation_states: Iterator[AllocationState] = run_allocation(
                     stub,
                     request=CreateAllocationRequest(
                         allocation=Allocation(
@@ -176,6 +175,59 @@ class TestRunAllocation(unittest.TestCase):
                         ),
                     ),
                 )
+                current_allocation_state = "wait_blob_request"
+                for allocation_state in allocation_states:
+                    allocation_state: AllocationState
+
+                    if current_allocation_state == "wait_blob_request":
+                        if len(allocation_state.output_blob_requests) == 0:
+                            continue  # Received empty initial AllocationState, keep waiting.
+
+                        self.assertEqual(len(allocation_state.output_blob_requests), 1)
+                        blocking_call_args_blob_request: AllocationOutputBLOBRequest = (
+                            allocation_state.output_blob_requests[0]
+                        )
+                        blocking_call_args_blob: BLOB = create_tmp_blob(
+                            id=blocking_call_args_blob_request.id,
+                            chunks_count=1,
+                            chunk_size=blocking_call_args_blob_request.size,
+                        )
+                        stub.send_allocation_update(
+                            AllocationUpdate(
+                                allocation_id=allocation_id,
+                                output_blob=AllocationOutputBLOB(
+                                    status=Status(code=grpc.StatusCode.OK.value[0]),
+                                    blob=blocking_call_args_blob,
+                                ),
+                            )
+                        )
+                        current_allocation_state = "wait_blob_deletion"
+
+                    if current_allocation_state == "wait_blob_deletion":
+                        if len(allocation_state.output_blob_requests) == 0:
+                            current_allocation_state = "wait_function_call"
+
+                    if current_allocation_state == "wait_function_call":
+                        if len(allocation_state.function_calls) > 0:
+                            self.assertEqual(len(allocation_state.function_calls), 1)
+                            allocation_function_call: AllocationFunctionCall = (
+                                allocation_state.function_calls[0]
+                            )
+                            stub.send_allocation_update(
+                                AllocationUpdate(
+                                    allocation_id=allocation_id,
+                                    function_call_creation_result=AllocationFunctionCallCreationResult(
+                                        status=Status(code=grpc.StatusCode.OK.value[0]),
+                                        allocation_function_call_id=allocation_function_call.id,
+                                    ),
+                                )
+                            )
+                            current_allocation_state = "wait_result"
+
+                    if current_allocation_state == "wait_result":
+                        if allocation_state.HasField("result"):
+                            alloc_result: AllocationResult = allocation_state.result
+                            break
 
                 self.assertEqual(
                     alloc_result.outcome_code,
@@ -183,16 +235,19 @@ class TestRunAllocation(unittest.TestCase):
                 )
                 self.assertFalse(alloc_result.HasField("request_error_output"))
 
-                updates: ExecutionPlanUpdates = alloc_result.updates
-                self.assertTrue(updates.HasField("root_function_call_id"))
-                self.assertFalse(updates.HasField("start_at"))
-                self.assertEqual(len(updates.updates), 1)
-                update: ExecutionPlanUpdate = updates.updates[0]
+                tail_call_updates: ExecutionPlanUpdates = alloc_result.updates
+                self.assertTrue(tail_call_updates.HasField("root_function_call_id"))
+                self.assertFalse(tail_call_updates.HasField("start_at"))
+                self.assertEqual(len(tail_call_updates.updates), 0)
 
-                function_call: FunctionCall = update.function_call
-                self.assertEqual(
-                    alloc_result.updates.root_function_call_id, function_call.id
+                function_call_updates: ExecutionPlanUpdates = (
+                    allocation_function_call.updates
                 )
+                function_call_update: ExecutionPlanUpdate = (
+                    function_call_updates.updates[0]
+                )
+                self.assertTrue(function_call_update.HasField("function_call"))
+                function_call: FunctionCall = function_call_update.function_call
                 self.assertIsNotNone(function_call)
                 self.assertIsNotNone(function_call.id)
                 self.assertEqual(
@@ -204,29 +259,34 @@ class TestRunAllocation(unittest.TestCase):
                         function_name="file_chunker",
                     ),
                 )
+                self.assertEqual(
+                    function_call_updates.root_function_call_id, function_call.id
+                )
+                self.assertEqual(
+                    tail_call_updates.root_function_call_id, function_call.id
+                )
 
                 self.assertEqual(len(function_call.args), 2)
                 self.assertTrue(function_call.args[0].HasField("value"))
                 self.assertTrue(function_call.args[1].HasField("value"))
-                tail_call_args_blob: BLOB = alloc_result.uploaded_function_outputs_blob
                 arg_0: File = download_and_deserialize_so(
                     self,
                     function_call.args[0].value,
-                    tail_call_args_blob,
+                    blocking_call_args_blob,
                 )
                 self.assertEqual(arg_0.content, b"hello")
                 self.assertEqual(arg_0.content_type, "text/plain")
                 arg_0_metadata: ValueMetadata = read_so_metadata(
-                    self, function_call.args[0].value, tail_call_args_blob
+                    self, function_call.args[0].value, blocking_call_args_blob
                 )
                 arg_1: int = download_and_deserialize_so(
                     self,
                     function_call.args[1].value,
-                    tail_call_args_blob,
+                    blocking_call_args_blob,
                 )
                 self.assertEqual(arg_1, 3)
                 arg_1_metadata: ValueMetadata = read_so_metadata(
-                    self, function_call.args[1].value, tail_call_args_blob
+                    self, function_call.args[1].value, blocking_call_args_blob
                 )
 
                 function_call_metadata: FunctionCallMetadata = deserialize_metadata(
@@ -247,6 +307,7 @@ class TestRunAllocation(unittest.TestCase):
                 self.assertEqual(
                     function_call_metadata.kwargs["num_chunks"].collection, None
                 )
+
                 # Cleanup.
                 stub.delete_allocation(
                     DeleteAllocationRequest(

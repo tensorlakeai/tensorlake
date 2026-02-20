@@ -27,17 +27,17 @@ ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.defin
 @application()
 @function()
 def api_function_output_propagation(payload: str) -> str:
-    return foo.awaitable()
+    return foo.tail_call()
 
 
 @function()
 def foo() -> str:
-    return bar.awaitable()
+    return bar.tail_call()
 
 
 @function()
 def bar() -> str:
-    return buzz.awaitable()
+    return buzz.tail_call()
 
 
 @function()
@@ -59,22 +59,22 @@ class TestFunctionOutputPropagation(unittest.TestCase):
 @application()
 @function()
 def api_reducer_value_output_propagation(payload: str) -> str:
-    return foo_reducer_value.awaitable()
+    return foo_reducer_value.tail_call()
 
 
 @function()
 def foo_reducer_value() -> str:
-    return bar_reducer_value.awaitable()
+    return bar_reducer_value.tail_call()
 
 
 @function()
 def bar_reducer_value() -> str:
-    return buzz_reducer_value.awaitable()
+    return buzz_reducer_value.tail_call()
 
 
 @function()
 def buzz_reducer_value() -> str:
-    return concat_strings_value.awaitable.reduce("buzz_reducer_value")
+    return concat_strings_value.tail_call.reduce("buzz_reducer_value")
 
 
 @function()
@@ -96,27 +96,27 @@ class TestReducerValueOutputPropagation(unittest.TestCase):
 @application()
 @function()
 def api_reducer_subcall_output_propagation(payload: str) -> str:
-    return foo_reducer_subcall.awaitable()
+    return foo_reducer_subcall.tail_call()
 
 
 @function()
 def foo_reducer_subcall() -> str:
-    return bar_reducer_subcall.awaitable()
+    return bar_reducer_subcall.tail_call()
 
 
 @function()
 def bar_reducer_subcall() -> str:
-    return buzz_reducer_subcall.awaitable()
+    return buzz_reducer_subcall.tail_call()
 
 
 @function()
 def buzz_reducer_subcall() -> str:
-    return concat_strings_subcall.awaitable.reduce("buzz_reducer_subcall")
+    return concat_strings_subcall.tail_call.reduce("buzz_reducer_subcall")
 
 
 @function()
 def concat_strings_subcall(a: str, b: str) -> str:
-    return concat_strings_actually.awaitable(a, b)
+    return concat_strings_actually.tail_call(a, b)
 
 
 @function()

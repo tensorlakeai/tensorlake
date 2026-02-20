@@ -1,7 +1,8 @@
 from traceback import format_exception
 from typing import Any, List
 
-from ..interface import Awaitable, FunctionError, InternalError
+from ..interface import FunctionError, InternalError
+from ..interface.futures import Future
 from ..registry import get_class
 
 
@@ -21,12 +22,12 @@ def set_self_arg(args: List[Any], self_instance: Any) -> None:
 
 
 def create_function_error(
-    awaitable: Awaitable, cause: str | BaseException | None
+    future: Future, cause: str | BaseException | None
 ) -> FunctionError:
     if isinstance(cause, BaseException):
         exception_str: str = "".join(format_exception(cause))
-        return FunctionError(f"{awaitable} failed due to exception: \n{exception_str}")
+        return FunctionError(f"{future} failed due to exception: \n{exception_str}")
     elif isinstance(cause, str):
-        return FunctionError(f"{awaitable} failed: {cause}")
+        return FunctionError(f"{future} failed: {cause}")
     elif cause is None:
-        return FunctionError(f"{awaitable} failed")
+        return FunctionError(f"{future} failed")

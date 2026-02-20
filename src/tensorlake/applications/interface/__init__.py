@@ -1,7 +1,6 @@
 # Import here all public Applications SDK interfaces.
 # No imports outside of the interface Applications SDK package are allowed here.
 
-from .awaitables import RETURN_WHEN, Awaitable, Future
 from .decorators import application, cls, function
 from .exceptions import (
     DeserializationError,
@@ -19,6 +18,7 @@ from .exceptions import (
 )
 from .file import File
 from .function import Function
+from .futures import RETURN_WHEN, Future
 from .image import Image
 from .logger import Logger
 from .request import Request
@@ -39,7 +39,6 @@ __all__ = [
     "run_local_application",
     "run_remote_application",
     "function",
-    "Awaitable",
     "DeserializationError",
     "File",
     "Function",
