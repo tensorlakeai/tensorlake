@@ -1,11 +1,14 @@
-from collections.abc import Generator
+import asyncio
+from collections.abc import Coroutine, Generator
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, TypeVar, Union
 
 from tensorlake.vendor.nanoid.nanoid import generate as nanoid_generate
 
 from ..runtime_hooks import await_future as runtime_hook_await_future
+from ..runtime_hooks import coroutine_to_future as runtime_hook_coroutine_to_future
+from ..runtime_hooks import register_coroutine as runtime_hook_register_coroutine
 from ..runtime_hooks import run_futures as runtime_hook_run_futures
 from ..runtime_hooks import wait_futures as runtime_hook_wait_futures
 from .exceptions import InternalError, SDKUsageError, TensorlakeError
@@ -21,6 +24,14 @@ def _request_scoped_id() -> str:
     # for months and we don't want to ever collide these IDs between
     # function calls of the same request.
     return nanoid_generate()
+
+
+FutureType = TypeVar("FutureType", bound="Future")
+# Future itself, or a coroutine created by calling an async Tensorlake Function or an asyncio.Task that runs such coroutine.
+# Instead of a Future, user can pass any of these. We unwrap the Future in this case.
+_TensorlakeFutureWrapper = Union[
+    FutureType, Coroutine[Any, Any, FutureType], asyncio.Task
+]
 
 
 class _FutureResultMissingType:
@@ -39,10 +50,11 @@ class RETURN_WHEN(Enum):
 
 
 class Future:
-    """An object representing an ongoing computation in a Tensorlake Application.
+    """An object representing a computation in a Tensorlake Application.
 
     A Future tracks an asynchronous computation in Tensorlake Application
-    and provides access to its result.
+    and provides access to its result. A computation is not running on Future creation.
+    It is started by calling one of the run() methods, result() or awaiting the Future object.
 
     All public fields and methods of Future are meant to be used by users in their
     Tensorlake Application code. All internal fields and methods of Future prefixed
@@ -59,57 +71,46 @@ class Future:
         self._id: str = id
         # Set when running the Future.
         self._start_delay: float | None = None
-        self._tail_call: bool = False
+        self._run_hook_was_called: bool = False
+        # Set for async function Futures.
+        self._coroutine: Coroutine[Any, Any, Any] | None = None
         # Up to date result and exception, kept updated by runtime.
         # Lock is not needed because we're not doing any blocking reads/writes here.
         self._result: Any | _FutureResultMissingType = _FutureResultMissing
         self._exception: TensorlakeError | None = None
 
-    def _run(self) -> "Future":
-        """Runs this Future as soon as possible.
+    def run(self) -> "Future":
+        """Runs this Future as soon as possible and returns it.
 
+        Returns self for chaining with .result().
+
+        Raises SDKUsageError if the Future was already started.
         Raises TensorlakeError on error.
         """
-        self._start_delay = None
-        self._tail_call = False
+        if self._run_hook_was_called:
+            raise SDKUsageError(
+                f"Attempt to run Future that is already started: {self}"
+            )
+        self._run_hook_was_called = True
         runtime_hook_run_futures(futures=[self])
         return self
 
-    def _run_later(self, start_delay: float) -> "Future":
-        """Runs this Future after the given delay in seconds.
+    def run_later(self, start_delay: float) -> "Future":
+        """Runs this Future after the given delay in seconds and returns it.
 
         Raises TensorlakeError on error.
         """
-        self._start_delay = start_delay
-        self._tail_call = False
-        runtime_hook_run_futures(futures=[self])
-        return self
-
-    def _run_tail_call(self) -> "Future":
-        """Runs this Future as a tail call.
-
-        Raises TensorlakeError on error.
-        """
-        self._start_delay = None
-        self._tail_call = True
-        runtime_hook_run_futures(futures=[self])
-        return self
-
-    def set_result(self, result: Any):
-        """Mark the Future as done and set its result."""
-        self._result = result
-
-    def set_exception(self, exception: TensorlakeError):
-        """Mark the Future as failed and set its exception."""
-        self._exception = exception
-
-    @property
-    def exception(self) -> TensorlakeError | None:
-        """Returns the exception representing the failure of the future, or None if it is not completed yet or succeeded."""
-        return self._exception
+        if not self._run_hook_was_called:
+            self._start_delay = start_delay
+        return self.run()
 
     def __await__(self) -> Generator[None, None, Any]:
-        """Returns a generator for the result of the future.
+        """Runs the Future and returns a generator for the result.
+
+        The same Future can be awaited multiple times. The first await runs the Future,
+        subsequent awaits just wait for the result of the Future. This method is intended
+        to be used directly by async functions doing non-blocking calls to sync functions
+        via function.future().
 
         Generator:
             Raises RequestError if a function call represented by the Future raised RequestError.
@@ -119,11 +120,20 @@ class Future:
         """
         if self.done():
             return self._done_result()
+        if not self._run_hook_was_called:
+            self.run()
         yield from runtime_hook_await_future(self)
         return self._done_result()
 
+    @property
+    def exception(self) -> TensorlakeError | None:
+        """Returns the exception representing the failure of the future, or None if it is not completed yet or succeeded."""
+        return self._exception
+
     def result(self, timeout: float | None = None) -> Any:
         """Returns the result of the future, blocking until it is available.
+
+        Runs the future if it's not already running.
 
         Raises RequestError if a function call represented by the Future raised RequestError.
         Raises FunctionError if a function call represented by the Future failed.
@@ -132,6 +142,8 @@ class Future:
         """
         if self.done():
             return self._done_result()
+        if not self._run_hook_was_called:
+            self.run()
         runtime_hook_wait_futures(
             [self],
             timeout=timeout,
@@ -174,18 +186,36 @@ class Future:
 
         timeout can be used to control the maximum number of seconds to wait before returning.
         Returns a tuple of two lists: (done, not_done) depending on return_when.
+        The Futures must already by started when calling this method, otherwise SDKUsageError is raised.
 
         This is similar to concurrent.futures.wait:
         https://docs.python.org/3/library/concurrent.futures.html#concurrent.futures.wait
 
+        Raises SDKUsageError if any of the given futures were not started or if any of the given objects is not a Future.
         Raises TensorlakeError on error running the wait operation. Errors of each individual Future are
         accessible via their .exception property and they don't get raised by wait operation.
         """
+        for future in futures:
+            if not isinstance(future, Future):
+                raise SDKUsageError(f"Cannot run a non-Future object {future}.")
+            if not future._run_hook_was_called:
+                raise SDKUsageError(
+                    f"Attempt to wait on Future that was not started: {future}"
+                )
+
         return runtime_hook_wait_futures(
             futures=list(futures),
             timeout=timeout,
             return_when=return_when,
         )
+
+    def _set_result(self, result: Any):
+        """Mark the Future as done and set its result."""
+        self._result = result
+
+    def _set_exception(self, exception: TensorlakeError):
+        """Mark the Future as failed and set its exception."""
+        self._exception = exception
 
     def __reduce__(self):
         # This helps users to see that they made a coding mistake and used a Tensorlake Future
@@ -241,11 +271,11 @@ class ListFuture(Future):
     def __init__(
         self,
         id: str,
-        items: "list[Any | Future] | ListFuture",
+        items: "list[Any | _TensorlakeFutureWrapper[Future]] | _TensorlakeFutureWrapper[ListFuture]",
         metadata: _FutureListMetadata,
     ):
         super().__init__(id=id)
-        self._items: "list[Any | Future] | ListFuture" = items
+        self._items: "list[Any | _TensorlakeFutureWrapper[Future]] | _TensorlakeFutureWrapper[ListFuture]" = (items)
         self._metadata: _FutureListMetadata = metadata
 
     @property
@@ -258,7 +288,7 @@ class ListFuture(Future):
 
     def __repr__(self) -> str:
         # Shows exact structure of the Future. Used for debug logging.
-        if isinstance(self._items, list):
+        if isinstance(_unwrap_future(self._items), list):
             items_repr = ",\n    ".join(repr(item) for item in self._items)
         else:
             items_repr = repr(self._items)
@@ -272,10 +302,13 @@ class ListFuture(Future):
 
 def _make_map_operation_future(
     function_name: str,
-    items: Iterable[Any | Future] | ListFuture,
+    items: (
+        Iterable[Any | _TensorlakeFutureWrapper[Future]]
+        | _TensorlakeFutureWrapper[ListFuture]
+    ),
 ) -> ListFuture:
     items: list[Any | Future] | ListFuture = items
-    if not isinstance(items, ListFuture):
+    if not isinstance(_unwrap_future(items), ListFuture):
         items = list(items)  # should be iterable
     return ListFuture(
         id=_request_scoped_id(),
@@ -294,13 +327,13 @@ class FunctionCallFuture(Future):
         self,
         id: str,
         function_name: str,
-        args: List[Any | Future],
-        kwargs: Dict[str, Any | Future],
+        args: List[Any | _TensorlakeFutureWrapper[Future]],
+        kwargs: Dict[str, Any | _TensorlakeFutureWrapper[Future]],
     ):
         super().__init__(id=id)
         self._function_name: str = function_name
-        self._args: List[Any | Future] = args
-        self._kwargs: Dict[str, Any | Future] = kwargs
+        self._args: List[Any | _TensorlakeFutureWrapper[Future]] = args
+        self._kwargs: Dict[str, Any | _TensorlakeFutureWrapper[Future]] = kwargs
 
     def __repr__(self) -> str:
         # Shows exact structure of the Future. Used for debug logging.
@@ -332,13 +365,21 @@ class ReduceOperationFuture(Future):
         self,
         id: str,
         function_name: str,
-        items: list[Any | Future] | ListFuture,
-        initial: Any | Future | _InitialMissingType,
+        items: (
+            list[Any | _TensorlakeFutureWrapper[Future]]
+            | _TensorlakeFutureWrapper[ListFuture]
+        ),
+        initial: Any | _TensorlakeFutureWrapper[Future] | _InitialMissingType,
     ):
         super().__init__(id=id)
         self._function_name: str = function_name
-        self._items: list[Any | Future] | ListFuture = items
-        self._initial: Any | Future | _InitialMissingType = initial
+        self._items: (
+            list[Any | _TensorlakeFutureWrapper[Future]]
+            | _TensorlakeFutureWrapper[ListFuture]
+        ) = items
+        self._initial: Any | _TensorlakeFutureWrapper[Future] | _InitialMissingType = (
+            initial
+        )
 
     def __repr__(self) -> str:
         # Shows exact structure of the Future. Used for debug logging.
@@ -354,11 +395,13 @@ class ReduceOperationFuture(Future):
 
 def _make_reduce_operation_future(
     function_name: str,
-    items: Iterable[Any | Future] | ListFuture,
-    initial: Any | Future | _InitialMissingType,
+    items: (
+        Iterable[Any | _TensorlakeFutureWrapper[Future]]
+        | _TensorlakeFutureWrapper[ListFuture]
+    ),
+    initial: Any | _TensorlakeFutureWrapper[Future] | _InitialMissingType,
 ) -> ReduceOperationFuture:
-    items: list[Any | Future] | ListFuture = items
-    if not isinstance(items, ListFuture):
+    if not isinstance(_unwrap_future(items), ListFuture):
         items = list(items)
     return ReduceOperationFuture(
         id=_request_scoped_id(),
@@ -366,3 +409,47 @@ def _make_reduce_operation_future(
         items=items,
         initial=initial,
     )
+
+
+def _wrap_future_into_coroutine(future: Future) -> Coroutine[Any, Any, Any]:
+    """Wraps a Future into a coroutine that can be awaited.
+
+    The returned coroutine will wait until the future is done and then return its result or raise its exception.
+    """
+
+    # Use a verbose name for the coroutine function to make it easier to understand stack traces and debugging
+    # with async functions.
+    async def tensorlake_async_function_coroutine() -> Any:
+        # Blocks asyncio event loop until the Future is running.
+        # This is absolutely important for strict ordering guarantees of function call starts
+        # and thus determinism.
+        future.run()
+        # Unblocks asyncio event loop.
+        return await future
+        # Multiple Future.__await__() completions are not expected to be reordered because asyncio event
+        # loop processes events in FIFO order. So this implementation is expected to be deterministic.
+
+    coroutine: Coroutine[Any, Any, Any] = tensorlake_async_function_coroutine()
+    future._coroutine = coroutine
+    runtime_hook_register_coroutine(coroutine, future)
+    return coroutine
+
+
+def _unwrap_future(value: Any | _TensorlakeFutureWrapper[Future]) -> Any | Future:
+    """Unwraps a Future from the given value if it's a future wrapper. Otherwise, returns the value itself."""
+    if isinstance(value, Future):
+        return value
+
+    coroutine: Any | None = None
+    if isinstance(value, asyncio.Task):
+        coroutine = value.get_coro()
+    elif isinstance(value, Coroutine):
+        coroutine = value
+
+    if coroutine is not None:
+        future: Future | None = runtime_hook_coroutine_to_future(coroutine)
+        if future is not None:
+            return future
+
+    # Something else, just return the value itself.
+    return value

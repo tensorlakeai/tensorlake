@@ -1,9 +1,11 @@
+import asyncio
 import unittest
 
 import parameterized
 import validate_all_applications
 
 from tensorlake.applications import (
+    Future,
     Request,
     application,
     function,
@@ -56,8 +58,8 @@ async def async_app_calls_sync(x: int) -> int:
 @application()
 @function()
 def sync_app_calls_async(x: int) -> int:
-    doubled: int = async_double(x).result()
-    return async_add(x, doubled).result()
+    doubled: int = async_double.future(x).result()
+    return async_add.future(x, doubled).result()
 
 
 @application()
@@ -78,13 +80,13 @@ async def async_app_calls_mixed_reversed(x: int) -> int:
 @function()
 def sync_app_calls_mixed(x: int) -> int:
     doubled: int = sync_double(x)
-    return async_add(x, doubled).result()
+    return async_add.future(x, doubled).result()
 
 
 @application()
 @function()
 def sync_app_calls_mixed_reversed(x: int) -> int:
-    doubled: int = async_double(x).result()
+    doubled: int = async_double.future(x).result()
     return sync_add(x, doubled)
 
 
@@ -103,108 +105,108 @@ async def async_app_sync_map(items: list[int]) -> list[int]:
 @application()
 @function()
 def sync_app_async_map(items: list[int]) -> list[int]:
-    return async_double.map(items).result()
+    return async_double.future.map(items).result()
 
 
 @application()
 @function()
 async def async_app_async_reduce(items: list[int]) -> int:
-    return async_add.tail_call.reduce(items)
+    return async_add.future.reduce(items)
 
 
 @application()
 @function()
 async def async_app_sync_reduce(items: list[int]) -> int:
-    return sync_add.tail_call.reduce(items)
+    return sync_add.future.reduce(items)
 
 
 @application()
 @function()
 def sync_app_async_reduce(items: list[int]) -> int:
-    return async_add.tail_call.reduce(items)
+    return async_add.future.reduce(items).result()
 
 
 @application()
 @function()
 async def async_app_async_map_then_reduce(items: list[int]) -> int:
     doubled: list[int] = await async_double.map(items)
-    return async_add.tail_call.reduce(doubled)
+    return async_add.future.reduce(doubled)
 
 
 @application()
 @function()
 async def async_app_sync_map_then_async_reduce(items: list[int]) -> int:
     doubled: list[int] = sync_double.map(items)
-    return async_add.tail_call.reduce(doubled)
+    return async_add.future.reduce(doubled)
 
 
 @application()
 @function()
 def sync_app_async_map_then_sync_reduce(items: list[int]) -> int:
-    doubled: list[int] = async_double.map(items).result()
-    return sync_add.tail_call.reduce(doubled)
+    doubled: list[int] = async_double.future.map(items).result()
+    return sync_add.future.reduce(doubled)
 
 
 @application()
 @function()
 async def async_app_returns_future(x: int) -> int:
-    return async_double.tail_call(x)
+    return async_double.future(x)
 
 
 @application()
 @function()
 def sync_app_returns_future(x: int) -> int:
-    return sync_double.tail_call(x)
+    return sync_double.future(x)
 
 
 @application()
 @function()
 async def async_app_returns_sync_future(x: int) -> int:
-    return sync_double.tail_call(x)
+    return sync_double.future(x)
 
 
 @application()
 @function()
-async def async_app_passes_future_to_sync(x: int) -> int:
-    doubled = async_double(x)
-    return sync_add.tail_call(x, doubled)
+async def async_app_passes_coroutine_to_sync(x: int) -> int:
+    doubled: asyncio.Coroutine = async_double(x)
+    return sync_add.future(x, doubled)
 
 
 @application()
 @function()
-async def async_app_passes_future_to_async(x: int) -> int:
-    doubled = async_double(x)
-    return async_double.tail_call(doubled)
+async def async_app_passes_coroutine_to_async(x: int) -> int:
+    doubled: asyncio.Coroutine = async_double(x)
+    return async_double.future(doubled)
 
 
 @application()
 @function()
 def sync_app_passes_future_to_sync(x: int) -> int:
-    doubled = sync_double.future(x)
-    return sync_add.tail_call(x, doubled)
+    doubled: Future = sync_double.future(x)
+    return sync_add.future(x, doubled)
 
 
 @application()
 @function()
 async def async_app_passes_sync_future_to_async(x: int) -> int:
-    doubled = sync_double.future(x)
-    return async_double.tail_call(doubled)
+    doubled: Future = sync_double.future(x)
+    return async_double.future(doubled)
 
 
 @application()
 @function()
-async def async_app_chains_futures(x: int) -> int:
-    a = async_double(x)
-    b = async_double(x)
-    return sync_add.tail_call(a, b)
+async def async_app_chains_coroutines_and_futures(x: int) -> int:
+    a: asyncio.Coroutine = async_double(x)
+    b: asyncio.Coroutine = async_double(x)
+    return sync_add.future(a, b)
 
 
 @application()
 @function()
 def sync_app_chains_futures(x: int) -> int:
-    a = sync_double.future(x)
-    b = sync_double.future(x)
-    return sync_add.tail_call(a, b)
+    a: Future = sync_double.future(x)
+    b: Future = sync_double.future(x)
+    return sync_add.future(a, b)
 
 
 class TestSyncAsyncCalls(unittest.TestCase):
@@ -367,20 +369,20 @@ class TestSyncAsyncCalls(unittest.TestCase):
         self.assertEqual(request.output(), 10)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_async_app_passes_future_to_sync(self, _: str, is_remote: bool):
+    def test_async_app_passes_coroutine_to_sync(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(
-            async_app_passes_future_to_sync, is_remote, 5
+            async_app_passes_coroutine_to_sync, is_remote, 5
         )
         self.assertEqual(request.output(), 15)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_async_app_passes_future_to_async(self, _: str, is_remote: bool):
+    def test_async_app_passes_coroutine_to_async(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(
-            async_app_passes_future_to_async, is_remote, 5
+            async_app_passes_coroutine_to_async, is_remote, 5
         )
         self.assertEqual(request.output(), 20)
 
@@ -401,10 +403,12 @@ class TestSyncAsyncCalls(unittest.TestCase):
         self.assertEqual(request.output(), 20)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_async_app_chains_futures(self, _: str, is_remote: bool):
+    def test_async_app_chains_coroutines_and_futures(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
-        request: Request = run_application(async_app_chains_futures, is_remote, 5)
+        request: Request = run_application(
+            async_app_chains_coroutines_and_futures, is_remote, 5
+        )
         self.assertEqual(request.output(), 20)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])

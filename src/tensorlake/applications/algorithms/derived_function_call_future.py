@@ -11,9 +11,7 @@ def derived_function_call_future(
 
     Raises TensorlakeError on error.
     """
+    future: FunctionCallFuture = function.future(*args, **kwargs)
     if source._start_delay is not None:
-        return function.future.call_later(source._start_delay, *args, **kwargs)
-    elif source._tail_call:
-        return function.tail_call(*args, **kwargs)
-    else:
-        return function.future(*args, **kwargs)
+        future._start_delay = source._start_delay
+    return future

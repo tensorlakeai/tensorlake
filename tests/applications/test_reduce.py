@@ -28,7 +28,7 @@ def success_api_function_awaitable_collection(x: int) -> AccumulatedState:
     seq: list[AccumulatedState] = transform_int_to_accumulated_state.map(
         generate_seq(x)
     )
-    return accumulate_reduce.tail_call.reduce(seq, AccumulatedState(sum=0))
+    return accumulate_reduce.future.reduce(seq, AccumulatedState(sum=0))
 
 
 @application()
@@ -37,7 +37,7 @@ async def async_success_api_function_awaitable_collection(x: int) -> Accumulated
     seq: list[AccumulatedState] = await async_transform_int_to_accumulated_state.map(
         generate_seq(x)
     )
-    return async_accumulate_reduce.tail_call.reduce(seq, AccumulatedState(sum=0))
+    return async_accumulate_reduce.future.reduce(seq, AccumulatedState(sum=0))
 
 
 @application()
@@ -46,7 +46,7 @@ def success_api_function_value_collection(x: int) -> AccumulatedState:
     seq: list[AccumulatedState] = [
         transform_int_to_accumulated_state(i) for i in generate_seq(x)
     ]
-    return accumulate_reduce.tail_call.reduce(seq, AccumulatedState(sum=0))
+    return accumulate_reduce.future.reduce(seq, AccumulatedState(sum=0))
 
 
 @application()
@@ -55,7 +55,7 @@ async def async_success_api_function_value_collection(x: int) -> AccumulatedStat
     seq: list[AccumulatedState] = [
         await async_transform_int_to_accumulated_state(i) for i in generate_seq(x)
     ]
-    return async_accumulate_reduce.tail_call.reduce(seq, AccumulatedState(sum=0))
+    return async_accumulate_reduce.future.reduce(seq, AccumulatedState(sum=0))
 
 
 # TODO: We need to allow a future as reducer input so tensorlake functions can generate sequences.
@@ -91,7 +91,7 @@ async def async_accumulate_reduce(
 @function()
 def fail_api_function(x: int) -> AccumulatedState:
     seq = [transform_int_to_accumulated_state(i) for i in generate_seq(x)]
-    return accumulate_reduce_fail_at_3.tail_call.reduce(seq, AccumulatedState(sum=0))
+    return accumulate_reduce_fail_at_3.future.reduce(seq, AccumulatedState(sum=0))
 
 
 @application()
@@ -100,7 +100,7 @@ async def async_fail_api_function(x: int) -> AccumulatedState:
     seq: list[AccumulatedState] = [
         await async_transform_int_to_accumulated_state(i) for i in generate_seq(x)
     ]
-    return accumulate_reduce_fail_at_3.tail_call.reduce(seq, AccumulatedState(sum=0))
+    return accumulate_reduce_fail_at_3.future.reduce(seq, AccumulatedState(sum=0))
 
 
 @function()
@@ -116,52 +116,52 @@ def accumulate_reduce_fail_at_3(
 @application()
 @function()
 def api_reduce_no_items_no_initial(_: Any) -> AccumulatedState:
-    return accumulate_reduce.tail_call.reduce([])
+    return accumulate_reduce.future.reduce([])
 
 
 @application()
 @function()
 async def async_api_reduce_no_items_no_initial(_: Any) -> AccumulatedState:
-    return async_accumulate_reduce.tail_call.reduce([])
+    return async_accumulate_reduce.future.reduce([])
 
 
 @application()
 @function()
 def api_reduce_no_items_with_initial(_: Any) -> AccumulatedState:
-    return accumulate_reduce.tail_call.reduce([], AccumulatedState(sum=10))
+    return accumulate_reduce.future.reduce([], AccumulatedState(sum=10))
 
 
 @application()
 @function()
 async def async_api_reduce_no_items_with_initial(_: Any) -> AccumulatedState:
-    return async_accumulate_reduce.tail_call.reduce([], AccumulatedState(sum=10))
+    return async_accumulate_reduce.future.reduce([], AccumulatedState(sum=10))
 
 
 @application()
 @function()
 def api_reduce_one_value_item(_: Any) -> AccumulatedState:
-    return accumulate_reduce.tail_call.reduce([AccumulatedState(sum=10)])
+    return accumulate_reduce.future.reduce([AccumulatedState(sum=10)])
 
 
 @application()
 @function()
 async def async_api_reduce_one_value_item(_: Any) -> AccumulatedState:
-    return async_accumulate_reduce.tail_call.reduce([AccumulatedState(sum=10)])
+    return async_accumulate_reduce.future.reduce([AccumulatedState(sum=10)])
 
 
 @application()
 @function()
-def api_reduce_one_awaitable_item(_: Any) -> AccumulatedState:
-    # User has to use generate_single_value.tail_call() because Future returned
-    # by generate_single_value.tail_call() will be used as the tail call result
+def api_reduce_one_future_item(_: Any) -> AccumulatedState:
+    # User has to use generate_single_value.future() because Future returned
+    # by generate_single_value.future() will be used as the tail call result
     # of this function.
-    return accumulate_reduce.tail_call.reduce([generate_single_value.tail_call()])
+    return accumulate_reduce.future.reduce([generate_single_value.future()])
 
 
 @application()
 @function()
-async def async_api_reduce_one_awaitable_item(_: Any) -> AccumulatedState:
-    return async_accumulate_reduce.tail_call.reduce([generate_single_value.tail_call()])
+async def async_api_reduce_one_future_item(_: Any) -> AccumulatedState:
+    return async_accumulate_reduce.future.reduce([generate_single_value.future()])
 
 
 @function()
@@ -173,28 +173,28 @@ def generate_single_value() -> AccumulatedState:
 @function()
 def api_reduce_mapped_collection_nonblocking(_: Any) -> AccumulatedState:
     mapped_collection = transform_int_to_accumulated_state.future.map([1, 2, 4])
-    return accumulate_reduce.tail_call.reduce(mapped_collection)
+    return accumulate_reduce.future.reduce(mapped_collection)
 
 
 @application()
 @function()
 async def async_api_reduce_mapped_collection_nonblocking(_: Any) -> AccumulatedState:
     mapped_collection = async_transform_int_to_accumulated_state.map([1, 2, 4])
-    return async_accumulate_reduce.tail_call.reduce(mapped_collection)
+    return async_accumulate_reduce.future.reduce(mapped_collection)
 
 
 @application()
 @function()
 def api_reduce_mapped_collection_tailcall(_: Any) -> AccumulatedState:
     mapped_collection = transform_int_to_accumulated_state.future.map([1, 2, 4])
-    return accumulate_reduce.tail_call.reduce(mapped_collection)
+    return accumulate_reduce.future.reduce(mapped_collection)
 
 
 @application()
 @function()
 async def async_api_reduce_mapped_collection_tailcall(_: Any) -> AccumulatedState:
     mapped_collection = async_transform_int_to_accumulated_state.map([1, 2, 4])
-    return async_accumulate_reduce.tail_call.reduce(mapped_collection)
+    return async_accumulate_reduce.future.reduce(mapped_collection)
 
 
 @application()
@@ -208,7 +208,7 @@ def api_reduce_of_reduced_list(_: Any) -> str:
         reduced_str_2,
         reduced_str_3,
     ]
-    return concat_strs.tail_call.reduce(list_of_reduced_strs)
+    return concat_strs.future.reduce(list_of_reduced_strs)
 
 
 @function()
@@ -227,7 +227,7 @@ async def async_api_reduce_of_reduced_list(_: Any) -> str:
         reduced_str_2,
         reduced_str_3,
     ]
-    return async_concat_strs.tail_call.reduce(list_of_reduced_strs)
+    return async_concat_strs.future.reduce(list_of_reduced_strs)
 
 
 @function()
@@ -246,7 +246,7 @@ def api_reduce_of_mapped_collections(_: Any) -> str:
         concat_strs.future.reduce(mapped_collection_2),
         concat_strs.future.reduce(mapped_collection_3),
     ]
-    return concat_strs.tail_call.reduce(list_of_reduced_strs)
+    return concat_strs.future.reduce(list_of_reduced_strs)
 
 
 @function()
@@ -265,7 +265,7 @@ async def async_api_reduce_of_mapped_collections(_: Any) -> str:
         async_concat_strs.reduce(mapped_collection_2),
         async_concat_strs.reduce(mapped_collection_3),
     ]
-    return async_concat_strs.tail_call.reduce(list_of_reduced_strs)
+    return async_concat_strs.future.reduce(list_of_reduced_strs)
 
 
 @function()
@@ -410,9 +410,8 @@ class TestReduce(unittest.TestCase):
     def test_reduce_one_function_call_item(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
-
         request: Request = run_application(
-            api_reduce_one_awaitable_item,
+            api_reduce_one_future_item,
             is_remote,
             None,
         )
@@ -425,7 +424,7 @@ class TestReduce(unittest.TestCase):
             deploy_applications(__file__)
 
         request: Request = run_application(
-            async_api_reduce_one_awaitable_item,
+            async_api_reduce_one_future_item,
             is_remote,
             None,
         )
@@ -531,7 +530,6 @@ class TestReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_reduce_of_mapped_collections(self, _: str, is_remote: bool):
-        is_remote: bool = False
         if is_remote:
             deploy_applications(__file__)
 

@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 
 import parameterized
@@ -62,13 +63,13 @@ def sync_three_futures_consume_same_future_tail_call(x: int) -> int:
     a: Future = sync_add.future(doubled, 1)
     b: Future = sync_add.future(doubled, 2)
     c: Future = sync_add.future(doubled, 3)
-    return sync_add.tail_call(sync_add(a, b), c)
+    return sync_add.future(sync_add.future(a, b), c)
 
 
 @application()
 @function()
 async def async_sync_three_futures_consume_same_future(x: int) -> int:
-    doubled: Future = async_double(x)
+    doubled: asyncio.Coroutine = async_double(x)
     a: int = await async_add(doubled, 1)
     b: int = await async_add(doubled, 2)
     c: int = await async_add(doubled, 3)
@@ -78,11 +79,11 @@ async def async_sync_three_futures_consume_same_future(x: int) -> int:
 @application()
 @function()
 async def async_three_futures_consume_same_future_tail_call(x: int) -> int:
-    doubled: Future = async_double(x)
-    a: Future = async_add(doubled, 1)
-    b: Future = async_add(doubled, 2)
-    c: Future = async_add(doubled, 3)
-    return async_add.tail_call(async_add(a, b), c)
+    doubled: asyncio.Coroutine = async_double(x)
+    a: asyncio.Coroutine = async_add(doubled, 1)
+    b: asyncio.Coroutine = async_add(doubled, 2)
+    c: asyncio.Coroutine = async_add(doubled, 3)
+    return async_add.future(async_add(a, b), c)
 
 
 class TestFuturesConsumeFutures(unittest.TestCase):

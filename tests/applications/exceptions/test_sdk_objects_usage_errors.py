@@ -98,6 +98,7 @@ def return_function() -> Any:
 @function()
 def future_wait_wrong_return_when(_: str) -> str:
     future: Future = other_function.future(1)
+    future.run()
     try:
         Future.wait([future, future], return_when="wrong_value")
     except SDKUsageError as e:
@@ -114,9 +115,23 @@ def return_map_future(_: str) -> list:
 
 @application()
 @function()
-def return_non_tail_call_future() -> None:
-    # Check that returning a non-tail-call Future fails the function.
-    return other_function.future(1)
+def run_already_started_future(_: str) -> str:
+    future: Future = other_function.future(1)
+    future.run()
+    try:
+        future.run()
+    except SDKUsageError as e:
+        assert "Attempt to run Future that is already started" in str(e)
+        return "success"
+
+
+@application()
+@function()
+def tail_call_running_future() -> None:
+    # Check that returning a running Future at tail call fails the function.
+    future: Future = other_function.future(1)
+    future.run()
+    return future
 
 
 @function()
@@ -247,15 +262,26 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
         self.assertEqual(str(context.exception), "function_error")
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_return_non_tail_call_future(self, _, is_remote: bool):
+    def test_run_already_started_future(self, _, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
 
         request: Request = run_application(
-            return_non_tail_call_future,
+            run_already_started_future,
+            is_remote,
+            "whatever",
+        )
+        self.assertEqual(request.output(), "success")
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_tail_call_running_future(self, _, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+
+        request: Request = run_application(
+            tail_call_running_future,
             is_remote,
         )
-        # Future not created using function.tail_call cannot be returned as a tail call.
         with self.assertRaises(RequestFailed) as context:
             request.output()
         self.assertEqual(str(context.exception), "function_error")

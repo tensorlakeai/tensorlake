@@ -1,4 +1,4 @@
-from collections.abc import Generator
+from collections.abc import Coroutine, Generator
 from typing import Any, Callable, List, TypeVar
 
 from .interface.exceptions import InternalError, SDKUsageError
@@ -123,6 +123,64 @@ def clear_run_futures_hook() -> None:
     """
     global __run_futures
     __run_futures = None
+
+
+__register_coroutine: Callable[[Coroutine, Future], None] = None
+
+
+def register_coroutine(coroutine: Coroutine, future: Future) -> None:
+    """Associates the given coroutine with the given future."""
+    global __register_coroutine
+    if __register_coroutine is None:
+        _raise_multiprocessing_usage_error()
+
+    return __register_coroutine(coroutine, future)
+
+
+def set_register_coroutine_hook(hook: Any) -> None:
+    global __register_coroutine
+    if __register_coroutine is not None:
+        raise InternalError("__register_coroutine runtime hook already initialized")
+
+    __register_coroutine = hook
+
+
+def clear_register_coroutine_hook() -> None:
+    """Clears the __register_coroutine runtime hook if set.
+
+    Never raises.
+    """
+    global __register_coroutine
+    __register_coroutine = None
+
+
+__coroutine_to_future: Callable[[Coroutine], Future | None] = None
+
+
+def coroutine_to_future(coroutine: Coroutine) -> Future | None:
+    """Returns Future of the given coroutine if any."""
+    global __coroutine_to_future
+    if __coroutine_to_future is None:
+        _raise_multiprocessing_usage_error()
+
+    return __coroutine_to_future(coroutine)
+
+
+def set_coroutine_to_future_hook(hook: Any) -> None:
+    global __coroutine_to_future
+    if __coroutine_to_future is not None:
+        raise InternalError("__coroutine_to_future runtime hook already initialized")
+
+    __coroutine_to_future = hook
+
+
+def clear_coroutine_to_future_hook() -> None:
+    """Clears the __coroutine_to_future runtime hook if set.
+
+    Never raises.
+    """
+    global __coroutine_to_future
+    __coroutine_to_future = None
 
 
 def _raise_multiprocessing_usage_error() -> None:

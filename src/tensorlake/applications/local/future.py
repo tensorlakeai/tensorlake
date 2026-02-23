@@ -1,9 +1,10 @@
 import time
 
 from ..interface.futures import Future
-from ..metadata import FunctionCallMetadata, ReduceOperationMetadata
+from ..metadata import FunctionCallMetadata
+from .future_run.return_output_future_metadata import ReturnOutputFutureMetadata
 
-UserFutureMetadataType = FunctionCallMetadata | ReduceOperationMetadata | None
+UserFutureMetadataType = FunctionCallMetadata | ReturnOutputFutureMetadata | None
 
 
 class LocalFuture:

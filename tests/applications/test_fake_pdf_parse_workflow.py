@@ -63,7 +63,7 @@ def parse_pdf_api(payload: RequestPayload) -> ResponsePayload:
     # Use map operation running in background as argument to other function calls.
     chunk_embeddings: Future = chunk_and_embed.future.map(
         [chunk.content for chunk in response.chunks]
-    )
+    ).run()
 
     # We can't return chunk_embeddings future here because there's no function call ID associated with it.
     # Due to this limitation we have to use a blocking call.
@@ -73,12 +73,11 @@ def parse_pdf_api(payload: RequestPayload) -> ResponsePayload:
     chunks: List[ChunkEmbeddings] = chunk_embeddings.result()
 
     # Spawn a recurring background function to watch for the PDF file updates.
-    watch_pdf_updates.future.call_later(
-        start_delay=0.5,
+    watch_pdf_updates.future(
         url=payload.url,
         page_range=payload.page_range,
         iteration=0,
-    )
+    ).run_later(start_delay=0.5)
     return ResponsePayload(chunks=chunks)
 
 
@@ -108,7 +107,7 @@ def chunk_and_embed(page: str) -> ChunkEmbeddings:
     output = ChunkEmbeddings(chunk_embeddings=chunk_embeddings)
     # Spawn IndexEmbedding function call in background to save the embeddings.
     # We're not interested in waiting for it to complete or value the function returned.
-    IndexEmbedding().index.future(output)
+    IndexEmbedding().index.future(output).run()
 
     return output
 
@@ -144,12 +143,11 @@ def watch_pdf_updates(url: str, page_range: str, iteration: int) -> None:
     # Don't loop forever in tests.
     if iteration < 5:
         # Schedule next check in 0.1 seconds.
-        watch_pdf_updates.future.call_later(
-            start_delay=0.1,
+        watch_pdf_updates.future(
             url=url,
             page_range=page_range,
             iteration=iteration + 1,
-        )
+        ).run_later(start_delay=0.1)
 
 
 class TestPDFParseDataWorkflow(unittest.TestCase):

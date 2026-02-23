@@ -84,7 +84,7 @@ def api_function_tail_call(url: str) -> List[FileChunk]:
     print(f"api_function_tail_call called with url: {url}")
     assert url == "https://example.com"
     assert isinstance(url, str)
-    return file_chunker.tail_call(
+    return file_chunker.future(
         File(content=bytes(b"hello"), content_type="text/plain"),
         num_chunks=3,
     )

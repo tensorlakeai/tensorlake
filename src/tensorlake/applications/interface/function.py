@@ -1,5 +1,6 @@
 import inspect
 import types
+from collections.abc import Coroutine
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List
 
@@ -14,6 +15,7 @@ from .futures import (
     _make_map_operation_future,
     _make_reduce_operation_future,
     _request_scoped_id,
+    _wrap_future_into_coroutine,
 )
 from .image import Image
 from .retries import Retries
@@ -74,9 +76,6 @@ class Function:
         self._function_config: _FunctionConfiguration | None = None
         self._application_config: _ApplicationConfiguration | None = None
         self._future_factory: FunctionFutureFactory = FunctionFutureFactory(self)
-        self._tail_call_future_factory: FunctionTailCallFutureFactory = (
-            FunctionTailCallFutureFactory(self)
-        )
         # Mimic original function if it's a regular user defined function.
         if inspect.isfunction(self._original_function):
             # Copy original function metadata into this Function object so function inspection
@@ -104,29 +103,31 @@ class Function:
                         self, mimic_attr, getattr(self._original_function, mimic_attr)
                     )
 
-    def __call__(self, *args, **kwargs) -> Any | Future:
-        """Calls the function and returns its result.
+    def __call__(self, *args, **kwargs) -> Any | Coroutine[Any, Any, Any]:
+        """Calls the function and returns its result if sync function. Returns a coroutine otherwise.
 
-        If the function is async function then returns its Future and doesn't block.
+        If the function is async function then returns its coroutine and doesn't block.
+        The coroutine will only be executed if awaited or if started by user using i.e. asyncio.create_task().
         Otherwise, blocks until the result is ready and returns it.
 
         Raises RequestError if the function raised RequestError.
         Raises FunctionError if the function failed.
         Raises TensorlakeError on other errors.
         """
-        future: FunctionCallFuture = self._make_function_call_future(
-            list(args),
-            dict(kwargs),
-        )._run()
+        future: FunctionCallFuture = self.future(*args, **kwargs)
         if inspect.iscoroutinefunction(self):
-            return future
+            return _wrap_future_into_coroutine(future)
         else:
+            future.run()
             return future.result()
 
-    def map(self, items: Iterable[Any | Future] | ListFuture) -> Iterable[Any] | Future:
-        """Returns an iterable with every item transformed using the function.
+    def map(
+        self, items: Iterable[Any | Future] | ListFuture
+    ) -> Iterable[Any] | Coroutine[Any, Any, Any]:
+        """Returns an iterable with every item transformed using the function if sync function. Returns a coroutine otherwise.
 
-        If the function is async function then returns a Future for the end result and doesn't block.
+        If the function is async function then returns its coroutine and doesn't block.
+        The coroutine will only be executed if awaited or if started by user using i.e. asyncio.create_task().
         Otherwise, blocks until the result is ready and returns an iterable of results.
         Similar to https://docs.python.org/3/library/functions.html#map except all transformations
         are done in parallel.
@@ -135,13 +136,11 @@ class Function:
         Raises FunctionError if the function failed.
         Raises TensorlakeError on other errors.
         """
-        future: ListFuture = _make_map_operation_future(
-            function_name=self._function_config.function_name,
-            items=items,
-        )._run()
+        future: ListFuture = self.future.map(items)
         if inspect.iscoroutinefunction(self):
-            return future
+            return _wrap_future_into_coroutine(future)
         else:
+            future.run()
             return future.result()
 
     def reduce(
@@ -149,10 +148,11 @@ class Function:
         items: Iterable[Any | Future] | ListFuture,
         initial: Any | Future | _InitialMissingType = _InitialMissing,
         /,
-    ) -> Any | Future:
-        """Performs a reduce operation using the supplied function over the supplied items.
+    ) -> Any | Coroutine[Any, Any, Any]:
+        """Performs a reduce operation using the supplied function over the supplied items and returns result if sync function. Returns a coroutine otherwise.
 
-        If the function is async function then returns a Future for the end result and doesn't block.
+        If the function is async function then returns its coroutine and doesn't block.
+        The coroutine will only be executed if awaited or if started by user using i.e. asyncio.create_task().
         Otherwise, blocks until the result is ready.
         Similar to https://docs.python.org/3/library/functools.html#functools.reduce.
 
@@ -160,25 +160,17 @@ class Function:
         Raises FunctionError if the function failed.
         Raises TensorlakeError on other errors.
         """
-        future: ReduceOperationFuture = _make_reduce_operation_future(
-            function_name=self._function_config.function_name,
-            items=items,
-            initial=initial,
-        )._run()
+        future: ReduceOperationFuture = self.future.reduce(items, initial)
         if inspect.iscoroutinefunction(self):
-            return future
+            return _wrap_future_into_coroutine(future)
         else:
+            future.run()
             return future.result()
 
     @property
     def future(self) -> "FunctionFutureFactory":
         """Returns function factory for creating futures."""
         return self._future_factory
-
-    @property
-    def tail_call(self) -> "FunctionTailCallFutureFactory":
-        """Returns function factory for creating tail call futures."""
-        return self._tail_call_future_factory
 
     def _make_function_call_future(
         self, args: list[Any | Future], kwargs: dict[str, Any | Future]
@@ -251,18 +243,7 @@ class FunctionFutureFactory:
 
         Raises TensorlakeError on error.
         """
-        return self._function._make_function_call_future(
-            list(args), dict(kwargs)
-        )._run()
-
-    def call_later(self, start_delay: float, *args, **kwargs) -> "Future":
-        """Call this Function after the given delay in seconds and returns its Future.
-
-        Raises TensorlakeError on error.
-        """
-        return self._function._make_function_call_future(
-            list(args), dict(kwargs)
-        )._run_later(start_delay=start_delay)
+        return self._function._make_function_call_future(list(args), dict(kwargs))
 
     def map(self, items: Iterable[Any | Future] | ListFuture) -> Future:
         """Returns a Future that represents mapping of the function over the iterable.
@@ -272,7 +253,7 @@ class FunctionFutureFactory:
         return _make_map_operation_future(
             function_name=self._function._function_config.function_name,
             items=items,
-        )._run()
+        )
 
     def reduce(
         self,
@@ -288,7 +269,7 @@ class FunctionFutureFactory:
             function_name=self._function._function_config.function_name,
             items=items,
             initial=initial,
-        )._run()
+        )
 
     def __repr__(self) -> str:
         # Shows exact structure of the Future Factory. Used for debug logging.
@@ -307,41 +288,6 @@ class FunctionFutureFactory:
             f"Attempt to pickle a Tensorlake Function.future factory for {self._function}. It cannot "
             "be passed as a function parameter or returned from a Tensorlake Function."
         )
-
-
-class FunctionTailCallFutureFactory:
-    """Factory for creating tail call futures for a specific Tensorlake Function.
-
-    This class is returned by Function.tail_call property.
-    """
-
-    def __init__(self, function: Function):
-        self._function: Function = function
-
-    def __call__(self, *args, **kwargs) -> Future:
-        """Returns a Future that represents a tail call of the function.
-
-        Raises TensorlakeError on error.
-        """
-        return self._function._make_function_call_future(
-            list(args), dict(kwargs)
-        )._run_tail_call()
-
-    def reduce(
-        self,
-        items: Iterable[Any | Future] | ListFuture,
-        initial: Any | Future | _InitialMissingType = _InitialMissing,
-        /,
-    ) -> Future:
-        """Returns a tail call Future that represents reducing the iterable using the function.
-
-        Raises TensorlakeError on error.
-        """
-        return _make_reduce_operation_future(
-            function_name=self._function._function_config.function_name,
-            items=items,
-            initial=initial,
-        )._run_tail_call()
 
 
 # Non-public helper functions placed here for now to avoid circular imports.

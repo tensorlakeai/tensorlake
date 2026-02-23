@@ -13,7 +13,7 @@ from tensorlake.applications.validation import (
 @application()
 @function()
 def application_function_with_simple_future_type_hint() -> Future:
-    return other_function.tail_call()
+    return other_function.future()
 
 
 @function()

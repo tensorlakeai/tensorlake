@@ -6,6 +6,10 @@ from .futures import (
     ListFuture,
     ReduceOperationFuture,
     _FutureListKind,
+    _InitialMissing,
+    _InitialMissingType,
+    _TensorlakeFutureWrapper,
+    _unwrap_future,
 )
 
 # Limit the size of pretty printed Futures in error messages.
@@ -15,7 +19,7 @@ _PRETTY_PRINT_INDENT_STEP = 2
 
 
 def pretty_print(
-    obj: Future | Any,
+    obj: _TensorlakeFutureWrapper[Future] | Any,
     indent: int = 0,
     char_limit: int = _DEFAULT_PRETTY_PRINT_CHAR_LIMIT,
 ) -> str:
@@ -24,12 +28,13 @@ def pretty_print(
     The pretty printed string is very clear and is human readable.
     Doesn't raise any exceptions.
     """
-    if isinstance(obj, ListFuture):
-        return _pretty_print_list_future(obj, indent, char_limit)
-    elif isinstance(obj, FunctionCallFuture):
-        return _pretty_print_function_call_future(obj, indent, char_limit)
-    elif isinstance(obj, ReduceOperationFuture):
-        return _pretty_print_reduce_operation_future(obj, indent, char_limit)
+    unwrapped: Future | Any = _unwrap_future(obj)
+    if isinstance(unwrapped, ListFuture):
+        return _pretty_print_list_future(unwrapped, indent, char_limit)
+    elif isinstance(unwrapped, FunctionCallFuture):
+        return _pretty_print_function_call_future(unwrapped, indent, char_limit)
+    elif isinstance(unwrapped, ReduceOperationFuture):
+        return _pretty_print_reduce_operation_future(unwrapped, indent, char_limit)
     else:
         try:
             # i.e. repr() returns "'foo'" instead of "foo".
@@ -49,9 +54,12 @@ def _pretty_print_list_future(future: ListFuture, indent: int, char_limit: int) 
     else:
         prefix: str = f"Tensorlake List Future of "
 
-    if isinstance(future._items, ListFuture):
+    items: list[_TensorlakeFutureWrapper[Future] | Any] | ListFuture = _unwrap_future(
+        future._items
+    )
+    if isinstance(items, ListFuture):
         return prefix + pretty_print(
-            future._items, indent=indent, char_limit=char_limit - len(prefix)
+            items, indent=indent, char_limit=char_limit - len(prefix)
         )
 
     indent_str: str = " " * indent
@@ -59,12 +67,12 @@ def _pretty_print_list_future(future: ListFuture, indent: int, char_limit: int) 
         prefix,
         "[",
     ]
-    if len(future._items) != 0:
+    if len(items) != 0:
         strs.append("\n")
     chars_count: int = sum(len(s) for s in strs)
 
     item_indent_str: str = " " * (indent + _PRETTY_PRINT_INDENT_STEP)
-    for item in future._items:
+    for item in items:
         item_str: str = "".join(
             [
                 item_indent_str,
@@ -164,9 +172,15 @@ def _pretty_print_reduce_operation_future(
     prefix: str = (
         f"Tensorlake Reduce Operation Future of '{future._function_name}' over "
     )
-    if isinstance(future._items, ListFuture):
+    initial: Future | Any | _InitialMissingType = _unwrap_future(future._initial)
+    has_initial: bool = future._initial is not _InitialMissing
+
+    items: list[_TensorlakeFutureWrapper[Future] | Any] | ListFuture = _unwrap_future(
+        future._items
+    )
+    if isinstance(items, ListFuture):
         return prefix + pretty_print(
-            future._items, indent=indent, char_limit=char_limit - len(prefix)
+            items, indent=indent, char_limit=char_limit - len(prefix)
         )
 
     indent_str: str = " " * indent
@@ -174,12 +188,28 @@ def _pretty_print_reduce_operation_future(
         prefix,
         "[",
     ]
-    if len(future._items) != 0:
+    if has_initial or len(items) != 0:
         strs.append("\n")
     chars_count: int = sum(len(s) for s in strs)
 
     item_indent_str: str = " " * (indent + _PRETTY_PRINT_INDENT_STEP)
-    for input_item in future._items:
+
+    if has_initial:
+        initial_str: str = "".join(
+            [
+                item_indent_str,
+                pretty_print(
+                    initial,
+                    indent=indent + _PRETTY_PRINT_INDENT_STEP,
+                    char_limit=char_limit - chars_count,
+                ),
+                ",\n",
+            ]
+        )
+        strs.append(initial_str)
+        chars_count += len(initial_str)
+
+    for input_item in items:
         input_item_str: str = "".join(
             [
                 item_indent_str,
@@ -201,7 +231,7 @@ def _pretty_print_reduce_operation_future(
             strs.append(input_item_str)
             chars_count += len(input_item_str)
 
-    if len(future._items) != 0:
+    if has_initial or len(items) != 0:
         strs.append(indent_str)
         chars_count += len(strs[-1])
 

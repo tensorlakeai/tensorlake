@@ -32,7 +32,7 @@ async def test_graph_api_fan_in(payload: TestGraphRequestPayload) -> File:
     ctx.state.set("numbers_count", len(payload.numbers))
     numbers = parse_and_multiply_number.map(payload.numbers)
     sum = sum_numbers_fan_in(numbers, initial=0)
-    return store_sum_as_file.tail_call(sum)
+    return store_sum_as_file.future(sum)
 
 
 @application()
@@ -43,7 +43,7 @@ async def test_graph_api_reduce(payload: TestGraphRequestPayload) -> File:
     ctx.state.set("numbers_count", len(payload.numbers))
     numbers = [parse_and_multiply_number(number) for number in payload.numbers]
     sum = sum_numbers_reducer.reduce(numbers, 0)
-    return store_sum_as_file.tail_call(sum)
+    return store_sum_as_file.future(sum)
 
 
 @function()
@@ -52,9 +52,9 @@ async def parse_and_multiply_number(number: str) -> int:
     # Raises ValueError if not a number.
     parsed_number = int(number)
     if parsed_number % 2 == 0:
-        return MultiplierFunction().multiply.tail_call(number=parsed_number)
+        return MultiplierFunction().multiply.future(number=parsed_number)
     else:
-        return MultiplierFunction().multiply.tail_call(number=parsed_number - 1)
+        return MultiplierFunction().multiply.future(number=parsed_number - 1)
 
 
 @cls()

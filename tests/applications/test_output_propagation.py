@@ -27,17 +27,17 @@ ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.defin
 @application()
 @function()
 def api_function_output_propagation(payload: str) -> str:
-    return foo.tail_call()
+    return foo.future()
 
 
 @function()
 def foo() -> str:
-    return bar.tail_call()
+    return bar.future()
 
 
 @function()
 def bar() -> str:
-    return buzz.tail_call()
+    return buzz.future()
 
 
 @function()
@@ -59,22 +59,22 @@ class TestFunctionOutputPropagation(unittest.TestCase):
 @application()
 @function()
 def api_reducer_value_output_propagation(payload: str) -> str:
-    return foo_reducer_value.tail_call()
+    return foo_reducer_value.future()
 
 
 @function()
 def foo_reducer_value() -> str:
-    return bar_reducer_value.tail_call()
+    return bar_reducer_value.future()
 
 
 @function()
 def bar_reducer_value() -> str:
-    return buzz_reducer_value.tail_call()
+    return buzz_reducer_value.future()
 
 
 @function()
 def buzz_reducer_value() -> str:
-    return concat_strings_value.tail_call.reduce("buzz_reducer_value")
+    return concat_strings_value.future.reduce("buzz_reducer_value")
 
 
 @function()
@@ -96,27 +96,27 @@ class TestReducerValueOutputPropagation(unittest.TestCase):
 @application()
 @function()
 def api_reducer_subcall_output_propagation(payload: str) -> str:
-    return foo_reducer_subcall.tail_call()
+    return foo_reducer_subcall.future()
 
 
 @function()
 def foo_reducer_subcall() -> str:
-    return bar_reducer_subcall.tail_call()
+    return bar_reducer_subcall.future()
 
 
 @function()
 def bar_reducer_subcall() -> str:
-    return buzz_reducer_subcall.tail_call()
+    return buzz_reducer_subcall.future()
 
 
 @function()
 def buzz_reducer_subcall() -> str:
-    return concat_strings_subcall.tail_call.reduce("buzz_reducer_subcall")
+    return concat_strings_subcall.future.reduce("buzz_reducer_subcall")
 
 
 @function()
 def concat_strings_subcall(a: str, b: str) -> str:
-    return concat_strings_actually.tail_call(a, b)
+    return concat_strings_actually.future(a, b)
 
 
 @function()

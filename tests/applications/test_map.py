@@ -32,8 +32,7 @@ async def async_api_function_recursive_blocking_map(numbers: list[int]) -> list[
 @application()
 @function()
 def api_function_recursive_non_blocking_map(numbers: list[int]) -> list[int]:
-    future: Future = to_int.future.map(to_string.future.map(numbers))
-    return future.result()
+    return to_int.future.map(to_string.future.map(numbers)).run().result()
 
 
 @application()
@@ -41,8 +40,7 @@ def api_function_recursive_non_blocking_map(numbers: list[int]) -> list[int]:
 def api_function_recursive_non_blocking_map_with_future(
     numbers: list[int],
 ) -> list[int]:
-    future: Future = to_int.future.map(to_string.future.map(numbers))
-    return future.result()
+    return to_int.future.map(to_string.future.map(numbers)).run().result()
 
 
 @application()
@@ -50,8 +48,7 @@ def api_function_recursive_non_blocking_map_with_future(
 def api_function_recursive_non_blocking_map_with_future_and_tail_call(
     numbers: list[int],
 ) -> list[int]:
-    future: Future = to_int_tail_call.future.map(to_string.future.map(numbers))
-    return future.result()
+    return to_int_tail_call.future.map(to_string.future.map(numbers)).run().result()
 
 
 @application()
@@ -108,7 +105,7 @@ async def async_to_int(value: str) -> int:
 
 @function()
 def to_int_tail_call(value: str) -> Future:
-    return async_to_int.tail_call(value)
+    return async_to_int.future(value)
 
 
 @function()
@@ -157,7 +154,6 @@ class TestRecursiveMaps(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_non_blocking_with_future_and_tail_call(self, _: str, is_remote: bool):
-        is_remote: bool = False
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(
@@ -169,7 +165,6 @@ class TestRecursiveMaps(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_non_blocking(self, _: str, is_remote: bool):
-        is_remote: bool = False
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(

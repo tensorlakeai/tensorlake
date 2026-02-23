@@ -3,7 +3,8 @@ import inspect
 import shutil
 import tempfile
 import threading
-from collections.abc import Generator
+import weakref
+from collections.abc import Coroutine, Generator
 from concurrent.futures import ALL_COMPLETED as STD_ALL_COMPLETED
 from concurrent.futures import FIRST_COMPLETED as STD_FIRST_COMPLETED
 from concurrent.futures import FIRST_EXCEPTION as STD_FIRST_EXCEPTION
@@ -25,6 +26,8 @@ from tensorlake.applications.multiprocessing import setup_multiprocessing
 
 from ..algorithms import (
     derived_function_call_future,
+    dfs_bottom_up_unique_only,
+    tail_call_output_future_ids,
     validate_tail_call_user_future,
 )
 from ..function.application_call import (
@@ -65,20 +68,25 @@ from ..interface.futures import (
     _FutureListKind,
     _InitialMissing,
     _request_scoped_id,
+    _TensorlakeFutureWrapper,
+    _unwrap_future,
 )
 from ..metadata import (
     FunctionCallArgumentMetadata,
     FunctionCallMetadata,
-    ReduceOperationMetadata,
 )
 from ..registry import get_function
 from ..request_context.http_client.context import RequestContextHTTPClient
 from ..request_context.http_server.server import RequestContextHTTPServer
 from ..runtime_hooks import (
     clear_await_future_hook,
+    clear_coroutine_to_future_hook,
+    clear_register_coroutine_hook,
     clear_run_futures_hook,
     clear_wait_futures_hook,
     set_await_future_hook,
+    set_coroutine_to_future_hook,
+    set_register_coroutine_hook,
     set_run_futures_hook,
     set_wait_futures_hook,
 )
@@ -102,6 +110,7 @@ from .future_run.future_run import (
     get_current_future_run,
 )
 from .future_run.list_future_run import ListFutureRun
+from .future_run.return_output_future_metadata import ReturnOutputFutureMetadata
 from .future_run.return_output_future_run import ReturnOutputFutureRun
 from .request import LocalRequest
 from .request_context.http_handler_factory import LocalRequestContextHTTPHandlerFactory
@@ -137,6 +146,12 @@ class LocalRunner:
             blob_store_dir_path=self._blob_store_dir_path,
             blob_store=self._blob_store,
             logger=self._logger,
+        )
+        # Coroutine -> Future, use weakref so once a coroutine is no longer used
+        # it's deleted from the mapping automatically. This is required because coroutine
+        # objects are owned by user code and so is their lifecycle.
+        self._coroutine_to_future: weakref.WeakKeyDictionary[Coroutine, Future] = (
+            weakref.WeakKeyDictionary()
         )
 
         # Future runs that currently exist.
@@ -288,17 +303,18 @@ class LocalRunner:
         set_run_futures_hook(self._run_futures_runtime_hook)
         set_await_future_hook(self._await_future_runtime_hook)
         set_wait_futures_hook(self._wait_futures_runtime_hook)
+        set_register_coroutine_hook(self._register_coroutine_runtime_hook)
+        set_coroutine_to_future_hook(self._coroutine_to_future_runtime_hook)
         setup_multiprocessing()
 
         try:
             app_signature: inspect.Signature = function_signature(self._app)
-            app_function_call_future: FunctionCallFuture = (
-                self._app._make_function_call_future(self._app_args, self._app_kwargs)
+            app_function_call_future: FunctionCallFuture = self._app.future(
+                *self._app_args, **self._app_kwargs
             )
             app_output_serializer: UserDataSerializer = function_output_serializer(
                 self._app, None
             )
-            app_function_call_future._tail_call = True
             self._create_future_run(
                 future=app_function_call_future,
                 output_serializer_name_override=app_output_serializer.name,
@@ -380,6 +396,8 @@ class LocalRunner:
         clear_await_future_hook()
         clear_run_futures_hook()
         clear_wait_futures_hook()
+        clear_register_coroutine_hook()
+        clear_coroutine_to_future_hook()
 
     def __enter__(self) -> "LocalRunner":
         return self
@@ -387,50 +405,71 @@ class LocalRunner:
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
 
+    def _register_coroutine_runtime_hook(
+        self, coroutine: Coroutine, future: Future
+    ) -> None:
+        # Don't catch any exceptions here because this is called from user code
+        # and we want to propagate them to the user. We don't know what user gave
+        # so it's easy to fail for any reason here.
+        #
+        # NB: all exceptions raised here must be derived from TensorlakeError.
+        try:
+            self.__register_coroutine_runtime_hook(coroutine, future)
+        except TensorlakeError:
+            raise
+        except Exception as e:
+            raise InternalError("Unexpected error while registering coroutine") from e
+
+    def __register_coroutine_runtime_hook(
+        self, coroutine: Coroutine, future: Future
+    ) -> None:
+        self._coroutine_to_future[coroutine] = future
+
+    def _coroutine_to_future_runtime_hook(self, coroutine: Coroutine) -> Future | None:
+        # Don't catch any exceptions here because this is called from user code
+        # and we want to propagate them to the user. We don't know what user gave
+        # so it's easy to fail for any reason here.
+        #
+        # NB: all exceptions raised here must be derived from TensorlakeError.
+        try:
+            return self.__coroutine_to_future_runtime_hook(coroutine)
+        except TensorlakeError:
+            raise
+        except Exception as e:
+            raise InternalError(
+                "Unexpected error while converting coroutine to future"
+            ) from e
+
+    def __coroutine_to_future_runtime_hook(self, coroutine: Coroutine) -> Future | None:
+        return self._coroutine_to_future.get(coroutine, None)
+
     def _run_futures_runtime_hook(self, futures: List[Future]) -> None:
         # Don't catch any exceptions here because this is called from user code
         # and we want to propagate them to the user. We don't know what user gave
         # so it's easy to fail for any reason here.
         #
         # NB: all exceptions raised here must be derived from TensorlakeError.
+        # NB: this hook must block the calling thread until all the Futures are fully started.
+        # If we do any asyncio await/yield operation here then this will result in concurrent
+        # hooks running with non-deterministic completion order.
 
         try:
             self._user_code_cancellation_point()
             for user_future in futures:
-                if not isinstance(user_future, Future):
-                    raise SDKUsageError(
-                        f"Cannot run a non-Future object {user_future}."
+                # SDK automatically starts user futures that are tail calls and
+                # function call or other operation inputs. This is why we walk
+                # the Futures tree, not just starting the user_future.
+                for future in dfs_bottom_up_unique_only(user_future):
+                    if future._id in self._future_runs:
+                        continue  # Future was already started by user.
+
+                    # Future is started by user code, cannot be a tail call.
+                    self._create_future_run(
+                        future=future,
+                        output_serializer_name_override=None,
+                        has_output_type_hint_override=False,
+                        output_type_hint_override=None,
                     )
-                if user_future._id in self._future_runs:
-                    raise InternalError(
-                        f"Future with ID {user_future._id} is already running, this should never happen."
-                    )
-                output_serializer_name_override: str | None = None
-                has_output_type_hint_override: bool = False
-                output_type_hint_override: Any = None
-                if user_future._tail_call:
-                    # Tail call futures inherit output overrides from the parent
-                    # function that created them. This is the LocalRunner equivalent
-                    # of AllocationRunner's instance-level override variables.
-                    parent_run: LocalFutureRun = get_current_future_run()
-                    parent_metadata: UserFutureMetadataType = (
-                        parent_run.local_future.future_metadata
-                    )
-                    output_serializer_name_override = (
-                        parent_metadata.output_serializer_name_override
-                    )
-                    has_output_type_hint_override = (
-                        parent_metadata.has_output_type_hint_override
-                    )
-                    output_type_hint_override = (
-                        parent_metadata.output_type_hint_override
-                    )
-                self._create_future_run(
-                    future=user_future,
-                    output_serializer_name_override=output_serializer_name_override,
-                    has_output_type_hint_override=has_output_type_hint_override,
-                    output_type_hint_override=output_type_hint_override,
-                )
         except TensorlakeError:
             raise
         except Exception as e:
@@ -477,6 +516,10 @@ class LocalRunner:
             _resolve_user_aio_loop_future(future_run_std_future)
 
         yield from user_aio_loop_future.__await__()
+
+        # The coroutine is done running. It can't be started again by user code.
+        # Clear the hard reference.
+        future._coroutine = None
 
     def _wait_futures_runtime_hook(
         self, futures: List[Future], timeout: float | None, return_when: RETURN_WHEN
@@ -621,6 +664,7 @@ class LocalRunner:
 
         function_name: str = "<unknown>"
         output_blob_serializer: UserDataSerializer | None = None
+        output_serializer_name_override: str | None = None
         has_output_type_hint_override: bool = False
         output_type_hint_override: Any = None
         if isinstance(future_run, FunctionCallFutureRun):
@@ -629,6 +673,7 @@ class LocalRunner:
                 get_function(function_name),
                 metadata.output_serializer_name_override,
             )
+            output_serializer_name_override = metadata.output_serializer_name_override
             if metadata.has_output_type_hint_override:
                 has_output_type_hint_override = True
                 output_type_hint_override = metadata.output_type_hint_override
@@ -656,13 +701,14 @@ class LocalRunner:
             )
             return
 
-        if isinstance(result.output, Future):
-            future: Future = result.output
+        output: Future | Any = result.output
+        if isinstance(output, Future):
             try:
                 # ReturnOutputFutureRun and ListFutureRun are not doing real tail calls when returning a Future.
                 if isinstance(future_run, FunctionCallFutureRun):
                     validate_tail_call_user_future(
-                        function_name=function_name, tail_call_user_future=future
+                        function_name=function_name,
+                        tail_call_user_future=output,
                     )
             except SDKUsageError as e:
                 self._handle_future_run_failure(
@@ -671,8 +717,50 @@ class LocalRunner:
                 )
                 return
 
+            output_override_future_ids: set[str] = tail_call_output_future_ids(output)
+            # SDK automatically starts user futures that are tail calls and
+            # function call or other operation inputs. This is why we walk
+            # the Futures tree, not just starting the output.
+            for future in dfs_bottom_up_unique_only(output):
+                future: Future
+                # Only function call future run does a real tail call, other future runs are internal local runner machinery.
+                if isinstance(future_run, FunctionCallFutureRun):
+                    if future._id in self._future_runs:
+                        self._handle_future_run_failure(
+                            future_run=future_run,
+                            error=SDKUsageError(
+                                f"A tail call Future {future} returned from function '{function_name}' is already running, "
+                                "a tail call Future should not be started."
+                            ),
+                        )
+                        return
+                else:
+                    if future._id in self._future_runs:
+                        # Happens when i.e. one future item reduce op returns this future and it was already started
+                        # when traversing the reduce operation tree.
+                        continue
+
+                self._create_future_run(
+                    future=future,
+                    output_serializer_name_override=(
+                        output_serializer_name_override
+                        if future._id in output_override_future_ids
+                        else None
+                    ),
+                    has_output_type_hint_override=(
+                        has_output_type_hint_override
+                        if future._id in output_override_future_ids
+                        else False
+                    ),
+                    output_type_hint_override=(
+                        output_type_hint_override
+                        if future._id in output_override_future_ids
+                        else None
+                    ),
+                )
+
             # The future returned by user is already running so must be in the dict.
-            source_future_run: LocalFutureRun = self._future_runs[future._id]
+            source_future_run: LocalFutureRun = self._future_runs[output._id]
             self._link_future_run_output_to_consumer(
                 source=source_future_run,
                 consumer=future_run,
@@ -787,10 +875,10 @@ class LocalRunner:
             future: LocalFuture = future_run.local_future
 
             if error is not None:
-                future.future.set_exception(error)
+                future.future._set_exception(error)
             else:
                 # Intentionally do serialize -> deserialize cycle to ensure the same UX as in remote mode.
-                future.future.set_result(_deserialize_value(ser_value))
+                future.future._set_result(_deserialize_value(ser_value))
 
             # Finish std future so wait hooks waiting on it unblock.
             # Success/failure needs to be propagated to std future as well so std wait calls work correctly.
@@ -919,6 +1007,14 @@ class LocalRunner:
 
         Raises TensorlakeError on error.
         """
+        if future._coroutine is not None and not future._run_hook_was_called:
+            # We're starting the future for the user.
+            # Close the coroutine to prevent "RuntimeWarning: coroutine '...' was never awaited" warning
+            # because user code is not expected to await the coroutine and it's a user code bug if it does.
+            future._run_hook_was_called = True
+            future._coroutine.close()
+            future._coroutine = None
+
         if isinstance(future, ListFuture):
             self._create_future_run_for_list(
                 future=future,
@@ -956,21 +1052,30 @@ class LocalRunner:
         function: Function = get_function(future._metadata.function_name)
 
         inputs: list[Future | Any]
-        if isinstance(future._items, ListFuture):
-            self._check_future_run_for_user_object_exists(future._items)
-            inputs_future_run: ListFutureRun = self._future_runs[future._items._id]
+        items: list[_TensorlakeFutureWrapper[Future] | Any] | ListFuture = (
+            _unwrap_future(future._items)
+        )
+        if isinstance(items, ListFuture):
+            self._check_future_run_for_user_object_exists(items)
+            inputs_future_run: ListFutureRun = self._future_runs[items._id]
             inputs = inputs_future_run.items
         else:
-            for item in future._items:
+            inputs = []
+            for item in items:
                 self._check_future_run_for_user_object_exists(item)
-            inputs = future._items
+                inputs.append(_unwrap_future(item))
 
         outputs: list[Future] = []
         for input in inputs:
-            # Calling SDK recursively here. The depth of recursion is strictly one.
-            # This is because the input is an already running Future, we won't decend into it.
             mapped_input: FunctionCallFuture = derived_function_call_future(
                 future, function, input
+            )
+            # No output override for list future because it can't be returned from tail call.
+            self._create_future_run(
+                future=mapped_input,
+                output_serializer_name_override=None,
+                has_output_type_hint_override=False,
+                output_type_hint_override=None,
             )
             outputs.append(mapped_input)
 
@@ -1052,9 +1157,12 @@ class LocalRunner:
         )
 
     def _function_arg_metadata(
-        self, arg: Any | Future, value_serializer: UserDataSerializer
+        self,
+        arg: Any | _TensorlakeFutureWrapper[Future],
+        value_serializer: UserDataSerializer,
     ) -> FunctionCallArgumentMetadata:
         # Raises TensorlakeError on error.
+        arg: Future | Any = _unwrap_future(arg)
         if isinstance(arg, Future):
             return FunctionCallArgumentMetadata(
                 value_id=arg._id,
@@ -1089,23 +1197,26 @@ class LocalRunner:
         function: Function = get_function(future._function_name)
         inputs: list[Future | Any] = []
         if future._initial is not _InitialMissing:
-            inputs.append(future._initial)
+            inputs.append(_unwrap_future(future._initial))
 
-        if isinstance(future._items, ListFuture):
-            self._check_future_run_for_user_object_exists(future._items)
-            inputs_future_run: ListFutureRun = self._future_runs[future._items._id]
+        items: list[_TensorlakeFutureWrapper[Future] | Any] | ListFuture = (
+            _unwrap_future(future._items)
+        )
+        if isinstance(items, ListFuture):
+            self._check_future_run_for_user_object_exists(items)
+            inputs_future_run: ListFutureRun = self._future_runs[items._id]
             inputs.extend(inputs_future_run.items)
         else:
-            for item in future._items:
+            for item in items:
                 self._check_future_run_for_user_object_exists(item)
-            inputs.extend(future._items)
+                inputs.append(_unwrap_future(item))
 
         if len(inputs) == 0:
             raise SDKUsageError("reduce of empty iterable with no initial value")
 
         reduce_operation_output: Future | Any
         if len(inputs) == 1:
-            reduce_operation_output = inputs[0]
+            reduce_operation_output = _unwrap_future(inputs[0])
         else:
             # Create a chain of function calls to reduce all args one by one.
             # Ordering of calls is important here. We should reduce ["a", "b", "c", "d"]
@@ -1116,21 +1227,19 @@ class LocalRunner:
                 future, function, inputs[0], inputs[1]
             )
             for input in inputs[2:]:
-                # Calling SDK recursively here. The depth of recursion is strictly one.
-                # This is because the input is an already running Future, we won't descend into it.
                 last_future = derived_function_call_future(
                     future, function, last_future, input
                 )
-
             reduce_operation_output = last_future
 
-        metadata: ReduceOperationMetadata = ReduceOperationMetadata(
-            id=future._id,
+        # Don't start any of the futures we create here. They will be started automatically
+        # when reduce_operation_output gets returned from tail call.
+
+        metadata: ReturnOutputFutureMetadata = ReturnOutputFutureMetadata(
             output_serializer_name_override=output_serializer_name_override,
             output_type_hint_override=output_type_hint_override,
             has_output_type_hint_override=has_output_type_hint_override,
         )
-
         self._future_runs[future._id] = ReturnOutputFutureRun(
             local_future=LocalFuture(
                 future=future,
@@ -1142,7 +1251,10 @@ class LocalRunner:
             output=reduce_operation_output,
         )
 
-    def _check_future_run_for_user_object_exists(self, user_object: Any) -> None:
+    def _check_future_run_for_user_object_exists(
+        self, user_object: Any | _TensorlakeFutureWrapper[Future]
+    ) -> None:
+        user_object: Future | Any = _unwrap_future(user_object)
         if isinstance(user_object, Future):
             if user_object._id not in self._future_runs:
                 raise InternalError(

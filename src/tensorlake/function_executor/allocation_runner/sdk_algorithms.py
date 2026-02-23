@@ -24,6 +24,8 @@ from tensorlake.applications.interface.futures import (
     ListFuture,
     ReduceOperationFuture,
     _request_scoped_id,
+    _TensorlakeFutureWrapper,
+    _unwrap_future,
 )
 from tensorlake.applications.metadata import (
     CollectionItemMetadata,
@@ -134,7 +136,9 @@ def future_durable_id(
         # Iterate over sorted dict keys to ensure deterministic hash key order.
         sorted_kwarg_keys: list[str] = sorted(future._kwargs.keys())
         for kwarg_name in sorted_kwarg_keys:
-            kwarg_value: Future | Any = future._kwargs[kwarg_name]
+            kwarg_value: _TensorlakeFutureWrapper[Future] | Any = future._kwargs[
+                kwarg_name
+            ]
             _add_future_durable_id(
                 value=kwarg_value,
                 future_infos=future_infos,
@@ -143,14 +147,17 @@ def future_durable_id(
     elif isinstance(future, ListFuture):
         # Future specific metadata, part of durable ID.
         durable_id_attrs.append(future._metadata.durability_key)
-        if isinstance(future._items, ListFuture):
+        items: ListFuture | list[_TensorlakeFutureWrapper[Future] | Any] = (
+            _unwrap_future(future._items)
+        )
+        if isinstance(items, ListFuture):
             _add_future_durable_id(
-                value=future._items,
+                value=items,
                 future_infos=future_infos,
                 durable_id_attrs=durable_id_attrs,
             )
         else:
-            for item in future._items:
+            for item in items:
                 _add_future_durable_id(
                     value=item,
                     future_infos=future_infos,
@@ -167,14 +174,17 @@ def future_durable_id(
             durable_id_attrs=durable_id_attrs,
         )
 
-        if isinstance(future._items, ListFuture):
+        items: ListFuture | list[_TensorlakeFutureWrapper[Future] | Any] = (
+            _unwrap_future(future._items)
+        )
+        if isinstance(items, ListFuture):
             _add_future_durable_id(
-                value=future._items,
+                value=items,
                 future_infos=future_infos,
                 durable_id_attrs=durable_id_attrs,
             )
         else:
-            for item in future._items:
+            for item in items:
                 _add_future_durable_id(
                     value=item,
                     future_infos=future_infos,
@@ -187,7 +197,7 @@ def future_durable_id(
 
 
 def _add_future_durable_id(
-    value: Future | Any,
+    value: _TensorlakeFutureWrapper[Future] | Any,
     future_infos: dict[str, FutureInfo],
     durable_id_attrs: list[str],
 ) -> None:
@@ -196,6 +206,7 @@ def _add_future_durable_id(
     Raises InternalError if the value is a Future but its durable ID is not found in future_durable_ids.
     """
     # We don't hash user provided values. Only hash Futures to verify tree structure.
+    value: Future | Any = _unwrap_future(value)
     if isinstance(value, Future):
         value_future_info: FutureInfo | None = future_infos.get(value._id, None)
         if value_future_info is None:
@@ -254,8 +265,10 @@ def replace_user_values_with_serialized_values(
     serialized_values: Dict[str, SerializedValue] = {}
 
     def to_serialized_value(
-        future_or_value: Future | Any, value_serializer: UserDataSerializer
+        future_or_value: _TensorlakeFutureWrapper[Future] | Any,
+        value_serializer: UserDataSerializer,
     ) -> Any | SerializedValue:
+        future_or_value: Future | Any = _unwrap_future(future_or_value)
         if isinstance(future_or_value, ReduceOperationFuture):
             future_info: FutureInfo = future_infos[future_or_value._id]
             if not isinstance(future_info.reduce_future_output, Future):
@@ -351,8 +364,9 @@ def _function_call_execution_plan_update(
     function_pb_args: List[FunctionArg] = []
 
     def process_function_call_argument(
-        arg: SerializedValue | Future,
+        arg: SerializedValue | _TensorlakeFutureWrapper[Future],
     ) -> FunctionCallArgumentMetadata:
+        arg: SerializedValue | Future = _unwrap_future(arg)
         if isinstance(arg, SerializedValue):
             function_pb_args.append(
                 FunctionArg(

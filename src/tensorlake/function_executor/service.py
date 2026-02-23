@@ -35,6 +35,8 @@ from tensorlake.applications.request_context.http_server.server import (
 )
 from tensorlake.applications.runtime_hooks import (
     set_await_future_hook,
+    set_coroutine_to_future_hook,
+    set_register_coroutine_hook,
     set_run_futures_hook,
     set_wait_futures_hook,
 )
@@ -119,6 +121,8 @@ class Service(FunctionExecutorServicer):
         set_run_futures_hook(self._run_futures_runtime_hook)
         set_await_future_hook(self._await_future_runtime_hook)
         set_wait_futures_hook(self._wait_futures_runtime_hook)
+        set_register_coroutine_hook(self._register_coroutine_runtime_hook)
+        set_coroutine_to_future_hook(self._coroutine_to_future_runtime_hook)
         setup_multiprocessing()
 
         app_modules_zip_fd, app_modules_zip_path = tempfile.mkstemp(suffix=".zip")
@@ -351,8 +355,12 @@ class Service(FunctionExecutorServicer):
 
         return Empty()
 
-    def _await_future_runtime_hook(self, future: Future) -> Generator[None, None, Any]:
-        # NB: This function is called by user code in user async function thread.
+    def _thread_allocation_runner(self) -> AllocationRunner:
+        """Returns the AllocationRunner for the current thread's allocation.
+
+        Uses the allocation ID context variable to look up the runner.
+        No need to lock self._allocation_infos because we hold GIL non stop.
+        """
         try:
             allocation_id: str = get_allocation_id_context_variable()
         except LookupError:
@@ -361,59 +369,32 @@ class Service(FunctionExecutorServicer):
                 "Please only call Tensorlake SDK from Tensorlake Functions."
             )
 
-        # No need to lock self._allocation_infos because we're not blocking here so we
-        # hold GIL non stop.
-        if not allocation_id in self._allocation_infos:
+        if allocation_id not in self._allocation_infos:
             raise InternalError(
                 f"allocation id '{allocation_id}' not found in Function Executor."
             )
 
-        return self._allocation_infos[allocation_id].runner.await_future_runtime_hook(
-            future
-        )
+        return self._allocation_infos[allocation_id].runner
+
+    def _await_future_runtime_hook(self, future: Future) -> Generator[None, None, Any]:
+        return self._thread_allocation_runner().await_future_runtime_hook(future)
 
     def _run_futures_runtime_hook(self, futures: List[Future]) -> None:
-        # NB: This function is called by user code in user function thread.
-        try:
-            allocation_id: str = get_allocation_id_context_variable()
-        except LookupError:
-            raise SDKUsageError(
-                "Tensorlake SDK was called outside of a Tensorlake Function thread or process."
-                "Please only call Tensorlake SDK from Tensorlake Functions."
-            )
-
-        # No need to lock self._allocation_infos because we're not blocking here so we
-        # hold GIL non stop.
-        if not allocation_id in self._allocation_infos:
-            raise InternalError(
-                f"allocation id '{allocation_id}' not found in Function Executor."
-            )
-
-        # Blocks the user function thread until done.
-        # Any exception raised here goes to the calling user function.
-        self._allocation_infos[allocation_id].runner.run_futures_runtime_hook(futures)
+        self._thread_allocation_runner().run_futures_runtime_hook(futures)
 
     def _wait_futures_runtime_hook(
         self, futures: List[Future], timeout: float | None, return_when: RETURN_WHEN
     ) -> tuple[List[Future], List[Future]]:
-        # NB: This function is called by user code in user function thread.
-        try:
-            allocation_id: str = get_allocation_id_context_variable()
-        except LookupError:
-            raise SDKUsageError(
-                "Tensorlake SDK was called outside of a Tensorlake Function thread or process."
-                "Please only call Tensorlake SDK from Tensorlake Functions."
-            )
-
-        # No need to lock self._allocation_infos because we're not blocking here so we
-        # hold GIL non stop.
-        if not allocation_id in self._allocation_infos:
-            raise InternalError(
-                f"allocation id '{allocation_id}' not found in Function Executor."
-            )
-
-        # Blocks the user function thread until done.
-        # Any exception raised here goes to the calling user function.
-        return self._allocation_infos[allocation_id].runner.wait_futures_runtime_hook(
+        return self._thread_allocation_runner().wait_futures_runtime_hook(
             futures, timeout, return_when
+        )
+
+    def _register_coroutine_runtime_hook(self, coroutine: Any, future: Future) -> None:
+        self._thread_allocation_runner().register_coroutine_runtime_hook(
+            coroutine, future
+        )
+
+    def _coroutine_to_future_runtime_hook(self, coroutine: Any) -> Any:
+        return self._thread_allocation_runner().coroutine_to_future_runtime_hook(
+            coroutine
         )

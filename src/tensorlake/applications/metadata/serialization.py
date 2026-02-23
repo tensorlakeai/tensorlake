@@ -2,14 +2,13 @@ import pickle
 
 from ..interface import InternalError
 from .function_call import FunctionCallMetadata
-from .reduce_operation import ReduceOperationMetadata
 from .value import ValueMetadata
 
 _PICKLE_PROTOCOL_LEVEL = 5  # Python 3.8+ only, most efficient.
 
 
 def serialize_metadata(
-    metadata: ValueMetadata | FunctionCallMetadata | ReduceOperationMetadata,
+    metadata: ValueMetadata | FunctionCallMetadata,
 ) -> bytes:
     # Use pickle binary serialization format because it allows us to serialize type hints (types)
     # easily, it's also space efficient. We still need to care about compatibility between versions
@@ -21,7 +20,7 @@ def serialize_metadata(
 
 def deserialize_metadata(
     data: bytes,
-) -> ValueMetadata | FunctionCallMetadata | ReduceOperationMetadata:
+) -> ValueMetadata | FunctionCallMetadata:
     try:
         return pickle.loads(data)
     except Exception as e:

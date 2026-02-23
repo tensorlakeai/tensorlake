@@ -4,7 +4,8 @@ import datetime
 import inspect
 import threading
 import time
-from collections.abc import Generator
+import weakref
+from collections.abc import Coroutine, Generator
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
@@ -25,6 +26,8 @@ from tensorlake.applications import (
 )
 from tensorlake.applications.algorithms import (
     derived_function_call_future,
+    dfs_bottom_up_unique_only,
+    tail_call_output_future_ids,
     validate_tail_call_user_future,
 )
 from tensorlake.applications.blob_store import BLOBStore
@@ -43,7 +46,10 @@ from tensorlake.applications.interface.futures import (
     ReduceOperationFuture,
     _FutureListKind,
     _InitialMissing,
+    _InitialMissingType,
     _request_scoped_id,
+    _TensorlakeFutureWrapper,
+    _unwrap_future,
 )
 from tensorlake.applications.internal_logger import InternalLogger
 from tensorlake.applications.metadata import (
@@ -202,6 +208,12 @@ class AllocationRunner:
 
         # Allocation Execution state.
         #
+        # Coroutine -> Future, use weakref so once a coroutine is no longer used
+        # it's deleted from the mapping automatically. This is required because coroutine
+        # objects are owned by user code and so is their lifecycle.
+        self._coroutine_to_future: weakref.WeakKeyDictionary = (
+            weakref.WeakKeyDictionary()
+        )
         # Futures that were created (started) during this allocation.
         # Future ID -> FutureInfo.
         self._future_infos: Dict[str, FutureInfo] = {}
@@ -343,6 +355,14 @@ class AllocationRunner:
                 f"Unknown request context operation type: {type(operation)}"
             )
 
+    def register_coroutine_runtime_hook(
+        self, coroutine: Coroutine, future: Future
+    ) -> None:
+        self._coroutine_to_future[coroutine] = future
+
+    def coroutine_to_future_runtime_hook(self, coroutine: Coroutine) -> Future | None:
+        return self._coroutine_to_future.get(coroutine, None)
+
     def run_futures_runtime_hook(self, futures: List[Future]) -> None:
         # NB: This code is called from user function thread. User function code is blocked.
         # Right now we can only be called from the function thread, not any child threads that user
@@ -350,6 +370,9 @@ class AllocationRunner:
         # All exceptions raised here will be propagated to user code by design.
         #
         # NB: all exceptions raised here must be derived from TensorlakeError.
+        # NB: this hook must block the calling thread until all the Futures are fully started.
+        # If we do any asyncio await/yield operation here then this will result in concurrent
+        # hooks running with non-deterministic completion order.
         try:
             return self._run_futures_runtime_hook(futures)
         except TensorlakeError:
@@ -364,38 +387,59 @@ class AllocationRunner:
     def _run_futures_runtime_hook(self, futures: List[Future]) -> None:
         # NB: To support durability, ordering of running the Futures must be deterministic.
         for user_future in futures:
-            if not isinstance(user_future, Future):
-                raise SDKUsageError(f"Cannot run a non-Future object {user_future}.")
-            if user_future._id in self._future_infos:
-                raise InternalError(
-                    f"Future with ID {user_future._id} is already running, this should never happen."
-                )
+            # SDK automatically starts user futures that are function call
+            # or other operation inputs. This is why we walk the Futures tree,
+            # not just starting the user_future.
+            for future in dfs_bottom_up_unique_only(user_future):
+                if future._id in self._future_infos:
+                    continue  # Future was already started by user.
 
-            durable_id: str = future_durable_id(
-                future=user_future,
-                parent_function_call_id=self._allocation.function_call_id,
-                previous_future_durable_id=self._previous_future_durable_id,
-                future_infos=self._future_infos,
-            )
-            self._previous_future_durable_id = durable_id
-            future_info: FutureInfo = FutureInfo(
-                future=user_future,
-                durable_id=durable_id,
-                map_future_output=None,
-                reduce_future_output=None,
-            )
-            self._future_infos[user_future._id] = future_info
+                # Future is started by user code, cannot be a tail call.
+                self._run_future(future, tail_call=False)
 
-            if isinstance(user_future, ListFuture):
-                self._run_list_future(future_info)
-            elif isinstance(user_future, ReduceOperationFuture):
-                self._run_reduce_opearation_future(future_info)
-            elif isinstance(user_future, FunctionCallFuture):
-                self._run_function_call_future(future_info)
-            else:
-                raise InternalError(
-                    f"Unsupported Future type: {type(user_future)} with ID {user_future._id}"
-                )
+    def _run_future(self, future: Future, tail_call: bool) -> None:
+        """Registers the future in _future_infos and starts it.
+
+        Raises InternalError on error.
+        """
+        if future._coroutine is not None and not future._run_hook_was_called:
+            # We're starting the future for the user.
+            # Close the coroutine to prevent "RuntimeWarning: coroutine '...' was never awaited" warning
+            # because user code is not expected to await the coroutine and it's a user code bug if it does.
+            future._run_hook_was_called = True
+            future._coroutine.close()
+            future._coroutine = None
+
+        if future._id in self._future_infos:
+            raise InternalError(
+                f"Future with ID {future._id} is already registered in AllocationRunner."
+            )
+
+        durable_id: str = future_durable_id(
+            future=future,
+            parent_function_call_id=self._allocation.function_call_id,
+            previous_future_durable_id=self._previous_future_durable_id,
+            future_infos=self._future_infos,
+        )
+        self._previous_future_durable_id = durable_id
+        future_info: FutureInfo = FutureInfo(
+            future=future,
+            durable_id=durable_id,
+            map_future_output=None,
+            reduce_future_output=None,
+        )
+        self._future_infos[future._id] = future_info
+
+        if isinstance(future, ListFuture):
+            self._run_list_future(future_info)
+        elif isinstance(future, ReduceOperationFuture):
+            self._run_reduce_opearation_future(future_info, tail_call)
+        elif isinstance(future, FunctionCallFuture):
+            self._run_function_call_future(future_info, tail_call)
+        else:
+            raise InternalError(
+                f"Unsupported Future type: {type(future)} with ID {future._id}"
+            )
 
     def _run_list_future(self, future_info: FutureInfo) -> None:
         # Server can't run ListFuture, we need to run each list item separately as a new
@@ -410,52 +454,60 @@ class AllocationRunner:
             )
         function: Function = get_function(user_future._metadata.function_name)
 
-        map_inputs: list[Future | Any]
-        if isinstance(user_future._items, ListFuture):
-            inputs_future_info: FutureInfo = self._future_infos[user_future._items._id]
+        map_inputs: list[_TensorlakeFutureWrapper[Future] | Any]
+        items: list[_TensorlakeFutureWrapper[Future] | Any] | ListFuture = (
+            _unwrap_future(user_future._items)
+        )
+        if isinstance(items, ListFuture):
+            inputs_future_info: FutureInfo = self._future_infos[items._id]
             map_inputs = inputs_future_info.map_future_output
         else:
-            map_inputs = user_future._items
+            map_inputs = items
 
         map_outputs: list[FunctionCallFuture] = []
         for input in map_inputs:
-            # Calling SDK recursively here. The depth of recursion is strictly one.
-            # This is because the input is an already running Future, we won't decend into it.
             mapped_input: FunctionCallFuture = derived_function_call_future(
                 user_future, function, input
             )
+            # No output override for list future because it can't be returned from tail call.
+            # Strictly one level of recursion per mapped item, so it's okay.
+            self._run_future(mapped_input, tail_call=False)
             map_outputs.append(mapped_input)
 
         future_info.map_future_output = map_outputs
 
-    def _run_reduce_opearation_future(self, future_info: FutureInfo) -> None:
+    def _run_reduce_opearation_future(
+        self, future_info: FutureInfo, tail_call: bool
+    ) -> None:
         # Server can't run ReduceOperationFuture, we need to run each list item separately as a new
         # internal (not user visible) Future. All child Futures of user_future are already running.
         # FIXME: This is not efficient. When we change to log oriented protocol, all the function calls need
         # to come in a single batch of ordered events instead sending one function call to Server at a time.
         user_future: ReduceOperationFuture = future_info.future
-
-        # We do recursive calls into the SDK but with only one level, so it's okay.
         function: Function = get_function(user_future._function_name)
 
-        inputs: list[Future | Any] = []
-        if user_future._initial is not _InitialMissing:
-            inputs.append(user_future._initial)
+        inputs: list[_TensorlakeFutureWrapper[Future] | Any] = []
+        initial: Future | Any | _InitialMissingType = _unwrap_future(
+            user_future._initial
+        )
+        if initial is not _InitialMissing:
+            inputs.append(initial)
 
-        if isinstance(user_future._items, ListFuture):
-            inputs_future_info: FutureInfo = self._future_infos[user_future._items._id]
+        items: list[_TensorlakeFutureWrapper[Future] | Any] | ListFuture = (
+            _unwrap_future(user_future._items)
+        )
+        if isinstance(items, ListFuture):
+            inputs_future_info: FutureInfo = self._future_infos[items._id]
             inputs.extend(inputs_future_info.map_future_output)
         else:
-            inputs.extend(user_future._items)
+            inputs.extend(items)
 
         if len(inputs) == 0:
             raise SDKUsageError("reduce of empty iterable with no initial value")
 
         if len(inputs) == 1:
-            # This is UX corner case. If this is a Future and user didn't do tail_call on it
-            # then they can get a value serialized in a wrong way here. We'll need to explain
-            # it in user docs.
-            future_info.reduce_future_output = inputs[0]
+            # Child future inputs[0] is already running due to DFS bottom up traversal.
+            future_info.reduce_future_output = _unwrap_future(inputs[0])
             return
 
         # Create a chain of function calls to reduce all args one by one.
@@ -467,13 +519,15 @@ class AllocationRunner:
             user_future, function, inputs[0], inputs[1]
         )
         for input in inputs[2:]:
-            # Calling SDK recursively here. The depth of recursion is strictly one.
-            # This is because the input is an already running Future, we won't descend into it.
+            # Strictly one level of recursion per reduced item, so it's okay.
+            self._run_future(last_future, tail_call=False)
             last_future = derived_function_call_future(
                 user_future, function, last_future, input
             )
+        reduce_operation_output: Future = last_future
+        self._run_future(reduce_operation_output, tail_call=tail_call)
 
-        future_info.reduce_future_output = last_future
+        future_info.reduce_future_output = reduce_operation_output
 
     def wait_futures_runtime_hook(
         self, futures: List[Future], timeout: float | None, return_when: RETURN_WHEN
@@ -526,7 +580,7 @@ class AllocationRunner:
                     future_id=future._id,
                     exc_info=e,
                 )
-                future.set_exception(
+                future._set_exception(
                     InternalError(
                         f"Unexpected error while waiting for child future completion: {e}"
                     )
@@ -575,6 +629,8 @@ class AllocationRunner:
         user_aio_loop_future: asyncio.Future = user_aio_loop.create_future()
 
         def background_wait():
+            # Required for pretty_print called when converting Future to str.
+            set_allocation_id_context_variable(self._allocation.allocation_id)
             try:
                 self._wait_future_completion(future=future, deadline=None)
             except BaseException as e:
@@ -583,7 +639,7 @@ class AllocationRunner:
                     future_id=future._id,
                     exc_info=e,
                 )
-                future.set_exception(
+                future._set_exception(
                     InternalError(
                         f"Unexpected error while waiting for child future completion: {e}"
                     )
@@ -592,6 +648,9 @@ class AllocationRunner:
 
         threading.Thread(target=background_wait, daemon=True).start()
         yield from user_aio_loop_future.__await__()
+        # The coroutine is done running. It can't be started again by user code.
+        # Clear the hard reference.
+        future._coroutine = None
 
     def _wait_future_completion(self, future: Future, deadline: float | None) -> None:
         """Waits for the completion of the future and sets its result or exception if didn't timeout.
@@ -631,7 +690,7 @@ class AllocationRunner:
                 "Durable Future ID is not set for FutureInfo.",
                 future_id=future_info.future._id,
             )
-            future.set_exception(
+            future._set_exception(
                 InternalError("Durable Future ID is not set for FutureInfo.")
             )
             return
@@ -682,7 +741,7 @@ class AllocationRunner:
                     logger=self._logger,
                 )[0]
                 if serialized_output.metadata is None:
-                    future.set_exception(
+                    future._set_exception(
                         InternalError(
                             "Function Call output SerializedValue is missing metadata."
                         )
@@ -691,7 +750,7 @@ class AllocationRunner:
                 output: Any = deserialize_value_with_metadata(
                     serialized_output.data, serialized_output.metadata
                 )
-                future.set_result(output)
+                future._set_result(output)
             elif (
                 result.outcome_code
                 == AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE
@@ -705,26 +764,26 @@ class AllocationRunner:
                             logger=self._logger,
                         )[0]
                     )
-                    future.set_exception(
+                    future._set_exception(
                         RequestError(
                             message=serialized_request_error.data.decode("utf-8")
                         )
                     )
                 else:
                     # We don't have a user visible cause of failure.
-                    future.set_exception(create_function_error(future, cause=None))
+                    future._set_exception(create_function_error(future, cause=None))
             else:
                 self._logger.error(
                     f"Unexpected outcome code in function call result: {result.outcome_code}"
                 )
-                future.set_exception(
+                future._set_exception(
                     InternalError(
                         f"Unexpected outcome code in function call result: {result.outcome_code}"
                     )
                 )
         else:
             # timeout and no result or error are available.
-            future.set_exception(TimeoutError())
+            future._set_exception(TimeoutError())
 
         # Future result is set, we can remove the Future from tracking.
         del self._future_infos[future._id]
@@ -763,11 +822,11 @@ class AllocationRunner:
                 break
 
         if is_timeout:
-            future.set_exception(TimeoutError())
+            future._set_exception(TimeoutError())
         elif exception is not None:
-            future.set_exception(exception)
+            future._set_exception(exception)
         else:
-            future.set_result(collection)
+            future._set_result(collection)
 
     def _wait_reduce_operation_future_completion(
         self, future_info: FutureInfo, deadline: float | None
@@ -780,7 +839,7 @@ class AllocationRunner:
         reduce_future_output: Future | Any | None = future_info.reduce_future_output
 
         if reduce_future_output is None:
-            future.set_exception(
+            future._set_exception(
                 InternalError("Reduce operation future is missing the output future.")
             )
             return
@@ -789,14 +848,16 @@ class AllocationRunner:
             # FIXME: Recursive call. Max 1000 recursion depth is allowed in Python by default.
             self._wait_future_completion(future=reduce_future_output, deadline=deadline)
             if reduce_future_output.exception is not None:
-                future.set_exception(reduce_future_output.exception)
+                future._set_exception(reduce_future_output.exception)
             else:
-                future.set_result(reduce_future_output.result())
+                future._set_result(reduce_future_output.result())
         else:
             # This can happen when we have only one item to reduce, in that case we shortcut and set the output directly without creating a Future for it.
-            future.set_result(reduce_future_output)
+            future._set_result(reduce_future_output)
 
-    def _run_function_call_future(self, future_info: FutureInfo) -> None:
+    def _run_function_call_future(
+        self, future_info: FutureInfo, tail_call: bool
+    ) -> None:
         future: FunctionCallFuture = future_info.future
 
         # Copy the user's future to not pollute user Future by the modifications coming next.
@@ -835,17 +896,13 @@ class AllocationRunner:
             future=future_copy,
             uploaded_serialized_objects=serialized_objects,
             output_serializer_name_override=(
-                self._output_value_serializer_name_override
-                if future._tail_call
-                else None
+                self._output_value_serializer_name_override if tail_call else None
             ),
             output_type_hint_override=(
-                self._output_value_type_hint_override if future._tail_call else None
+                self._output_value_type_hint_override if tail_call else None
             ),
             has_output_type_hint_override=(
-                self._has_output_value_type_hint_override
-                if future._tail_call
-                else False
+                self._has_output_value_type_hint_override if tail_call else False
             ),
             function_ref=self._function_ref,
             future_infos=self._future_infos,
@@ -904,7 +961,7 @@ class AllocationRunner:
                 status=function_call_creation_info.result.status,
             )
             exception: InternalError = InternalError("Failed to start function call")
-            future_info.future.set_exception(exception)
+            future_info.future._set_exception(exception)
             raise exception
         else:
             self._logger.info(
@@ -1046,7 +1103,9 @@ class AllocationRunner:
 
         # This is user code.
         try:
-            output: Any | Future = self._call_user_function(args, kwargs)
+            output: Any | _TensorlakeFutureWrapper[Future] = self._call_user_function(
+                args, kwargs
+            )
         except RequestError as e:
             # This is user code.
             try:
@@ -1075,7 +1134,11 @@ class AllocationRunner:
                 self._allocation_event_details, e
             )
 
+        # Required for _unwrap_future calls done by various algorithms below.
+        set_allocation_id_context_variable(self._allocation.allocation_id)
+
         tail_call_output_future: Future | None = None
+        output: Any | Future = _unwrap_future(output)
         if isinstance(output, Future):
             # Function returned tail call. This is user code.
             try:
@@ -1087,6 +1150,25 @@ class AllocationRunner:
                 # This is internal FE code.
                 return self._result_helper.from_user_exception(
                     self._allocation_event_details, e
+                )
+
+            # SDK automatically starts tail call futures and their inputs.
+            # This is why we walk the Futures tree, not just starting the output.
+            # This is our code.
+            output_future_ids: set[str] = tail_call_output_future_ids(output)
+            for future in dfs_bottom_up_unique_only(output):
+                if future._id in self._future_infos:
+                    return self._result_helper.from_user_exception(
+                        self._allocation_event_details,
+                        SDKUsageError(
+                            f"A tail call Future {future} returned from function '{self._function_ref.function_name}' is already running, "
+                            "a tail call Future should not be started."
+                        ),
+                    )
+
+                self._run_future(
+                    future,
+                    tail_call=(future._id in output_future_ids),
                 )
 
             if isinstance(output, ReduceOperationFuture):

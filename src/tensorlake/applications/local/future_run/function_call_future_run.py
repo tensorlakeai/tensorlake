@@ -43,10 +43,6 @@ class FunctionCallFutureRun(LocalFutureRun):
             result_queue=result_queue,
             thread_pool=thread_pool,
         )
-        if not isinstance(local_future.future, FunctionCallFuture):
-            raise InternalError(
-                "local_future must be a LocalFuture of FunctionCallFuture"
-            )
 
         self._application: Function = application
         self._function: Function = function
