@@ -61,7 +61,7 @@ class TestRequestFailedRaisedOnFunctionError(unittest.TestCase):
 
         stderr: str = captured_stderr.getvalue()
         self.assertIn(
-            "FunctionError: Tensorlake Function Call application_function(\n"
+            "FunctionError: Tensorlake Function Call Future application_function(\n"
             "  'magic_string',\n"
             ") failed due to exception: \n"
             "Traceback (most recent call last):\n",

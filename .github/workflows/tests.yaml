@@ -59,6 +59,10 @@ jobs:
         with:
           # Indexify Server storage path has to be that same in container and host
           # so Executor can use local FS BLOB store.
+          #
+          # Indexify Server tag 972f302c8a14eccdf407bfe889b9f39c06c4ee91 is the last
+          # compatible with Python PE.
+          # TODO: Use latest Server and latest Dataplane images, stop using Python PE.
           run: |
             mkdir -p /tmp/indexify-server-storage/indexify_storage/blobs
             docker run -i -a stdout -a stderr --rm \
@@ -67,7 +71,7 @@ jobs:
               --name indexify-server \
               -v /tmp/indexify-server-storage:/tmp/indexify-server-storage \
               -w /tmp/indexify-server-storage \
-              ${{ steps.login-ecr.outputs.registry }}/indexify-server:latest  &
+              ${{ steps.login-ecr.outputs.registry }}/indexify-server:972f302c8a14eccdf407bfe889b9f39c06c4ee91  &
           wait-on: |
             tcp:localhost:8900
           tail: true

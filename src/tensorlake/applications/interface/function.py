@@ -1,18 +1,22 @@
 import inspect
+import types
+from collections.abc import Coroutine
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List
 
-from .awaitables import (
-    Awaitable,
-    AwaitableList,
-    FunctionCallAwaitable,
+from .exceptions import SDKUsageError
+from .futures import (
+    FunctionCallFuture,
+    Future,
+    ListFuture,
+    ReduceOperationFuture,
     _InitialMissing,
     _InitialMissingType,
+    _make_map_operation_future,
+    _make_reduce_operation_future,
     _request_scoped_id,
-    make_map_operation_awaitable,
-    make_reduce_operation_awaitable,
+    _wrap_future_into_coroutine,
 )
-from .exceptions import SDKUsageError
 from .image import Image
 from .retries import Retries
 
@@ -57,24 +61,35 @@ class Function:
     are created at Python script loading time where it's not possible to provide
     a good UX. This is why all the validation is done separately i.e. on deployment."""
 
+    @property
+    def __class__(self):
+        # Make isinstance(self, types.FunctionType) return True so that
+        # inspect.isfunction() and inspect.iscoroutinefunction() work on Function
+        # instances. This is needed for other frameworks (e.g. agentic frameworks)
+        # to detect async Tensorlake Functions via inspect.iscoroutinefunction().
+        # Python's isinstance() checks type(obj) first (still Function), then falls
+        # back to obj.__class__. So isinstance(self, Function) continues to work.
+        return types.FunctionType
+
     def __init__(self, original_function: Callable):
         self._original_function: Callable = original_function
         self._function_config: _FunctionConfiguration | None = None
         self._application_config: _ApplicationConfiguration | None = None
-        self._awaitables_factory: FunctionAwaitablesFactory = FunctionAwaitablesFactory(
-            self
-        )
+        self._future_factory: FunctionFutureFactory = FunctionFutureFactory(self)
         # Mimic original function if it's a regular user defined function.
         if inspect.isfunction(self._original_function):
             # Copy original function metadata into this Function object so function inspection
             # tools like these used by Agentic frameworks to generate tool descriptions work.
             # See the attributes at "function" at
-            # https://docs.python.org/3/library/inspect.html#types-and-members.
+            # https://docs.python.org/3/library/inspect.html#types-and-members and
+            # https://docs.python.org/3/reference/datamodel.html#special-read-only-attributes.
             for mimic_attr in [
+                "__annotate__",
                 "__doc__",
                 "__name__",
                 "__qualname__",
                 "__code__",
+                "__closure__",
                 "__defaults__",
                 "__kwdefaults__",
                 "__globals__",
@@ -88,29 +103,32 @@ class Function:
                         self, mimic_attr, getattr(self._original_function, mimic_attr)
                     )
 
-    def __call__(self, *args, **kwargs) -> Any:
-        """Does a blocking function call and returns its result.
+    def __call__(self, *args, **kwargs) -> Any | Coroutine[Any, Any, Any]:
+        """Calls the function and returns its result if sync function. Returns a coroutine otherwise.
+
+        If the function is async function then returns its coroutine and doesn't block.
+        The coroutine will only be executed if awaited or if started by user using i.e. asyncio.create_task().
+        Otherwise, blocks until the result is ready and returns it.
 
         Raises RequestError if the function raised RequestError.
         Raises FunctionError if the function failed.
         Raises TensorlakeError on other errors.
         """
-        # Called when the Function is called using () operator.
-        return (
-            FunctionCallAwaitable(
-                id=_request_scoped_id(),
-                function_name=self._function_config.function_name,
-                args=list(args),
-                kwargs=dict(kwargs),
-            )
-            .run()
-            .result()
-        )
+        future: FunctionCallFuture = self.future(*args, **kwargs)
+        if inspect.iscoroutinefunction(self):
+            return _wrap_future_into_coroutine(future)
+        else:
+            future.run()
+            return future.result()
 
-    def map(self, items: Iterable[Any | Awaitable] | AwaitableList) -> List[Any]:
-        """Returns a list with every item transformed using the function.
+    def map(
+        self, items: Iterable[Any | Future] | ListFuture
+    ) -> Iterable[Any] | Coroutine[Any, Any, Any]:
+        """Returns an iterable with every item transformed using the function if sync function. Returns a coroutine otherwise.
 
-        Blocks until the result is ready.
+        If the function is async function then returns its coroutine and doesn't block.
+        The coroutine will only be executed if awaited or if started by user using i.e. asyncio.create_task().
+        Otherwise, blocks until the result is ready and returns an iterable of results.
         Similar to https://docs.python.org/3/library/functions.html#map except all transformations
         are done in parallel.
 
@@ -118,44 +136,51 @@ class Function:
         Raises FunctionError if the function failed.
         Raises TensorlakeError on other errors.
         """
-        return (
-            make_map_operation_awaitable(
-                function_name=self._function_config.function_name,
-                items=items,
-            )
-            .run()
-            .result()
-        )
+        future: ListFuture = self.future.map(items)
+        if inspect.iscoroutinefunction(self):
+            return _wrap_future_into_coroutine(future)
+        else:
+            future.run()
+            return future.result()
 
     def reduce(
         self,
-        items: Iterable[Any | Awaitable] | AwaitableList,
-        initial: Any | _InitialMissingType = _InitialMissing,
+        items: Iterable[Any | Future] | ListFuture,
+        initial: Any | Future | _InitialMissingType = _InitialMissing,
         /,
-    ) -> Any:
-        """Calls the function as a reducer of the supplied iterable.
+    ) -> Any | Coroutine[Any, Any, Any]:
+        """Performs a reduce operation using the supplied function over the supplied items and returns result if sync function. Returns a coroutine otherwise.
 
-        Blocks until the result is ready.
+        If the function is async function then returns its coroutine and doesn't block.
+        The coroutine will only be executed if awaited or if started by user using i.e. asyncio.create_task().
+        Otherwise, blocks until the result is ready.
         Similar to https://docs.python.org/3/library/functools.html#functools.reduce.
 
         Raises RequestError if the function raised RequestError.
         Raises FunctionError if the function failed.
         Raises TensorlakeError on other errors.
         """
-        return (
-            make_reduce_operation_awaitable(
-                function_name=self._function_config.function_name,
-                items=items,
-                initial=initial,
-            )
-            .run()
-            .result()
-        )
+        future: ReduceOperationFuture = self.future.reduce(items, initial)
+        if inspect.iscoroutinefunction(self):
+            return _wrap_future_into_coroutine(future)
+        else:
+            future.run()
+            return future.result()
 
     @property
-    def awaitable(self) -> "FunctionAwaitablesFactory":
-        """Returns function factory for creating awaitables."""
-        return self._awaitables_factory
+    def future(self) -> "FunctionFutureFactory":
+        """Returns function factory for creating futures."""
+        return self._future_factory
+
+    def _make_function_call_future(
+        self, args: list[Any | Future], kwargs: dict[str, Any | Future]
+    ) -> FunctionCallFuture:
+        return FunctionCallFuture(
+            id=_request_scoped_id(),
+            function_name=self._function_config.function_name,
+            args=args,
+            kwargs=kwargs,
+        )
 
     def __repr__(self) -> str:
         # Shows exact structure of the Function. Used for debug logging.
@@ -204,68 +229,63 @@ class Function:
             return _function_name(self._original_function)
 
 
-class FunctionAwaitablesFactory:
-    """Factory for creating awaitables for a specific Tensorlake Function.
+class FunctionFutureFactory:
+    """Factory for creating futures for a specific Tensorlake Function.
 
-    This class is returned by Function.awaitable property.
+    This class is returned by Function.future property.
     """
 
     def __init__(self, function: Function):
         self._function: Function = function
 
-    def __call__(self, *args, **kwargs) -> Awaitable:
-        """Returns an awaitable that represents a call of the function.
+    def __call__(self, *args, **kwargs) -> Future:
+        """Returns a Future that represents a call of the function.
 
         Raises TensorlakeError on error.
         """
-        return FunctionCallAwaitable(
-            id=_request_scoped_id(),
-            function_name=self._function._function_config.function_name,
-            args=list(args),
-            kwargs=dict(kwargs),
-        )
+        return self._function._make_function_call_future(list(args), dict(kwargs))
 
-    def map(self, iterable: Iterable[Any | Awaitable]) -> Awaitable:
-        """Returns an awaitable that represents mapping the function over the iterable.
+    def map(self, items: Iterable[Any | Future] | ListFuture) -> Future:
+        """Returns a Future that represents mapping of the function over the iterable.
 
         Raises TensorlakeError on error.
         """
-        return make_map_operation_awaitable(
+        return _make_map_operation_future(
             function_name=self._function._function_config.function_name,
-            items=iterable,
+            items=items,
         )
 
     def reduce(
         self,
-        iterable: Iterable[Any | Awaitable],
-        initial: Any | _InitialMissingType = _InitialMissing,
+        items: Iterable[Any | Future] | ListFuture,
+        initial: Any | Future | _InitialMissingType = _InitialMissing,
         /,
-    ) -> Awaitable:
-        """Returns an awaitable that represents reducing the iterable using the function.
+    ) -> Future:
+        """Returns a Future that represents reducing the iterable using the function.
 
         Raises TensorlakeError on error.
         """
-        return make_reduce_operation_awaitable(
+        return _make_reduce_operation_future(
             function_name=self._function._function_config.function_name,
-            items=iterable,
+            items=items,
             initial=initial,
         )
 
     def __repr__(self) -> str:
-        # Shows exact structure of the Awaitable Factory. Used for debug logging.
-        return f"<FunctionAwaitablesFactory function={self._function!r}>"
+        # Shows exact structure of the Future Factory. Used for debug logging.
+        return f"<FunctionFutureFactory function={self._function!r}>"
 
     def __str__(self) -> str:
-        # Shows a simple human readable representation of the Awaitable Factory. Used in error messages.
-        return f"Tensorlake Function.awaitable factory for {self._function}"
+        # Shows a simple human readable representation of the Future Factory. Used in error messages.
+        return f"Tensorlake Function.future factory for {self._function}"
 
     def __reduce__(self):
-        # This helps users to see that they made a coding mistake and returned a Tensorlake Function .awaitable
+        # This helps users to see that they made a coding mistake and returned a Tensorlake Function .future
         # factory object from their function without calling it or passed it as a function call parameter (directly
         # or inside another object).
         # Note: this exception will be converted into SerializationError when pickling is attempted.
         raise SDKUsageError(
-            f"Attempt to pickle a Tensorlake Function.awaitable factory for {self._function}. It cannot "
+            f"Attempt to pickle a Tensorlake Function.future factory for {self._function}. It cannot "
             "be passed as a function parameter or returned from a Tensorlake Function."
         )
 

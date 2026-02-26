@@ -30,7 +30,8 @@ def get_context_worker(q) -> None:
 
 def run_future_worker(q) -> None:
     try:
-        application_mt_get_context.awaitable("whatever").run()
+        future = application_mt_get_context.future("whatever")
+        future.run()
         q.put(None)
     except Exception as e:
         q.put(e)
@@ -85,7 +86,7 @@ def application_mt_run_future(_: str) -> str:
 @application()
 @function()
 def application_mt_wait_future(_: str) -> str:
-    future: Future = application_mt_get_context.awaitable("whatever").run()
+    future: Future = application_mt_get_context.future("whatever").run()
     q: mt_queue.SimpleQueue = mt_queue.SimpleQueue()
 
     thread = threading.Thread(target=wait_future_worker, args=(q, future))

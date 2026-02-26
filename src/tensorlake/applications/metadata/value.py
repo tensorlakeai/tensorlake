@@ -9,7 +9,7 @@ from pydantic import BaseModel
 # that depend on a lot of complicated contextual factors.
 class ValueMetadata(BaseModel):
     # ID of the value, uniquness guarantees depend on how the field is set.
-    # If the value is returned from an awaitable then the ID of the awaitable.
+    # If the value is returned from a Future then the ID of the Future.
     id: str
     # Type hint of the value, either Type hint from function signature or type(value).
     type_hint: Any

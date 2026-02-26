@@ -1,3 +1,4 @@
+import asyncio
 import time
 import unittest
 from typing import Any
@@ -25,10 +26,12 @@ ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.defin
 @function()
 def api_function_return_when_all_completed(_: Any) -> str:
     futures: list[Future] = [
-        sleep_and_return_arg.awaitable(arg="foo", delay=0).run(),
-        sleep_and_return_arg.awaitable(arg="bar", delay=2).run(),
-        sleep_and_return_arg.awaitable(arg="buzz", delay=2).run(),
+        sleep_and_return_arg.future(arg="foo", delay=0),
+        sleep_and_return_arg.future(arg="bar", delay=2),
+        sleep_and_return_arg.future(arg="buzz", delay=2),
     ]
+    for f in futures:
+        f.run()
 
     # This call should take 2 seconds to complete.
     done, not_done = Future.wait(futures, return_when=RETURN_WHEN.ALL_COMPLETED)
@@ -60,10 +63,12 @@ def api_function_return_when_first_completed(_: Any) -> str:
     # FIXME: In remote mode FIRST_COMPLETED waits on futures serially,
     # so this test will fail if we put "bar" second in the futures list.
     futures: list[Future] = [
-        sleep_and_return_arg.awaitable(arg="bar", delay=0).run(),
-        sleep_and_return_arg.awaitable(arg="foo", delay=2).run(),
-        sleep_and_return_arg.awaitable(arg="buzz", delay=2).run(),
+        sleep_and_return_arg.future(arg="bar", delay=0),
+        sleep_and_return_arg.future(arg="foo", delay=2),
+        sleep_and_return_arg.future(arg="buzz", delay=2),
     ]
+    for f in futures:
+        f.run()
 
     # This call should take 0 seconds to complete.
     done, not_done = Future.wait(futures, return_when=RETURN_WHEN.FIRST_COMPLETED)
@@ -87,7 +92,7 @@ def api_function_return_when_first_completed(_: Any) -> str:
 @application()
 @function()
 def api_function_wait_timeout(_: Any) -> str:
-    future: Future = sleep_and_return_arg.awaitable(arg="foo", delay=5).run()
+    future: Future = sleep_and_return_arg.future(arg="foo", delay=5).run()
     try:
         future.result(timeout=1.0)
     except TimeoutError:
@@ -102,10 +107,12 @@ def api_function_wait_timeout(_: Any) -> str:
 @function()
 def api_function_return_when_first_failure(_: Any) -> str:
     futures: list[Future] = [
-        sleep_and_return_arg.awaitable(arg="foo", delay=2).run(),
-        raise_request_error.awaitable(message="bar", delay=0).run(),
-        sleep_and_return_arg.awaitable(arg="buzz", delay=2).run(),
+        sleep_and_return_arg.future(arg="foo", delay=2),
+        raise_request_error.future(message="bar", delay=0),
+        sleep_and_return_arg.future(arg="buzz", delay=2),
     ]
+    for f in futures:
+        f.run()
 
     # This call should take 0 seconds to complete.
     done, not_done = Future.wait(futures, return_when=RETURN_WHEN.FIRST_FAILURE)
@@ -135,6 +142,34 @@ def raise_request_error(message: str, delay: float) -> Any:
     raise RequestError(message)
 
 
+@function()
+@application()
+def api_function_future_result_caching() -> str:
+    # This call should take 2 seconds to complete.
+    start_time: float = time.monotonic()
+    future: Future = sleep_and_return_arg.future("foo", delay=2)
+    result1: str = future.result()
+    assert result1 == "foo"
+    elapsed_time: float = time.monotonic() - start_time
+    assert elapsed_time >= 2.0
+
+    # This call should return immediately.
+    start_time = time.monotonic()
+    result2: str = future.result()
+    assert result2 == "foo"
+    elapsed_time = time.monotonic() - start_time
+    assert elapsed_time < 1.0
+
+    # This call should return immediately.
+    start_time = time.monotonic()
+    result3: str = future.result()
+    assert result3 == "foo"
+    elapsed_time = time.monotonic() - start_time
+    assert elapsed_time < 1.0
+
+    return "success"
+
+
 class TestFuturesWait(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_wait_all_completed(self, _: str, is_remote: bool):
@@ -162,18 +197,27 @@ class TestFuturesWait(unittest.TestCase):
         request: Request = run_application(api_function_wait_timeout, is_remote, "foo")
         self.assertEqual(request.output(), "success")
 
-    # FIXME: Enable this test for local mode. It's currently disabled because in
-    # local mode we're stopping whole request execution on a function run failure."
-    # FIXME: Enable this test for remote mode. It's currently disabled for the same reason.
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    @unittest.skip(
-        "We're currently stopping whole request execution on a function run failure."
-    )
     def test_wait_first_failure(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(
             api_function_return_when_first_failure, is_remote, "foo"
+        )
+        # We're currently stopping whole request execution on a function run failure.
+        # So the request error gets propagated to the request output instead of being
+        # raised in the application function.
+        # self.assertEqual(request.output(), "success")
+        with self.assertRaises(RequestError) as cm:
+            request.output()
+        self.assertEqual(str(cm.exception), "bar")
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_future_result_caching(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+        request: Request = run_application(
+            api_function_future_result_caching, is_remote, "foo"
         )
         self.assertEqual(request.output(), "success")
 

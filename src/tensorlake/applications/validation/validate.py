@@ -13,11 +13,11 @@ from ..function.introspect import (
 )
 from ..function.type_hints import (
     function_signature,
-    is_awaitable_type_hint,
     is_file_type_hint,
+    is_future_type_hint,
 )
 from ..function.user_data_serializer import function_input_serializer
-from ..interface import Awaitable, File, Function, InternalError, SerializationError
+from ..interface import File, Function, InternalError, SerializationError
 from ..interface.decorators import (
     _ApplicationDecorator,
     _class_name,
@@ -26,6 +26,7 @@ from ..interface.decorators import (
     _FunctionDecorator,
 )
 from ..interface.function import _is_application_function
+from ..interface.futures import Future as _Future
 from ..registry import (
     get_classes,
     get_classes_with_duplicates,
@@ -557,13 +558,13 @@ def _validate_application_function(
     else:
         if is_file_type_hint(signature.return_annotation):
             pass  # Not serialized using Pydantic
-        elif is_awaitable_type_hint(signature.return_annotation):
+        elif is_future_type_hint(signature.return_annotation):
             messages.append(
                 ValidationMessage(
-                    message=f"Application function return type hint is an Awaitable. "
-                    "Instead of using Awaitable as a return type hint, please use type hint of the value returned by the Awaitable. "
-                    "For example, if the Awaitable (once resolved) returns str, then please use 'str' in the return type hint of "
-                    "the application function instead of the Awaitable.",
+                    message=f"Application function return type hint is a Future. "
+                    "Instead of using Future as a return type hint, please use type hint of the value returned by the Future. "
+                    "For example, if the Future (once resolved) returns str, then please use 'str' in the return type hint of "
+                    "the application function instead of the Future.",
                     severity=ValidationMessageSeverity.ERROR,
                     details=function_details,
                 )
@@ -586,13 +587,13 @@ def _validate_application_function(
                             details=function_details,
                         )
                     )
-                elif str(Awaitable) in e_str:
+                elif str(_Future) in e_str:
                     messages.append(
                         ValidationMessage(
-                            message=f"Application function return type hint '{signature.return_annotation}' uses an Awaitable object. "
-                            "Instead of using Awaitable in the return type hint, please use type hint of the value returned by the Awaitable. "
-                            "For example, if the Awaitable (once resolved) returns str, then please use 'str' in the return type hint of "
-                            "the application function instead of the Awaitable.",
+                            message=f"Application function return type hint '{signature.return_annotation}' uses a Future. "
+                            "Instead of using Future in the return type hint, please use type hint of the value returned by the Future. "
+                            "For example, if the Future (once resolved) returns str, then please use 'str' in the return type hint of "
+                            "the application function instead of the Future.",
                             severity=ValidationMessageSeverity.ERROR,
                             details=function_details,
                         )
