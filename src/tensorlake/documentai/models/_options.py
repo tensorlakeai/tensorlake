@@ -258,9 +258,9 @@ class FormFillingOptions(BaseModel):
         False,
         description="If true, disables AcroForm detection.",
     )
-    no_gemini_detection: Optional[bool] = Field(
+    no_widget_detection: Optional[bool] = Field(
         False,
-        description="If true, disables Gemini detection.",
+        description="If true, disables widget detection.",
     )
 
 
