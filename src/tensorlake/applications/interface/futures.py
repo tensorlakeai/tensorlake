@@ -82,7 +82,7 @@ class Future:
     def run(self) -> "Future":
         """Runs this Future as soon as possible and returns it.
 
-        Returns self for chaining with .result().
+        Returns self to start the Future immeditely and save it in i.e. a list.
 
         Raises SDKUsageError if the Future was already started.
         Raises TensorlakeError on error.
