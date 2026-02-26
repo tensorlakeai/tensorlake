@@ -25,7 +25,7 @@ class Total(BaseModel):
 @application()
 @function(image=mapper_image, description="Sums the squares of a sequence of numbers")
 def sequence_summer(a: int) -> Total:
-    return reducer.awaitable.reduce(processor.awaitable.map(range(a)))
+    return reducer.future.reduce(processor.future.map(range(a)))
 
 
 @function(image=process_image)
