@@ -14,6 +14,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from tensorlake.applications.remote.code.ignored_code_paths import (
+    CodePathsSummary,
     _parse_gitignore,
     ignored_code_paths,
 )
@@ -56,7 +57,7 @@ class TestLeadingSlashFix(unittest.TestCase):
             gitignore = root / ".gitignore"
             gitignore.write_text("/build/\n")
 
-            result = _parse_gitignore(root, gitignore)
+            result = _parse_gitignore(root, gitignore).ignored_paths
             self.assertIn(_abspath(root, "build"), result)
 
     def test_leading_slash_file(self):
@@ -67,7 +68,7 @@ class TestLeadingSlashFix(unittest.TestCase):
             gitignore = root / ".gitignore"
             gitignore.write_text("/config.local\n")
 
-            result = _parse_gitignore(root, gitignore)
+            result = _parse_gitignore(root, gitignore).ignored_paths
             self.assertIn(_abspath(root, "config.local"), result)
 
     def test_leading_slash_no_crash_on_missing_targets(self):
@@ -78,7 +79,7 @@ class TestLeadingSlashFix(unittest.TestCase):
             gitignore.write_text("/nonexistent\n/also_missing/\n")
 
             # Must not raise NotImplementedError
-            result = _parse_gitignore(root, gitignore)
+            result = _parse_gitignore(root, gitignore).ignored_paths
             self.assertEqual(result, set())
 
     def test_multiple_leading_slashes_stripped(self):
@@ -89,7 +90,7 @@ class TestLeadingSlashFix(unittest.TestCase):
             gitignore = root / ".gitignore"
             gitignore.write_text("///dist\n")
 
-            result = _parse_gitignore(root, gitignore)
+            result = _parse_gitignore(root, gitignore).ignored_paths
             self.assertIn(_abspath(root, "dist"), result)
 
     def test_leading_slash_anchors_to_root_only(self):
@@ -101,7 +102,7 @@ class TestLeadingSlashFix(unittest.TestCase):
             gitignore = root / ".gitignore"
             gitignore.write_text("/build/\n")
 
-            result = _parse_gitignore(root, gitignore)
+            result = _parse_gitignore(root, gitignore).ignored_paths
             self.assertIn(_abspath(root, "build"), result)
             self.assertNotIn(_abspath(root, "src/build"), result)
 
@@ -127,7 +128,7 @@ class TestRecursiveMatching(unittest.TestCase):
             gitignore = root / ".gitignore"
             gitignore.write_text("*.pyc\n")
 
-            result = _parse_gitignore(root, gitignore)
+            result = _parse_gitignore(root, gitignore).ignored_paths
             self.assertIn(_abspath(root, "top.pyc"), result)
             self.assertIn(_abspath(root, "src/nested.pyc"), result)
             self.assertIn(_abspath(root, "src/deep/very_nested.pyc"), result)
@@ -149,7 +150,7 @@ class TestRecursiveMatching(unittest.TestCase):
             gitignore = root / ".gitignore"
             gitignore.write_text("__pycache__/\n")
 
-            result = _parse_gitignore(root, gitignore)
+            result = _parse_gitignore(root, gitignore).ignored_paths
             self.assertIn(_abspath(root, "__pycache__"), result)
             self.assertIn(_abspath(root, "src/__pycache__"), result)
             self.assertIn(_abspath(root, "src/pkg/__pycache__"), result)
@@ -169,7 +170,7 @@ class TestRecursiveMatching(unittest.TestCase):
             gitignore = root / ".gitignore"
             gitignore.write_text("node_modules/\n")
 
-            result = _parse_gitignore(root, gitignore)
+            result = _parse_gitignore(root, gitignore).ignored_paths
             self.assertIn(_abspath(root, "node_modules"), result)
             self.assertIn(_abspath(root, "packages/frontend/node_modules"), result)
 
@@ -182,7 +183,7 @@ class TestRecursiveMatching(unittest.TestCase):
             gitignore = root / ".gitignore"
             gitignore.write_text(".env\n")
 
-            result = _parse_gitignore(root, gitignore)
+            result = _parse_gitignore(root, gitignore).ignored_paths
             self.assertIn(_abspath(root, ".env"), result)
             self.assertIn(_abspath(root, "services/api/.env"), result)
 
@@ -195,7 +196,7 @@ class TestRecursiveMatching(unittest.TestCase):
             gitignore = root / ".gitignore"
             gitignore.write_text("src/build\n")
 
-            result = _parse_gitignore(root, gitignore)
+            result = _parse_gitignore(root, gitignore).ignored_paths
             self.assertIn(_abspath(root, "src/build"), result)
             self.assertNotIn(_abspath(root, "other/src/build"), result)
 
@@ -211,7 +212,7 @@ class TestNegation(unittest.TestCase):
             gitignore = root / ".gitignore"
             gitignore.write_text("logs/\n!logs/important.log\n")
 
-            result = _parse_gitignore(root, gitignore)
+            result = _parse_gitignore(root, gitignore).ignored_paths
             self.assertIn(_abspath(root, "logs"), result)
 
 
@@ -229,7 +230,7 @@ class TestDirectoryOnlyPatterns(unittest.TestCase):
             gitignore = root / ".gitignore"
             gitignore.write_text("logs/\n")
 
-            result = _parse_gitignore(root, gitignore)
+            result = _parse_gitignore(root, gitignore).ignored_paths
             self.assertIn(_abspath(root, "logs"), result)
             self.assertNotIn(_abspath(root, "src/logs"), result)
 
@@ -244,7 +245,7 @@ class TestBasicPatterns(unittest.TestCase):
             gitignore = root / ".gitignore"
             gitignore.write_text("# comment\ndist/\n# another\n")
 
-            result = _parse_gitignore(root, gitignore)
+            result = _parse_gitignore(root, gitignore).ignored_paths
             self.assertIn(_abspath(root, "dist"), result)
 
     def test_blank_lines_ignored(self):
@@ -255,7 +256,7 @@ class TestBasicPatterns(unittest.TestCase):
             gitignore = root / ".gitignore"
             gitignore.write_text("\n\ndist/\n\n")
 
-            result = _parse_gitignore(root, gitignore)
+            result = _parse_gitignore(root, gitignore).ignored_paths
             self.assertIn(_abspath(root, "dist"), result)
 
     def test_wildcard_multiple_matches(self):
@@ -266,7 +267,7 @@ class TestBasicPatterns(unittest.TestCase):
             gitignore = root / ".gitignore"
             gitignore.write_text("*.log\n")
 
-            result = _parse_gitignore(root, gitignore)
+            result = _parse_gitignore(root, gitignore).ignored_paths
             self.assertIn(_abspath(root, "app.log"), result)
             self.assertIn(_abspath(root, "error.log"), result)
             self.assertNotIn(_abspath(root, "readme.txt"), result)
@@ -279,21 +280,21 @@ class TestEdgeCases(unittest.TestCase):
             root = Path(root)
             gitignore = root / ".gitignore"
             gitignore.write_text("")
-            self.assertEqual(_parse_gitignore(root, gitignore), set())
+            self.assertEqual(_parse_gitignore(root, gitignore).ignored_paths, set())
 
     def test_only_comments(self):
         with TemporaryDirectory() as root:
             root = Path(root)
             gitignore = root / ".gitignore"
             gitignore.write_text("# comment\n\n# another\n")
-            self.assertEqual(_parse_gitignore(root, gitignore), set())
+            self.assertEqual(_parse_gitignore(root, gitignore).ignored_paths, set())
 
     def test_no_matches(self):
         with TemporaryDirectory() as root:
             root = Path(root)
             gitignore = root / ".gitignore"
             gitignore.write_text("*.xyz\nnonexistent_dir/\n")
-            self.assertEqual(_parse_gitignore(root, gitignore), set())
+            self.assertEqual(_parse_gitignore(root, gitignore).ignored_paths, set())
 
     def test_trailing_whitespace_stripped(self):
         with TemporaryDirectory() as root:
@@ -303,7 +304,7 @@ class TestEdgeCases(unittest.TestCase):
             gitignore = root / ".gitignore"
             gitignore.write_text("dist/   \n")
 
-            result = _parse_gitignore(root, gitignore)
+            result = _parse_gitignore(root, gitignore).ignored_paths
             self.assertIn(_abspath(root, "dist"), result)
 
 
@@ -364,7 +365,7 @@ class TestRealisticGitignore(unittest.TestCase):
                 "venv/\n"
             )
 
-            result = _parse_gitignore(root, gitignore)
+            result = _parse_gitignore(root, gitignore).ignored_paths
 
             # Source code must NOT be excluded
             self.assertNotIn(_abspath(root, "src/app/main.py"), result)
@@ -417,7 +418,7 @@ class TestIgnoredCodePathsIntegration(unittest.TestCase):
 
             with patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("VIRTUAL_ENV", None)
-                result = ignored_code_paths(str(root))
+                result = ignored_code_paths(str(root)).ignored_paths
 
             self.assertIn(_abspath(root, "myenv"), result)
             self.assertNotIn(_abspath(root, "src"), result)
@@ -442,7 +443,7 @@ class TestIgnoredCodePathsIntegration(unittest.TestCase):
 
             with patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("VIRTUAL_ENV", None)
-                result = ignored_code_paths(str(root))
+                result = ignored_code_paths(str(root)).ignored_paths
 
             self.assertIn(_abspath(root, "dist"), result)
             self.assertIn(_abspath(root, "src/__pycache__"), result)
@@ -478,7 +479,7 @@ class TestWalkCodeEndToEnd(unittest.TestCase):
 
             with patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("VIRTUAL_ENV", None)
-                excluded = ignored_code_paths(str(root))
+                excluded = ignored_code_paths(str(root)).ignored_paths
 
             walked_files = list(walk_code(str(root), excluded))
 
@@ -510,7 +511,7 @@ class TestWalkCodeEndToEnd(unittest.TestCase):
             # Not a git repo — forces fallback parser
             with patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("VIRTUAL_ENV", None)
-                excluded = ignored_code_paths(str(root))
+                excluded = ignored_code_paths(str(root)).ignored_paths
 
             walked_files = list(walk_code(str(root), excluded))
 
@@ -545,7 +546,7 @@ class TestWalkCodeEndToEnd(unittest.TestCase):
             # Not a git repo — forces fallback parser, exercises the leading '/' fix
             with patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("VIRTUAL_ENV", None)
-                excluded = ignored_code_paths(str(root))
+                excluded = ignored_code_paths(str(root)).ignored_paths
 
             walked_files = list(walk_code(str(root), excluded))
 
