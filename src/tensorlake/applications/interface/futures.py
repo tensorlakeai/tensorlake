@@ -186,7 +186,9 @@ class Future:
 
         timeout can be used to control the maximum number of seconds to wait before returning.
         Returns a tuple of two lists: (done, not_done) depending on return_when.
-        The Futures must already by started when calling this method, otherwise SDKUsageError is raised.
+        `done` list contains futures that are done (successfully or with failure) at the moment of return.
+        `not_done` list contains futures that are not done at the moment of return.
+        The Futures are started by this method if they were not started before.
 
         This is similar to concurrent.futures.wait:
         https://docs.python.org/3/library/concurrent.futures.html#concurrent.futures.wait
@@ -199,9 +201,7 @@ class Future:
             if not isinstance(future, Future):
                 raise SDKUsageError(f"Cannot run a non-Future object {future}.")
             if not future._run_hook_was_called:
-                raise SDKUsageError(
-                    f"Attempt to wait on Future that was not started: {future}"
-                )
+                future.run()
 
         return runtime_hook_wait_futures(
             futures=list(futures),

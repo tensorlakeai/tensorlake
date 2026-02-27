@@ -1,4 +1,3 @@
-import asyncio
 import time
 import unittest
 from typing import Any
@@ -24,7 +23,7 @@ ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.defin
 
 @application()
 @function()
-def api_function_return_when_all_completed(_: Any) -> str:
+def app_return_when_all_completed(_: Any) -> str:
     futures: list[Future] = [
         sleep_and_return_arg.future(arg="foo", delay=0),
         sleep_and_return_arg.future(arg="bar", delay=2),
@@ -59,7 +58,7 @@ def sleep_and_return_arg(arg: Any, delay: float) -> Any:
 
 @application()
 @function()
-def api_function_return_when_first_completed(_: Any) -> str:
+def app_return_when_first_completed(_: Any) -> str:
     # FIXME: In remote mode FIRST_COMPLETED waits on futures serially,
     # so this test will fail if we put "bar" second in the futures list.
     futures: list[Future] = [
@@ -91,7 +90,7 @@ def api_function_return_when_first_completed(_: Any) -> str:
 
 @application()
 @function()
-def api_function_wait_timeout(_: Any) -> str:
+def app_wait_timeout(_: Any) -> str:
     future: Future = sleep_and_return_arg.future(arg="foo", delay=5).run()
     try:
         future.result(timeout=1.0)
@@ -105,7 +104,7 @@ def api_function_wait_timeout(_: Any) -> str:
 
 @application()
 @function()
-def api_function_return_when_first_failure(_: Any) -> str:
+def app_return_when_first_failure(_: Any) -> str:
     futures: list[Future] = [
         sleep_and_return_arg.future(arg="foo", delay=2),
         raise_request_error.future(message="bar", delay=0),
@@ -144,7 +143,7 @@ def raise_request_error(message: str, delay: float) -> Any:
 
 @function()
 @application()
-def api_function_future_result_caching() -> str:
+def app_future_result_caching() -> str:
     # This call should take 2 seconds to complete.
     start_time: float = time.monotonic()
     future: Future = sleep_and_return_arg.future("foo", delay=2)
@@ -170,13 +169,34 @@ def api_function_future_result_caching() -> str:
     return "success"
 
 
+@application()
+@function()
+def app_wait_runs_not_running_futures() -> str:
+    futures: list[Future] = [
+        sleep_and_return_arg.future(arg="foo", delay=0),
+        sleep_and_return_arg.future(arg="bar", delay=0),
+        sleep_and_return_arg.future(arg="buzz", delay=0),
+    ]
+
+    done, not_done = Future.wait(futures, return_when=RETURN_WHEN.ALL_COMPLETED)
+    assert len(done) == 3
+    assert len(not_done) == 0
+    assert all(future.done() for future in futures)
+
+    assert futures[0].result() == "foo"
+    assert futures[1].result() == "bar"
+    assert futures[2].result() == "buzz"
+
+    return "success"
+
+
 class TestFuturesWait(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_wait_all_completed(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(
-            api_function_return_when_all_completed, is_remote, "foo"
+            app_return_when_all_completed, is_remote, "foo"
         )
         self.assertEqual(request.output(), "success")
 
@@ -185,7 +205,7 @@ class TestFuturesWait(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(
-            api_function_return_when_first_completed, is_remote, "foo"
+            app_return_when_first_completed, is_remote, "foo"
         )
         self.assertEqual(request.output(), "success")
 
@@ -194,7 +214,7 @@ class TestFuturesWait(unittest.TestCase):
     def test_wait_timeout(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
-        request: Request = run_application(api_function_wait_timeout, is_remote, "foo")
+        request: Request = run_application(app_wait_timeout, is_remote, "foo")
         self.assertEqual(request.output(), "success")
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
@@ -202,7 +222,7 @@ class TestFuturesWait(unittest.TestCase):
         if is_remote:
             deploy_applications(__file__)
         request: Request = run_application(
-            api_function_return_when_first_failure, is_remote, "foo"
+            app_return_when_first_failure, is_remote, "foo"
         )
         # We're currently stopping whole request execution on a function run failure.
         # So the request error gets propagated to the request output instead of being
@@ -216,8 +236,16 @@ class TestFuturesWait(unittest.TestCase):
     def test_future_result_caching(self, _: str, is_remote: bool):
         if is_remote:
             deploy_applications(__file__)
+        request: Request = run_application(app_future_result_caching, is_remote, "foo")
+        self.assertEqual(request.output(), "success")
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_wait_runs_not_running_futures(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
         request: Request = run_application(
-            api_function_future_result_caching, is_remote, "foo"
+            app_wait_runs_not_running_futures,
+            is_remote,
         )
         self.assertEqual(request.output(), "success")
 
