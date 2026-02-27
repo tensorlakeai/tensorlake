@@ -181,7 +181,7 @@ class SandboxClient:
 
     def create(
         self,
-        image: str,
+        image: str | None = None,
         cpus: float = 1.0,
         memory_mb: int = 512,
         ephemeral_disk_mb: int = 1024,
@@ -618,19 +618,21 @@ class SandboxClient:
             SandboxError: If sandbox fails to start or times out
             SandboxConnectionError: If the server is unreachable
         """
-        result = self.create(
-            image=image,
-            cpus=cpus,
-            memory_mb=memory_mb,
-            ephemeral_disk_mb=ephemeral_disk_mb,
-            secret_names=secret_names,
-            timeout_secs=timeout_secs,
-            entrypoint=entrypoint,
-            allow_internet_access=allow_internet_access,
-            allow_out=allow_out,
-            deny_out=deny_out,
-            pool_id=pool_id,
-        )
+        if pool_id is not None:
+            result = self.claim(pool_id)
+        else:
+            result = self.create(
+                image=image,
+                cpus=cpus,
+                memory_mb=memory_mb,
+                ephemeral_disk_mb=ephemeral_disk_mb,
+                secret_names=secret_names,
+                timeout_secs=timeout_secs,
+                entrypoint=entrypoint,
+                allow_internet_access=allow_internet_access,
+                allow_out=allow_out,
+                deny_out=deny_out,
+            )
 
         deadline = time.time() + startup_timeout
         while time.time() < deadline:

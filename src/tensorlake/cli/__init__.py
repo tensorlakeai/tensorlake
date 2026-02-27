@@ -8,6 +8,7 @@ from . import (
     init,
     new,
     parse,
+    sandbox,
     secrets,
 )
 
@@ -105,4 +106,5 @@ cli.add_command(new.new)
 cli.add_command(deploy.deploy)
 cli.add_command(secrets.secrets)
 cli.add_command(parse.parse)
+cli.add_command(sandbox.sbx)
 cli.add_command(applications.ls)

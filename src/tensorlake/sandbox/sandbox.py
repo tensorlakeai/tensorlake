@@ -368,6 +368,45 @@ class Sandbox:
         )
         return ListDirectoryResponse.model_validate(response.json())
 
+    # --- PTY sessions ---
+
+    def create_pty_session(
+        self,
+        command: str,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        working_dir: str | None = None,
+        rows: int = 24,
+        cols: int = 80,
+    ) -> dict:
+        """Create an interactive PTY session.
+
+        Returns a dict with ``session_id`` and ``token`` for WebSocket
+        connection via :meth:`pty_ws_url`.
+        """
+        payload: dict = {"command": command, "rows": rows, "cols": cols}
+        if args is not None:
+            payload["args"] = args
+        if env is not None:
+            payload["env"] = env
+        if working_dir is not None:
+            payload["working_dir"] = working_dir
+        response = self._handle_response(
+            self._client.post("/api/v1/pty", json=payload)
+        )
+        return response.json()
+
+    def pty_ws_url(self, session_id: str, token: str) -> str:
+        """Construct the WebSocket URL for a PTY session."""
+        base = str(self._client.base_url).rstrip("/")
+        if base.startswith("https://"):
+            ws_base = "wss://" + base[8:]
+        elif base.startswith("http://"):
+            ws_base = "ws://" + base[7:]
+        else:
+            ws_base = base
+        return f"{ws_base}/api/v1/pty/{session_id}/ws?token={token}"
+
     # --- Health and info ---
 
     def health(self) -> HealthResponse:
