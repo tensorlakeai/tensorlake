@@ -156,6 +156,35 @@ class Future:
         # This logic relies on runtime setting these fields as soon as the future is done.
         return self._result is not _FutureResultMissing or self._exception is not None
 
+    def coroutine(self) -> Coroutine[Any, Any, Any]:
+        """Returns an asyncio coroutine for the Future.
+
+        The coroutine can be used the same way as any coroutine returned by an async Tensorlake function call.
+        Returns the same coroutine object if called multiple times on the same Future.
+
+        Raises SDKUsageError if called from a sync function.
+        Raises SDKUsageError if called on an already started Future.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            raise SDKUsageError(
+                "Future.coroutine() can only be called from an async function. "
+                "Use Future.result() to get the result in a sync function."
+            )
+
+        # self._coroutine is set to None when the Future is done().
+        # We also can't recreate coroutines to not leak resources.
+        # So we have to limit the usage of coroutine().
+        if self._run_hook_was_called:
+            raise SDKUsageError(
+                f"Future.coroutine() cannot be called on a Future that is already running: {self}"
+            )
+
+        if self._coroutine is not None:
+            return self._coroutine
+        return _wrap_future_into_coroutine(self)
+
     def _done_result(self) -> Any:
         """Returns the result of the future if it's done, otherwise raises an error."""
         if not self.done():

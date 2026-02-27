@@ -86,6 +86,43 @@ async def async_three_futures_consume_same_future_tail_call(x: int) -> int:
     return async_add.future(async_add(a, b), c)
 
 
+# Tail call returns a coroutine (calling async function directly).
+# This is distinct from async_three_futures_consume_same_future_tail_call which
+# returns a Future via .future(). Here the coroutine wraps the Future and needs
+# to be unwrapped by the runner.
+@application()
+@function()
+async def async_three_futures_consume_same_future_coroutine_tail_call(x: int) -> int:
+    doubled = async_double(x)
+    a = async_add(doubled, 1)
+    b = async_add(doubled, 2)
+    c = async_add(doubled, 3)
+    return async_add(async_add(a, b), c)
+
+
+# Tail call returns a coroutine from sync .future().coroutine().
+# Async app consumes sync function futures converted to coroutines.
+@application()
+@function()
+async def async_sync_futures_as_coroutines_tail_call(x: int) -> int:
+    doubled = sync_double.future(x).coroutine()
+    a = sync_add.future(doubled, 1).coroutine()
+    b = sync_add.future(doubled, 2).coroutine()
+    c = sync_add.future(doubled, 3).coroutine()
+    return sync_add.future(sync_add.future(a, b), c).coroutine()
+
+
+# Tail call returns a coroutine from async .future().coroutine().
+@application()
+@function()
+async def async_futures_as_coroutines_tail_call(x: int) -> int:
+    doubled = async_double.future(x).coroutine()
+    a = async_add.future(doubled, 1).coroutine()
+    b = async_add.future(doubled, 2).coroutine()
+    c = async_add.future(doubled, 3).coroutine()
+    return async_add.future(async_add.future(a, b), c).coroutine()
+
+
 class TestFuturesConsumeFutures(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_sync(self, _: str, is_remote: bool):
@@ -126,6 +163,39 @@ class TestFuturesConsumeFutures(unittest.TestCase):
             deploy_applications(__file__)
         request: Request = run_application(
             async_three_futures_consume_same_future_tail_call,
+            is_remote,
+            x=5,
+        )
+        self.assertEqual(request.output(), 36)
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_async_coroutine_tail_call(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+        request: Request = run_application(
+            async_three_futures_consume_same_future_coroutine_tail_call,
+            is_remote,
+            x=5,
+        )
+        self.assertEqual(request.output(), 36)
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_async_sync_futures_as_coroutines_tail_call(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+        request: Request = run_application(
+            async_sync_futures_as_coroutines_tail_call,
+            is_remote,
+            x=5,
+        )
+        self.assertEqual(request.output(), 36)
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_async_futures_as_coroutines_tail_call(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+        request: Request = run_application(
+            async_futures_as_coroutines_tail_call,
             is_remote,
             x=5,
         )

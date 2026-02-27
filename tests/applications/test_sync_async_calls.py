@@ -7,6 +7,7 @@ import validate_all_applications
 from tensorlake.applications import (
     Future,
     Request,
+    SDKUsageError,
     application,
     function,
 )
@@ -207,6 +208,73 @@ def sync_app_chains_futures(x: int) -> int:
     a: Future = sync_double.future(x)
     b: Future = sync_double.future(x)
     return sync_add.future(a, b)
+
+
+@application()
+@function()
+async def async_app_await_sync_coroutine(x: int) -> int:
+    return await sync_double.future(x).coroutine()
+
+
+@application()
+@function()
+async def async_app_create_task_from_sync_coroutine(x: int) -> int:
+    task: asyncio.Task = asyncio.create_task(sync_double.future(x).coroutine())
+    return await task
+
+
+@application()
+@function()
+async def async_app_gather_sync_coroutines(x: int) -> int:
+    coroutines = [
+        sync_double.future(x).coroutine(),
+        sync_add.future(x, x).coroutine(),
+    ]
+    results: list[int] = await asyncio.gather(*coroutines)
+    return results[0] + results[1]
+
+
+@application()
+@function()
+async def async_app_coroutine_returns_same_object(x: int) -> int:
+    future: Future = sync_double.future(x)
+    coro1 = future.coroutine()
+    coro2 = future.coroutine()
+    assert coro1 is coro2
+    return await coro1
+
+
+@application()
+@function()
+async def async_app_pass_sync_coroutine_as_arg(x: int) -> int:
+    doubled_coroutine = sync_double.future(x).coroutine()
+    return async_add(x, doubled_coroutine)
+
+
+@application()
+@function()
+def sync_app_coroutine_raises(x: int) -> int:
+    try:
+        sync_double.future(x).coroutine()
+    except SDKUsageError as e:
+        assert str(e) == (
+            "Future.coroutine() can only be called from an async function. "
+            "Use Future.result() to get the result in a sync function."
+        )
+        return x
+    raise Exception("Expected SDKUsageError")
+
+
+@application()
+@function()
+async def async_app_coroutine_on_started_future_raises(x: int) -> int:
+    future: Future = sync_double.future(x)
+    future.run()
+    try:
+        future.coroutine()
+    except SDKUsageError:
+        return await future
+    raise Exception("Expected SDKUsageError")
 
 
 class TestSyncAsyncCalls(unittest.TestCase):
@@ -417,6 +485,67 @@ class TestSyncAsyncCalls(unittest.TestCase):
             deploy_applications(__file__)
         request: Request = run_application(sync_app_chains_futures, is_remote, 5)
         self.assertEqual(request.output(), 20)
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_async_app_await_sync_coroutine(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+        request: Request = run_application(async_app_await_sync_coroutine, is_remote, 5)
+        self.assertEqual(request.output(), 10)
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_async_app_create_task_from_sync_coroutine(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+        request: Request = run_application(
+            async_app_create_task_from_sync_coroutine, is_remote, 5
+        )
+        self.assertEqual(request.output(), 10)
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_async_app_gather_sync_coroutines(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+        request: Request = run_application(
+            async_app_gather_sync_coroutines, is_remote, 5
+        )
+        self.assertEqual(request.output(), 20)
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_async_app_coroutine_returns_same_object(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+        request: Request = run_application(
+            async_app_coroutine_returns_same_object, is_remote, 5
+        )
+        self.assertEqual(request.output(), 10)
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_async_app_pass_sync_coroutine_as_arg(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+        request: Request = run_application(
+            async_app_pass_sync_coroutine_as_arg, is_remote, 5
+        )
+        self.assertEqual(request.output(), 15)
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_sync_app_coroutine_raises(self, _: str, is_remote: bool):
+        if is_remote:
+            deploy_applications(__file__)
+        request: Request = run_application(sync_app_coroutine_raises, is_remote, 5)
+        self.assertEqual(request.output(), 5)
+
+    @parameterized.parameterized.expand([("remote", True), ("local", False)])
+    def test_async_app_coroutine_on_started_future_raises(
+        self, _: str, is_remote: bool
+    ):
+        if is_remote:
+            deploy_applications(__file__)
+        request: Request = run_application(
+            async_app_coroutine_on_started_future_raises, is_remote, 5
+        )
+        self.assertEqual(request.output(), 10)
 
 
 if __name__ == "__main__":

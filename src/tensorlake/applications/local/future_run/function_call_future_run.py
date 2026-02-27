@@ -13,6 +13,8 @@ from ...interface.function import Function
 from ...interface.futures import (
     FunctionCallFuture,
     Future,
+    _TensorlakeFutureWrapper,
+    _unwrap_future,
 )
 from ...interface.request_context import RequestContext
 from ...interface.retries import Retries
@@ -86,16 +88,20 @@ class FunctionCallFutureRun(LocalFutureRun):
         while True:
             try:
                 if inspect.iscoroutinefunction(self._function):
-                    result: Any | Future = asyncio.run(
+                    result: Any | _TensorlakeFutureWrapper[Future] = asyncio.run(
                         self._function._original_function(
                             *self._arg_values, **self._kwarg_values
                         )
                     )
                 else:
-                    result: Any | Future = self._function._original_function(
-                        *self._arg_values, **self._kwarg_values
+                    result: Any | _TensorlakeFutureWrapper[Future] = (
+                        self._function._original_function(
+                            *self._arg_values, **self._kwarg_values
+                        )
                     )
-                return LocalFutureRunResult(id=future._id, output=result, error=None)
+                return LocalFutureRunResult(
+                    id=future._id, output=_unwrap_future(result), error=None
+                )
             except RequestError as e:
                 # Never retry on RequestError.
                 return LocalFutureRunResult(id=future._id, output=None, error=e)
