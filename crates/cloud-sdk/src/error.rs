@@ -4,7 +4,6 @@
 //! It includes a general `SdkError` type that encompasses all possible error scenarios
 //! across the different clients, including authentication and authorization errors.
 
-use reqwest_eventsource::CannotCloneRequestError;
 use thiserror::Error;
 
 use crate::{
@@ -73,11 +72,7 @@ pub enum SdkError {
         message: String,
     },
 
-    /// Client returned an error initializing the EventSource stream
-    #[error(transparent)]
-    EventSourceConnectionError(#[from] CannotCloneRequestError),
-
-    /// EventSource client returned an unexpected error
-    #[error(transparent)]
-    EventSourceError(#[from] Box<reqwest_eventsource::Error>),
+    /// EventSource (SSE) stream error
+    #[error("EventSource error: {0}")]
+    EventSourceError(String),
 }

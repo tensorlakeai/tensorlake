@@ -1,6 +1,6 @@
 use reqwest::header::{HeaderMap, HeaderValue};
 
-use crate::config::resolver::{ConfigSource, ResolvedConfig};
+use crate::config::resolver::ResolvedConfig;
 use crate::error::{CliError, Result};
 
 /// CLI context holding resolved configuration and providing authenticated HTTP clients.
@@ -12,9 +12,7 @@ pub struct CliContext {
     pub api_key: Option<String>,
     pub personal_access_token: Option<String>,
     pub organization_id: Option<String>,
-    pub organization_id_source: Option<ConfigSource>,
     pub project_id: Option<String>,
-    pub project_id_source: Option<ConfigSource>,
     pub debug: bool,
     introspect_cache: Option<IntrospectResult>,
 }
@@ -35,9 +33,7 @@ impl CliContext {
             api_key: config.api_key,
             personal_access_token: config.personal_access_token,
             organization_id: config.organization_id,
-            organization_id_source: config.organization_id_source,
             project_id: config.project_id,
-            project_id_source: config.project_id_source,
             debug: config.debug,
             introspect_cache: None,
         }
@@ -91,22 +87,6 @@ impl CliContext {
             .map_err(|e| CliError::Http(e))
     }
 
-    /// Build a cloud-sdk Sdk instance.
-    pub fn sdk(&self) -> Result<tensorlake_cloud_sdk::Sdk> {
-        let token = self.bearer_token()?;
-        let mut builder = tensorlake_cloud_sdk::ClientBuilder::new(&self.api_url)
-            .bearer_token(&token);
-
-        // Only add scope headers for PAT auth
-        if self.api_key.is_none() {
-            if let (Some(org_id), Some(proj_id)) = (self.effective_organization_id(), self.effective_project_id()) {
-                builder = builder.scope(&org_id, &proj_id);
-            }
-        }
-
-        Ok(tensorlake_cloud_sdk::Sdk::with_client_builder(builder)?)
-    }
-
     pub fn bearer_token(&self) -> Result<String> {
         self.api_key
             .as_ref()
@@ -121,16 +101,6 @@ impl CliContext {
 
     pub fn has_org_and_project(&self) -> bool {
         self.effective_organization_id().is_some() && self.effective_project_id().is_some()
-    }
-
-    pub fn needs_init(&self) -> bool {
-        if self.api_key.is_some() {
-            return false;
-        }
-        if !self.has_authentication() {
-            return false;
-        }
-        !self.has_org_and_project()
     }
 
     pub fn effective_organization_id(&self) -> Option<String> {
@@ -200,25 +170,4 @@ impl CliContext {
         self.introspect_cache.as_ref().and_then(|r| r.id.clone())
     }
 
-    pub fn organization_source(&self) -> &str {
-        if self.api_key.is_some() {
-            return "API key introspection";
-        }
-        match &self.organization_id_source {
-            Some(ConfigSource::Cli) => "CLI flag or environment variable",
-            Some(ConfigSource::Config) => "local config (.tensorlake/config.toml)",
-            None => "not configured",
-        }
-    }
-
-    pub fn project_source(&self) -> &str {
-        if self.api_key.is_some() {
-            return "API key introspection";
-        }
-        match &self.project_id_source {
-            Some(ConfigSource::Cli) => "CLI flag or environment variable",
-            Some(ConfigSource::Config) => "local config (.tensorlake/config.toml)",
-            None => "not configured",
-        }
-    }
 }
