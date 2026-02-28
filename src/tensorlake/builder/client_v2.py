@@ -19,7 +19,8 @@ import os
 import tempfile
 from dataclasses import dataclass
 
-import click
+import sys
+
 import httpx
 from httpx_sse import aconnect_sse
 from pydantic import BaseModel
@@ -162,13 +163,13 @@ class ImageBuilderV2Client:
         Returns:
             dict: A dictionary mapping image hashes to their corresponding build IDs.
         """
-        click.echo("Building images...")
+        print("Building images...", file=sys.stderr)
 
         builds = {}
         for image, context in context_collection.items():
-            click.echo(f"Building {image.name}")
+            print(f"Building {image.name}", file=sys.stderr)
             build = await self.build(context, image)
-            click.echo(f"Built {image.name} with hash {image_hash(image)}")
+            print(f"Built {image.name} with hash {image_hash(image)}", file=sys.stderr)
             builds[image_hash(image)] = build.id
 
         return builds
@@ -187,8 +188,9 @@ class ImageBuilderV2Client:
         _fd, context_file_path = tempfile.mkstemp()
         create_image_context_file(image, context_file_path)
 
-        click.echo(
-            f"{image.name}: Posting {os.path.getsize(context_file_path)} bytes of context to build service...."
+        print(
+            f"{image.name}: Posting {os.path.getsize(context_file_path)} bytes of context to build service....",
+            file=sys.stderr,
         )
 
         file_content = await asyncio.to_thread(
@@ -219,7 +221,7 @@ class ImageBuilderV2Client:
 
         build = BuildInfo.model_validate(res.json())
 
-        click.echo(f"Waiting for build {build.id} of {image.name} to complete...")
+        print(f"Waiting for build {build.id} of {image.name} to complete...", file=sys.stderr)
 
         try:
             return await self.stream_logs(build)
@@ -233,7 +235,7 @@ class ImageBuilderV2Client:
             # Build for image generator cancelled successfully
             # Cancelled build for image generator
             # Aborted!
-        except (asyncio.CancelledError, KeyboardInterrupt, click.Abort):
+        except (asyncio.CancelledError, KeyboardInterrupt):
             await self._cancel_build(build, image)
             raise
 
@@ -244,7 +246,7 @@ class ImageBuilderV2Client:
         Args:
             build (NewBuild): The build for which to stream logs.
         """
-        click.echo(f"Streaming logs for build {build.id}")
+        print(f"Streaming logs for build {build.id}", file=sys.stderr)
         async with httpx.AsyncClient(timeout=120) as client:
             async with aconnect_sse(
                 client,
@@ -260,19 +262,15 @@ class ImageBuilderV2Client:
 
     def _print_build_log_event(self, event: BuildLogEvent):
         if event.build_status == "pending":
-            click.secho("Build waiting in queue...")
+            print("Build waiting in queue...", file=sys.stderr)
         else:
             match event.stream:
                 case "stdout":
-                    click.secho(
-                        event.message,
-                        nl=False,
-                        err=False,
-                    )
+                    print(event.message, end="", file=sys.stderr)
                 case "stderr":
-                    click.secho(event.message, err=True)
+                    print(event.message, file=sys.stderr)
                 case "info":
-                    click.secho(f"{event.timestamp}: {event.message}")
+                    print(f"{event.timestamp}: {event.message}", file=sys.stderr)
 
     async def build_info(self, build_id: str) -> BuildInfo:
         """
@@ -290,15 +288,15 @@ class ImageBuilderV2Client:
         )
         if not res.is_success:
             error_message = res.text
-            click.secho(f"Error building image: {error_message}", fg="red")
+            print(f"Error building image: {error_message}", file=sys.stderr)
             raise RuntimeError(f"Error building image: {error_message}")
 
         build_info = BuildInfo.model_validate(res.json())
 
         if build_info.status == "failed":
-            click.secho(
+            print(
                 f"Build {build_info.id} failed with error: {build_info.error_message}",
-                fg="red",
+                file=sys.stderr,
             )
             raise RuntimeError(
                 f"Build {build_info.id} failed with error: {build_info.error_message}"
@@ -308,7 +306,7 @@ class ImageBuilderV2Client:
 
     async def _cancel_build(self, build: BuildInfo, image: Image):
         try:
-            click.secho(f"\nCancelling build for image {image.name} ...", fg="yellow")
+            print(f"\nCancelling build for image {image.name} ...", file=sys.stderr)
             response = await self._client.post(
                 f"{self._build_service}/builds/{build.id}/cancel",
                 headers=self._headers,
@@ -316,8 +314,8 @@ class ImageBuilderV2Client:
             )
 
             if response.status_code == 202:
-                click.secho(f"Build for image {image.name} cancelled successfully")
+                print(f"Build for image {image.name} cancelled successfully", file=sys.stderr)
             else:
-                click.secho(f"Failed to cancel build {build.id}: {response.text}")
+                print(f"Failed to cancel build {build.id}: {response.text}", file=sys.stderr)
         except Exception as e:
-            click.secho(f"Failed to cancel build {build.id}: {e}")
+            print(f"Failed to cancel build {build.id}: {e}", file=sys.stderr)

@@ -114,7 +114,7 @@ version = "8.3.1"
 description = "Composable command line interface toolkit"
 optional = false
 python-versions = ">=3.10"
-groups = ["main", "dev"]
+groups = ["dev"]
 files = [
     {file = "click-8.3.1-py3-none-any.whl", hash = "sha256:981153a64e25f12d547d3426c367a4857371575ee7ad18df2a6183ab0545b2a6"},
     {file = "click-8.3.1.tar.gz", hash = "sha256:12ff4785d337a1bb490bb7e9c2b1ee5da3112e94a8622f26a6c77f5d2fc6842a"},
@@ -129,7 +129,7 @@ version = "0.4.6"
 description = "Cross-platform colored terminal text."
 optional = false
 python-versions = "!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*,!=3.4.*,!=3.5.*,!=3.6.*,>=2.7"
-groups = ["main", "dev"]
+groups = ["dev"]
 markers = "platform_system == \"Windows\""
 files = [
     {file = "colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"},
@@ -474,40 +474,35 @@ colors = ["colorama"]
 plugins = ["setuptools"]
 
 [[package]]
-name = "markdown-it-py"
-version = "4.0.0"
-description = "Python port of markdown-it. Markdown parsing, done right!"
+name = "maturin"
+version = "1.12.4"
+description = "Build and publish crates with pyo3, cffi and uniffi bindings as well as rust binaries as python packages"
 optional = false
-python-versions = ">=3.10"
-groups = ["main"]
+python-versions = ">=3.7"
+groups = ["dev"]
 files = [
-    {file = "markdown_it_py-4.0.0-py3-none-any.whl", hash = "sha256:87327c59b172c5011896038353a81343b6754500a08cd7a4973bb48c6d578147"},
-    {file = "markdown_it_py-4.0.0.tar.gz", hash = "sha256:cb0a2b4aa34f932c007117b194e945bd74e0ec24133ceb5bac59009cda1cb9f3"},
+    {file = "maturin-1.12.4-py3-none-linux_armv6l.whl", hash = "sha256:cf8a0eddef9ab8773bc823c77aed3de9a5c85fb760c86448048a79ef89794c81"},
+    {file = "maturin-1.12.4-py3-none-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl", hash = "sha256:eba1bd1c1513d00fec75228da98622c68a9f50f9693aaa6fb7dacb244e7bbf26"},
+    {file = "maturin-1.12.4-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:89749cfc0e6baf5517fa370729a98955552e42fefc406b95732d5c8e85bc90c0"},
+    {file = "maturin-1.12.4-py3-none-manylinux_2_12_i686.manylinux2010_i686.musllinux_1_1_i686.whl", hash = "sha256:4d68664e5b81f282144a3b717a7e8593ec94ac87d7ae563a4c464e93d6cde877"},
+    {file = "maturin-1.12.4-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.musllinux_1_1_x86_64.whl", hash = "sha256:88e09e6c386b08974fab0c7e4c07d7c7c50a0ba63095d31e930d80568488e1be"},
+    {file = "maturin-1.12.4-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.musllinux_1_1_aarch64.whl", hash = "sha256:5cc56481b0f360571587c35a1d960ce6d0a0258d49aebb6af98fff9db837c337"},
+    {file = "maturin-1.12.4-py3-none-manylinux_2_17_armv7l.manylinux2014_armv7l.musllinux_1_1_armv7l.whl", hash = "sha256:8fd7eb0c9bb017e98d81aa86a1d440b912fe4f7f219571035dd6ab330c82071c"},
+    {file = "maturin-1.12.4-py3-none-manylinux_2_17_ppc64le.manylinux2014_ppc64le.musllinux_1_1_ppc64le.whl", hash = "sha256:5bb07c349dd066277a61e017a6d6e0860cd54b7b33f8ead10b9e5a4ffb740a0a"},
+    {file = "maturin-1.12.4-py3-none-manylinux_2_17_s390x.manylinux2014_s390x.whl", hash = "sha256:c21baaed066b5bec893db2d261bfe3b9da054d99c018326f0bdcf1dc4c3a1eb9"},
+    {file = "maturin-1.12.4-py3-none-manylinux_2_31_riscv64.musllinux_1_1_riscv64.whl", hash = "sha256:939c4c57efa8ea982a991ee3ccb3992364622e9cbd1ede922b5cfb0f652bf517"},
+    {file = "maturin-1.12.4-py3-none-win32.whl", hash = "sha256:d72f626616292cb3e283941f47835ffc608207ebd8f95f4c50523a6631ffcb2e"},
+    {file = "maturin-1.12.4-py3-none-win_amd64.whl", hash = "sha256:ab32c5ff7579a549421cae03e6297d3b03d7b81fa2934e3bdf24a102d99eb378"},
+    {file = "maturin-1.12.4-py3-none-win_arm64.whl", hash = "sha256:b8c05d24209af50ed9ae9e5de473c84866b9676c637fcfad123ee57f4a9ed098"},
+    {file = "maturin-1.12.4.tar.gz", hash = "sha256:06f6438be7e723aaf4b412fb34839854b540a1350f7614fadf5bd1db2b98d5f7"},
 ]
 
 [package.dependencies]
-mdurl = ">=0.1,<1.0"
+tomli = {version = ">=1.1.0", markers = "python_full_version < \"3.11.0\""}
 
 [package.extras]
-benchmarking = ["psutil", "pytest", "pytest-benchmark"]
-compare = ["commonmark (>=0.9,<1.0)", "markdown (>=3.4,<4.0)", "markdown-it-pyrs", "mistletoe (>=1.0,<2.0)", "mistune (>=3.0,<4.0)", "panflute (>=2.3,<3.0)"]
-linkify = ["linkify-it-py (>=1,<3)"]
-plugins = ["mdit-py-plugins (>=0.5.0)"]
-profiling = ["gprof2dot"]
-rtd = ["ipykernel", "jupyter_sphinx", "mdit-py-plugins (>=0.5.0)", "myst-parser", "pyyaml", "sphinx", "sphinx-book-theme (>=1.0,<2.0)", "sphinx-copybutton", "sphinx-design"]
-testing = ["coverage", "pytest", "pytest-cov", "pytest-regressions", "requests"]
-
-[[package]]
-name = "mdurl"
-version = "0.1.2"
-description = "Markdown URL utilities"
-optional = false
-python-versions = ">=3.7"
-groups = ["main"]
-files = [
-    {file = "mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8"},
-    {file = "mdurl-0.1.2.tar.gz", hash = "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba"},
-]
+patchelf = ["patchelf"]
+zig = ["ziglang (>=0.10.0)"]
 
 [[package]]
 name = "mypy-extensions"
@@ -822,21 +817,6 @@ files = [
 typing-extensions = ">=4.14.1"
 
 [[package]]
-name = "pygments"
-version = "2.19.2"
-description = "Pygments is a syntax highlighting package written in Python."
-optional = false
-python-versions = ">=3.8"
-groups = ["main"]
-files = [
-    {file = "pygments-2.19.2-py3-none-any.whl", hash = "sha256:86540386c03d588bb81d44bc3928634ff26449851e99741617ecb9037ee5ec0b"},
-    {file = "pygments-2.19.2.tar.gz", hash = "sha256:636cb2477cec7f8952536970bc533bc43743542f70392ae026374600add5b887"},
-]
-
-[package.extras]
-windows-terminal = ["colorama (>=0.4.6)"]
-
-[[package]]
 name = "pytokens"
 version = "0.4.1"
 description = "A Fast, spec compliant Python 3.14+ tokenizer that runs on older Pythons."
@@ -990,25 +970,6 @@ files = [
 httpx = ">=0.25.0"
 
 [[package]]
-name = "rich"
-version = "14.3.2"
-description = "Render rich text, tables, progress bars, syntax highlighting, markdown and more to the terminal"
-optional = false
-python-versions = ">=3.8.0"
-groups = ["main"]
-files = [
-    {file = "rich-14.3.2-py3-none-any.whl", hash = "sha256:08e67c3e90884651da3239ea668222d19bea7b589149d8014a21c633420dbb69"},
-    {file = "rich-14.3.2.tar.gz", hash = "sha256:e712f11c1a562a11843306f5ed999475f09ac31ffb64281f73ab29ffdda8b3b8"},
-]
-
-[package.dependencies]
-markdown-it-py = ">=2.2.0"
-pygments = ">=2.13.0,<3.0.0"
-
-[package.extras]
-jupyter = ["ipywidgets (>=7.5.1,<9)"]
-
-[[package]]
 name = "setuptools"
 version = "69.5.1"
 description = "Easily download, build, install, upgrade, and uninstall Python packages"
@@ -1084,18 +1045,6 @@ files = [
 ]
 
 [[package]]
-name = "tomlkit"
-version = "0.14.0"
-description = "Style preserving TOML library"
-optional = false
-python-versions = ">=3.9"
-groups = ["main"]
-files = [
-    {file = "tomlkit-0.14.0-py3-none-any.whl", hash = "sha256:592064ed85b40fa213469f81ac584f67a4f2992509a7c3ea2d632208623a3680"},
-    {file = "tomlkit-0.14.0.tar.gz", hash = "sha256:cf00efca415dbd57575befb1f6634c4f42d2d87dbba376128adb42c121b87064"},
-]
-
-[[package]]
 name = "typing-extensions"
 version = "4.15.0"
 description = "Backported and Experimental Type Hints for Python 3.9+"
@@ -1147,5 +1096,5 @@ test = ["covdefaults (>=2.3)", "coverage (>=7.2.7)", "coverage-enable-subprocess
 
 [metadata]
 lock-version = "2.1"
-python-versions = "^3.10"
-content-hash = "e48feed6d52f426d6955c685f0a10e5bcbca9e30803fb80224b4c22520282cfa"
+python-versions = ">=3.10"
+content-hash = "7f817614fb0046f7ad684a4cd643c1bf6b9062656bb33f736c5469e0d97ab06f"

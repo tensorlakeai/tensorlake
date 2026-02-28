@@ -1,5 +1,3 @@
-import click
-
 from ..function.introspect import (
     ClassDetails,
     FunctionDetails,
@@ -7,26 +5,24 @@ from ..function.introspect import (
 from .message import ValidationMessage, ValidationMessageSeverity
 
 
-def print_validation_messages(
+def format_validation_messages(
     messages: list[ValidationMessage],
-) -> None:
-    """Prints the validation messages in a nice human-readable format."""
+) -> list[dict]:
+    """Returns the validation messages as a list of structured dicts."""
+    result = []
     for message in messages:
-        _print_validation_message(message)
+        result.append(_format_validation_message(message))
+    return result
 
 
-def _print_validation_message(message: ValidationMessage) -> None:
+def _format_validation_message(message: ValidationMessage) -> dict:
     severity: str = ""
-    color: str | None = None
     if message.severity == ValidationMessageSeverity.ERROR:
-        severity = "‼️  Error: "
-        color = "bright_red"
+        severity = "error"
     elif message.severity == ValidationMessageSeverity.WARNING:
-        severity = "⚠️  Warning: "
-        color = "bright_yellow"
+        severity = "warning"
     elif message.severity == ValidationMessageSeverity.INFO:
-        severity = "ℹ️  Info: "
-        color = "cyan"
+        severity = "info"
 
     location: str = ""
     if isinstance(message.details, FunctionDetails):
@@ -55,8 +51,4 @@ def _print_validation_message(message: ValidationMessage) -> None:
             ]
         )
 
-    click.echo(
-        f"{severity}{location}\n{click.style(message.message, fg=color)}\n\n",
-        err=(message.severity == ValidationMessageSeverity.ERROR),
-        nl=False,
-    )
+    return {"severity": severity, "message": message.message, "location": location}

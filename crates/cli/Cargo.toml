@@ -1,0 +1,33 @@
+[package]
+name = "tensorlake-cli"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "TensorLake CLI"
+
+[[bin]]
+name = "tensorlake"
+path = "src/main.rs"
+
+[dependencies]
+tensorlake-cloud-sdk = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+dirs = { workspace = true }
+comfy-table = { workspace = true }
+indicatif = { workspace = true }
+console = { workspace = true }
+dialoguer = { workspace = true }
+open = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+crossterm = { workspace = true }
+tokio-tungstenite = { workspace = true }
+url = { workspace = true }
+urlencoding = { workspace = true }
+futures = { workspace = true }

@@ -1,34 +1,33 @@
-[tool.poetry]
+[project]
 name = "tensorlake"
 version = "0.4.5"
 description = "Tensorlake SDK for Document Ingestion API and Serverless Applications"
 readme = "README.md"
-authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
-homepage = "https://github.com/tensorlakeai/tensorlake"
-repository = "https://github.com/tensorlakeai/tensorlake"
+authors = [{ name = "Tensorlake Inc.", email = "support@tensorlake.ai" }]
+requires-python = ">=3.10"
+dependencies = [
+    "httpx[http2]>=0.27.2,<1.0",
+    "pydantic>=2.0,<3.0",
+    "httpx-sse>=0.4.1",
+    "grpcio>=1.40.0,<2.0.0",
+    "grpcio-tools>=1.40.0,<2.0.0",
+]
 
-[tool.poetry.dependencies]
-python = "^3.10"
-httpx = { version = ">=0.27.2, < 1.0", extras = ["http2"] }
-pydantic = ">=2.0, <3.0"
-httpx-sse = "^0.4.1"
-# TODO: Look into consolidating this with click
-rich = ">=14.0.0"
-click = ">=8.1.0"
-tomlkit = "^0.14.0"
-# pip installs the latest grpcio <2.0.0
-# when developing with poetry, the version
-# from dev.dependencies is used.
-grpcio = ">=1.40.0,<2.0.0"
-grpcio-tools = ">=1.40.0,<2.0.0"
-
-[tool.poetry.scripts]
-tensorlake = "tensorlake.cli:cli"
-function-executor = "tensorlake.function_executor.main:main"
+[project.urls]
+Homepage = "https://github.com/tensorlakeai/tensorlake"
+Repository = "https://github.com/tensorlakeai/tensorlake"
 
 [build-system]
-requires = ["poetry==2.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "crates/cli/Cargo.toml"
+module-name = "tensorlake"
+python-source = "src"
+data = "tensorlake.data"
+strip = true
 
 [tool.black]
 extend_exclude = "vendor"
@@ -51,6 +50,4 @@ grpcio = "1.60.0"
 grpcio-tools = "1.60.0"
 # grpcio-tools implicit dependency, have to pin to an old version too.
 setuptools = "^69.0.0"
-
-[tool.poetry.plugins."poetry.command"]
-postinstall = "scripts:install_deps"
+maturin = ">=1.9,<2.0"
