@@ -5,8 +5,15 @@ use crate::config::resolver;
 use crate::error::{CliError, Result};
 use crate::project::detection::find_project_root;
 
+/// Result of a successful login flow.
+pub struct LoginResult {
+    pub token: String,
+    pub organization_id: Option<String>,
+    pub project_id: Option<String>,
+}
+
 /// Run the interactive device code login flow.
-pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<String> {
+pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginResult> {
     let login_start_url = format!("{}/platform/cli/login/start", ctx.api_url);
 
     let http = reqwest::Client::new();
@@ -140,6 +147,9 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<String>
     save_credentials(&ctx.api_url, &access_token)?;
     eprintln!("login successful!");
 
+    let mut org_id = None;
+    let mut proj_id = None;
+
     if auto_init {
         // Recreate context with new PAT
         let resolved = resolver::resolve(
@@ -154,17 +164,30 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<String>
         );
         let updated_ctx = CliContext::from_resolved(resolved);
 
-        if !updated_ctx.has_org_and_project() {
+        if updated_ctx.has_org_and_project() {
+            org_id = updated_ctx.effective_organization_id();
+            proj_id = updated_ctx.effective_project_id();
+        } else {
             eprintln!("\nNo organization and project configuration found. Let's set up your project.\n");
             let project_root = find_project_root(None);
-            if let Err(e) = run_init_flow(&updated_ctx, true, true, false, &project_root).await {
-                eprintln!("\nYou can run 'tensorlake init' later to complete the setup.");
-                if ctx.debug {
-                    eprintln!("Error: {}", e);
+            match run_init_flow(&updated_ctx, true, true, false, &project_root).await {
+                Ok((o, p)) => {
+                    org_id = Some(o);
+                    proj_id = Some(p);
+                }
+                Err(e) => {
+                    eprintln!("\nYou can run 'tensorlake init' later to complete the setup.");
+                    if ctx.debug {
+                        eprintln!("Error: {}", e);
+                    }
                 }
             }
         }
     }
 
-    Ok(access_token)
+    Ok(LoginResult {
+        token: access_token,
+        organization_id: org_id,
+        project_id: proj_id,
+    })
 }

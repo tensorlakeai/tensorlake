@@ -10,17 +10,17 @@ use crate::project::detection::find_project_root;
 pub async fn ensure_auth_and_project(ctx: &mut CliContext) -> Result<()> {
     if !ctx.has_authentication() {
         eprintln!("It seems like you're not logged in. Let's log you in...\n");
-        let token = run_login_flow(ctx, true).await?;
+        let login_result = run_login_flow(ctx, true).await?;
 
-        // Reload context with new credentials
+        // Reload context with new credentials and org/project from login flow
         let resolved = resolver::resolve(
             Some(&ctx.api_url),
             Some(&ctx.cloud_url),
             None,
-            Some(&token),
+            Some(&login_result.token),
             Some(&ctx.namespace),
-            ctx.organization_id.as_deref(),
-            ctx.project_id.as_deref(),
+            login_result.organization_id.as_deref(),
+            login_result.project_id.as_deref(),
             ctx.debug,
         );
         *ctx = CliContext::from_resolved(resolved);
