@@ -30,6 +30,12 @@ jobs:
           python-version: '3.10'
           cache: "pip"
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
       - name: Install Poetry
         uses: snok/install-poetry@v1
         with:
@@ -67,7 +73,7 @@ jobs:
         with:
           # Storage path must be the same in container and host
           # so the Dataplane can access the local FS blob store.
-          # Use the same gid, uid to avoid blob access permission issues. 
+          # Use the same gid, uid to avoid blob access permission issues.
           run: |
             mkdir -p /tmp/indexify-server-storage/indexify_storage/blobs
             docker run -i -a stdout -a stderr --rm \
@@ -134,6 +140,12 @@ jobs:
         with:
           python-version: '3.11'
           cache: "pip"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
 
       - name: Install Poetry
         uses: snok/install-poetry@v1
