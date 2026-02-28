@@ -37,12 +37,14 @@ pub async fn run_init_flow(
         return Ok((org.to_string(), proj.to_string()));
     }
 
-    let pat = load_credentials(&ctx.api_url).ok_or_else(|| {
-        if interactive {
-            eprintln!("no valid credentials found. please run 'tensorlake login' first.");
-        }
-        CliError::Cancelled
-    })?;
+    let pat = ctx.personal_access_token.clone()
+        .or_else(|| load_credentials(&ctx.api_url))
+        .ok_or_else(|| {
+            if interactive {
+                eprintln!("no valid credentials found. please run 'tensorlake login' first.");
+            }
+            CliError::Cancelled
+        })?;
 
     if interactive {
         eprintln!("initializing TensorLake configuration...\n");
