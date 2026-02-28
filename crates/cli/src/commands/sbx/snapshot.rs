@@ -8,7 +8,10 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, timeout: f64) -> Result<()>
     eprintln!("Snapshotting sandbox {}...", sandbox_id);
 
     let resp = client
-        .post(sandbox_endpoint(ctx, &format!("sandboxes/{}/snapshot", sandbox_id)))
+        .post(sandbox_endpoint(
+            ctx,
+            &format!("sandboxes/{}/snapshot", sandbox_id),
+        ))
         .send()
         .await
         .map_err(CliError::Http)?;
@@ -64,18 +67,21 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, timeout: f64) -> Result<()>
             let current_status = info.get("status").and_then(|v| v.as_str()).unwrap_or("");
 
             if current_status == "completed" {
-                let size_bytes = info
-                    .get("size_bytes")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
+                let size_bytes = info.get("size_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
                 let size_mb = size_bytes as f64 / (1024.0 * 1024.0);
                 eprintln!("Snapshot completed ({:.1} MB)", size_mb);
                 println!("{}", snapshot_id);
                 return Ok(());
             }
             if current_status == "failed" {
-                let error = info.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
-                return Err(CliError::Other(anyhow::anyhow!("Snapshot failed: {}", error)));
+                let error = info
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error");
+                return Err(CliError::Other(anyhow::anyhow!(
+                    "Snapshot failed: {}",
+                    error
+                )));
             }
         }
 

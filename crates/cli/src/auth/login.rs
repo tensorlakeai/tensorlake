@@ -32,7 +32,10 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
         )));
     }
 
-    let body: serde_json::Value = resp.json().await.map_err(|e| CliError::auth(e.to_string()))?;
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| CliError::auth(e.to_string()))?;
     let device_code = body
         .get("device_code")
         .and_then(|v| v.as_str())
@@ -54,8 +57,10 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
     // Give user time to read
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-    if let Err(_) = open::that(&verification_uri) {
-        eprintln!("failed to open web browser. please open the URL above manually and enter the code.");
+    if open::that(&verification_uri).is_err() {
+        eprintln!(
+            "failed to open web browser. please open the URL above manually and enter the code."
+        );
     }
 
     eprintln!("waiting for the code to be processed...");
@@ -168,7 +173,9 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
             org_id = updated_ctx.effective_organization_id();
             proj_id = updated_ctx.effective_project_id();
         } else {
-            eprintln!("\nNo organization and project configuration found. Let's set up your project.\n");
+            eprintln!(
+                "\nNo organization and project configuration found. Let's set up your project.\n"
+            );
             let project_root = find_project_root(None);
             match run_init_flow(&updated_ctx, true, true, false, &project_root).await {
                 Ok((o, p)) => {

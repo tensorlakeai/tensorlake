@@ -2,6 +2,7 @@ use crate::auth::context::CliContext;
 use crate::commands::sbx::sandbox_endpoint;
 use crate::error::{CliError, Result};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     ctx: &CliContext,
     command: &str,
@@ -18,7 +19,9 @@ pub async fn run(
     let client = ctx.client()?;
 
     // Create sandbox (lifecycle API)
-    let label = image.map(|i| format!("image {}", i)).unwrap_or_else(|| "default image".to_string());
+    let label = image
+        .map(|i| format!("image {}", i))
+        .unwrap_or_else(|| "default image".to_string());
     eprintln!("Creating sandbox with {}...", label);
 
     let mut create_body = serde_json::json!({
@@ -87,16 +90,9 @@ pub async fn run(
     eprintln!("Sandbox {} is running.", sandbox_id);
 
     // Run exec (proxy API)
-    let result = crate::commands::sbx::exec::run(
-        ctx,
-        &sandbox_id,
-        command,
-        args,
-        timeout,
-        workdir,
-        env,
-    )
-    .await;
+    let result =
+        crate::commands::sbx::exec::run(ctx, &sandbox_id, command, args, timeout, workdir, env)
+            .await;
 
     // Cleanup (lifecycle API)
     if keep {

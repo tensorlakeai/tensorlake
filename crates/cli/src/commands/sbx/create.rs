@@ -2,6 +2,7 @@ use crate::auth::context::CliContext;
 use crate::commands::sbx::sandbox_endpoint;
 use crate::error::{CliError, Result};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     ctx: &CliContext,
     image: Option<&str>,

@@ -14,7 +14,10 @@ pub async fn list(ctx: &CliContext) -> Result<()> {
     let mut table = new_table(&["Name", "Created At"]);
     for secret in &secrets {
         let name = secret.get("name").and_then(|v| v.as_str()).unwrap_or("-");
-        let created_at = secret.get("createdAt").and_then(|v| v.as_str()).unwrap_or("-");
+        let created_at = secret
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-");
         table.add_row(vec![Cell::new(name), Cell::new(created_at)]);
     }
     println!("{table}");
@@ -33,9 +36,9 @@ pub async fn set(ctx: &CliContext, pairs: &[String]) -> Result<()> {
     let mut seen_names = std::collections::HashSet::new();
 
     for pair in pairs {
-        let eq_pos = pair
-            .find('=')
-            .ok_or_else(|| CliError::usage(format!("invalid secret format {}, missing '='", pair)))?;
+        let eq_pos = pair.find('=').ok_or_else(|| {
+            CliError::usage(format!("invalid secret format {}, missing '='", pair))
+        })?;
         let name = &pair[..eq_pos];
         let value = &pair[eq_pos + 1..];
 
@@ -82,9 +85,12 @@ pub async fn set(ctx: &CliContext, pairs: &[String]) -> Result<()> {
             "permission denied. set TENSORLAKE_API_KEY with required permissions, or run 'tensorlake init'.",
         ));
     }
-    if status >= 400 && status < 500 {
+    if (400..500).contains(&status) {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        let msg = body.get("message").and_then(|v| v.as_str()).unwrap_or("unknown error");
+        let msg = body
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
         return Err(CliError::usage(format!("could not set secrets: {}", msg)));
     }
     if !resp.status().is_success() {
@@ -107,33 +113,29 @@ pub async fn unset(ctx: &CliContext, names: &[String]) -> Result<()> {
     let secrets = get_all_secrets(ctx).await?;
     let secrets_map: std::collections::HashMap<&str, &serde_json::Value> = secrets
         .iter()
-        .filter_map(|s| {
-            s.get("name")
-                .and_then(|n| n.as_str())
-                .map(|name| (name, s))
-        })
+        .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(|name| (name, s)))
         .collect();
 
     let client = ctx.client()?;
     let mut num = 0;
 
     for name in names {
-        if let Some(secret) = secrets_map.get(name.as_str()) {
-            if let Some(id) = secret.get("id").and_then(|v| v.as_str()) {
-                let resp = client
-                    .delete(format!(
-                        "{}/platform/v1/organizations/{}/projects/{}/secrets/{}",
-                        ctx.api_url,
-                        ctx.effective_organization_id().unwrap_or_default(),
-                        ctx.effective_project_id().unwrap_or_default(),
-                        id
-                    ))
-                    .send()
-                    .await
-                    .map_err(CliError::Http)?;
-                if resp.status().is_success() {
-                    num += 1;
-                }
+        if let Some(secret) = secrets_map.get(name.as_str())
+            && let Some(id) = secret.get("id").and_then(|v| v.as_str())
+        {
+            let resp = client
+                .delete(format!(
+                    "{}/platform/v1/organizations/{}/projects/{}/secrets/{}",
+                    ctx.api_url,
+                    ctx.effective_organization_id().unwrap_or_default(),
+                    ctx.effective_project_id().unwrap_or_default(),
+                    id
+                ))
+                .send()
+                .await
+                .map_err(CliError::Http)?;
+            if resp.status().is_success() {
+                num += 1;
             }
         }
     }
@@ -161,7 +163,10 @@ async fn get_all_secrets(ctx: &CliContext) -> Result<Vec<serde_json::Value>> {
 
     if !resp.status().is_success() {
         let status = resp.status();
-        return Err(CliError::auth(format!("failed to fetch secrets (HTTP {})", status)));
+        return Err(CliError::auth(format!(
+            "failed to fetch secrets (HTTP {})",
+            status
+        )));
     }
 
     let body: serde_json::Value = resp.json().await.map_err(CliError::Http)?;

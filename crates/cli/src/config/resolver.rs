@@ -1,4 +1,6 @@
-use crate::config::files::{TomlTable, get_nested_value, load_credentials, load_global_config, load_local_config};
+use crate::config::files::{
+    TomlTable, get_nested_value, load_credentials, load_global_config, load_local_config,
+};
 
 /// Resolved configuration values with source tracking.
 #[derive(Debug, Clone)]
@@ -15,6 +17,7 @@ pub struct ResolvedConfig {
 
 /// Resolve all configuration from CLI args > env vars > local config > global config > defaults.
 /// CLI args and env vars are already merged by clap (via `env` attribute).
+#[allow(clippy::too_many_arguments)]
 pub fn resolve(
     api_url: Option<&str>,
     cloud_url: Option<&str>,
@@ -29,8 +32,10 @@ pub fn resolve(
     let global_config = load_global_config();
 
     let final_api_url = resolve_api_url(api_url, &local_config, &global_config);
-    let final_cloud_url = resolve_cloud_url(cloud_url, &final_api_url, &local_config, &global_config);
-    let (final_api_key, final_pat) = resolve_auth(api_key, pat, &local_config, &global_config, &final_api_url);
+    let final_cloud_url =
+        resolve_cloud_url(cloud_url, &final_api_url, &local_config, &global_config);
+    let (final_api_key, final_pat) =
+        resolve_auth(api_key, pat, &local_config, &global_config, &final_api_url);
     let final_namespace = resolve_namespace(namespace, &local_config, &global_config);
     let (org_id, proj_id) = resolve_project_config(organization_id, project_id, &local_config);
 
@@ -53,7 +58,12 @@ fn resolve_api_url(cli: Option<&str>, local: &TomlTable, global: &TomlTable) -> 
         .unwrap_or_else(|| "https://api.tensorlake.ai".to_string())
 }
 
-fn resolve_cloud_url(cli: Option<&str>, api_url: &str, local: &TomlTable, global: &TomlTable) -> String {
+fn resolve_cloud_url(
+    cli: Option<&str>,
+    api_url: &str,
+    local: &TomlTable,
+    global: &TomlTable,
+) -> String {
     cli.map(|s| s.to_string())
         .or_else(|| get_nested_value(local, "tensorlake.cloud_url"))
         .or_else(|| get_nested_value(global, "tensorlake.cloud_url"))

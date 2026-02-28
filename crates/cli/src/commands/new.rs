@@ -6,7 +6,7 @@ use crate::project::templates::{PYTHON_TEMPLATE, README_TEMPLATE};
 
 /// Sanitize name to snake_case.
 fn sanitize(name: &str) -> String {
-    let mut result = name.replace('-', "_").replace(' ', "_");
+    let mut result = name.replace(['-', ' '], "_");
 
     // Insert underscores before uppercase letters (camelCase/PascalCase)
     let mut snake = String::new();
@@ -92,13 +92,11 @@ pub fn run(name: &str, force: bool) -> Result<()> {
     let python_file = target_dir.join(&filename);
     let readme_file = target_dir.join("README.md");
 
-    if !force {
-        if python_file.exists() {
-            return Err(CliError::usage(format!(
-                "'{}' already exists. use --force to overwrite, or choose a different name.",
-                filename
-            )));
-        }
+    if !force && python_file.exists() {
+        return Err(CliError::usage(format!(
+            "'{}' already exists. use --force to overwrite, or choose a different name.",
+            filename
+        )));
     }
 
     let python_content = PYTHON_TEMPLATE
@@ -111,7 +109,10 @@ pub fn run(name: &str, force: bool) -> Result<()> {
         .replace("{filename}", &filename)
         .replace("{module_name}", &module_name);
 
-    eprintln!("\nCreating new Tensorlake application in '{}'...\n", module_name);
+    eprintln!(
+        "\nCreating new Tensorlake application in '{}'...\n",
+        module_name
+    );
 
     if force && target_dir.exists() {
         fs::remove_dir_all(&target_dir)?;

@@ -21,7 +21,12 @@ pub fn find_project_root(start_path: Option<&Path>) -> PathBuf {
     }
 
     // Strategy 3: Python project markers
-    let python_markers = ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"];
+    let python_markers = [
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "requirements.txt",
+    ];
     if let Some(root) = search_upward(&current, |dir| {
         python_markers.iter().any(|m| dir.join(m).exists())
     }) {

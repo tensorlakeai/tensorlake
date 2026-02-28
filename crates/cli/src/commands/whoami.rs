@@ -26,9 +26,15 @@ pub async fn run(ctx: &mut CliContext, output_json: bool) -> Result<()> {
     }
 
     let mut data = serde_json::Map::new();
-    data.insert("endpoint".to_string(), serde_json::Value::String(ctx.api_url.clone()));
+    data.insert(
+        "endpoint".to_string(),
+        serde_json::Value::String(ctx.api_url.clone()),
+    );
     if let Some(org_id) = ctx.effective_organization_id() {
-        data.insert("organizationId".to_string(), serde_json::Value::String(org_id));
+        data.insert(
+            "organizationId".to_string(),
+            serde_json::Value::String(org_id),
+        );
     }
     if let Some(proj_id) = ctx.effective_project_id() {
         data.insert("projectId".to_string(), serde_json::Value::String(proj_id));
@@ -42,18 +48,37 @@ pub async fn run(ctx: &mut CliContext, output_json: bool) -> Result<()> {
         } else {
             "*".repeat(pat.len())
         };
-        data.insert("personalAccessToken".to_string(), serde_json::Value::String(masked));
+        data.insert(
+            "personalAccessToken".to_string(),
+            serde_json::Value::String(masked),
+        );
     }
 
     if output_json {
-        println!("{}", serde_json::to_string_pretty(&serde_json::Value::Object(data))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::Value::Object(data))?
+        );
         return Ok(());
     }
 
     println!("Dashboard Endpoint    : {}", ctx.cloud_url);
-    println!("API Endpoint          : {}", data.get("endpoint").and_then(|v| v.as_str()).unwrap_or("-"));
-    println!("Organization ID       : {}", data.get("organizationId").and_then(|v| v.as_str()).unwrap_or("-"));
-    println!("Project ID            : {}", data.get("projectId").and_then(|v| v.as_str()).unwrap_or("-"));
+    println!(
+        "API Endpoint          : {}",
+        data.get("endpoint").and_then(|v| v.as_str()).unwrap_or("-")
+    );
+    println!(
+        "Organization ID       : {}",
+        data.get("organizationId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-")
+    );
+    println!(
+        "Project ID            : {}",
+        data.get("projectId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-")
+    );
     if let Some(key_id) = data.get("apiKeyId").and_then(|v| v.as_str()) {
         println!("API Key ID            : {}", key_id);
     }

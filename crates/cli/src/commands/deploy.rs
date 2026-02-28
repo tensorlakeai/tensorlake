@@ -58,7 +58,10 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
                 eprintln!("⚙️  {}", message);
             }
             "validation" => {
-                let severity = event.get("severity").and_then(|v| v.as_str()).unwrap_or("info");
+                let severity = event
+                    .get("severity")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("info");
                 let message = event.get("message").and_then(|v| v.as_str()).unwrap_or("");
                 let location = event.get("location").and_then(|v| v.as_str()).unwrap_or("");
                 match severity {
@@ -80,7 +83,10 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
                 }
             }
             "build_start" => {
-                let image = event.get("image").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let image = event
+                    .get("image")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 eprintln!("📦 Building `{}` image...", image);
             }
             "build_log" => {
@@ -94,23 +100,41 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
                 eprintln!("\n✅ All images built successfully");
             }
             "build_failed" => {
-                let image = event.get("image").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let error = event.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
+                let image = event
+                    .get("image")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let error = event
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error");
                 eprintln!("❌ Image '{}' build failed: {}", image, error);
             }
             "deployed" => {
-                let application = event.get("application").and_then(|v| v.as_str()).unwrap_or("");
+                let application = event
+                    .get("application")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 eprintln!("🚀 Application `{}` deployed successfully", application);
                 if let Some(curl_command) = event.get("curl_command").and_then(|v| v.as_str()) {
-                    eprintln!("\n💡 To invoke it, you can use the following cURL command:\n\n{}", curl_command);
+                    eprintln!(
+                        "\n💡 To invoke it, you can use the following cURL command:\n\n{}",
+                        curl_command
+                    );
                 }
             }
             "done" => {
                 let doc_url = event.get("doc_url").and_then(|v| v.as_str()).unwrap_or("");
-                eprintln!("\n📚 Visit our documentation if you need more information about invoking applications: {}\n", doc_url);
+                eprintln!(
+                    "\n📚 Visit our documentation if you need more information about invoking applications: {}\n",
+                    doc_url
+                );
             }
             "error" => {
-                let message = event.get("message").and_then(|v| v.as_str()).unwrap_or("unknown error");
+                let message = event
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error");
                 eprintln!("Error: {}", message);
             }
             _ => {

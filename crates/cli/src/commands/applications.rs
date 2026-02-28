@@ -48,7 +48,10 @@ pub async fn ls(ctx: &CliContext) -> Result<()> {
     let mut table = new_table(&["Name", "Description", "Deployed At"]);
     for app in &active {
         let name = app.get("name").and_then(|v| v.as_str()).unwrap_or("-");
-        let description = app.get("description").and_then(|v| v.as_str()).unwrap_or("");
+        let description = app
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let deployed_at = app
             .get("created_at")
             .and_then(|v| v.as_i64())

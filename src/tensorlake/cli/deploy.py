@@ -156,9 +156,7 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: list[Func
         for image_info in images.values():
             image_info: ImageInformation
             for function in image_info.functions:
-                _emit(
-                    {"type": "build_start", "image": image_info.image.name}
-                )
+                _emit({"type": "build_start", "image": image_info.image.name})
                 try:
                     await builder.build(
                         BuildContext(
@@ -218,9 +216,7 @@ def _deploy_applications(
         _emit({"type": "error", "message": str(e)})
         sys.exit(1)
     except TensorlakeError as e:
-        _emit(
-            {"type": "error", "message": f"failed to deploy applications: {e}"}
-        )
+        _emit({"type": "error", "message": f"failed to deploy applications: {e}"})
         sys.exit(1)
     except Exception as e:
         _emit(
@@ -241,7 +237,9 @@ def _deploy_applications(
 
 def deploy_entrypoint():
     """Entry point for the deploy command (called from Rust CLI via python -m)."""
-    parser = argparse.ArgumentParser(description="Deploy applications to Tensorlake Cloud")
+    parser = argparse.ArgumentParser(
+        description="Deploy applications to Tensorlake Cloud"
+    )
     parser.add_argument(
         "application_file_path",
         help="Path to the application .py file",

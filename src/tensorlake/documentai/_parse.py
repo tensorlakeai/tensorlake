@@ -3,10 +3,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import sys
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Union, overload
-
-import sys
 
 from httpx_sse import ServerSentEvent, aconnect_sse, connect_sse
 from pydantic import BaseModel, ValidationError

@@ -16,10 +16,9 @@
 
 import asyncio
 import os
+import sys
 import tempfile
 from dataclasses import dataclass
-
-import sys
 
 import httpx
 from httpx_sse import aconnect_sse
@@ -221,7 +220,10 @@ class ImageBuilderV2Client:
 
         build = BuildInfo.model_validate(res.json())
 
-        print(f"Waiting for build {build.id} of {image.name} to complete...", file=sys.stderr)
+        print(
+            f"Waiting for build {build.id} of {image.name} to complete...",
+            file=sys.stderr,
+        )
 
         try:
             return await self.stream_logs(build)
@@ -314,8 +316,14 @@ class ImageBuilderV2Client:
             )
 
             if response.status_code == 202:
-                print(f"Build for image {image.name} cancelled successfully", file=sys.stderr)
+                print(
+                    f"Build for image {image.name} cancelled successfully",
+                    file=sys.stderr,
+                )
             else:
-                print(f"Failed to cancel build {build.id}: {response.text}", file=sys.stderr)
+                print(
+                    f"Failed to cancel build {build.id}: {response.text}",
+                    file=sys.stderr,
+                )
         except Exception as e:
             print(f"Failed to cancel build {build.id}: {e}", file=sys.stderr)

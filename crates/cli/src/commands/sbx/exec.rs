@@ -33,7 +33,9 @@ pub async fn run(
         }
         client_builder = client_builder.default_headers(headers);
     }
-    let client = client_builder.build().map_err(|e| CliError::Other(anyhow::anyhow!("{}", e)))?;
+    let client = client_builder
+        .build()
+        .map_err(|e| CliError::Other(anyhow::anyhow!("{}", e)))?;
 
     // Start process
     let mut body = serde_json::json!({
@@ -91,22 +93,23 @@ async fn wait_and_print(
     pid: &str,
     timeout: Option<f64>,
 ) -> Result<i32> {
-    let deadline = timeout.map(|t| tokio::time::Instant::now() + std::time::Duration::from_secs_f64(t));
+    let deadline =
+        timeout.map(|t| tokio::time::Instant::now() + std::time::Duration::from_secs_f64(t));
 
     loop {
         // Check timeout
-        if let Some(dl) = deadline {
-            if tokio::time::Instant::now() > dl {
-                // Kill process
-                let _ = client
-                    .delete(format!("{}/api/v1/processes/{}", proxy_base, pid))
-                    .send()
-                    .await;
-                return Err(CliError::Other(anyhow::anyhow!(
-                    "Command timed out after {}s",
-                    timeout.unwrap_or(0.0)
-                )));
-            }
+        if let Some(dl) = deadline
+            && tokio::time::Instant::now() > dl
+        {
+            // Kill process
+            let _ = client
+                .delete(format!("{}/api/v1/processes/{}", proxy_base, pid))
+                .send()
+                .await;
+            return Err(CliError::Other(anyhow::anyhow!(
+                "Command timed out after {}s",
+                timeout.unwrap_or(0.0)
+            )));
         }
 
         let info_resp = client
@@ -116,7 +119,9 @@ async fn wait_and_print(
             .map_err(CliError::Http)?;
 
         if !info_resp.status().is_success() {
-            return Err(CliError::Other(anyhow::anyhow!("failed to get process status")));
+            return Err(CliError::Other(anyhow::anyhow!(
+                "failed to get process status"
+            )));
         }
 
         let info: serde_json::Value = info_resp.json().await.map_err(CliError::Http)?;

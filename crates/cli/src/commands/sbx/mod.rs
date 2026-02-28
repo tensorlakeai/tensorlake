@@ -1,9 +1,9 @@
-pub mod ls;
-pub mod create;
 pub mod cp;
-pub mod snapshot;
+pub mod create;
 pub mod exec;
+pub mod ls;
 pub mod run;
+pub mod snapshot;
 pub mod ssh;
 
 use crate::auth::context::CliContext;
@@ -15,7 +15,10 @@ use crate::error::Result;
 /// Localhost mode: `{api_url}/v1/namespaces/{namespace}/sandboxes`
 pub fn sandbox_endpoint(ctx: &CliContext, endpoint: &str) -> String {
     if is_localhost(&ctx.api_url) {
-        format!("{}/v1/namespaces/{}/{}", ctx.api_url, ctx.namespace, endpoint)
+        format!(
+            "{}/v1/namespaces/{}/{}",
+            ctx.api_url, ctx.namespace, endpoint
+        )
     } else {
         format!("{}/{}", ctx.api_url, endpoint)
     }
@@ -55,8 +58,8 @@ fn resolve_proxy_url(api_url: &str) -> String {
     }
     if let Ok(parsed) = url::Url::parse(api_url) {
         let host = parsed.host_str().unwrap_or("");
-        if host.starts_with("api.") {
-            let proxy_host = format!("sandbox.{}", &host[4..]);
+        if let Some(rest) = host.strip_prefix("api.") {
+            let proxy_host = format!("sandbox.{}", rest);
             return format!("{}://{}", parsed.scheme(), proxy_host);
         }
     }
@@ -95,7 +98,10 @@ pub fn parse_env_vars(env: &[String]) -> Result<Option<serde_json::Value>> {
         })?;
         let key = &item[..eq_pos];
         let value = &item[eq_pos + 1..];
-        map.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+        map.insert(
+            key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
     }
     Ok(Some(serde_json::Value::Object(map)))
 }

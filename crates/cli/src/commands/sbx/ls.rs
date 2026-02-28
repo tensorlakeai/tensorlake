@@ -9,11 +9,7 @@ pub async fn run(ctx: &CliContext) -> Result<()> {
     let client = ctx.client()?;
     let url = sandbox_endpoint(ctx, "sandboxes");
 
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(CliError::Http)?;
+    let resp = client.get(&url).send().await.map_err(CliError::Http)?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -38,10 +34,22 @@ pub async fn run(ctx: &CliContext) -> Result<()> {
         return Ok(());
     }
 
-    let mut table = new_table(&["ID", "Status", "Image", "CPUs", "Memory", "Disk", "Created At"]);
+    let mut table = new_table(&[
+        "ID",
+        "Status",
+        "Image",
+        "CPUs",
+        "Memory",
+        "Disk",
+        "Created At",
+    ]);
 
     for s in &sandboxes {
-        let id = s.get("sandbox_id").or_else(|| s.get("id")).and_then(|v| v.as_str()).unwrap_or("-");
+        let id = s
+            .get("sandbox_id")
+            .or_else(|| s.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("-");
         let status = s.get("status").and_then(|v| v.as_str()).unwrap_or("-");
         let image = s.get("image").and_then(|v| v.as_str()).unwrap_or("-");
 
@@ -62,10 +70,7 @@ pub async fn run(ctx: &CliContext) -> Result<()> {
             .map(|v| format!("{} MB", v))
             .unwrap_or_else(|| "-".to_string());
 
-        let created_at = s
-            .get("created_at")
-            .and_then(|v| v.as_str())
-            .unwrap_or("-");
+        let created_at = s.get("created_at").and_then(|v| v.as_str()).unwrap_or("-");
 
         table.add_row(vec![
             Cell::new(id),

@@ -325,31 +325,26 @@ async fn main() {
 
 async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<()> {
     match command {
-        Commands::Login => {
-            commands::login::run(ctx).await
-        }
-        Commands::Whoami { output } => {
-            commands::whoami::run(ctx, output == "json").await
-        }
-        Commands::Init { directory, no_confirm } => {
-            commands::init::run(ctx, directory.as_deref(), no_confirm).await
-        }
-        Commands::New { name, force } => {
-            commands::new::run(&name, force)
-        }
+        Commands::Login => commands::login::run(ctx).await,
+        Commands::Whoami { output } => commands::whoami::run(ctx, output == "json").await,
+        Commands::Init {
+            directory,
+            no_confirm,
+        } => commands::init::run(ctx, directory.as_deref(), no_confirm).await,
+        Commands::New { name, force } => commands::new::run(&name, force),
         Commands::Deploy { args } => {
             ensure_auth_and_project(ctx).await?;
             commands::deploy::run(ctx, &args).await
         }
-        Commands::Parse { args } => {
-            commands::parse::run(ctx, &args).await
-        }
+        Commands::Parse { args } => commands::parse::run(ctx, &args).await,
         Commands::Secrets(subcmd) => {
             ensure_auth_and_project(ctx).await?;
             match subcmd {
                 SecretsCommands::Ls => commands::secrets::list(ctx).await,
                 SecretsCommands::Set { secrets } => commands::secrets::set(ctx, &secrets).await,
-                SecretsCommands::Rm { secret_names } => commands::secrets::unset(ctx, &secret_names).await,
+                SecretsCommands::Rm { secret_names } => {
+                    commands::secrets::unset(ctx, &secret_names).await
+                }
             }
         }
         Commands::Applications(app_args) => {
@@ -362,20 +357,79 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             ensure_auth_and_project(ctx).await?;
             match subcmd {
                 SbxCommands::Ls => commands::sbx::ls::run(ctx).await,
-                SbxCommands::New { image, cpus, memory, disk, timeout, entrypoint, snapshot, wait } => {
-                    commands::sbx::create::run(ctx, image.as_deref(), cpus, memory, disk, timeout, &entrypoint, snapshot.as_deref(), wait).await
+                SbxCommands::New {
+                    image,
+                    cpus,
+                    memory,
+                    disk,
+                    timeout,
+                    entrypoint,
+                    snapshot,
+                    wait,
+                } => {
+                    commands::sbx::create::run(
+                        ctx,
+                        image.as_deref(),
+                        cpus,
+                        memory,
+                        disk,
+                        timeout,
+                        &entrypoint,
+                        snapshot.as_deref(),
+                        wait,
+                    )
+                    .await
                 }
-                SbxCommands::Exec { sandbox_id, command, args, timeout, workdir, env } => {
-                    commands::sbx::exec::run(ctx, &sandbox_id, &command, &args, timeout, workdir.as_deref(), &env).await
+                SbxCommands::Exec {
+                    sandbox_id,
+                    command,
+                    args,
+                    timeout,
+                    workdir,
+                    env,
+                } => {
+                    commands::sbx::exec::run(
+                        ctx,
+                        &sandbox_id,
+                        &command,
+                        &args,
+                        timeout,
+                        workdir.as_deref(),
+                        &env,
+                    )
+                    .await
                 }
-                SbxCommands::Cp { src, dest } => {
-                    commands::sbx::cp::run(ctx, &src, &dest).await
-                }
-                SbxCommands::Snapshot { sandbox_id, timeout } => {
-                    commands::sbx::snapshot::run(ctx, &sandbox_id, timeout).await
-                }
-                SbxCommands::Run { command, args, image, cpus, memory, disk, timeout, workdir, env, keep } => {
-                    commands::sbx::run::run(ctx, &command, &args, image.as_deref(), cpus, memory, disk, timeout, workdir.as_deref(), &env, keep).await
+                SbxCommands::Cp { src, dest } => commands::sbx::cp::run(ctx, &src, &dest).await,
+                SbxCommands::Snapshot {
+                    sandbox_id,
+                    timeout,
+                } => commands::sbx::snapshot::run(ctx, &sandbox_id, timeout).await,
+                SbxCommands::Run {
+                    command,
+                    args,
+                    image,
+                    cpus,
+                    memory,
+                    disk,
+                    timeout,
+                    workdir,
+                    env,
+                    keep,
+                } => {
+                    commands::sbx::run::run(
+                        ctx,
+                        &command,
+                        &args,
+                        image.as_deref(),
+                        cpus,
+                        memory,
+                        disk,
+                        timeout,
+                        workdir.as_deref(),
+                        &env,
+                        keep,
+                    )
+                    .await
                 }
                 SbxCommands::Ssh { sandbox_id, shell } => {
                     commands::sbx::ssh::run(ctx, &sandbox_id, &shell).await

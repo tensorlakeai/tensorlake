@@ -54,10 +54,13 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
             }
             "output" => {
                 let content = event.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                println!("{}", content);  // Markdown to stdout
+                println!("{}", content); // Markdown to stdout
             }
             "error" => {
-                let message = event.get("message").and_then(|v| v.as_str()).unwrap_or("unknown error");
+                let message = event
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error");
                 eprintln!("Error: {}", message);
             }
             _ => {

@@ -2,10 +2,9 @@ import inspect
 import io
 import os
 import stat
+import sys
 import zipfile
 from typing import Dict, List, Set
-
-import sys
 
 from pydantic import BaseModel
 

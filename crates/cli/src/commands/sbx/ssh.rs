@@ -71,17 +71,18 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
         .ok_or_else(|| CliError::Other(anyhow::anyhow!("missing token in PTY response")))?;
 
     // Build WebSocket URL from proxy base
-    let ws_base = proxy_base.replace("https://", "wss://").replace("http://", "ws://");
-    let ws_url = format!(
-        "{}/api/v1/pty/{}/ws?token={}",
-        ws_base, session_id, token
-    );
+    let ws_base = proxy_base
+        .replace("https://", "wss://")
+        .replace("http://", "ws://");
+    let ws_url = format!("{}/api/v1/pty/{}/ws?token={}", ws_base, session_id, token);
 
     // Connect WebSocket
     use tokio_tungstenite::tungstenite;
 
     let mut request = tungstenite::client::IntoClientRequest::into_client_request(ws_url.as_str())
-        .map_err(|e| CliError::Other(anyhow::anyhow!("failed to build WebSocket request: {}", e)))?;
+        .map_err(|e| {
+            CliError::Other(anyhow::anyhow!("failed to build WebSocket request: {}", e))
+        })?;
 
     // Add auth headers to WebSocket request
     for (key, value) in &headers {
@@ -97,8 +98,8 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
     const _OP_RESIZE: u8 = 0x01;
     const OP_READY: u8 = 0x02;
 
-    use futures::stream::StreamExt;
     use futures::sink::SinkExt;
+    use futures::stream::StreamExt;
     use tokio::io::AsyncReadExt;
 
     let (mut ws_write, mut ws_read) = ws_stream.split();
@@ -128,10 +129,10 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
                     }
                     Ok(tungstenite::Message::Close(Some(frame))) => {
                         let reason = frame.reason.to_string();
-                        if reason.starts_with("exit:") {
-                            if let Ok(code) = reason[5..].parse::<i32>() {
-                                exit_code = Some(code);
-                            }
+                        if let Some(code_str) = reason.strip_prefix("exit:")
+                            && let Ok(code) = code_str.parse::<i32>()
+                        {
+                            exit_code = Some(code);
                         }
                         break;
                     }
@@ -175,10 +176,10 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
     // Restore terminal
     crossterm::terminal::disable_raw_mode()?;
 
-    if let Some(code) = result {
-        if code != 0 {
-            return Err(CliError::ExitCode(code));
-        }
+    if let Some(code) = result
+        && code != 0
+    {
+        return Err(CliError::ExitCode(code));
     }
 
     Ok(())

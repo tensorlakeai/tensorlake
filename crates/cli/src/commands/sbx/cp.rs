@@ -49,7 +49,11 @@ pub async fn run(ctx: &CliContext, src: &str, dest: &str) -> Result<()> {
         let client = build_proxy_client(ctx, host_override.as_deref())?;
 
         let resp = client
-            .get(format!("{}/api/v1/files?path={}", proxy_base, urlencoding::encode(src_path)))
+            .get(format!(
+                "{}/api/v1/files?path={}",
+                proxy_base,
+                urlencoding::encode(src_path)
+            ))
             .send()
             .await
             .map_err(CliError::Http)?;
@@ -78,7 +82,10 @@ pub async fn run(ctx: &CliContext, src: &str, dest: &str) -> Result<()> {
     } else if let Some(sandbox_id) = dest_sbx {
         // Upload: local -> sandbox
         if !Path::new(src_path).is_file() {
-            return Err(CliError::usage(format!("Local file not found: {}", src_path)));
+            return Err(CliError::usage(format!(
+                "Local file not found: {}",
+                src_path
+            )));
         }
 
         let data = std::fs::read(src_path)?;
@@ -86,7 +93,11 @@ pub async fn run(ctx: &CliContext, src: &str, dest: &str) -> Result<()> {
         let client = build_proxy_client(ctx, host_override.as_deref())?;
 
         let resp = client
-            .put(format!("{}/api/v1/files?path={}", proxy_base, urlencoding::encode(dest_path)))
+            .put(format!(
+                "{}/api/v1/files?path={}",
+                proxy_base,
+                urlencoding::encode(dest_path)
+            ))
             .body(data.clone())
             .send()
             .await

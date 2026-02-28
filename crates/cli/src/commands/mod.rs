@@ -4,6 +4,6 @@ pub mod init;
 pub mod login;
 pub mod new;
 pub mod parse;
+pub mod sbx;
 pub mod secrets;
 pub mod whoami;
-pub mod sbx;

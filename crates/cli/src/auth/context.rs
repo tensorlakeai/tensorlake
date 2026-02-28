@@ -45,8 +45,11 @@ impl CliContext {
         headers.insert("Accept", HeaderValue::from_static("application/json"));
         headers.insert(
             "User-Agent",
-            HeaderValue::from_str(&format!("Tensorlake CLI (rust/{})", env!("CARGO_PKG_VERSION")))
-                .unwrap_or_else(|_| HeaderValue::from_static("Tensorlake CLI")),
+            HeaderValue::from_str(&format!(
+                "Tensorlake CLI (rust/{})",
+                env!("CARGO_PKG_VERSION")
+            ))
+            .unwrap_or_else(|_| HeaderValue::from_static("Tensorlake CLI")),
         );
 
         if let Some(key) = &self.api_key {
@@ -64,15 +67,13 @@ impl CliContext {
             if let Some(org_id) = self.effective_organization_id() {
                 headers.insert(
                     "X-Forwarded-Organization-Id",
-                    HeaderValue::from_str(&org_id)
-                        .map_err(|e| CliError::auth(e.to_string()))?,
+                    HeaderValue::from_str(&org_id).map_err(|e| CliError::auth(e.to_string()))?,
                 );
             }
             if let Some(proj_id) = self.effective_project_id() {
                 headers.insert(
                     "X-Forwarded-Project-Id",
-                    HeaderValue::from_str(&proj_id)
-                        .map_err(|e| CliError::auth(e.to_string()))?,
+                    HeaderValue::from_str(&proj_id).map_err(|e| CliError::auth(e.to_string()))?,
                 );
             }
         } else {
@@ -84,7 +85,7 @@ impl CliContext {
         reqwest::Client::builder()
             .default_headers(headers)
             .build()
-            .map_err(|e| CliError::Http(e))
+            .map_err(CliError::Http)
     }
 
     pub fn bearer_token(&self) -> Result<String> {
@@ -149,9 +150,18 @@ impl CliContext {
 
         let body: serde_json::Value = resp.json().await.map_err(CliError::Http)?;
         let result = IntrospectResult {
-            id: body.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            organization_id: body.get("organizationId").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            project_id: body.get("projectId").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            id: body
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            organization_id: body
+                .get("organizationId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            project_id: body
+                .get("projectId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         };
 
         // For API keys, set org/project from introspection
@@ -169,5 +179,4 @@ impl CliContext {
     pub fn api_key_id(&self) -> Option<String> {
         self.introspect_cache.as_ref().and_then(|r| r.id.clone())
     }
-
 }

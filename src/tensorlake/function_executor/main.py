@@ -43,7 +43,7 @@ def main():
     logger = logger.bind(
         executor_id=args.executor_id,
         fn_executor_id=args.function_executor_id,
-        **info_response_kv_args()
+        **info_response_kv_args(),
     )
     logger.info("starting function executor server", address=args.address)
     if len(ignored_args) > 0:

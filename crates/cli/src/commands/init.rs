@@ -37,7 +37,9 @@ pub async fn run_init_flow(
         return Ok((org.to_string(), proj.to_string()));
     }
 
-    let pat = ctx.personal_access_token.clone()
+    let pat = ctx
+        .personal_access_token
+        .clone()
         .or_else(|| load_credentials(&ctx.api_url))
         .ok_or_else(|| {
             if interactive {
@@ -70,7 +72,10 @@ pub async fn run_init_flow(
         return Err(CliError::Cancelled);
     }
 
-    let orgs_body: serde_json::Value = orgs_resp.json().await.map_err(|e| CliError::auth(e.to_string()))?;
+    let orgs_body: serde_json::Value = orgs_resp
+        .json()
+        .await
+        .map_err(|e| CliError::auth(e.to_string()))?;
     let organizations = orgs_body
         .get("items")
         .and_then(|v| v.as_array())
@@ -92,14 +97,20 @@ pub async fn run_init_flow(
             .unwrap_or_default()
             .to_string();
         if interactive {
-            let name = org.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let name = org
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             eprintln!("found organization: {} ({})", name, organization_id);
         }
     } else {
         if interactive {
             eprintln!("multiple organizations found:");
             for (i, org) in organizations.iter().enumerate() {
-                let name = org.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let name = org
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 let id = org.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
                 eprintln!("  {}. {} (ID: {})", i + 1, name, id);
             }
@@ -108,7 +119,7 @@ pub async fn run_init_flow(
         let selection = dialoguer::Select::new()
             .with_prompt("Select an organization")
             .items(
-                &organizations
+                organizations
                     .iter()
                     .map(|o| {
                         let name = o.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
@@ -128,7 +139,10 @@ pub async fn run_init_flow(
             .unwrap_or_default()
             .to_string();
         if interactive {
-            let name = org.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let name = org
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             eprintln!("selected: {}", name);
         }
     }
@@ -157,8 +171,10 @@ pub async fn run_init_flow(
         return Err(CliError::Cancelled);
     }
 
-    let projects_body: serde_json::Value =
-        projects_resp.json().await.map_err(|e| CliError::auth(e.to_string()))?;
+    let projects_body: serde_json::Value = projects_resp
+        .json()
+        .await
+        .map_err(|e| CliError::auth(e.to_string()))?;
     let projects = projects_body
         .get("items")
         .and_then(|v| v.as_array())
@@ -166,7 +182,9 @@ pub async fn run_init_flow(
 
     if projects.is_empty() {
         if interactive {
-            eprintln!("no projects found in this organization. create one at your TensorLake dashboard first.");
+            eprintln!(
+                "no projects found in this organization. create one at your TensorLake dashboard first."
+            );
         }
         return Err(CliError::Cancelled);
     }
@@ -180,14 +198,20 @@ pub async fn run_init_flow(
             .unwrap_or_default()
             .to_string();
         if interactive {
-            let name = proj.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let name = proj
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             eprintln!("found project: {} ({})", name, project_id);
         }
     } else {
         if interactive {
             eprintln!("multiple projects found:");
             for (i, proj) in projects.iter().enumerate() {
-                let name = proj.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let name = proj
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 let id = proj.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
                 eprintln!("  {}. {} (ID: {})", i + 1, name, id);
             }
@@ -196,7 +220,7 @@ pub async fn run_init_flow(
         let selection = dialoguer::Select::new()
             .with_prompt("Select a project")
             .items(
-                &projects
+                projects
                     .iter()
                     .map(|p| {
                         let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
@@ -216,7 +240,10 @@ pub async fn run_init_flow(
             .unwrap_or_default()
             .to_string();
         if interactive {
-            let name = proj.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let name = proj
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             eprintln!("selected: {}", name);
         }
     }
@@ -228,14 +255,22 @@ pub async fn run_init_flow(
         }
 
         let mut config = crate::config::files::TomlTable::new();
-        config.insert("organization".to_string(), toml::Value::String(organization_id.clone()));
-        config.insert("project".to_string(), toml::Value::String(project_id.clone()));
+        config.insert(
+            "organization".to_string(),
+            toml::Value::String(organization_id.clone()),
+        );
+        config.insert(
+            "project".to_string(),
+            toml::Value::String(project_id.clone()),
+        );
         save_local_config(&config, project_root)?;
 
         if interactive {
             let config_path = project_root.join(".tensorlake").join("config.toml");
             eprintln!("configuration saved to {}", config_path.display());
-            eprintln!("\nYou can now use TensorLake commands in this project without specifying --organization and --project flags.");
+            eprintln!(
+                "\nYou can now use TensorLake commands in this project without specifying --organization and --project flags."
+            );
         }
     }
 

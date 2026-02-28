@@ -97,8 +97,8 @@ from ..user_data_serializer import (
 )
 from ..validation import (
     ValidationMessage,
-    has_error_message,
     format_validation_messages,
+    has_error_message,
     validate_loaded_applications,
 )
 from .class_instance_store import ClassInstanceStore
@@ -204,7 +204,10 @@ class LocalRunner:
         if has_error_message(validation_messages):
             # Don't print non-error messages for now to reduce noise for users.
             for msg in format_validation_messages(validation_messages):
-                print(f"{msg['severity']}: {msg['location']}{msg['message']}", file=sys.stderr)
+                print(
+                    f"{msg['severity']}: {msg['location']}{msg['message']}",
+                    file=sys.stderr,
+                )
             raise SDKUsageError(
                 "Local application run aborted due to code validation errors, "
                 "please address them before running the application."

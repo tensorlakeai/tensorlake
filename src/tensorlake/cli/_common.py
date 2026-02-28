@@ -200,7 +200,9 @@ class Context:
     ) -> "Context":
         """Create a Context from arguments (typically env vars set by the Rust CLI)."""
         final_api_url = api_url or "https://api.tensorlake.ai"
-        final_cloud_url = cloud_url or cls._resolve_cloud_url_from_api_url(final_api_url)
+        final_cloud_url = cloud_url or cls._resolve_cloud_url_from_api_url(
+            final_api_url
+        )
         final_namespace = namespace or "default"
 
         return cls(
