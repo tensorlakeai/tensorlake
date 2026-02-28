@@ -21,13 +21,17 @@ from .models import (
     CreateSandboxPoolResponse,
     CreateSandboxRequest,
     CreateSandboxResponse,
+    CreateSnapshotResponse,
     ListSandboxesResponse,
     ListSandboxPoolsResponse,
+    ListSnapshotsResponse,
     NetworkConfig,
     SandboxInfo,
     SandboxPoolInfo,
     SandboxPoolRequest,
     SandboxStatus,
+    SnapshotInfo,
+    SnapshotStatus,
 )
 
 
@@ -125,6 +129,27 @@ class SandboxClient:
         parsed = urlparse(self._api_url)
         return parsed.hostname in ("localhost", "127.0.0.1")
 
+    def _resolve_proxy_url(self) -> str:
+        """Derive the sandbox proxy URL from the API URL.
+
+        Checks the ``TENSORLAKE_SANDBOX_PROXY_URL`` env var first, then
+        infers the proxy domain from the API URL so that
+        ``api.tensorlake.dev`` → ``sandbox.tensorlake.dev``, etc.
+        """
+        import os
+
+        explicit = os.getenv("TENSORLAKE_SANDBOX_PROXY_URL")
+        if explicit:
+            return explicit
+        if self._is_localhost():
+            return "http://localhost:9443"
+        parsed = urlparse(self._api_url)
+        host = parsed.hostname or ""
+        if host.startswith("api."):
+            proxy_host = "sandbox." + host[4:]
+            return f"{parsed.scheme}://{proxy_host}"
+        return _defaults.SANDBOX_PROXY_URL
+
     def _endpoint_url(self, endpoint: str) -> str:
         if self._is_localhost():
             return f"{self._api_url}/v1/namespaces/{self._namespace}/{endpoint}"
@@ -191,6 +216,7 @@ class SandboxClient:
         allow_internet_access: bool = True,
         allow_out: list[str] | None = None,
         deny_out: list[str] | None = None,
+        snapshot_id: str | None = None,
     ) -> CreateSandboxResponse:
         """Create a new standalone sandbox.
 
@@ -210,6 +236,10 @@ class SandboxClient:
                 over *deny_out*.
             deny_out: Destination IPs/CIDRs to deny
                 (e.g. ``["192.168.1.0/24"]``).
+            snapshot_id: ID of a completed snapshot to restore from.
+                When set, image, resources, entrypoint, and secrets
+                are inherited from the snapshot unless explicitly
+                overridden.
 
         Returns:
             CreateSandboxResponse with sandbox_id and status
@@ -238,6 +268,7 @@ class SandboxClient:
                 timeout_secs=timeout_secs,
                 entrypoint=entrypoint,
                 network=network,
+                snapshot_id=snapshot_id,
             )
             response = self._run_request(
                 self._client.build_request(
@@ -348,6 +379,140 @@ class SandboxClient:
             if e.response.status_code == 404:
                 raise SandboxNotFoundError(sandbox_id) from e
             raise RemoteAPIError(e.response.status_code, e.response.text) from e
+
+    # --- Snapshot operations ---
+
+    def snapshot(self, sandbox_id: str) -> CreateSnapshotResponse:
+        """Create a snapshot of a running sandbox's filesystem.
+
+        This is an asynchronous operation. Poll with :meth:`get_snapshot`
+        until the status is ``completed`` or ``failed``.
+
+        Args:
+            sandbox_id: ID of the running sandbox to snapshot
+
+        Returns:
+            CreateSnapshotResponse with snapshot_id and status
+
+        Raises:
+            SandboxNotFoundError: If sandbox doesn't exist
+            RemoteAPIError: If the API request fails
+            SandboxConnectionError: If the server is unreachable
+        """
+        try:
+            response = self._run_request(
+                self._client.build_request(
+                    "POST",
+                    url=self._endpoint_url(f"sandboxes/{sandbox_id}/snapshot"),
+                )
+            )
+            return CreateSnapshotResponse.model_validate(response.json())
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise SandboxNotFoundError(sandbox_id) from e
+            raise RemoteAPIError(e.response.status_code, e.response.text) from e
+
+    def get_snapshot(self, snapshot_id: str) -> SnapshotInfo:
+        """Get information about a snapshot.
+
+        Args:
+            snapshot_id: ID of the snapshot
+
+        Returns:
+            SnapshotInfo with full snapshot details
+
+        Raises:
+            RemoteAPIError: If the API request fails
+            SandboxConnectionError: If the server is unreachable
+        """
+        try:
+            response = self._run_request(
+                self._client.build_request(
+                    "GET",
+                    url=self._endpoint_url(f"snapshots/{snapshot_id}"),
+                )
+            )
+            return SnapshotInfo.model_validate(response.json())
+        except httpx.HTTPStatusError as e:
+            raise RemoteAPIError(e.response.status_code, e.response.text) from e
+
+    def list_snapshots(self) -> list[SnapshotInfo]:
+        """List all snapshots in the namespace.
+
+        Returns:
+            List of SnapshotInfo objects
+
+        Raises:
+            RemoteAPIError: If the API request fails
+            SandboxConnectionError: If the server is unreachable
+        """
+        try:
+            response = self._run_request(
+                self._client.build_request(
+                    "GET",
+                    url=self._endpoint_url("snapshots"),
+                )
+            )
+            data = ListSnapshotsResponse.model_validate(response.json())
+            return data.snapshots
+        except httpx.HTTPStatusError as e:
+            raise RemoteAPIError(e.response.status_code, e.response.text) from e
+
+    def delete_snapshot(self, snapshot_id: str) -> None:
+        """Delete a snapshot.
+
+        Args:
+            snapshot_id: ID of the snapshot to delete
+
+        Raises:
+            RemoteAPIError: If the API request fails
+            SandboxConnectionError: If the server is unreachable
+        """
+        try:
+            self._run_request(
+                self._client.build_request(
+                    "DELETE",
+                    url=self._endpoint_url(f"snapshots/{snapshot_id}"),
+                )
+            )
+        except httpx.HTTPStatusError as e:
+            raise RemoteAPIError(e.response.status_code, e.response.text) from e
+
+    def snapshot_and_wait(
+        self,
+        sandbox_id: str,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
+    ) -> SnapshotInfo:
+        """Create a snapshot and wait for it to complete.
+
+        Args:
+            sandbox_id: ID of the running sandbox to snapshot
+            timeout: Max seconds to wait for completion (default 300)
+            poll_interval: Seconds between status polls (default 1)
+
+        Returns:
+            SnapshotInfo with completed snapshot details
+
+        Raises:
+            SandboxError: If snapshot fails or times out
+        """
+        result = self.snapshot(sandbox_id)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            info = self.get_snapshot(result.snapshot_id)
+            if info.status == SnapshotStatus.COMPLETED:
+                return info
+            if info.status == SnapshotStatus.FAILED:
+                raise SandboxError(
+                    f"Snapshot {result.snapshot_id} failed: {info.error}"
+                )
+            time.sleep(poll_interval)
+        raise SandboxError(
+            f"Snapshot {result.snapshot_id} did not complete within {timeout}s"
+        )
+
+    # --- Pool operations ---
 
     def create_pool(
         self,
@@ -556,10 +721,7 @@ class SandboxClient:
         from .sandbox import Sandbox
 
         if proxy_url is None:
-            if self._is_localhost():
-                proxy_url = "http://localhost:9443"
-            else:
-                proxy_url = _defaults.SANDBOX_PROXY_URL
+            proxy_url = self._resolve_proxy_url()
 
         return Sandbox(
             sandbox_id=sandbox_id,
@@ -582,6 +744,7 @@ class SandboxClient:
         allow_out: list[str] | None = None,
         deny_out: list[str] | None = None,
         pool_id: str | None = None,
+        snapshot_id: str | None = None,
         proxy_url: str | None = None,
         startup_timeout: float = 60,
     ) -> "Sandbox":
@@ -608,6 +771,7 @@ class SandboxClient:
             deny_out: Destination IPs/CIDRs to deny
                 (e.g. ``["192.168.1.0/24"]``).
             pool_id: Pool ID to use for warm containers (optional)
+            snapshot_id: ID of a completed snapshot to restore from
             proxy_url: Override the sandbox proxy URL
             startup_timeout: Max seconds to wait for Running status (default 60)
 
@@ -632,6 +796,7 @@ class SandboxClient:
                 allow_internet_access=allow_internet_access,
                 allow_out=allow_out,
                 deny_out=deny_out,
+                snapshot_id=snapshot_id,
             )
 
         deadline = time.time() + startup_timeout
