@@ -18,9 +18,11 @@ pub async fn run(
     let url = sandbox_endpoint(ctx, "sandboxes");
 
     let mut body = serde_json::json!({
-        "cpus": cpus,
-        "memory_mb": memory,
-        "ephemeral_disk_mb": disk,
+        "resources": {
+            "cpus": cpus,
+            "memory_mb": memory,
+            "ephemeral_disk_mb": disk,
+        },
     });
     if let Some(img) = image {
         body["image"] = serde_json::Value::String(img.to_string());

@@ -25,9 +25,11 @@ pub async fn run(
     eprintln!("Creating sandbox with {}...", label);
 
     let mut create_body = serde_json::json!({
-        "cpus": cpus,
-        "memory_mb": memory,
-        "ephemeral_disk_mb": disk,
+        "resources": {
+            "cpus": cpus,
+            "memory_mb": memory,
+            "ephemeral_disk_mb": disk,
+        },
     });
     if let Some(img) = image {
         create_body["image"] = serde_json::Value::String(img.to_string());
