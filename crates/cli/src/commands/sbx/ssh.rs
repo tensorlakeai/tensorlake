@@ -41,6 +41,10 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
             "command": shell,
             "rows": rows,
             "cols": cols,
+            "env": {
+                "TERM": "xterm-256color",
+                "COLORTERM": "truecolor",
+            },
         }))
         .send()
         .await

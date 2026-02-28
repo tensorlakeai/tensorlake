@@ -113,6 +113,7 @@ enum Commands {
     Secrets(SecretsCommands),
 
     /// List applications
+    #[command(name = "ls")]
     Applications(ApplicationsArgs),
 
     /// Manage sandboxes
@@ -123,15 +124,15 @@ enum Commands {
 #[derive(Subcommand)]
 enum SecretsCommands {
     /// List all secrets
-    List,
+    Ls,
     /// Set one or more secrets (KEY=VALUE)
     Set {
         /// Secret key-value pairs (KEY=VALUE)
         #[arg(required = true)]
         secrets: Vec<String>,
     },
-    /// Unset one or more secrets
-    Unset {
+    /// Remove one or more secrets
+    Rm {
         /// Secret names to unset
         #[arg(required = true)]
         secret_names: Vec<String>,
@@ -156,7 +157,7 @@ enum SbxCommands {
     Ls,
 
     /// Create a new sandbox
-    Create {
+    New {
         /// Container image
         #[arg(short, long)]
         image: Option<String>,
@@ -346,9 +347,9 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
         Commands::Secrets(subcmd) => {
             ensure_auth_and_project(ctx).await?;
             match subcmd {
-                SecretsCommands::List => commands::secrets::list(ctx).await,
+                SecretsCommands::Ls => commands::secrets::list(ctx).await,
                 SecretsCommands::Set { secrets } => commands::secrets::set(ctx, &secrets).await,
-                SecretsCommands::Unset { secret_names } => commands::secrets::unset(ctx, &secret_names).await,
+                SecretsCommands::Rm { secret_names } => commands::secrets::unset(ctx, &secret_names).await,
             }
         }
         Commands::Applications(app_args) => {
@@ -361,7 +362,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             ensure_auth_and_project(ctx).await?;
             match subcmd {
                 SbxCommands::Ls => commands::sbx::ls::run(ctx).await,
-                SbxCommands::Create { image, cpus, memory, disk, timeout, entrypoint, snapshot, wait } => {
+                SbxCommands::New { image, cpus, memory, disk, timeout, entrypoint, snapshot, wait } => {
                     commands::sbx::create::run(ctx, image.as_deref(), cpus, memory, disk, timeout, &entrypoint, snapshot.as_deref(), wait).await
                 }
                 SbxCommands::Exec { sandbox_id, command, args, timeout, workdir, env } => {
