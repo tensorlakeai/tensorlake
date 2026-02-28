@@ -1,0 +1,4 @@
+#!/usr/bin/env python3
+from tensorlake.cli.deploy import deploy_entrypoint
+
+deploy_entrypoint()
