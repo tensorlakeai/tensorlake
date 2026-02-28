@@ -17,6 +17,7 @@ from tensorlake.sandbox import (
     ProcessStatus,
     SandboxClient,
     SandboxStatus,
+    SnapshotStatus,
 )
 from tensorlake.sandbox.exceptions import (
     RemoteAPIError,
@@ -188,6 +189,7 @@ def ls_cmd(ctx: Context):
     _STATUS_STYLE = {
         "running": "green",
         "pending": "yellow",
+        "snapshotting": "blue",
         "terminated": "red",
     }
 
@@ -197,6 +199,7 @@ def ls_cmd(ctx: Context):
     table.add_column("Image")
     table.add_column("CPUs", justify="right")
     table.add_column("Memory", justify="right")
+    table.add_column("Disk", justify="right")
     table.add_column("Created At")
 
     for s in sandboxes:
@@ -207,6 +210,7 @@ def ls_cmd(ctx: Context):
             s.image or "-",
             str(s.resources.cpus),
             f"{s.resources.memory_mb} MB",
+            f"{s.resources.ephemeral_disk_mb} MB",
             s.created_at.strftime("%Y-%m-%d %H:%M:%S") if s.created_at else "-",
         )
 
@@ -227,10 +231,14 @@ def ls_cmd(ctx: Context):
 @click.option("--disk", type=int, default=1024, help="Ephemeral disk in MB")
 @click.option("--timeout", type=int, default=None, help="Timeout in seconds")
 @click.option("--entrypoint", multiple=True, help="Entrypoint command parts")
+@click.option("--snapshot", "snapshot_id", default=None, help="Create from a snapshot ID")
 @click.option("--wait/--no-wait", default=True, help="Wait for sandbox to be running")
 @require_auth_and_project
-def create_cmd(ctx: Context, image, cpus, memory, disk, timeout, entrypoint, wait):
-    """Create a new sandbox."""
+def create_cmd(ctx: Context, image, cpus, memory, disk, timeout, entrypoint, snapshot_id, wait):
+    """Create a new sandbox.
+
+    Use --snapshot to restore from a previously saved snapshot.
+    """
     client = _make_sandbox_client(ctx)
     try:
         result = client.create(
@@ -240,6 +248,7 @@ def create_cmd(ctx: Context, image, cpus, memory, disk, timeout, entrypoint, wai
             ephemeral_disk_mb=disk,
             timeout_secs=timeout,
             entrypoint=list(entrypoint) if entrypoint else None,
+            snapshot_id=snapshot_id,
         )
         click.echo(
             f"Created sandbox {result.sandbox_id} ({result.status.value})", err=True
@@ -328,6 +337,75 @@ def cp_cmd(ctx: Context, src: str, dest: str):
                 sandbox.close()
     except SandboxError as e:
         _handle_sandbox_error(e, sandbox_id=src_sbx or dest_sbx)
+    finally:
+        client.close()
+
+
+# ---------------------------------------------------------------------------
+# sbx snapshot
+# ---------------------------------------------------------------------------
+
+
+@sbx.command("snapshot")
+@click.argument("sandbox_id")
+@click.option("--timeout", "-t", type=float, default=300, help="Max seconds to wait")
+@require_auth_and_project
+def snapshot_cmd(ctx: Context, sandbox_id, timeout):
+    """Snapshot a running sandbox's filesystem.
+
+    Creates a point-in-time snapshot that can be used to create new sandboxes.
+    Use 'tensorlake sbx create --snapshot SNAPSHOT_ID' to restore.
+
+    \b
+    Examples:
+        tensorlake sbx snapshot SANDBOX_ID
+        tensorlake sbx create --snapshot SNAPSHOT_ID
+    """
+    console = Console(stderr=True)
+    client = _make_sandbox_client(ctx)
+    try:
+        click.echo(f"Snapshotting sandbox {sandbox_id}...", err=True)
+        result = client.snapshot(sandbox_id)
+        click.echo(
+            f"Snapshot {result.snapshot_id} initiated ({result.status.value})",
+            err=True,
+        )
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                info = client.get_snapshot(result.snapshot_id)
+            except RemoteAPIError as e:
+                if e.status_code == 404:
+                    console.print(
+                        f"[bold red]Snapshot not found:[/] {result.snapshot_id}"
+                    )
+                    console.print(
+                        "  The server may not support snapshot status polling."
+                    )
+                    raise SystemExit(1)
+                raise
+            if info.status == SnapshotStatus.COMPLETED:
+                size_mb = (info.size_bytes or 0) / (1024 * 1024)
+                click.echo(
+                    f"Snapshot completed ({size_mb:.1f} MB)", err=True
+                )
+                click.echo(result.snapshot_id)
+                return
+            if info.status == SnapshotStatus.FAILED:
+                console.print(
+                    f"[bold red]Snapshot failed:[/] {info.error}"
+                )
+                raise SystemExit(1)
+            click.echo(".", err=True, nl=False)
+            time.sleep(1)
+
+        click.echo(" timed out", err=True)
+        raise click.ClickException(
+            f"Snapshot did not complete within {timeout}s"
+        )
+    except SandboxError as e:
+        _handle_sandbox_error(e, sandbox_id=sandbox_id)
     finally:
         client.close()
 

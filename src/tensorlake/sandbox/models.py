@@ -35,7 +35,16 @@ class SandboxStatus(str, Enum):
 
     PENDING = "pending"
     RUNNING = "running"
+    SNAPSHOTTING = "snapshotting"
     TERMINATED = "terminated"
+
+
+class SnapshotStatus(str, Enum):
+    """Status of a snapshot."""
+
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 class ContainerResourcesInfo(BaseModel):
@@ -94,6 +103,7 @@ class CreateSandboxRequest(BaseModel):
     timeout_secs: int | None = None
     entrypoint: list[str] | None = None
     network: NetworkConfig | None = None
+    snapshot_id: str | None = None
 
 
 class SandboxPoolRequest(BaseModel):
@@ -195,6 +205,38 @@ class ListSandboxPoolsResponse(BaseModel):
     """Response from listing sandbox pools (internal use)."""
 
     pools: list[SandboxPoolInfo]
+
+
+# --- Snapshot models ---
+
+
+class CreateSnapshotResponse(BaseModel):
+    """Response from creating a snapshot."""
+
+    snapshot_id: str
+    status: SnapshotStatus
+
+
+class SnapshotInfo(BaseModel):
+    """Full snapshot information."""
+
+    snapshot_id: str = Field(alias="id")
+    namespace: str
+    sandbox_id: str
+    base_image: str
+    status: SnapshotStatus
+    error: str | None = None
+    snapshot_uri: str | None = None
+    size_bytes: int | None = None
+    created_at: OptionalTimestamp = None
+
+    model_config = {"populate_by_name": True}
+
+
+class ListSnapshotsResponse(BaseModel):
+    """Response from listing snapshots (internal use)."""
+
+    snapshots: list[SnapshotInfo]
 
 
 # --- Container daemon models (process management, file ops, I/O) ---

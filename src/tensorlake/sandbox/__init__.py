@@ -15,6 +15,7 @@ from .models import (
     ContainerResourcesInfo,
     CreateSandboxPoolResponse,
     CreateSandboxResponse,
+    CreateSnapshotResponse,
     DaemonInfo,
     DirectoryEntry,
     HealthResponse,
@@ -30,6 +31,8 @@ from .models import (
     SandboxPoolInfo,
     SandboxStatus,
     SendSignalResponse,
+    SnapshotInfo,
+    SnapshotStatus,
     StdinMode,
 )
 from .sandbox import Sandbox
@@ -48,6 +51,10 @@ __all__ = [
     "CreateSandboxPoolResponse",
     "ContainerResourcesInfo",
     "NetworkConfig",
+    # Snapshot models
+    "SnapshotStatus",
+    "SnapshotInfo",
+    "CreateSnapshotResponse",
     # Command result
     "CommandResult",
     # Process models
