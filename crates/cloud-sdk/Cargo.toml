@@ -16,7 +16,7 @@ futures = { workspace = true }
 hex = { workspace = true }
 pin-project-lite = { workspace = true }
 reqwest = { workspace = true }
-reqwest-eventsource = { workspace = true }
+eventsource-stream = { workspace = true }
 reqwest-middleware = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

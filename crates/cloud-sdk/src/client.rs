@@ -1,10 +1,10 @@
 //! HTTP client that interacts with the Tensorlake Cloud API.
+use eventsource_stream::Eventsource;
 use futures::{Stream, StreamExt};
 use reqwest::{
     Method, Request, Response, StatusCode,
     header::{ACCEPT, HeaderMap, HeaderValue, InvalidHeaderValue},
 };
-use reqwest_eventsource::{CannotCloneRequestError, Error as SseError, Event, EventSource};
 use reqwest_middleware::{ClientBuilder as ReqwestClientBuilder, ClientWithMiddleware, Middleware};
 use serde::de::DeserializeOwned;
 use std::{pin::Pin, result::Result, sync::Arc};
@@ -135,32 +135,27 @@ impl Client {
     pub async fn build_event_source_request<T>(
         &self,
         path: &str,
-    ) -> Result<EventSourceStream<T>, CannotCloneRequestError>
+    ) -> Result<EventSourceStream<T>, SdkError>
     where
         T: DeserializeOwned,
     {
-        let builder = self.base_client.get(self.base_url.clone() + path);
-        let req = EventSource::new(builder)?;
+        let response = self
+            .base_client
+            .get(self.base_url.clone() + path)
+            .header(ACCEPT, "text/event-stream")
+            .send()
+            .await?;
 
-        let stream = req
-            .take_while(|event| {
-                futures::future::ready(match event {
-                    Ok(Event::Message(_) | Event::Open) => true,
-                    Err(SseError::StreamEnded) => false,
-                    Err(_) => true,
-                })
-            })
-            .filter_map(move |event| {
-                async move {
-                    match event {
-                        Ok(Event::Open) => None, // keep-alive; nothing to emit
-                        Ok(Event::Message(msg)) => match serde_json::from_str::<T>(&msg.data) {
-                            Ok(evt) => Some(Ok(evt)),
-                            Err(error) => Some(Err(SdkError::Json(error))),
-                        },
-                        Err(SseError::StreamEnded) => None,
-                        Err(error) => Some(Err(SdkError::EventSourceError(Box::new(error)))),
-                    }
+        let stream = response
+            .bytes_stream()
+            .eventsource()
+            .filter_map(move |event| async move {
+                match event {
+                    Ok(msg) => match serde_json::from_str::<T>(&msg.data) {
+                        Ok(evt) => Some(Ok(evt)),
+                        Err(error) => Some(Err(SdkError::Json(error))),
+                    },
+                    Err(error) => Some(Err(SdkError::EventSourceError(error.to_string()))),
                 }
             });
         Ok(Box::pin(stream))

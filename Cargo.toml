@@ -27,8 +27,8 @@ serde_path_to_error = "0.1.20"
 
 # HTTP
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "multipart", "rustls", "stream"] }
-reqwest-eventsource = "0.6"
-reqwest-middleware = { version = "0.5.1", features = ["json", "multipart"] }
+eventsource-stream = "0.2"
+reqwest-middleware = { version = "0.5.1", features = ["json", "multipart", "query"] }
 url = "2.5.8"
 urlencoding = "2.1"
 

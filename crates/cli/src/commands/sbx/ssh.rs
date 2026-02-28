@@ -90,7 +90,7 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
 
     // PTY protocol opcodes
     const OP_DATA: u8 = 0x00;
-    const OP_RESIZE: u8 = 0x01;
+    const _OP_RESIZE: u8 = 0x01;
     const OP_READY: u8 = 0x02;
 
     use futures::stream::StreamExt;
