@@ -181,9 +181,12 @@ class TestAutoInitFlow(unittest.TestCase):
                 )
 
                 runner = CliRunner()
-                with patch("webbrowser.open"), patch(
-                    "tensorlake.cli._project_detection.find_project_root",
-                    return_value=local_config_path.parent.parent,
+                with (
+                    patch("webbrowser.open"),
+                    patch(
+                        "tensorlake.cli._project_detection.find_project_root",
+                        return_value=local_config_path.parent.parent,
+                    ),
                 ):
                     result = runner.invoke(
                         cli, ["secrets", "list"], prog_name="tensorlake"
@@ -541,9 +544,12 @@ class TestLoginInitChaining(unittest.TestCase):
                 )
 
                 runner = CliRunner()
-                with patch("webbrowser.open"), patch(
-                    "tensorlake.cli._project_detection.find_project_root",
-                    return_value=local_config_path.parent.parent,
+                with (
+                    patch("webbrowser.open"),
+                    patch(
+                        "tensorlake.cli._project_detection.find_project_root",
+                        return_value=local_config_path.parent.parent,
+                    ),
                 ):
                     result = runner.invoke(cli, ["login"], prog_name="tensorlake")
 

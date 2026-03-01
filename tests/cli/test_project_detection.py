@@ -232,8 +232,10 @@ class TestFindProjectRootInteractive(unittest.TestCase):
             custom_dir = detected_dir / "custom"
             custom_dir.mkdir()
 
-            with patch("click.echo"), patch("click.confirm", return_value=False), patch(
-                "click.prompt", return_value=str(custom_dir)
+            with (
+                patch("click.echo"),
+                patch("click.confirm", return_value=False),
+                patch("click.prompt", return_value=str(custom_dir)),
             ):
                 result = find_project_root_interactive(detected_dir)
                 self.assertEqual(result.resolve(), custom_dir.resolve())

@@ -1458,7 +1458,7 @@ mod tests {
         // Test that serializing Rfc3339DateTime produces a plain string, not a nested struct
         let now = chrono::Utc::now();
         let rfc_dt = Rfc3339DateTime(now);
-        let serialized = serde_json::to_value(&rfc_dt).unwrap();
+        let serialized = serde_json::to_value(rfc_dt).unwrap();
 
         // Should be a string, not an object
         assert!(
@@ -1596,6 +1596,7 @@ mod tests {
 
         let event = result.unwrap();
         // Should deserialize to FunctionRunAssigned variant (backward compat)
+        #[allow(deprecated)]
         match event {
             RequestStateChangeEvent::FunctionRunAssigned(e) => {
                 assert_eq!(e.allocation_id, "alloc-789");
