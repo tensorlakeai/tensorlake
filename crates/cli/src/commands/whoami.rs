@@ -14,7 +14,7 @@ pub async fn run(ctx: &mut CliContext, output_json: bool) -> Result<()> {
         } else {
             eprintln!("You are not logged in and have not provided an API key.");
             eprintln!(
-                "Run 'tensorlake login' to authenticate, or see 'tensorlake --help' for API key options."
+                "Run 'tl login' to authenticate, or see 'tl --help' for API key options."
             );
         }
         return Ok(());

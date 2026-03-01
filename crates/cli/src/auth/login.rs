@@ -102,18 +102,18 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
             }
             "expired" => {
                 return Err(CliError::auth(
-                    "login request has expired. run 'tensorlake login' to start a new one.",
+                    "login request has expired. run 'tl login' to start a new one.",
                 ));
             }
             "failed" => {
                 return Err(CliError::auth(
-                    "login request was denied. run 'tensorlake login' to try again.",
+                    "login request was denied. run 'tl login' to try again.",
                 ));
             }
             "approved" => break,
             other => {
                 return Err(CliError::auth(format!(
-                    "got unexpected login status '{}'. run 'tensorlake login' again.",
+                    "got unexpected login status '{}'. run 'tl login' again.",
                     other
                 )));
             }
@@ -183,7 +183,7 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
                     proj_id = Some(p);
                 }
                 Err(e) => {
-                    eprintln!("\nYou can run 'tensorlake init' later to complete the setup.");
+                    eprintln!("\nYou can run 'tl init' later to complete the setup.");
                     if ctx.debug {
                         eprintln!("Error: {}", e);
                     }

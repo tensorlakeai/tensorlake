@@ -77,12 +77,12 @@ pub async fn set(ctx: &CliContext, pairs: &[String]) -> Result<()> {
     let status = resp.status().as_u16();
     if status == 401 {
         return Err(CliError::auth(
-            "authentication failed. set TENSORLAKE_API_KEY or run 'tensorlake login'.",
+            "authentication failed. set TENSORLAKE_API_KEY or run 'tl login'.",
         ));
     }
     if status == 403 {
         return Err(CliError::auth(
-            "permission denied. set TENSORLAKE_API_KEY with required permissions, or run 'tensorlake init'.",
+            "permission denied. set TENSORLAKE_API_KEY with required permissions, or run 'tl init'.",
         ));
     }
     if (400..500).contains(&status) {

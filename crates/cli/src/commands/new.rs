@@ -129,7 +129,7 @@ pub fn run(name: &str, force: bool) -> Result<()> {
     eprintln!("application created successfully!");
     eprintln!("==================================================");
     eprintln!("\nNext steps:");
-    eprintln!("  Deploy: tensorlake deploy {}", filename);
+    eprintln!("  Deploy: tl deploy {}", filename);
     eprintln!("\nLearn more: https://docs.tensorlake.ai/quickstart");
 
     Ok(())

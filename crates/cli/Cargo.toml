@@ -6,7 +6,7 @@ license = "Apache-2.0"
 description = "TensorLake CLI"
 
 [[bin]]
-name = "tensorlake"
+name = "tl"
 path = "src/main.rs"
 
 [dependencies]

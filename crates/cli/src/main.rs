@@ -14,7 +14,7 @@ use error::CliError;
 
 #[derive(Parser)]
 #[command(
-    name = "tensorlake",
+    name = "tl",
     about = "Tensorlake CLI",
     version,
     infer_subcommands = true,
@@ -22,7 +22,7 @@ use error::CliError;
 Authentication:
   Use --api-key or TENSORLAKE_API_KEY for API key authentication
   Use --pat or TENSORLAKE_PAT for Personal Access Token authentication
-  Use 'tensorlake login' to obtain a PAT interactively"
+  Use 'tl login' to obtain a PAT interactively"
 )]
 struct Cli {
     /// Show detailed error information and stack traces

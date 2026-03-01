@@ -43,7 +43,7 @@ pub async fn run_init_flow(
         .or_else(|| load_credentials(&ctx.api_url))
         .ok_or_else(|| {
             if interactive {
-                eprintln!("no valid credentials found. please run 'tensorlake login' first.");
+                eprintln!("no valid credentials found. please run 'tl login' first.");
             }
             CliError::Cancelled
         })?;
@@ -65,7 +65,7 @@ pub async fn run_init_flow(
     if orgs_resp.status().as_u16() != 200 {
         if interactive {
             eprintln!(
-                "could not fetch organizations (HTTP {}). run 'tensorlake login' to re-authenticate.",
+                "could not fetch organizations (HTTP {}). run 'tl login' to re-authenticate.",
                 orgs_resp.status()
             );
         }
@@ -164,7 +164,7 @@ pub async fn run_init_flow(
     if projects_resp.status().as_u16() != 200 {
         if interactive {
             eprintln!(
-                "could not fetch projects (HTTP {}). run 'tensorlake login' to re-authenticate.",
+                "could not fetch projects (HTTP {}). run 'tl login' to re-authenticate.",
                 projects_resp.status()
             );
         }

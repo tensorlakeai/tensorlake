@@ -27,12 +27,12 @@ pub async fn ensure_auth_and_project(ctx: &mut CliContext) -> Result<()> {
 
         if !ctx.has_authentication() {
             return Err(CliError::auth(
-                "Authentication failed. Please try running 'tensorlake login' manually.",
+                "Authentication failed. Please try running 'tl login' manually.",
             ));
         }
         if !ctx.has_org_and_project() {
             return Err(CliError::auth(
-                "Organization and project configuration missing. Please run 'tensorlake init'.",
+                "Organization and project configuration missing. Please run 'tl init'.",
             ));
         }
         return Ok(());
