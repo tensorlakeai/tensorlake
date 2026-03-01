@@ -4,6 +4,7 @@ build: build_proto
 	@rm -rf dist
 	@poetry install --with=dev
 	@poetry build
+	@cp tensorlake.data/scripts/* $$(poetry env info --path)/bin/ 2>/dev/null || true
 
 # .proto file and generated Python files have to be in the same directory.
 # See known issue https://github.com/grpc/grpc/issues/29459.
