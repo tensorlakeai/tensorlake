@@ -1,4 +1,5 @@
 import time
+import threading
 import unittest
 from typing import List
 
@@ -151,12 +152,46 @@ def watch_pdf_updates(url: str, page_range: str, iteration: int) -> None:
 
 
 class TestPDFParseDataWorkflow(unittest.TestCase):
+    @staticmethod
+    def _request_output_with_timeout(
+        request: Request,
+        timeout_sec: float,
+    ) -> ResponsePayload:
+        result_holder: dict[str, ResponsePayload] = {}
+        error_holder: dict[str, BaseException] = {}
+        done = threading.Event()
+
+        def _wait_output() -> None:
+            try:
+                result_holder["value"] = request.output()
+            except BaseException as e:
+                error_holder["error"] = e
+            finally:
+                done.set()
+
+        # Daemon thread ensures a stuck output wait does not block process exit.
+        thread = threading.Thread(target=_wait_output, daemon=True)
+        thread.start()
+
+        if not done.wait(timeout_sec):
+            raise TimeoutError(
+                f"request.output() timed out after {timeout_sec}s for request_id={request.id}"
+            )
+
+        if "error" in error_holder:
+            raise error_holder["error"]
+
+        return result_holder["value"]
+
     def test_local_api_call(self):
         request: Request = run_local_application(
             parse_pdf_api,
             RequestPayload(url="http://example.com/sample.pdf", page_range="1-5"),
         )
-        payload: ResponsePayload = request.output()
+        payload: ResponsePayload = self._request_output_with_timeout(
+            request=request,
+            timeout_sec=30.0,
+        )
         self.assertEqual(len(payload.chunks), 5)
 
     def test_remote_api_call(self):
@@ -165,7 +200,10 @@ class TestPDFParseDataWorkflow(unittest.TestCase):
             parse_pdf_api,
             RequestPayload(url="http://example.com/sample.pdf", page_range="1-5"),
         )
-        payload: ResponsePayload = request.output()
+        payload: ResponsePayload = self._request_output_with_timeout(
+            request=request,
+            timeout_sec=120.0,
+        )
         self.assertEqual(len(payload.chunks), 5)
 
 
