@@ -1,6 +1,6 @@
+from pathlib import Path
 import runpy
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 
