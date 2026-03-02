@@ -46,10 +46,12 @@ def buzz() -> str:
 
 
 class TestFunctionOutputPropagation(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             api_function_output_propagation, is_remote, "test"
         )
@@ -83,10 +85,12 @@ def concat_strings_value(a: str, b: str) -> str:
 
 
 class TestReducerValueOutputPropagation(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             api_reducer_value_output_propagation, is_remote, "test"
         )
@@ -125,10 +129,12 @@ def concat_strings_actually(a: str, b: str) -> str:
 
 
 class TestReducerSubcallOutputPropagation(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             "api_reducer_subcall_output_propagation", is_remote, "test"
         )

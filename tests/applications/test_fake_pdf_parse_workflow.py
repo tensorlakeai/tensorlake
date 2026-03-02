@@ -151,6 +151,10 @@ def watch_pdf_updates(url: str, page_range: str, iteration: int) -> None:
 
 
 class TestPDFParseDataWorkflow(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     def test_local_api_call(self):
         request: Request = run_local_application(
             parse_pdf_api,
@@ -160,7 +164,6 @@ class TestPDFParseDataWorkflow(unittest.TestCase):
         self.assertEqual(len(payload.chunks), 5)
 
     def test_remote_api_call(self):
-        deploy_applications(__file__)
         request: Request = run_remote_application(
             parse_pdf_api,
             RequestPayload(url="http://example.com/sample.pdf", page_range="1-5"),

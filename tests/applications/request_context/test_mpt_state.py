@@ -70,11 +70,12 @@ def mt_get_after_set() -> str:
 
 
 class TestUseRequestStateFromChildThread(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_get_after_set(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(mt_get_after_set, is_remote)
 
         output: str = request.output()
@@ -110,11 +111,12 @@ def mp_get_after_set() -> str:
 
 
 class TestUseRequestStateFromChildProcess(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_get_after_set(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(mp_get_after_set, is_remote)
 
         output: str = request.output()

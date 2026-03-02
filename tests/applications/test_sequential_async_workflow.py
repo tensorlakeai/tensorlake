@@ -52,6 +52,10 @@ async def simple_workflow(payload: str) -> str:
 
 
 class TestSequentialAsyncWorkflow(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     def test_local_api_call(self):
         request: Request = run_local_application(
             simple_workflow,
@@ -60,7 +64,6 @@ class TestSequentialAsyncWorkflow(unittest.TestCase):
         self.assertEqual(request.output(), "[hello, foo! hello, foo!]")
 
     def test_remote_api_call(self):
-        deploy_applications(__file__)
         request: Request = run_remote_application(
             simple_workflow,
             payload="Bar",

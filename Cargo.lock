@@ -2200,7 +2200,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-cli"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "anyhow",
  "chrono",

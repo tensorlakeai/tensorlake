@@ -38,11 +38,12 @@ def func_update_progress(values: tuple[int, int]) -> str:
 
 
 class TestUseProgressFromFunction(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_update_progress(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(func_update_progress, is_remote, (10, 100))
         self.assertEqual(request.output(), "success")
 
@@ -61,11 +62,12 @@ def mt_update_progress(values: tuple[int, int]) -> str:
 
 
 class TestUseProgressFromChildThread(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_update_progress(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(mt_update_progress, is_remote, (10, 100))
         self.assertEqual(request.output(), "success")
 
@@ -84,11 +86,12 @@ def mp_update_progress(values: tuple[int, int]) -> str:
 
 
 class TestUseProgressFromChildProcess(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_update_progress(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(mp_update_progress, is_remote, (10, 100))
         self.assertEqual("success", request.output())
         self.assertEqual(request.output(), "success")

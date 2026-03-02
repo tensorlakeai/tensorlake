@@ -9,7 +9,7 @@ from tensorlake.vendor.nanoid.nanoid import generate as nanoid_generate
 from ..runtime_hooks import await_future as runtime_hook_await_future
 from ..runtime_hooks import coroutine_to_future as runtime_hook_coroutine_to_future
 from ..runtime_hooks import register_coroutine as runtime_hook_register_coroutine
-from ..runtime_hooks import run_futures as runtime_hook_run_futures
+from ..runtime_hooks import run_future as runtime_hook_run_future
 from ..runtime_hooks import wait_futures as runtime_hook_wait_futures
 from .exceptions import InternalError, SDKUsageError, TensorlakeError
 
@@ -92,8 +92,13 @@ class Future:
                 f"Attempt to run Future that is already started: {self}"
             )
         self._run_hook_was_called = True
-        runtime_hook_run_futures(futures=[self])
-        return self
+
+        try:
+            runtime_hook_run_future(future=self)
+            return self
+        except TensorlakeError as e:
+            self._set_exception(e)
+            raise
 
     def run_later(self, start_delay: float) -> "Future":
         """Runs this Future after the given delay in seconds and returns it.
@@ -465,7 +470,10 @@ def _wrap_future_into_coroutine(future: Future) -> Coroutine[Any, Any, Any]:
 
 
 def _unwrap_future(value: Any | _TensorlakeFutureWrapper[Future]) -> Any | Future:
-    """Unwraps a Future from the given value if it's a future wrapper. Otherwise, returns the value itself."""
+    """Unwraps a Future from the given value if it's a future wrapper. Otherwise, returns the value itself.
+
+    Doesn't raise any exceptions.
+    """
     if isinstance(value, Future):
         return value
 

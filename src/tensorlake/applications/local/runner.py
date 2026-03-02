@@ -82,12 +82,12 @@ from ..runtime_hooks import (
     clear_await_future_hook,
     clear_coroutine_to_future_hook,
     clear_register_coroutine_hook,
-    clear_run_futures_hook,
+    clear_run_future_hook,
     clear_wait_futures_hook,
     set_await_future_hook,
     set_coroutine_to_future_hook,
     set_register_coroutine_hook,
-    set_run_futures_hook,
+    set_run_future_hook,
     set_wait_futures_hook,
 )
 from ..user_data_serializer import (
@@ -304,7 +304,7 @@ class LocalRunner:
         """
         self._request_context_http_server_thread.start()
 
-        set_run_futures_hook(self._run_futures_runtime_hook)
+        set_run_future_hook(self._run_future_runtime_hook)
         set_await_future_hook(self._await_future_runtime_hook)
         set_wait_futures_hook(self._wait_futures_runtime_hook)
         set_register_coroutine_hook(self._register_coroutine_runtime_hook)
@@ -398,7 +398,7 @@ class LocalRunner:
 
         # Only clear runtime hooks at the very end when nothing can use them.
         clear_await_future_hook()
-        clear_run_futures_hook()
+        clear_run_future_hook()
         clear_wait_futures_hook()
         clear_register_coroutine_hook()
         clear_coroutine_to_future_hook()
@@ -447,7 +447,7 @@ class LocalRunner:
     def __coroutine_to_future_runtime_hook(self, coroutine: Coroutine) -> Future | None:
         return self._coroutine_to_future.get(coroutine, None)
 
-    def _run_futures_runtime_hook(self, futures: List[Future]) -> None:
+    def _run_future_runtime_hook(self, user_future: Future) -> None:
         # Don't catch any exceptions here because this is called from user code
         # and we want to propagate them to the user. We don't know what user gave
         # so it's easy to fail for any reason here.
@@ -459,21 +459,20 @@ class LocalRunner:
 
         try:
             self._user_code_cancellation_point()
-            for user_future in futures:
-                # SDK automatically starts user futures that are tail calls and
-                # function call or other operation inputs. This is why we walk
-                # the Futures tree, not just starting the user_future.
-                for future in dfs_bottom_up_unique_only(user_future):
-                    if future._id in self._future_runs:
-                        continue  # Future was already started by user.
+            # SDK automatically starts user futures that are tail calls and
+            # function call or other operation inputs. This is why we walk
+            # the Futures tree, not just starting the user_future.
+            for future in dfs_bottom_up_unique_only(user_future):
+                if future._id in self._future_runs:
+                    continue  # Future was already started by user.
 
-                    # Future is started by user code, cannot be a tail call.
-                    self._create_future_run(
-                        future=future,
-                        output_serializer_name_override=None,
-                        has_output_type_hint_override=False,
-                        output_type_hint_override=None,
-                    )
+                # Future is started by user code, cannot be a tail call.
+                self._create_future_run(
+                    future=future,
+                    output_serializer_name_override=None,
+                    has_output_type_hint_override=False,
+                    output_type_hint_override=None,
+                )
         except TensorlakeError:
             raise
         except Exception as e:

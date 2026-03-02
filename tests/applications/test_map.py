@@ -114,10 +114,12 @@ async def async_concat_strings(a: str, b: str) -> str:
 
 
 class TestRecursiveMaps(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_blocking(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             api_function_recursive_blocking_map, is_remote, [1, 2, 3, 4, 5]
         )
@@ -125,8 +127,6 @@ class TestRecursiveMaps(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_blocking(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_api_function_recursive_blocking_map, is_remote, [1, 2, 3, 4, 5]
         )
@@ -134,8 +134,6 @@ class TestRecursiveMaps(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_non_blocking(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             api_function_recursive_non_blocking_map, is_remote, [1, 2, 3, 4, 5]
         )
@@ -143,8 +141,6 @@ class TestRecursiveMaps(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_non_blocking_with_future(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             api_function_recursive_non_blocking_map_with_future,
             is_remote,
@@ -154,8 +150,6 @@ class TestRecursiveMaps(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_non_blocking_with_future_and_tail_call(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             api_function_recursive_non_blocking_map_with_future_and_tail_call,
             is_remote,
@@ -165,8 +159,6 @@ class TestRecursiveMaps(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_non_blocking(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_api_function_recursive_non_blocking_map, is_remote, [1, 2, 3, 4, 5]
         )
@@ -174,8 +166,6 @@ class TestRecursiveMaps(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_tail_call(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             api_function_recursive_tail_call_map, is_remote, [1, 2, 3, 4, 5]
         )
@@ -184,8 +174,6 @@ class TestRecursiveMaps(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_tail_call(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_api_function_recursive_tail_call_map, is_remote, [1, 2, 3, 4, 5]
         )
@@ -194,8 +182,6 @@ class TestRecursiveMaps(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_map_reduce_futures(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             api_function_map_reduce_futures, is_remote, [1, 2, 3, 4, 5]
         )

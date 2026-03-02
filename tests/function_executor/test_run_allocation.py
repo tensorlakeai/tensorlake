@@ -219,6 +219,7 @@ class TestRunAllocation(unittest.TestCase):
                                     function_call_creation_result=AllocationFunctionCallCreationResult(
                                         status=Status(code=grpc.StatusCode.OK.value[0]),
                                         allocation_function_call_id=allocation_function_call.id,
+                                        function_call_id=allocation_function_call.updates.root_function_call_id,
                                     ),
                                 )
                             )
@@ -402,6 +403,7 @@ class TestRunAllocation(unittest.TestCase):
                                     function_call_creation_result=AllocationFunctionCallCreationResult(
                                         status=Status(code=grpc.StatusCode.OK.value[0]),
                                         allocation_function_call_id=allocation_function_call.id,
+                                        function_call_id=allocation_function_call.updates.root_function_call_id,
                                     ),
                                 )
                             )
@@ -543,6 +545,7 @@ class TestRunAllocation(unittest.TestCase):
                     AllocationUpdate(
                         allocation_id=allocation_id,
                         function_call_result=AllocationFunctionCallResult(
+                            function_call_id=allocation_function_call_watcher.root_function_call_id,
                             watcher_id=allocation_function_call_watcher.id,
                             outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
                             value_output=SerializedObjectInsideBLOB(

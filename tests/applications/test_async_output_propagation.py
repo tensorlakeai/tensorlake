@@ -41,10 +41,12 @@ async def bar_coroutine(x: str) -> str:
 
 
 class TestReturnCoroutine(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(api_return_coroutine, is_remote, "coroutine")
         self.assertEqual(request.output(), "coroutine")
 
@@ -66,10 +68,12 @@ async def bar_future(x: str) -> str:
 
 
 class TestReturnFuture(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(api_return_future, is_remote, "future")
         self.assertEqual(request.output(), "future")
 
@@ -86,10 +90,12 @@ async def foo_sync_future_coroutine(x: str) -> str:
 
 
 class TestReturnSyncFutureCoroutine(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             api_return_sync_future_coroutine, is_remote, "sync_future_coroutine"
         )
@@ -108,10 +114,12 @@ async def foo_async_future_coroutine(x: str) -> str:
 
 
 class TestReturnAsyncFutureCoroutine(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             api_return_async_future_coroutine, is_remote, "async_future_coroutine"
         )
@@ -138,10 +146,12 @@ async def mixed_step_sync_future_coroutine(x: str) -> str:
 
 
 class TestMixedChain(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(api_mixed_chain, is_remote, "mixed")
         self.assertEqual(request.output(), "mixed")
 

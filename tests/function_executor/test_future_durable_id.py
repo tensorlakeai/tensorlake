@@ -9,10 +9,12 @@ from tensorlake.applications.interface.futures import (
     _FutureListKind,
     _FutureListMetadata,
 )
-from tensorlake.function_executor.allocation_runner.sdk_algorithms import (
-    FutureInfo,
+from tensorlake.function_executor.allocation_runner.event_loop.durable_id import (
     _sha256_hash_strings,
     future_durable_id,
+)
+from tensorlake.function_executor.allocation_runner.event_loop.future_info import (
+    FutureInfo,
 )
 
 

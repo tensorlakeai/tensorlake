@@ -138,10 +138,12 @@ async def await_coroutine_implicitly_started_by_sdk() -> str:
 
 
 class TestAsyncio(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_gather_all(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             gather_all,
             is_remote,
@@ -150,8 +152,6 @@ class TestAsyncio(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_gather_first_failure(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             gather_first_failure,
             is_remote,
@@ -166,29 +166,21 @@ class TestAsyncio(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_create_task(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(create_task, is_remote)
         self.assertEqual(request.output(), 10)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_ensure_future(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(ensure_future, is_remote)
         self.assertEqual(request.output(), 10)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_await_coroutine_twice(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(await_coroutine_twice, is_remote)
         self.assertEqual(request.output(), "success")
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_await_coroutine_implicitly_started_by_sdk(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             await_coroutine_implicitly_started_by_sdk, is_remote
         )

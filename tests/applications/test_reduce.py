@@ -274,11 +274,12 @@ async def async_int_to_str(x: int) -> str:
 
 
 class TestReduce(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success_function_call_collection(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             success_api_function_awaitable_collection, is_remote, 6
         )
@@ -287,9 +288,6 @@ class TestReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_success_function_call_collection(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             async_success_api_function_awaitable_collection, is_remote, 6
         )
@@ -298,9 +296,6 @@ class TestReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_success_value_collection(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             success_api_function_value_collection, is_remote, 6
         )
@@ -309,9 +304,6 @@ class TestReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_success_value_collection(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             async_success_api_function_value_collection, is_remote, 6
         )
@@ -320,25 +312,16 @@ class TestReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_failure(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(fail_api_function, is_remote, 6)
         self.assertRaises(RequestFailed, request.output)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_failure(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(async_fail_api_function, is_remote, 6)
         self.assertRaises(RequestFailed, request.output)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_reduce_nothing(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             api_reduce_no_items_no_initial, is_remote, None
         )
@@ -346,9 +329,6 @@ class TestReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_reduce_nothing(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             async_api_reduce_no_items_no_initial, is_remote, None
         )
@@ -356,9 +336,6 @@ class TestReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_reduce_initial(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             api_reduce_no_items_with_initial,
             is_remote,
@@ -369,9 +346,6 @@ class TestReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_reduce_initial(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             async_api_reduce_no_items_with_initial,
             is_remote,
@@ -382,9 +356,6 @@ class TestReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_reduce_one_value_item(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             api_reduce_one_value_item,
             is_remote,
@@ -395,9 +366,6 @@ class TestReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_reduce_one_value_item(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             async_api_reduce_one_value_item,
             is_remote,
@@ -408,8 +376,6 @@ class TestReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_reduce_one_function_call_item(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             api_reduce_one_future_item,
             is_remote,
@@ -420,9 +386,6 @@ class TestReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_reduce_one_function_call_item(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             async_api_reduce_one_future_item,
             is_remote,
@@ -433,9 +396,6 @@ class TestReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_reduce_mapped_collection_nonblocking(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             api_reduce_mapped_collection_nonblocking,
             is_remote,
@@ -446,9 +406,6 @@ class TestReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_reduce_mapped_collection_nonblocking(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             async_api_reduce_mapped_collection_nonblocking,
             is_remote,
@@ -459,9 +416,6 @@ class TestReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_reduce_mapped_collection_tailcall(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             api_reduce_mapped_collection_tailcall,
             is_remote,
@@ -472,9 +426,6 @@ class TestReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_reduce_mapped_collection_tailcall(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             async_api_reduce_mapped_collection_tailcall,
             is_remote,
@@ -485,9 +436,6 @@ class TestReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_reduce_of_reduced_list(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             api_reduce_of_reduced_list,
             is_remote,
@@ -500,9 +448,6 @@ class TestReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_reduce_of_reduced_list(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             async_api_reduce_of_reduced_list,
             is_remote,
@@ -515,9 +460,6 @@ class TestReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_reduce_of_mapped_collections(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             api_reduce_of_mapped_collections,
             is_remote,
@@ -530,9 +472,6 @@ class TestReduce(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_reduce_of_mapped_collections(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             async_api_reduce_of_mapped_collections,
             is_remote,

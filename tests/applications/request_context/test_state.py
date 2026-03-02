@@ -110,10 +110,12 @@ def test_request_context_state_set_get_pydantic_model_internal(model_name: str) 
 
 
 class TestRequestState(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_request_context_state_set_get_simple_value(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
 
         request: Request = run_application(
             test_request_context_state_set_get_simple_value_api, is_remote, 11
@@ -126,9 +128,6 @@ class TestRequestState(unittest.TestCase):
     def test_request_context_state_set_get_user_class_instance(
         self, _: str, is_remote: bool
     ):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             test_request_context_state_set_get_user_class_instance_api,
             is_remote,
@@ -142,9 +141,6 @@ class TestRequestState(unittest.TestCase):
     def test_request_context_state_set_get_pydantic_model(
         self, _: str, is_remote: bool
     ):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             test_request_context_state_set_get_pydantic_model_api,
             is_remote,
@@ -156,9 +152,6 @@ class TestRequestState(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_request_context_state_get_default_value(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             test_request_context_state_get_default_value_api,
             is_remote,
@@ -172,9 +165,6 @@ class TestRequestState(unittest.TestCase):
     def test_request_context_state_get_without_default_value_returns_none(
         self, _: str, is_remote: bool
     ):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             test_request_context_state_get_without_default_value_returns_none_api,
             is_remote,

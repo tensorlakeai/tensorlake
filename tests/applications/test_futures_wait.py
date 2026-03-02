@@ -191,10 +191,12 @@ def app_wait_runs_not_running_futures() -> str:
 
 
 class TestFuturesWait(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_wait_all_completed(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             app_return_when_all_completed, is_remote, "foo"
         )
@@ -202,8 +204,6 @@ class TestFuturesWait(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_wait_first_completed(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             app_return_when_first_completed, is_remote, "foo"
         )
@@ -212,15 +212,11 @@ class TestFuturesWait(unittest.TestCase):
     # Timeouts are not implemented in local mode.
     @parameterized.parameterized.expand([("remote", True)])
     def test_wait_timeout(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(app_wait_timeout, is_remote, "foo")
         self.assertEqual(request.output(), "success")
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_wait_first_failure(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             app_return_when_first_failure, is_remote, "foo"
         )
@@ -234,15 +230,11 @@ class TestFuturesWait(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_future_result_caching(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(app_future_result_caching, is_remote, "foo")
         self.assertEqual(request.output(), "success")
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_wait_runs_not_running_futures(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             app_wait_runs_not_running_futures,
             is_remote,

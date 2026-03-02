@@ -39,7 +39,7 @@ from tensorlake.applications.runtime_hooks import (
     set_await_future_hook,
     set_coroutine_to_future_hook,
     set_register_coroutine_hook,
-    set_run_futures_hook,
+    set_run_future_hook,
     set_wait_futures_hook,
 )
 
@@ -120,7 +120,7 @@ class Service(FunctionExecutorServicer):
             app_version=request.function.application_version,
             fn=request.function.function_name,
         )
-        set_run_futures_hook(self._run_futures_runtime_hook)
+        set_run_future_hook(self._run_future_runtime_hook)
         set_await_future_hook(self._await_future_runtime_hook)
         set_wait_futures_hook(self._wait_futures_runtime_hook)
         set_register_coroutine_hook(self._register_coroutine_runtime_hook)
@@ -261,7 +261,7 @@ class Service(FunctionExecutorServicer):
 
         allocation_logger: InternalLogger = self._logger.bind(
             request_id=allocation.request_id,
-            function_call_id=allocation.function_call_id,
+            fn_call_id=allocation.function_call_id,
             allocation_id=allocation.allocation_id,
         )
         allocation_runner: AllocationRunner = AllocationRunner(
@@ -379,24 +379,26 @@ class Service(FunctionExecutorServicer):
         return self._allocation_infos[allocation_id].runner
 
     def _await_future_runtime_hook(self, future: Future) -> Generator[None, None, Any]:
-        return self._thread_allocation_runner().await_future_runtime_hook(future)
+        return self._thread_allocation_runner().event_loop.await_future_runtime_hook(
+            future
+        )
 
-    def _run_futures_runtime_hook(self, futures: List[Future]) -> None:
-        self._thread_allocation_runner().run_futures_runtime_hook(futures)
+    def _run_future_runtime_hook(self, future: Future) -> None:
+        self._thread_allocation_runner().event_loop.run_future_runtime_hook(future)
 
     def _wait_futures_runtime_hook(
         self, futures: List[Future], timeout: float | None, return_when: RETURN_WHEN
     ) -> tuple[List[Future], List[Future]]:
-        return self._thread_allocation_runner().wait_futures_runtime_hook(
+        return self._thread_allocation_runner().event_loop.wait_futures_runtime_hook(
             futures, timeout, return_when
         )
 
     def _register_coroutine_runtime_hook(self, coroutine: Any, future: Future) -> None:
-        self._thread_allocation_runner().register_coroutine_runtime_hook(
+        self._thread_allocation_runner().event_loop.register_coroutine_runtime_hook(
             coroutine, future
         )
 
     def _coroutine_to_future_runtime_hook(self, coroutine: Any) -> Any:
-        return self._thread_allocation_runner().coroutine_to_future_runtime_hook(
+        return self._thread_allocation_runner().event_loop.coroutine_to_future_runtime_hook(
             coroutine
         )

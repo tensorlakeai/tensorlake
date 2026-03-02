@@ -39,15 +39,16 @@ def function_that_always_fails(x: int) -> str:
 
 
 class TestFunctionRetries(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     def setUp(self) -> None:
         global function_with_retry_policy_call_number
         function_with_retry_policy_call_number = 0
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_function_retries(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         start_time: float = time.monotonic()
         request: Request = run_application(
             function_that_succeeds_on_3rd_retry, is_remote, 1
@@ -61,9 +62,6 @@ class TestFunctionRetries(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_function_fails_with_retries_exhausted(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         start_time: float = time.monotonic()
         request: Request = run_application(function_that_always_fails, is_remote, 1)
         self.assertRaises(RequestFailed, request.output)
