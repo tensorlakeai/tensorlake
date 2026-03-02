@@ -1,8 +1,7 @@
-from pathlib import Path
 import runpy
 import unittest
+from pathlib import Path
 from unittest.mock import patch
-
 
 SCRIPT_PATH: Path = (
     Path(__file__).resolve().parents[2]
