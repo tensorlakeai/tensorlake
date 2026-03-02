@@ -29,6 +29,30 @@ class RequestState:
         raise InternalError("RequestState subclasses must implement get method.")
 
 
+class ApplicationState:
+    """Abstract interface for application-scoped state key-value API.
+
+    The API allows to set and get key-value pairs from Indexify functions.
+    The key-value pairs are scoped per application and persist across all requests.
+    A value can be any serializable object, the serializer of the current function
+    is used to serialize and deserialize values."""
+
+    def set(self, key: str, value: Any) -> None:
+        """Set a key-value pair.
+
+        Raises SerializationError if failed to serialize the value.
+        Raises TensorlakeError on other errors.
+        """
+        raise InternalError("ApplicationState subclasses must implement set method.")
+
+    def get(self, key: str, default: Any | None = None) -> Any | None:
+        """Get a value by key. If the key does not exist, return the default value.
+
+        Raises DeserializationError if failed to deserialize the value.
+        Raises TensorlakeError on other errors."""
+        raise InternalError("ApplicationState subclasses must implement get method.")
+
+
 class RequestMetrics:
     """Abstract interface for reporting application request metrics."""
 
@@ -95,6 +119,12 @@ class RequestContext:
     @property
     def state(self) -> RequestState:
         raise InternalError("RequestContext subclasses must implement state property.")
+
+    @property
+    def app_state(self) -> ApplicationState:
+        raise InternalError(
+            "RequestContext subclasses must implement app_state property."
+        )
 
     @property
     def progress(self) -> FunctionProgress:

@@ -6,11 +6,13 @@ from tensorlake.applications.blob_store import BLOBStore
 from tensorlake.applications.internal_logger import InternalLogger
 
 from ...interface.request_context import (
+    ApplicationState,
     FunctionProgress,
     RequestContext,
     RequestMetrics,
     RequestState,
 )
+from .app_state import ApplicationStateHTTPClient
 from .metrics import RequestMetricsHTTPClient
 from .progress import FunctionProgressHTTPClient
 from .state import RequestStateHTTPClient
@@ -46,6 +48,12 @@ class RequestContextHTTPClient(RequestContext):
 
         self._state: RequestStateHTTPClient = RequestStateHTTPClient(
             request_id=request_id,
+            allocation_id=allocation_id,
+            http_client=http_client,
+            blob_store=self._blob_store,
+            logger=self._logger,
+        )
+        self._app_state: ApplicationStateHTTPClient = ApplicationStateHTTPClient(
             allocation_id=allocation_id,
             http_client=http_client,
             blob_store=self._blob_store,
@@ -112,6 +120,10 @@ class RequestContextHTTPClient(RequestContext):
     @property
     def state(self) -> RequestState:
         return self._state
+
+    @property
+    def app_state(self) -> ApplicationState:
+        return self._app_state
 
     @property
     def progress(self) -> FunctionProgress:

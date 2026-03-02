@@ -5,6 +5,24 @@ from tensorlake.applications.request_context.http_server.handlers.add_metrics im
     ADD_METRICS_PATH,
     ADD_METRICS_VERB,
 )
+from tensorlake.applications.request_context.http_server.handlers.app_state.commit_write import (
+    COMMIT_WRITE_PATH as APP_STATE_COMMIT_WRITE_PATH,
+)
+from tensorlake.applications.request_context.http_server.handlers.app_state.commit_write import (
+    COMMIT_WRITE_VERB as APP_STATE_COMMIT_WRITE_VERB,
+)
+from tensorlake.applications.request_context.http_server.handlers.app_state.prepare_read import (
+    PREPARE_READ_PATH as APP_STATE_PREPARE_READ_PATH,
+)
+from tensorlake.applications.request_context.http_server.handlers.app_state.prepare_read import (
+    PREPARE_READ_VERB as APP_STATE_PREPARE_READ_VERB,
+)
+from tensorlake.applications.request_context.http_server.handlers.app_state.prepare_write import (
+    PREPARE_WRITE_PATH as APP_STATE_PREPARE_WRITE_PATH,
+)
+from tensorlake.applications.request_context.http_server.handlers.app_state.prepare_write import (
+    PREPARE_WRITE_VERB as APP_STATE_PREPARE_WRITE_VERB,
+)
 from tensorlake.applications.request_context.http_server.handlers.handler import Handler
 from tensorlake.applications.request_context.http_server.handlers.progress_update import (
     PROGRESS_UPDATE_PATH,
@@ -27,6 +45,15 @@ from tensorlake.applications.request_context.http_server.router import Router
 
 from ..allocation_info import AllocationInfo
 from .handlers.add_metrics import AddMetricsHandler
+from .handlers.app_state.commit_write import (
+    CommitWriteHandler as AppStateCommitWriteHandler,
+)
+from .handlers.app_state.prepare_read import (
+    PrepareReadHandler as AppStatePrepareReadHandler,
+)
+from .handlers.app_state.prepare_write import (
+    PrepareWriteHandler as AppStatePrepareWriteHandler,
+)
 from .handlers.progress_update import ProgressUpdateHandler
 from .handlers.request_state.commit_write import CommitWriteHandler
 from .handlers.request_state.prepare_read import PrepareReadHandler
@@ -64,6 +91,24 @@ class RequestContextHTTPHandlerFactory:
                 logger=logger,
             ),
             Route(path=COMMIT_WRITE_PATH, verb=COMMIT_WRITE_VERB): CommitWriteHandler(
+                allocation_infos=allocation_infos,
+                logger=logger,
+            ),
+            Route(
+                path=APP_STATE_PREPARE_READ_PATH, verb=APP_STATE_PREPARE_READ_VERB
+            ): AppStatePrepareReadHandler(
+                allocation_infos=allocation_infos,
+                logger=logger,
+            ),
+            Route(
+                path=APP_STATE_PREPARE_WRITE_PATH, verb=APP_STATE_PREPARE_WRITE_VERB
+            ): AppStatePrepareWriteHandler(
+                allocation_infos=allocation_infos,
+                logger=logger,
+            ),
+            Route(
+                path=APP_STATE_COMMIT_WRITE_PATH, verb=APP_STATE_COMMIT_WRITE_VERB
+            ): AppStateCommitWriteHandler(
                 allocation_infos=allocation_infos,
                 logger=logger,
             ),

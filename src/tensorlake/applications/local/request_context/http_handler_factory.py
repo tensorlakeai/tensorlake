@@ -5,6 +5,24 @@ from tensorlake.applications.request_context.http_server.handlers.add_metrics im
     ADD_METRICS_PATH,
     ADD_METRICS_VERB,
 )
+from tensorlake.applications.request_context.http_server.handlers.app_state.commit_write import (
+    COMMIT_WRITE_PATH as APP_STATE_COMMIT_WRITE_PATH,
+)
+from tensorlake.applications.request_context.http_server.handlers.app_state.commit_write import (
+    COMMIT_WRITE_VERB as APP_STATE_COMMIT_WRITE_VERB,
+)
+from tensorlake.applications.request_context.http_server.handlers.app_state.prepare_read import (
+    PREPARE_READ_PATH as APP_STATE_PREPARE_READ_PATH,
+)
+from tensorlake.applications.request_context.http_server.handlers.app_state.prepare_read import (
+    PREPARE_READ_VERB as APP_STATE_PREPARE_READ_VERB,
+)
+from tensorlake.applications.request_context.http_server.handlers.app_state.prepare_write import (
+    PREPARE_WRITE_PATH as APP_STATE_PREPARE_WRITE_PATH,
+)
+from tensorlake.applications.request_context.http_server.handlers.app_state.prepare_write import (
+    PREPARE_WRITE_VERB as APP_STATE_PREPARE_WRITE_VERB,
+)
 from tensorlake.applications.request_context.http_server.handlers.handler import Handler
 from tensorlake.applications.request_context.http_server.handlers.progress_update import (
     PROGRESS_UPDATE_PATH,
@@ -26,6 +44,15 @@ from tensorlake.applications.request_context.http_server.handlers.request_state.
 from ...request_context.http_server.route import Route
 from ...request_context.http_server.router import Router
 from .handlers.add_metrics import LocalAddMetricsHandler
+from .handlers.app_state.commit_write import (
+    LocalCommitWriteHandler as LocalAppStateCommitWriteHandler,
+)
+from .handlers.app_state.prepare_read import (
+    LocalPrepareReadHandler as LocalAppStatePrepareReadHandler,
+)
+from .handlers.app_state.prepare_write import (
+    LocalPrepareWriteHandler as LocalAppStatePrepareWriteHandler,
+)
 from .handlers.progress_update import LocalProgressUpdateHandler
 from .handlers.request_state.commit_write import LocalCommitWriteHandler
 from .handlers.request_state.prepare_read import LocalPrepareReadHandler
@@ -44,6 +71,7 @@ class LocalRequestContextHTTPHandlerFactory:
         logger: InternalLogger,
     ):
         request_state_dir_path: str = os.path.join(blob_store_dir_path, "request_state")
+        app_state_dir_path: str = os.path.join(blob_store_dir_path, "app_state")
         self._logger: InternalLogger = logger.bind(module=__name__)
         self._routes: dict[Route, Handler] = {
             Route(
@@ -66,6 +94,21 @@ class LocalRequestContextHTTPHandlerFactory:
                 path=COMMIT_WRITE_PATH, verb=COMMIT_WRITE_VERB
             ): LocalCommitWriteHandler(
                 request_state_dir_path=request_state_dir_path,
+            ),
+            Route(
+                path=APP_STATE_PREPARE_READ_PATH, verb=APP_STATE_PREPARE_READ_VERB
+            ): LocalAppStatePrepareReadHandler(
+                app_state_dir_path=app_state_dir_path,
+            ),
+            Route(
+                path=APP_STATE_PREPARE_WRITE_PATH, verb=APP_STATE_PREPARE_WRITE_VERB
+            ): LocalAppStatePrepareWriteHandler(
+                app_state_dir_path=app_state_dir_path,
+            ),
+            Route(
+                path=APP_STATE_COMMIT_WRITE_PATH, verb=APP_STATE_COMMIT_WRITE_VERB
+            ): LocalAppStateCommitWriteHandler(
+                app_state_dir_path=app_state_dir_path,
             ),
         }
 

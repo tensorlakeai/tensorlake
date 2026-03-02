@@ -59,6 +59,24 @@ from tensorlake.applications.registry import get_function
 from tensorlake.applications.request_context.contextvar import (
     set_current_request_context,
 )
+from tensorlake.applications.request_context.http_server.handlers.app_state.commit_write import (
+    CommitWriteRequest as AppStateCommitWriteRequest,
+)
+from tensorlake.applications.request_context.http_server.handlers.app_state.commit_write import (
+    CommitWriteResponse as AppStateCommitWriteResponse,
+)
+from tensorlake.applications.request_context.http_server.handlers.app_state.prepare_read import (
+    PrepareReadRequest as AppStatePrepareReadRequest,
+)
+from tensorlake.applications.request_context.http_server.handlers.app_state.prepare_read import (
+    PrepareReadResponse as AppStatePrepareReadResponse,
+)
+from tensorlake.applications.request_context.http_server.handlers.app_state.prepare_write import (
+    PrepareWriteRequest as AppStatePrepareWriteRequest,
+)
+from tensorlake.applications.request_context.http_server.handlers.app_state.prepare_write import (
+    PrepareWriteResponse as AppStatePrepareWriteResponse,
+)
 from tensorlake.applications.request_context.http_server.handlers.progress_update import (
     FunctionProgressUpdateRequest,
     FunctionProgressUpdateResponse,
@@ -101,6 +119,7 @@ from ..user_events import (
 from .allocation_state_wrapper import AllocationStateWrapper
 from .contextvars import set_allocation_id_context_variable
 from .download import download_function_arguments, download_serialized_objects
+from .request_context.app_state import AllocationAppState
 from .request_context.progress import AllocationProgress
 from .request_context.request_state import AllocationRequestState
 from .result_helper import ResultHelper
@@ -184,6 +203,10 @@ class AllocationRunner:
 
         self._allocation_state: AllocationStateWrapper = AllocationStateWrapper()
         self._request_state: AllocationRequestState = AllocationRequestState(
+            allocation_state=self._allocation_state,
+            logger=logger,
+        )
+        self._app_state: AllocationAppState = AllocationAppState(
             allocation_state=self._allocation_state,
             logger=logger,
         )
@@ -317,6 +340,8 @@ class AllocationRunner:
             self._request_state.deliver_operation_result(
                 update.request_state_operation_result
             )
+        elif update.HasField("app_state_operation_result"):
+            self._app_state.deliver_operation_result(update.app_state_operation_result)
         else:
             self._logger.error(
                 "received unexpected allocation update",
@@ -354,6 +379,32 @@ class AllocationRunner:
             raise RuntimeError(
                 f"Unknown request context operation type: {type(operation)}"
             )
+
+    def run_app_state_operation(
+        self,
+        operation: (
+            AppStatePrepareWriteRequest
+            | AppStatePrepareReadRequest
+            | AppStateCommitWriteRequest
+        ),
+    ) -> (
+        AppStatePrepareWriteResponse
+        | AppStatePrepareReadResponse
+        | AppStateCommitWriteResponse
+    ):
+        """Runs the given app state operation and returns its result.
+
+        Blocks until the operation completes.
+        Raises exception on error.
+        """
+        if isinstance(operation, AppStatePrepareReadRequest):
+            return self._app_state.prepare_read(operation)
+        elif isinstance(operation, AppStatePrepareWriteRequest):
+            return self._app_state.prepare_write(operation)
+        elif isinstance(operation, AppStateCommitWriteRequest):
+            return self._app_state.commit_write(operation)
+        else:
+            raise RuntimeError(f"Unknown app state operation type: {type(operation)}")
 
     def register_coroutine_runtime_hook(
         self, coroutine: Coroutine, future: Future
