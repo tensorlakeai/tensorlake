@@ -4,7 +4,7 @@ from ..interface.exceptions import InternalError
 from ..interface.futures import (
     FunctionCallFuture,
     Future,
-    ListFuture,
+    MapFuture,
     ReduceOperationFuture,
     _InitialMissingType,
     _TensorlakeFutureWrapper,
@@ -49,12 +49,12 @@ def dfs_bottom_up(root: Future) -> Generator[Future, None, None]:
         node: Future = dfs_stack.pop()
         yield_stack.append(node)
 
-        if isinstance(node, ListFuture):
-            node: ListFuture
-            items: list[_TensorlakeFutureWrapper[Future] | Any] | ListFuture = (
+        if isinstance(node, MapFuture):
+            node: MapFuture
+            items: list[_TensorlakeFutureWrapper[Future] | Any] | Future = (
                 _unwrap_future(node._items)
             )
-            if isinstance(items, ListFuture):
+            if isinstance(items, Future):
                 dfs_stack.append(items)
             else:
                 for item in node._items:
@@ -67,10 +67,10 @@ def dfs_bottom_up(root: Future) -> Generator[Future, None, None]:
             if isinstance(initial, Future):
                 dfs_stack.append(initial)
 
-            items: list[_TensorlakeFutureWrapper[Future] | Any] | ListFuture = (
+            items: list[_TensorlakeFutureWrapper[Future] | Any] | Future = (
                 _unwrap_future(node._items)
             )
-            if isinstance(items, ListFuture):
+            if isinstance(items, Future):
                 dfs_stack.append(items)
             else:
                 for item in node._items:

@@ -44,7 +44,8 @@ def fd_caching_function(action: str) -> str:
 
 
 class TestFileDescriptorCaching(unittest.TestCase):
-    def setUp(self) -> None:
+    @classmethod
+    def setUpClass(cls) -> None:
         deploy_applications(__file__)
 
     def test_second_write_goes_to_cached_file_descriptor_if_same_func(self):
@@ -104,7 +105,8 @@ cached_function_class_instance: FunctionClass | None = None
 
 
 class TestFunctionClassInstanceCaching(unittest.TestCase):
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls) -> None:
         deploy_applications(__file__)
 
     def test_function_class_instance_caching(self):

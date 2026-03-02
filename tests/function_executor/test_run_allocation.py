@@ -219,6 +219,7 @@ class TestRunAllocation(unittest.TestCase):
                                     function_call_creation_result=AllocationFunctionCallCreationResult(
                                         status=Status(code=grpc.StatusCode.OK.value[0]),
                                         allocation_function_call_id=allocation_function_call.id,
+                                        function_call_id=allocation_function_call.updates.root_function_call_id,
                                     ),
                                 )
                             )
@@ -298,14 +299,10 @@ class TestRunAllocation(unittest.TestCase):
                 self.assertEqual(
                     function_call_metadata.args[0].value_id, arg_0_metadata.id
                 )
-                self.assertEqual(function_call_metadata.args[0].collection, None)
                 self.assertEqual(len(function_call_metadata.kwargs), 1)
                 self.assertEqual(
                     function_call_metadata.kwargs["num_chunks"].value_id,
                     arg_1_metadata.id,
-                )
-                self.assertEqual(
-                    function_call_metadata.kwargs["num_chunks"].collection, None
                 )
 
                 # Cleanup.
@@ -402,6 +399,7 @@ class TestRunAllocation(unittest.TestCase):
                                     function_call_creation_result=AllocationFunctionCallCreationResult(
                                         status=Status(code=grpc.StatusCode.OK.value[0]),
                                         allocation_function_call_id=allocation_function_call.id,
+                                        function_call_id=allocation_function_call.updates.root_function_call_id,
                                     ),
                                 )
                             )
@@ -476,14 +474,10 @@ class TestRunAllocation(unittest.TestCase):
                 self.assertEqual(
                     function_call_metadata.args[0].value_id, arg_0_metadata.id
                 )
-                self.assertEqual(function_call_metadata.args[0].collection, None)
                 self.assertEqual(len(function_call_metadata.kwargs), 1)
                 self.assertEqual(
                     function_call_metadata.kwargs["num_chunks"].value_id,
                     arg_1_metadata.id,
-                )
-                self.assertEqual(
-                    function_call_metadata.kwargs["num_chunks"].collection, None
                 )
 
                 self.assertTrue(allocation_function_call_watcher.HasField("id"))
@@ -543,6 +537,7 @@ class TestRunAllocation(unittest.TestCase):
                     AllocationUpdate(
                         allocation_id=allocation_id,
                         function_call_result=AllocationFunctionCallResult(
+                            function_call_id=allocation_function_call_watcher.root_function_call_id,
                             watcher_id=allocation_function_call_watcher.id,
                             outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
                             value_output=SerializedObjectInsideBLOB(
@@ -857,21 +852,25 @@ class TestRunAllocation(unittest.TestCase):
                                 function_call_metadata=serialize_metadata(
                                     FunctionCallMetadata(
                                         id="file_chunker_call",
+                                        function_name="file_chunker",
                                         output_serializer_name_override=None,
                                         output_type_hint_override=None,
                                         has_output_type_hint_override=False,
                                         args=[
                                             FunctionCallArgumentMetadata(
-                                                value_id="file_arg_id", collection=None
+                                                value_id="file_arg_id",
                                             )
                                         ],
                                         kwargs={
                                             "num_chunks": FunctionCallArgumentMetadata(
                                                 value_id="num_chunks_arg_id",
-                                                collection=None,
                                             ),
                                         },
-                                        oso=None,
+                                        is_map_splitter=False,
+                                        is_reduce_splitter=False,
+                                        splitter_function_name=None,
+                                        splitter_input_mode=None,
+                                        is_map_concat=False,
                                     )
                                 ),
                             ),
@@ -1028,15 +1027,21 @@ class TestRunAllocation(unittest.TestCase):
                                 function_call_metadata=serialize_metadata(
                                     FunctionCallMetadata(
                                         id="returns_argument_call",
+                                        function_name="returns_argument",
                                         output_serializer_name_override=None,
                                         output_type_hint_override=None,
                                         has_output_type_hint_override=False,
                                         args=[
                                             FunctionCallArgumentMetadata(
-                                                value_id="arg_id", collection=None
+                                                value_id="arg_id",
                                             ),
                                         ],
                                         kwargs={},
+                                        is_map_splitter=False,
+                                        is_reduce_splitter=False,
+                                        splitter_function_name=None,
+                                        splitter_input_mode=None,
+                                        is_map_concat=False,
                                     )
                                 ),
                                 request_error_blob=create_request_error_blob(),

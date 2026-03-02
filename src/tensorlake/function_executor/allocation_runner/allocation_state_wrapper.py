@@ -2,6 +2,8 @@ import hashlib
 import threading
 from typing import Any, Callable, Iterable
 
+from google.protobuf.timestamp_pb2 import Timestamp
+
 from tensorlake.applications import InternalError
 
 from ..proto.function_executor_pb2 import (
@@ -73,16 +75,19 @@ class AllocationStateWrapper:
             self._update_hash()
             self._allocation_state_update_lock.notify_all()
 
-    def add_function_call_watcher(self, id: str, root_function_call_id: str) -> None:
+    def add_function_call_watcher(
+        self, id: str, root_function_call_id: str, deadline: Timestamp | None
+    ) -> None:
         with self._allocation_state_update_lock:
-            self._allocation_state.function_call_watchers.append(
-                AllocationFunctionCallWatcher(
-                    watcher_id=id,
-                    id=id,
-                    function_call_id=root_function_call_id,
-                    root_function_call_id=root_function_call_id,
-                )
+            watcher = AllocationFunctionCallWatcher(
+                watcher_id=id,
+                id=id,
+                function_call_id=root_function_call_id,
+                root_function_call_id=root_function_call_id,
             )
+            if deadline is not None:
+                watcher.deadline.CopyFrom(deadline)
+            self._allocation_state.function_call_watchers.append(watcher)
             self._update_hash()
             self._allocation_state_update_lock.notify_all()
 

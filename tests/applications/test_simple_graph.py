@@ -48,6 +48,10 @@ async def print_and_return_value_async(value: str) -> str:
 
 
 class TestSimpleGraph(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     def test_sync_local_api_call(self):
         request: Request = run_local_application(
             simple_graph_api_sync,
@@ -56,7 +60,6 @@ class TestSimpleGraph(unittest.TestCase):
         self.assertEqual(request.output(), "simple graph: 1, 2, 3, 4, 5")
 
     def test_sync_remote_api_call(self):
-        deploy_applications(__file__)
         request: Request = run_remote_application(
             simple_graph_api_sync,
             TestGraphRequestPayload(numbers=[str(i) for i in range(1, 6)]),
@@ -72,7 +75,6 @@ class TestSimpleGraph(unittest.TestCase):
         self.assertEqual(request.output(), "simple graph: 1, 2, 3, 4, 5")
 
     def test_async_remote_api_call(self):
-        deploy_applications(__file__)
         request: Request = run_remote_application(
             simple_graph_api_async,
             TestGraphRequestPayload(numbers=[str(i) for i in range(1, 6)]),

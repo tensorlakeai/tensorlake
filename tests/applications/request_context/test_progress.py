@@ -43,6 +43,10 @@ def test_update_progress_with_parameters(
 
 
 class TestProgress(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     def setUp(self):
         """Capture stdout before each test."""
         self.captured_output = io.StringIO()
@@ -54,9 +58,6 @@ class TestProgress(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_update_progress(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(test_update_progress, is_remote, (10, 100))
         self.assertEqual("success", request.output())
 
@@ -134,11 +135,12 @@ def test_update_progress_raises_expected_error(values: tuple[int, int]) -> str:
 
 
 class TestProgressRaisesError(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_update_progress(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             test_update_progress_raises_expected_error, is_remote, (10, 100)
         )

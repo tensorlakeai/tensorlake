@@ -8,7 +8,7 @@ from .exceptions import SDKUsageError
 from .futures import (
     FunctionCallFuture,
     Future,
-    ListFuture,
+    MapFuture,
     ReduceOperationFuture,
     _InitialMissing,
     _InitialMissingType,
@@ -122,7 +122,7 @@ class Function:
             return future.result()
 
     def map(
-        self, items: Iterable[Any | Future] | ListFuture
+        self, items: Iterable[Any | Future] | MapFuture
     ) -> Iterable[Any] | Coroutine[Any, Any, Any]:
         """Returns an iterable with every item transformed using the function if sync function. Returns a coroutine otherwise.
 
@@ -136,7 +136,7 @@ class Function:
         Raises FunctionError if the function failed.
         Raises TensorlakeError on other errors.
         """
-        future: ListFuture = self.future.map(items)
+        future: MapFuture = self.future.map(items)
         if inspect.iscoroutinefunction(self):
             return _wrap_future_into_coroutine(future)
         else:
@@ -145,7 +145,7 @@ class Function:
 
     def reduce(
         self,
-        items: Iterable[Any | Future] | ListFuture,
+        items: Iterable[Any | Future] | MapFuture,
         initial: Any | Future | _InitialMissingType = _InitialMissing,
         /,
     ) -> Any | Coroutine[Any, Any, Any]:
@@ -245,7 +245,7 @@ class FunctionFutureFactory:
         """
         return self._function._make_function_call_future(list(args), dict(kwargs))
 
-    def map(self, items: Iterable[Any | Future] | ListFuture) -> Future:
+    def map(self, items: Iterable[Any | Future] | Future) -> Future:
         """Returns a Future that represents mapping of the function over the iterable.
 
         Raises TensorlakeError on error.
@@ -257,7 +257,7 @@ class FunctionFutureFactory:
 
     def reduce(
         self,
-        items: Iterable[Any | Future] | ListFuture,
+        items: Iterable[Any | Future] | Future,
         initial: Any | Future | _InitialMissingType = _InitialMissing,
         /,
     ) -> Future:

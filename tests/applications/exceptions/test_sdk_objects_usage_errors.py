@@ -108,13 +108,6 @@ def future_wait_wrong_return_when(_: str) -> str:
 
 @application()
 @function()
-def return_map_future(_: str) -> list:
-    # With the new API, .future.map() returns a ListFuture (a valid tail call).
-    return other_function.future.map([1, 2, 3])
-
-
-@application()
-@function()
 def run_already_started_future(_: str) -> str:
     future: Future = other_function.future(1)
     future.run()
@@ -140,11 +133,12 @@ def other_function_reduce(arg1, arg2):
 
 
 class TestSDKObjectsUsageErrors(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_future_list_as_function_argument(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             function_call_future_list_as_function_argument,
             is_remote,
@@ -154,9 +148,6 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_return_list_of_futures_from_application(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             application_return_list_of_futures,
             is_remote,
@@ -171,9 +162,6 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_return_list_of_futures_from_regular_function(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             application_call_return_list_of_futures,
             is_remote,
@@ -188,9 +176,6 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_function_as_function_argument(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             function_as_function_argument,
             is_remote,
@@ -200,9 +185,6 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_return_function_from_application(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             application_return_function,
             is_remote,
@@ -218,9 +200,6 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_return_function_from_regular_function(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             application_call_return_function,
             is_remote,
@@ -236,9 +215,6 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_future_wait_wrong_return_when(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             future_wait_wrong_return_when,
             is_remote,
@@ -247,25 +223,7 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
         self.assertEqual(request.output(), "success")
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
-    def test_return_map_future(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
-        request: Request = run_application(
-            return_map_future,
-            is_remote,
-            "whatever",
-        )
-        # ListFuture cannot be returned as a tail call.
-        with self.assertRaises(RequestFailed) as context:
-            request.output()
-        self.assertEqual(str(context.exception), "function_error")
-
-    @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_run_already_started_future(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             run_already_started_future,
             is_remote,
@@ -275,9 +233,6 @@ class TestSDKObjectsUsageErrors(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_tail_call_running_future(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             tail_call_running_future,
             is_remote,

@@ -4,13 +4,10 @@ from tensorlake.applications import InternalError
 from tensorlake.applications.interface.futures import (
     FunctionCallFuture,
     Future,
-    ListFuture,
+    MapFuture,
     ReduceOperationFuture,
-    _FutureListKind,
-    _FutureListMetadata,
 )
-from tensorlake.function_executor.allocation_runner.sdk_algorithms import (
-    FutureInfo,
+from tensorlake.function_executor.allocation_runner.event_loop.durable_id import (
     _sha256_hash_strings,
     future_durable_id,
 )
@@ -27,7 +24,7 @@ class TestFutureDurableId(unittest.TestCase):
             ),
             parent_function_call_id="parent_function_call_id_123",
             previous_future_durable_id="previous_awaitable_id_456",
-            future_infos={},
+            future_durable_ids={},
         )
         self.assertEqual(
             result,
@@ -57,13 +54,8 @@ class TestFutureDurableId(unittest.TestCase):
             ),
             parent_function_call_id="parent_function_call_id_123",
             previous_future_durable_id="previous_awaitable_id_456",
-            future_infos={
-                "fc_1": FutureInfo(
-                    future=child_fc,
-                    durable_id="durable_fc_1",
-                    map_future_output=None,
-                    reduce_future_output=None,
-                ),
+            future_durable_ids={
+                "fc_1": "durable_fc_1",
             },
         )
         self.assertEqual(
@@ -104,19 +96,9 @@ class TestFutureDurableId(unittest.TestCase):
             ),
             parent_function_call_id="parent_function_call_id_123",
             previous_future_durable_id="previous_awaitable_id_456",
-            future_infos={
-                "fc_1": FutureInfo(
-                    future=child_fc_1,
-                    durable_id="durable_fc_1",
-                    map_future_output=None,
-                    reduce_future_output=None,
-                ),
-                "fc_2": FutureInfo(
-                    future=child_fc_2,
-                    durable_id="durable_fc_2",
-                    map_future_output=None,
-                    reduce_future_output=None,
-                ),
+            future_durable_ids={
+                "fc_1": "durable_fc_1",
+                "fc_2": "durable_fc_2",
             },
         )
         self.assertEqual(
@@ -156,19 +138,9 @@ class TestFutureDurableId(unittest.TestCase):
             ),
             parent_function_call_id="parent_function_call_id_123",
             previous_future_durable_id="previous_awaitable_id_456",
-            future_infos={
-                "fc_1": FutureInfo(
-                    future=child_fc_1,
-                    durable_id="durable_fc_1",
-                    map_future_output=None,
-                    reduce_future_output=None,
-                ),
-                "fc_2": FutureInfo(
-                    future=child_fc_2,
-                    durable_id="durable_fc_2",
-                    map_future_output=None,
-                    reduce_future_output=None,
-                ),
+            future_durable_ids={
+                "fc_1": "durable_fc_1",
+                "fc_2": "durable_fc_2",
             },
         )
         self.assertEqual(
@@ -199,29 +171,16 @@ class TestFutureDurableId(unittest.TestCase):
             kwargs={},
         )
         result = future_durable_id(
-            future=ListFuture(
+            future=MapFuture(
                 id="l1",
                 items=[child_fc_1, child_fc_2],
-                metadata=_FutureListMetadata(
-                    kind=_FutureListKind.MAP_OPERATION,
-                    function_name="map_func",
-                ),
+                function_name="map_func",
             ),
             parent_function_call_id="parent_function_call_id_123",
             previous_future_durable_id="previous_awaitable_id_456",
-            future_infos={
-                "fc_1": FutureInfo(
-                    future=child_fc_1,
-                    durable_id="durable_fc_1",
-                    map_future_output=None,
-                    reduce_future_output=None,
-                ),
-                "fc_2": FutureInfo(
-                    future=child_fc_2,
-                    durable_id="durable_fc_2",
-                    map_future_output=None,
-                    reduce_future_output=None,
-                ),
+            future_durable_ids={
+                "fc_1": "durable_fc_1",
+                "fc_2": "durable_fc_2",
             },
         )
         self.assertEqual(
@@ -251,29 +210,16 @@ class TestFutureDurableId(unittest.TestCase):
             kwargs={},
         )
         result = future_durable_id(
-            future=ListFuture(
+            future=MapFuture(
                 id="l1",
                 items=[child_fc_1, 42, "plain", child_fc_2],
-                metadata=_FutureListMetadata(
-                    kind=_FutureListKind.MAP_OPERATION,
-                    function_name="map_func",
-                ),
+                function_name="map_func",
             ),
             parent_function_call_id="parent_function_call_id_123",
             previous_future_durable_id="previous_awaitable_id_456",
-            future_infos={
-                "fc_1": FutureInfo(
-                    future=child_fc_1,
-                    durable_id="durable_fc_1",
-                    map_future_output=None,
-                    reduce_future_output=None,
-                ),
-                "fc_2": FutureInfo(
-                    future=child_fc_2,
-                    durable_id="durable_fc_2",
-                    map_future_output=None,
-                    reduce_future_output=None,
-                ),
+            future_durable_ids={
+                "fc_1": "durable_fc_1",
+                "fc_2": "durable_fc_2",
             },
         )
         self.assertEqual(
@@ -291,32 +237,21 @@ class TestFutureDurableId(unittest.TestCase):
         )
 
     def test_list_future_with_list_future_items(self):
-        inner_list = ListFuture(
+        inner_list = MapFuture(
             id="list_1",
             items=[],
-            metadata=_FutureListMetadata(
-                kind=_FutureListKind.MAP_OPERATION,
-                function_name="map_func",
-            ),
+            function_name="map_func",
         )
         result = future_durable_id(
-            future=ListFuture(
+            future=MapFuture(
                 id="l2",
                 items=inner_list,
-                metadata=_FutureListMetadata(
-                    kind=_FutureListKind.MAP_OPERATION,
-                    function_name="outer_map_func",
-                ),
+                function_name="outer_map_func",
             ),
             parent_function_call_id="parent_function_call_id_123",
             previous_future_durable_id="previous_awaitable_id_456",
-            future_infos={
-                "list_1": FutureInfo(
-                    future=inner_list,
-                    durable_id="durable_list_1",
-                    map_future_output=None,
-                    reduce_future_output=None,
-                ),
+            future_durable_ids={
+                "list_1": "durable_list_1",
             },
         )
         self.assertEqual(
@@ -341,7 +276,7 @@ class TestFutureDurableId(unittest.TestCase):
             ),
             parent_function_call_id="parent_function_call_id_123",
             previous_future_durable_id="previous_awaitable_id_456",
-            future_infos={},
+            future_durable_ids={},
         )
         self.assertEqual(
             result,
@@ -385,25 +320,10 @@ class TestFutureDurableId(unittest.TestCase):
             ),
             parent_function_call_id="parent_function_call_id_123",
             previous_future_durable_id="previous_awaitable_id_456",
-            future_infos={
-                "fc_1": FutureInfo(
-                    future=child_fc_1,
-                    durable_id="durable_fc_1",
-                    map_future_output=None,
-                    reduce_future_output=None,
-                ),
-                "fc_2": FutureInfo(
-                    future=child_fc_2,
-                    durable_id="durable_fc_2",
-                    map_future_output=None,
-                    reduce_future_output=None,
-                ),
-                "fc_3": FutureInfo(
-                    future=child_fc_3,
-                    durable_id="durable_fc_3",
-                    map_future_output=None,
-                    reduce_future_output=None,
-                ),
+            future_durable_ids={
+                "fc_1": "durable_fc_1",
+                "fc_2": "durable_fc_2",
+                "fc_3": "durable_fc_3",
             },
         )
         self.assertEqual(
@@ -423,13 +343,10 @@ class TestFutureDurableId(unittest.TestCase):
         )
 
     def test_reduce_operation_future_with_list_future_items(self):
-        inner_list = ListFuture(
+        inner_list = MapFuture(
             id="list_1",
             items=[],
-            metadata=_FutureListMetadata(
-                kind=_FutureListKind.MAP_OPERATION,
-                function_name="map_func",
-            ),
+            function_name="map_func",
         )
         result = future_durable_id(
             future=ReduceOperationFuture(
@@ -440,13 +357,8 @@ class TestFutureDurableId(unittest.TestCase):
             ),
             parent_function_call_id="parent_function_call_id_123",
             previous_future_durable_id="previous_awaitable_id_456",
-            future_infos={
-                "list_1": FutureInfo(
-                    future=inner_list,
-                    durable_id="durable_list_1",
-                    map_future_output=None,
-                    reduce_future_output=None,
-                ),
+            future_durable_ids={
+                "list_1": "durable_list_1",
             },
         )
         self.assertEqual(
@@ -470,13 +382,10 @@ class TestFutureDurableId(unittest.TestCase):
             args=[4],
             kwargs={},
         )
-        inner_list = ListFuture(
+        inner_list = MapFuture(
             id="list_1",
             items=[],
-            metadata=_FutureListMetadata(
-                kind=_FutureListKind.MAP_OPERATION,
-                function_name="map_func",
-            ),
+            function_name="map_func",
         )
         result = future_durable_id(
             future=ReduceOperationFuture(
@@ -487,19 +396,9 @@ class TestFutureDurableId(unittest.TestCase):
             ),
             parent_function_call_id="parent_function_call_id_123",
             previous_future_durable_id="previous_awaitable_id_456",
-            future_infos={
-                "fc_3": FutureInfo(
-                    future=child_fc_3,
-                    durable_id="durable_fc_3",
-                    map_future_output=None,
-                    reduce_future_output=None,
-                ),
-                "list_1": FutureInfo(
-                    future=inner_list,
-                    durable_id="durable_list_1",
-                    map_future_output=None,
-                    reduce_future_output=None,
-                ),
+            future_durable_ids={
+                "fc_3": "durable_fc_3",
+                "list_1": "durable_list_1",
             },
         )
         self.assertEqual(
@@ -511,13 +410,13 @@ class TestFutureDurableId(unittest.TestCase):
                     "ReduceOperation",
                     "reduce_fn",
                     "durable_fc_3",  # initial
-                    "durable_list_1",  # items (ListFuture)
+                    "durable_list_1",  # items (MapFuture)
                 ]
             ),
         )
 
     def test_unexpected_future_type_raises_error(self):
-        # A plain Future (not FunctionCallFuture/ListFuture/ReduceOperationFuture)
+        # A plain Future (not FunctionCallFuture/MapFuture/ReduceOperationFuture)
         # should trigger the else branch.
         with self.assertRaises(InternalError):
             future_durable_id(
@@ -526,7 +425,7 @@ class TestFutureDurableId(unittest.TestCase):
                 ),
                 parent_function_call_id="parent_id",
                 previous_future_durable_id="prev_id",
-                future_infos={},
+                future_durable_ids={},
             )
 
     def test_missing_future_info_raises_error(self):
@@ -536,7 +435,7 @@ class TestFutureDurableId(unittest.TestCase):
             args=[],
             kwargs={},
         )
-        # future_infos is missing entry for "child_1"
+        # future_durable_ids is missing entry for "child_1"
         with self.assertRaises(InternalError):
             future_durable_id(
                 future=FunctionCallFuture(
@@ -547,7 +446,7 @@ class TestFutureDurableId(unittest.TestCase):
                 ),
                 parent_function_call_id="parent_id",
                 previous_future_durable_id="prev_id",
-                future_infos={},
+                future_durable_ids={},
             )
 
 

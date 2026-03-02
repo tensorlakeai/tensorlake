@@ -20,14 +20,11 @@ from typing import Any, Dict, List
 
 from tensorlake.applications.blob_store import BLOBStore
 from tensorlake.applications.internal_logger import InternalLogger
-from tensorlake.applications.metadata import ValueMetadata
+from tensorlake.applications.metadata import SPLITTER_INPUT_MODE, ValueMetadata
 from tensorlake.applications.multiprocessing import setup_multiprocessing
 
 from ..algorithms import (
-    derived_function_call_future,
     dfs_bottom_up_unique_only,
-    tail_call_output_future_ids,
-    validate_tail_call_user_future,
 )
 from ..function.application_call import (
     ApplicationArgument,
@@ -59,13 +56,14 @@ from ..interface import (
     SDKUsageError,
     SerializationError,
     TensorlakeError,
+    TimeoutError,
 )
 from ..interface.futures import (
     FunctionCallFuture,
-    ListFuture,
+    MapFuture,
     ReduceOperationFuture,
-    _FutureListKind,
     _InitialMissing,
+    _InitialMissingType,
     _request_scoped_id,
     _TensorlakeFutureWrapper,
     _unwrap_future,
@@ -82,12 +80,12 @@ from ..runtime_hooks import (
     clear_await_future_hook,
     clear_coroutine_to_future_hook,
     clear_register_coroutine_hook,
-    clear_run_futures_hook,
+    clear_run_future_hook,
     clear_wait_futures_hook,
     set_await_future_hook,
     set_coroutine_to_future_hook,
     set_register_coroutine_hook,
-    set_run_futures_hook,
+    set_run_future_hook,
     set_wait_futures_hook,
 )
 from ..user_data_serializer import (
@@ -101,7 +99,7 @@ from ..validation import (
     validate_loaded_applications,
 )
 from .class_instance_store import ClassInstanceStore
-from .future import LocalFuture, UserFutureMetadataType
+from .future import LocalFunctionCallFuture
 from .future_run.function_call_future_run import FunctionCallFutureRun
 from .future_run.future_run import (
     LocalFutureRun,
@@ -109,9 +107,6 @@ from .future_run.future_run import (
     StopLocalFutureRun,
     get_current_future_run,
 )
-from .future_run.list_future_run import ListFutureRun
-from .future_run.return_output_future_metadata import ReturnOutputFutureMetadata
-from .future_run.return_output_future_run import ReturnOutputFutureRun
 from .request import LocalRequest
 from .request_context.http_handler_factory import LocalRequestContextHTTPHandlerFactory
 from .utils import print_exception
@@ -304,7 +299,7 @@ class LocalRunner:
         """
         self._request_context_http_server_thread.start()
 
-        set_run_futures_hook(self._run_futures_runtime_hook)
+        set_run_future_hook(self._run_future_runtime_hook)
         set_await_future_hook(self._await_future_runtime_hook)
         set_wait_futures_hook(self._wait_futures_runtime_hook)
         set_register_coroutine_hook(self._register_coroutine_runtime_hook)
@@ -326,6 +321,8 @@ class LocalRunner:
                 output_type_hint_override=return_type_hint(
                     app_signature.return_annotation
                 ),
+                is_map_concat=False,
+                parent_function_name=self._app._name,
             )
         except TensorlakeError as e:
             # Handle exceptions that depend on user inputs. All other exceptions are
@@ -398,7 +395,7 @@ class LocalRunner:
 
         # Only clear runtime hooks at the very end when nothing can use them.
         clear_await_future_hook()
-        clear_run_futures_hook()
+        clear_run_future_hook()
         clear_wait_futures_hook()
         clear_register_coroutine_hook()
         clear_coroutine_to_future_hook()
@@ -447,7 +444,7 @@ class LocalRunner:
     def __coroutine_to_future_runtime_hook(self, coroutine: Coroutine) -> Future | None:
         return self._coroutine_to_future.get(coroutine, None)
 
-    def _run_futures_runtime_hook(self, futures: List[Future]) -> None:
+    def _run_future_runtime_hook(self, user_future: Future) -> None:
         # Don't catch any exceptions here because this is called from user code
         # and we want to propagate them to the user. We don't know what user gave
         # so it's easy to fail for any reason here.
@@ -459,21 +456,23 @@ class LocalRunner:
 
         try:
             self._user_code_cancellation_point()
-            for user_future in futures:
-                # SDK automatically starts user futures that are tail calls and
-                # function call or other operation inputs. This is why we walk
-                # the Futures tree, not just starting the user_future.
-                for future in dfs_bottom_up_unique_only(user_future):
-                    if future._id in self._future_runs:
-                        continue  # Future was already started by user.
+            # SDK automatically starts user futures that are tail calls and
+            # function call or other operation inputs. This is why we walk
+            # the Futures tree, not just starting the user_future.
+            for future in dfs_bottom_up_unique_only(user_future):
+                if future._id in self._future_runs:
+                    continue  # Future was already started by user.
 
-                    # Future is started by user code, cannot be a tail call.
-                    self._create_future_run(
-                        future=future,
-                        output_serializer_name_override=None,
-                        has_output_type_hint_override=False,
-                        output_type_hint_override=None,
-                    )
+                # Future is started by user code, cannot be a tail call.
+                current_future_run: LocalFutureRun = get_current_future_run()
+                self._create_future_run(
+                    future=future,
+                    output_serializer_name_override=None,
+                    has_output_type_hint_override=False,
+                    output_type_hint_override=None,
+                    is_map_concat=False,
+                    parent_function_name=current_future_run.local_future.future_metadata.function_name,
+                )
         except TensorlakeError:
             raise
         except Exception as e:
@@ -571,6 +570,9 @@ class LocalRunner:
             local_future_run: LocalFutureRun = self._future_runs[future._id]
             if local_future_run.std_future in done_std_futures:
                 done_user_futures.append(future)
+            elif timeout is not None:
+                future._set_exception(TimeoutError())
+                done_user_futures.append(future)
             else:
                 not_done_user_futures.append(future)
 
@@ -621,7 +623,7 @@ class LocalRunner:
     def _control_loop_start_runnable_futures(self) -> None:
         # Future runs can be modified concurrently so iterate over a copy.
         for future_run in self._future_runs.copy().values():
-            future: LocalFuture = future_run.local_future
+            future: LocalFunctionCallFuture = future_run.local_future
 
             if not future.start_time_elapsed:
                 continue
@@ -664,103 +666,49 @@ class LocalRunner:
         self, future_run: LocalFutureRun, result: LocalFutureRunResult
     ) -> None:
         user_future: Future = future_run.local_future.future
-        metadata: UserFutureMetadataType = future_run.local_future.future_metadata
-
-        function_name: str = "<unknown>"
-        output_blob_serializer: UserDataSerializer | None = None
-        output_serializer_name_override: str | None = None
-        has_output_type_hint_override: bool = False
-        output_type_hint_override: Any = None
-        if isinstance(future_run, FunctionCallFutureRun):
-            function_name = user_future._function_name
-            output_blob_serializer = function_output_serializer(
-                get_function(function_name),
-                metadata.output_serializer_name_override,
-            )
-            output_serializer_name_override = metadata.output_serializer_name_override
-            if metadata.has_output_type_hint_override:
-                has_output_type_hint_override = True
-                output_type_hint_override = metadata.output_type_hint_override
-        elif isinstance(future_run, ReturnOutputFutureRun):
-            function_name = user_future._function_name
-            output_blob_serializer = function_output_serializer(
-                get_function(function_name),
-                metadata.output_serializer_name_override,
-            )
-            if metadata.has_output_type_hint_override:
-                has_output_type_hint_override = True
-                output_type_hint_override = metadata.output_type_hint_override
-        elif isinstance(future_run, ListFutureRun):
-            function_name = "Assembly future list"
-            # In remote mode we assemble the list locally and only store its individual items in BLOB store.
-            # As we store everything in local mode then we just use the most flexible serializer
-            # here that always works.
-            output_blob_serializer = PickleUserDataSerializer()
-        else:
-            self._handle_future_run_failure(
-                future_run=future_run,
-                error=InternalError(
-                    f"Unexpected LocalFutureRun subclass: {type(future_run)}."
-                ),
-            )
-            return
-
+        metadata: FunctionCallMetadata = future_run.local_future.future_metadata
+        output_blob_serializer: UserDataSerializer = function_output_serializer(
+            get_function(metadata.function_name),
+            metadata.output_serializer_name_override,
+        )
         output: Future | Any = result.output
-        if isinstance(output, Future):
-            try:
-                # ReturnOutputFutureRun and ListFutureRun are not doing real tail calls when returning a Future.
-                if isinstance(future_run, FunctionCallFutureRun):
-                    validate_tail_call_user_future(
-                        function_name=function_name,
-                        tail_call_user_future=output,
-                    )
-            except SDKUsageError as e:
-                self._handle_future_run_failure(
-                    future_run=future_run,
-                    error=e,
-                )
-                return
 
-            output_override_future_ids: set[str] = tail_call_output_future_ids(output)
+        if isinstance(output, Future):
             # SDK automatically starts user futures that are tail calls and
             # function call or other operation inputs. This is why we walk
             # the Futures tree, not just starting the output.
             for future in dfs_bottom_up_unique_only(output):
                 future: Future
-                # Only function call future run does a real tail call, other future runs are internal local runner machinery.
-                if isinstance(future_run, FunctionCallFutureRun):
-                    if future._id in self._future_runs:
-                        self._handle_future_run_failure(
-                            future_run=future_run,
-                            error=SDKUsageError(
-                                f"A tail call Future {future} returned from function '{function_name}' is already running, "
-                                "a tail call Future should not be started."
-                            ),
-                        )
-                        return
-                else:
-                    if future._id in self._future_runs:
-                        # Happens when i.e. one future item reduce op returns this future and it was already started
-                        # when traversing the reduce operation tree.
-                        continue
+                if future._id in self._future_runs:
+                    self._handle_future_run_failure(
+                        future_run=future_run,
+                        error=SDKUsageError(
+                            f"A tail call Future {future} returned from function '{metadata.function_name}' is already running, "
+                            "a tail call Future should not be started."
+                        ),
+                    )
+                    return
 
+                is_tail_call_output: bool = future is output
                 self._create_future_run(
                     future=future,
                     output_serializer_name_override=(
-                        output_serializer_name_override
-                        if future._id in output_override_future_ids
+                        metadata.output_serializer_name_override
+                        if is_tail_call_output
                         else None
                     ),
                     has_output_type_hint_override=(
-                        has_output_type_hint_override
-                        if future._id in output_override_future_ids
+                        metadata.has_output_type_hint_override
+                        if is_tail_call_output
                         else False
                     ),
                     output_type_hint_override=(
-                        output_type_hint_override
-                        if future._id in output_override_future_ids
+                        metadata.output_type_hint_override
+                        if is_tail_call_output
                         else None
                     ),
+                    is_map_concat=metadata.is_map_splitter and is_tail_call_output,
+                    parent_function_name=metadata.function_name,
                 )
 
             # The future returned by user is already running so must be in the dict.
@@ -778,8 +726,8 @@ class LocalRunner:
                         value=result.output,
                         value_serializer=output_blob_serializer,
                         type_hint=(
-                            output_type_hint_override
-                            if has_output_type_hint_override
+                            metadata.output_type_hint_override
+                            if metadata.has_output_type_hint_override
                             else type(result.output)
                         ),
                     )
@@ -827,36 +775,14 @@ class LocalRunner:
     def _future_run_data_dependencies_are_resolved(
         self, future_run: LocalFutureRun
     ) -> bool:
-        if isinstance(future_run, FunctionCallFutureRun):
-            metadata: FunctionCallMetadata = future_run.local_future.future_metadata
-            for arg_metadata in metadata.args:
-                if not self._value_store.has(arg_metadata.value_id):
-                    return False
-            for arg_metadata in metadata.kwargs.values():
-                if not self._value_store.has(arg_metadata.value_id):
-                    return False
-            return True
-
-        elif isinstance(future_run, ReturnOutputFutureRun):
-            # There are no prerequisites for ReturnOutputFutureRun.
-            # It just returns a Future as a tail call or a value.
-            return True
-
-        elif isinstance(future_run, ListFutureRun):
-            for item in future_run.items:
-                if isinstance(item, Future):
-                    if not self._value_store.has(item._id):
-                        return False
-            return True
-
-        else:
-            self._handle_future_run_failure(
-                future_run=future_run,
-                error=InternalError(
-                    f"Unexpected LocalFutureRun subclass: {type(future_run)}"
-                ),
-            )
-            return False
+        metadata: FunctionCallMetadata = future_run.local_future.future_metadata
+        for arg_metadata in metadata.args:
+            if not self._value_store.has(arg_metadata.value_id):
+                return False
+        for arg_metadata in metadata.kwargs.values():
+            if not self._value_store.has(arg_metadata.value_id):
+                return False
+        return True
 
     def _handle_future_run_final_output(
         self,
@@ -876,24 +802,28 @@ class LocalRunner:
         while len(future_runs) > 0:
             future_run = future_runs.pop()
             ser_value = future_ser_values.pop()
-            future: LocalFuture = future_run.local_future
+            local_future: LocalFunctionCallFuture = future_run.local_future
 
-            if error is not None:
-                future.future._set_exception(error)
-            else:
-                # Intentionally do serialize -> deserialize cycle to ensure the same UX as in remote mode.
-                future.future._set_result(_deserialize_value(ser_value))
+            # Don't overwrite if the future is already done (e.g. Future.wait timed out).
+            if not local_future.future.done():
+                if error is not None:
+                    local_future.future._set_exception(error)
+                else:
+                    # Intentionally do serialize -> deserialize cycle to ensure the same UX as in remote mode.
+                    local_future.future._set_result(_deserialize_value(ser_value))
 
             # Finish std future so wait hooks waiting on it unblock.
             # Success/failure needs to be propagated to std future as well so std wait calls work correctly.
             future_run.finish(is_exception=error is not None)
 
             # Propagate output to consumer futures if any.
-            for consumer_future_id in future.output_consumer_future_ids:
+            for consumer_future_id in local_future.output_consumer_future_ids:
                 consumer_future_run: LocalFutureRun = self._future_runs[
                     consumer_future_id
                 ]
-                consumer_future: LocalFuture = consumer_future_run.local_future
+                consumer_future: LocalFunctionCallFuture = (
+                    consumer_future_run.local_future
+                )
                 consumer_future_output: SerializedValue | None = None
                 if error is None:
                     consumer_future_output = SerializedValue(
@@ -953,21 +883,12 @@ class LocalRunner:
         data dependencies are available in blob store and its start
         time delay has elapsed.
         """
-        if isinstance(future_run, FunctionCallFutureRun):
-            self._start_function_call_future_run(future_run)
-        elif isinstance(future_run, ReturnOutputFutureRun):
-            future_run.start()
-        elif isinstance(future_run, ListFutureRun):
-            self._start_list_future_run(future_run)
-        else:
-            raise InternalError(
-                f"Unexpcted LocalFutureRun subclass: {type(future_run)}"
-            )
+        self._start_function_call_future_run(future_run)
 
     def _start_function_call_future_run(
         self, future_run: FunctionCallFutureRun
     ) -> None:
-        local_future: LocalFuture = future_run.local_future
+        local_future: LocalFunctionCallFuture = future_run.local_future
         metadata: FunctionCallMetadata = local_future.future_metadata
         arg_values: List[Any] = []
         kwarg_values: Dict[str, Any] = {}
@@ -983,24 +904,14 @@ class LocalRunner:
 
         future_run.start(arg_values=arg_values, kwarg_values=kwarg_values)
 
-    def _start_list_future_run(self, future_run: ListFutureRun) -> None:
-        resolved_items: list[Any] = []
-        for item in future_run.items:
-            if isinstance(item, Future):
-                resolved_items.append(
-                    _deserialize_value(self._value_store.get(item._id))
-                )
-            else:
-                resolved_items.append(item)
-
-        future_run.start(resolved_items)
-
     def _create_future_run(
         self,
         future: Future,
         output_serializer_name_override: str | None,
         has_output_type_hint_override: bool,
         output_type_hint_override: Any,
+        is_map_concat: bool,
+        parent_function_name: str,
     ) -> None:
         """Creates future run for the supplied Future created by user.
 
@@ -1019,9 +930,13 @@ class LocalRunner:
             future._coroutine.close()
             future._coroutine = None
 
-        if isinstance(future, ListFuture):
-            self._create_future_run_for_list(
+        if isinstance(future, MapFuture):
+            self._create_future_run_for_map_splitter(
                 future=future,
+                output_serializer_name_override=output_serializer_name_override,
+                has_output_type_hint_override=has_output_type_hint_override,
+                output_type_hint_override=output_type_hint_override,
+                parent_function_name=parent_function_name,
             )
         elif isinstance(future, ReduceOperationFuture):
             self._create_future_run_for_reduce_operation(
@@ -1029,6 +944,7 @@ class LocalRunner:
                 output_serializer_name_override=output_serializer_name_override,
                 has_output_type_hint_override=has_output_type_hint_override,
                 output_type_hint_override=output_type_hint_override,
+                parent_function_name=parent_function_name,
             )
         elif isinstance(future, FunctionCallFuture):
             self._create_future_run_for_function_call(
@@ -1036,62 +952,101 @@ class LocalRunner:
                 output_serializer_name_override=output_serializer_name_override,
                 has_output_type_hint_override=has_output_type_hint_override,
                 output_type_hint_override=output_type_hint_override,
+                is_map_concat=is_map_concat,
             )
         else:
             raise InternalError(f"Unexpected future type: {type(future)}.")
 
-    def _create_future_run_for_list(
+    def _create_future_run_for_map_splitter(
         self,
-        future: ListFuture,
+        future: MapFuture,
+        output_serializer_name_override: str | None,
+        has_output_type_hint_override: bool,
+        output_type_hint_override: Any,
+        parent_function_name: str,
     ) -> None:
-        """Creates ListFutureRun for the supplied future.
+        """Creates FunctionCallFutureRun with is_map_splitter for the supplied MapFuture.
 
-        output_serializer_name_override is not in args because ListFuture
-        cannot be returned from a function.
+        The splitter waits for its inputs to resolve, then creates individual
+        map function calls and a concat future to collect the results.
 
         Raises TensorlakeError on error.
         """
-        if future._metadata.kind != _FutureListKind.MAP_OPERATION:
-            raise InternalError(f"Unsupported ListFuture kind: {future._metadata.kind}")
-        function: Function = get_function(future._metadata.function_name)
-
-        inputs: list[Future | Any]
-        items: list[_TensorlakeFutureWrapper[Future] | Any] | ListFuture = (
-            _unwrap_future(future._items)
+        parent_function: Function = get_function(parent_function_name)
+        user_input_serializer: UserDataSerializer = function_input_serializer(
+            parent_function, app_call=False
         )
-        if isinstance(items, ListFuture):
+
+        items: list[_TensorlakeFutureWrapper[Future] | Any] | Future = _unwrap_future(
+            future._items
+        )
+        if isinstance(items, Future):
             self._check_future_run_for_user_object_exists(items)
-            inputs_future_run: ListFutureRun = self._future_runs[items._id]
-            inputs = inputs_future_run.items
+            splitter_args = [items]
         else:
-            inputs = []
+            splitter_args = []
             for item in items:
                 self._check_future_run_for_user_object_exists(item)
-                inputs.append(_unwrap_future(item))
+                splitter_args.append(_unwrap_future(item))
 
-        outputs: list[Future] = []
-        for input in inputs:
-            mapped_input: FunctionCallFuture = derived_function_call_future(
-                future, function, input
-            )
-            # No output override for list future because it can't be returned from tail call.
-            self._create_future_run(
-                future=mapped_input,
-                output_serializer_name_override=None,
-                has_output_type_hint_override=False,
-                output_type_hint_override=None,
-            )
-            outputs.append(mapped_input)
+        # Non-tail-call splitters have to use their splitter function output serializer.
+        # I.e. an application function with json output serializer doing reduce
+        # operation with reduce function that returns a non-json-serializable
+        # (but picklable) object. `output_serializer_name_override is None`
+        # means this is not a tail call.
+        if output_serializer_name_override is None:
+            splitter_function: Function = get_function(future._function_name)
+            output_serializer_name_override = function_output_serializer(
+                splitter_function, None
+            ).name
 
-        self._future_runs[future._id] = ListFutureRun(
-            local_future=LocalFuture(
+        splitter_metadata: FunctionCallMetadata = FunctionCallMetadata(
+            id=future._id,
+            function_name=parent_function_name,
+            output_serializer_name_override=output_serializer_name_override,
+            output_type_hint_override=output_type_hint_override,
+            has_output_type_hint_override=has_output_type_hint_override,
+            args=[
+                self._function_arg_metadata(arg, user_input_serializer)
+                for arg in splitter_args
+            ],
+            kwargs={},
+            is_map_splitter=True,
+            is_reduce_splitter=False,
+            splitter_function_name=future._function_name,
+            splitter_input_mode=(
+                SPLITTER_INPUT_MODE.ITEM_PER_ARG
+                if isinstance(items, list)
+                else SPLITTER_INPUT_MODE.ITEMS_IN_ONE_ARG
+            ),
+            is_map_concat=False,
+        )
+
+        function_run_request_context: RequestContextHTTPClient = (
+            RequestContextHTTPClient(
+                request_id=_LOCAL_REQUEST_ID,
+                allocation_id=future._id,
+                function_name=parent_function_name,
+                function_run_id=future._id,
+                server_base_url=self._request_context_http_server.base_url,
+                http_client=self._request_context_http_client,
+                blob_store=self._blob_store,
+                logger=self._logger,
+            )
+        )
+
+        self._future_runs[future._id] = FunctionCallFutureRun(
+            local_future=LocalFunctionCallFuture(
                 future=future,
-                future_metadata=None,
+                future_metadata=splitter_metadata,
                 start_delay=future._start_delay,
             ),
             result_queue=self._future_run_result_queue,
             thread_pool=self._future_run_thread_pool,
-            items=outputs,
+            application=self._app,
+            function=parent_function,
+            class_instance=self._class_instance_store.get(parent_function),
+            request_context=function_run_request_context,
         )
 
     def _create_future_run_for_function_call(
@@ -1100,6 +1055,7 @@ class LocalRunner:
         output_serializer_name_override: str | None,
         has_output_type_hint_override: bool,
         output_type_hint_override: Any,
+        is_map_concat: bool,
     ) -> None:
         """Creates LocalFunctionCallFutureRun for the supplied future.
 
@@ -1112,11 +1068,17 @@ class LocalRunner:
 
         metadata: FunctionCallMetadata = FunctionCallMetadata(
             id=future._id,
+            function_name=future._function_name,
             output_serializer_name_override=output_serializer_name_override,
             output_type_hint_override=output_type_hint_override,
             has_output_type_hint_override=has_output_type_hint_override,
             args=[],
             kwargs={},
+            is_map_splitter=False,
+            is_reduce_splitter=False,
+            splitter_function_name=None,
+            is_map_concat=is_map_concat,
+            splitter_input_mode=None,
         )
 
         # Arguments don't inherit serializer overrides because only the
@@ -1147,7 +1109,7 @@ class LocalRunner:
             )
         )
         self._future_runs[future._id] = FunctionCallFutureRun(
-            local_future=LocalFuture(
+            local_future=LocalFunctionCallFuture(
                 future=future,
                 future_metadata=metadata,
                 start_delay=future._start_delay,
@@ -1170,7 +1132,6 @@ class LocalRunner:
         if isinstance(arg, Future):
             return FunctionCallArgumentMetadata(
                 value_id=arg._id,
-                collection=None,
             )
         else:
             value_id: str = _request_scoped_id()
@@ -1184,7 +1145,6 @@ class LocalRunner:
             )
             return FunctionCallArgumentMetadata(
                 value_id=value_id,
-                collection=None,
             )
 
     def _create_future_run_for_reduce_operation(
@@ -1193,66 +1153,102 @@ class LocalRunner:
         output_serializer_name_override: str | None,
         has_output_type_hint_override: bool,
         output_type_hint_override: Any,
+        parent_function_name: str,
     ) -> None:
-        """Creates ReduceExpansionFutureRun for the supplied reduce operation.
+        """Creates FunctionCallFutureRun with is_reduce_splitter for the supplied reduce operation.
+
+        The splitter waits for its inputs (and optional initial value) to resolve,
+        then creates a chain of derived FunctionCallFutures that reduce the inputs.
 
         Raises TensorlakeError on error.
         """
-        function: Function = get_function(future._function_name)
-        inputs: list[Future | Any] = []
-        if future._initial is not _InitialMissing:
-            inputs.append(_unwrap_future(future._initial))
-
-        items: list[_TensorlakeFutureWrapper[Future] | Any] | ListFuture = (
-            _unwrap_future(future._items)
+        parent_function: Function = get_function(parent_function_name)
+        user_input_serializer: UserDataSerializer = function_input_serializer(
+            parent_function, app_call=False
         )
-        if isinstance(items, ListFuture):
+
+        splitter_args: list[Future | Any] = []
+        items: list[_TensorlakeFutureWrapper[Future] | Any] | Future = _unwrap_future(
+            future._items
+        )
+        if isinstance(items, Future):
             self._check_future_run_for_user_object_exists(items)
-            inputs_future_run: ListFutureRun = self._future_runs[items._id]
-            inputs.extend(inputs_future_run.items)
+            splitter_args = [items]
         else:
             for item in items:
                 self._check_future_run_for_user_object_exists(item)
-                inputs.append(_unwrap_future(item))
+                splitter_args.append(_unwrap_future(item))
 
-        if len(inputs) == 0:
-            raise SDKUsageError("reduce of empty iterable with no initial value")
+        splitter_kwargs: dict[str, Any] = {}
+        initial: Any | _InitialMissingType = _unwrap_future(future._initial)
+        if initial is not _InitialMissing:
+            if isinstance(initial, Future):
+                self._check_future_run_for_user_object_exists(initial)
+            splitter_kwargs["initial"] = initial
 
-        reduce_operation_output: Future | Any
-        if len(inputs) == 1:
-            reduce_operation_output = _unwrap_future(inputs[0])
-        else:
-            # Create a chain of function calls to reduce all args one by one.
-            # Ordering of calls is important here. We should reduce ["a", "b", "c", "d"]
-            # using string concat function into "abcd".
+        # Non-tail-call splitters have to use their splitter function output serializer.
+        # I.e. an application function with json output serializer doing reduce
+        # operation with reduce function that returns a non-json-serializable
+        # (but picklable) object.`output_serializer_name_override is None`
+        # means this is not a tail call.
+        if output_serializer_name_override is None:
+            splitter_function: Function = get_function(future._function_name)
+            output_serializer_name_override = function_output_serializer(
+                splitter_function, None
+            ).name
 
-            # inputs now contain at least two items.
-            last_future: FunctionCallFuture = derived_function_call_future(
-                future, function, inputs[0], inputs[1]
-            )
-            for input in inputs[2:]:
-                last_future = derived_function_call_future(
-                    future, function, last_future, input
-                )
-            reduce_operation_output = last_future
-
-        # Don't start any of the futures we create here. They will be started automatically
-        # when reduce_operation_output gets returned from tail call.
-
-        metadata: ReturnOutputFutureMetadata = ReturnOutputFutureMetadata(
+        splitter_metadata: FunctionCallMetadata = FunctionCallMetadata(
+            id=future._id,
+            function_name=parent_function_name,
             output_serializer_name_override=output_serializer_name_override,
             output_type_hint_override=output_type_hint_override,
             has_output_type_hint_override=has_output_type_hint_override,
+            args=[],
+            kwargs={},
+            is_map_splitter=False,
+            is_reduce_splitter=True,
+            splitter_function_name=future._function_name,
+            splitter_input_mode=(
+                SPLITTER_INPUT_MODE.ITEM_PER_ARG
+                if isinstance(items, list)
+                else SPLITTER_INPUT_MODE.ITEMS_IN_ONE_ARG
+            ),
+            is_map_concat=False,
         )
-        self._future_runs[future._id] = ReturnOutputFutureRun(
-            local_future=LocalFuture(
+
+        for arg in splitter_args:
+            splitter_metadata.args.append(
+                self._function_arg_metadata(arg, user_input_serializer)
+            )
+        for key, arg in splitter_kwargs.items():
+            splitter_metadata.kwargs[key] = self._function_arg_metadata(
+                arg, user_input_serializer
+            )
+
+        function_run_request_context: RequestContextHTTPClient = (
+            RequestContextHTTPClient(
+                request_id=_LOCAL_REQUEST_ID,
+                allocation_id=future._id,
+                function_name=parent_function_name,
+                function_run_id=future._id,
+                server_base_url=self._request_context_http_server.base_url,
+                http_client=self._request_context_http_client,
+                blob_store=self._blob_store,
+                logger=self._logger,
+            )
+        )
+        self._future_runs[future._id] = FunctionCallFutureRun(
+            local_future=LocalFunctionCallFuture(
                 future=future,
-                future_metadata=metadata,
+                future_metadata=splitter_metadata,
                 start_delay=future._start_delay,
             ),
             result_queue=self._future_run_result_queue,
             thread_pool=self._future_run_thread_pool,
-            output=reduce_operation_output,
+            application=self._app,
+            function=parent_function,
+            class_instance=self._class_instance_store.get(parent_function),
+            request_context=function_run_request_context,
         )
 
     def _check_future_run_for_user_object_exists(

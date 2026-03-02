@@ -252,11 +252,12 @@ def test_tuple_arg_and_return_value_internal(
 
 
 class TestRegularFunctionCallSignatures(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_function_with_no_args(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             test_function_with_no_args_api, is_remote, None
         )
@@ -264,9 +265,6 @@ class TestRegularFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_function_returning_nothing(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             test_function_returning_nothing_api, is_remote, None
         )
@@ -274,9 +272,6 @@ class TestRegularFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_only_positional_args(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             test_only_positional_args_api,
             is_remote,
@@ -286,9 +281,6 @@ class TestRegularFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_only_kwargs(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             test_only_kwargs_api,
             is_remote,
@@ -298,9 +290,6 @@ class TestRegularFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_mixed_args(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request1: Request = run_application(
             test_mixed_args_api,
             is_remote,
@@ -310,9 +299,6 @@ class TestRegularFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_default_args(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             test_default_args_api,
             is_remote,
@@ -322,9 +308,6 @@ class TestRegularFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_file_args(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             test_file_args_api,
             is_remote,
@@ -334,9 +317,6 @@ class TestRegularFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_file_return_value(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             test_file_return_value_api,
             is_remote,
@@ -346,9 +326,6 @@ class TestRegularFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_pydantic_args(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             test_pydantic_args_api,
             is_remote,
@@ -358,9 +335,6 @@ class TestRegularFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_pydantic_return_value(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             test_pydantic_return_value_api,
             is_remote,
@@ -370,9 +344,6 @@ class TestRegularFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_set_arg_and_return_value(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             test_set_arg_and_return_value_api,
             is_remote,
@@ -381,9 +352,6 @@ class TestRegularFunctionCallSignatures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_tuple_arg_and_return_value(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             test_tuple_arg_and_return_value_api,
             is_remote,

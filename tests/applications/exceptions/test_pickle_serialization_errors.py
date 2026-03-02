@@ -59,11 +59,12 @@ def return_unpicklable_object() -> NotUnpicklableObject:
 
 
 class TestPickleSerializationErrors(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_call_function_passing_not_picklable_object(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             application_call_function_passing_not_picklable_object,
             is_remote,
@@ -76,9 +77,6 @@ class TestPickleSerializationErrors(unittest.TestCase):
         "Non-local error propagation logic is not working correctly yet in both modes."
     )
     def test_call_function_that_returns_unpicklable_object(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             application_call_function_that_returns_unpicklable_object,
             is_remote,

@@ -38,11 +38,12 @@ def func_get_request_id(_: int) -> str:
 
 
 class TestUseRequestIdFromFunction(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_get_expected_request_id(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(func_get_request_id, is_remote, 11)
         self.assertEqual(request.id, request.output())
 
@@ -61,11 +62,12 @@ def mt_get_request_id(_: int) -> str:
 
 
 class TestUseRequestIdFromChildThread(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_get_expected_request_id(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(mt_get_request_id, is_remote, 11)
         self.assertEqual(request.id, request.output())
 
@@ -82,11 +84,12 @@ def mp_get_request_id(_: int) -> str:
 
 
 class TestUseRequestIdFromChildProcess(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_get_expected_request_id(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(mp_get_request_id, is_remote, 11)
         self.assertEqual(request.id, request.output())
 

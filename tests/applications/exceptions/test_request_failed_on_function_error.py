@@ -25,11 +25,12 @@ def application_function(_: str) -> str:
 
 
 class TestRequestFailedRaisedOnFunctionError(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_expected_exception(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             application_function,
             is_remote,

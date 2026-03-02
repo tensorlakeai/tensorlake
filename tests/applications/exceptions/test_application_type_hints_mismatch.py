@@ -35,11 +35,12 @@ def application_returning_object_that_mismatch_return_type_hint() -> None:
 
 
 class TestApplicationTypeHintsMismatch(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_call_application_function_with_wrong_payload(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         # The request didn't start because its application payload couldn't be serialized.
         with self.assertRaises(SerializationError) as context:
             run_application(
@@ -56,9 +57,6 @@ class TestApplicationTypeHintsMismatch(unittest.TestCase):
     def test_call_application_function_that_returns_wrong_value(
         self, _, is_remote: bool
     ):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             application_returning_object_that_mismatch_return_type_hint,
             is_remote,

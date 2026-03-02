@@ -96,6 +96,10 @@ async def store_sum_as_file(total: int) -> File:
 
 
 class TestAsyncComplexGraph(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     def test_local_api_call_of_complex_graph_produces_expected_outputs(self):
         for function in ["test_graph_api_reduce", "test_graph_api_fan_in"]:
             request = run_local_application(
@@ -108,7 +112,6 @@ class TestAsyncComplexGraph(unittest.TestCase):
             self.assertEqual(file.content, b"Total sum: 116")
 
     def test_remote_api_call_of_complex_graph_produces_expected_outputs(self):
-        deploy_applications(__file__)
         for function in ["test_graph_api_reduce", "test_graph_api_fan_in"]:
             request: Request = run_remote_application(
                 function,

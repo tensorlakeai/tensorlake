@@ -1,6 +1,4 @@
-import hashlib
-from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any
 
 from tensorlake.applications import (
     Function,
@@ -19,17 +17,9 @@ from tensorlake.applications.function.user_data_serializer import (
     serialize_value,
 )
 from tensorlake.applications.interface.futures import (
-    FunctionCallFuture,
-    Future,
-    ListFuture,
-    ReduceOperationFuture,
     _request_scoped_id,
-    _TensorlakeFutureWrapper,
-    _unwrap_future,
 )
 from tensorlake.applications.metadata import (
-    CollectionItemMetadata,
-    CollectionMetadata,
     FunctionCallArgumentMetadata,
     FunctionCallMetadata,
     ValueMetadata,
@@ -50,183 +40,17 @@ from ..proto.function_executor_pb2 import (
     FunctionRef,
     SerializedObjectInsideBLOB,
 )
+from .event_loop.output_events import (
+    FunctionCallRef,
+    OutputEventCreateFunctionCall,
+    SpecialFunctionCallSettings,
+)
 from .http_request_parse import (
     parse_application_function_call_arg_from_single_payload,
     parse_application_function_call_args_from_http_request,
     parse_application_function_call_args_from_multipart_form_data,
 )
 from .value import SerializedValue, Value
-
-
-@dataclass
-class FutureInfo:
-    # Original Future created by user code or internal Future created by SDK i.e.
-    # a future per map function call, or a future per reduce operation step.
-    future: Future
-    # The future's durable ID.
-    # ReduceOp and ListFuture are not visible to Server but we still
-    # compute durable IDs because this allows to detect changes not visible
-    # to Server and also avoids us using a recursive durable ID compute algorithm.
-    durable_id: str
-    # Set if this future is ListFuture.
-    map_future_output: List[FunctionCallFuture] | None
-    # Set if this is reduce operation future. None can be a valid output.
-    reduce_future_output: Future | Any | None
-
-
-def future_durable_id(
-    future: Future,
-    parent_function_call_id: str,
-    previous_future_durable_id: str,
-    future_infos: dict[str, FutureInfo],
-) -> str:
-    """Return durable ID for the supplied Future.
-
-    parent_function_call_id is durable ID of the function call that created the Future.
-    previous_durable_id is durable ID of the previous Future created by the parent function call.
-    future_infos is a mapping from Future IDs to their FutureInfo.
-
-    Durable Future IDs are the same across different executions (allocations) of the same parent function call
-    if the parent function call is deterministic, i.e. it creates the same Futures in the same order each
-    time it's executed. If this is not the case then the durable Future IDs will differ between executions, which may
-    lead to re-execution of some function calls even if their inputs are the same as in a previous execution.
-
-    To produce a durable Future ID, we compute it as a hash of:
-    - parent_function_call_id, this scopes each durable ID to its parent function call and allows to generate them locally while running
-      the parent function call.
-    - previous_durable_id, this ties each Future durable ID to the previous Future created by the parent function call.
-      If while replaying the parent function call it follows a different execution path (i.e. running a different function call) then this new
-      function call and all next function calls won't be replayed because their durable IDs will be different due to different previous_durable_id
-      in their durable ID hash. This ensures that any drift in the execution path gets detected and gets handled according to the replay mode used.
-    - Future-specific metadata. This ensures that we detect changes inside each Future, i.e. a change of called function name.
-    - Deterministically ordered durable IDs of all immediate child Futures.
-      This ensures that changes in the structure of the Future tree leads to different durable IDs of its nodes
-      starting from root so it's easy to detect a drift on Server side just by comparing durable ID of root.
-
-    We're deliberately not hashing entire user values (i.e. function call args) to produce their durable IDs. This is because hashing entire user values
-    is an expensive operation (i.e. hashing gigabytes of arbitrary user supplied objects which are function call parameters).
-    This also results in better UX, i.e. this allows:
-    - Seamless Schema Evolution: Users may want to change the schema of function parameters (e.g. add a new field with a default value
-      to a pydantic model).
-    - Use of non-deterministic functions: Users may want to use non-deterministic functions (e.g. functions that return current time or random values)
-      inside otherwise deterministic function call trees.
-    - To avoid "Serialization Flakiness": Strict equality checks on serialized data are fragile and can lead to false positive
-      re-executions due to minor, non-semantic changes in serialization (e.g. different field ordering in protobufs, or insertion order in dicts).
-    - To decouple Logic from Data. We adhere to a philosophy of being Strict on Control Flow but Lenient on Data. "The History is the Source of Truth."
-
-    Raises TensorlakeError on error.
-    """
-    # Warning: any change of ordering of operations in this function may lead to different durable IDs being generated
-    # which may lead to re-execution of function calls on Server side even if nothing changed in the future tree.
-    durable_id_attrs: list[str] = [
-        parent_function_call_id,
-        previous_future_durable_id,
-    ]
-
-    if isinstance(future, FunctionCallFuture):
-        # Future specific metadata, part of durable ID.
-        durable_id_attrs.extend(["FunctionCall", future._function_name])
-        for arg in future._args:
-            _add_future_durable_id(
-                value=arg,
-                future_infos=future_infos,
-                durable_id_attrs=durable_id_attrs,
-            )
-
-        # Iterate over sorted dict keys to ensure deterministic hash key order.
-        sorted_kwarg_keys: list[str] = sorted(future._kwargs.keys())
-        for kwarg_name in sorted_kwarg_keys:
-            kwarg_value: _TensorlakeFutureWrapper[Future] | Any = future._kwargs[
-                kwarg_name
-            ]
-            _add_future_durable_id(
-                value=kwarg_value,
-                future_infos=future_infos,
-                durable_id_attrs=durable_id_attrs,
-            )
-    elif isinstance(future, ListFuture):
-        # Future specific metadata, part of durable ID.
-        durable_id_attrs.append(future._metadata.durability_key)
-        items: ListFuture | list[_TensorlakeFutureWrapper[Future] | Any] = (
-            _unwrap_future(future._items)
-        )
-        if isinstance(items, ListFuture):
-            _add_future_durable_id(
-                value=items,
-                future_infos=future_infos,
-                durable_id_attrs=durable_id_attrs,
-            )
-        else:
-            for item in items:
-                _add_future_durable_id(
-                    value=item,
-                    future_infos=future_infos,
-                    durable_id_attrs=durable_id_attrs,
-                )
-
-    elif isinstance(future, ReduceOperationFuture):
-        # Future specific metadata, part of durable ID.
-        durable_id_attrs.extend(["ReduceOperation", future._function_name])
-
-        _add_future_durable_id(
-            value=future._initial,
-            future_infos=future_infos,
-            durable_id_attrs=durable_id_attrs,
-        )
-
-        items: ListFuture | list[_TensorlakeFutureWrapper[Future] | Any] = (
-            _unwrap_future(future._items)
-        )
-        if isinstance(items, ListFuture):
-            _add_future_durable_id(
-                value=items,
-                future_infos=future_infos,
-                durable_id_attrs=durable_id_attrs,
-            )
-        else:
-            for item in items:
-                _add_future_durable_id(
-                    value=item,
-                    future_infos=future_infos,
-                    durable_id_attrs=durable_id_attrs,
-                )
-    else:
-        raise InternalError(f"Unexpected Future type: {type(future)}")
-
-    return _sha256_hash_strings(durable_id_attrs)
-
-
-def _add_future_durable_id(
-    value: _TensorlakeFutureWrapper[Future] | Any,
-    future_infos: dict[str, FutureInfo],
-    durable_id_attrs: list[str],
-) -> None:
-    """Adds durable ID of the given Future to durable_attrs if the value is a Future. Does nothing otherwise.
-
-    Raises InternalError if the value is a Future but its durable ID is not found in future_durable_ids.
-    """
-    # We don't hash user provided values. Only hash Futures to verify tree structure.
-    value: Future | Any = _unwrap_future(value)
-    if isinstance(value, Future):
-        value_future_info: FutureInfo | None = future_infos.get(value._id, None)
-        if value_future_info is None:
-            raise InternalError(
-                f"FutureInfo for Future with id {value._id} not found in future_infos."
-            )
-        durable_id_attrs.append(value_future_info.durable_id)
-
-
-def _sha256_hash_strings(strings: list[str]) -> str:
-    """Returns sha256 hash of the concatenation of strings in the given list.
-
-    If the strings are sha256 hashes, the result is also a high quality sha256 hash
-    of the original hashed values. See https://en.wikipedia.org/wiki/Merkle_tree.
-    """
-    sha256 = hashlib.sha256()
-    for s in strings:
-        sha256.update(s.encode("utf-8"))
-        sha256.update(b"|")  # Separator to avoid collisions of neighbouring strings.
-    return sha256.hexdigest()
 
 
 def serialize_user_value(
@@ -248,228 +72,11 @@ def serialize_user_value(
     )
 
 
-def replace_user_values_with_serialized_values(
-    future: FunctionCallFuture,
-    future_infos: dict[str, FutureInfo],
-) -> Dict[str, SerializedValue]:
-    """Replaces user values in the given FunctionCallFuture with their SerializedValues.
-
-    The provided future is modified in-place with each user supplied value being
-    SerializedValue instead of the original user object.
-
-    Returns a mapping from value ID to SerializedValue for all serialized user values in the tree.
-
-    Raises SerializationError if serialization of any value fails.
-    Raises TensorlakeError for other errors.
-    """
-    serialized_values: Dict[str, SerializedValue] = {}
-
-    def to_serialized_value(
-        future_or_value: _TensorlakeFutureWrapper[Future] | Any,
-        value_serializer: UserDataSerializer,
-    ) -> Any | SerializedValue:
-        future_or_value: Future | Any = _unwrap_future(future_or_value)
-        if isinstance(future_or_value, ReduceOperationFuture):
-            future_info: FutureInfo = future_infos[future_or_value._id]
-            if not isinstance(future_info.reduce_future_output, Future):
-                # Replace the ReduceOperationFuture with its output value and upload.
-                # This simplifies execution plan update generation.
-                future_or_value = future_info.reduce_future_output
-            else:
-                return future_or_value
-        elif isinstance(future_or_value, Future):
-            return future_or_value
-
-        # This is user supplied value now, need to serialize it.
-        future_or_value: Any
-        serialized_value: SerializedValue = serialize_user_value(
-            value=future_or_value,
-            serializer=value_serializer,
-            type_hint=type(future_or_value),
-        )
-        serialized_values[serialized_value.metadata.id] = serialized_value
-        return serialized_value
-
-    args_serializer: UserDataSerializer = function_input_serializer(
-        get_function(future._function_name), app_call=False
-    )
-    # Iterating over list copy to allow modifying the original list.
-    for index, arg in enumerate(list(future._args)):
-        future._args[index] = to_serialized_value(
-            future_or_value=arg, value_serializer=args_serializer
-        )
-    # Iterating over dict copy to allow modifying the original list.
-    for kwarg_name, kwarg_value in dict(future._kwargs).items():
-        future._kwargs[kwarg_name] = to_serialized_value(
-            future_or_value=kwarg_value, value_serializer=args_serializer
-        )
-
-    return serialized_values
-
-
-def to_execution_plan_updates(
-    future: FunctionCallFuture,
-    uploaded_serialized_objects: Dict[str, SerializedObjectInsideBLOB],
-    output_serializer_name_override: str | None,
-    has_output_type_hint_override: bool,
-    output_type_hint_override: Any,
-    function_ref: FunctionRef,
-    future_infos: dict[str, FutureInfo],
-) -> ExecutionPlanUpdates:
-    """Constructs ExecutionPlanUpdates proto for the supplied function call future.
-
-    Each user supplied value in the args must be a SerializedValue present in uploaded_serialized_objects.
-    function_call_ids is a mapping from FunctionCallFuture IDs to their durable IDs for all FunctionCallFutures
-    in the tree rooted at function_call_future.
-
-    Raises TensorlakeError on error.
-    """
-    updates: List[ExecutionPlanUpdate] = []
-
-    updates.append(
-        _function_call_execution_plan_update(
-            function_call_future=future,
-            uploaded_serialized_objects=uploaded_serialized_objects,
-            output_serializer_name_override=output_serializer_name_override,
-            has_output_type_hint_override=has_output_type_hint_override,
-            output_type_hint_override=output_type_hint_override,
-            function_ref=function_ref,
-            future_infos=future_infos,
-        )
-    )
-
-    return ExecutionPlanUpdates(
-        updates=updates,
-        root_function_call_id=future._id,
-    )
-
-
-def _function_call_execution_plan_update(
-    function_call_future: FunctionCallFuture,
-    uploaded_serialized_objects: Dict[str, SerializedObjectInsideBLOB],
-    output_serializer_name_override: str | None,
-    has_output_type_hint_override: bool,
-    output_type_hint_override: Any,
-    function_ref: FunctionRef,
-    future_infos: dict[str, FutureInfo],
-) -> ExecutionPlanUpdate:
-    metadata: FunctionCallMetadata = FunctionCallMetadata(
-        id=function_call_future._id,
-        output_serializer_name_override=output_serializer_name_override,
-        output_type_hint_override=output_type_hint_override,
-        has_output_type_hint_override=has_output_type_hint_override,
-        args=[],
-        kwargs={},
-    )
-    function_pb_args: List[FunctionArg] = []
-
-    def process_function_call_argument(
-        arg: SerializedValue | _TensorlakeFutureWrapper[Future],
-    ) -> FunctionCallArgumentMetadata:
-        arg: SerializedValue | Future = _unwrap_future(arg)
-        if isinstance(arg, SerializedValue):
-            function_pb_args.append(
-                FunctionArg(
-                    value=uploaded_serialized_objects[arg.metadata.id],
-                )
-            )
-            return FunctionCallArgumentMetadata(
-                value_id=arg.metadata.id,
-                collection=None,
-            )
-        elif isinstance(arg, ListFuture):
-            _embed_collection_into_function_pb_args(
-                future=arg,
-                function_pb_args=function_pb_args,
-                future_infos=future_infos,
-            )
-            return FunctionCallArgumentMetadata(
-                value_id=None,
-                collection=_to_collection_metadata(arg, future_infos),
-            )
-        elif isinstance(arg, FunctionCallFuture):
-            arg_durable_id: str = future_infos[arg._id].durable_id
-            function_pb_args.append(
-                FunctionArg(
-                    function_call_id=arg_durable_id,
-                )
-            )
-            return FunctionCallArgumentMetadata(
-                value_id=arg_durable_id,
-                collection=None,
-            )
-        elif isinstance(arg, ReduceOperationFuture):
-            future_info: FutureInfo = future_infos[arg._id]
-            if isinstance(future_info.reduce_future_output, Future):
-                # FIXME: recursion, should be an iterative algorithm.
-                return process_function_call_argument(future_info.reduce_future_output)
-            else:
-                raise InternalError(
-                    "ReduceOperationFuture with value output should have been replaced by its output value by now."
-                )
-        else:
-            raise InternalError(
-                f"Unexpected type of function call argument: {type(arg)}"
-            )
-
-    for arg in function_call_future._args:
-        metadata.args.append(process_function_call_argument(arg))
-
-    for kwarg_name, kwarg_value in function_call_future._kwargs.items():
-        metadata.kwargs[kwarg_name] = process_function_call_argument(kwarg_value)
-
-    return ExecutionPlanUpdate(
-        function_call=FunctionCall(
-            id=function_call_future._id,
-            target=FunctionRef(
-                namespace=function_ref.namespace,
-                application_name=function_ref.application_name,
-                function_name=function_call_future._function_name,
-                application_version=function_ref.application_version,
-            ),
-            args=function_pb_args,
-            call_metadata=serialize_metadata(metadata),
-        )
-    )
-
-
-def _to_collection_metadata(
-    future: ListFuture, future_infos: dict[str, FutureInfo]
-) -> CollectionMetadata:
-    collection_metadata: CollectionMetadata = CollectionMetadata(items=[])
-    future_info: FutureInfo = future_infos[future._id]
-
-    for mapped_item in future_info.map_future_output:
-        mapped_item: FunctionCallFuture
-        collection_metadata.items.append(
-            CollectionItemMetadata(
-                value_id=future_infos[mapped_item._id].durable_id,
-                collection=None,
-            )
-        )
-
-    return collection_metadata
-
-
-def _embed_collection_into_function_pb_args(
-    future: ListFuture,
-    function_pb_args: List[FunctionArg],
-    future_infos: dict[str, FutureInfo],
-) -> None:
-    for output_item in future_infos[future._id].map_future_output:
-        output_item: FunctionCallFuture
-        function_pb_args.append(
-            FunctionArg(
-                function_call_id=future_infos[output_item._id].durable_id,
-            )
-        )
-
-
 def deserialize_application_function_call_args(
     function: Function,
     payload: SerializedValue,
     function_instance_arg: Any | None,
-) -> tuple[List[Any], Dict[str, Any]]:
+) -> tuple[list[Any], dict[str, Any]]:
     """Returns a mapping from application function positional argument index or keyword to its deserialized Value.
 
     Raises DeserializationError if deserialization of any argument fails.
@@ -532,7 +139,7 @@ def deserialize_application_function_call_args(
 
 def validate_and_deserialize_function_call_metadata(
     serialized_function_call_metadata: bytes,
-    serialized_args: List[SerializedValue],
+    serialized_args: list[SerializedValue],
     function: Function,
     logger: InternalLogger,
 ) -> FunctionCallMetadata | None:
@@ -577,13 +184,13 @@ def validate_and_deserialize_function_call_metadata(
 
 
 def deserialize_sdk_function_call_args(
-    serialized_args: List[SerializedValue],
-) -> Dict[str, Value]:
+    serialized_args: list[SerializedValue],
+) -> dict[str, Value]:
     """Returns a mapping from serialized argument IDs to their deserialized Values.
 
     Raises TensorlakeError on error.
     """
-    args: Dict[str, Value] = {}
+    args: dict[str, Value] = {}
     for ix, serialized_arg in enumerate(serialized_args):
         if serialized_arg.metadata is None:
             raise InternalError("SDK function call arguments must have metadata.")
@@ -602,9 +209,9 @@ def deserialize_sdk_function_call_args(
 
 def reconstruct_sdk_function_call_args(
     function_call_metadata: FunctionCallMetadata,
-    arg_values: Dict[str, Value],
+    arg_values: dict[str, Value],
     function_instance_arg: Any | None,
-) -> tuple[List[Any], Dict[str, Any]]:
+) -> tuple[list[Any], dict[str, Any]]:
     """Returns function call args and kwargs reconstructed from arg_values."""
     args, kwargs = _reconstruct_sdk_function_call_args(
         function_call_metadata=function_call_metadata,
@@ -619,10 +226,10 @@ def reconstruct_sdk_function_call_args(
 
 def _reconstruct_sdk_function_call_args(
     function_call_metadata: FunctionCallMetadata,
-    arg_values: Dict[str, Value],
-) -> tuple[List[Any], Dict[str, Any]]:
-    args: List[Any] = []
-    kwargs: Dict[str, Any] = {}
+    arg_values: dict[str, Value],
+) -> tuple[list[Any], dict[str, Any]]:
+    args: list[Any] = []
+    kwargs: dict[str, Any] = {}
 
     for arg_metadata in function_call_metadata.args:
         args.append(_reconstruct_function_arg_value(arg_metadata, arg_values))
@@ -632,32 +239,127 @@ def _reconstruct_sdk_function_call_args(
 
 
 def _reconstruct_function_arg_value(
-    arg_metadata: FunctionCallArgumentMetadata, arg_values: Dict[str, Value]
+    arg_metadata: FunctionCallArgumentMetadata, arg_values: dict[str, Value]
 ) -> Any:
     """Reconstructs the original value from function arg metadata."""
-    # NB: This code needs to be in sync with LocalRunner where it's doing a similar thing.
-    if arg_metadata.collection is None:
-        return arg_values[arg_metadata.value_id].object
-    else:
-        return _reconstruct_collection_value(arg_metadata.collection, arg_values)
+    return arg_values[arg_metadata.value_id].object
 
 
-def _reconstruct_collection_value(
-    collection_metadata: CollectionMetadata, arg_values: Dict[str, Value]
-) -> List[Any]:
-    """Reconstructs the original values from the supplied collection metadata."""
-    # NB: This code needs to be in sync with LocalRunner where it's doing a similar thing.
-    result: list[Any] = []
-    stack: list[tuple[CollectionMetadata, list[Any]]] = [(collection_metadata, result)]
-    while len(stack) > 0:
-        collection_metadata, collection_values = stack.pop()
+_OutputEventArgValueType = Any | FunctionCallRef
+_OutputEventArgSerializedValueType = SerializedValue | FunctionCallRef
 
-        for item in collection_metadata.items:
-            if item.collection is None:
-                collection_values.append(arg_values[item.value_id].object)
-            else:
-                item_collection: list[Any] = []
-                stack.append((item.collection, item_collection))
-                collection_values.append(item_collection)
 
-    return result
+def serialize_output_event_args(
+    args: list[_OutputEventArgValueType],
+    kwargs: dict[str, _OutputEventArgValueType],
+    function_name: str,
+) -> tuple[
+    list[_OutputEventArgSerializedValueType],
+    dict[str, _OutputEventArgSerializedValueType],
+    dict[str, SerializedValue],
+]:
+    """Serializes raw values in output event args, passes refs through unchanged.
+
+    Returns (serialized_args, serialized_kwargs, serialized_values_for_blob_upload).
+
+    Raises SerializationError if serialization of any value fails.
+    """
+    serialized_values: dict[str, SerializedValue] = {}
+    args_serializer: UserDataSerializer = function_input_serializer(
+        get_function(function_name), app_call=False
+    )
+
+    def serialize_arg(
+        arg: Any | FunctionCallRef,
+    ) -> SerializedValue | FunctionCallRef:
+        if isinstance(arg, FunctionCallRef):
+            return arg
+        serialized_value: SerializedValue = serialize_user_value(
+            value=arg, serializer=args_serializer, type_hint=type(arg)
+        )
+        serialized_values[serialized_value.metadata.id] = serialized_value
+        return serialized_value
+
+    serialized_args = [serialize_arg(a) for a in args]
+    serialized_kwargs = {k: serialize_arg(v) for k, v in kwargs.items()}
+    return serialized_args, serialized_kwargs, serialized_values
+
+
+def output_event_to_execution_plan_updates(
+    output_event: OutputEventCreateFunctionCall,
+    serialized_args: list[SerializedValue | FunctionCallRef],
+    serialized_kwargs: dict[str, SerializedValue | FunctionCallRef],
+    uploaded_serialized_objects: dict[str, SerializedObjectInsideBLOB],
+    output_serializer_name_override: str | None,
+    has_output_type_hint_override: bool,
+    output_type_hint_override: Any,
+    function_ref: FunctionRef,
+    settings: SpecialFunctionCallSettings | None,
+) -> ExecutionPlanUpdates:
+    """Constructs ExecutionPlanUpdates proto from an OutputEventCreateFunctionCall and serialized args.
+
+    Raises TensorlakeError on error.
+    """
+    metadata: FunctionCallMetadata = FunctionCallMetadata(
+        id=output_event.durable_id,
+        function_name=output_event.function_name,
+        output_serializer_name_override=output_serializer_name_override,
+        output_type_hint_override=output_type_hint_override,
+        has_output_type_hint_override=has_output_type_hint_override,
+        args=[],
+        kwargs={},
+        is_map_splitter=settings.is_map_splitter if settings else False,
+        splitter_function_name=settings.splitter_function_name if settings else None,
+        splitter_input_mode=(
+            settings.splitter_input_mode.value
+            if settings and settings.splitter_input_mode
+            else None
+        ),
+        is_map_concat=settings.is_map_concat if settings else False,
+        is_reduce_splitter=settings.is_reduce_splitter if settings else False,
+    )
+    function_pb_args: list[FunctionArg] = []
+
+    def process_arg(
+        arg: SerializedValue | FunctionCallRef,
+    ) -> FunctionCallArgumentMetadata:
+        if isinstance(arg, SerializedValue):
+            function_pb_args.append(
+                FunctionArg(value=uploaded_serialized_objects[arg.metadata.id])
+            )
+            return FunctionCallArgumentMetadata(
+                value_id=arg.metadata.id,
+            )
+        elif isinstance(arg, FunctionCallRef):
+            function_pb_args.append(FunctionArg(function_call_id=arg.durable_id))
+            return FunctionCallArgumentMetadata(
+                value_id=arg.durable_id,
+            )
+        else:
+            raise InternalError(
+                f"Unexpected type of serialized output event argument: {type(arg)}"
+            )
+
+    for arg in serialized_args:
+        metadata.args.append(process_arg(arg))
+    for kwarg_name, kwarg_value in serialized_kwargs.items():
+        metadata.kwargs[kwarg_name] = process_arg(kwarg_value)
+
+    return ExecutionPlanUpdates(
+        updates=[
+            ExecutionPlanUpdate(
+                function_call=FunctionCall(
+                    id=output_event.durable_id,
+                    target=FunctionRef(
+                        namespace=function_ref.namespace,
+                        application_name=function_ref.application_name,
+                        function_name=output_event.function_name,
+                        application_version=function_ref.application_version,
+                    ),
+                    args=function_pb_args,
+                    call_metadata=serialize_metadata(metadata),
+                )
+            )
+        ],
+        root_function_call_id=output_event.durable_id,
+    )

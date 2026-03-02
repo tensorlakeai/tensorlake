@@ -284,87 +284,67 @@ class TestSyncAsyncCalls(unittest.TestCase):
     these calls are valid.
     """
 
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_sync_app_calls_sync(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(sync_app_calls_sync, is_remote, 5)
         self.assertEqual(request.output(), 15)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_calls_async(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(async_app_calls_async, is_remote, 5)
         self.assertEqual(request.output(), 15)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_calls_sync(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(async_app_calls_sync, is_remote, 5)
         self.assertEqual(request.output(), 15)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_sync_app_calls_async(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(sync_app_calls_async, is_remote, 5)
         self.assertEqual(request.output(), 15)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_calls_mixed(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(async_app_calls_mixed, is_remote, 5)
         self.assertEqual(request.output(), 15)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_calls_mixed_reversed(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(async_app_calls_mixed_reversed, is_remote, 5)
         self.assertEqual(request.output(), 15)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_sync_app_calls_mixed(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(sync_app_calls_mixed, is_remote, 5)
         self.assertEqual(request.output(), 15)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_sync_app_calls_mixed_reversed(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(sync_app_calls_mixed_reversed, is_remote, 5)
         self.assertEqual(request.output(), 15)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_async_map(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(async_app_async_map, is_remote, [1, 2, 3])
         self.assertEqual(request.output(), [2, 4, 6])
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_sync_map(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(async_app_sync_map, is_remote, [1, 2, 3])
         self.assertEqual(request.output(), [2, 4, 6])
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_sync_app_async_map(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(sync_app_async_map, is_remote, [1, 2, 3])
         self.assertEqual(request.output(), [2, 4, 6])
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_async_reduce(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_app_async_reduce, is_remote, [1, 2, 3, 4]
         )
@@ -372,8 +352,6 @@ class TestSyncAsyncCalls(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_sync_reduce(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_app_sync_reduce, is_remote, [1, 2, 3, 4]
         )
@@ -381,8 +359,6 @@ class TestSyncAsyncCalls(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_sync_app_async_reduce(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             sync_app_async_reduce, is_remote, [1, 2, 3, 4]
         )
@@ -390,8 +366,6 @@ class TestSyncAsyncCalls(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_async_map_then_reduce(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_app_async_map_then_reduce, is_remote, [1, 2, 3, 4]
         )
@@ -399,8 +373,6 @@ class TestSyncAsyncCalls(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_sync_map_then_async_reduce(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_app_sync_map_then_async_reduce, is_remote, [1, 2, 3, 4]
         )
@@ -408,8 +380,6 @@ class TestSyncAsyncCalls(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_sync_app_async_map_then_sync_reduce(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             sync_app_async_map_then_sync_reduce, is_remote, [1, 2, 3, 4]
         )
@@ -417,29 +387,21 @@ class TestSyncAsyncCalls(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_returns_future(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(async_app_returns_future, is_remote, 5)
         self.assertEqual(request.output(), 10)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_sync_app_returns_future(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(sync_app_returns_future, is_remote, 5)
         self.assertEqual(request.output(), 10)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_returns_sync_future(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(async_app_returns_sync_future, is_remote, 5)
         self.assertEqual(request.output(), 10)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_passes_coroutine_to_sync(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_app_passes_coroutine_to_sync, is_remote, 5
         )
@@ -447,8 +409,6 @@ class TestSyncAsyncCalls(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_passes_coroutine_to_async(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_app_passes_coroutine_to_async, is_remote, 5
         )
@@ -456,15 +416,11 @@ class TestSyncAsyncCalls(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_sync_app_passes_future_to_sync(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(sync_app_passes_future_to_sync, is_remote, 5)
         self.assertEqual(request.output(), 15)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_passes_sync_future_to_async(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_app_passes_sync_future_to_async, is_remote, 5
         )
@@ -472,8 +428,6 @@ class TestSyncAsyncCalls(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_chains_coroutines_and_futures(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_app_chains_coroutines_and_futures, is_remote, 5
         )
@@ -481,22 +435,16 @@ class TestSyncAsyncCalls(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_sync_app_chains_futures(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(sync_app_chains_futures, is_remote, 5)
         self.assertEqual(request.output(), 20)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_await_sync_coroutine(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(async_app_await_sync_coroutine, is_remote, 5)
         self.assertEqual(request.output(), 10)
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_create_task_from_sync_coroutine(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_app_create_task_from_sync_coroutine, is_remote, 5
         )
@@ -504,8 +452,6 @@ class TestSyncAsyncCalls(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_gather_sync_coroutines(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_app_gather_sync_coroutines, is_remote, 5
         )
@@ -513,8 +459,6 @@ class TestSyncAsyncCalls(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_coroutine_returns_same_object(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_app_coroutine_returns_same_object, is_remote, 5
         )
@@ -522,8 +466,6 @@ class TestSyncAsyncCalls(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_app_pass_sync_coroutine_as_arg(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_app_pass_sync_coroutine_as_arg, is_remote, 5
         )
@@ -531,8 +473,6 @@ class TestSyncAsyncCalls(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_sync_app_coroutine_raises(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(sync_app_coroutine_raises, is_remote, 5)
         self.assertEqual(request.output(), 5)
 
@@ -540,8 +480,6 @@ class TestSyncAsyncCalls(unittest.TestCase):
     def test_async_app_coroutine_on_started_future_raises(
         self, _: str, is_remote: bool
     ):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_app_coroutine_on_started_future_raises, is_remote, 5
         )

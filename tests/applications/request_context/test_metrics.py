@@ -41,11 +41,12 @@ def func_emit_metrics(_: int) -> str:
 
 
 class TestUseMetricsFromFunction(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_emit_metrics(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(func_emit_metrics, is_remote, 1)
         self.assertEqual(request.output(), "success")
 
@@ -104,11 +105,12 @@ def mt_emit_metrics(_: int) -> str:
 
 
 class TestUseMetricsFromChildThread(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_emit_metrics(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(mt_emit_metrics, is_remote, 1)
         self.assertEqual(request.output(), "success")
 
@@ -128,11 +130,12 @@ def mp_emit_metrics(_: int) -> str:
 
 
 class TestUseMetricsFromChildProcess(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_emit_metrics(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(mp_emit_metrics, is_remote, 1)
         self.assertEqual(request.output(), "success")
 

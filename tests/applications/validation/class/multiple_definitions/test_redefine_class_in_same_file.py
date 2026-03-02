@@ -30,6 +30,10 @@ class Class1:
 
 
 class TestMultipleClassDefinitions(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     def test_applications_are_valid(self):
         self.assertEqual(validate_loaded_applications(), [])
 
@@ -37,8 +41,6 @@ class TestMultipleClassDefinitions(unittest.TestCase):
     def test_redefine_same_class_in_the_same_file_succeeds(
         self, _: str, is_remote: bool
     ):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application("Class1.method", is_remote)
         self.assertEqual(request.output(), "Class1.method_redefined")
 
