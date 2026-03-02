@@ -80,6 +80,11 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
                         "⚠️  Your Tensorlake project has missing secrets: {}. Application invocations may fail until these secrets are set.",
                         names.join(", ")
                     );
+                } else if let Some(count) = event.get("count").and_then(|v| v.as_u64()) {
+                    eprintln!(
+                        "⚠️  Your Tensorlake project is missing {} secret(s). Application invocations may fail until these secrets are set.",
+                        count
+                    );
                 }
             }
             "build_start" => {

@@ -30,6 +30,13 @@ def _emit(obj):
     print(json.dumps(obj), flush=True)
 
 
+def _format_error_message(prefix: str, error: Exception | BaseException | None = None) -> str:
+    """Return a user-facing error message without leaking exception payloads."""
+    if error is None:
+        return prefix
+    return f"{prefix} ({type(error).__name__})"
+
+
 def _build_context_from_env() -> Context:
     """Build CLI context from environment variables set by the Rust CLI."""
     return Context.default(
@@ -91,11 +98,14 @@ def deploy(
             }
         )
         sys.exit(1)
-    except ImportError as e:
+    except ImportError:
         _emit(
             {
                 "type": "error",
-                "message": f"failed to import application file: {e}. "
+                "message": _format_error_message(
+                    "failed to import application file"
+                )
+                + ". "
                 f"make sure all dependencies are installed in your current environment.",
             }
         )
@@ -104,7 +114,10 @@ def deploy(
         _emit(
             {
                 "type": "error",
-                "message": f"failed to load {application_file_path}: {type(e).__name__}: {e}",
+                "message": _format_error_message(
+                    f"failed to load {application_file_path}",
+                    e,
+                ),
             }
         )
         sys.exit(1)
@@ -126,7 +139,7 @@ def deploy(
 
     missing = _warning_missing_secrets(auth, list(list_secret_names()))
     if missing:
-        _emit({"type": "missing_secrets", "names": missing})
+        _emit({"type": "missing_secrets", "count": len(missing)})
 
     functions: list[Function] = get_functions()
 
@@ -136,7 +149,7 @@ def deploy(
         _emit({"type": "error", "message": "build cancelled by user"})
         sys.exit(1)
     except Exception as e:
-        _emit({"type": "error", "message": str(e)})
+        _emit({"type": "error", "message": _format_error_message("build failed", e)})
         sys.exit(1)
 
     _deploy_applications(
@@ -173,7 +186,11 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: list[Func
                         {
                             "type": "build_failed",
                             "image": image_info.image.name,
-                            "error": f"image '{image_info.image.name}' build failed: {error}. "
+                            "error": _format_error_message(
+                                f"image '{image_info.image.name}' build failed",
+                                error,
+                            )
+                            + ". "
                             f"check your Image() configuration and try again.",
                         }
                     )
@@ -213,16 +230,21 @@ def _deploy_applications(
                 }
             )
     except SDKUsageError as e:
-        _emit({"type": "error", "message": str(e)})
+        _emit({"type": "error", "message": _format_error_message("invalid usage", e)})
         sys.exit(1)
     except TensorlakeError as e:
-        _emit({"type": "error", "message": f"failed to deploy applications: {e}"})
+        _emit(
+            {
+                "type": "error",
+                "message": _format_error_message("failed to deploy applications", e),
+            }
+        )
         sys.exit(1)
     except Exception as e:
         _emit(
             {
                 "type": "error",
-                "message": f"failed to deploy applications: {type(e).__name__}: {e}",
+                "message": _format_error_message("failed to deploy applications", e),
             }
         )
         sys.exit(1)
@@ -268,7 +290,7 @@ def deploy_entrypoint():
     except SystemExit:
         raise
     except Exception as e:
-        _emit({"type": "error", "message": f"{type(e).__name__}: {e}"})
+        _emit({"type": "error", "message": _format_error_message("deploy failed", e)})
         sys.exit(1)
 
 
