@@ -391,9 +391,7 @@ class Sandbox:
             payload["env"] = env
         if working_dir is not None:
             payload["working_dir"] = working_dir
-        response = self._handle_response(
-            self._client.post("/api/v1/pty", json=payload)
-        )
+        response = self._handle_response(self._client.post("/api/v1/pty", json=payload))
         return response.json()
 
     def pty_ws_url(self, session_id: str, token: str) -> str:

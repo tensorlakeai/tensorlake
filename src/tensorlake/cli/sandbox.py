@@ -38,14 +38,18 @@ def _handle_sandbox_error(e: SandboxError, sandbox_id: str | None = None) -> Non
 
     if isinstance(e, SandboxConnectionError):
         console.print(f"[bold red]Connection error:[/] {e}")
-        console.print("  Check that the API server is reachable and your credentials are valid.")
+        console.print(
+            "  Check that the API server is reachable and your credentials are valid."
+        )
         raise SystemExit(1)
 
     if isinstance(e, RemoteAPIError):
         status = e.status_code
         if status == 404 and sandbox_id:
             console.print(f"[bold red]Sandbox not found:[/] {sandbox_id}")
-            console.print("  Run [bold]tensorlake sbx ls[/] to see available sandboxes.")
+            console.print(
+                "  Run [bold]tensorlake sbx ls[/] to see available sandboxes."
+            )
         elif status == 401:
             console.print("[bold red]Authentication failed.[/]")
             console.print("  Run [bold]tensorlake login[/] or check your API key.")
@@ -206,7 +210,11 @@ def ls_cmd(ctx: Context):
         status_style = _STATUS_STYLE.get(s.status.value, "")
         table.add_row(
             s.sandbox_id,
-            f"[{status_style}]{s.status.value}[/{status_style}]" if status_style else s.status.value,
+            (
+                f"[{status_style}]{s.status.value}[/{status_style}]"
+                if status_style
+                else s.status.value
+            ),
             s.image or "-",
             str(s.resources.cpus),
             f"{s.resources.memory_mb} MB",
@@ -225,16 +233,22 @@ def ls_cmd(ctx: Context):
 
 
 @sbx.command("create")
-@click.option("--image", "-i", default=None, help="Container image (server default if omitted)")
+@click.option(
+    "--image", "-i", default=None, help="Container image (server default if omitted)"
+)
 @click.option("--cpus", type=float, default=1.0, help="Number of CPUs")
 @click.option("--memory", type=int, default=512, help="Memory in MB")
 @click.option("--disk", type=int, default=1024, help="Ephemeral disk in MB")
 @click.option("--timeout", type=int, default=None, help="Timeout in seconds")
 @click.option("--entrypoint", multiple=True, help="Entrypoint command parts")
-@click.option("--snapshot", "snapshot_id", default=None, help="Create from a snapshot ID")
+@click.option(
+    "--snapshot", "snapshot_id", default=None, help="Create from a snapshot ID"
+)
 @click.option("--wait/--no-wait", default=True, help="Wait for sandbox to be running")
 @require_auth_and_project
-def create_cmd(ctx: Context, image, cpus, memory, disk, timeout, entrypoint, snapshot_id, wait):
+def create_cmd(
+    ctx: Context, image, cpus, memory, disk, timeout, entrypoint, snapshot_id, wait
+):
     """Create a new sandbox.
 
     Use --snapshot to restore from a previously saved snapshot.
@@ -387,23 +401,17 @@ def snapshot_cmd(ctx: Context, sandbox_id, timeout):
                 raise
             if info.status == SnapshotStatus.COMPLETED:
                 size_mb = (info.size_bytes or 0) / (1024 * 1024)
-                click.echo(
-                    f"Snapshot completed ({size_mb:.1f} MB)", err=True
-                )
+                click.echo(f"Snapshot completed ({size_mb:.1f} MB)", err=True)
                 click.echo(result.snapshot_id)
                 return
             if info.status == SnapshotStatus.FAILED:
-                console.print(
-                    f"[bold red]Snapshot failed:[/] {info.error}"
-                )
+                console.print(f"[bold red]Snapshot failed:[/] {info.error}")
                 raise SystemExit(1)
             click.echo(".", err=True, nl=False)
             time.sleep(1)
 
         click.echo(" timed out", err=True)
-        raise click.ClickException(
-            f"Snapshot did not complete within {timeout}s"
-        )
+        raise click.ClickException(f"Snapshot did not complete within {timeout}s")
     except SandboxError as e:
         _handle_sandbox_error(e, sandbox_id=sandbox_id)
     finally:
@@ -475,7 +483,9 @@ def exec_cmd(ctx: Context, sandbox_id, command, args, timeout, workdir, env):
 )
 @click.argument("command")
 @click.argument("args", nargs=-1, type=click.UNPROCESSED)
-@click.option("--image", "-i", default=None, help="Container image (server default if omitted)")
+@click.option(
+    "--image", "-i", default=None, help="Container image (server default if omitted)"
+)
 @click.option("--cpus", type=float, default=1.0, help="Number of CPUs")
 @click.option("--memory", type=int, default=512, help="Memory in MB")
 @click.option("--disk", type=int, default=1024, help="Ephemeral disk in MB")
@@ -484,7 +494,9 @@ def exec_cmd(ctx: Context, sandbox_id, command, args, timeout, workdir, env):
 )
 @click.option("--workdir", "-w", default=None, help="Working directory")
 @click.option("--env", "-e", multiple=True, help="Environment variable (KEY=VALUE)")
-@click.option("--keep/--no-keep", default=False, help="Keep sandbox after command exits")
+@click.option(
+    "--keep/--no-keep", default=False, help="Keep sandbox after command exits"
+)
 @require_auth_and_project
 def run_cmd(
     ctx: Context, command, args, image, cpus, memory, disk, timeout, workdir, env, keep
@@ -602,9 +614,7 @@ def ssh_cmd(ctx: Context, sandbox_id, shell):
                 rows, cols = 24, 80
 
             # Create PTY session on the sandbox
-            pty_info = sandbox.create_pty_session(
-                command=shell, rows=rows, cols=cols
-            )
+            pty_info = sandbox.create_pty_session(command=shell, rows=rows, cols=cols)
             session_id = pty_info["session_id"]
             token = pty_info["token"]
 
