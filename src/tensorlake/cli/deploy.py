@@ -30,7 +30,9 @@ def _emit(obj):
     print(json.dumps(obj), flush=True)
 
 
-def _format_error_message(prefix: str, error: Exception | BaseException | None = None) -> str:
+def _format_error_message(
+    prefix: str, error: Exception | BaseException | None = None
+) -> str:
     """Return a user-facing error message without leaking exception payloads."""
     if error is None:
         return prefix
@@ -102,9 +104,7 @@ def deploy(
         _emit(
             {
                 "type": "error",
-                "message": _format_error_message(
-                    "failed to import application file"
-                )
+                "message": _format_error_message("failed to import application file")
                 + ". "
                 f"make sure all dependencies are installed in your current environment.",
             }
