@@ -6,6 +6,7 @@ from tensorlake.applications import InternalError
 
 from ..proto.function_executor_pb2 import (
     BLOB,
+    AllocationAppStateOperation,
     AllocationFunctionCall,
     AllocationFunctionCallWatcher,
     AllocationOutputBLOBRequest,
@@ -25,6 +26,7 @@ class AllocationStateWrapper:
             function_call_watchers=[],
             output_blob_requests=[],
             request_state_operations=[],
+            app_state_operations=[],
         )
         self._update_hash()
 
@@ -128,6 +130,21 @@ class AllocationStateWrapper:
             _remove_repeated_field_item(
                 lambda op: op.operation_id == id,
                 self._allocation_state.request_state_operations,
+            )
+            self._update_hash()
+            self._allocation_state_update_lock.notify_all()
+
+    def add_app_state_operation(self, operation: AllocationAppStateOperation) -> None:
+        with self._allocation_state_update_lock:
+            self._allocation_state.app_state_operations.append(operation)
+            self._update_hash()
+            self._allocation_state_update_lock.notify_all()
+
+    def remove_app_state_operation(self, id: str) -> None:
+        with self._allocation_state_update_lock:
+            _remove_repeated_field_item(
+                lambda op: op.operation_id == id,
+                self._allocation_state.app_state_operations,
             )
             self._update_hash()
             self._allocation_state_update_lock.notify_all()

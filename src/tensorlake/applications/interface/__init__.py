@@ -23,6 +23,7 @@ from .image import Image
 from .logger import Logger
 from .request import Request
 from .request_context import (
+    ApplicationState,
     FunctionProgress,
     RequestContext,
     RequestState,
@@ -50,6 +51,7 @@ __all__ = [
     "InternalError",
     "RemoteAPIError",
     "Request",
+    "ApplicationState",
     "RequestContext",
     "RequestFailed",
     "RequestState",
