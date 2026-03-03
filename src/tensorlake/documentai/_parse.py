@@ -7,7 +7,6 @@ import sys
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Union, overload
 
-from httpx_sse import ServerSentEvent, aconnect_sse, connect_sse
 from pydantic import BaseModel, ValidationError
 
 from ._base import _BaseClient, _validate_file_input
@@ -358,24 +357,19 @@ class _ParseMixin(_BaseClient):
 
         while retry_count < 5:
             try:
-                with connect_sse(
-                    client=self._client,
-                    method="GET",
-                    url=f"parse/{parse_id}",
-                    headers=self._headers(),
-                ) as sse:
-                    for sse_event in sse.iter_sse():
-                        parse_result = self._handle_sse_event(
-                            sse_event, set_status, print_line
-                        )
-                        if parse_result:
-                            print("", file=sys.stderr)
-                            return parse_result
-
-                    print(
-                        "SSE connection ended without completion event",
-                        file=sys.stderr,
+                sse_events = self._parse_events(parse_id)
+                for sse_event in sse_events:
+                    parse_result = self._handle_sse_event(
+                        sse_event, set_status, print_line
                     )
+                    if parse_result:
+                        print("", file=sys.stderr)
+                        return parse_result
+
+                print(
+                    "SSE connection ended without completion event",
+                    file=sys.stderr,
+                )
 
             except (ConnectionError, TimeoutError) as e:
                 retry_count += 1
@@ -425,27 +419,22 @@ class _ParseMixin(_BaseClient):
 
         while retry_count < 5:
             try:
-                async with aconnect_sse(
-                    client=self._aclient,
-                    method="GET",
-                    url=f"parse/{parse_id}",
-                    headers=self._headers(),
-                ) as sse:
-                    async for sse_event in sse.aiter_sse():
-                        parse_result = self._handle_sse_event(
-                            sse_event, set_status, print_line
-                        )
-                        if parse_result:
-                            print("", file=sys.stderr)
-                            return parse_result
-
-                        # Always yield after processing each event
-                        await asyncio.sleep(0)
-
-                    print(
-                        "SSE connection ended without completion event",
-                        file=sys.stderr,
+                sse_events = await self._parse_events_async(parse_id)
+                for sse_event in sse_events:
+                    parse_result = self._handle_sse_event(
+                        sse_event, set_status, print_line
                     )
+                    if parse_result:
+                        print("", file=sys.stderr)
+                        return parse_result
+
+                    # Always yield after processing each event
+                    await asyncio.sleep(0)
+
+                print(
+                    "SSE connection ended without completion event",
+                    file=sys.stderr,
+                )
             except (ConnectionError, TimeoutError) as e:
                 retry_count += 1
                 print(
@@ -472,28 +461,31 @@ class _ParseMixin(_BaseClient):
 
     def _handle_sse_event(
         self,
-        sse_event: ServerSentEvent,
+        sse_event: dict[str, Any],
         set_status: Callable[[str, Optional[str]], None],
         print_line: Callable[[str], None],
     ) -> Optional[ParseResult]:
         """
         Handle SSE event and return True if parse is complete (success or failure).
         """
-        match sse_event.event:
+        event_name = sse_event.get("event")
+        event_data = sse_event.get("data")
+
+        match event_name:
             case "parse_update":
                 try:
-                    parse_result = ParseResult.model_validate_json(sse_event.data)
+                    parse_result = ParseResult.model_validate_json(event_data)
                     set_status(f"Status: {parse_result.status.value}", "magenta")
                 except ValidationError:
-                    set_status(f"Parse update received: {sse_event.data}", "blue")
+                    set_status(f"Parse update received: {event_data}", "blue")
 
                 return None
             case "parse_done":
-                parse_result = ParseResult.model_validate_json(sse_event.data)
+                parse_result = ParseResult.model_validate_json(event_data)
                 set_status(f"Parse ID: {parse_result.parse_id} done", "green")
                 return parse_result
             case "parse_failed":
-                parse_result = ParseResult.model_validate_json(sse_event.data)
+                parse_result = ParseResult.model_validate_json(event_data)
                 message = (
                     f"Parse failed ({parse_result.parse_id}): {parse_result.error}"
                     if parse_result.error
@@ -506,7 +498,7 @@ class _ParseMixin(_BaseClient):
                 set_status("Parse job waiting in queue.", "yellow")
                 return None
             case _:
-                set_status(f"Unknown SSE event: {sse_event.event}", "cyan")
+                set_status(f"Unknown SSE event: {event_name}", "cyan")
                 return None
 
     @overload

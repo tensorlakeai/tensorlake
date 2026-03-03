@@ -124,6 +124,12 @@ impl Client {
         self.handle_response(response).await
     }
 
+    /// Execute an HTTP request without mapping non-success statuses to [`SdkError`].
+    pub async fn execute_raw(&self, request: Request) -> Result<Response, SdkError> {
+        let response = self.client.execute(request).await?;
+        Ok(response)
+    }
+
     pub fn request(
         &self,
         method: reqwest::Method,

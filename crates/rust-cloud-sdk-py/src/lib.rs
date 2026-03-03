@@ -12,6 +12,7 @@ use reqwest::Method;
 use reqwest::multipart::{Form, Part};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use tensorlake_cloud_sdk::document_ai::DocumentAiClient;
 use tensorlake_cloud_sdk::sandboxes::models::{CreateSandboxRequest, SandboxPoolRequest};
 use tensorlake_cloud_sdk::sandboxes::{SandboxProxyClient, SandboxesClient};
 use tensorlake_cloud_sdk::{Client, ClientBuilder, error::SdkError};
@@ -21,6 +22,11 @@ create_exception!(tensorlake_rust_cloud_sdk, CloudApiClientError, PyException);
 create_exception!(
     tensorlake_rust_cloud_sdk,
     CloudSandboxClientError,
+    PyException
+);
+create_exception!(
+    tensorlake_rust_cloud_sdk,
+    CloudDocumentAIClientError,
     PyException
 );
 
@@ -824,6 +830,102 @@ impl CloudSandboxProxyClient {
     }
 }
 
+#[pyclass]
+pub struct CloudDocumentAIClient {
+    client: DocumentAiClient,
+    runtime: Runtime,
+}
+
+#[pymethods]
+impl CloudDocumentAIClient {
+    #[new]
+    #[pyo3(signature = (api_url, api_key))]
+    fn new(api_url: String, api_key: String) -> PyResult<Self> {
+        let client = ClientBuilder::new(&api_url)
+            .bearer_token(&api_key)
+            .build()
+            .map_err(into_document_ai_py_error)?;
+        let runtime = Runtime::new().map_err(|e| {
+            CloudDocumentAIClientError::new_err((
+                "internal",
+                Option::<u16>::None,
+                format!("failed to create tokio runtime: {e}"),
+            ))
+        })?;
+        let document_ai_client = DocumentAiClient::new(client);
+
+        Ok(Self {
+            client: document_ai_client,
+            runtime,
+        })
+    }
+
+    fn close(&self) {
+        // reqwest clients are closed when dropped; this is a no-op for API parity.
+    }
+
+    #[pyo3(signature = (method, path, body_json=None))]
+    fn request_json(
+        &self,
+        method: String,
+        path: String,
+        body_json: Option<String>,
+    ) -> PyResult<String> {
+        let method = Method::from_bytes(method.as_bytes()).map_err(|error| {
+            CloudDocumentAIClientError::new_err((
+                "sdk_usage",
+                Option::<u16>::None,
+                format!("invalid HTTP method `{method}`: {error}"),
+            ))
+        })?;
+        let body_json = body_json
+            .as_deref()
+            .map(serde_json::from_str::<Value>)
+            .transpose()
+            .map_err(|error| {
+                CloudDocumentAIClientError::new_err((
+                    "sdk_usage",
+                    Option::<u16>::None,
+                    format!("invalid JSON payload: {error}"),
+                ))
+            })?;
+
+        self.run_with_retry(5, move |client| {
+            let method = method.clone();
+            let path = path.clone();
+            let body_json = body_json.clone();
+            async move {
+                let response = client.request(method, &path, body_json.as_ref()).await?;
+                Ok(serde_json::to_string(&response)?)
+            }
+        })
+    }
+
+    fn upload_file_json(&self, file_name: String, content: Vec<u8>) -> PyResult<String> {
+        self.run_with_retry(5, move |client| {
+            let file_name = file_name.clone();
+            let content = content.clone();
+            async move {
+                let response = client.upload_file(&file_name, content).await?;
+                Ok(serde_json::to_string(&response)?)
+            }
+        })
+    }
+
+    fn parse_events_json(&self, parse_id: String) -> PyResult<Vec<String>> {
+        self.run_with_retry(10, move |client| {
+            let parse_id = parse_id.clone();
+            async move {
+                let events = client.parse_events(&parse_id).await?;
+                events
+                    .into_iter()
+                    .map(|event| serde_json::to_string(&event).map_err(SdkError::from))
+                    .collect()
+            }
+        })
+    }
+}
+
 impl CloudApiClient {
     fn run_with_retry<T, F, Fut>(&self, max_retries: usize, mut operation: F) -> PyResult<T>
     where
@@ -870,6 +972,33 @@ impl CloudSandboxClient {
                     let sleep_time = calculate_sleep_time(retries);
                     eprintln!(
                         "Retrying rust sandbox API request after {sleep_time:.2} seconds. Retry count: {retries}. Retryable exception: {err}"
+                    );
+                    std::thread::sleep(Duration::from_secs_f64(sleep_time));
+                }
+            }
+        }
+    }
+}
+
+impl CloudDocumentAIClient {
+    fn run_with_retry<T, F, Fut>(&self, max_retries: usize, mut operation: F) -> PyResult<T>
+    where
+        F: FnMut(DocumentAiClient) -> Fut,
+        Fut: Future<Output = Result<T, SdkError>>,
+    {
+        let mut retries = 0usize;
+        loop {
+            match self.runtime.block_on(operation(self.client.clone())) {
+                Ok(value) => return Ok(value),
+                Err(err) => {
+                    if !is_retryable(&err) || retries >= max_retries {
+                        return Err(into_document_ai_py_error(err));
+                    }
+
+                    retries += 1;
+                    let sleep_time = calculate_sleep_time(retries);
+                    eprintln!(
+                        "Retrying rust document-ai request after {sleep_time:.2} seconds. Retry count: {retries}. Retryable exception: {err}"
                     );
                     std::thread::sleep(Duration::from_secs_f64(sleep_time));
                 }
@@ -983,6 +1112,55 @@ fn into_sandbox_py_error(error: SdkError) -> PyErr {
     }
 }
 
+fn into_document_ai_py_error(error: SdkError) -> PyErr {
+    match error {
+        SdkError::Authentication(message) => {
+            CloudDocumentAIClientError::new_err(("sdk_usage", Some(401u16), message))
+        }
+        SdkError::Authorization(message) => {
+            CloudDocumentAIClientError::new_err(("sdk_usage", Some(403u16), message))
+        }
+        SdkError::ServerError { status, message } => {
+            CloudDocumentAIClientError::new_err(("remote_api", Some(status.as_u16()), message))
+        }
+        SdkError::Http(http_error) => {
+            if http_error.is_timeout() {
+                CloudDocumentAIClientError::new_err((
+                    "connection",
+                    Some(504u16),
+                    http_error.to_string(),
+                ))
+            } else if http_error.is_connect() {
+                CloudDocumentAIClientError::new_err((
+                    "connection",
+                    Some(503u16),
+                    http_error.to_string(),
+                ))
+            } else {
+                CloudDocumentAIClientError::new_err((
+                    "internal",
+                    Option::<u16>::None,
+                    http_error.to_string(),
+                ))
+            }
+        }
+        SdkError::Middleware(middleware_error) => {
+            let message = middleware_error.to_string();
+            let lower = message.to_lowercase();
+            if lower.contains("timeout") || lower.contains("connect") {
+                CloudDocumentAIClientError::new_err(("connection", Option::<u16>::None, message))
+            } else {
+                CloudDocumentAIClientError::new_err(("internal", Option::<u16>::None, message))
+            }
+        }
+        other => CloudDocumentAIClientError::new_err((
+            "internal",
+            Option::<u16>::None,
+            other.to_string(),
+        )),
+    }
+}
+
 fn parse_json_payload<T: DeserializeOwned>(request_json: &str) -> PyResult<T> {
     serde_json::from_str(request_json).map_err(|error| {
         CloudSandboxClientError::new_err((
@@ -1038,8 +1216,13 @@ fn tensorlake_rust_cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> P
         "CloudSandboxClientError",
         _py.get_type_bound::<CloudSandboxClientError>(),
     )?;
+    module.add(
+        "CloudDocumentAIClientError",
+        _py.get_type_bound::<CloudDocumentAIClientError>(),
+    )?;
     module.add_class::<CloudApiClient>()?;
     module.add_class::<CloudSandboxClient>()?;
     module.add_class::<CloudSandboxProxyClient>()?;
+    module.add_class::<CloudDocumentAIClient>()?;
     Ok(())
 }
