@@ -9,6 +9,7 @@ from ..http_server.handlers.add_metrics import (
     AddMetricsRequest,
     AddTimerRequest,
 )
+from .transport import RequestContextHTTPTransport
 
 
 class RequestMetricsHTTPClient(RequestMetrics):
@@ -22,12 +23,12 @@ class RequestMetricsHTTPClient(RequestMetrics):
         request_id: str,
         allocation_id: str,
         function_name: str,
-        http_client: httpx.Client,
+        http_client: RequestContextHTTPTransport,
     ):
         self._request_id: str = request_id
         self._allocation_id: str = allocation_id
         self._function_name: str = function_name
-        self._http_client: httpx.Client = http_client
+        self._http_client: RequestContextHTTPTransport = http_client
 
     def timer(self, name: str, value: int | float):
         # If we don't validate user supplied inputs here then there will be a Pydantic validation error

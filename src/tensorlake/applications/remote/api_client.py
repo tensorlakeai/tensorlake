@@ -1,7 +1,6 @@
 import json
 import os
 
-import httpx
 from pydantic import BaseModel
 
 from tensorlake.applications.interface.exceptions import (
@@ -111,46 +110,6 @@ def _raise_as_tensorlake_error(e: Exception) -> None:
             raise SDKUsageError(message) from None
         else:
             raise InternalError(message) from None
-
-    # Convert all transient httpx exceptions into RemoteAPIError with 503 status code
-    # which indicates Service Temporarily Unavailable. Similar meaning.
-    if isinstance(e, (httpx.NetworkError, httpx.RemoteProtocolError)):
-        raise RemoteAPIError(
-            status_code=503, message=f"Transient HTTP error: {str(e)}"
-        ) from e
-
-    # Convert client side timeout into HTTP timeout error.
-    if isinstance(e, httpx.TimeoutException):
-        raise RemoteAPIError(
-            status_code=504, message=f"Request timed out: {str(e)}"
-        ) from e
-
-    if isinstance(e, httpx.HTTPStatusError):
-        status_code: int = e.response.status_code
-
-        try:
-            response_text: str = e.response.text
-        except httpx.ResponseNotRead:
-            # This exceptions is raised when response content has not been read yet.
-            # because the response is in streaming mode. We have to call .read() first.
-            try:
-                e.response.read()
-                response_text: str = e.response.text
-            except Exception:
-                response_text: str = "Failed to read response text"
-
-        if status_code == 401:
-            raise SDKUsageError(
-                "The provided Tensorlake API credentials are not valid. "
-                f"Please check your `tensorlake login` status or '{_API_KEY_ENVIRONMENT_VARIABLE_NAME}' environment variable."
-            ) from None
-        elif status_code == 403:
-            raise SDKUsageError(
-                "The provided Tensorlake API credentials are not authorized for the requested operation."
-            ) from None
-        else:
-            message: str = f"HTTP request failed: {response_text}"
-            raise RemoteAPIError(status_code=status_code, message=message) from e
 
     raise InternalError(str(e)) from e
 
@@ -331,10 +290,19 @@ class APIClient:
                 else:
                     raise RequestErrorException(request_metadata.request_error.message)
 
-            serialized_value, content_type = self._rust_client.request_output_bytes(
+            serialized_value_raw, content_type = self._rust_client.request_output_bytes(
                 application_name=application_name,
                 request_id=request_id,
             )
+            if isinstance(serialized_value_raw, (bytes, bytearray, memoryview)):
+                serialized_value: bytes = bytes(serialized_value_raw)
+            elif isinstance(serialized_value_raw, list):
+                serialized_value = bytes(serialized_value_raw)
+            else:
+                raise InternalError(
+                    "Unexpected request output payload type from Rust Cloud SDK: "
+                    f"{type(serialized_value_raw).__name__}"
+                )
             return RequestOutput(
                 serialized_value=serialized_value,
                 content_type=content_type,

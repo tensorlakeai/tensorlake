@@ -60,6 +60,13 @@ class _FakeRustClient:
         return (b"payload", "application/octet-stream")
 
 
+class _FakeRustListBytes(_FakeRustClient):
+    def request_output_bytes(self, application_name, request_id):
+        assert application_name == "app"
+        assert request_id == "req-123"
+        return ([112, 97, 121, 108, 111, 97, 100], "application/octet-stream")
+
+
 class _FakeRustNotFinished(_FakeRustClient):
     def request_metadata_json(self, application_name, request_id):
         return (
@@ -130,6 +137,16 @@ class TestAPIClientRustBackend(unittest.TestCase):
             api_url="http://localhost:8900", api_key="k", namespace="default"
         )
         client._rust_client = _FakeRustClient()
+
+        output = client.request_output("app", "req-123")
+        self.assertEqual(output.serialized_value, b"payload")
+        self.assertEqual(output.content_type, "application/octet-stream")
+
+    def test_request_output_success_from_rust_list_bytes(self):
+        client = APIClient(
+            api_url="http://localhost:8900", api_key="k", namespace="default"
+        )
+        client._rust_client = _FakeRustListBytes()
 
         output = client.request_output("app", "req-123")
         self.assertEqual(output.serialized_value, b"payload")

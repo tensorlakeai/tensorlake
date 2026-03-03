@@ -6,8 +6,6 @@ import json
 import time
 from urllib.parse import urlparse
 
-import httpx
-
 from . import _defaults
 from .exceptions import (
     PoolInUseError,
@@ -89,15 +87,6 @@ def _raise_as_sandbox_error(e: Exception) -> None:
         if status_code is not None:
             raise RemoteAPIError(status_code, message) from None
         raise SandboxError(message) from None
-
-    if isinstance(e, (httpx.NetworkError, httpx.RemoteProtocolError)):
-        raise SandboxConnectionError(str(e)) from e
-
-    if isinstance(e, httpx.TimeoutException):
-        raise SandboxConnectionError(str(e)) from e
-
-    if isinstance(e, httpx.HTTPStatusError):
-        raise RemoteAPIError(e.response.status_code, e.response.text) from e
 
     raise SandboxError(str(e)) from e
 

@@ -18,8 +18,6 @@ from queue import Empty as QueueEmptyError
 from queue import SimpleQueue
 from typing import Any, Dict, List
 
-import httpx
-
 from tensorlake.applications.blob_store import BLOBStore
 from tensorlake.applications.internal_logger import InternalLogger
 from tensorlake.applications.metadata import ValueMetadata
@@ -78,6 +76,7 @@ from ..metadata import (
 )
 from ..registry import get_function
 from ..request_context.http_client.context import RequestContextHTTPClient
+from ..request_context.http_client.transport import RequestContextHTTPTransport
 from ..request_context.http_server.server import RequestContextHTTPServer
 from ..runtime_hooks import (
     clear_await_future_hook,
@@ -189,7 +188,7 @@ class LocalRunner:
         )
         # Use a single HTTP client for the whole LocalRunner. It's thread-safe.
         # It reduces resource usage and makes it easy to close just one client at the end.
-        self._request_context_http_client: httpx.Client = (
+        self._request_context_http_client: RequestContextHTTPTransport = (
             RequestContextHTTPClient.create_http_client(
                 server_base_url=self._request_context_http_server.base_url,
             )
