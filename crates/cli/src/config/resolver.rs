@@ -1,5 +1,6 @@
 use crate::config::files::{
     TomlTable, get_nested_value, load_credentials, load_global_config, load_local_config,
+    normalize_api_url,
 };
 
 /// Resolved configuration values with source tracking.
@@ -52,10 +53,12 @@ pub fn resolve(
 }
 
 fn resolve_api_url(cli: Option<&str>, local: &TomlTable, global: &TomlTable) -> String {
-    cli.map(|s| s.to_string())
+    let api_url = cli
+        .map(|s| s.to_string())
         .or_else(|| get_nested_value(local, "tensorlake.api_url"))
         .or_else(|| get_nested_value(global, "tensorlake.api_url"))
-        .unwrap_or_else(|| "https://api.tensorlake.ai".to_string())
+        .unwrap_or_else(|| "https://api.tensorlake.ai".to_string());
+    normalize_api_url(&api_url)
 }
 
 fn resolve_cloud_url(

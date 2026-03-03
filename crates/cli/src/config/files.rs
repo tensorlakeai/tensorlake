@@ -24,6 +24,38 @@ pub fn credentials_path() -> PathBuf {
     config_dir().join("credentials.toml")
 }
 
+/// Normalize API URL values for credential table keying.
+///
+/// This avoids mismatches between equivalent URLs like:
+/// - https://api.tensorlake.ai
+/// - https://api.tensorlake.ai/
+/// - https://api.tensorlake.ai:443/
+pub fn normalize_api_url(api_url: &str) -> String {
+    let trimmed = api_url.trim();
+    if let Ok(mut parsed) = url::Url::parse(trimmed) {
+        parsed.set_fragment(None);
+        parsed.set_query(None);
+
+        if (parsed.scheme() == "https" && parsed.port() == Some(443))
+            || (parsed.scheme() == "http" && parsed.port() == Some(80))
+        {
+            let _ = parsed.set_port(None);
+        }
+
+        let mut normalized = parsed.to_string();
+        while normalized.ends_with('/') {
+            normalized.pop();
+        }
+        normalized
+    } else {
+        trimmed.trim_end_matches('/').to_string()
+    }
+}
+
+fn parse_toml_table(content: &str) -> Option<TomlTable> {
+    toml::from_str(content).ok()
+}
+
 /// Load the global config file as a TOML table.
 pub fn load_global_config() -> TomlTable {
     let path = global_config_path();
@@ -34,11 +66,7 @@ pub fn load_global_config() -> TomlTable {
         Ok(c) => c,
         Err(_) => return TomlTable::new(),
     };
-    content
-        .parse::<toml::Value>()
-        .ok()
-        .and_then(|v| v.as_table().cloned())
-        .unwrap_or_default()
+    parse_toml_table(&content).unwrap_or_default()
 }
 
 /// Search upward from cwd for `.tensorlake/config.toml` and load it.
@@ -48,11 +76,7 @@ pub fn load_local_config() -> TomlTable {
             Ok(c) => c,
             Err(_) => return TomlTable::new(),
         };
-        return content
-            .parse::<toml::Value>()
-            .ok()
-            .and_then(|v| v.as_table().cloned())
-            .unwrap_or_default();
+        return parse_toml_table(&content).unwrap_or_default();
     }
     TomlTable::new()
 }
@@ -113,9 +137,8 @@ pub fn load_credentials(api_url: &str) -> Option<String> {
         return None;
     }
     let content = fs::read_to_string(&path).ok()?;
-    let table: toml::Value = content.parse().ok()?;
-    let scoped = table.get(api_url)?;
-    scoped.get("token")?.as_str().map(|s| s.to_string())
+    let table = parse_toml_table(&content)?;
+    extract_scoped_token(&table, api_url)
 }
 
 /// Save PAT to credentials file scoped by API URL.
@@ -126,18 +149,26 @@ pub fn save_credentials(api_url: &str, token: &str) -> Result<()> {
     let path = credentials_path();
     let mut table: TomlTable = if path.exists() {
         let content = fs::read_to_string(&path)?;
-        content
-            .parse::<toml::Value>()
-            .ok()
-            .and_then(|v| v.as_table().cloned())
-            .unwrap_or_default()
+        parse_toml_table(&content).unwrap_or_default()
     } else {
         TomlTable::new()
     };
 
+    let normalized_url = normalize_api_url(api_url);
+
+    // Collapse equivalent URL keys so we always keep a single canonical entry.
+    let keys_to_remove: Vec<String> = table
+        .keys()
+        .filter(|k| normalize_api_url(k) == normalized_url)
+        .cloned()
+        .collect();
+    for key in keys_to_remove {
+        table.remove(&key);
+    }
+
     let mut section = TomlTable::new();
     section.insert("token".to_string(), toml::Value::String(token.to_string()));
-    table.insert(api_url.to_string(), toml::Value::Table(section));
+    table.insert(normalized_url, toml::Value::Table(section));
 
     let content = toml::to_string_pretty(&toml::Value::Table(table))?;
     fs::write(&path, &content)?;
@@ -149,6 +180,43 @@ pub fn save_credentials(api_url: &str, token: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn extract_scoped_token(credentials: &TomlTable, api_url: &str) -> Option<String> {
+    let normalized_api_url = normalize_api_url(api_url);
+
+    // 1) exact key match
+    if let Some(token) = credentials
+        .get(api_url.trim())
+        .and_then(|scoped| scoped.get("token"))
+        .and_then(|v| v.as_str())
+    {
+        return Some(token.to_string());
+    }
+
+    // 2) canonical key match
+    if let Some(token) = credentials
+        .get(&normalized_api_url)
+        .and_then(|scoped| scoped.get("token"))
+        .and_then(|v| v.as_str())
+    {
+        return Some(token.to_string());
+    }
+
+    // 3) compatible lookup across previously stored URL variants
+    for (key, value) in credentials {
+        if normalize_api_url(key) == normalized_api_url {
+            if let Some(token) = value.get("token").and_then(|v| v.as_str()) {
+                return Some(token.to_string());
+            }
+        }
+    }
+
+    // 4) legacy unscoped format: token = "..."
+    credentials
+        .get("token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 /// Get a nested value from a TOML table using dot notation (e.g. "tensorlake.api_url").
@@ -196,4 +264,52 @@ fn add_to_gitignore(path: &Path, entry: &str) -> Result<()> {
         fs::write(path, format!("{}\n", entry))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_scoped_token, normalize_api_url};
+
+    #[test]
+    fn normalize_api_url_collapses_common_equivalents() {
+        let base = "https://api.tensorlake.ai";
+        assert_eq!(normalize_api_url(base), base);
+        assert_eq!(normalize_api_url("https://api.tensorlake.ai/"), base);
+        assert_eq!(normalize_api_url("https://api.tensorlake.ai:443/"), base);
+        assert_eq!(normalize_api_url("https://api.tensorlake.ai///"), base);
+    }
+
+    #[test]
+    fn extract_scoped_token_handles_url_variants() {
+        let content = r#"
+["https://api.tensorlake.ai"]
+token = "abc123"
+"#;
+        let table: super::TomlTable = toml::from_str(content).expect("valid toml");
+
+        assert_eq!(
+            extract_scoped_token(&table, "https://api.tensorlake.ai").expect("token for exact key"),
+            "abc123"
+        );
+        assert_eq!(
+            extract_scoped_token(&table, "https://api.tensorlake.ai/")
+                .expect("token for normalized key"),
+            "abc123"
+        );
+        assert_eq!(
+            extract_scoped_token(&table, "https://api.tensorlake.ai:443")
+                .expect("token for default-port key"),
+            "abc123"
+        );
+    }
+
+    #[test]
+    fn extract_scoped_token_supports_legacy_unscoped_format() {
+        let table: super::TomlTable =
+            toml::from_str(r#"token = "legacy-token""#).expect("valid toml");
+        assert_eq!(
+            extract_scoped_token(&table, "https://api.tensorlake.ai").expect("legacy token"),
+            "legacy-token"
+        );
+    }
 }
