@@ -89,10 +89,9 @@ def deploy(
     application_file_path: str,
     parallel_builds: bool,
     upgrade_running_requests: bool,
+    indexify_url: str | None = None,
 ):
     """Deploys applications to Tensorlake Cloud, emitting NDJSON events to stdout."""
-    auth = _build_context_from_env()
-
     _emit(
         {
             "type": "status",
@@ -138,19 +137,40 @@ def deploy(
         _emit({"type": "validation_failed"})
         sys.exit(1)
 
+    functions: list[Function] = get_functions()
+
+    if indexify_url:
+        from tensorlake.applications.remote.api_client import APIClient
+
+        api_client = APIClient(
+            api_url=indexify_url,
+            api_key=None,
+            namespace=os.environ.get("INDEXIFY_NAMESPACE", "default"),
+        )
+        _deploy_applications(
+            api_client=api_client,
+            api_url=indexify_url,
+            application_file_path=application_file_path,
+            upgrade_running_requests=upgrade_running_requests,
+            functions=functions,
+        )
+        return
+
+    auth = _build_context_from_env()
+
+    # Create builder client with proper authentication
+    bearer_token = auth.api_key or auth.personal_access_token
+    builder_v2 = ImageBuilderV2Client(
+        build_service=os.getenv("TENSORLAKE_BUILD_SERVICE")
+        or f"{auth.api_url}/images/v2",
+        api_key=bearer_token,
+        organization_id=auth.organization_id if not auth.api_key else None,
+        project_id=auth.project_id if not auth.api_key else None,
+    )
+
     missing = _warning_missing_secrets(auth, list(list_secret_names()))
     if missing:
         _emit({"type": "missing_secrets", "count": len(missing)})
-
-    functions: list[Function] = get_functions()
-
-    build_service = os.getenv("TENSORLAKE_BUILD_SERVICE") or f"{auth.api_url}/images/v2"
-    parsed = urlparse(build_service)
-    build_service_path = parsed.path.rstrip("/") or "/images/v2"
-    builder_v2 = ImageBuilderV2Client(
-        cloud_client=auth.cloud_client,
-        build_service_path=build_service_path,
-    )
 
     try:
         asyncio.run(_prepare_images_v2(builder_v2, functions))
@@ -162,7 +182,8 @@ def deploy(
         sys.exit(1)
 
     _deploy_applications(
-        auth=auth,
+        api_client=auth.rust_cloud_client,
+        api_url=auth.api_url,
         application_file_path=application_file_path,
         upgrade_running_requests=upgrade_running_requests,
         functions=functions,
@@ -210,7 +231,8 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: list[Func
 
 
 def _deploy_applications(
-    auth: Context,
+    api_client,
+    api_url: str,
     application_file_path: str,
     upgrade_running_requests: bool,
     functions: list[Function],
@@ -228,7 +250,7 @@ def _deploy_applications(
         for application_function in filter_applications(functions):
             application_function: Function
             curl_command: str | None = example_application_curl_command(
-                api_url=auth.api_url,
+                api_url=api_url,
                 application=application_function,
                 file_paths=None,
             )
@@ -279,6 +301,11 @@ def deploy_entrypoint():
         default=False,
         help="Upgrade requests that are already queued or running",
     )
+    parser.add_argument(
+        "--indexify-url",
+        default=None,
+        help="Deploy directly to an Indexify server, skipping image build and platform auth",
+    )
     args = parser.parse_args()
 
     try:
@@ -286,6 +313,7 @@ def deploy_entrypoint():
             application_file_path=args.application_file_path,
             parallel_builds=args.parallel_builds,
             upgrade_running_requests=args.upgrade_running_requests,
+            indexify_url=args.indexify_url,
         )
     except SystemExit:
         raise
