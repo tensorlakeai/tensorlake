@@ -189,7 +189,11 @@ impl CloudApiClient {
                             .map_err(|e| SdkError::ClientError(e.to_string()))?;
                         form = form.part(name, part);
                     }
-                    client.build_multipart_request(Method::POST, &path, form)?
+                    client
+                        .request(Method::POST, &path)
+                        .header("Accept", "application/json")
+                        .multipart(form)
+                        .build()?
                 };
 
                 let response = client.execute(request).await?;
