@@ -1,4 +1,10 @@
 use comfy_table::Cell;
+use tensorlake_cloud_sdk::Sdk;
+use tensorlake_cloud_sdk::error::SdkError;
+use tensorlake_cloud_sdk::secrets::SecretsClient;
+use tensorlake_cloud_sdk::secrets::models::{
+    DeleteSecretRequest, ListSecretsRequest, NewSecret, UpsertSecret, UpsertSecretRequest,
+};
 
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
@@ -32,7 +38,7 @@ pub async fn list(ctx: &CliContext) -> Result<()> {
 }
 
 pub async fn set(ctx: &CliContext, pairs: &[String]) -> Result<()> {
-    let mut upsert_secrets: Vec<serde_json::Value> = Vec::new();
+    let mut upsert_secrets: Vec<NewSecret> = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
 
     for pair in pairs {
@@ -58,47 +64,24 @@ pub async fn set(ctx: &CliContext, pairs: &[String]) -> Result<()> {
             return Err(CliError::usage(format!("duplicate secret name: {}", name)));
         }
 
-        upsert_secrets.push(serde_json::json!({"name": name, "value": value}));
+        upsert_secrets.push(NewSecret {
+            name: name.to_string(),
+            value: value.to_string(),
+        });
     }
 
-    let client = ctx.client()?;
-    let resp = client
-        .put(format!(
-            "{}/platform/v1/organizations/{}/projects/{}/secrets",
-            ctx.api_url,
-            ctx.effective_organization_id().unwrap_or_default(),
-            ctx.effective_project_id().unwrap_or_default()
-        ))
-        .json(&upsert_secrets)
-        .send()
+    let (organization_id, project_id) = org_and_project(ctx)?;
+    let request = UpsertSecretRequest::builder()
+        .organization_id(organization_id)
+        .project_id(project_id)
+        .secrets(UpsertSecret::Multiple(upsert_secrets.clone()))
+        .build()
+        .map_err(|e| CliError::usage(e.to_string()))?;
+
+    secrets_client(ctx)?
+        .upsert(request)
         .await
-        .map_err(CliError::Http)?;
-
-    let status = resp.status().as_u16();
-    if status == 401 {
-        return Err(CliError::auth(
-            "authentication failed. set TENSORLAKE_API_KEY or run 'tl login'.",
-        ));
-    }
-    if status == 403 {
-        return Err(CliError::auth(
-            "permission denied. set TENSORLAKE_API_KEY with required permissions, or run 'tl init'.",
-        ));
-    }
-    if (400..500).contains(&status) {
-        let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        let msg = body
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown error");
-        return Err(CliError::usage(format!("could not set secrets: {}", msg)));
-    }
-    if !resp.status().is_success() {
-        return Err(CliError::Other(anyhow::anyhow!(
-            "server error ({}) while setting secrets",
-            status
-        )));
-    }
+        .map_err(map_set_sdk_error)?;
 
     let count = upsert_secrets.len();
     if count == 1 {
@@ -116,27 +99,22 @@ pub async fn unset(ctx: &CliContext, names: &[String]) -> Result<()> {
         .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(|name| (name, s)))
         .collect();
 
-    let client = ctx.client()?;
+    let (organization_id, project_id) = org_and_project(ctx)?;
+    let client = secrets_client(ctx)?;
     let mut num = 0;
 
     for name in names {
         if let Some(secret) = secrets_map.get(name.as_str())
             && let Some(id) = secret.get("id").and_then(|v| v.as_str())
         {
-            let resp = client
-                .delete(format!(
-                    "{}/platform/v1/organizations/{}/projects/{}/secrets/{}",
-                    ctx.api_url,
-                    ctx.effective_organization_id().unwrap_or_default(),
-                    ctx.effective_project_id().unwrap_or_default(),
-                    id
-                ))
-                .send()
-                .await
-                .map_err(CliError::Http)?;
-            if resp.status().is_success() {
-                num += 1;
-            }
+            let request = DeleteSecretRequest::builder()
+                .organization_id(organization_id.clone())
+                .project_id(project_id.clone())
+                .secret_id(id)
+                .build()
+                .map_err(|e| CliError::usage(e.to_string()))?;
+            client.delete(&request).await.map_err(map_unset_sdk_error)?;
+            num += 1;
         }
     }
 
@@ -149,30 +127,107 @@ pub async fn unset(ctx: &CliContext, names: &[String]) -> Result<()> {
 }
 
 async fn get_all_secrets(ctx: &CliContext) -> Result<Vec<serde_json::Value>> {
-    let client = ctx.client()?;
-    let resp = client
-        .get(format!(
-            "{}/platform/v1/organizations/{}/projects/{}/secrets?pageSize=100",
-            ctx.api_url,
-            ctx.effective_organization_id().unwrap_or_default(),
-            ctx.effective_project_id().unwrap_or_default()
-        ))
-        .send()
+    let (organization_id, project_id) = org_and_project(ctx)?;
+    let request = ListSecretsRequest::builder()
+        .organization_id(organization_id)
+        .project_id(project_id)
+        .page_size(100)
+        .build()
+        .map_err(|e| CliError::usage(e.to_string()))?;
+    let resp = secrets_client(ctx)?
+        .list(&request)
         .await
-        .map_err(CliError::Http)?;
+        .map_err(map_list_sdk_error)?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        return Err(CliError::auth(format!(
-            "failed to fetch secrets (HTTP {})",
-            status
-        )));
+    Ok(resp
+        .items
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "id": item.id,
+                "name": item.name,
+                "createdAt": item.created_at,
+            })
+        })
+        .collect())
+}
+
+fn org_and_project(ctx: &CliContext) -> Result<(String, String)> {
+    let organization_id = ctx
+        .effective_organization_id()
+        .ok_or_else(|| CliError::auth("missing organization ID; run `tl init`"))?;
+    let project_id = ctx
+        .effective_project_id()
+        .ok_or_else(|| CliError::auth("missing project ID; run `tl init`"))?;
+    Ok((organization_id, project_id))
+}
+
+fn secrets_client(ctx: &CliContext) -> Result<SecretsClient> {
+    let token = ctx.bearer_token()?;
+    let sdk = Sdk::new(&ctx.api_url, &token)?;
+    Ok(sdk.secrets())
+}
+
+fn parse_remote_message(raw: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|body| {
+            body.get("message")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| raw.to_string())
+}
+
+fn map_list_sdk_error(error: SdkError) -> CliError {
+    match error {
+        SdkError::Authentication(_) => {
+            CliError::auth("authentication failed. set TENSORLAKE_API_KEY or run 'tl login'.")
+        }
+        SdkError::Authorization(_) => CliError::auth(
+            "permission denied. set TENSORLAKE_API_KEY with required permissions, or run 'tl init'.",
+        ),
+        SdkError::ServerError { status, .. } => {
+            CliError::auth(format!("failed to fetch secrets (HTTP {})", status))
+        }
+        other => CliError::from(other),
     }
+}
 
-    let body: serde_json::Value = resp.json().await.map_err(CliError::Http)?;
-    Ok(body
-        .get("items")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default())
+fn map_set_sdk_error(error: SdkError) -> CliError {
+    match error {
+        SdkError::Authentication(_) => {
+            CliError::auth("authentication failed. set TENSORLAKE_API_KEY or run 'tl login'.")
+        }
+        SdkError::Authorization(_) => CliError::auth(
+            "permission denied. set TENSORLAKE_API_KEY with required permissions, or run 'tl init'.",
+        ),
+        SdkError::ServerError { status, message } => {
+            let code = status.as_u16();
+            if (400..500).contains(&code) {
+                CliError::usage(format!(
+                    "could not set secrets: {}",
+                    parse_remote_message(&message)
+                ))
+            } else {
+                CliError::Other(anyhow::anyhow!(
+                    "server error ({}) while setting secrets",
+                    code
+                ))
+            }
+        }
+        other => CliError::from(other),
+    }
+}
+
+fn map_unset_sdk_error(error: SdkError) -> CliError {
+    match error {
+        SdkError::Authentication(_) => {
+            CliError::auth("authentication failed. set TENSORLAKE_API_KEY or run 'tl login'.")
+        }
+        SdkError::Authorization(_) => CliError::auth(
+            "permission denied. set TENSORLAKE_API_KEY with required permissions, or run 'tl init'.",
+        ),
+        other => CliError::from(other),
+    }
 }
