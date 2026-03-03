@@ -4,10 +4,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
-
 from tensorlake.applications.interface.exceptions import InternalError
-from tensorlake.applications.remote.api_client import APIClient
 
 try:
     from tensorlake_rust_cloud_sdk import CloudApiClient as RustCloudApiClient
@@ -30,28 +27,6 @@ def _cli_error(msg):
     sys.exit(1)
 
 
-def raise_on_authn_authz(response: httpx.Response):
-    if response.status_code == 401:
-        _cli_error("The credentials to access Tensorlake's API are not valid")
-    elif response.status_code == 403:
-        _cli_error(
-            "The credentials to access Tensorlake's API are not authorized for this operation"
-        )
-
-
-async def raise_on_authn_authz_async(response: httpx.Response):
-    raise_on_authn_authz(response)
-
-
-HTTP_EVENT_HOOKS = {
-    "response": [raise_on_authn_authz],
-}
-
-ASYNC_HTTP_EVENT_HOOKS = {
-    "response": [raise_on_authn_authz_async],
-}
-
-
 @dataclass
 class Context:
     """Class for CLI context."""
@@ -63,59 +38,10 @@ class Context:
     personal_access_token: str | None = None
     version: str = VERSION
     debug: bool = False
-    _client: httpx.Client | None = None
     _introspect_response: dict[str, Any] | None = None
-    _api_client: APIClient | None = None
     _rust_cloud_client: Any | None = None
     organization_id_value: str | None = None
     project_id_value: str | None = None
-
-    @property
-    def client(self) -> httpx.Client:
-        if self._client is None:
-            headers = {
-                "Accept": "application/json",
-                "User-Agent": f"Tensorlake CLI (python/{sys.version_info[0]}.{sys.version_info[1]} sdk/{self.version})",
-            }
-            if self.api_key:
-                headers["Authorization"] = f"Bearer {self.api_key}"
-            elif self.personal_access_token:
-                headers["Authorization"] = f"Bearer {self.personal_access_token}"
-                if self.organization_id:
-                    headers["X-Forwarded-Organization-Id"] = self.organization_id
-                if self.project_id:
-                    headers["X-Forwarded-Project-Id"] = self.project_id
-            else:
-                _cli_error(
-                    "Missing API key or personal access token. Please run `tensorlake login` to authenticate."
-                )
-
-            self._client = httpx.Client(
-                base_url=self.api_url, headers=headers, event_hooks=HTTP_EVENT_HOOKS
-            )
-        return self._client
-
-    @property
-    def api_client(self) -> APIClient:
-        if self._api_client is None:
-            if self.api_key:
-                bearer_token = self.api_key
-                org_id = None
-                proj_id = None
-            else:
-                bearer_token = self.personal_access_token
-                org_id = self.organization_id
-                proj_id = self.project_id
-
-            self._api_client = APIClient(
-                api_url=self.api_url,
-                api_key=bearer_token,
-                organization_id=org_id,
-                project_id=proj_id,
-                namespace=self.namespace,
-            )
-
-        return self._api_client
 
     @property
     def rust_cloud_client(self):
