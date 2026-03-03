@@ -42,6 +42,7 @@ test_document_ai:
 	cd tests && ./run_tests.sh --document-ai
 
 test_sandbox:
+	@poetry run maturin develop --manifest-path crates/rust-cloud-sdk-py/Cargo.toml
 	cd tests/sandbox && poetry run python test_lifecycle.py -v
 
 .PHONY: all build build_proto fmt build_rust_py_client test test_document_ai test_sandbox

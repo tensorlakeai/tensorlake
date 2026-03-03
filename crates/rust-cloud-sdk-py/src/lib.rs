@@ -271,6 +271,125 @@ impl CloudApiClient {
         })
     }
 
+    fn introspect_api_key_json(&self) -> PyResult<String> {
+        self.run_with_retry(5, move |client| async move {
+            let request = client
+                .request(Method::POST, "/platform/v1/keys/introspect")
+                .build()?;
+            let response = client.execute(request).await?;
+            Ok(response.text().await?)
+        })
+    }
+
+    #[pyo3(signature = (organization_id, project_id, page_size=100))]
+    fn list_secrets_json(
+        &self,
+        organization_id: String,
+        project_id: String,
+        page_size: i32,
+    ) -> PyResult<String> {
+        self.run_with_retry(5, move |client| {
+            let path = format!(
+                "/platform/v1/organizations/{organization_id}/projects/{project_id}/secrets"
+            );
+            async move {
+                let request = client
+                    .request(Method::GET, &path)
+                    .query(&[("pageSize", page_size)])
+                    .build()?;
+                let response = client.execute(request).await?;
+                Ok(response.text().await?)
+            }
+        })
+    }
+
+    fn start_image_build(
+        &self,
+        build_service_path: String,
+        graph_name: String,
+        graph_version: String,
+        graph_function_name: String,
+        image_name: String,
+        image_id: String,
+        context_tar_gz: Vec<u8>,
+    ) -> PyResult<String> {
+        self.run_with_retry(5, move |client| {
+            let build_service_path = build_service_path.clone();
+            let graph_name = graph_name.clone();
+            let graph_version = graph_version.clone();
+            let graph_function_name = graph_function_name.clone();
+            let image_name = image_name.clone();
+            let image_id = image_id.clone();
+            let context_tar_gz = context_tar_gz.clone();
+            async move {
+                let endpoint = format!("{}/builds", build_service_path.trim_end_matches('/'));
+                let form = Form::new()
+                    .text("graph_name", graph_name)
+                    .text("graph_version", graph_version)
+                    .text("graph_function_name", graph_function_name)
+                    .text("image_name", image_name)
+                    .text("image_id", image_id)
+                    .part(
+                        "context",
+                        Part::bytes(context_tar_gz).file_name("context.tar.gz"),
+                    );
+                let request = client.build_multipart_request(Method::PUT, &endpoint, form)?;
+                let response = client.execute(request).await?;
+                Ok(response.text().await?)
+            }
+        })
+    }
+
+    fn build_info_json(&self, build_service_path: String, build_id: String) -> PyResult<String> {
+        self.run_with_retry(5, move |client| {
+            let path = format!(
+                "{}/builds/{build_id}",
+                build_service_path.trim_end_matches('/')
+            );
+            async move {
+                let request = client.request(Method::GET, &path).build()?;
+                let response = client.execute(request).await?;
+                Ok(response.text().await?)
+            }
+        })
+    }
+
+    fn cancel_build(&self, build_service_path: String, build_id: String) -> PyResult<()> {
+        self.run_with_retry(5, move |client| {
+            let path = format!(
+                "{}/builds/{build_id}/cancel",
+                build_service_path.trim_end_matches('/')
+            );
+            async move {
+                let request = client.request(Method::POST, &path).build()?;
+                let _response = client.execute(request).await?;
+                Ok(())
+            }
+        })
+    }
+
+    fn stream_build_logs_json(
+        &self,
+        build_service_path: String,
+        build_id: String,
+    ) -> PyResult<Vec<String>> {
+        self.run_with_retry(10, move |client| {
+            let path = format!(
+                "{}/builds/{build_id}/logs",
+                build_service_path.trim_end_matches('/')
+            );
+            async move {
+                let mut stream = client.build_event_source_request::<Value>(&path).await?;
+                let mut events: Vec<String> = Vec::new();
+                while let Some(event) = stream.next().await {
+                    let event = event?;
+                    events.push(serde_json::to_string(&event)?);
+                }
+                Ok(events)
+            }
+        })
+    }
+
     fn endpoint_url(&self, endpoint: String) -> String {
         format!("{}/{}", self.api_url.trim_end_matches('/'), endpoint)
     }

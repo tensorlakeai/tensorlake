@@ -1,10 +1,23 @@
 import importlib.metadata
+import json
 import sys
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
+from tensorlake.applications.interface.exceptions import InternalError
 from tensorlake.applications.remote.api_client import APIClient
+
+try:
+    from tensorlake_rust_cloud_sdk import CloudApiClient as RustCloudApiClient
+    from tensorlake_rust_cloud_sdk import CloudApiClientError as RustCloudApiClientError
+
+    _RUST_CLOUD_CLIENT_AVAILABLE = True
+except Exception:
+    RustCloudApiClient = None
+    RustCloudApiClientError = None
+    _RUST_CLOUD_CLIENT_AVAILABLE = False
 
 try:
     VERSION = importlib.metadata.version("tensorlake")
@@ -51,8 +64,9 @@ class Context:
     version: str = VERSION
     debug: bool = False
     _client: httpx.Client | None = None
-    _introspect_response: httpx.Response | None = None
+    _introspect_response: dict[str, Any] | None = None
     _api_client: APIClient | None = None
+    _rust_cloud_client: Any | None = None
     organization_id_value: str | None = None
     project_id_value: str | None = None
 
@@ -104,29 +118,67 @@ class Context:
         return self._api_client
 
     @property
+    def rust_cloud_client(self):
+        if self._rust_cloud_client is None:
+            if not _RUST_CLOUD_CLIENT_AVAILABLE:
+                _cli_error(
+                    "Rust Cloud SDK client is required but unavailable. Run `make build_rust_py_client`."
+                )
+            bearer_token = self.api_key or self.personal_access_token
+            if bearer_token is None:
+                _cli_error(
+                    "Missing API key or personal access token. Please run `tensorlake login` to authenticate."
+                )
+            try:
+                self._rust_cloud_client = RustCloudApiClient(
+                    api_url=self.api_url,
+                    api_key=bearer_token,
+                )
+            except Exception as e:
+                raise InternalError(str(e)) from e
+        return self._rust_cloud_client
+
+    @property
     def api_key_id(self):
         if self.api_key:
-            return self._introspect().json().get("id")
+            return self._introspect().get("id")
         else:
             return None
 
     @property
     def project_id(self):
         if self.api_key:
-            return self._introspect().json().get("projectId")
+            return self._introspect().get("projectId")
         return self.project_id_value
 
     @property
     def organization_id(self):
         if self.api_key:
-            return self._introspect().json().get("organizationId")
+            return self._introspect().get("organizationId")
         return self.organization_id_value
 
-    def _introspect(self) -> httpx.Response:
+    def _introspect(self) -> dict[str, Any]:
         if self._introspect_response is None:
             try:
-                introspect_response = self.client.post("/platform/v1/keys/introspect")
-                if introspect_response.status_code == 401:
+                response_json = self.rust_cloud_client.introspect_api_key_json()
+                self._introspect_response = json.loads(response_json)
+            except Exception as e:
+                status_code: int | None = None
+                if (
+                    RustCloudApiClientError is not None
+                    and isinstance(e, RustCloudApiClientError)
+                    and len(e.args) > 0
+                ):
+                    if len(e.args) == 3:
+                        _, status_code, _ = e.args
+                    elif (
+                        len(e.args) == 1
+                        and isinstance(e.args[0], tuple)
+                        and len(e.args[0]) == 3
+                    ):
+                        _, status_code, _ = e.args[0]
+
+                if status_code == 401:
                     print(
                         "The TensorLake API key is not valid.",
                         file=sys.stderr,
@@ -136,7 +188,7 @@ class Context:
                         file=sys.stderr,
                     )
                     _cli_error("Invalid API key")
-                if introspect_response.status_code == 404:
+                if status_code == 404:
                     print(
                         f"The server at {self.api_url} doesn't support TensorLake API introspection.",
                         file=sys.stderr,
@@ -146,22 +198,19 @@ class Context:
                         file=sys.stderr,
                     )
                     _cli_error("API introspection not supported")
-                introspect_response.raise_for_status()
-                self._introspect_response = introspect_response
-            except httpx.HTTPStatusError as e:
-                status_code = e.response.status_code
+
+                if status_code is None:
+                    status_code = 500
                 print(f"Error validating API key: HTTP {status_code}", file=sys.stderr)
 
                 if self.debug:
                     print("", file=sys.stderr)
                     print("Technical details:", file=sys.stderr)
                     print(
-                        f"  Status: {status_code} {e.response.reason_phrase}",
+                        f"  URL: {self.api_url}/platform/v1/keys/introspect",
                         file=sys.stderr,
                     )
-                    print(f"  URL: {e.request.url}", file=sys.stderr)
-                    if e.response.text:
-                        print(f"  Response: {e.response.text}", file=sys.stderr)
+                    print(f"  Error: {e}", file=sys.stderr)
                 else:
                     print("", file=sys.stderr)
                     print(
@@ -171,6 +220,23 @@ class Context:
 
                 _cli_error(f"API key validation failed with status {status_code}")
         return self._introspect_response
+
+    def list_secret_names(self, page_size: int = 100) -> list[str]:
+        org_id = self.organization_id
+        project_id = self.project_id
+        if org_id is None or project_id is None:
+            return []
+
+        try:
+            response_json = self.rust_cloud_client.list_secrets_json(
+                organization_id=org_id,
+                project_id=project_id,
+                page_size=page_size,
+            )
+            payload = json.loads(response_json)
+            return [item["name"] for item in payload.get("items", []) if "name" in item]
+        except Exception:
+            return []
 
     def has_authentication(self) -> bool:
         return self.api_key is not None or self.personal_access_token is not None

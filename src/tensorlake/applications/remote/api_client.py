@@ -1,9 +1,7 @@
 import json
 import os
-from typing import Any, Callable
 
 import httpx
-from httpx_sse import EventSource, ServerSentEvent, connect_sse
 from pydantic import BaseModel
 
 from tensorlake.applications.interface.exceptions import (
@@ -20,7 +18,6 @@ from tensorlake.applications.interface.exceptions import (
     TensorlakeError,
 )
 from tensorlake.applications.remote.manifests.application import ApplicationManifest
-from tensorlake.utils.retries import exponential_backoff
 
 try:
     from tensorlake_rust_cloud_sdk import CloudApiClient as RustCloudApiClient
@@ -31,10 +28,6 @@ except Exception:
     RustCloudApiClient = None
     RustCloudApiClientError = None
     _RUST_CLOUD_CLIENT_AVAILABLE = False
-
-# Timeout used by default for HTTP requests that don't run customer code
-# or download large amounts of data.
-_DEFAULT_HTTP_REQUEST_TIMEOUT_SEC = 5.0
 
 _API_NAMESPACE_FROM_ENV: str | None = os.getenv("INDEXIFY_NAMESPACE", "default")
 _API_URL_FROM_ENV: str = os.getenv("TENSORLAKE_API_URL", "https://api.tensorlake.ai")
@@ -76,36 +69,6 @@ class RequestInput(BaseModel):
 class RequestOutput(BaseModel):
     serialized_value: bytes
     content_type: str
-
-
-def _print_retry(e: BaseException, sleep_time: float, retries: int):
-    # Print each retry to keep user's UX interactive.
-    print(
-        f"Retrying remote API request after {sleep_time:.2f} seconds. Retry count: {retries}. Retryable exception: {e}",
-    )
-
-
-# We use _is_retriable_exception to decide which exceptions are retriable.
-_RETRIABLE_EXCEPTIONS = (Exception,)
-
-
-def _is_retriable_exception(e: Exception) -> bool:
-    if isinstance(e, RemoteAPIError):
-        # 502 Service Unavailable is returned by reverse proxies when the backend server is not available.
-        # i.e. when a single replica Server is getting deployed. We also convert all transient httpx exceptions
-        # into it.
-        if e.status_code == 502:
-            return True
-        # 503 Service Unavailable is returned by reverse proxies when the backend server is not available.
-        # i.e. when a single replica Server is getting deployed. We also convert all transient httpx exceptions
-        # into it.
-        if e.status_code == 503:
-            return True
-        # Server timeout or client side timeout.
-        if e.status_code == 504:
-            return True
-
-    return False
 
 
 def _raise_as_tensorlake_error(e: Exception) -> None:
@@ -201,28 +164,27 @@ class APIClient:
         project_id: str | None = None,
         namespace: str | None = _API_NAMESPACE_FROM_ENV,
     ):
-        self._client: httpx.Client = httpx.Client(
-            timeout=_DEFAULT_HTTP_REQUEST_TIMEOUT_SEC
-        )
         self._namespace: str | None = namespace
         self._api_url: str = api_url
         self._api_key: str | None = api_key
         self._organization_id: str | None = organization_id
         self._project_id: str | None = project_id
-        self._rust_client = None
+        if not _RUST_CLOUD_CLIENT_AVAILABLE:
+            raise InternalError(
+                "Rust Cloud SDK client is required but unavailable. "
+                "Build/install it with `make build_rust_py_client`."
+            )
 
-        if _RUST_CLOUD_CLIENT_AVAILABLE:
-            try:
-                self._rust_client = RustCloudApiClient(
-                    api_url=self._api_url,
-                    api_key=self._api_key,
-                    organization_id=self._organization_id,
-                    project_id=self._project_id,
-                    namespace=self._namespace,
-                )
-            except Exception:
-                # Fallback to pure-Python implementation when Rust backend is unavailable.
-                self._rust_client = None
+        try:
+            self._rust_client = RustCloudApiClient(
+                api_url=self._api_url,
+                api_key=self._api_key,
+                organization_id=self._organization_id,
+                project_id=self._project_id,
+                namespace=self._namespace,
+            )
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
 
     def __enter__(self) -> "APIClient":
         """Context manager entry point."""
@@ -234,12 +196,7 @@ class APIClient:
 
     def close(self):
         """Frees resources held by the API client."""
-        self._client.close()
-        if self._rust_client is not None:
-            try:
-                self._rust_client.close()
-            except Exception:
-                pass
+        self._rust_client.close()
 
     def upsert_application(
         self,
@@ -252,29 +209,14 @@ class APIClient:
         Raises SDKUsageError if the client configuration is not valid for the operation.
         Raises TensorlakeError on other errors.
         """
-        if self._rust_client is not None:
-            try:
-                self._rust_client.upsert_application(
-                    manifest_json=manifest_json,
-                    code_zip=code_zip,
-                    upgrade_running_requests=upgrade_running_requests,
-                )
-                return
-            except Exception as e:
-                _raise_as_tensorlake_error(e)
-
-        self._run_request(
-            self._client.build_request(
-                "POST",
-                url=self._endpoint_url(f"v1/namespaces/{self._namespace}/applications"),
-                files={"code": code_zip},
-                data={
-                    "code_content_type": "application/zip",
-                    "application": manifest_json,
-                    "upgrade_requests_to_latest_code": upgrade_running_requests,
-                },
+        try:
+            self._rust_client.upsert_application(
+                manifest_json=manifest_json,
+                code_zip=code_zip,
+                upgrade_running_requests=upgrade_running_requests,
             )
-        )
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
 
     def delete_application(
         self,
@@ -286,21 +228,10 @@ class APIClient:
         Raises SDKUsageError if the client configuration is not valid for the operation.
         Raises TensorlakeError on other errors.
         """
-        if self._rust_client is not None:
-            try:
-                self._rust_client.delete_application(application_name=application_name)
-                return
-            except Exception as e:
-                _raise_as_tensorlake_error(e)
-
-        self._run_request(
-            self._client.build_request(
-                "DELETE",
-                url=self._endpoint_url(
-                    f"v1/namespaces/{self._namespace}/applications/{application_name}"
-                ),
-            )
-        )
+        try:
+            self._rust_client.delete_application(application_name=application_name)
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
 
     def applications(self) -> list[Application]:
         """Returns list of all existing applications.
@@ -308,30 +239,12 @@ class APIClient:
         Raises SDKUsageError if the client configuration is not valid for the operation.
         Raises TensorlakeError on other errors.
         """
-        if self._rust_client is not None:
-            try:
-                response_json: str = self._rust_client.applications_json()
-                application_jsons: list[dict] = json.loads(response_json)[
-                    "applications"
-                ]
-                return [Application.model_validate(app) for app in application_jsons]
-            except Exception as e:
-                _raise_as_tensorlake_error(e)
-
-        applications_response: httpx.Response = self._run_request(
-            self._client.build_request(
-                "GET",
-                url=self._endpoint_url(f"v1/namespaces/{self._namespace}/applications"),
-            )
-        )
         try:
-            application_jsons: list[dict] = applications_response.json()["applications"]
-
+            response_json: str = self._rust_client.applications_json()
+            application_jsons: list[dict] = json.loads(response_json)["applications"]
             return [Application.model_validate(app) for app in application_jsons]
         except Exception as e:
-            raise InternalError(
-                f"failed to parse applications list response: {applications_response.text}"
-            ) from e
+            _raise_as_tensorlake_error(e)
 
     def application(self, application_name: str) -> ApplicationManifest:
         """Returns manifest json dict for a specific application.
@@ -339,29 +252,13 @@ class APIClient:
         Raises SDKUsageError if the client configuration is not valid for the operation.
         Raises TensorlakeError on other errors.
         """
-        if self._rust_client is not None:
-            try:
-                response_json: str = self._rust_client.application_manifest_json(
-                    application_name=application_name
-                )
-                return ApplicationManifest.model_validate_json(response_json)
-            except Exception as e:
-                _raise_as_tensorlake_error(e)
-
-        application_response: httpx.Response = self._run_request(
-            self._client.build_request(
-                "GET",
-                url=self._endpoint_url(
-                    f"v1/namespaces/{self._namespace}/applications/{application_name}"
-                ),
-            )
-        )
         try:
-            return ApplicationManifest.model_validate_json(application_response.text)
+            response_json: str = self._rust_client.application_manifest_json(
+                application_name=application_name
+            )
+            return ApplicationManifest.model_validate_json(response_json)
         except Exception as e:
-            raise InternalError(
-                f"failed to parse application response: {application_response.text}"
-            ) from e
+            _raise_as_tensorlake_error(e)
 
     def run_request(
         self,
@@ -374,81 +271,16 @@ class APIClient:
         Raises SDKUsageError if the client configuration is not valid for the operation.
         Raises TensorlakeError on other errors.
         """
-        if self._rust_client is not None:
-            try:
-                rust_inputs: list[tuple[str, bytes, str]] = [
-                    (part.name, part.data, part.content_type) for part in inputs
-                ]
-                return self._rust_client.run_request(
-                    application_name=application_name, inputs=rust_inputs
-                )
-            except Exception as e:
-                _raise_as_tensorlake_error(e)
-
-        # NB. Keep all the modes used here supported because when users run requests using regular
-        # HTTP clients they only use multipart requests for multiple inputs. For 1 input they use
-        # regular HTTP request with content type set to the input content type. And for 0 inputs
-        # they use regular HTTP request with empty body. All these modes must be covered in tests.
-        #
-        # NB. Keep this code in sync with curl_command.example_application_curl_command().
-        if len(inputs) == 0:
-            # Empty body mode for no application function parameters.
-            response: httpx.Response = self._run_request(
-                self._client.build_request(
-                    "POST",
-                    url=self._endpoint_url(
-                        f"v1/namespaces/{self._namespace}/applications/{application_name}"
-                    ),
-                    headers={
-                        "Accept": "application/json",
-                    },
-                    content=b"",
-                )
-            )
-        elif len(inputs) == 1 and inputs[0].name == "0":
-            # Single part mode for application function calls with a single positional parameter.
-            # I.e. this mode doesn't work when a single kwarg is used because this mode doesn't store
-            # kwarg name.
-            response: httpx.Response = self._run_request(
-                self._client.build_request(
-                    "POST",
-                    url=self._endpoint_url(
-                        f"v1/namespaces/{self._namespace}/applications/{application_name}"
-                    ),
-                    headers={
-                        "Accept": "application/json",
-                        "Content-Type": inputs[0].content_type,
-                    },
-                    content=inputs[0].data,
-                )
-            )
-        else:
-            # Multipart mode for multiple application function parameters.
-            # field name -> (filename, filedata, content_type)
-            files: dict[str, tuple[str, bytes, str]] = {}
-            for part in inputs:
-                files[part.name] = (part.name, part.data, part.content_type)
-
-            response: httpx.Response = self._run_request(
-                self._client.build_request(
-                    "POST",
-                    url=self._endpoint_url(
-                        f"v1/namespaces/{self._namespace}/applications/{application_name}"
-                    ),
-                    headers={
-                        "Accept": "application/json",
-                        # Content type is set by httpx when using multipart form data.
-                    },
-                    files=files,
-                )
-            )
-
         try:
-            return response.json()["request_id"]
+            rust_inputs: list[tuple[str, bytes, str]] = [
+                (part.name, part.data, part.content_type) for part in inputs
+            ]
+            return self._rust_client.run_request(
+                application_name=application_name,
+                inputs=rust_inputs,
+            )
         except Exception as e:
-            raise InternalError(
-                f"failed to parse run request response: {response.text}"
-            ) from e
+            _raise_as_tensorlake_error(e)
 
     def wait_on_request_completion(
         self,
@@ -460,31 +292,13 @@ class APIClient:
         Raises SDKUsageError if the client configuration is not valid for the operation.
         Raises TensorlakeError on other errors.
         """
-
-        if self._rust_client is not None:
-            try:
-                self._rust_client.wait_on_request_completion(
-                    application_name=application_name,
-                    request_id=request_id,
-                )
-                return
-            except Exception as e:
-                _raise_as_tensorlake_error(e)
-
-        def event_processor(sse: ServerSentEvent) -> None | bool:
-            event: dict[str, Any] = sse.json()
-            # Finish processing when we see RequestFinished event.
-            if "RequestFinished" in event:
-                return True
-
-        self._run_sse_stream(
-            method="GET",
-            url=self._endpoint_url(
-                f"v1/namespaces/{self._namespace}/applications/{application_name}/requests/{request_id}/progress"
-            ),
-            timeout=None,  # No timeout as we wait for customer code completion
-            event_processor=event_processor,
-        )
+        try:
+            self._rust_client.wait_on_request_completion(
+                application_name=application_name,
+                request_id=request_id,
+            )
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
 
     def request_output(
         self,
@@ -499,155 +313,31 @@ class APIClient:
         Raises SDKUsageError if the client configuration is not valid for the operation.
         Raises TensorlakeError on other errors.
         """
-        if self._rust_client is not None:
-            try:
-                request_metadata_json: str = self._rust_client.request_metadata_json(
-                    application_name=application_name,
-                    request_id=request_id,
-                )
-                request_metadata: RequestMetadata = RequestMetadata.model_validate_json(
-                    request_metadata_json
-                )
-
-                if request_metadata.outcome is None:
-                    raise RequestNotFinished()
-
-                if isinstance(request_metadata.outcome, dict):
-                    if request_metadata.request_error is None:
-                        raise RequestFailed(request_metadata.outcome["failure"])
-                    else:
-                        raise RequestErrorException(
-                            request_metadata.request_error.message
-                        )
-
-                # request.outcome is str at this point so the request is finished successfully and its output is available.
-                serialized_value, content_type = self._rust_client.request_output_bytes(
-                    application_name=application_name,
-                    request_id=request_id,
-                )
-                return RequestOutput(
-                    serialized_value=serialized_value,
-                    content_type=content_type,
-                )
-            except Exception as e:
-                _raise_as_tensorlake_error(e)
-
-        request_metadata_response: httpx.Response = self._run_request(
-            self._client.build_request(
-                "GET",
-                url=self._endpoint_url(
-                    f"v1/namespaces/{self._namespace}/applications/{application_name}/requests/{request_id}"
-                ),
-            )
-        )
-
         try:
+            request_metadata_json: str = self._rust_client.request_metadata_json(
+                application_name=application_name,
+                request_id=request_id,
+            )
             request_metadata: RequestMetadata = RequestMetadata.model_validate_json(
-                request_metadata_response.text
+                request_metadata_json
+            )
+
+            if request_metadata.outcome is None:
+                raise RequestNotFinished()
+
+            if isinstance(request_metadata.outcome, dict):
+                if request_metadata.request_error is None:
+                    raise RequestFailed(request_metadata.outcome["failure"])
+                else:
+                    raise RequestErrorException(request_metadata.request_error.message)
+
+            serialized_value, content_type = self._rust_client.request_output_bytes(
+                application_name=application_name,
+                request_id=request_id,
+            )
+            return RequestOutput(
+                serialized_value=serialized_value,
+                content_type=content_type,
             )
         except Exception as e:
-            raise InternalError(
-                f"failed to parse request metadata response: {request_metadata_response.text}"
-            ) from e
-
-        if request_metadata.outcome is None:
-            raise RequestNotFinished()
-
-        if isinstance(request_metadata.outcome, dict):
-            if request_metadata.request_error is None:
-                raise RequestFailed(request_metadata.outcome["failure"])
-            else:
-                raise RequestErrorException(request_metadata.request_error.message)
-
-        # request.outcome is str at this point so the request is finished successfully and its output is available.
-        request_output_response: httpx.Response = self._run_request(
-            self._client.build_request(
-                "GET",
-                url=self._endpoint_url(
-                    f"v1/namespaces/{self._namespace}/applications/{application_name}/requests/{request_id}/output"
-                ),
-                timeout=None,  # No timeout as we download customer data of any size
-            )
-        )
-        return RequestOutput(
-            serialized_value=request_output_response.content,
-            content_type=request_output_response.headers.get("Content-Type", ""),
-        )
-
-    @exponential_backoff(
-        max_retries=5,
-        retryable_exceptions=_RETRIABLE_EXCEPTIONS,
-        is_retryable=_is_retriable_exception,
-        on_retry=_print_retry,
-    )
-    def _run_request(self, request: httpx.Request) -> httpx.Response:
-        """Sends an HTTP request and returns the response.
-
-        Raises SDKUsageError if the client configuration is not valid for the operation.
-        Raises TensorlakeError on other errors.
-        """
-        self._add_auth_headers(request.headers)
-
-        try:
-            response: httpx.Response = self._client.send(request)
-            response.raise_for_status()
-        except Exception as e:
             _raise_as_tensorlake_error(e)
-
-        return response
-
-    @exponential_backoff(
-        max_retries=10,  # Give extra retries for SSE streams because they have much higher change of getting disrupted due to transient errors
-        retryable_exceptions=_RETRIABLE_EXCEPTIONS,
-        is_retryable=_is_retriable_exception,
-        on_retry=_print_retry,
-    )
-    def _run_sse_stream(
-        self,
-        method: str,
-        url: str,
-        timeout: float | None,
-        event_processor: Callable[[ServerSentEvent], None | Any],
-    ) -> Any:
-        """Sends an HTTP request to connect to an SSE stream and calls the event processor for each event.
-
-        If the event processor returns non None value then the stream processing stops and the non None value is returned.
-        Raises SDKUsageError if the client configuration is not valid for the operation.
-        Raises TensorlakeError on other errors.
-        """
-        auth_headers: dict[str, str] = {}
-        self._add_auth_headers(auth_headers)
-
-        try:
-            with connect_sse(
-                self._client,
-                method=method,
-                url=url,
-                headers=auth_headers,
-                timeout=timeout,
-            ) as event_source:
-                event_source: EventSource
-                event_source.response.raise_for_status()
-                for sse in event_source.iter_sse():
-                    result: Any | None = event_processor(sse)
-                    if result is not None:
-                        return result
-        except Exception as e:
-            _raise_as_tensorlake_error(e)
-
-    def _add_auth_headers(self, headers: dict[str, str]) -> None:
-        """Adds authentication headers to the headers dict.
-
-        Doesn't raise any exceptions.
-        """
-        if self._api_key is not None:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-        # Add X-Forwarded-Organization-Id and X-Forwarded-Project-Id headers when org/project IDs are provided
-        # These are needed when using PAT (API keys get org/project via introspection)
-        if self._organization_id is not None:
-            headers["X-Forwarded-Organization-Id"] = self._organization_id
-        if self._project_id is not None:
-            headers["X-Forwarded-Project-Id"] = self._project_id
-
-    def _endpoint_url(self, endpoint: str) -> str:
-        return f"{self._api_url}/{endpoint}"

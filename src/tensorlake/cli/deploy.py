@@ -54,11 +54,7 @@ def _build_context_from_env() -> Context:
 def _warning_missing_secrets(auth: Context, secrets: list[str]) -> list[str]:
     """Check for missing secrets and return their names."""
     try:
-        resp = auth.client.get(
-            f"/platform/v1/organizations/{auth.organization_id}/projects/{auth.project_id}/secrets?pageSize=100"
-        )
-        resp.raise_for_status()
-        existing = [s["name"] for s in resp.json()["items"]]
+        existing = auth.list_secret_names(page_size=100)
     except Exception:
         return []
     return [s for s in secrets if s not in existing]

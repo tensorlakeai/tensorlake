@@ -126,23 +126,22 @@ class SandboxClient:
         self._namespace: str | None = namespace
         self._max_retries = max_retries
         self._retry_backoff_sec = retry_backoff_sec
-        self._client: httpx.Client = httpx.Client(
-            timeout=_defaults.DEFAULT_HTTP_TIMEOUT_SEC
-        )
-        self._rust_client = None
+        if not _RUST_SANDBOX_CLIENT_AVAILABLE:
+            raise SandboxError(
+                "Rust Cloud SDK sandbox client is required but unavailable. "
+                "Build/install it with `make build_rust_py_client`."
+            )
 
-        if _RUST_SANDBOX_CLIENT_AVAILABLE:
-            try:
-                self._rust_client = RustCloudSandboxClient(
-                    api_url=self._api_url,
-                    api_key=self._api_key,
-                    organization_id=self._organization_id,
-                    project_id=self._project_id,
-                    namespace=self._namespace,
-                )
-            except Exception:
-                # Fallback to pure-Python implementation when Rust backend is unavailable.
-                self._rust_client = None
+        try:
+            self._rust_client = RustCloudSandboxClient(
+                api_url=self._api_url,
+                api_key=self._api_key,
+                organization_id=self._organization_id,
+                project_id=self._project_id,
+                namespace=self._namespace,
+            )
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     @classmethod
     def for_cloud(
@@ -198,12 +197,7 @@ class SandboxClient:
 
     def close(self):
         """Close the HTTP client."""
-        self._client.close()
-        if self._rust_client is not None:
-            try:
-                self._rust_client.close()
-            except Exception:
-                pass
+        self._rust_client.close()
 
     def _is_localhost(self) -> bool:
         """Check whether the API URL points to a local server.
@@ -235,60 +229,6 @@ class SandboxClient:
             proxy_host = "sandbox." + host[4:]
             return f"{parsed.scheme}://{proxy_host}"
         return _defaults.SANDBOX_PROXY_URL
-
-    def _endpoint_url(self, endpoint: str) -> str:
-        if self._is_localhost():
-            return f"{self._api_url}/v1/namespaces/{self._namespace}/{endpoint}"
-        return f"{self._api_url}/{endpoint}"
-
-    def _add_auth_headers(self, headers: dict[str, str]) -> None:
-        if self._api_key is not None:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-        if self._organization_id is not None:
-            headers["X-Forwarded-Organization-Id"] = self._organization_id
-        if self._project_id is not None:
-            headers["X-Forwarded-Project-Id"] = self._project_id
-
-    def _run_request(self, request: httpx.Request) -> httpx.Response:
-        """Send an HTTP request with auth headers and retry on transient errors.
-
-        Retries on connection errors and 429/502/503/504 status codes
-        with exponential backoff.
-
-        Raises:
-            httpx.HTTPStatusError: For non-retryable HTTP errors (callers
-                handle mapping to specific exception types).
-            SandboxConnectionError: When the server is unreachable after
-                all retry attempts.
-        """
-        self._add_auth_headers(request.headers)
-        last_exception: Exception | None = None
-
-        for attempt in range(self._max_retries):
-            if attempt > 0:
-                time.sleep(self._retry_backoff_sec * (2 ** (attempt - 1)))
-
-            try:
-                response = self._client.send(request)
-            except httpx.RequestError as e:
-                last_exception = SandboxConnectionError(str(e))
-                if attempt < self._max_retries - 1:
-                    continue
-                raise last_exception from e
-
-            if (
-                response.status_code in _defaults.RETRYABLE_STATUS_CODES
-                and attempt < self._max_retries - 1
-            ):
-                continue
-
-            response.raise_for_status()
-            return response
-
-        # Should not be reached, but guard against it.
-        if last_exception is not None:
-            raise last_exception
-        raise SandboxError("Request failed after retries")
 
     def create(
         self,
@@ -356,26 +296,13 @@ class SandboxClient:
             snapshot_id=snapshot_id,
         )
 
-        if self._rust_client is not None:
-            try:
-                response_json = self._rust_client.create_sandbox(
-                    request_json=request_model.model_dump_json(exclude_none=True)
-                )
-                return CreateSandboxResponse.model_validate_json(response_json)
-            except Exception as e:
-                _raise_as_sandbox_error(e)
-
         try:
-            response = self._run_request(
-                self._client.build_request(
-                    "POST",
-                    url=self._endpoint_url("sandboxes"),
-                    json=request_model.model_dump(exclude_none=True),
-                )
+            response_json = self._rust_client.create_sandbox(
+                request_json=request_model.model_dump_json(exclude_none=True)
             )
-            return CreateSandboxResponse.model_validate(response.json())
-        except httpx.HTTPStatusError as e:
-            raise RemoteAPIError(e.response.status_code, e.response.text) from e
+            return CreateSandboxResponse.model_validate_json(response_json)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def claim(self, pool_id: str) -> CreateSandboxResponse:
         """Claim a sandbox from a pool.
@@ -393,23 +320,11 @@ class SandboxClient:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
-        if self._rust_client is not None:
-            try:
-                response_json = self._rust_client.claim_sandbox(pool_id=pool_id)
-                return CreateSandboxResponse.model_validate_json(response_json)
-            except Exception as e:
-                _raise_as_sandbox_error(e)
-
         try:
-            response = self._run_request(
-                self._client.build_request(
-                    "POST",
-                    url=self._endpoint_url(f"sandbox-pools/{pool_id}/sandboxes"),
-                )
-            )
-            return CreateSandboxResponse.model_validate(response.json())
-        except httpx.HTTPStatusError as e:
-            raise RemoteAPIError(e.response.status_code, e.response.text) from e
+            response_json = self._rust_client.claim_sandbox(pool_id=pool_id)
+            return CreateSandboxResponse.model_validate_json(response_json)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def get(self, sandbox_id: str) -> SandboxInfo:
         """Get information about a sandbox.
@@ -425,29 +340,13 @@ class SandboxClient:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
-        if self._rust_client is not None:
-            try:
-                response_json = self._rust_client.get_sandbox_json(
-                    sandbox_id=sandbox_id
-                )
-                return SandboxInfo.model_validate_json(response_json)
-            except Exception as e:
-                if _rust_status_code(e) == 404:
-                    raise SandboxNotFoundError(sandbox_id) from None
-                _raise_as_sandbox_error(e)
-
         try:
-            response = self._run_request(
-                self._client.build_request(
-                    "GET",
-                    url=self._endpoint_url(f"sandboxes/{sandbox_id}"),
-                )
-            )
-            return SandboxInfo.model_validate(response.json())
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                raise SandboxNotFoundError(sandbox_id) from e
-            raise RemoteAPIError(e.response.status_code, e.response.text) from e
+            response_json = self._rust_client.get_sandbox_json(sandbox_id=sandbox_id)
+            return SandboxInfo.model_validate_json(response_json)
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
+            _raise_as_sandbox_error(e)
 
     def list(self) -> list[SandboxInfo]:
         """List all sandboxes in the namespace.
@@ -459,25 +358,12 @@ class SandboxClient:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
-        if self._rust_client is not None:
-            try:
-                response_json = self._rust_client.list_sandboxes_json()
-                data = ListSandboxesResponse.model_validate(json.loads(response_json))
-                return data.sandboxes
-            except Exception as e:
-                _raise_as_sandbox_error(e)
-
         try:
-            response = self._run_request(
-                self._client.build_request(
-                    "GET",
-                    url=self._endpoint_url("sandboxes"),
-                )
-            )
-            data = ListSandboxesResponse.model_validate(response.json())
+            response_json = self._rust_client.list_sandboxes_json()
+            data = ListSandboxesResponse.model_validate(json.loads(response_json))
             return data.sandboxes
-        except httpx.HTTPStatusError as e:
-            raise RemoteAPIError(e.response.status_code, e.response.text) from e
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def delete(self, sandbox_id: str) -> None:
         """Terminate a sandbox.
@@ -490,26 +376,12 @@ class SandboxClient:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
-        if self._rust_client is not None:
-            try:
-                self._rust_client.delete_sandbox(sandbox_id=sandbox_id)
-                return
-            except Exception as e:
-                if _rust_status_code(e) == 404:
-                    raise SandboxNotFoundError(sandbox_id) from None
-                _raise_as_sandbox_error(e)
-
         try:
-            self._run_request(
-                self._client.build_request(
-                    "DELETE",
-                    url=self._endpoint_url(f"sandboxes/{sandbox_id}"),
-                )
-            )
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                raise SandboxNotFoundError(sandbox_id) from e
-            raise RemoteAPIError(e.response.status_code, e.response.text) from e
+            self._rust_client.delete_sandbox(sandbox_id=sandbox_id)
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
+            _raise_as_sandbox_error(e)
 
     # --- Snapshot operations ---
 
@@ -530,27 +402,13 @@ class SandboxClient:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
-        if self._rust_client is not None:
-            try:
-                response_json = self._rust_client.create_snapshot(sandbox_id=sandbox_id)
-                return CreateSnapshotResponse.model_validate_json(response_json)
-            except Exception as e:
-                if _rust_status_code(e) == 404:
-                    raise SandboxNotFoundError(sandbox_id) from None
-                _raise_as_sandbox_error(e)
-
         try:
-            response = self._run_request(
-                self._client.build_request(
-                    "POST",
-                    url=self._endpoint_url(f"sandboxes/{sandbox_id}/snapshot"),
-                )
-            )
-            return CreateSnapshotResponse.model_validate(response.json())
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                raise SandboxNotFoundError(sandbox_id) from e
-            raise RemoteAPIError(e.response.status_code, e.response.text) from e
+            response_json = self._rust_client.create_snapshot(sandbox_id=sandbox_id)
+            return CreateSnapshotResponse.model_validate_json(response_json)
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
+            _raise_as_sandbox_error(e)
 
     def get_snapshot(self, snapshot_id: str) -> SnapshotInfo:
         """Get information about a snapshot.
@@ -565,25 +423,11 @@ class SandboxClient:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
-        if self._rust_client is not None:
-            try:
-                response_json = self._rust_client.get_snapshot_json(
-                    snapshot_id=snapshot_id
-                )
-                return SnapshotInfo.model_validate_json(response_json)
-            except Exception as e:
-                _raise_as_sandbox_error(e)
-
         try:
-            response = self._run_request(
-                self._client.build_request(
-                    "GET",
-                    url=self._endpoint_url(f"snapshots/{snapshot_id}"),
-                )
-            )
-            return SnapshotInfo.model_validate(response.json())
-        except httpx.HTTPStatusError as e:
-            raise RemoteAPIError(e.response.status_code, e.response.text) from e
+            response_json = self._rust_client.get_snapshot_json(snapshot_id=snapshot_id)
+            return SnapshotInfo.model_validate_json(response_json)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def list_snapshots(self) -> list[SnapshotInfo]:
         """List all snapshots in the namespace.
@@ -595,25 +439,12 @@ class SandboxClient:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
-        if self._rust_client is not None:
-            try:
-                response_json = self._rust_client.list_snapshots_json()
-                data = ListSnapshotsResponse.model_validate(json.loads(response_json))
-                return data.snapshots
-            except Exception as e:
-                _raise_as_sandbox_error(e)
-
         try:
-            response = self._run_request(
-                self._client.build_request(
-                    "GET",
-                    url=self._endpoint_url("snapshots"),
-                )
-            )
-            data = ListSnapshotsResponse.model_validate(response.json())
+            response_json = self._rust_client.list_snapshots_json()
+            data = ListSnapshotsResponse.model_validate(json.loads(response_json))
             return data.snapshots
-        except httpx.HTTPStatusError as e:
-            raise RemoteAPIError(e.response.status_code, e.response.text) from e
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def delete_snapshot(self, snapshot_id: str) -> None:
         """Delete a snapshot.
@@ -625,22 +456,10 @@ class SandboxClient:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
-        if self._rust_client is not None:
-            try:
-                self._rust_client.delete_snapshot(snapshot_id=snapshot_id)
-                return
-            except Exception as e:
-                _raise_as_sandbox_error(e)
-
         try:
-            self._run_request(
-                self._client.build_request(
-                    "DELETE",
-                    url=self._endpoint_url(f"snapshots/{snapshot_id}"),
-                )
-            )
-        except httpx.HTTPStatusError as e:
-            raise RemoteAPIError(e.response.status_code, e.response.text) from e
+            self._rust_client.delete_snapshot(snapshot_id=snapshot_id)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def snapshot_and_wait(
         self,
@@ -722,26 +541,13 @@ class SandboxClient:
             warm_containers=warm_containers,
         )
 
-        if self._rust_client is not None:
-            try:
-                response_json = self._rust_client.create_pool(
-                    request_json=request_model.model_dump_json(exclude_none=True)
-                )
-                return CreateSandboxPoolResponse.model_validate_json(response_json)
-            except Exception as e:
-                _raise_as_sandbox_error(e)
-
         try:
-            response = self._run_request(
-                self._client.build_request(
-                    "POST",
-                    url=self._endpoint_url("sandbox-pools"),
-                    json=request_model.model_dump(exclude_none=True),
-                )
+            response_json = self._rust_client.create_pool(
+                request_json=request_model.model_dump_json(exclude_none=True)
             )
-            return CreateSandboxPoolResponse.model_validate(response.json())
-        except httpx.HTTPStatusError as e:
-            raise RemoteAPIError(e.response.status_code, e.response.text) from e
+            return CreateSandboxPoolResponse.model_validate_json(response_json)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def get_pool(self, pool_id: str) -> SandboxPoolInfo:
         """Get information about a sandbox pool.
@@ -757,27 +563,13 @@ class SandboxClient:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
-        if self._rust_client is not None:
-            try:
-                response_json = self._rust_client.get_pool_json(pool_id=pool_id)
-                return SandboxPoolInfo.model_validate_json(response_json)
-            except Exception as e:
-                if _rust_status_code(e) == 404:
-                    raise PoolNotFoundError(pool_id) from None
-                _raise_as_sandbox_error(e)
-
         try:
-            response = self._run_request(
-                self._client.build_request(
-                    "GET",
-                    url=self._endpoint_url(f"sandbox-pools/{pool_id}"),
-                )
-            )
-            return SandboxPoolInfo.model_validate(response.json())
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                raise PoolNotFoundError(pool_id) from e
-            raise RemoteAPIError(e.response.status_code, e.response.text) from e
+            response_json = self._rust_client.get_pool_json(pool_id=pool_id)
+            return SandboxPoolInfo.model_validate_json(response_json)
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise PoolNotFoundError(pool_id) from None
+            _raise_as_sandbox_error(e)
 
     def list_pools(self) -> list[SandboxPoolInfo]:
         """List all sandbox pools in the namespace.
@@ -789,27 +581,12 @@ class SandboxClient:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
-        if self._rust_client is not None:
-            try:
-                response_json = self._rust_client.list_pools_json()
-                data = ListSandboxPoolsResponse.model_validate(
-                    json.loads(response_json)
-                )
-                return data.pools
-            except Exception as e:
-                _raise_as_sandbox_error(e)
-
         try:
-            response = self._run_request(
-                self._client.build_request(
-                    "GET",
-                    url=self._endpoint_url("sandbox-pools"),
-                )
-            )
-            data = ListSandboxPoolsResponse.model_validate(response.json())
+            response_json = self._rust_client.list_pools_json()
+            data = ListSandboxPoolsResponse.model_validate(json.loads(response_json))
             return data.pools
-        except httpx.HTTPStatusError as e:
-            raise RemoteAPIError(e.response.status_code, e.response.text) from e
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def update_pool(
         self,
@@ -858,31 +635,16 @@ class SandboxClient:
             warm_containers=warm_containers,
         )
 
-        if self._rust_client is not None:
-            try:
-                response_json = self._rust_client.update_pool(
-                    pool_id=pool_id,
-                    request_json=request_model.model_dump_json(exclude_none=True),
-                )
-                return SandboxPoolInfo.model_validate_json(response_json)
-            except Exception as e:
-                if _rust_status_code(e) == 404:
-                    raise PoolNotFoundError(pool_id) from None
-                _raise_as_sandbox_error(e)
-
         try:
-            response = self._run_request(
-                self._client.build_request(
-                    "PUT",
-                    url=self._endpoint_url(f"sandbox-pools/{pool_id}"),
-                    json=request_model.model_dump(exclude_none=True),
-                )
+            response_json = self._rust_client.update_pool(
+                pool_id=pool_id,
+                request_json=request_model.model_dump_json(exclude_none=True),
             )
-            return SandboxPoolInfo.model_validate(response.json())
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                raise PoolNotFoundError(pool_id) from e
-            raise RemoteAPIError(e.response.status_code, e.response.text) from e
+            return SandboxPoolInfo.model_validate_json(response_json)
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise PoolNotFoundError(pool_id) from None
+            _raise_as_sandbox_error(e)
 
     def delete_pool(self, pool_id: str) -> None:
         """Delete a sandbox pool.
@@ -896,33 +658,17 @@ class SandboxClient:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
-        if self._rust_client is not None:
-            try:
-                self._rust_client.delete_pool(pool_id=pool_id)
-                return
-            except Exception as e:
-                kind, status_code, message = _parse_rust_client_error_fields(e)
-                if status_code == 404:
-                    raise PoolNotFoundError(pool_id) from None
-                if status_code == 409:
-                    raise PoolInUseError(pool_id, message) from None
-                if kind == "connection":
-                    raise SandboxConnectionError(message) from None
-                _raise_as_sandbox_error(e)
-
         try:
-            self._run_request(
-                self._client.build_request(
-                    "DELETE",
-                    url=self._endpoint_url(f"sandbox-pools/{pool_id}"),
-                )
-            )
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                raise PoolNotFoundError(pool_id) from e
-            elif e.response.status_code == 409:
-                raise PoolInUseError(pool_id, e.response.text) from e
-            raise RemoteAPIError(e.response.status_code, e.response.text) from e
+            self._rust_client.delete_pool(pool_id=pool_id)
+        except Exception as e:
+            kind, status_code, message = _parse_rust_client_error_fields(e)
+            if status_code == 404:
+                raise PoolNotFoundError(pool_id) from None
+            if status_code == 409:
+                raise PoolInUseError(pool_id, message) from None
+            if kind == "connection":
+                raise SandboxConnectionError(message) from None
+            _raise_as_sandbox_error(e)
 
     def connect(self, sandbox_id: str, proxy_url: str | None = None) -> "Sandbox":
         """Connect to a running sandbox for process and file operations.

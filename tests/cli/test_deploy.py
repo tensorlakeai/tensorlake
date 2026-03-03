@@ -48,20 +48,13 @@ class TestDeployHelpers(unittest.TestCase):
         )
 
     def test_warning_missing_secrets_returns_only_missing(self):
-        response = MagicMock()
-        response.json.return_value = {"items": [{"name": "EXISTING"}]}
-
         auth = MagicMock()
-        auth.organization_id = "org-1"
-        auth.project_id = "proj-1"
-        auth.client.get.return_value = response
+        auth.list_secret_names.return_value = ["EXISTING"]
 
         missing = deploy_module._warning_missing_secrets(auth, ["EXISTING", "MISSING"])
 
         self.assertEqual(missing, ["MISSING"])
-        auth.client.get.assert_called_once_with(
-            "/platform/v1/organizations/org-1/projects/proj-1/secrets?pageSize=100"
-        )
+        auth.list_secret_names.assert_called_once_with(page_size=100)
 
 
 class TestDeployEntrypoints(unittest.TestCase):

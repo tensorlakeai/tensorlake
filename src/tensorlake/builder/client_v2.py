@@ -19,14 +19,21 @@ import os
 import sys
 import tempfile
 from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import urlparse
 
-import httpx
-from httpx_sse import aconnect_sse
 from pydantic import BaseModel
 
 from tensorlake.applications import Image
 from tensorlake.applications.image import create_image_context_file, image_hash
-from tensorlake.cli._common import ASYNC_HTTP_EVENT_HOOKS
+
+try:
+    from tensorlake_rust_cloud_sdk import CloudApiClient as RustCloudApiClient
+
+    _RUST_CLOUD_CLIENT_AVAILABLE = True
+except Exception:
+    RustCloudApiClient = None
+    _RUST_CLOUD_CLIENT_AVAILABLE = False
 
 
 @dataclass
@@ -109,17 +116,24 @@ class ImageBuilderV2Client:
         organization_id: str | None = None,
         project_id: str | None = None,
     ):
-        self._client = httpx.AsyncClient(event_hooks=ASYNC_HTTP_EVENT_HOOKS)
-        self._build_service = build_service
-        self._headers = {}
-        if api_key:
-            self._headers["Authorization"] = f"Bearer {api_key}"
-            # Add X-Forwarded headers when not using an API key (i.e., using PAT)
-            # API keys already contain org/project info via introspection
-            if organization_id:
-                self._headers["X-Forwarded-Organization-Id"] = organization_id
-            if project_id:
-                self._headers["X-Forwarded-Project-Id"] = project_id
+        if not _RUST_CLOUD_CLIENT_AVAILABLE:
+            raise RuntimeError(
+                "Rust Cloud SDK client is required but unavailable. "
+                "Build/install it with `make build_rust_py_client`."
+            )
+
+        parsed = urlparse(build_service)
+        if not parsed.scheme or not parsed.netloc:
+            raise ValueError(f"Invalid build service URL: {build_service}")
+
+        self._build_service_path = parsed.path.rstrip("/") or "/images/v2"
+        api_url = f"{parsed.scheme}://{parsed.netloc}"
+        self._rust_client = RustCloudApiClient(
+            api_url=api_url,
+            api_key=api_key,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
 
     @classmethod
     def from_env(cls):
@@ -192,33 +206,25 @@ class ImageBuilderV2Client:
             file=sys.stderr,
         )
 
-        file_content = await asyncio.to_thread(
-            lambda: open(context_file_path, "rb").read()
-        )
-        files = {"context": file_content}
+        file_content = await asyncio.to_thread(Path(context_file_path).read_bytes)
 
         os.remove(context_file_path)
-        data = {
-            "graph_name": context.application_name,
-            "graph_version": context.application_version,
-            "graph_function_name": context.function_name,
-            "image_name": image.name,
-            "image_id": image._id,
-        }
 
-        res = await self._client.put(
-            f"{self._build_service}/builds",
-            data=data,
-            files=files,
-            headers=self._headers,
-            timeout=60,
-        )
+        try:
+            build_json = await asyncio.to_thread(
+                self._rust_client.start_image_build,
+                self._build_service_path,
+                context.application_name,
+                context.application_version,
+                context.function_name,
+                image.name,
+                image._id,
+                file_content,
+            )
+        except Exception as e:
+            raise RuntimeError(f"Error building image {image.name}: {e}") from e
 
-        if not res.is_success:
-            error_message = res.text
-            raise RuntimeError(f"Error building image {image.name}: {error_message}")
-
-        build = BuildInfo.model_validate(res.json())
+        build = BuildInfo.model_validate_json(build_json)
 
         print(
             f"Waiting for build {build.id} of {image.name} to complete...",
@@ -249,16 +255,14 @@ class ImageBuilderV2Client:
             build (NewBuild): The build for which to stream logs.
         """
         print(f"Streaming logs for build {build.id}", file=sys.stderr)
-        async with httpx.AsyncClient(timeout=120) as client:
-            async with aconnect_sse(
-                client,
-                "GET",
-                f"{self._build_service}/builds/{build.id}/logs",
-                headers=self._headers,
-            ) as event_source:
-                async for sse in event_source.aiter_sse():
-                    log_entry = BuildLogEvent.model_validate(sse.json())
-                    self._print_build_log_event(event=log_entry)
+        events_json: list[str] = await asyncio.to_thread(
+            self._rust_client.stream_build_logs_json,
+            self._build_service_path,
+            build.id,
+        )
+        for event_json in events_json:
+            log_entry = BuildLogEvent.model_validate_json(event_json)
+            self._print_build_log_event(event=log_entry)
 
         return await self.build_info(build.id)
 
@@ -283,17 +287,17 @@ class ImageBuilderV2Client:
         Returns:
             BuildInfo: Information about the build.
         """
-        res = await self._client.get(
-            f"{self._build_service}/builds/{build_id}",
-            headers=self._headers,
-            timeout=60,
-        )
-        if not res.is_success:
-            error_message = res.text
-            print(f"Error building image: {error_message}", file=sys.stderr)
-            raise RuntimeError(f"Error building image: {error_message}")
+        try:
+            build_info_json = await asyncio.to_thread(
+                self._rust_client.build_info_json,
+                self._build_service_path,
+                build_id,
+            )
+        except Exception as e:
+            print(f"Error building image: {e}", file=sys.stderr)
+            raise RuntimeError(f"Error building image: {e}") from e
 
-        build_info = BuildInfo.model_validate(res.json())
+        build_info = BuildInfo.model_validate_json(build_info_json)
 
         if build_info.status == "failed":
             print(
@@ -309,21 +313,14 @@ class ImageBuilderV2Client:
     async def _cancel_build(self, build: BuildInfo, image: Image):
         try:
             print(f"\nCancelling build for image {image.name} ...", file=sys.stderr)
-            response = await self._client.post(
-                f"{self._build_service}/builds/{build.id}/cancel",
-                headers=self._headers,
-                timeout=60,
+            await asyncio.to_thread(
+                self._rust_client.cancel_build,
+                self._build_service_path,
+                build.id,
             )
-
-            if response.status_code == 202:
-                print(
-                    f"Build for image {image.name} cancelled successfully",
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    f"Failed to cancel build {build.id}: {response.text}",
-                    file=sys.stderr,
-                )
+            print(
+                f"Build for image {image.name} cancelled successfully",
+                file=sys.stderr,
+            )
         except Exception as e:
             print(f"Failed to cancel build {build.id}: {e}", file=sys.stderr)
