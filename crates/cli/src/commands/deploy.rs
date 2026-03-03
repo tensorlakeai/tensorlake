@@ -23,6 +23,9 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
         cmd.env("TENSORLAKE_PROJECT_ID", &proj_id);
     }
     cmd.env("INDEXIFY_NAMESPACE", &ctx.namespace);
+    if ctx.debug {
+        cmd.env("TENSORLAKE_DEBUG", "1");
+    }
 
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::piped())
@@ -141,6 +144,16 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown error");
                 eprintln!("Error: {}", message);
+                if let Some(details) = event.get("details").and_then(|v| v.as_str()) {
+                    if !details.is_empty() {
+                        eprintln!("{}", details);
+                    }
+                }
+                if let Some(traceback) = event.get("traceback").and_then(|v| v.as_str()) {
+                    if !traceback.is_empty() {
+                        eprintln!("\nPython traceback:\n{}", traceback);
+                    }
+                }
             }
             _ => {
                 // Unknown event type — pass through

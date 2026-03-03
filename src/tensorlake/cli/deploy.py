@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import sys
+import traceback
 
 from tensorlake.applications import Function, Image, SDKUsageError, TensorlakeError
 from tensorlake.applications.applications import filter_applications
@@ -37,6 +38,28 @@ def _format_error_message(
     if error is None:
         return prefix
     return f"{prefix} ({type(error).__name__})"
+
+
+def _debug_enabled() -> bool:
+    return os.environ.get("TENSORLAKE_DEBUG", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _error_event(prefix: str, error: Exception | BaseException | None = None) -> dict:
+    event: dict[str, str] = {
+        "type": "error",
+        "message": _format_error_message(prefix, error),
+    }
+    if error is not None:
+        # Keep a concise detail line visible by default for actionable debugging.
+        event["details"] = f"{type(error).__name__}: {error}"
+    if _debug_enabled():
+        event["traceback"] = traceback.format_exc()
+    return event
 
 
 def _build_context_from_env() -> Context:
@@ -96,26 +119,16 @@ def deploy(
             }
         )
         sys.exit(1)
-    except ImportError:
+    except ImportError as e:
         _emit(
-            {
-                "type": "error",
-                "message": _format_error_message("failed to import application file")
-                + ". "
-                f"make sure all dependencies are installed in your current environment.",
-            }
+            _error_event(
+                "failed to import application file. make sure all dependencies are installed in your current environment.",
+                e,
+            )
         )
         sys.exit(1)
     except Exception as e:
-        _emit(
-            {
-                "type": "error",
-                "message": _format_error_message(
-                    f"failed to load {application_file_path}",
-                    e,
-                ),
-            }
-        )
+        _emit(_error_event(f"failed to load {application_file_path}", e))
         sys.exit(1)
 
     validation_messages: list[ValidationMessage] = validate_loaded_applications()
@@ -145,7 +158,7 @@ def deploy(
         _emit({"type": "error", "message": "build cancelled by user"})
         sys.exit(1)
     except Exception as e:
-        _emit({"type": "error", "message": _format_error_message("build failed", e)})
+        _emit(_error_event("build failed", e))
         sys.exit(1)
 
     _deploy_applications(
@@ -226,23 +239,13 @@ def _deploy_applications(
                 }
             )
     except SDKUsageError as e:
-        _emit({"type": "error", "message": _format_error_message("invalid usage", e)})
+        _emit(_error_event("invalid usage", e))
         sys.exit(1)
     except TensorlakeError as e:
-        _emit(
-            {
-                "type": "error",
-                "message": _format_error_message("failed to deploy applications", e),
-            }
-        )
+        _emit(_error_event("failed to deploy applications", e))
         sys.exit(1)
     except Exception as e:
-        _emit(
-            {
-                "type": "error",
-                "message": _format_error_message("failed to deploy applications", e),
-            }
-        )
+        _emit(_error_event("failed to deploy applications", e))
         sys.exit(1)
 
     _emit(
@@ -286,7 +289,7 @@ def deploy_entrypoint():
     except SystemExit:
         raise
     except Exception as e:
-        _emit({"type": "error", "message": _format_error_message("deploy failed", e)})
+        _emit(_error_event("deploy failed", e))
         sys.exit(1)
 
 

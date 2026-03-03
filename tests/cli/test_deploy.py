@@ -56,6 +56,18 @@ class TestDeployHelpers(unittest.TestCase):
         self.assertEqual(missing, ["MISSING"])
         auth.list_secret_names.assert_called_once_with(page_size=100)
 
+    def test_error_event_includes_traceback_when_debug_enabled(self):
+        with patch.dict(os.environ, {"TENSORLAKE_DEBUG": "1"}, clear=True):
+            try:
+                raise RuntimeError("boom")
+            except RuntimeError as e:
+                event = deploy_module._error_event("deploy failed", e)
+
+        self.assertEqual(event["type"], "error")
+        self.assertEqual(event["message"], "deploy failed (RuntimeError)")
+        self.assertEqual(event["details"], "RuntimeError: boom")
+        self.assertIn("RuntimeError: boom", event["traceback"])
+
 
 class TestDeployEntrypoints(unittest.TestCase):
     def _make_auth_context(self):
@@ -87,11 +99,13 @@ class TestDeployEntrypoints(unittest.TestCase):
 
         self.assertEqual(exc.exception.code, 1)
         self.assertEqual(emit.call_args_list[0].args[0]["type"], "status")
-        self.assertEqual(emit.call_args_list[-1].args[0]["type"], "error")
+        event = emit.call_args_list[-1].args[0]
+        self.assertEqual(event["type"], "error")
         self.assertIn(
             "failed to import application file",
-            emit.call_args_list[-1].args[0]["message"],
+            event["message"],
         )
+        self.assertEqual(event["details"], "ImportError: boom")
 
     def test_deploy_emits_validation_failed_when_validation_has_errors(self):
         with (
@@ -182,6 +196,7 @@ class TestDeployEntrypoints(unittest.TestCase):
         event = emit.call_args.args[0]
         self.assertEqual(event["type"], "error")
         self.assertEqual(event["message"], "deploy failed (RuntimeError)")
+        self.assertEqual(event["details"], "RuntimeError: boom")
 
 
 if __name__ == "__main__":
