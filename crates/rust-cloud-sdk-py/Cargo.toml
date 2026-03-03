@@ -1,0 +1,19 @@
+[package]
+name = "tensorlake-rust-cloud-sdk-py"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "PyO3 bindings for Tensorlake Rust cloud client"
+
+[lib]
+name = "tensorlake_rust_cloud_sdk"
+crate-type = ["cdylib"]
+
+[dependencies]
+tensorlake-cloud-sdk = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+pyo3 = { workspace = true }

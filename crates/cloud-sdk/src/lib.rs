@@ -40,6 +40,7 @@
 //!
 //! - [`ApplicationsClient`](applications::ApplicationsClient): Manage applications, functions, and requests
 //! - [`ImagesClient`](images::ImagesClient): Build and manage container images
+//! - [`SandboxesClient`](sandboxes::SandboxesClient): Manage sandbox lifecycle, pools, and snapshots
 //! - [`SecretsClient`](secrets::SecretsClient): Manage secrets for secure configuration
 //!
 //! ## Error Handling
@@ -67,9 +68,11 @@
 pub mod applications;
 pub mod error;
 pub mod images;
+pub mod sandboxes;
 pub mod secrets;
 use applications::*;
 use images::*;
+use sandboxes::*;
 use secrets::*;
 
 mod client;
@@ -219,6 +222,21 @@ impl Sdk {
     /// ```
     pub fn images(&self) -> ImagesClient {
         ImagesClient::new(self.client.clone())
+    }
+
+    /// Get a client for managing sandbox lifecycle, pools, and snapshots.
+    ///
+    /// # Arguments
+    ///
+    /// * `namespace` - Namespace used when `use_namespaced_endpoints` is true
+    /// * `use_namespaced_endpoints` - If true, use `/v1/namespaces/{namespace}/...`
+    ///   paths. If false, use cloud-style top-level paths such as `/sandboxes`.
+    pub fn sandboxes(&self, namespace: &str, use_namespaced_endpoints: bool) -> SandboxesClient {
+        SandboxesClient::new(
+            self.client.clone(),
+            namespace.to_string(),
+            use_namespaced_endpoints,
+        )
     }
 
     /// Get a client for managing secrets.

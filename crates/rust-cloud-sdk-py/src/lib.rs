@@ -1,0 +1,651 @@
+#![allow(unexpected_cfgs)]
+#![allow(unsafe_op_in_unsafe_fn)]
+
+use std::future::Future;
+use std::time::Duration;
+
+use futures::StreamExt;
+use pyo3::create_exception;
+use pyo3::exceptions::PyException;
+use pyo3::prelude::*;
+use reqwest::Method;
+use reqwest::multipart::{Form, Part};
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+use tensorlake_cloud_sdk::sandboxes::SandboxesClient;
+use tensorlake_cloud_sdk::sandboxes::models::{CreateSandboxRequest, SandboxPoolRequest};
+use tensorlake_cloud_sdk::{Client, ClientBuilder, error::SdkError};
+use tokio::runtime::Runtime;
+
+create_exception!(tensorlake_rust_cloud_sdk, CloudApiClientError, PyException);
+create_exception!(
+    tensorlake_rust_cloud_sdk,
+    CloudSandboxClientError,
+    PyException
+);
+
+const DEFAULT_HTTP_REQUEST_TIMEOUT_SEC: f64 = 5.0;
+
+#[pyclass]
+pub struct CloudApiClient {
+    client: Client,
+    runtime: Runtime,
+    api_url: String,
+    namespace: String,
+}
+
+#[pymethods]
+impl CloudApiClient {
+    #[new]
+    #[pyo3(signature = (api_url, api_key=None, organization_id=None, project_id=None, namespace=None))]
+    fn new(
+        api_url: String,
+        api_key: Option<String>,
+        organization_id: Option<String>,
+        project_id: Option<String>,
+        namespace: Option<String>,
+    ) -> PyResult<Self> {
+        let mut builder = ClientBuilder::new(&api_url);
+        if let Some(token) = api_key.as_deref() {
+            builder = builder.bearer_token(token);
+        }
+
+        if let (Some(org_id), Some(project_id)) =
+            (organization_id.as_deref(), project_id.as_deref())
+        {
+            builder = builder.scope(org_id, project_id);
+        }
+
+        let client = builder.build().map_err(into_py_error)?;
+        let runtime = Runtime::new().map_err(|e| {
+            CloudApiClientError::new_err((
+                "internal",
+                Option::<u16>::None,
+                format!("failed to create tokio runtime: {e}"),
+            ))
+        })?;
+
+        Ok(Self {
+            client,
+            runtime,
+            api_url,
+            namespace: namespace.unwrap_or_else(|| "default".to_string()),
+        })
+    }
+
+    fn close(&self) {
+        // reqwest clients are closed when dropped; this is a no-op for API parity.
+    }
+
+    fn upsert_application(
+        &self,
+        manifest_json: String,
+        code_zip: Vec<u8>,
+        upgrade_running_requests: bool,
+    ) -> PyResult<()> {
+        let namespace = self.namespace.clone();
+        self.run_with_retry(5, move |client| {
+            let namespace = namespace.clone();
+            let manifest_json = manifest_json.clone();
+            let code_zip = code_zip.clone();
+            async move {
+                let form = Form::new()
+                    .part("code", Part::bytes(code_zip).file_name("code.zip"))
+                    .text("code_content_type", "application/zip")
+                    .text("application", manifest_json)
+                    .text(
+                        "upgrade_requests_to_latest_code",
+                        upgrade_running_requests.to_string(),
+                    );
+
+                let request = client.build_multipart_request(
+                    Method::POST,
+                    &format!("/v1/namespaces/{namespace}/applications"),
+                    form,
+                )?;
+
+                let _response = client.execute(request).await?;
+                Ok(())
+            }
+        })
+    }
+
+    fn delete_application(&self, application_name: String) -> PyResult<()> {
+        let namespace = self.namespace.clone();
+        self.run_with_retry(5, move |client| {
+            let path = format!("/v1/namespaces/{namespace}/applications/{application_name}");
+            async move {
+                let request = client.request(Method::DELETE, &path).build()?;
+                let _response = client.execute(request).await?;
+                Ok(())
+            }
+        })
+    }
+
+    fn applications_json(&self) -> PyResult<String> {
+        let namespace = self.namespace.clone();
+        self.run_with_retry(5, move |client| {
+            let path = format!("/v1/namespaces/{namespace}/applications");
+            async move {
+                let request = client.request(Method::GET, &path).build()?;
+                let response = client.execute(request).await?;
+                let text = response.text().await?;
+                Ok(text)
+            }
+        })
+    }
+
+    fn application_manifest_json(&self, application_name: String) -> PyResult<String> {
+        let namespace = self.namespace.clone();
+        self.run_with_retry(5, move |client| {
+            let path = format!("/v1/namespaces/{namespace}/applications/{application_name}");
+            async move {
+                let request = client.request(Method::GET, &path).build()?;
+                let response = client.execute(request).await?;
+                let text = response.text().await?;
+                Ok(text)
+            }
+        })
+    }
+
+    fn run_request(
+        &self,
+        application_name: String,
+        inputs: Vec<(String, Vec<u8>, String)>,
+    ) -> PyResult<String> {
+        let namespace = self.namespace.clone();
+        self.run_with_retry(5, move |client| {
+            let namespace = namespace.clone();
+            let application_name = application_name.clone();
+            let inputs = inputs.clone();
+            async move {
+                let path = format!("/v1/namespaces/{namespace}/applications/{application_name}");
+                let request = if inputs.is_empty() {
+                    client
+                        .request(Method::POST, &path)
+                        .header("Accept", "application/json")
+                        .body(Vec::<u8>::new())
+                        .build()?
+                } else if inputs.len() == 1 && inputs[0].0 == "0" {
+                    let (_, data, content_type) = inputs[0].clone();
+                    client
+                        .request(Method::POST, &path)
+                        .header("Accept", "application/json")
+                        .header("Content-Type", content_type)
+                        .body(data)
+                        .build()?
+                } else {
+                    let mut form = Form::new();
+                    for (name, data, content_type) in inputs {
+                        let part = Part::bytes(data)
+                            .file_name(name.clone())
+                            .mime_str(&content_type)
+                            .map_err(|e| SdkError::ClientError(e.to_string()))?;
+                        form = form.part(name, part);
+                    }
+                    client.build_multipart_request(Method::POST, &path, form)?
+                };
+
+                let response = client.execute(request).await?;
+                let text = response.text().await?;
+                let body: Value = serde_json::from_str(&text)?;
+                let request_id = body["request_id"].as_str().ok_or_else(|| {
+                    SdkError::ClientError(format!(
+                        "missing request_id in run request response body: {text}"
+                    ))
+                })?;
+                Ok(request_id.to_string())
+            }
+        })
+    }
+
+    fn wait_on_request_completion(
+        &self,
+        application_name: String,
+        request_id: String,
+    ) -> PyResult<()> {
+        let namespace = self.namespace.clone();
+        self.run_with_retry(10, move |client| {
+            let path =
+                format!("/v1/namespaces/{namespace}/applications/{application_name}/requests/{request_id}/progress");
+            async move {
+                let mut stream = client.build_event_source_request::<Value>(&path).await?;
+                while let Some(event) = stream.next().await {
+                    let event = event?;
+                    if event.get("RequestFinished").is_some() {
+                        return Ok(());
+                    }
+                }
+
+                Err(SdkError::EventSourceError(
+                    "progress stream ended before request completion".to_string(),
+                ))
+            }
+        })
+    }
+
+    fn request_metadata_json(
+        &self,
+        application_name: String,
+        request_id: String,
+    ) -> PyResult<String> {
+        let namespace = self.namespace.clone();
+        self.run_with_retry(5, move |client| {
+            let path = format!(
+                "/v1/namespaces/{namespace}/applications/{application_name}/requests/{request_id}"
+            );
+            async move {
+                let request = client.request(Method::GET, &path).build()?;
+                let response = client.execute(request).await?;
+                let text = response.text().await?;
+                Ok(text)
+            }
+        })
+    }
+
+    fn request_output_bytes(
+        &self,
+        application_name: String,
+        request_id: String,
+    ) -> PyResult<(Vec<u8>, String)> {
+        let namespace = self.namespace.clone();
+        self.run_with_retry(5, move |client| {
+            let path = format!(
+                "/v1/namespaces/{namespace}/applications/{application_name}/requests/{request_id}/output"
+            );
+            async move {
+                let request = client
+                    .request(Method::GET, &path)
+                    .timeout(Duration::from_secs_f64(DEFAULT_HTTP_REQUEST_TIMEOUT_SEC))
+                    .build()?;
+                let response = client.execute(request).await?;
+                let content_type = response
+                    .headers()
+                    .get("Content-Type")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                let bytes = response.bytes().await?;
+                Ok((bytes.to_vec(), content_type))
+            }
+        })
+    }
+
+    fn endpoint_url(&self, endpoint: String) -> String {
+        format!("{}/{}", self.api_url.trim_end_matches('/'), endpoint)
+    }
+}
+
+#[pyclass]
+pub struct CloudSandboxClient {
+    client: SandboxesClient,
+    runtime: Runtime,
+}
+
+#[pymethods]
+impl CloudSandboxClient {
+    #[new]
+    #[pyo3(signature = (api_url, api_key=None, organization_id=None, project_id=None, namespace=None))]
+    fn new(
+        api_url: String,
+        api_key: Option<String>,
+        organization_id: Option<String>,
+        project_id: Option<String>,
+        namespace: Option<String>,
+    ) -> PyResult<Self> {
+        let mut builder = ClientBuilder::new(&api_url);
+        if let Some(token) = api_key.as_deref() {
+            builder = builder.bearer_token(token);
+        }
+
+        if let (Some(org_id), Some(project_id)) =
+            (organization_id.as_deref(), project_id.as_deref())
+        {
+            builder = builder.scope(org_id, project_id);
+        }
+
+        let client = builder.build().map_err(into_sandbox_py_error)?;
+        let runtime = Runtime::new().map_err(|e| {
+            CloudSandboxClientError::new_err((
+                "internal",
+                Option::<u16>::None,
+                format!("failed to create tokio runtime: {e}"),
+            ))
+        })?;
+        let use_namespaced_endpoints = is_localhost_api_url(&api_url);
+        let sandboxes_client = SandboxesClient::new(
+            client,
+            namespace.unwrap_or_else(|| "default".to_string()),
+            use_namespaced_endpoints,
+        );
+
+        Ok(Self {
+            client: sandboxes_client,
+            runtime,
+        })
+    }
+
+    fn close(&self) {
+        // reqwest clients are closed when dropped; this is a no-op for API parity.
+    }
+
+    fn create_sandbox(&self, request_json: String) -> PyResult<String> {
+        let request: CreateSandboxRequest = parse_json_payload(&request_json)?;
+        self.run_with_retry(5, move |client| {
+            let request = request.clone();
+            async move {
+                let response = client.create(&request).await?;
+                Ok(serde_json::to_string(&response)?)
+            }
+        })
+    }
+
+    fn claim_sandbox(&self, pool_id: String) -> PyResult<String> {
+        self.run_with_retry(5, move |client| {
+            let pool_id = pool_id.clone();
+            async move {
+                let response = client.claim(&pool_id).await?;
+                Ok(serde_json::to_string(&response)?)
+            }
+        })
+    }
+
+    fn get_sandbox_json(&self, sandbox_id: String) -> PyResult<String> {
+        self.run_with_retry(5, move |client| {
+            let sandbox_id = sandbox_id.clone();
+            async move {
+                let response = client.get(&sandbox_id).await?;
+                Ok(serde_json::to_string(&response)?)
+            }
+        })
+    }
+
+    fn list_sandboxes_json(&self) -> PyResult<String> {
+        self.run_with_retry(5, move |client| async move {
+            let sandboxes = client.list().await?;
+            let response = serde_json::json!({ "sandboxes": sandboxes });
+            Ok(serde_json::to_string(&response)?)
+        })
+    }
+
+    fn delete_sandbox(&self, sandbox_id: String) -> PyResult<()> {
+        self.run_with_retry(5, move |client| {
+            let sandbox_id = sandbox_id.clone();
+            async move { client.delete(&sandbox_id).await }
+        })
+    }
+
+    fn create_snapshot(&self, sandbox_id: String) -> PyResult<String> {
+        self.run_with_retry(5, move |client| {
+            let sandbox_id = sandbox_id.clone();
+            async move {
+                let response = client.snapshot(&sandbox_id).await?;
+                Ok(serde_json::to_string(&response)?)
+            }
+        })
+    }
+
+    fn get_snapshot_json(&self, snapshot_id: String) -> PyResult<String> {
+        self.run_with_retry(5, move |client| {
+            let snapshot_id = snapshot_id.clone();
+            async move {
+                let response = client.get_snapshot(&snapshot_id).await?;
+                Ok(serde_json::to_string(&response)?)
+            }
+        })
+    }
+
+    fn list_snapshots_json(&self) -> PyResult<String> {
+        self.run_with_retry(5, move |client| async move {
+            let snapshots = client.list_snapshots().await?;
+            let response = serde_json::json!({ "snapshots": snapshots });
+            Ok(serde_json::to_string(&response)?)
+        })
+    }
+
+    fn delete_snapshot(&self, snapshot_id: String) -> PyResult<()> {
+        self.run_with_retry(5, move |client| {
+            let snapshot_id = snapshot_id.clone();
+            async move { client.delete_snapshot(&snapshot_id).await }
+        })
+    }
+
+    fn create_pool(&self, request_json: String) -> PyResult<String> {
+        let request: SandboxPoolRequest = parse_json_payload(&request_json)?;
+        self.run_with_retry(5, move |client| {
+            let request = request.clone();
+            async move {
+                let response = client.create_pool(&request).await?;
+                Ok(serde_json::to_string(&response)?)
+            }
+        })
+    }
+
+    fn get_pool_json(&self, pool_id: String) -> PyResult<String> {
+        self.run_with_retry(5, move |client| {
+            let pool_id = pool_id.clone();
+            async move {
+                let response = client.get_pool(&pool_id).await?;
+                Ok(serde_json::to_string(&response)?)
+            }
+        })
+    }
+
+    fn list_pools_json(&self) -> PyResult<String> {
+        self.run_with_retry(5, move |client| async move {
+            let pools = client.list_pools().await?;
+            let response = serde_json::json!({ "pools": pools });
+            Ok(serde_json::to_string(&response)?)
+        })
+    }
+
+    fn update_pool(&self, pool_id: String, request_json: String) -> PyResult<String> {
+        let request: SandboxPoolRequest = parse_json_payload(&request_json)?;
+        self.run_with_retry(5, move |client| {
+            let pool_id = pool_id.clone();
+            let request = request.clone();
+            async move {
+                let response = client.update_pool(&pool_id, &request).await?;
+                Ok(serde_json::to_string(&response)?)
+            }
+        })
+    }
+
+    fn delete_pool(&self, pool_id: String) -> PyResult<()> {
+        self.run_with_retry(5, move |client| {
+            let pool_id = pool_id.clone();
+            async move { client.delete_pool(&pool_id).await }
+        })
+    }
+}
+
+impl CloudApiClient {
+    fn run_with_retry<T, F, Fut>(&self, max_retries: usize, mut operation: F) -> PyResult<T>
+    where
+        F: FnMut(Client) -> Fut,
+        Fut: Future<Output = Result<T, SdkError>>,
+    {
+        let mut retries = 0usize;
+        loop {
+            match self.runtime.block_on(operation(self.client.clone())) {
+                Ok(value) => return Ok(value),
+                Err(err) => {
+                    if !is_retryable(&err) || retries >= max_retries {
+                        return Err(into_py_error(err));
+                    }
+
+                    retries += 1;
+                    let sleep_time = calculate_sleep_time(retries);
+                    eprintln!(
+                        "Retrying rust cloud API request after {sleep_time:.2} seconds. Retry count: {retries}. Retryable exception: {err}"
+                    );
+                    std::thread::sleep(Duration::from_secs_f64(sleep_time));
+                }
+            }
+        }
+    }
+}
+
+impl CloudSandboxClient {
+    fn run_with_retry<T, F, Fut>(&self, max_retries: usize, mut operation: F) -> PyResult<T>
+    where
+        F: FnMut(SandboxesClient) -> Fut,
+        Fut: Future<Output = Result<T, SdkError>>,
+    {
+        let mut retries = 0usize;
+        loop {
+            match self.runtime.block_on(operation(self.client.clone())) {
+                Ok(value) => return Ok(value),
+                Err(err) => {
+                    if !is_retryable(&err) || retries >= max_retries {
+                        return Err(into_sandbox_py_error(err));
+                    }
+
+                    retries += 1;
+                    let sleep_time = calculate_sleep_time(retries);
+                    eprintln!(
+                        "Retrying rust sandbox API request after {sleep_time:.2} seconds. Retry count: {retries}. Retryable exception: {err}"
+                    );
+                    std::thread::sleep(Duration::from_secs_f64(sleep_time));
+                }
+            }
+        }
+    }
+}
+
+fn calculate_sleep_time(retries: usize) -> f64 {
+    let initial_delay_seconds: f64 = 0.1;
+    let max_delay_seconds: f64 = 15.0;
+    let jitter_multiplier: f64 = 0.75;
+    let base_delay = initial_delay_seconds * 2f64.powi(retries as i32);
+    base_delay.min(max_delay_seconds) * jitter_multiplier
+}
+
+fn is_retryable(error: &SdkError) -> bool {
+    match error {
+        SdkError::ServerError { status, .. } => {
+            *status == reqwest::StatusCode::BAD_GATEWAY
+                || *status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+                || *status == reqwest::StatusCode::GATEWAY_TIMEOUT
+        }
+        SdkError::Http(http_error) => http_error.is_connect() || http_error.is_timeout(),
+        SdkError::Middleware(middleware_error) => {
+            let source = middleware_error.to_string().to_lowercase();
+            source.contains("timeout") || source.contains("connect")
+        }
+        SdkError::EventSourceError(_) => true,
+        _ => false,
+    }
+}
+
+fn into_py_error(error: SdkError) -> PyErr {
+    match error {
+        SdkError::Authentication(message) => {
+            CloudApiClientError::new_err(("sdk_usage", Some(401u16), message))
+        }
+        SdkError::Authorization(message) => {
+            CloudApiClientError::new_err(("sdk_usage", Some(403u16), message))
+        }
+        SdkError::ServerError { status, message } => {
+            CloudApiClientError::new_err(("remote_api", Some(status.as_u16()), message))
+        }
+        SdkError::Http(http_error) => {
+            if http_error.is_timeout() {
+                CloudApiClientError::new_err(("remote_api", Some(504u16), http_error.to_string()))
+            } else if http_error.is_connect() {
+                CloudApiClientError::new_err(("remote_api", Some(503u16), http_error.to_string()))
+            } else {
+                CloudApiClientError::new_err((
+                    "internal",
+                    Option::<u16>::None,
+                    http_error.to_string(),
+                ))
+            }
+        }
+        SdkError::Middleware(middleware_error) => CloudApiClientError::new_err((
+            "internal",
+            Option::<u16>::None,
+            middleware_error.to_string(),
+        )),
+        other => CloudApiClientError::new_err(("internal", Option::<u16>::None, other.to_string())),
+    }
+}
+
+fn into_sandbox_py_error(error: SdkError) -> PyErr {
+    match error {
+        SdkError::Authentication(message) => {
+            CloudSandboxClientError::new_err(("sdk_usage", Some(401u16), message))
+        }
+        SdkError::Authorization(message) => {
+            CloudSandboxClientError::new_err(("sdk_usage", Some(403u16), message))
+        }
+        SdkError::ServerError { status, message } => {
+            CloudSandboxClientError::new_err(("remote_api", Some(status.as_u16()), message))
+        }
+        SdkError::Http(http_error) => {
+            if http_error.is_timeout() {
+                CloudSandboxClientError::new_err((
+                    "connection",
+                    Some(504u16),
+                    http_error.to_string(),
+                ))
+            } else if http_error.is_connect() {
+                CloudSandboxClientError::new_err((
+                    "connection",
+                    Some(503u16),
+                    http_error.to_string(),
+                ))
+            } else {
+                CloudSandboxClientError::new_err((
+                    "internal",
+                    Option::<u16>::None,
+                    http_error.to_string(),
+                ))
+            }
+        }
+        SdkError::Middleware(middleware_error) => {
+            let message = middleware_error.to_string();
+            let lower = message.to_lowercase();
+            if lower.contains("timeout") || lower.contains("connect") {
+                CloudSandboxClientError::new_err(("connection", Option::<u16>::None, message))
+            } else {
+                CloudSandboxClientError::new_err(("internal", Option::<u16>::None, message))
+            }
+        }
+        other => {
+            CloudSandboxClientError::new_err(("internal", Option::<u16>::None, other.to_string()))
+        }
+    }
+}
+
+fn parse_json_payload<T: DeserializeOwned>(request_json: &str) -> PyResult<T> {
+    serde_json::from_str(request_json).map_err(|error| {
+        CloudSandboxClientError::new_err((
+            "sdk_usage",
+            Option::<u16>::None,
+            format!("invalid JSON payload: {error}"),
+        ))
+    })
+}
+
+fn is_localhost_api_url(api_url: &str) -> bool {
+    reqwest::Url::parse(api_url)
+        .ok()
+        .and_then(|url| url.host_str().map(ToString::to_string))
+        .is_some_and(|host| host == "localhost" || host == "127.0.0.1")
+}
+
+#[pymodule]
+fn tensorlake_rust_cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add(
+        "CloudApiClientError",
+        _py.get_type_bound::<CloudApiClientError>(),
+    )?;
+    module.add(
+        "CloudSandboxClientError",
+        _py.get_type_bound::<CloudSandboxClientError>(),
+    )?;
+    module.add_class::<CloudApiClient>()?;
+    module.add_class::<CloudSandboxClient>()?;
+    Ok(())
+}

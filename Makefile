@@ -28,6 +28,9 @@ fmt:
 	@poetry run black .
 	@poetry run isort . --profile black
 
+build_rust_py_client:
+	@poetry run maturin develop --manifest-path crates/rust-cloud-sdk-py/Cargo.toml
+
 check:
 	@poetry run black --check .
 	@poetry run isort . --check-only --profile black
@@ -41,4 +44,4 @@ test_document_ai:
 test_sandbox:
 	cd tests/sandbox && poetry run python test_lifecycle.py -v
 
-.PHONY: all build build_proto fmt test test_document_ai test_sandbox
+.PHONY: all build build_proto fmt build_rust_py_client test test_document_ai test_sandbox

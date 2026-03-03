@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/cloud-sdk", "crates/cli"]
+members = ["crates/cloud-sdk", "crates/cli", "crates/rust-cloud-sdk-py"]
 resolver = "3"
 
 [workspace.package]
@@ -64,3 +64,6 @@ console = "0.16.2"
 dialoguer = "0.12"
 open = "5"
 crossterm = "0.29"
+
+# Python bindings
+pyo3 = { version = "0.22", features = ["abi3-py310", "extension-module"] }
