@@ -11,6 +11,8 @@ from tensorlake.documentai.models import (
     StructuredExtractionOptions,
 )
 
+PUBLIC_TEST_PDF_URL = "https://raw.githubusercontent.com/tensorlakeai/tensorlake/main/tests/document_ai/testdata/example_bank_statement.pdf"
+
 
 class TestParse(unittest.TestCase):
     def setUp(self):
@@ -32,7 +34,7 @@ class TestParse(unittest.TestCase):
 
     def test_simple_parse(self):
         parse_id = self.doc_ai.parse(
-            file="https://pub-226479de18b2493f96b64c6674705dd8.r2.dev/real-estate-purchase-all-signed.pdf",
+            file_url=PUBLIC_TEST_PDF_URL,
             page_range="1-2",
         )
         self.assertIsNotNone(parse_id)
@@ -64,7 +66,7 @@ class TestParse(unittest.TestCase):
         doc_ai_eu = DocumentAI(region=Region.EU)
 
         parse_id = doc_ai_eu.parse(
-            file_url="https://pub-226479de18b2493f96b64c6674705dd8.r2.dev/real-estate-purchase-all-signed.pdf",
+            file_url=PUBLIC_TEST_PDF_URL,
             page_range="1-2",
         )
         self.assertIsNotNone(parse_id)
