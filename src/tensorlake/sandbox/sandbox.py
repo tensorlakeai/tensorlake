@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import time
 from typing import TYPE_CHECKING, Iterator
-from urllib.parse import urlparse
-
-import httpx
 
 from . import _defaults
-from .exceptions import RemoteAPIError, SandboxError
+from .exceptions import (
+    RemoteAPIError,
+    SandboxConnectionError,
+    SandboxError,
+)
 from .models import (
     CommandResult,
     DaemonInfo,
@@ -32,6 +33,54 @@ from .models import (
 if TYPE_CHECKING:
     from .client import SandboxClient
 
+try:
+    from tensorlake_rust_cloud_sdk import (
+        CloudSandboxClientError as RustCloudSandboxClientError,
+    )
+    from tensorlake_rust_cloud_sdk import (
+        CloudSandboxProxyClient as RustCloudSandboxProxyClient,
+    )
+
+    _RUST_SANDBOX_PROXY_CLIENT_AVAILABLE = True
+except Exception:
+    RustCloudSandboxProxyClient = None
+    RustCloudSandboxClientError = None
+    _RUST_SANDBOX_PROXY_CLIENT_AVAILABLE = False
+
+
+def _parse_rust_client_error_fields(
+    e: Exception,
+) -> tuple[str | None, int | None, str]:
+    kind: str | None = None
+    status_code: int | None = None
+    message = str(e)
+
+    if len(e.args) == 3:
+        kind, status_code, message = e.args
+    elif len(e.args) == 1 and isinstance(e.args[0], tuple) and len(e.args[0]) == 3:
+        kind, status_code, message = e.args[0]
+
+    return kind, status_code, message
+
+
+def _raise_as_sandbox_error(e: Exception) -> None:
+    if isinstance(e, SandboxError):
+        raise
+
+    if (
+        RustCloudSandboxClientError is not None
+        and isinstance(e, RustCloudSandboxClientError)
+        and len(e.args) > 0
+    ):
+        kind, status_code, message = _parse_rust_client_error_fields(e)
+        if kind == "connection":
+            raise SandboxConnectionError(message) from None
+        if status_code is not None:
+            raise RemoteAPIError(status_code, message) from None
+        raise SandboxError(message) from None
+
+    raise SandboxError(str(e)) from e
+
 
 class Sandbox:
     """Client for interacting with a running sandbox.
@@ -42,7 +91,7 @@ class Sandbox:
     Can be used as a context manager. If created via
     ``SandboxClient.create_and_connect()``, exiting the context manager
     automatically terminates the sandbox. Otherwise, it only closes the
-    HTTP connection while the sandbox continues running.
+    client while the sandbox continues running.
     """
 
     def __init__(
@@ -57,31 +106,23 @@ class Sandbox:
         self._owns_sandbox: bool = False
         self._lifecycle_client: SandboxClient | None = None
 
-        headers: dict[str, str] = {}
-        if api_key is not None:
-            headers["Authorization"] = f"Bearer {api_key}"
-        if organization_id is not None:
-            headers["X-Forwarded-Organization-Id"] = organization_id
-        if project_id is not None:
-            headers["X-Forwarded-Project-Id"] = project_id
+        if not _RUST_SANDBOX_PROXY_CLIENT_AVAILABLE:
+            raise SandboxError(
+                "Rust Cloud SDK sandbox proxy client is required but unavailable. "
+                "Build/install it with `make build_rust_py_client`."
+            )
 
-        parsed = urlparse(proxy_url)
-        if parsed.hostname in ("localhost", "127.0.0.1"):
-            base_url = proxy_url.rstrip("/")
-            headers["Host"] = f"{sandbox_id}.local"
-        else:
-            port_part = f":{parsed.port}" if parsed.port else ""
-            base_url = f"{parsed.scheme}://{sandbox_id}.{parsed.hostname}{port_part}"
-
-        # Each Sandbox connects to a different proxy endpoint (subdomain per
-        # sandbox), so it needs its own httpx.Client with a unique base_url.
-        self._client: httpx.Client = httpx.Client(
-            base_url=base_url,
-            headers=headers,
-            # Sandbox proxy operations (process start, file I/O) are generally
-            # fast, but container startup or large file transfers can take time.
-            timeout=_defaults.DEFAULT_HTTP_TIMEOUT_SEC,
-        )
+        try:
+            self._rust_client = RustCloudSandboxProxyClient(
+                proxy_url=proxy_url,
+                sandbox_id=sandbox_id,
+                api_key=api_key,
+                organization_id=organization_id,
+                project_id=project_id,
+            )
+            self._base_url = self._rust_client.base_url()
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     @property
     def sandbox_id(self) -> str:
@@ -95,7 +136,7 @@ class Sandbox:
 
         If this sandbox was created via ``create_and_connect()``, the
         sandbox is terminated (deleted from the server). Otherwise only
-        the HTTP connection is closed and the sandbox keeps running.
+        the client is closed and the sandbox keeps running.
         """
         if self._owns_sandbox:
             self.terminate()
@@ -103,8 +144,8 @@ class Sandbox:
             self.close()
 
     def close(self):
-        """Close the HTTP connection. The sandbox keeps running."""
-        self._client.close()
+        """Close the client connection. The sandbox keeps running."""
+        self._rust_client.close()
 
     def terminate(self):
         """Terminate the sandbox and close the connection."""
@@ -114,16 +155,6 @@ class Sandbox:
         self.close()
         if lifecycle_client is not None:
             lifecycle_client.delete(self._sandbox_id)
-
-    def _handle_response(self, response: httpx.Response) -> httpx.Response:
-        if response.is_success:
-            return response
-        try:
-            error_data = response.json()
-            message = error_data.get("error", response.text)
-        except Exception:
-            message = response.text
-        raise RemoteAPIError(response.status_code, message)
 
     # --- High-level convenience ---
 
@@ -222,25 +253,35 @@ class Sandbox:
         if stderr_mode != OutputMode.CAPTURE:
             payload["stderr_mode"] = stderr_mode
 
-        response = self._handle_response(
-            self._client.post("/api/v1/processes", json=payload)
-        )
-        return ProcessInfo.model_validate(response.json())
+        try:
+            response_json = self._rust_client.start_process_json(json.dumps(payload))
+            return ProcessInfo.model_validate_json(response_json)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def list_processes(self) -> list[ProcessInfo]:
         """List all processes in the sandbox."""
-        response = self._handle_response(self._client.get("/api/v1/processes"))
-        data = ListProcessesResponse.model_validate(response.json())
-        return data.processes
+        try:
+            response_json = self._rust_client.list_processes_json()
+            data = ListProcessesResponse.model_validate_json(response_json)
+            return data.processes
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def get_process(self, pid: int) -> ProcessInfo:
         """Get information about a specific process."""
-        response = self._handle_response(self._client.get(f"/api/v1/processes/{pid}"))
-        return ProcessInfo.model_validate(response.json())
+        try:
+            response_json = self._rust_client.get_process_json(pid=pid)
+            return ProcessInfo.model_validate_json(response_json)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def kill_process(self, pid: int) -> None:
         """Kill a process."""
-        self._handle_response(self._client.delete(f"/api/v1/processes/{pid}"))
+        try:
+            self._rust_client.kill_process(pid=pid)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def send_signal(self, pid: int, signal: int) -> SendSignalResponse:
         """Send a signal to a process.
@@ -249,73 +290,78 @@ class Sandbox:
             pid: Process ID
             signal: Signal number (e.g. 15 for SIGTERM, 9 for SIGKILL)
         """
-        response = self._handle_response(
-            self._client.post(
-                f"/api/v1/processes/{pid}/signal", json={"signal": signal}
-            )
-        )
-        return SendSignalResponse.model_validate(response.json())
+        try:
+            response_json = self._rust_client.send_signal_json(pid=pid, signal=signal)
+            return SendSignalResponse.model_validate_json(response_json)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     # --- Process I/O ---
 
     def write_stdin(self, pid: int, data: bytes) -> None:
         """Write data to a process's stdin."""
-        self._handle_response(
-            self._client.post(f"/api/v1/processes/{pid}/stdin", content=data)
-        )
+        try:
+            self._rust_client.write_stdin(pid=pid, data=data)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def close_stdin(self, pid: int) -> None:
         """Close a process's stdin."""
-        self._handle_response(self._client.post(f"/api/v1/processes/{pid}/stdin/close"))
+        try:
+            self._rust_client.close_stdin(pid=pid)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def get_stdout(self, pid: int) -> OutputResponse:
         """Get all stdout output from a process."""
-        response = self._handle_response(
-            self._client.get(f"/api/v1/processes/{pid}/stdout")
-        )
-        return OutputResponse.model_validate(response.json())
+        try:
+            response_json = self._rust_client.get_stdout_json(pid=pid)
+            return OutputResponse.model_validate_json(response_json)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def get_stderr(self, pid: int) -> OutputResponse:
         """Get all stderr output from a process."""
-        response = self._handle_response(
-            self._client.get(f"/api/v1/processes/{pid}/stderr")
-        )
-        return OutputResponse.model_validate(response.json())
+        try:
+            response_json = self._rust_client.get_stderr_json(pid=pid)
+            return OutputResponse.model_validate_json(response_json)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def get_output(self, pid: int) -> OutputResponse:
         """Get all combined output from a process."""
-        response = self._handle_response(
-            self._client.get(f"/api/v1/processes/{pid}/output")
-        )
-        return OutputResponse.model_validate(response.json())
+        try:
+            response_json = self._rust_client.get_output_json(pid=pid)
+            return OutputResponse.model_validate_json(response_json)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def follow_stdout(self, pid: int) -> Iterator[OutputEvent]:
         """Stream stdout from a process via SSE. Replays existing output then streams live."""
-        yield from self._follow_stream(f"/api/v1/processes/{pid}/stdout/follow")
+        try:
+            events_json = self._rust_client.follow_stdout_json(pid=pid)
+            for event_json in events_json:
+                yield OutputEvent.model_validate_json(event_json)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def follow_stderr(self, pid: int) -> Iterator[OutputEvent]:
         """Stream stderr from a process via SSE. Replays existing output then streams live."""
-        yield from self._follow_stream(f"/api/v1/processes/{pid}/stderr/follow")
+        try:
+            events_json = self._rust_client.follow_stderr_json(pid=pid)
+            for event_json in events_json:
+                yield OutputEvent.model_validate_json(event_json)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def follow_output(self, pid: int) -> Iterator[OutputEvent]:
         """Stream combined output from a process via SSE. Replays existing output then streams live."""
-        yield from self._follow_stream(f"/api/v1/processes/{pid}/output/follow")
-
-    def _follow_stream(self, path: str) -> Iterator[OutputEvent]:
-        with self._client.stream("GET", path, timeout=None) as response:
-            if not response.is_success:
-                response.read()
-                try:
-                    error_data = response.json()
-                    message = error_data.get("error", response.text)
-                except Exception:
-                    message = response.text
-                raise RemoteAPIError(response.status_code, message)
-
-            for line in response.iter_lines():
-                if line.startswith("data: "):
-                    data = json.loads(line[6:])
-                    yield OutputEvent.model_validate(data)
+        try:
+            events_json = self._rust_client.follow_output_json(pid=pid)
+            for event_json in events_json:
+                yield OutputEvent.model_validate_json(event_json)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     # --- File operations ---
 
@@ -328,10 +374,10 @@ class Sandbox:
         Returns:
             File contents as bytes
         """
-        response = self._handle_response(
-            self._client.get("/api/v1/files", params={"path": path})
-        )
-        return response.content
+        try:
+            return self._rust_client.read_file_bytes(path=path)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def write_file(self, path: str, content: bytes) -> None:
         """Write a file to the sandbox.
@@ -340,9 +386,10 @@ class Sandbox:
             path: Absolute path inside the sandbox
             content: File contents as bytes
         """
-        self._handle_response(
-            self._client.put("/api/v1/files", params={"path": path}, content=content)
-        )
+        try:
+            self._rust_client.write_file(path=path, content=content)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def delete_file(self, path: str) -> None:
         """Delete a file from the sandbox.
@@ -350,9 +397,10 @@ class Sandbox:
         Args:
             path: Absolute path inside the sandbox
         """
-        self._handle_response(
-            self._client.delete("/api/v1/files", params={"path": path})
-        )
+        try:
+            self._rust_client.delete_file(path=path)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def list_directory(self, path: str) -> ListDirectoryResponse:
         """List contents of a directory in the sandbox.
@@ -363,10 +411,11 @@ class Sandbox:
         Returns:
             ListDirectoryResponse with path and entries
         """
-        response = self._handle_response(
-            self._client.get("/api/v1/files/list", params={"path": path})
-        )
-        return ListDirectoryResponse.model_validate(response.json())
+        try:
+            response_json = self._rust_client.list_directory_json(path=path)
+            return ListDirectoryResponse.model_validate_json(response_json)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     # --- PTY sessions ---
 
@@ -391,12 +440,18 @@ class Sandbox:
             payload["env"] = env
         if working_dir is not None:
             payload["working_dir"] = working_dir
-        response = self._handle_response(self._client.post("/api/v1/pty", json=payload))
-        return response.json()
+
+        try:
+            response_json = self._rust_client.create_pty_session_json(
+                json.dumps(payload)
+            )
+            return json.loads(response_json)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def pty_ws_url(self, session_id: str, token: str) -> str:
         """Construct the WebSocket URL for a PTY session."""
-        base = str(self._client.base_url).rstrip("/")
+        base = self._base_url.rstrip("/")
         if base.startswith("https://"):
             ws_base = "wss://" + base[8:]
         elif base.startswith("http://"):
@@ -409,10 +464,16 @@ class Sandbox:
 
     def health(self) -> HealthResponse:
         """Check the container daemon health."""
-        response = self._handle_response(self._client.get("/api/v1/health"))
-        return HealthResponse.model_validate(response.json())
+        try:
+            response_json = self._rust_client.health_json()
+            return HealthResponse.model_validate_json(response_json)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     def info(self) -> DaemonInfo:
         """Get container daemon info (version, uptime, process counts)."""
-        response = self._handle_response(self._client.get("/api/v1/info"))
-        return DaemonInfo.model_validate(response.json())
+        try:
+            response_json = self._rust_client.info_json()
+            return DaemonInfo.model_validate_json(response_json)
+        except Exception as e:
+            _raise_as_sandbox_error(e)

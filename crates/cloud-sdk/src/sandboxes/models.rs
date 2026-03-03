@@ -165,3 +165,75 @@ pub struct SnapshotInfo {
 pub struct ListSnapshotsResponse {
     pub snapshots: Vec<SnapshotInfo>,
 }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProcessInfo {
+    pub pid: i64,
+    pub status: String,
+    #[serde(default)]
+    pub exit_code: Option<i64>,
+    #[serde(default)]
+    pub signal: Option<i64>,
+    #[serde(default)]
+    pub stdin_writable: bool,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub started_at: serde_json::Value,
+    #[serde(default)]
+    pub ended_at: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ListProcessesResponse {
+    pub processes: Vec<ProcessInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SendSignalResponse {
+    pub success: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OutputResponse {
+    pub pid: i64,
+    pub lines: Vec<String>,
+    pub line_count: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OutputEvent {
+    pub line: String,
+    pub timestamp: serde_json::Value,
+    #[serde(default)]
+    pub stream: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DaemonInfo {
+    pub version: String,
+    pub uptime_secs: i64,
+    pub running_processes: i64,
+    pub total_processes: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HealthResponse {
+    pub healthy: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DirectoryEntry {
+    pub name: String,
+    pub is_dir: bool,
+    #[serde(default)]
+    pub size: Option<i64>,
+    #[serde(default)]
+    pub modified_at: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ListDirectoryResponse {
+    pub path: String,
+    pub entries: Vec<DirectoryEntry>,
+}

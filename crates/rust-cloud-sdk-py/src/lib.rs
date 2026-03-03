@@ -12,8 +12,8 @@ use reqwest::Method;
 use reqwest::multipart::{Form, Part};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tensorlake_cloud_sdk::sandboxes::SandboxesClient;
 use tensorlake_cloud_sdk::sandboxes::models::{CreateSandboxRequest, SandboxPoolRequest};
+use tensorlake_cloud_sdk::sandboxes::{SandboxProxyClient, SandboxesClient};
 use tensorlake_cloud_sdk::{Client, ClientBuilder, error::SdkError};
 use tokio::runtime::Runtime;
 
@@ -578,6 +578,252 @@ impl CloudSandboxClient {
     }
 }
 
+impl CloudSandboxProxyClient {
+    fn run_with_retry<T, F, Fut>(&self, max_retries: usize, mut operation: F) -> PyResult<T>
+    where
+        F: FnMut(SandboxProxyClient) -> Fut,
+        Fut: Future<Output = Result<T, SdkError>>,
+    {
+        let mut retries = 0usize;
+        loop {
+            match self.runtime.block_on(operation(self.client.clone())) {
+                Ok(value) => return Ok(value),
+                Err(err) => {
+                    if !is_retryable(&err) || retries >= max_retries {
+                        return Err(into_sandbox_py_error(err));
+                    }
+
+                    retries += 1;
+                    let sleep_time = calculate_sleep_time(retries);
+                    eprintln!(
+                        "Retrying rust sandbox proxy request after {sleep_time:.2} seconds. Retry count: {retries}. Retryable exception: {err}"
+                    );
+                    std::thread::sleep(Duration::from_secs_f64(sleep_time));
+                }
+            }
+        }
+    }
+}
+
+#[pyclass]
+pub struct CloudSandboxProxyClient {
+    client: SandboxProxyClient,
+    runtime: Runtime,
+    base_url: String,
+}
+
+#[pymethods]
+impl CloudSandboxProxyClient {
+    #[new]
+    #[pyo3(signature = (proxy_url, sandbox_id, api_key=None, organization_id=None, project_id=None))]
+    fn new(
+        proxy_url: String,
+        sandbox_id: String,
+        api_key: Option<String>,
+        organization_id: Option<String>,
+        project_id: Option<String>,
+    ) -> PyResult<Self> {
+        let (base_url, host_override) = resolve_proxy_target(&proxy_url, &sandbox_id)?;
+
+        let mut builder = ClientBuilder::new(&base_url);
+        if let Some(token) = api_key.as_deref() {
+            builder = builder.bearer_token(token);
+        }
+
+        if let (Some(org_id), Some(project_id)) =
+            (organization_id.as_deref(), project_id.as_deref())
+        {
+            builder = builder.scope(org_id, project_id);
+        }
+
+        let client = builder.build().map_err(into_sandbox_py_error)?;
+        let runtime = Runtime::new().map_err(|e| {
+            CloudSandboxClientError::new_err((
+                "internal",
+                Option::<u16>::None,
+                format!("failed to create tokio runtime: {e}"),
+            ))
+        })?;
+        let sandbox_proxy_client = SandboxProxyClient::new(client, host_override);
+
+        Ok(Self {
+            client: sandbox_proxy_client,
+            runtime,
+            base_url,
+        })
+    }
+
+    fn close(&self) {
+        // reqwest clients are closed when dropped; this is a no-op for API parity.
+    }
+
+    fn base_url(&self) -> String {
+        self.base_url.clone()
+    }
+
+    fn start_process_json(&self, payload_json: String) -> PyResult<String> {
+        let payload: Value = parse_json_payload(&payload_json)?;
+        self.run_with_retry(5, move |client| {
+            let payload = payload.clone();
+            async move {
+                let response = client.start_process(&payload).await?;
+                Ok(serde_json::to_string(&response)?)
+            }
+        })
+    }
+
+    fn list_processes_json(&self) -> PyResult<String> {
+        self.run_with_retry(5, move |client| async move {
+            let processes = client.list_processes().await?;
+            let response = serde_json::json!({ "processes": processes });
+            Ok(serde_json::to_string(&response)?)
+        })
+    }
+
+    fn get_process_json(&self, pid: i64) -> PyResult<String> {
+        self.run_with_retry(5, move |client| async move {
+            let response = client.get_process(pid).await?;
+            Ok(serde_json::to_string(&response)?)
+        })
+    }
+
+    fn kill_process(&self, pid: i64) -> PyResult<()> {
+        self.run_with_retry(
+            5,
+            move |client| async move { client.kill_process(pid).await },
+        )
+    }
+
+    fn send_signal_json(&self, pid: i64, signal: i64) -> PyResult<String> {
+        self.run_with_retry(5, move |client| async move {
+            let response = client.send_signal(pid, signal).await?;
+            Ok(serde_json::to_string(&response)?)
+        })
+    }
+
+    fn write_stdin(&self, pid: i64, data: Vec<u8>) -> PyResult<()> {
+        self.run_with_retry(5, move |client| {
+            let data = data.clone();
+            async move { client.write_stdin(pid, data).await }
+        })
+    }
+
+    fn close_stdin(&self, pid: i64) -> PyResult<()> {
+        self.run_with_retry(
+            5,
+            move |client| async move { client.close_stdin(pid).await },
+        )
+    }
+
+    fn get_stdout_json(&self, pid: i64) -> PyResult<String> {
+        self.run_with_retry(5, move |client| async move {
+            let response = client.get_stdout(pid).await?;
+            Ok(serde_json::to_string(&response)?)
+        })
+    }
+
+    fn get_stderr_json(&self, pid: i64) -> PyResult<String> {
+        self.run_with_retry(5, move |client| async move {
+            let response = client.get_stderr(pid).await?;
+            Ok(serde_json::to_string(&response)?)
+        })
+    }
+
+    fn get_output_json(&self, pid: i64) -> PyResult<String> {
+        self.run_with_retry(5, move |client| async move {
+            let response = client.get_output(pid).await?;
+            Ok(serde_json::to_string(&response)?)
+        })
+    }
+
+    fn follow_stdout_json(&self, pid: i64) -> PyResult<Vec<String>> {
+        self.run_with_retry(10, move |client| async move {
+            let events = client.follow_stdout(pid).await?;
+            events
+                .into_iter()
+                .map(|event| serde_json::to_string(&event).map_err(SdkError::from))
+                .collect()
+        })
+    }
+
+    fn follow_stderr_json(&self, pid: i64) -> PyResult<Vec<String>> {
+        self.run_with_retry(10, move |client| async move {
+            let events = client.follow_stderr(pid).await?;
+            events
+                .into_iter()
+                .map(|event| serde_json::to_string(&event).map_err(SdkError::from))
+                .collect()
+        })
+    }
+
+    fn follow_output_json(&self, pid: i64) -> PyResult<Vec<String>> {
+        self.run_with_retry(10, move |client| async move {
+            let events = client.follow_output(pid).await?;
+            events
+                .into_iter()
+                .map(|event| serde_json::to_string(&event).map_err(SdkError::from))
+                .collect()
+        })
+    }
+
+    fn read_file_bytes(&self, path: String) -> PyResult<Vec<u8>> {
+        self.run_with_retry(5, move |client| {
+            let path = path.clone();
+            async move { client.read_file(&path).await }
+        })
+    }
+
+    fn write_file(&self, path: String, content: Vec<u8>) -> PyResult<()> {
+        self.run_with_retry(5, move |client| {
+            let path = path.clone();
+            let content = content.clone();
+            async move { client.write_file(&path, content).await }
+        })
+    }
+
+    fn delete_file(&self, path: String) -> PyResult<()> {
+        self.run_with_retry(5, move |client| {
+            let path = path.clone();
+            async move { client.delete_file(&path).await }
+        })
+    }
+
+    fn list_directory_json(&self, path: String) -> PyResult<String> {
+        self.run_with_retry(5, move |client| {
+            let path = path.clone();
+            async move {
+                let response = client.list_directory(&path).await?;
+                Ok(serde_json::to_string(&response)?)
+            }
+        })
+    }
+
+    fn create_pty_session_json(&self, payload_json: String) -> PyResult<String> {
+        let payload: Value = parse_json_payload(&payload_json)?;
+        self.run_with_retry(5, move |client| {
+            let payload = payload.clone();
+            async move {
+                let response = client.create_pty_session(&payload).await?;
+                Ok(serde_json::to_string(&response)?)
+            }
+        })
+    }
+
+    fn health_json(&self) -> PyResult<String> {
+        self.run_with_retry(5, move |client| async move {
+            let response = client.health().await?;
+            Ok(serde_json::to_string(&response)?)
+        })
+    }
+
+    fn info_json(&self) -> PyResult<String> {
+        self.run_with_retry(5, move |client| async move {
+            let response = client.info().await?;
+            Ok(serde_json::to_string(&response)?)
+        })
+    }
+}
+
 impl CloudApiClient {
     fn run_with_retry<T, F, Fut>(&self, max_retries: usize, mut operation: F) -> PyResult<T>
     where
@@ -747,6 +993,34 @@ fn parse_json_payload<T: DeserializeOwned>(request_json: &str) -> PyResult<T> {
     })
 }
 
+fn resolve_proxy_target(proxy_url: &str, sandbox_id: &str) -> PyResult<(String, Option<String>)> {
+    let parsed = reqwest::Url::parse(proxy_url).map_err(|error| {
+        CloudSandboxClientError::new_err((
+            "sdk_usage",
+            Option::<u16>::None,
+            format!("invalid proxy url `{proxy_url}`: {error}"),
+        ))
+    })?;
+    let host = parsed.host_str().ok_or_else(|| {
+        CloudSandboxClientError::new_err((
+            "sdk_usage",
+            Option::<u16>::None,
+            format!("proxy url `{proxy_url}` is missing a host"),
+        ))
+    })?;
+
+    if host == "localhost" || host == "127.0.0.1" {
+        return Ok((
+            proxy_url.trim_end_matches('/').to_string(),
+            Some(format!("{sandbox_id}.local")),
+        ));
+    }
+
+    let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+    let base_url = format!("{}://{sandbox_id}.{host}{port}", parsed.scheme());
+    Ok((base_url, None))
+}
+
 fn is_localhost_api_url(api_url: &str) -> bool {
     reqwest::Url::parse(api_url)
         .ok()
@@ -766,5 +1040,6 @@ fn tensorlake_rust_cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> P
     )?;
     module.add_class::<CloudApiClient>()?;
     module.add_class::<CloudSandboxClient>()?;
+    module.add_class::<CloudSandboxProxyClient>()?;
     Ok(())
 }
