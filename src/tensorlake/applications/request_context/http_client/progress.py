@@ -7,6 +7,7 @@ from ..http_server.handlers.progress_update import (
     PROGRESS_UPDATE_VERB,
     FunctionProgressUpdateRequest,
 )
+from .transport import RequestContextHTTPTransport
 
 
 class FunctionProgressHTTPClient(FunctionProgress):
@@ -21,13 +22,13 @@ class FunctionProgressHTTPClient(FunctionProgress):
         allocation_id: str,
         function_name: str,
         function_run_id: str,
-        http_client: httpx.Client,
+        http_client: RequestContextHTTPTransport,
     ):
         self._request_id: str = request_id
         self._allocation_id: str = allocation_id
         self._function_name: str = function_name
         self._function_run_id: str = function_run_id
-        self._http_client: httpx.Client = http_client
+        self._http_client: RequestContextHTTPTransport = http_client
 
     def update(
         self,

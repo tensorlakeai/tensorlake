@@ -3,13 +3,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import sys
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Union, overload
 
-from httpx_sse import ServerSentEvent, aconnect_sse, connect_sse
 from pydantic import BaseModel, ValidationError
-from rich.live import Live
-from rich.text import Text
 
 from ._base import _BaseClient, _validate_file_input
 from ._utils import _drop_none
@@ -346,76 +344,57 @@ class _ParseMixin(_BaseClient):
         Args:
             parse_id: The ID of the parse operation to wait for. This is the string returned by the parse method.
         """
-        status_text = Text("Waiting for completion of parse job.", style="bold")
+        print("Waiting for completion of parse job.", file=sys.stderr)
         retry_count = 0
 
-        with Live(
-            status_text,
-            refresh_per_second=4,
-            transient=True,
-            redirect_stdout=True,
-            redirect_stderr=True,
-        ) as live:
-            # Print static info above the live line
-            live.console.print(f"Parse ID: {parse_id}")
+        print(f"Parse ID: {parse_id}", file=sys.stderr)
 
-            def set_status(message: str, style: Optional[str] = None) -> None:
-                live.update(Text(message, style=style if style else ""), refresh=True)
+        def set_status(message: str, style: Optional[str] = None) -> None:
+            print(f"\r{message}", end="", file=sys.stderr)
 
-            def print_line(message: str) -> None:
-                live.console.print(message)
+        def print_line(message: str) -> None:
+            print(message, file=sys.stderr)
 
-            while retry_count < 5:
-                try:
-                    with connect_sse(
-                        client=self._client,
-                        method="GET",
-                        url=f"parse/{parse_id}",
-                        headers=self._headers(),
-                    ) as sse:
-                        for sse_event in sse.iter_sse():
-                            parse_result = self._handle_sse_event(
-                                sse_event, set_status, print_line
-                            )
-                            if parse_result:
-                                # Final status has already been rendered via set_status
-                                return parse_result
-
-                        live.console.print(
-                            "[yellow]SSE connection ended without completion event[/yellow]"
-                        )
-
-                except (ConnectionError, TimeoutError) as e:
-                    retry_count += 1
-                    live.console.print(
-                        f"[yellow]Connection issue (attempt {retry_count} / 5): {e}[/yellow]"
+        while retry_count < 5:
+            try:
+                sse_events = self._parse_events(parse_id)
+                for sse_event in sse_events:
+                    parse_result = self._handle_sse_event(
+                        sse_event, set_status, print_line
                     )
-                    if retry_count < 5:
-                        wait_time = min(2**retry_count, 30)
-                        live.console.print(
-                            f"[yellow]Retrying in {wait_time} seconds...[/yellow]"
-                        )
-                        time.sleep(wait_time)
+                    if parse_result:
+                        print("", file=sys.stderr)
+                        return parse_result
 
-            live.console.print(
-                "[yellow]Max retries reached. Checking final status...[/yellow]"
-            )
-            # Fetch final status and render a final line
-            final_result = self.get_parsed_result(parse_id)
-            if final_result.status:
-                # Best-effort styling
-                style = (
-                    "green"
-                    if str(final_result.status).lower()
-                    in {"done", "success", "completed"}
-                    else (
-                        "red"
-                        if str(final_result.status).lower() in {"failed", "error"}
-                        else "magenta"
-                    )
+                print(
+                    "SSE connection ended without completion event",
+                    file=sys.stderr,
                 )
-                set_status(f"Status: {final_result.status}", style)
-            return final_result
+
+            except (ConnectionError, TimeoutError) as e:
+                retry_count += 1
+                print(
+                    f"Connection issue (attempt {retry_count} / 5): {e}",
+                    file=sys.stderr,
+                )
+                if retry_count < 5:
+                    wait_time = min(2**retry_count, 30)
+                    print(
+                        f"Retrying in {wait_time} seconds...",
+                        file=sys.stderr,
+                    )
+                    time.sleep(wait_time)
+
+        print(
+            "Max retries reached. Checking final status...",
+            file=sys.stderr,
+        )
+        # Fetch final status and render a final line
+        final_result = self.get_parsed_result(parse_id)
+        if final_result.status:
+            set_status(f"Status: {final_result.status}")
+        print("", file=sys.stderr)
+        return final_result
 
     async def wait_for_completion_async(self, parse_id: str) -> ParseResult:
         """
@@ -427,113 +406,99 @@ class _ParseMixin(_BaseClient):
         Args:
             parse_id: The ID of the parse operation to wait for. This is the string returned by the parse method.
         """
-        status_text = Text("Waiting for completion of parse job.", style="bold")
+        print("Waiting for completion of parse job.", file=sys.stderr)
         retry_count = 0
 
-        with Live(
-            status_text,
-            refresh_per_second=4,
-            transient=True,
-            redirect_stdout=True,
-            redirect_stderr=True,
-        ) as live:
-            live.console.print(f"Parse ID: {parse_id}")
+        print(f"Parse ID: {parse_id}", file=sys.stderr)
 
-            def set_status(message: str, style: Optional[str] = None) -> None:
-                live.update(Text(message, style=style if style else ""), refresh=True)
+        def set_status(message: str, style: Optional[str] = None) -> None:
+            print(f"\r{message}", end="", file=sys.stderr)
 
-            def print_line(message: str) -> None:
-                live.console.print(message)
+        def print_line(message: str) -> None:
+            print(message, file=sys.stderr)
 
-            while retry_count < 5:
-                try:
-                    async with aconnect_sse(
-                        client=self._aclient,
-                        method="GET",
-                        url=f"parse/{parse_id}",
-                        headers=self._headers(),
-                    ) as sse:
-                        async for sse_event in sse.aiter_sse():
-                            parse_result = self._handle_sse_event(
-                                sse_event, set_status, print_line
-                            )
-                            if parse_result:
-                                return parse_result
-
-                            # Always yield after processing each event
-                            await asyncio.sleep(0)
-
-                        live.console.print(
-                            "[yellow]SSE connection ended without completion event[/yellow]"
-                        )
-                except (ConnectionError, TimeoutError) as e:
-                    retry_count += 1
-                    live.console.print(
-                        f"[yellow]Connection issue (attempt {retry_count} / 5): {e}[/yellow]"
+        while retry_count < 5:
+            try:
+                sse_events = await self._parse_events_async(parse_id)
+                for sse_event in sse_events:
+                    parse_result = self._handle_sse_event(
+                        sse_event, set_status, print_line
                     )
-                    if retry_count < 5:
-                        wait_time = min(2**retry_count, 30)
-                        live.console.print(
-                            f"[yellow]Retrying in {wait_time} seconds...[/yellow]"
-                        )
-                        await asyncio.sleep(wait_time)
+                    if parse_result:
+                        print("", file=sys.stderr)
+                        return parse_result
 
-            live.console.print(
-                "[yellow]Max retries reached. Checking final status...[/yellow]"
-            )
-            final_result = await self.get_parsed_result_async(parse_id)
-            if final_result.status:
-                style = (
-                    "green"
-                    if str(final_result.status).lower()
-                    in {"done", "success", "completed"}
-                    else (
-                        "red"
-                        if str(final_result.status).lower() in {"failed", "error"}
-                        else "magenta"
-                    )
+                    # Always yield after processing each event
+                    await asyncio.sleep(0)
+
+                print(
+                    "SSE connection ended without completion event",
+                    file=sys.stderr,
                 )
-                set_status(f"Status: {final_result.status}", style)
-            return final_result
+            except (ConnectionError, TimeoutError) as e:
+                retry_count += 1
+                print(
+                    f"Connection issue (attempt {retry_count} / 5): {e}",
+                    file=sys.stderr,
+                )
+                if retry_count < 5:
+                    wait_time = min(2**retry_count, 30)
+                    print(
+                        f"Retrying in {wait_time} seconds...",
+                        file=sys.stderr,
+                    )
+                    await asyncio.sleep(wait_time)
+
+        print(
+            "Max retries reached. Checking final status...",
+            file=sys.stderr,
+        )
+        final_result = await self.get_parsed_result_async(parse_id)
+        if final_result.status:
+            set_status(f"Status: {final_result.status}")
+        print("", file=sys.stderr)
+        return final_result
 
     def _handle_sse_event(
         self,
-        sse_event: ServerSentEvent,
+        sse_event: dict[str, Any],
         set_status: Callable[[str, Optional[str]], None],
         print_line: Callable[[str], None],
     ) -> Optional[ParseResult]:
         """
         Handle SSE event and return True if parse is complete (success or failure).
         """
-        match sse_event.event:
+        event_name = sse_event.get("event")
+        event_data = sse_event.get("data")
+
+        match event_name:
             case "parse_update":
                 try:
-                    parse_result = ParseResult.model_validate_json(sse_event.data)
+                    parse_result = ParseResult.model_validate_json(event_data)
                     set_status(f"Status: {parse_result.status.value}", "magenta")
                 except ValidationError:
-                    set_status(f"Parse update received: {sse_event.data}", "blue")
+                    set_status(f"Parse update received: {event_data}", "blue")
 
                 return None
             case "parse_done":
-                parse_result = ParseResult.model_validate_json(sse_event.data)
+                parse_result = ParseResult.model_validate_json(event_data)
                 set_status(f"Parse ID: {parse_result.parse_id} done", "green")
                 return parse_result
             case "parse_failed":
-                parse_result = ParseResult.model_validate_json(sse_event.data)
+                parse_result = ParseResult.model_validate_json(event_data)
                 message = (
                     f"Parse failed ({parse_result.parse_id}): {parse_result.error}"
                     if parse_result.error
                     else f"Parse failed ({parse_result.parse_id})"
                 )
                 set_status(message, "red")
-                # Also print a persistent line above the live display so it remains after exit
-                print_line(f"[red]{message}[/red]")
+                print_line(message)
                 return parse_result
             case "parse_queued":
                 set_status("Parse job waiting in queue.", "yellow")
                 return None
             case _:
-                set_status(f"Unknown SSE event: {sse_event.event}", "cyan")
+                set_status(f"Unknown SSE event: {event_name}", "cyan")
                 return None
 
     @overload

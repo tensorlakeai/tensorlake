@@ -14,6 +14,7 @@ from ...interface.request_context import (
 from .metrics import RequestMetricsHTTPClient
 from .progress import FunctionProgressHTTPClient
 from .state import RequestStateHTTPClient
+from .transport import RequestContextHTTPTransport
 
 # No long running HTTP requests are done in request context HTTP client.
 _DEFAULT_HTTP_REQUEST_TIMEOUT_SEC: float = 5.0
@@ -32,7 +33,7 @@ class RequestContextHTTPClient(RequestContext):
         function_name: str,
         function_run_id: str,
         server_base_url: str,
-        http_client: httpx.Client,
+        http_client: RequestContextHTTPTransport,
         blob_store: BLOBStore,
         logger: InternalLogger,
     ):
@@ -66,7 +67,7 @@ class RequestContextHTTPClient(RequestContext):
         )
 
     @classmethod
-    def create_http_client(cls, server_base_url: str) -> httpx.Client:
+    def create_http_client(cls, server_base_url: str) -> RequestContextHTTPTransport:
         """Creates an HTTP client for use in RequestContextHTTPClient."""
         # httpx.Client is thread-safe.
         return httpx.Client(

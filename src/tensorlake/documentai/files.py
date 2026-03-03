@@ -3,14 +3,24 @@ This module contains the FileUploader class, which is used to upload files to th
 """
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Optional, Union
 
-import httpx
 from pydantic import BaseModel, Field
 
 from .common import get_doc_ai_base_url
 from .models import Region
+
+try:
+    from tensorlake_rust_cloud_sdk import (
+        CloudDocumentAIClient as RustCloudDocumentAIClient,
+    )
+
+    _RUST_DOCUMENT_AI_CLIENT_AVAILABLE = True
+except Exception:
+    RustCloudDocumentAIClient = None
+    _RUST_DOCUMENT_AI_CLIENT_AVAILABLE = False
 
 
 class FileInfo(BaseModel):
@@ -37,19 +47,23 @@ class FileUploader:
         if not api_key:
             raise ValueError("API key is required for FileUploader.")
 
+        if not _RUST_DOCUMENT_AI_CLIENT_AVAILABLE:
+            raise ValueError(
+                "Rust Document AI client is required but unavailable. "
+                "Build/install it with `make build_rust_py_client`."
+            )
+
         self.api_key = api_key
 
         doc_ai_base_url = get_doc_ai_base_url(region=region, server_url=server_url)
-        self._client = httpx.Client(base_url=doc_ai_base_url, timeout=None)
-        self._async_client = httpx.AsyncClient(base_url=doc_ai_base_url, timeout=None)
+        self._rust_client = RustCloudDocumentAIClient(
+            api_url=doc_ai_base_url,
+            api_key=self.api_key,
+        )
 
-        if server_url:
-            self._client.base_url = f"{server_url}/documents/v2"
-            self._async_client.base_url = f"{server_url}/documents/v2"
-
-    def upload_file(self, file_path: Union[str, Path]):
+    def upload_file(self, file_path: Union[str, Path]) -> str:
         """
-        Upload a file to the Tensorlake
+        Upload a file to Tensorlake.
 
         Args:
             file_path: Path to the file to upload
@@ -59,11 +73,10 @@ class FileUploader:
             String in the format "tensorlake-<ID>"
 
         Raises:
-            httpx.HTTPError: If the request fails
             FileNotFoundError: If the file doesn't exist
         """
 
-        if file_path is str:
+        if isinstance(file_path, str):
             if file_path.startswith("http://") or file_path.startswith("https://"):
                 raise ValueError(
                     "file upload supports only local files. If you want to parse a remote file, please call the parse method with the remote file URL."
@@ -73,26 +86,26 @@ class FileUploader:
         if not path.exists():
             raise FileNotFoundError(f"File not found: {path}")
 
-        with open(path, "rb") as f:
-            files = {"file": (path.name, f)}
-            response = self._client.put(
-                url="files",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                },
-                files=files,
-            )
+        response_json = self._rust_client.upload_file_json(
+            file_name=path.name,
+            content=path.read_bytes(),
+        )
+        payload = json.loads(response_json)
+        status_code = int(payload.get("status_code", 500))
+        body = payload.get("body", "")
 
-            if response.status_code >= 400:
-                print(f"Error uploading file: {response.text}")
-                raise RuntimeError(f"Error uploading file: {response.text}")
+        if status_code >= 400:
+            print(f"Error uploading file: {body}")
+            raise RuntimeError(f"Error uploading file: {body}")
 
-            resp = response.json()
-            return resp.get("file_id")
+        try:
+            return json.loads(body).get("file_id")
+        except Exception as e:
+            raise RuntimeError(f"Invalid upload response payload: {body}") from e
 
     async def upload_file_async(self, path: Union[str, Path]) -> str:
         """
-        Upload a file to the Tensorlake asynchronously.
+        Upload a file to Tensorlake asynchronously.
 
         Args:
             file_path: Path to the file to upload
@@ -102,29 +115,9 @@ class FileUploader:
             String in the format "tensorlake-<ID>"
 
         Raises:
-            httpx.HTTPError: If the request fails
             FileNotFoundError: If the file doesn't exist
         """
-        path = Path(path)
-        if not path.exists():
-            raise FileNotFoundError(f"File not found: {path}")
-
-        file_content = await asyncio.to_thread(path.read_bytes)
-        files = {"file": (path.name, file_content)}
-        response = await self._async_client.put(
-            url="files",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-            },
-            files=files,
-        )
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            print(e.response.text)
-            raise e
-        resp = response.json()
-        return resp.get("file_id")
+        return await asyncio.to_thread(self.upload_file, path)
 
     def _headers(self):
         return {

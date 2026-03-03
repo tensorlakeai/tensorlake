@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import shutil
+import sys
 import tempfile
 import threading
 import weakref
@@ -16,8 +17,6 @@ from concurrent.futures import wait as std_wait
 from queue import Empty as QueueEmptyError
 from queue import SimpleQueue
 from typing import Any, Dict, List
-
-import httpx
 
 from tensorlake.applications.blob_store import BLOBStore
 from tensorlake.applications.internal_logger import InternalLogger
@@ -77,6 +76,7 @@ from ..metadata import (
 )
 from ..registry import get_function
 from ..request_context.http_client.context import RequestContextHTTPClient
+from ..request_context.http_client.transport import RequestContextHTTPTransport
 from ..request_context.http_server.server import RequestContextHTTPServer
 from ..runtime_hooks import (
     clear_await_future_hook,
@@ -96,8 +96,8 @@ from ..user_data_serializer import (
 )
 from ..validation import (
     ValidationMessage,
+    format_validation_messages,
     has_error_message,
-    print_validation_messages,
     validate_loaded_applications,
 )
 from .class_instance_store import ClassInstanceStore
@@ -188,7 +188,7 @@ class LocalRunner:
         )
         # Use a single HTTP client for the whole LocalRunner. It's thread-safe.
         # It reduces resource usage and makes it easy to close just one client at the end.
-        self._request_context_http_client: httpx.Client = (
+        self._request_context_http_client: RequestContextHTTPTransport = (
             RequestContextHTTPClient.create_http_client(
                 server_base_url=self._request_context_http_server.base_url,
             )
@@ -202,7 +202,11 @@ class LocalRunner:
         validation_messages: list[ValidationMessage] = validate_loaded_applications()
         if has_error_message(validation_messages):
             # Don't print non-error messages for now to reduce noise for users.
-            print_validation_messages(validation_messages)
+            for msg in format_validation_messages(validation_messages):
+                print(
+                    f"{msg['severity']}: {msg['location']}{msg['message']}",
+                    file=sys.stderr,
+                )
             raise SDKUsageError(
                 "Local application run aborted due to code validation errors, "
                 "please address them before running the application."

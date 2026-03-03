@@ -1,14 +1,127 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import sys
 from typing import Any, Dict, Optional
+from urllib.parse import urlencode
 
-import httpx
 from pydantic import ValidationError
 
 from .common import get_doc_ai_base_url
 from .models import DocumentAIError, ErrorCode, ErrorResponse, MimeType, Region
+
+try:
+    from tensorlake_rust_cloud_sdk import (
+        CloudDocumentAIClient as RustCloudDocumentAIClient,
+    )
+    from tensorlake_rust_cloud_sdk import (
+        CloudDocumentAIClientError as RustCloudDocumentAIClientError,
+    )
+
+    _RUST_DOCUMENT_AI_CLIENT_AVAILABLE = True
+except Exception:
+    RustCloudDocumentAIClient = None
+    RustCloudDocumentAIClientError = None
+    _RUST_DOCUMENT_AI_CLIENT_AVAILABLE = False
+
+
+class _RustHTTPResponse:
+    def __init__(self, status_code: int, headers: dict[str, str], body: str):
+        self.status_code = status_code
+        self.headers = {k.lower(): v for k, v in headers.items()}
+        self._body = body
+
+    @property
+    def text(self) -> str:
+        return self._body
+
+    @property
+    def is_success(self) -> bool:
+        return 200 <= self.status_code < 300
+
+    def json(self) -> dict:
+        if not self._body:
+            return {}
+        return json.loads(self._body)
+
+
+def _parse_rust_client_error_fields(
+    e: Exception,
+) -> tuple[str | None, int | None, str]:
+    kind: str | None = None
+    status_code: int | None = None
+    message = str(e)
+
+    if len(e.args) == 3:
+        kind, status_code, message = e.args
+    elif len(e.args) == 1 and isinstance(e.args[0], tuple) and len(e.args[0]) == 3:
+        kind, status_code, message = e.args[0]
+
+    return kind, status_code, message
+
+
+def _raise_as_document_ai_error(e: Exception) -> None:
+    if isinstance(e, DocumentAIError):
+        raise
+
+    if (
+        RustCloudDocumentAIClientError is not None
+        and isinstance(e, RustCloudDocumentAIClientError)
+        and len(e.args) > 0
+    ):
+        kind, status_code, message = _parse_rust_client_error_fields(e)
+        if kind == "connection":
+            raise ConnectionError(message) from None
+        if status_code in (401, 403):
+            raise DocumentAIError(
+                message="Invalid API key or unauthorized access.",
+                code="unauthorized",
+            ) from None
+        if status_code is not None:
+            raise DocumentAIError(
+                message=message,
+                code=ErrorCode.INTERNAL_ERROR.value,
+            ) from None
+        raise DocumentAIError(
+            message=message,
+            code=ErrorCode.INTERNAL_ERROR.value,
+        ) from None
+
+    raise DocumentAIError(
+        message=str(e),
+        code=ErrorCode.INTERNAL_ERROR.value,
+    ) from e
+
+
+def _deserialize_rust_response(response_json: str) -> _RustHTTPResponse:
+    try:
+        payload = json.loads(response_json)
+    except Exception as e:
+        raise DocumentAIError(
+            message=f"Failed to parse Rust response payload: {e}",
+            code=ErrorCode.INTERNAL_ERROR.value,
+        ) from e
+
+    status_code = int(payload.get("status_code", 500))
+    headers = payload.get("headers", {})
+    if not isinstance(headers, dict):
+        headers = {}
+    body = payload.get("body", "")
+    if not isinstance(body, str):
+        body = str(body)
+
+    return _RustHTTPResponse(status_code=status_code, headers=headers, body=body)
+
+
+def _append_query_params(url: str, params: dict[str, Any] | None) -> str:
+    if not params:
+        return url
+
+    query_string = urlencode(params, doseq=True)
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}{query_string}"
 
 
 class _BaseClient:
@@ -26,21 +139,32 @@ class _BaseClient:
                 "API key is required. Set TENSORLAKE_API_KEY or pass api_key."
             )
 
+        if not _RUST_DOCUMENT_AI_CLIENT_AVAILABLE:
+            raise ValueError(
+                "Rust Document AI client is required but unavailable. "
+                "Build/install it with `make build_rust_py_client`."
+            )
+
         doc_ai_url = get_doc_ai_base_url(region=region, server_url=server_url)
-        self._client = httpx.Client(base_url=doc_ai_url, timeout=None)
-        self._aclient = httpx.AsyncClient(base_url=doc_ai_url, timeout=None)
+        try:
+            self._rust_client = RustCloudDocumentAIClient(
+                api_url=doc_ai_url,
+                api_key=self.api_key,
+            )
+        except Exception as e:
+            _raise_as_document_ai_error(e)
 
     def close(self):
         """
         Close the HTTP clients.
         """
-        self._client.close()
+        self._rust_client.close()
 
     async def _aclose(self):
         """
         Close the asynchronous HTTP clients.
         """
-        await self._aclient.aclose()
+        await asyncio.to_thread(self.close)
 
     def __enter__(self):
         """
@@ -75,8 +199,26 @@ class _BaseClient:
             "Connection": "close",
         }
 
-    def _request(self, method: str, url: str, **kw: Any) -> httpx.Response:
-        resp = self._client.request(method, url, headers=self._headers(), **kw)
+    def _request(self, method: str, url: str, **kw: Any) -> _RustHTTPResponse:
+        params = kw.pop("params", None)
+        body_json = kw.pop("json", None)
+        if kw:
+            unexpected = ", ".join(sorted(kw.keys()))
+            raise ValueError(f"Unsupported request kwargs: {unexpected}")
+
+        path = _append_query_params(url, params)
+
+        try:
+            response_json = self._rust_client.request_json(
+                method=method,
+                path=path,
+                body_json=(json.dumps(body_json) if body_json is not None else None),
+            )
+        except Exception as e:
+            _raise_as_document_ai_error(e)
+
+        resp = _deserialize_rust_response(response_json)
+
         if resp.is_success:
             return resp
 
@@ -96,23 +238,21 @@ class _BaseClient:
             code=error_response.code,
         )
 
-    async def _arequest(self, method: str, url: str, **kw: Any) -> httpx.Response:
-        resp = await self._aclient.request(method, url, headers=self._headers(), **kw)
-        if resp.is_success:
-            return resp
+    async def _arequest(self, method: str, url: str, **kw: Any) -> _RustHTTPResponse:
+        return await asyncio.to_thread(self._request, method, url, **kw)
 
-        error_response = _deserialize_error_response(resp)
-        _print_error_line(
-            error_response.code.value, error_response.message, error_response.trace_id
-        )
+    def _parse_events(self, parse_id: str) -> list[dict[str, Any]]:
+        try:
+            serialized_events = self._rust_client.parse_events_json(parse_id=parse_id)
+            return [json.loads(event) for event in serialized_events]
+        except Exception as e:
+            _raise_as_document_ai_error(e)
 
-        raise DocumentAIError(
-            message=error_response.message,
-            code=error_response.code,
-        )
+    async def _parse_events_async(self, parse_id: str) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._parse_events, parse_id)
 
 
-def _deserialize_error_response(resp: httpx.Response) -> ErrorResponse:
+def _deserialize_error_response(resp: _RustHTTPResponse) -> ErrorResponse:
     """
     Handle error responses and return a structured ErrorResponse.
     """
@@ -124,7 +264,7 @@ def _deserialize_error_response(resp: httpx.Response) -> ErrorResponse:
         return ErrorResponse(
             message=str(resp.text),
             code=ErrorCode.INTERNAL_ERROR,
-            trace_id=resp.headers.get("X-Trace-ID"),
+            trace_id=resp.headers.get("x-trace-id") or resp.headers.get("X-Trace-ID"),
             details=None,
         )
 

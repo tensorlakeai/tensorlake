@@ -8,7 +8,6 @@ import zipfile
 from typing import Any, Dict, Generator, List
 
 import grpc
-import httpx
 
 from tensorlake.applications import (
     RETURN_WHEN,
@@ -29,6 +28,9 @@ from tensorlake.applications.remote.code.zip import (
 )
 from tensorlake.applications.request_context.http_client.context import (
     RequestContextHTTPClient,
+)
+from tensorlake.applications.request_context.http_client.transport import (
+    RequestContextHTTPTransport,
 )
 from tensorlake.applications.request_context.http_server.server import (
     RequestContextHTTPServer,
@@ -89,7 +91,7 @@ class Service(FunctionExecutorServicer):
         self._blob_store: BLOBStore | None = None
         self._request_context_http_server: RequestContextHTTPServer | None = None
         self._request_context_http_server_thread: threading.Thread | None = None
-        self._request_context_http_client: httpx.Client | None = None
+        self._request_context_http_client: RequestContextHTTPTransport | None = None
         self._health_check_handler: HealthCheckHandler | None = None
         # Tracks all existing allocations.
         # Added by create_allocation RPC, removed by delete_allocation RPC.

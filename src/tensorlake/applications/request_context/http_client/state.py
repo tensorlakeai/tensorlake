@@ -27,6 +27,7 @@ from ..http_server.handlers.request_state.prepare_write import (
     PrepareWriteRequest,
     PrepareWriteResponse,
 )
+from .transport import RequestContextHTTPTransport
 
 
 class RequestStateHTTPClient(RequestState):
@@ -39,13 +40,13 @@ class RequestStateHTTPClient(RequestState):
         self,
         request_id: str,
         allocation_id: str,
-        http_client: httpx.Client,
+        http_client: RequestContextHTTPTransport,
         blob_store: BLOBStore,
         logger: InternalLogger,
     ):
         self._request_id: str = request_id
         self._allocation_id: str = allocation_id
-        self._http_client: httpx.Client = http_client
+        self._http_client: RequestContextHTTPTransport = http_client
         self._blob_store: BLOBStore = blob_store
         self._logger: InternalLogger = logger.bind(module=__name__)
 

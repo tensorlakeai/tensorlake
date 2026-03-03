@@ -1,7 +1,9 @@
+import argparse
 import asyncio
+import json
 import os
-
-import click
+import sys
+import traceback
 
 from tensorlake.applications import Function, Image, SDKUsageError, TensorlakeError
 from tensorlake.applications.applications import filter_applications
@@ -17,44 +19,86 @@ from tensorlake.applications.remote.deploy import deploy_applications
 from tensorlake.applications.secrets import list_secret_names
 from tensorlake.applications.validation import (
     ValidationMessage,
+    format_validation_messages,
     has_error_message,
-    print_validation_messages,
     validate_loaded_applications,
 )
 from tensorlake.builder.client_v2 import BuildContext, ImageBuilderV2Client
-from tensorlake.cli._common import Context, require_auth_and_project
-from tensorlake.cli.secrets import warning_missing_secrets
+from tensorlake.cli._common import Context
 
 
-@click.command(
-    short_help="Deploys applications defined in <application-file-path> .py file to Tensorlake Cloud"
-)
-@click.option("-p", "--parallel-builds", is_flag=True, default=False)
-@click.option(
-    "-u",
-    "--upgrade-running-requests",
-    is_flag=True,
-    default=False,
-    help="Upgrade requests that are already queued or running to use the new deployed version of the applications",
-)
-@click.argument(
-    "application-file-path",
-    type=click.Path(exists=True, file_okay=True, dir_okay=False),
-)
-@require_auth_and_project
+def _emit(obj):
+    print(json.dumps(obj), flush=True)
+
+
+def _format_error_message(
+    prefix: str, error: Exception | BaseException | None = None
+) -> str:
+    """Return a user-facing error message without leaking exception payloads."""
+    if error is None:
+        return prefix
+    return f"{prefix} ({type(error).__name__})"
+
+
+def _debug_enabled() -> bool:
+    return os.environ.get("TENSORLAKE_DEBUG", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _error_event(prefix: str, error: Exception | BaseException | None = None) -> dict:
+    event: dict[str, str] = {
+        "type": "error",
+        "message": _format_error_message(prefix, error),
+    }
+    if error is not None:
+        # Keep a concise detail line visible by default for actionable debugging.
+        event["details"] = f"{type(error).__name__}: {error}"
+    if _debug_enabled():
+        event["traceback"] = traceback.format_exc()
+    return event
+
+
+def _build_context_from_env() -> Context:
+    """Build CLI context from environment variables set by the Rust CLI."""
+    return Context.default(
+        api_url=os.environ.get("TENSORLAKE_API_URL"),
+        api_key=os.environ.get("TENSORLAKE_API_KEY"),
+        personal_access_token=os.environ.get("TENSORLAKE_PAT"),
+        namespace=os.environ.get("INDEXIFY_NAMESPACE"),
+        organization_id=os.environ.get("TENSORLAKE_ORGANIZATION_ID"),
+        project_id=os.environ.get("TENSORLAKE_PROJECT_ID"),
+    )
+
+
+def _warning_missing_secrets(auth: Context, secrets: list[str]) -> list[str]:
+    """Check for missing secrets and return their names."""
+    try:
+        existing = auth.list_secret_names(page_size=100)
+    except Exception:
+        return []
+    return [s for s in secrets if s not in existing]
+
+
 def deploy(
-    auth: Context,
     application_file_path: str,
-    # TODO: implement with image builder v2
     parallel_builds: bool,
     upgrade_running_requests: bool,
 ):
-    """Deploys applications to Tensorlake Cloud."""
-    click.echo(f"⚙️  Preparing deployment for applications from {application_file_path}")
+    """Deploys applications to Tensorlake Cloud, emitting NDJSON events to stdout."""
+    auth = _build_context_from_env()
+
+    _emit(
+        {
+            "type": "status",
+            "message": f"Preparing deployment for applications from {application_file_path}",
+        }
+    )
 
     # Create builder client with proper authentication
-    # If using API key, don't pass org/project IDs (they come from introspection)
-    # If using PAT, pass org/project IDs for X-Forwarded headers
     bearer_token = auth.api_key or auth.personal_access_token
     builder_v2 = ImageBuilderV2Client(
         build_service=os.getenv("TENSORLAKE_BUILD_SERVICE")
@@ -65,35 +109,57 @@ def deploy(
     )
 
     try:
-        application_file_path: str = os.path.abspath(application_file_path)
+        application_file_path = os.path.abspath(application_file_path)
         load_code(application_file_path)
     except SyntaxError as e:
-        raise click.ClickException(
-            f"syntax error in {e.filename}, line {e.lineno}: {e.msg}"
-        ) from None
+        _emit(
+            {
+                "type": "error",
+                "message": f"syntax error in {e.filename}, line {e.lineno}: {e.msg}",
+            }
+        )
+        sys.exit(1)
     except ImportError as e:
-        raise click.ClickException(
-            f"failed to import application file: {e}. "
-            f"make sure all dependencies are installed in your current environment."
-        ) from None
+        _emit(
+            _error_event(
+                "failed to import application file. make sure all dependencies are installed in your current environment.",
+                e,
+            )
+        )
+        sys.exit(1)
     except Exception as e:
-        raise click.ClickException(
-            f"failed to load {application_file_path}: {type(e).__name__}: {e}"
-        ) from None
+        _emit(_error_event(f"failed to load {application_file_path}", e))
+        sys.exit(1)
 
     validation_messages: list[ValidationMessage] = validate_loaded_applications()
-    print_validation_messages(validation_messages)
-    if has_error_message(validation_messages):
-        click.echo(
-            "‼️  Deployment aborted due to code validation errors, please address them before deploying.",
-            err=True,
+    for item in format_validation_messages(validation_messages):
+        _emit(
+            {
+                "type": "validation",
+                "severity": item["severity"],
+                "message": item["message"],
+                "location": item["location"],
+            }
         )
-        raise click.Abort
 
-    warning_missing_secrets(auth, list(list_secret_names()))
+    if has_error_message(validation_messages):
+        _emit({"type": "validation_failed"})
+        sys.exit(1)
+
+    missing = _warning_missing_secrets(auth, list(list_secret_names()))
+    if missing:
+        _emit({"type": "missing_secrets", "count": len(missing)})
 
     functions: list[Function] = get_functions()
-    asyncio.run(_prepare_images_v2(builder_v2, functions))
+
+    try:
+        asyncio.run(_prepare_images_v2(builder_v2, functions))
+    except KeyboardInterrupt:
+        _emit({"type": "error", "message": "build cancelled by user"})
+        sys.exit(1)
+    except Exception as e:
+        _emit(_error_event("build failed", e))
+        sys.exit(1)
 
     _deploy_applications(
         auth=auth,
@@ -112,9 +178,7 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: list[Func
         for image_info in images.values():
             image_info: ImageInformation
             for function in image_info.functions:
-                click.echo(
-                    f"📦 Building `{image_info.image.name}` image...",
-                )
+                _emit({"type": "build_start", "image": image_info.image.name})
                 try:
                     await builder.build(
                         BuildContext(
@@ -124,21 +188,24 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: list[Func
                         ),
                         image_info.image,
                     )
-                except (
-                    asyncio.CancelledError,
-                    KeyboardInterrupt,
-                    click.Abort,
-                    click.UsageError,
-                ) as error:
-                    # Re-raise cancellation errors. Return early to skip printing the success message
+                except (asyncio.CancelledError, KeyboardInterrupt) as error:
                     raise error
                 except Exception as error:
-                    raise click.ClickException(
-                        f"image '{image_info.image.name}' build failed: {error}. "
-                        f"check your Image() configuration and try again."
-                    ) from None
+                    _emit(
+                        {
+                            "type": "build_failed",
+                            "image": image_info.image.name,
+                            "error": _format_error_message(
+                                f"image '{image_info.image.name}' build failed",
+                                error,
+                            )
+                            + ". "
+                            f"check your Image() configuration and try again.",
+                        }
+                    )
+                    sys.exit(1)
 
-    click.secho("\n✅ All images built successfully")
+    _emit({"type": "build_done"})
 
 
 def _deploy_applications(
@@ -147,40 +214,84 @@ def _deploy_applications(
     upgrade_running_requests: bool,
     functions: list[Function],
 ):
-    click.echo("⚙️  Deploying applications...\n")
+    _emit({"type": "status", "message": "Deploying applications..."})
 
     try:
         deploy_applications(
             applications_file_path=application_file_path,
             upgrade_running_requests=upgrade_running_requests,
-            load_source_dir_modules=False,  # Already loaded
-            api_client=auth.api_client,  # Use the authenticated API client from context
+            load_source_dir_modules=False,
+            api_client=auth.rust_cloud_client,
         )
 
         for application_function in filter_applications(functions):
             application_function: Function
-            click.echo(
-                f"🚀 Application `{application_function._name}` deployed successfully\n"
-            )
             curl_command: str | None = example_application_curl_command(
                 api_url=auth.api_url,
                 application=application_function,
                 file_paths=None,
             )
-            if curl_command is not None:
-                click.echo(
-                    f"💡 To invoke it, you can use the following cURL command:\n\n{curl_command}"
-                )
+            _emit(
+                {
+                    "type": "deployed",
+                    "application": application_function._name,
+                    "curl_command": curl_command,
+                }
+            )
     except SDKUsageError as e:
-        raise click.UsageError(str(e)) from None
+        _emit(_error_event("invalid usage", e))
+        sys.exit(1)
     except TensorlakeError as e:
-        raise click.ClickException(f"failed to deploy applications: {e}") from e
+        _emit(_error_event("failed to deploy applications", e))
+        sys.exit(1)
     except Exception as e:
-        raise click.ClickException(
-            f"failed to deploy applications: {type(e).__name__}: {e}"
-        ) from None
+        _emit(_error_event("failed to deploy applications", e))
+        sys.exit(1)
 
-    click.echo(
-        "\n📚 Visit our documentation if you need more information about invoking applications: "
-        "https://docs.tensorlake.ai/applications/quickstart#calling-applications\n\n"
+    _emit(
+        {
+            "type": "done",
+            "doc_url": "https://docs.tensorlake.ai/applications/quickstart#calling-applications",
+        }
     )
+
+
+def deploy_entrypoint():
+    """Entry point for the deploy command (called from Rust CLI via python -m)."""
+    parser = argparse.ArgumentParser(
+        description="Deploy applications to Tensorlake Cloud"
+    )
+    parser.add_argument(
+        "application_file_path",
+        help="Path to the application .py file",
+    )
+    parser.add_argument(
+        "-p",
+        "--parallel-builds",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "-u",
+        "--upgrade-running-requests",
+        action="store_true",
+        default=False,
+        help="Upgrade requests that are already queued or running",
+    )
+    args = parser.parse_args()
+
+    try:
+        deploy(
+            application_file_path=args.application_file_path,
+            parallel_builds=args.parallel_builds,
+            upgrade_running_requests=args.upgrade_running_requests,
+        )
+    except SystemExit:
+        raise
+    except Exception as e:
+        _emit(_error_event("deploy failed", e))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    deploy_entrypoint()

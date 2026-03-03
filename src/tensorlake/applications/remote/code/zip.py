@@ -2,10 +2,10 @@ import inspect
 import io
 import os
 import stat
+import sys
 import zipfile
 from typing import Dict, List, Set
 
-import click
 from pydantic import BaseModel
 
 from ...interface import Function, SDKUsageError
@@ -108,9 +108,9 @@ def _check_code_size(app_code_size: int, zip_infos: List[zipfile.ZipInfo]) -> No
     if app_code_size <= _MAX_CODE_SIZE_BYTES:
         return
 
-    click.echo(f"Application code ZIP archive content:")
+    print(f"Application code ZIP archive content:", file=sys.stderr)
     for zip_info in zip_infos:
-        click.echo(f"  {zip_info.filename}: {zip_info.file_size} bytes")
+        print(f"  {zip_info.filename}: {zip_info.file_size} bytes", file=sys.stderr)
     raise SDKUsageError(
         f"Application code size {app_code_size / 1024 / 1024} MB exceeds maximum size {_MAX_CODE_SIZE_BYTES / 1024/ 1024} MB. "
         "Please check the application code ZIP archive content above to see if anything unexpected is included."

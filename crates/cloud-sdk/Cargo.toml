@@ -1,0 +1,46 @@
+[package]
+name = "tensorlake-cloud-sdk"
+version = "0.1.0"
+authors = ["support@tensorlake.ai"]
+description = "A Rust SDK for interacting with Tensorlake Cloud APIs."
+license = "Apache-2.0"
+edition = "2024"
+
+[dependencies]
+bytes = { workspace = true }
+chrono = { workspace = true }
+utoipa = { workspace = true, optional = true }
+derive_builder = { workspace = true }
+flate2 = { workspace = true }
+futures = { workspace = true }
+hex = { workspace = true }
+pin-project-lite = { workspace = true }
+reqwest = { workspace = true }
+eventsource-stream = { workspace = true }
+reqwest-middleware = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_path_to_error = { workspace = true }
+serde_repr = { workspace = true }
+serde_with = { workspace = true }
+sha2 = { workspace = true }
+tar = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+url = { workspace = true }
+urlencoding = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+data-encoding = "2.5"
+rand = "0.9.2"
+zip = "0.6"
+
+[lints.clippy]
+too_many_arguments = "allow"
+
+[features]
+integration-tests = []
+openapi = ["utoipa"]
+
