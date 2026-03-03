@@ -2,6 +2,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use std::future::Future;
+use std::io::Write;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -396,6 +397,27 @@ impl CloudApiClient {
                     events.push(serde_json::to_string(&event)?);
                 }
                 Ok(events)
+            }
+        })
+    }
+
+    fn stream_build_logs_to_stderr(
+        &self,
+        build_service_path: String,
+        build_id: String,
+    ) -> PyResult<()> {
+        self.run_with_retry(10, move |client| {
+            let path = format!(
+                "{}/builds/{build_id}/logs",
+                build_service_path.trim_end_matches('/')
+            );
+            async move {
+                let mut stream = client.build_event_source_request::<Value>(&path).await?;
+                while let Some(event) = stream.next().await {
+                    let event = event?;
+                    print_build_log_event_to_stderr(&event);
+                }
+                Ok(())
             }
         })
     }
@@ -1162,6 +1184,50 @@ fn into_document_ai_py_error(error: SdkError) -> PyErr {
             Option::<u16>::None,
             other.to_string(),
         )),
+    }
+}
+
+fn print_build_log_event_to_stderr(event: &Value) {
+    let build_status = event
+        .get("build_status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if build_status == "pending" {
+        eprintln!("Build waiting in queue...");
+        return;
+    }
+
+    let message = event
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let stream = event
+        .get("stream")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    match stream {
+        "stdout" => {
+            eprint!("{message}");
+            let _ = std::io::stderr().flush();
+        }
+        "stderr" => eprintln!("{message}"),
+        "info" => {
+            let timestamp = event
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if timestamp.is_empty() {
+                eprintln!("{message}");
+            } else {
+                eprintln!("{timestamp}: {message}");
+            }
+        }
+        _ => {
+            if !message.is_empty() {
+                eprintln!("{message}");
+            }
+        }
     }
 }
 

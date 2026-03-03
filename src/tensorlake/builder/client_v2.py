@@ -255,28 +255,42 @@ class ImageBuilderV2Client:
             build (NewBuild): The build for which to stream logs.
         """
         print(f"Streaming logs for build {build.id}", file=sys.stderr)
-        events_json: list[str] = await asyncio.to_thread(
-            self._rust_client.stream_build_logs_json,
-            self._build_service_path,
-            build.id,
-        )
-        for event_json in events_json:
-            log_entry = BuildLogEvent.model_validate_json(event_json)
-            self._print_build_log_event(event=log_entry)
+        # Preferred path: stream logs directly from the Rust client into stderr
+        # as they arrive (prevents buffering everything until stream end).
+        if hasattr(self._rust_client, "stream_build_logs_to_stderr"):
+            await asyncio.to_thread(
+                self._rust_client.stream_build_logs_to_stderr,
+                self._build_service_path,
+                build.id,
+            )
+        else:
+            # Backward compatibility for older built extensions.
+            events_json: list[str] = await asyncio.to_thread(
+                self._rust_client.stream_build_logs_json,
+                self._build_service_path,
+                build.id,
+            )
+            for event_json in events_json:
+                log_entry = BuildLogEvent.model_validate_json(event_json)
+                self._print_build_log_event(event=log_entry)
 
         return await self.build_info(build.id)
 
     def _print_build_log_event(self, event: BuildLogEvent):
         if event.build_status == "pending":
-            print("Build waiting in queue...", file=sys.stderr)
+            print("Build waiting in queue...", file=sys.stderr, flush=True)
         else:
             match event.stream:
                 case "stdout":
-                    print(event.message, end="", file=sys.stderr)
+                    print(event.message, end="", file=sys.stderr, flush=True)
                 case "stderr":
-                    print(event.message, file=sys.stderr)
+                    print(event.message, file=sys.stderr, flush=True)
                 case "info":
-                    print(f"{event.timestamp}: {event.message}", file=sys.stderr)
+                    print(
+                        f"{event.timestamp}: {event.message}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
 
     async def build_info(self, build_id: str) -> BuildInfo:
         """
