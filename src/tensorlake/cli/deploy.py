@@ -85,11 +85,19 @@ def _warning_missing_secrets(auth: Context, secrets: list[str]) -> list[str]:
     return [s for s in secrets if s not in existing]
 
 
+def _onprem_enabled() -> bool:
+    return os.environ.get("TENSORLAKE_ONPREM", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def deploy(
     application_file_path: str,
     parallel_builds: bool,
     upgrade_running_requests: bool,
-    indexify_url: str | None = None,
 ):
     """Deploys applications to Tensorlake Cloud, emitting NDJSON events to stdout."""
     _emit(
@@ -139,17 +147,18 @@ def deploy(
 
     functions: list[Function] = get_functions()
 
-    if indexify_url:
+    if _onprem_enabled():
         from tensorlake.applications.remote.api_client import APIClient
 
+        api_url = os.environ.get("TENSORLAKE_API_URL", "http://localhost:8900")
         api_client = APIClient(
-            api_url=indexify_url,
+            api_url=api_url,
             api_key=None,
             namespace=os.environ.get("INDEXIFY_NAMESPACE", "default"),
         )
         _deploy_applications(
             api_client=api_client,
-            api_url=indexify_url,
+            api_url=api_url,
             application_file_path=application_file_path,
             upgrade_running_requests=upgrade_running_requests,
             functions=functions,
@@ -301,11 +310,6 @@ def deploy_entrypoint():
         default=False,
         help="Upgrade requests that are already queued or running",
     )
-    parser.add_argument(
-        "--indexify-url",
-        default=None,
-        help="Deploy directly to an Indexify server, skipping image build and platform auth",
-    )
     args = parser.parse_args()
 
     try:
@@ -313,7 +317,6 @@ def deploy_entrypoint():
             application_file_path=args.application_file_path,
             parallel_builds=args.parallel_builds,
             upgrade_running_requests=args.upgrade_running_requests,
-            indexify_url=args.indexify_url,
         )
     except SystemExit:
         raise
