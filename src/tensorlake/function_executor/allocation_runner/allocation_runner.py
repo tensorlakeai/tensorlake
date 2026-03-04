@@ -7,6 +7,7 @@ import time
 import weakref
 from collections.abc import Coroutine, Generator
 from dataclasses import dataclass
+from traceback import format_exception
 from typing import Any, Dict, List
 
 import grpc
@@ -121,6 +122,8 @@ from .upload import (
     upload_serialized_objects_to_blob,
 )
 from .value import SerializedValue, Value
+
+_CHILD_FUNCTION_ERROR_TRACE_PREFIX: str = "__tensorlake_function_error_trace__\n"
 
 
 @dataclass
@@ -764,11 +767,24 @@ class AllocationRunner:
                             logger=self._logger,
                         )[0]
                     )
-                    future._set_exception(
-                        RequestError(
-                            message=serialized_request_error.data.decode("utf-8")
-                        )
+                    request_error_message: str = serialized_request_error.data.decode(
+                        "utf-8"
                     )
+                    if request_error_message.startswith(
+                        _CHILD_FUNCTION_ERROR_TRACE_PREFIX
+                    ):
+                        future._set_exception(
+                            create_function_error(
+                                future,
+                                cause=request_error_message[
+                                    len(_CHILD_FUNCTION_ERROR_TRACE_PREFIX) :
+                                ],
+                            )
+                        )
+                    else:
+                        future._set_exception(
+                            RequestError(message=request_error_message)
+                        )
                 else:
                     # We don't have a user visible cause of failure.
                     future._set_exception(create_function_error(future, cause=None))
@@ -1129,6 +1145,40 @@ class AllocationRunner:
                 uploaded_request_error_blob=uploaded_output_blob,
             )
         except BaseException as e:
+            # For child function calls (created by SDK), forward traceback via
+            # request_error_output while preserving FUNCTION_ERROR semantics.
+            if (
+                function_call_metadata is not None
+                and self._allocation.inputs.HasField("request_error_blob")
+            ):
+                try:
+                    traceback_message: str = "".join(format_exception(e))
+                    traceback_payload: str = (
+                        f"{_CHILD_FUNCTION_ERROR_TRACE_PREFIX}{traceback_message}"
+                    )
+                    request_error_so, uploaded_output_blob = upload_request_error(
+                        utf8_message=traceback_payload.encode("utf-8", errors="replace"),
+                        destination_blob=self._allocation.inputs.request_error_blob,
+                        blob_store=self._blob_store,
+                        logger=self._logger,
+                    )
+                    alloc_result: AllocationResult = (
+                        self._result_helper.from_user_exception(
+                            self._allocation_event_details, e
+                        )
+                    )
+                    alloc_result.request_error_output.CopyFrom(request_error_so)
+                    alloc_result.uploaded_request_error_blob.CopyFrom(
+                        uploaded_output_blob
+                    )
+                    return alloc_result
+                except BaseException as upload_error:
+                    # Keep old fallback behavior if upload fails.
+                    self._logger.error(
+                        "failed to upload child function error details",
+                        exc_info=upload_error,
+                    )
+
             # This is internal FE code.
             return self._result_helper.from_user_exception(
                 self._allocation_event_details, e
