@@ -148,21 +148,12 @@ def deploy(
     functions: list[Function] = get_functions()
 
     if _onprem_enabled():
-        from tensorlake.applications.remote.api_client import APIClient
-
-        api_url = os.environ.get("TENSORLAKE_API_URL", "http://localhost:8900")
-        api_client = APIClient(
-            api_url=api_url,
-            api_key=None,
-            namespace=os.environ.get("INDEXIFY_NAMESPACE", "default"),
-        )
-        _deploy_applications(
-            api_client=api_client,
-            api_url=api_url,
-            application_file_path=application_file_path,
+        deploy_applications(
+            applications_file_path=application_file_path,
             upgrade_running_requests=upgrade_running_requests,
-            functions=functions,
+            load_source_dir_modules=False,
         )
+        _emit({"type": "done"})
         return
 
     auth = _build_context_from_env()
