@@ -7,7 +7,11 @@ use reqwest::{
 };
 use reqwest_middleware::{ClientBuilder as ReqwestClientBuilder, ClientWithMiddleware, Middleware};
 use serde::de::DeserializeOwned;
-use std::{pin::Pin, result::Result, sync::Arc};
+use std::{
+    pin::Pin,
+    result::Result,
+    sync::{Arc, Once},
+};
 
 use crate::error::SdkError;
 
@@ -258,7 +262,16 @@ fn str_to_header_value(value: &str) -> Result<HeaderValue, SdkError> {
         .map_err(|e: InvalidHeaderValue| SdkError::InvalidHeaderValue(e.to_string()))
 }
 
+fn ensure_rustls_provider() {
+    static INSTALL_PROVIDER: Once = Once::new();
+    INSTALL_PROVIDER.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 fn new_base_client(headers: &HeaderMap) -> Result<reqwest::Client, SdkError> {
+    ensure_rustls_provider();
+
     let client = reqwest::Client::builder()
         .user_agent(format!(
             "Tensorlake Cloud SDK/{}",
@@ -267,4 +280,18 @@ fn new_base_client(headers: &HeaderMap) -> Result<reqwest::Client, SdkError> {
         .default_headers(headers.clone())
         .build()?;
     Ok(client)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_rustls_provider;
+
+    #[test]
+    fn installs_rustls_provider() {
+        ensure_rustls_provider();
+        assert!(
+            rustls::crypto::CryptoProvider::get_default().is_some(),
+            "rustls crypto provider should be installed"
+        );
+    }
 }
