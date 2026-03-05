@@ -27,6 +27,7 @@ manifest-path = "crates/cli/Cargo.toml"
 module-name = "tensorlake"
 python-source = "src"
 data = "tensorlake.data"
+include = [{ path = "LICENSE", format = "sdist" }]
 strip = true
 
 [tool.black]
