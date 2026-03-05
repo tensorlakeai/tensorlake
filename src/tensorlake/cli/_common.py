@@ -42,7 +42,9 @@ class Context:
             # Match Rust CLI auth behavior:
             # - API key auth: no forwarded org/project scope headers
             # - PAT auth: include forwarded org/project scope headers when available
-            use_scope_headers = self.personal_access_token is not None and self.api_key is None
+            use_scope_headers = (
+                self.personal_access_token is not None and self.api_key is None
+            )
             self._cloud_client = CloudClient(
                 api_url=self.api_url,
                 api_key=bearer_token,
