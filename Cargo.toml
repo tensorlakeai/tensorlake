@@ -67,4 +67,4 @@ open = "5"
 crossterm = "0.29"
 
 # Python bindings
-pyo3 = { version = "0.22", features = ["abi3-py310", "extension-module"] }
+pyo3 = { version = "0.24", features = ["abi3-py310", "extension-module"] }
