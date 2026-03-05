@@ -10,15 +10,6 @@ class _FakeCloudClient:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
 
-    def introspect_api_key_json(self):
-        return json.dumps(
-            {
-                "id": "key-id",
-                "projectId": "proj-1",
-                "organizationId": "org-1",
-            }
-        )
-
     def list_secrets_json(self, organization_id, project_id, page_size):
         assert organization_id == "org-1"
         assert project_id == "proj-1"
@@ -74,6 +65,20 @@ class TestContext(unittest.TestCase):
             self.assertEqual(client.kwargs["organization_id"], "org-1")
             self.assertEqual(client.kwargs["project_id"], "proj-1")
 
+    def test_rust_cloud_client_with_api_key_does_not_forward_org_project_scope(self):
+        with patch.object(common_module, "CloudClient", _FakeCloudClient):
+            context = Context.default(
+                api_key="api-key",
+                organization_id="org-1",
+                project_id="proj-1",
+            )
+            client = context.rust_cloud_client
+
+            self.assertIsInstance(client, _FakeCloudClient)
+            self.assertEqual(client.kwargs["api_key"], "api-key")
+            self.assertIsNone(client.kwargs["organization_id"])
+            self.assertIsNone(client.kwargs["project_id"])
+
     def test_rust_cloud_client_requires_authentication(self):
         context = Context.default()
         with self.assertRaises(SystemExit):
@@ -81,7 +86,11 @@ class TestContext(unittest.TestCase):
 
     def test_list_secret_names_uses_rust_client(self):
         with patch.object(common_module, "CloudClient", _FakeCloudClient):
-            context = Context.default(api_key="api-key")
+            context = Context.default(
+                api_key="api-key",
+                organization_id="org-1",
+                project_id="proj-1",
+            )
             secret_names = context.list_secret_names(page_size=100)
             self.assertEqual(secret_names, ["SECRET_A", "SECRET_B"])
 
@@ -95,6 +104,11 @@ class TestContext(unittest.TestCase):
             secret_names = context.list_secret_names(page_size=100)
 
             self.assertEqual(secret_names, ["SECRET_A", "SECRET_B"])
+
+    def test_list_secret_names_without_org_or_project_returns_empty(self):
+        with patch.object(common_module, "CloudClient", _FakeCloudClient):
+            context = Context.default(api_key="api-key")
+            self.assertEqual(context.list_secret_names(page_size=100), [])
 
 
 if __name__ == "__main__":

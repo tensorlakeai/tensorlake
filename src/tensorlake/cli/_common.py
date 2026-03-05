@@ -2,9 +2,7 @@ import importlib.metadata
 import json
 import sys
 from dataclasses import dataclass
-from typing import Any
 
-from tensorlake.applications.interface.exceptions import RemoteAPIError, SDKUsageError
 from tensorlake.cloud_client import CloudClient
 
 try:
@@ -29,7 +27,6 @@ class Context:
     personal_access_token: str | None = None
     version: str = VERSION
     debug: bool = False
-    _introspect_response: dict[str, Any] | None = None
     _cloud_client: CloudClient | None = None
     organization_id_value: str | None = None
     project_id_value: str | None = None
@@ -42,11 +39,17 @@ class Context:
                 _cli_error(
                     "Missing API key or personal access token. Please run `tensorlake login` to authenticate."
                 )
+            # Match Rust CLI auth behavior:
+            # - API key auth: no forwarded org/project scope headers
+            # - PAT auth: include forwarded org/project scope headers when available
+            use_scope_headers = self.personal_access_token is not None and self.api_key is None
             self._cloud_client = CloudClient(
                 api_url=self.api_url,
                 api_key=bearer_token,
-                organization_id=self.organization_id_value,
-                project_id=self.project_id_value,
+                organization_id=(
+                    self.organization_id_value if use_scope_headers else None
+                ),
+                project_id=(self.project_id_value if use_scope_headers else None),
                 namespace=self.namespace,
             )
         return self._cloud_client
@@ -58,82 +61,15 @@ class Context:
 
     @property
     def api_key_id(self):
-        if self.api_key:
-            return self._introspect().get("id")
-        else:
-            return None
+        return None
 
     @property
     def project_id(self):
-        # Prefer explicitly provided IDs (from Rust CLI auth guard or flags).
-        # This avoids an unnecessary API-key introspection round-trip.
-        if self.project_id_value is not None:
-            return self.project_id_value
-        if self.api_key:
-            return self._introspect().get("projectId")
-        return None
+        return self.project_id_value
 
     @property
     def organization_id(self):
-        # Prefer explicitly provided IDs (from Rust CLI auth guard or flags).
-        # This avoids an unnecessary API-key introspection round-trip.
-        if self.organization_id_value is not None:
-            return self.organization_id_value
-        if self.api_key:
-            return self._introspect().get("organizationId")
-        return None
-
-    def _introspect(self) -> dict[str, Any]:
-        if self._introspect_response is None:
-            try:
-                response_json = self.cloud_client.introspect_api_key_json()
-                self._introspect_response = json.loads(response_json)
-            except SDKUsageError:
-                print(
-                    "The TensorLake API key is not valid.",
-                    file=sys.stderr,
-                )
-                print(
-                    "Please supply a valid API key with the `--api-key` flag, or run `tensorlake login` to authenticate.",
-                    file=sys.stderr,
-                )
-                _cli_error("Invalid API key")
-            except RemoteAPIError as e:
-                status_code = e.status_code
-                if status_code == 404:
-                    print(
-                        f"The server at {self.api_url} doesn't support TensorLake API introspection.",
-                        file=sys.stderr,
-                    )
-                    print(
-                        "Please check your API URL or contact support.",
-                        file=sys.stderr,
-                    )
-                    _cli_error("API introspection not supported")
-
-                print(f"Error validating API key: HTTP {status_code}", file=sys.stderr)
-
-                if self.debug:
-                    print("", file=sys.stderr)
-                    print("Technical details:", file=sys.stderr)
-                    print(
-                        f"  URL: {self.api_url}/platform/v1/keys/introspect",
-                        file=sys.stderr,
-                    )
-                    print(f"  Error: {e}", file=sys.stderr)
-                else:
-                    print("", file=sys.stderr)
-                    print(
-                        "For technical details, run with --debug or set TENSORLAKE_DEBUG=1",
-                        file=sys.stderr,
-                    )
-
-                _cli_error(f"API key validation failed with status {status_code}")
-            except Exception as e:
-                if self.debug:
-                    print(f"Error: {e}", file=sys.stderr)
-                _cli_error("API key validation failed")
-        return self._introspect_response
+        return self.organization_id_value
 
     def list_secret_names(self, page_size: int = 100) -> list[str]:
         org_id = self.organization_id
