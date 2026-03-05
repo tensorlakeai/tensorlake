@@ -1,6 +1,6 @@
 [package]
 name = "tensorlake-cli"
-version = "0.1.0"
+version = "0.4.6"
 edition = "2024"
 license = "Apache-2.0"
 description = "TensorLake CLI"
@@ -8,6 +8,10 @@ description = "TensorLake CLI"
 [[bin]]
 name = "tl"
 path = "src/main.rs"
+
+[[bin]]
+name = "tensorlake"
+path = "src/tensorlake.rs"
 
 [dependencies]
 tensorlake-cloud-sdk = { workspace = true }
