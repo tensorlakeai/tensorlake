@@ -16,6 +16,7 @@ futures = { workspace = true }
 hex = { workspace = true }
 pin-project-lite = { workspace = true }
 reqwest = { workspace = true }
+rustls = { workspace = true }
 eventsource-stream = { workspace = true }
 reqwest-middleware = { workspace = true }
 serde = { workspace = true }
@@ -43,4 +44,3 @@ too_many_arguments = "allow"
 [features]
 integration-tests = []
 openapi = ["utoipa"]
-
