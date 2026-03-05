@@ -36,6 +36,11 @@ class _FakeCloudClient:
         return None
 
 
+class _FailIntrospectCloudClient(_FakeCloudClient):
+    def introspect_api_key_json(self):
+        raise RuntimeError("introspection unavailable")
+
+
 class TestContext(unittest.TestCase):
     def test_default_resolves_cloud_url_from_api_url(self):
         context = Context.default(api_url="https://api.tensorlake.dev", api_key="key")
@@ -78,6 +83,17 @@ class TestContext(unittest.TestCase):
         with patch.object(common_module, "CloudClient", _FakeCloudClient):
             context = Context.default(api_key="api-key")
             secret_names = context.list_secret_names(page_size=100)
+            self.assertEqual(secret_names, ["SECRET_A", "SECRET_B"])
+
+    def test_list_secret_names_uses_provided_org_project_without_introspection(self):
+        with patch.object(common_module, "CloudClient", _FailIntrospectCloudClient):
+            context = Context.default(
+                api_key="api-key",
+                organization_id="org-1",
+                project_id="proj-1",
+            )
+            secret_names = context.list_secret_names(page_size=100)
+
             self.assertEqual(secret_names, ["SECRET_A", "SECRET_B"])
 
 

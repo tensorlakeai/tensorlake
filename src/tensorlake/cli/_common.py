@@ -65,15 +65,23 @@ class Context:
 
     @property
     def project_id(self):
+        # Prefer explicitly provided IDs (from Rust CLI auth guard or flags).
+        # This avoids an unnecessary API-key introspection round-trip.
+        if self.project_id_value is not None:
+            return self.project_id_value
         if self.api_key:
             return self._introspect().get("projectId")
-        return self.project_id_value
+        return None
 
     @property
     def organization_id(self):
+        # Prefer explicitly provided IDs (from Rust CLI auth guard or flags).
+        # This avoids an unnecessary API-key introspection round-trip.
+        if self.organization_id_value is not None:
+            return self.organization_id_value
         if self.api_key:
             return self._introspect().get("organizationId")
-        return self.organization_id_value
+        return None
 
     def _introspect(self) -> dict[str, Any]:
         if self._introspect_response is None:

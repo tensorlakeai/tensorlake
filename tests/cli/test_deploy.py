@@ -45,6 +45,7 @@ class TestDeployHelpers(unittest.TestCase):
             namespace="ns",
             organization_id="org-1",
             project_id="proj-1",
+            debug=False,
         )
 
     def test_warning_missing_secrets_returns_only_missing(self):

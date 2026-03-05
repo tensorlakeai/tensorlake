@@ -72,6 +72,7 @@ def _build_context_from_env() -> Context:
         namespace=os.environ.get("INDEXIFY_NAMESPACE"),
         organization_id=os.environ.get("TENSORLAKE_ORGANIZATION_ID"),
         project_id=os.environ.get("TENSORLAKE_PROJECT_ID"),
+        debug=_debug_enabled(),
     )
 
 
