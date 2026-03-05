@@ -2,6 +2,7 @@ mod auth;
 mod commands;
 mod config;
 mod error;
+mod http;
 mod output;
 mod project;
 

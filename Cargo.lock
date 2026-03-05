@@ -2200,7 +2200,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-cli"
-version = "0.4.6"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2214,6 +2214,7 @@ dependencies = [
  "indicatif",
  "open",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "tensorlake-cloud-sdk",
@@ -2227,7 +2228,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-cloud-sdk"
-version = "0.1.0"
+version = "0.4.8"
 dependencies = [
  "bytes",
  "chrono",
@@ -2261,7 +2262,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-py"
-version = "0.1.0"
+version = "0.4.8"
 dependencies = [
  "futures",
  "pyo3",

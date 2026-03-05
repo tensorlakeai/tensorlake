@@ -2,6 +2,7 @@ use reqwest::header::{HeaderMap, HeaderValue};
 
 use crate::config::resolver::ResolvedConfig;
 use crate::error::{CliError, Result};
+use crate::http;
 
 /// CLI context holding resolved configuration and providing authenticated HTTP clients.
 #[derive(Debug, Clone)]
@@ -82,7 +83,7 @@ impl CliContext {
             ));
         }
 
-        reqwest::Client::builder()
+        http::client_builder()
             .default_headers(headers)
             .build()
             .map_err(CliError::Http)

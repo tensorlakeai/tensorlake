@@ -3,6 +3,7 @@ use std::path::Path;
 use crate::auth::context::CliContext;
 use crate::commands::sbx::{parse_sandbox_path, sandbox_proxy_base};
 use crate::error::{CliError, Result};
+use crate::http;
 
 /// Build a reqwest client with auth headers and optional Host override for the sandbox proxy.
 fn build_proxy_client(ctx: &CliContext, host_override: Option<&str>) -> Result<reqwest::Client> {
@@ -22,7 +23,7 @@ fn build_proxy_client(ctx: &CliContext, host_override: Option<&str>) -> Result<r
     if let Some(host) = host_override {
         headers.insert(reqwest::header::HOST, host.parse().unwrap());
     }
-    reqwest::Client::builder()
+    http::client_builder()
         .default_headers(headers)
         .build()
         .map_err(|e| CliError::Other(anyhow::anyhow!("{}", e)))

@@ -1,5 +1,7 @@
 #![allow(unexpected_cfgs)]
 #![allow(unsafe_op_in_unsafe_fn)]
+// PyO3 macro expansion currently triggers false-positive `useless_conversion` lints.
+#![allow(clippy::useless_conversion)]
 
 use std::future::Future;
 use std::io::Write;
@@ -314,6 +316,7 @@ impl CloudApiClient {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_image_build(
         &self,
         build_service_path: String,

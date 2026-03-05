@@ -1,6 +1,7 @@
 use crate::auth::context::CliContext;
 use crate::commands::sbx::{parse_env_vars, sandbox_proxy_base};
 use crate::error::{CliError, Result};
+use crate::http;
 
 pub async fn run(
     ctx: &CliContext,
@@ -15,7 +16,7 @@ pub async fn run(
     let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
 
     // Build a client with optional Host header override (for localhost proxy)
-    let mut client_builder = reqwest::Client::builder();
+    let mut client_builder = http::client_builder();
     if let Ok(token) = ctx.bearer_token() {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(

@@ -205,10 +205,10 @@ fn extract_scoped_token(credentials: &TomlTable, api_url: &str) -> Option<String
 
     // 3) compatible lookup across previously stored URL variants
     for (key, value) in credentials {
-        if normalize_api_url(key) == normalized_api_url {
-            if let Some(token) = value.get("token").and_then(|v| v.as_str()) {
-                return Some(token.to_string());
-            }
+        if normalize_api_url(key) == normalized_api_url
+            && let Some(token) = value.get("token").and_then(|v| v.as_str())
+        {
+            return Some(token.to_string());
         }
     }
 

@@ -1,6 +1,7 @@
 use crate::auth::context::CliContext;
 use crate::commands::sbx::sandbox_proxy_base;
 use crate::error::{CliError, Result};
+use crate::http;
 
 pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> {
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
@@ -26,7 +27,7 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
     if let Some(ref host) = host_override {
         headers.insert(reqwest::header::HOST, host.parse().unwrap());
     }
-    let client = reqwest::Client::builder()
+    let client = http::client_builder()
         .default_headers(headers.clone())
         .build()
         .map_err(|e| CliError::Other(anyhow::anyhow!("{}", e)))?;
