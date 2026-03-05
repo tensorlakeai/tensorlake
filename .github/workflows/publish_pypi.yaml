@@ -54,6 +54,9 @@ jobs:
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
+        env:
+          # ring's AArch64 assembly requires __ARM_ARCH; manylinux2014 cross GCC 4.8 doesn't define it.
+          CFLAGS_aarch64_unknown_linux_gnu: ${{ matrix.platform.os == 'ubuntu-latest' && matrix.platform.target == 'aarch64' && '-D__ARM_ARCH=8' || '' }}
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist
