@@ -34,8 +34,8 @@ from .models import (
 )
 
 try:
-    from tensorlake_rust_cloud_sdk import CloudSandboxClient as RustCloudSandboxClient
-    from tensorlake_rust_cloud_sdk import (
+    from tensorlake._cloud_sdk import CloudSandboxClient as RustCloudSandboxClient
+    from tensorlake._cloud_sdk import (
         CloudSandboxClientError as RustCloudSandboxClientError,
     )
 

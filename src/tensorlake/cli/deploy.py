@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import traceback
+from urllib.parse import urlparse
 
 from tensorlake.applications import Function, Image, SDKUsageError, TensorlakeError
 from tensorlake.applications.applications import filter_applications
@@ -98,16 +99,6 @@ def deploy(
         }
     )
 
-    # Create builder client with proper authentication
-    bearer_token = auth.api_key or auth.personal_access_token
-    builder_v2 = ImageBuilderV2Client(
-        build_service=os.getenv("TENSORLAKE_BUILD_SERVICE")
-        or f"{auth.api_url}/images/v2",
-        api_key=bearer_token,
-        organization_id=auth.organization_id if not auth.api_key else None,
-        project_id=auth.project_id if not auth.api_key else None,
-    )
-
     try:
         application_file_path = os.path.abspath(application_file_path)
         load_code(application_file_path)
@@ -151,6 +142,14 @@ def deploy(
         _emit({"type": "missing_secrets", "count": len(missing)})
 
     functions: list[Function] = get_functions()
+
+    build_service = os.getenv("TENSORLAKE_BUILD_SERVICE") or f"{auth.api_url}/images/v2"
+    parsed = urlparse(build_service)
+    build_service_path = parsed.path.rstrip("/") or "/images/v2"
+    builder_v2 = ImageBuilderV2Client(
+        cloud_client=auth.cloud_client,
+        build_service_path=build_service_path,
+    )
 
     try:
         asyncio.run(_prepare_images_v2(builder_v2, functions))
@@ -221,7 +220,7 @@ def _deploy_applications(
             applications_file_path=application_file_path,
             upgrade_running_requests=upgrade_running_requests,
             load_source_dir_modules=False,
-            api_client=auth.rust_cloud_client,
+            api_client=auth.cloud_client,
         )
 
         for application_function in filter_applications(functions):

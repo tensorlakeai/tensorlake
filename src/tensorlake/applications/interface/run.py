@@ -1,7 +1,10 @@
+import atexit
+import threading
+
 from ..interface import SDKUsageError
 from ..local.runner import LocalRunner
 from ..registry import get_function
-from ..remote.api_client_context_manager import APIClient
+from ..remote.api_client import APIClient
 from ..remote.runner import RemoteRunner
 from .function import Function, _is_application_function
 from .request import Request
@@ -52,13 +55,22 @@ def run_remote_application(application: Function | str, *args, **kwargs) -> Requ
         application_name=app_name,
         args=list(args),
         kwargs=dict(kwargs),
-        api_client=_remote_api_client_singleton,
+        api_client=_get_remote_api_client(),
     ).run()
 
 
-import atexit
-
 # Use a singleton API client for all remote application runs because we don't want to require users to manage API clients
 # or call close on every RemoteRunner or RemoteRequest.
-_remote_api_client_singleton: APIClient = APIClient()
-atexit.register(_remote_api_client_singleton.close)
+# Lazily initialized to avoid requiring the Rust Cloud SDK at import time.
+_remote_api_client_singleton: APIClient | None = None
+_remote_api_client_lock = threading.Lock()
+
+
+def _get_remote_api_client() -> APIClient:
+    global _remote_api_client_singleton
+    if _remote_api_client_singleton is None:
+        with _remote_api_client_lock:
+            if _remote_api_client_singleton is None:
+                _remote_api_client_singleton = APIClient()
+                atexit.register(_remote_api_client_singleton.close)
+    return _remote_api_client_singleton

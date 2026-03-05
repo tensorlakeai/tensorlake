@@ -6,7 +6,7 @@ license = "Apache-2.0"
 description = "PyO3 bindings for Tensorlake Rust cloud client"
 
 [lib]
-name = "tensorlake_rust_cloud_sdk"
+name = "_cloud_sdk"
 crate-type = ["cdylib"]
 
 [dependencies]

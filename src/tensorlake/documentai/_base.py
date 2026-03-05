@@ -13,10 +13,8 @@ from .common import get_doc_ai_base_url
 from .models import DocumentAIError, ErrorCode, ErrorResponse, MimeType, Region
 
 try:
-    from tensorlake_rust_cloud_sdk import (
-        CloudDocumentAIClient as RustCloudDocumentAIClient,
-    )
-    from tensorlake_rust_cloud_sdk import (
+    from tensorlake._cloud_sdk import CloudDocumentAIClient as RustCloudDocumentAIClient
+    from tensorlake._cloud_sdk import (
         CloudDocumentAIClientError as RustCloudDocumentAIClientError,
     )
 

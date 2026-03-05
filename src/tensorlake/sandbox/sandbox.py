@@ -34,10 +34,10 @@ if TYPE_CHECKING:
     from .client import SandboxClient
 
 try:
-    from tensorlake_rust_cloud_sdk import (
+    from tensorlake._cloud_sdk import (
         CloudSandboxClientError as RustCloudSandboxClientError,
     )
-    from tensorlake_rust_cloud_sdk import (
+    from tensorlake._cloud_sdk import (
         CloudSandboxProxyClient as RustCloudSandboxProxyClient,
     )
 

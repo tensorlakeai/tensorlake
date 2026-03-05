@@ -4,17 +4,8 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-from tensorlake.applications.interface.exceptions import InternalError
-
-try:
-    from tensorlake_rust_cloud_sdk import CloudApiClient as RustCloudApiClient
-    from tensorlake_rust_cloud_sdk import CloudApiClientError as RustCloudApiClientError
-
-    _RUST_CLOUD_CLIENT_AVAILABLE = True
-except Exception:
-    RustCloudApiClient = None
-    RustCloudApiClientError = None
-    _RUST_CLOUD_CLIENT_AVAILABLE = False
+from tensorlake.applications.interface.exceptions import RemoteAPIError, SDKUsageError
+from tensorlake.cloud_client import CloudClient
 
 try:
     VERSION = importlib.metadata.version("tensorlake")
@@ -39,30 +30,31 @@ class Context:
     version: str = VERSION
     debug: bool = False
     _introspect_response: dict[str, Any] | None = None
-    _rust_cloud_client: Any | None = None
+    _cloud_client: CloudClient | None = None
     organization_id_value: str | None = None
     project_id_value: str | None = None
 
     @property
-    def rust_cloud_client(self):
-        if self._rust_cloud_client is None:
-            if not _RUST_CLOUD_CLIENT_AVAILABLE:
-                _cli_error(
-                    "Rust Cloud SDK client is required but unavailable. Run `make build_rust_py_client`."
-                )
+    def cloud_client(self) -> CloudClient:
+        if self._cloud_client is None:
             bearer_token = self.api_key or self.personal_access_token
             if bearer_token is None:
                 _cli_error(
                     "Missing API key or personal access token. Please run `tensorlake login` to authenticate."
                 )
-            try:
-                self._rust_cloud_client = RustCloudApiClient(
-                    api_url=self.api_url,
-                    api_key=bearer_token,
-                )
-            except Exception as e:
-                raise InternalError(str(e)) from e
-        return self._rust_cloud_client
+            self._cloud_client = CloudClient(
+                api_url=self.api_url,
+                api_key=bearer_token,
+                organization_id=self.organization_id_value,
+                project_id=self.project_id_value,
+                namespace=self.namespace,
+            )
+        return self._cloud_client
+
+    # Keep for backward compatibility with code that accesses this property.
+    @property
+    def rust_cloud_client(self) -> CloudClient:
+        return self.cloud_client
 
     @property
     def api_key_id(self):
@@ -86,34 +78,20 @@ class Context:
     def _introspect(self) -> dict[str, Any]:
         if self._introspect_response is None:
             try:
-                response_json = self.rust_cloud_client.introspect_api_key_json()
+                response_json = self.cloud_client.introspect_api_key_json()
                 self._introspect_response = json.loads(response_json)
-            except Exception as e:
-                status_code: int | None = None
-                if (
-                    RustCloudApiClientError is not None
-                    and isinstance(e, RustCloudApiClientError)
-                    and len(e.args) > 0
-                ):
-                    if len(e.args) == 3:
-                        _, status_code, _ = e.args
-                    elif (
-                        len(e.args) == 1
-                        and isinstance(e.args[0], tuple)
-                        and len(e.args[0]) == 3
-                    ):
-                        _, status_code, _ = e.args[0]
-
-                if status_code == 401:
-                    print(
-                        "The TensorLake API key is not valid.",
-                        file=sys.stderr,
-                    )
-                    print(
-                        "Please supply a valid API key with the `--api-key` flag, or run `tensorlake login` to authenticate.",
-                        file=sys.stderr,
-                    )
-                    _cli_error("Invalid API key")
+            except SDKUsageError:
+                print(
+                    "The TensorLake API key is not valid.",
+                    file=sys.stderr,
+                )
+                print(
+                    "Please supply a valid API key with the `--api-key` flag, or run `tensorlake login` to authenticate.",
+                    file=sys.stderr,
+                )
+                _cli_error("Invalid API key")
+            except RemoteAPIError as e:
+                status_code = e.status_code
                 if status_code == 404:
                     print(
                         f"The server at {self.api_url} doesn't support TensorLake API introspection.",
@@ -125,8 +103,6 @@ class Context:
                     )
                     _cli_error("API introspection not supported")
 
-                if status_code is None:
-                    status_code = 500
                 print(f"Error validating API key: HTTP {status_code}", file=sys.stderr)
 
                 if self.debug:
@@ -145,6 +121,10 @@ class Context:
                     )
 
                 _cli_error(f"API key validation failed with status {status_code}")
+            except Exception as e:
+                if self.debug:
+                    print(f"Error: {e}", file=sys.stderr)
+                _cli_error("API key validation failed")
         return self._introspect_response
 
     def list_secret_names(self, page_size: int = 100) -> list[str]:
@@ -154,7 +134,7 @@ class Context:
             return []
 
         try:
-            response_json = self.rust_cloud_client.list_secrets_json(
+            response_json = self.cloud_client.list_secrets_json(
                 organization_id=org_id,
                 project_id=project_id,
                 page_size=page_size,
