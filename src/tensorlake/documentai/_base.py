@@ -20,9 +20,17 @@ try:
 
     _RUST_DOCUMENT_AI_CLIENT_AVAILABLE = True
 except Exception:
-    RustCloudDocumentAIClient = None
-    RustCloudDocumentAIClientError = None
-    _RUST_DOCUMENT_AI_CLIENT_AVAILABLE = False
+    try:
+        from _cloud_sdk import CloudDocumentAIClient as RustCloudDocumentAIClient
+        from _cloud_sdk import (
+            CloudDocumentAIClientError as RustCloudDocumentAIClientError,
+        )
+
+        _RUST_DOCUMENT_AI_CLIENT_AVAILABLE = True
+    except Exception:
+        RustCloudDocumentAIClient = None
+        RustCloudDocumentAIClientError = None
+        _RUST_DOCUMENT_AI_CLIENT_AVAILABLE = False
 
 
 class _RustHTTPResponse:

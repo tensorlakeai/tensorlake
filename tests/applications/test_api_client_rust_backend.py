@@ -8,8 +8,8 @@ from tensorlake.applications.interface.exceptions import (
 from tensorlake.applications.remote.api_client import (
     APIClient,
     RequestInput,
-    _raise_as_tensorlake_error,
 )
+from tensorlake.cloud_client import _raise_as_tensorlake_error
 
 
 class _FakeRustClient:
@@ -85,7 +85,7 @@ class TestAPIClientRustBackend(unittest.TestCase):
             api_url="http://localhost:8900", api_key="k", namespace="default"
         )
         fake = _FakeRustClient()
-        client._rust_client = fake
+        client._cloud_client = fake
 
         request_id = client.run_request(
             "app",
@@ -106,7 +106,7 @@ class TestAPIClientRustBackend(unittest.TestCase):
         client = APIClient(
             api_url="http://localhost:8900", api_key="k", namespace="default"
         )
-        client._rust_client = _FakeRustClient()
+        client._cloud_client = _FakeRustClient()
 
         manifest = client.application("app")
 
@@ -118,7 +118,7 @@ class TestAPIClientRustBackend(unittest.TestCase):
         client = APIClient(
             api_url="http://localhost:8900", api_key="k", namespace="default"
         )
-        client._rust_client = _FakeRustNotFinished()
+        client._cloud_client = _FakeRustNotFinished()
 
         with self.assertRaises(RequestNotFinished):
             client.request_output("app", "req-123")
@@ -127,7 +127,7 @@ class TestAPIClientRustBackend(unittest.TestCase):
         client = APIClient(
             api_url="http://localhost:8900", api_key="k", namespace="default"
         )
-        client._rust_client = _FakeRustFailed()
+        client._cloud_client = _FakeRustFailed()
 
         with self.assertRaises(RequestFailed):
             client.request_output("app", "req-123")
@@ -136,7 +136,7 @@ class TestAPIClientRustBackend(unittest.TestCase):
         client = APIClient(
             api_url="http://localhost:8900", api_key="k", namespace="default"
         )
-        client._rust_client = _FakeRustClient()
+        client._cloud_client = _FakeRustClient()
 
         output = client.request_output("app", "req-123")
         self.assertEqual(output.serialized_value, b"payload")
@@ -146,7 +146,7 @@ class TestAPIClientRustBackend(unittest.TestCase):
         client = APIClient(
             api_url="http://localhost:8900", api_key="k", namespace="default"
         )
-        client._rust_client = _FakeRustListBytes()
+        client._cloud_client = _FakeRustListBytes()
 
         output = client.request_output("app", "req-123")
         self.assertEqual(output.serialized_value, b"payload")
@@ -156,17 +156,17 @@ class TestAPIClientRustBackend(unittest.TestCase):
         class FakeRustError(Exception):
             pass
 
-        import tensorlake.applications.remote.api_client as api_client_module
+        import tensorlake.cloud_client as cloud_client_module
 
-        previous = api_client_module.RustCloudApiClientError
+        previous = cloud_client_module._RustClientError
         try:
-            api_client_module.RustCloudApiClientError = FakeRustError
+            cloud_client_module._RustClientError = FakeRustError
             with self.assertRaises(SDKUsageError):
                 _raise_as_tensorlake_error(
                     FakeRustError(("sdk_usage", 401, "invalid credentials"))
                 )
         finally:
-            api_client_module.RustCloudApiClientError = previous
+            cloud_client_module._RustClientError = previous
 
 
 if __name__ == "__main__":

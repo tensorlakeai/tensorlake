@@ -17,8 +17,13 @@ try:
 
     _RUST_DOCUMENT_AI_CLIENT_AVAILABLE = True
 except Exception:
-    RustCloudDocumentAIClient = None
-    _RUST_DOCUMENT_AI_CLIENT_AVAILABLE = False
+    try:
+        from _cloud_sdk import CloudDocumentAIClient as RustCloudDocumentAIClient
+
+        _RUST_DOCUMENT_AI_CLIENT_AVAILABLE = True
+    except Exception:
+        RustCloudDocumentAIClient = None
+        _RUST_DOCUMENT_AI_CLIENT_AVAILABLE = False
 
 
 class FileInfo(BaseModel):

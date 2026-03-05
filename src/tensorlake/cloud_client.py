@@ -4,15 +4,23 @@ All Python code that needs to communicate with the TensorLake Cloud API
 should use CloudClient. The Rust SDK handles HTTP, auth, and serialization.
 """
 
-try:
-    from tensorlake._cloud_sdk import CloudApiClient as _RustClient
-    from tensorlake._cloud_sdk import CloudApiClientError as _RustClientError
+import importlib
 
-    _AVAILABLE = True
-except Exception:
-    _RustClient = None
-    _RustClientError = None
-    _AVAILABLE = False
+_IMPORT_ERROR: Exception | None = None
+_RustClient = None
+_RustClientError = None
+_AVAILABLE = False
+
+for _module_name in ("tensorlake._cloud_sdk", "_cloud_sdk"):
+    try:
+        _mod = importlib.import_module(_module_name)
+        _RustClient = _mod.CloudApiClient
+        _RustClientError = _mod.CloudApiClientError
+        _AVAILABLE = True
+        _IMPORT_ERROR = None
+        break
+    except Exception as e:
+        _IMPORT_ERROR = e
 
 _API_KEY_ENV_VAR = "TENSORLAKE_API_KEY"
 
@@ -81,9 +89,14 @@ class CloudClient:
         if not _AVAILABLE:
             from tensorlake.applications.interface.exceptions import InternalError
 
+            details = (
+                f" Import error: {type(_IMPORT_ERROR).__name__}: {_IMPORT_ERROR}"
+                if _IMPORT_ERROR is not None
+                else ""
+            )
             raise InternalError(
                 "Rust Cloud SDK client is required but unavailable. "
-                "Build/install it with `make build_rust_py_client`."
+                f"Build/install it with `make build_rust_py_client`.{details}"
             )
         try:
             self._client = _RustClient(
