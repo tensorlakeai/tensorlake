@@ -1,4 +1,5 @@
 import argparse
+import faulthandler
 from typing import Any
 
 from ..applications.internal_logger import InternalLogger
@@ -38,6 +39,10 @@ def main():
     args, ignored_args = parser.parse_known_args()
 
     logger = InternalLogger.get_logger(module=__name__)
+    try:
+        faulthandler.enable(all_threads=True)
+    except Exception as e:
+        logger.warning("failed to enable faulthandler", exc_info=e)
     validate_args(args, logger)
 
     logger = logger.bind(
