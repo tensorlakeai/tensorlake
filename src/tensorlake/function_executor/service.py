@@ -261,7 +261,7 @@ class Service(FunctionExecutorServicer):
 
         allocation_logger: InternalLogger = self._logger.bind(
             request_id=allocation.request_id,
-            fn_call_id=allocation.function_call_id,
+            function_call_id=allocation.function_call_id,
             allocation_id=allocation.allocation_id,
         )
         allocation_runner: AllocationRunner = AllocationRunner(
