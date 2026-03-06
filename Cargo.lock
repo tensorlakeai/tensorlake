@@ -2435,7 +2435,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-cloud-sdk"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "bytes",
  "chrono",
@@ -2469,7 +2469,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-py"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "futures",
  "pyo3",

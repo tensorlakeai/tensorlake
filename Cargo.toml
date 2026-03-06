@@ -76,3 +76,8 @@ crossterm = "0.29"
 
 # Python bindings
 pyo3 = { version = "0.22", features = ["abi3-py310", "extension-module"] }
+
+[profile.release]
+codegen-units = 1
+strip = true
+lto = true

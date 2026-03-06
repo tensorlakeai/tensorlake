@@ -31,7 +31,6 @@ include = [
     { path = "LICENSE", format = "sdist" },
     { path = "src/tensorlake/_cloud_sdk*.so", format = "wheel" },
 ]
-strip = true
 
 [tool.black]
 extend_exclude = "vendor"
