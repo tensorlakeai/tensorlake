@@ -1,6 +1,6 @@
 [package]
 name = "tensorlake-cli"
-version = "0.4.11"
+version = "0.4.12"
 edition = "2024"
 license = "Apache-2.0"
 description = "TensorLake CLI"
@@ -36,3 +36,7 @@ tokio-tungstenite = { workspace = true }
 url = { workspace = true }
 urlencoding = { workspace = true }
 futures = { workspace = true }
+bollard = { workspace = true }
+bytes = { workspace = true }
+http-body-util = { workspace = true }
+minijinja = { workspace = true }

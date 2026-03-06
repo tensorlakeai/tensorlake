@@ -34,6 +34,9 @@ test-crate crate:
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
+clippy-fix:
+    cargo clippy --fix --workspace --allow-dirty
+
 # Format all Rust code
 fmt-rust:
     cargo fmt --all

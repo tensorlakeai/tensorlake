@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+import argparse
+import importlib.metadata
+import json
+import os
+import sys
+import traceback
+
+from tensorlake.applications.image import ImageInformation, image_infos
+from tensorlake.applications.remote.code.loader import load_code
+
+
+def _emit(obj):
+    print(json.dumps(obj), flush=True)
+
+
+def _debug_enabled() -> bool:
+    return os.environ.get("TENSORLAKE_DEBUG", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def build_images(
+    application_file_path: str,
+    tag: str | None,
+    image_name: str | None,
+):
+    """Load application file and emit image definitions as NDJSON."""
+    try:
+        application_file_path = os.path.abspath(application_file_path)
+        load_code(application_file_path)
+    except SyntaxError as e:
+        _emit(
+            {
+                "type": "error",
+                "message": f"syntax error in {e.filename}, line {e.lineno}: {e.msg}",
+            }
+        )
+        sys.exit(1)
+    except ImportError as e:
+        _emit(
+            {
+                "type": "error",
+                "message": "failed to import application file. make sure all dependencies are installed in your current environment.",
+                "details": f"{type(e).__name__}: {e}",
+            }
+        )
+        sys.exit(1)
+    except Exception as e:
+        event = {
+            "type": "error",
+            "message": f"failed to load {application_file_path}",
+            "details": f"{type(e).__name__}: {e}",
+        }
+        if _debug_enabled():
+            event["traceback"] = traceback.format_exc()
+        _emit(event)
+        sys.exit(1)
+
+    infos: dict = image_infos()
+
+    if not infos:
+        _emit({"type": "error", "message": "no images found in application file"})
+        sys.exit(1)
+
+    sdk_version = importlib.metadata.version("tensorlake")
+
+    emitted = 0
+    for info in infos.values():
+        info: ImageInformation
+        image = info.image
+
+        if image_name and image.name != image_name:
+            continue
+
+        effective_tag = tag or image.tag
+
+        _emit(
+            {
+                "type": "image",
+                "name": image.name,
+                "tag": effective_tag,
+                "base_image": image._base_image,
+                "sdk_version": sdk_version,
+                "operations": [
+                    {
+                        "op": op.type.name,
+                        "args": op.args,
+                        "options": op.options,
+                    }
+                    for op in image._build_operations
+                ],
+            }
+        )
+        emitted += 1
+
+    if emitted == 0:
+        _emit(
+            {
+                "type": "error",
+                "message": (
+                    f"no image named '{image_name}' found in application file"
+                    if image_name
+                    else "no images found"
+                ),
+            }
+        )
+        sys.exit(1)
+
+    _emit({"type": "done"})
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Emit image definitions for images defined in a Tensorlake application file"
+    )
+    parser.add_argument(
+        "application_file_path",
+        help="Path to the application .py file",
+    )
+    parser.add_argument(
+        "--tag",
+        "-t",
+        default=None,
+        help="Tag to use for the images (overrides the tag defined in the image)",
+    )
+    parser.add_argument(
+        "--image-name",
+        "-i",
+        default=None,
+        help="Build only the image with this name",
+    )
+    args = parser.parse_args()
+
+    try:
+        build_images(
+            application_file_path=args.application_file_path,
+            tag=args.tag,
+            image_name=args.image_name,
+        )
+    except SystemExit:
+        raise
+    except Exception as e:
+        event = {
+            "type": "error",
+            "message": f"build-images failed ({type(e).__name__})",
+            "details": f"{type(e).__name__}: {e}",
+        }
+        if _debug_enabled():
+            event["traceback"] = traceback.format_exc()
+        _emit(event)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

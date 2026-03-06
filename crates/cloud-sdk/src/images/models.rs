@@ -261,15 +261,17 @@ pub enum ImageBuildOperationType {
 }
 
 /// Image build operation.
-#[derive(Debug, Clone, Builder)]
+#[derive(Debug, Clone, Builder, Deserialize)]
 pub struct ImageBuildOperation {
     /// The type of operation.
+    #[serde(rename = "op")]
     pub operation_type: ImageBuildOperationType,
     /// Arguments for the operation.
     #[builder(setter(into))]
     pub args: Vec<String>,
     /// Options for the operation.
     #[builder(default, setter(into))]
+    #[serde(default)]
     pub options: HashMap<String, String>,
 }
 
@@ -311,10 +313,18 @@ impl Image {
     }
 
     /// Generate the Dockerfile content for this image.
-    pub fn dockerfile_content(&self, sdk_version: &str) -> String {
+    ///
+    /// If `stage` is `Some`, appends `AS <stage>` to the `FROM` line.
+    pub fn dockerfile_content(&self, sdk_version: &str, stage: Option<&str>) -> String {
+        let from_line = match stage {
+            Some(s) => format!("FROM {} AS {}", self.base_image, s),
+            None => format!("FROM {}", self.base_image),
+        };
         let mut lines = vec![
-            format!("FROM {}", self.base_image),
+            from_line,
             "WORKDIR /app".to_string(),
+            // Handle externally-managed environments (PEP 668) on modern Linux distros.
+            "ENV PIP_BREAK_SYSTEM_PACKAGES=1".to_string(),
         ];
 
         for op in &self.build_operations {
@@ -336,46 +346,59 @@ impl Image {
     }
 
     /// Create a tar.gz archive containing the build context.
-    pub fn create_context_archive<W: Write>(&self, writer: W, sdk_version: &str) -> io::Result<()> {
+    ///
+    /// Generates the Dockerfile from the image definition, optionally with a stage name.
+    pub fn create_context_archive<W: Write>(
+        &self,
+        writer: W,
+        sdk_version: &str,
+        stage: Option<&str>,
+    ) -> io::Result<()> {
+        let dockerfile = self.dockerfile_content(sdk_version, stage);
+        self.create_context_archive_with_dockerfile(writer, &dockerfile)
+    }
+
+    /// Create a tar.gz archive using the provided Dockerfile content.
+    ///
+    /// Useful when the Dockerfile has been post-processed (e.g. via a template).
+    pub fn create_context_archive_with_dockerfile<W: Write>(
+        &self,
+        writer: W,
+        dockerfile: &str,
+    ) -> io::Result<()> {
         let gz_writer = flate2::write::GzEncoder::new(writer, flate2::Compression::default());
         let mut tar = tar::Builder::new(gz_writer);
 
         for op in &self.build_operations {
             match op.operation_type {
                 ImageBuildOperationType::COPY => {
-                    if let Some(src) = op.args.first()
-                        && std::path::Path::new(src).exists()
-                    {
-                        tar.append_dir_all(src, src)?;
+                    if let Some(src) = op.args.first() {
+                        add_path_to_archive(&mut tar, src)?;
                     }
                 }
                 ImageBuildOperationType::ADD => {
                     if let Some(src) = op.args.first() {
                         if is_url(src) || is_git_repo_url(src) {
-                            // Skip URLs and Git repos
                             continue;
                         }
                         if !std::path::Path::new(src).exists() {
-                            // Skip non-existent files
                             continue;
                         }
                         if is_inside_git_dir(src) {
-                            // Skip files inside .git directory
                             continue;
                         }
-                        tar.append_path(src)?;
+                        add_path_to_archive(&mut tar, src)?;
                     }
                 }
-                _ => {} // Other operations don't add files
+                _ => {}
             }
         }
 
-        // Add Dockerfile
-        let dockerfile = self.dockerfile_content(sdk_version);
+        let df_bytes = dockerfile.as_bytes();
         let mut header = tar::Header::new_gnu();
-        header.set_size(dockerfile.len() as u64);
+        header.set_size(df_bytes.len() as u64);
         header.set_mode(0o644);
-        tar.append_data(&mut header, "Dockerfile", dockerfile.as_bytes())?;
+        tar.append_data(&mut header, "Dockerfile", df_bytes)?;
 
         tar.finish()?;
         Ok(())
@@ -419,6 +442,14 @@ fn render_build_operation(op: &ImageBuildOperation) -> String {
     };
 
     format!("{}{} {}", op.operation_type, options, body)
+}
+
+fn add_path_to_archive<W: Write>(tar: &mut tar::Builder<W>, src: &str) -> io::Result<()> {
+    if std::path::Path::new(src).is_dir() {
+        tar.append_dir_all(src, src)
+    } else {
+        tar.append_path(src)
+    }
 }
 
 fn is_url(path: &str) -> bool {

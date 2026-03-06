@@ -2,6 +2,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 // PyO3 macro expansion currently triggers false-positive `useless_conversion` lints.
 #![allow(clippy::useless_conversion)]
+#![allow(clippy::too_many_arguments)]
 
 use std::future::Future;
 use std::io::Write;
@@ -1271,6 +1272,50 @@ fn is_localhost_api_url(api_url: &str) -> bool {
         .is_some_and(|host| host == "localhost" || host == "127.0.0.1")
 }
 
+/// Create a Docker build context tar.gz for a Tensorlake image definition.
+///
+/// Args:
+///     base_image: The base Docker image (e.g. "python:3.11-slim-bookworm").
+///     sdk_version: The tensorlake SDK version to install in the image.
+///     operations_json: JSON array of build operations, each with keys
+///         "op" ("RUN"|"COPY"|"ADD"|"ENV"), "args" (list of str), "options" (dict of str).
+///     file_path: Destination path for the resulting tar.gz file.
+#[pyfunction]
+fn create_image_context_file(
+    base_image: String,
+    sdk_version: String,
+    operations_json: String,
+    file_path: String,
+) -> PyResult<()> {
+    use tensorlake_cloud_sdk::images::models::{Image, ImageBuildOperation};
+
+    let operations: Vec<ImageBuildOperation> =
+        serde_json::from_str(&operations_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Failed to parse operations JSON: {e}"))
+        })?;
+
+    let image = Image::builder()
+        .name(String::new())
+        .base_image(base_image)
+        .build_operations(operations)
+        .build()
+        .map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Failed to build image: {e}"))
+        })?;
+
+    let mut file = std::fs::File::create(&file_path).map_err(|e| {
+        pyo3::exceptions::PyIOError::new_err(format!("Failed to create file '{}': {e}", file_path))
+    })?;
+
+    image
+        .create_context_archive(&mut file, &sdk_version, None)
+        .map_err(|e| {
+            pyo3::exceptions::PyIOError::new_err(format!("Failed to write context archive: {e}"))
+        })?;
+
+    Ok(())
+}
+
 #[pymodule]
 fn _cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add(
@@ -1289,5 +1334,6 @@ fn _cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<CloudSandboxClient>()?;
     module.add_class::<CloudSandboxProxyClient>()?;
     module.add_class::<CloudDocumentAIClient>()?;
+    module.add_function(wrap_pyfunction!(create_image_context_file, module)?)?;
     Ok(())
 }

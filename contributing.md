@@ -41,8 +41,15 @@ We welcome many types of contributions, including:
 ### Prerequisites
 
 - Python 3.10 or higher
-- [Poetry](https://python-poetry.org/) for dependency management
+- [Poetry 2.0.0](https://python-poetry.org/) for Python dependency management
+- [Rust](https://rustup.rs/) (stable toolchain) — required to build the CLI binary
 - Git
+
+Install Rust via rustup if you don't have it:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
 
 ### Setup Instructions
 
@@ -52,62 +59,117 @@ We welcome many types of contributions, including:
    cd tensorlake
    ```
 
-2. **Install dependencies**
+2. **Choose your install method**
+
+   **Option A — Global install (recommended):** installs into your user Python environment (`~/.local/`) so `tl` and `tensorlake` work from any directory without activating a virtualenv.
+
    ```bash
-   make build
+   make install-global
    ```
 
-3. **Set up environment variables**
+   Then make sure `~/.local/bin` is on your `PATH` (one-time setup):
+
+   ```fish
+   # fish
+   fish_add_path ~/.local/bin
+   ```
    ```bash
-   cp .env.example .env
-   # Edit .env with your API keys and configuration
+   # bash / zsh
+   export PATH="$HOME/.local/bin:$PATH"
    ```
 
-4. **Activate the virtual environment**
+   **Option B — Virtualenv install:** installs into the Poetry-managed virtualenv. The binaries are only available while the venv is active.
+
    ```bash
-   poetry shell
+   make install-dev
+   poetry shell   # activate the venv
    ```
 
-5. **Run tests to verify setup**
-   ```bash
-   make test_document_ai
-   ```
+   > **Note:** gRPC stubs are pre-generated and committed to the repository. Run `make build_proto` separately only if you modify `.proto` files. The `build_proto` step requires grpcio 1.60.0 (pinned for stub compatibility), which must be compiled from source and needs Python < 3.13.
 
-   For more detailed test output, you can also use:
-   ```
-   cd tests && ./run_tests.sh
+3. **Verify the installation**
+   ```bash
+   tl --help
+   tensorlake --help
    ```
 
 ### Project Structure
 
 ```
 tensorlake/
-├── src/tensorlake/          # Main SDK code
-│   ├── cli/                 # Command-line interface
-│   ├── documentai/          # Document AI functionality
-│   ├── functions_sdk/       # Functions SDK
-│   └── utils/               # Utility modules
-├── examples/                # Usage examples
-├── tests/                   # Test suite
-├── docs/                    # Documentation
-├── Makefile                # Build and development commands
-├── pyproject.toml          # Project configuration
-└── README.md               # Project overview
+├── src/tensorlake/              # Python SDK source
+│   ├── applications/            # Serverless applications SDK
+│   ├── cli/                     # Python CLI entry points (NDJSON producers)
+│   ├── documentai/              # Document AI client
+│   └── function_executor/       # gRPC function executor server
+├── crates/
+│   ├── cli/                     # Rust CLI binary (tl / tensorlake)
+│   └── cloud-sdk/               # Rust cloud SDK
+├── tensorlake.data/scripts/     # Python wrapper scripts installed alongside the CLI
+├── tests/                       # Test suite
+├── Makefile                     # Build and development commands
+├── pyproject.toml               # Python project configuration (maturin backend)
+└── Cargo.toml                   # Rust workspace configuration
 ```
+
+### How the CLI Works
+
+The CLI is a **Rust binary** (`tl` / `tensorlake`) that delegates work to **Python wrapper scripts** for commands that need to import user application code. This split allows the Rust binary to handle argument parsing, authentication, and output rendering, while Python handles SDK logic.
+
+For example, `tl deploy app.py` spawns `tensorlake-deploy app.py`, reads its NDJSON output on stdout, and renders it as human-readable text.
+
+Wrapper scripts live in `tensorlake.data/scripts/` and are installed into the virtualenv's `bin/` directory during `make install-dev`. They must be on `PATH` (alongside the Rust binary) for the affected CLI commands to work.
+
+| Rust command | Spawns wrapper script |
+|---|---|
+| `tl deploy` | `tensorlake-deploy` |
+| `tl parse` | `tensorlake-parse` |
+| `tl generate-dockerfiles` | `tensorlake-generate-dockerfiles` |
 
 ### Available Makefile Commands
 
-The project includes a Makefile with common development commands:
-
 ```bash
-# Build the project (installs dependencies and builds package)
+# Global install: build Rust CLI (release) + install Python package into ~/.local/
+make install-global
+
+# Virtualenv install: build Rust CLI (debug) + install into Poetry venv
+make install-dev
+
+# Same as install-dev but with release optimisations
+make install-dev-release
+
+# Build distributable wheel (does not install the CLI locally)
 make build
 
-# Format code with Black and isort
+# Regenerate gRPC stubs from .proto files
+make build_proto
+
+# Format Python code (Black + isort)
 make fmt
 
-# Run Document AI specific tests
+# Check formatting without modifying files
+make check
+
+# Run all tests
+make test
+
+# Run Document AI tests only
 make test_document_ai
+```
+
+### Working on the Rust CLI
+
+After editing Rust code in `crates/cli/`, rebuild and reinstall with:
+
+```bash
+make install-dev
+```
+
+Or use Cargo directly for a faster iteration loop (the binary won't be in the venv until you copy it):
+
+```bash
+cargo build -p tensorlake-cli
+# binary at target/debug/tl — run it directly or copy to your PATH
 ```
 
 ## Contributing Guidelines

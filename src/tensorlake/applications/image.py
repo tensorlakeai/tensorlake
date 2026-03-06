@@ -2,12 +2,11 @@
 
 import hashlib
 import importlib
+import json
 import logging
 import os
 import pathlib
-import tarfile
 from dataclasses import dataclass
-from io import BytesIO
 from typing import Any, Dict, List
 from urllib.parse import urlparse
 
@@ -41,33 +40,19 @@ def image_infos() -> Dict[Image, ImageInformation]:
 
 def create_image_context_file(img: Image, file_path: str) -> None:
     """Create a tar.gz file containing the Dockerfile and all necessary files for building the image"""
-    with tarfile.open(file_path, "w:gz") as tf:
-        for op in img._build_operations:
-            if op.type == _ImageBuildOperationType.COPY:
-                src: str = op.args[0]
-                logging.info(f"Adding {src}")
-                tf.add(src, src)
-            elif op.type == _ImageBuildOperationType.ADD:
-                src: str = op.args[0]
-                if _is_url(src) or _is_git_repo_url(src):
-                    logging.warning(
-                        "Skipping ADD: %s is a URL or Git repo reference", src
-                    )
-                    continue
-                if not os.path.exists(src):
-                    logging.warning("Skipping ADD: %s does not exist", src)
-                    continue
-                if _is_inside_git_dir(src):
-                    logging.warning("Skipping ADD: %s is inside a .git directory", src)
-                    continue
-                logging.info("Adding (ADD) %s", src)
-                tf.add(src, arcname=src)
+    from tensorlake_rust_cloud_sdk import create_image_context_file as _rust_create_image_context_file
 
-        df_content: str = dockerfile_content(img)
-        tarinfo = tarfile.TarInfo("Dockerfile")
-        tarinfo.size = len(df_content)
-
-        tf.addfile(tarinfo, BytesIO(df_content.encode()))
+    _rust_create_image_context_file(
+        base_image=img._base_image,
+        sdk_version=_SDK_VERSION,
+        operations_json=json.dumps(
+            [
+                {"op": op.type.name, "args": op.args, "options": op.options}
+                for op in img._build_operations
+            ]
+        ),
+        file_path=file_path,
+    )
 
 
 def dockerfile_content(img: Image) -> str:
