@@ -143,13 +143,12 @@ dependencies = [
 [[package]]
 name = "bollard"
 version = "0.20.1"
-source = "git+https://github.com/tensorlakeai/bollard?branch=use_local_config#432fa7d47dc3bd27704378d778c0a11f476ded71"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "227aa051deec8d16bd9c34605e7aaf153f240e35483dd42f6f78903847934738"
 dependencies = [
  "base64 0.22.1",
  "bollard-stubs",
  "bytes",
- "directories",
- "docker_credential",
  "futures-core",
  "futures-util",
  "hex",
@@ -655,6 +654,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "docker-credentials-config"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4193bd783c7bf560288cc72338b0934f699afbf9afd5dfb980e327f006fdfd7"
+dependencies = [
+ "base64 0.22.1",
+ "bollard",
+ "directories",
+ "docker_credential",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -2415,6 +2430,7 @@ dependencies = [
  "crossterm",
  "dialoguer",
  "dirs",
+ "docker-credentials-config",
  "futures",
  "http-body-util",
  "indicatif",

@@ -39,7 +39,8 @@ hex = "0.4"
 base64 = "0.22"
 
 # Docker
-bollard = { git = "https://github.com/tensorlakeai/bollard", branch = "use_local_config", features = ["with-env"] }
+bollard = "0.20"
+docker-credentials-config = "0.1.0"
 http-body-util = "0.1"
 
 # Templating

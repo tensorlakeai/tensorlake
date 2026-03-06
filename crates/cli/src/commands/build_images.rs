@@ -4,6 +4,7 @@ use std::process::Stdio;
 use bollard::Docker;
 use bollard::query_parameters::{BuildImageOptions, PushImageOptions, TagImageOptions};
 use bytes::Bytes;
+use docker_credentials_config::{DockerConfig, image_registry};
 use futures::StreamExt;
 use http_body_util::{Either, Full};
 use minijinja::Environment;
@@ -35,8 +36,7 @@ pub async fn run(
         return Ok(());
     }
 
-    let docker = Docker::connect_with_env()
-        .await
+    let docker = Docker::connect_with_defaults()
         .map_err(|e| CliError::Other(anyhow::anyhow!("Failed to connect to Docker daemon: {e}")))?;
 
     docker.ping().await.map_err(|e| {
@@ -218,13 +218,15 @@ async fn collect_image_contexts(
                     .unwrap_or("unknown error");
                 eprintln!("Error: {}", message);
                 if let Some(details) = event.get("details").and_then(|v| v.as_str())
-                    && !details.is_empty() {
-                        eprintln!("{}", details);
-                    }
+                    && !details.is_empty()
+                {
+                    eprintln!("{}", details);
+                }
                 if let Some(tb) = event.get("traceback").and_then(|v| v.as_str())
-                    && !tb.is_empty() {
-                        eprintln!("\nPython traceback:\n{}", tb);
-                    }
+                    && !tb.is_empty()
+                {
+                    eprintln!("\nPython traceback:\n{}", tb);
+                }
                 let _ = child.wait().await;
                 return Err(CliError::ExitCode(1));
             }
@@ -278,12 +280,18 @@ async fn build_image(docker: &Docker, image_name: &str, context: Bytes) -> Resul
 }
 
 async fn push_image(docker: &Docker, repository: &str, tag: &str) -> Result<()> {
+    let registry = image_registry(repository);
+    let config = DockerConfig::load()
+        .await
+        .map_err(|e| CliError::Other(anyhow::anyhow!("Failed to load Docker config: {e}")))?;
+    let credentials = config.credentials_for_registry(&registry);
+
     let options = PushImageOptions {
         tag: Some(tag.to_string()),
         platform: None,
     };
 
-    let mut stream = docker.push_image(repository, Some(options), None);
+    let mut stream = docker.push_image(repository, Some(options), credentials);
 
     while let Some(result) = stream.next().await {
         match result {

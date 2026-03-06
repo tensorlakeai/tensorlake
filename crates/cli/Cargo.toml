@@ -37,6 +37,7 @@ url = { workspace = true }
 urlencoding = { workspace = true }
 futures = { workspace = true }
 bollard = { workspace = true }
+docker-credentials-config = { workspace = true }
 bytes = { workspace = true }
 http-body-util = { workspace = true }
 minijinja = { workspace = true }
