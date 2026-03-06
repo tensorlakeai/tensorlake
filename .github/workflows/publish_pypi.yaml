@@ -37,13 +37,17 @@ jobs:
           - os: ubuntu-latest
             target: x86_64
             manylinux: auto
+            cloud_sdk_interpreter: /opt/python/cp310-cp310/bin/python
           - os: ubuntu-latest
             target: aarch64
             manylinux: auto
+            cloud_sdk_interpreter: /opt/python/cp310-cp310/bin/python
           - os: macos-15-intel
             target: x86_64
+            cloud_sdk_interpreter: python3.10
           - os: macos-14
             target: aarch64
+            cloud_sdk_interpreter: python3.10
     steps:
       - uses: actions/checkout@v4
 
@@ -59,7 +63,7 @@ jobs:
           CFLAGS_aarch64_unknown_linux_gnu: ${{ matrix.platform.os == 'ubuntu-latest' && matrix.platform.target == 'aarch64' && '-D__ARM_ARCH=8' || '' }}
         with:
           target: ${{ matrix.platform.target }}
-          args: --manifest-path crates/rust-cloud-sdk-py/Cargo.toml --release --out dist-cloud-sdk
+          args: --manifest-path crates/rust-cloud-sdk-py/Cargo.toml --release --out dist-cloud-sdk -i ${{ matrix.platform.cloud_sdk_interpreter }}
           manylinux: ${{ matrix.platform.manylinux || 'auto' }}
 
       - name: Bundle Cloud SDK extension into tensorlake wheel
@@ -74,6 +78,10 @@ jobs:
                   path.unlink()
 
           wheel = next(Path("dist-cloud-sdk").glob("tensorlake_rust_cloud_sdk-*.whl"))
+          if "abi3" not in wheel.name:
+              raise RuntimeError(
+                  f"Cloud SDK wheel must be abi3 for Python 3.10+ compatibility, got: {wheel.name}"
+              )
           with zipfile.ZipFile(wheel) as zf:
               members = [
                   m
