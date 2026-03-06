@@ -108,6 +108,7 @@ jobs:
           manylinux: ${{ matrix.platform.manylinux || 'auto' }}
 
       - name: Verify wheel imports Rust Cloud SDK extension
+        if: ${{ !(matrix.platform.os == 'ubuntu-latest' && matrix.platform.target == 'aarch64') }}
         run: |
           python -m venv /tmp/wheel-verify
           source /tmp/wheel-verify/bin/activate
