@@ -1,23 +1,14 @@
 import asyncio
 import os
 import sys
-import tempfile
-from dataclasses import dataclass
-from pathlib import Path
+from typing import Callable
 from urllib.parse import urlparse
 
 from pydantic import BaseModel
 
-from tensorlake.applications import Image
-from tensorlake.applications.image import create_image_context_file, image_hash
+from tensorlake.builder import ApplicationBuildImageRequest, ApplicationBuildRequest
+from tensorlake.builder.log_events import BuildLogEvent, emit_build_log_event
 from tensorlake.cloud_client import CloudClient
-
-
-@dataclass
-class BuildContext:
-    application_name: str
-    application_version: str
-    function_name: str
 
 
 class BuildInfo(BaseModel):
@@ -29,13 +20,11 @@ class BuildInfo(BaseModel):
     error_message: str | None = None
 
 
-class BuildLogEvent(BaseModel):
-    build_id: str
-    timestamp: str
-    stream: str
-    message: str
-    sequence_number: int
-    build_status: str
+class ApplicationImageBuildError(RuntimeError):
+    def __init__(self, image_name: str, error: Exception | BaseException):
+        self.image_name = image_name
+        self.error = error
+        super().__init__(f"Error building image {image_name}: {error}")
 
 
 class ImageBuilderV2Client:
@@ -45,9 +34,13 @@ class ImageBuilderV2Client:
         self,
         cloud_client: CloudClient,
         build_service_path: str = "/images/v2",
+        on_build_start: (
+            Callable[[ApplicationBuildImageRequest, str], None] | None
+        ) = None,
     ):
         self._cloud_client = cloud_client
         self._build_service_path = build_service_path
+        self._on_build_start = on_build_start
 
     @classmethod
     def from_env(cls) -> "ImageBuilderV2Client":
@@ -73,67 +66,73 @@ class ImageBuilderV2Client:
         )
         return cls(cloud_client=client, build_service_path=build_service_path)
 
-    async def build_collection(
-        self,
-        context_collection: dict[Image, BuildContext],
-        extra_env_vars: list[tuple[str, str]] | None = None,
-    ) -> dict[str, str]:
+    async def build(self, request: ApplicationBuildRequest) -> None:
         print("Building images...", file=sys.stderr)
+        for image_request in request.images:
+            for function_name in image_request.function_names:
+                if self._on_build_start is not None:
+                    self._on_build_start(image_request, function_name)
+                print(f"Building {image_request.name}", file=sys.stderr)
+                try:
+                    await self._build_single(
+                        application_name=request.name,
+                        application_version=request.version,
+                        function_name=function_name,
+                        image_name=image_request.name,
+                        image_key=image_request.key,
+                        context_tar_gz=image_request.context_tar_gz,
+                    )
+                    print(
+                        f"Built {image_request.name} with context sha256 {image_request.context_sha256}",
+                        file=sys.stderr,
+                    )
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    raise
+                except Exception as error:
+                    raise ApplicationImageBuildError(
+                        image_name=image_request.name,
+                        error=error,
+                    ) from error
 
-        builds = {}
-        for image, context in context_collection.items():
-            print(f"Building {image.name}", file=sys.stderr)
-            build = await self.build(context, image, extra_env_vars=extra_env_vars)
-            print(f"Built {image.name} with hash {image_hash(image)}", file=sys.stderr)
-            builds[image_hash(image)] = build.id
-
-        return builds
-
-    async def build(
+    async def _build_single(
         self,
-        context: BuildContext,
-        image: Image,
-        extra_env_vars: list[tuple[str, str]] | None = None,
+        application_name: str,
+        application_version: str,
+        function_name: str,
+        image_name: str,
+        image_key: str,
+        context_tar_gz: bytes,
     ) -> BuildInfo:
-        _fd, context_file_path = tempfile.mkstemp()
-        create_image_context_file(
-            image, context_file_path, extra_env_vars=extra_env_vars
-        )
-
         print(
-            f"{image.name}: Posting {os.path.getsize(context_file_path)} bytes of context to build service....",
+            f"{image_name}: Posting {len(context_tar_gz)} bytes of context to build service....",
             file=sys.stderr,
         )
-
-        file_content = await asyncio.to_thread(Path(context_file_path).read_bytes)
-
-        os.remove(context_file_path)
 
         try:
             build_json = await asyncio.to_thread(
                 self._cloud_client.start_image_build,
                 self._build_service_path,
-                context.application_name,
-                context.application_version,
-                context.function_name,
-                image.name,
-                image._id,
-                file_content,
+                application_name,
+                application_version,
+                function_name,
+                image_name,
+                image_key,
+                context_tar_gz,
             )
         except Exception as e:
-            raise RuntimeError(f"Error building image {image.name}: {e}") from e
+            raise RuntimeError(f"Error building image {image_name}: {e}") from e
 
         build = BuildInfo.model_validate_json(build_json)
 
         print(
-            f"Waiting for build {build.id} of {image.name} to complete...",
+            f"Waiting for build {build.id} of {image_name} to complete...",
             file=sys.stderr,
         )
 
         try:
             return await self.stream_logs(build)
         except (asyncio.CancelledError, KeyboardInterrupt):
-            await self._cancel_build(build, image)
+            await self._cancel_build(build, image_name)
             raise
 
     async def stream_logs(self, build: BuildInfo) -> BuildInfo:
@@ -157,20 +156,21 @@ class ImageBuilderV2Client:
         return await self.build_info(build.id)
 
     def _print_build_log_event(self, event: BuildLogEvent):
-        if event.build_status == "pending":
-            print("Build waiting in queue...", file=sys.stderr, flush=True)
-        else:
-            match event.stream:
-                case "stdout":
-                    print(event.message, end="", file=sys.stderr, flush=True)
-                case "stderr":
-                    print(event.message, file=sys.stderr, flush=True)
-                case "info":
-                    print(
-                        f"{event.timestamp}: {event.message}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
+        emit_build_log_event(
+            event,
+            emit_message=lambda message: print(message, file=sys.stderr, flush=True),
+            emit_stderr_message=lambda message: print(
+                message,
+                file=sys.stderr,
+                flush=True,
+            ),
+            emit_stdout_message=lambda message: print(
+                message,
+                end="",
+                file=sys.stderr,
+                flush=True,
+            ),
+        )
 
     async def build_info(self, build_id: str) -> BuildInfo:
         try:
@@ -196,16 +196,16 @@ class ImageBuilderV2Client:
 
         return build_info
 
-    async def _cancel_build(self, build: BuildInfo, image: Image):
+    async def _cancel_build(self, build: BuildInfo, image_name: str):
         try:
-            print(f"\nCancelling build for image {image.name} ...", file=sys.stderr)
+            print(f"\nCancelling build for image {image_name} ...", file=sys.stderr)
             await asyncio.to_thread(
                 self._cloud_client.cancel_build,
                 self._build_service_path,
                 build_id=build.id,
             )
             print(
-                f"Build for image {image.name} cancelled successfully",
+                f"Build for image {image_name} cancelled successfully",
                 file=sys.stderr,
             )
         except Exception as e:

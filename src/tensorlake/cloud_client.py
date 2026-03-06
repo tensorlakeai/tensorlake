@@ -259,6 +259,21 @@ class CloudClient:
         except Exception as e:
             _raise_as_tensorlake_error(e)
 
+    def create_application_build(
+        self,
+        build_service_path: str,
+        request_json: str,
+        image_contexts: list[tuple[str, bytes]],
+    ) -> str:
+        try:
+            return self._client.create_application_build(
+                build_service_path,
+                request_json,
+                image_contexts,
+            )
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
     def build_info_json(self, build_service_path: str, build_id: str) -> str:
         try:
             return self._client.build_info_json(build_service_path, build_id)

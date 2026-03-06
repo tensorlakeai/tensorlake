@@ -17,6 +17,10 @@ use reqwest::multipart::{Form, Part};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tensorlake_cloud_sdk::document_ai::DocumentAiClient;
+use tensorlake_cloud_sdk::images::ImagesClient;
+use tensorlake_cloud_sdk::images::models::{
+    ApplicationBuildContext, CreateApplicationBuildRequest,
+};
 use tensorlake_cloud_sdk::sandboxes::models::{CreateSandboxRequest, SandboxPoolRequest};
 use tensorlake_cloud_sdk::sandboxes::{SandboxProxyClient, SandboxesClient};
 use tensorlake_cloud_sdk::{Client, ClientBuilder, error::SdkError};
@@ -343,6 +347,43 @@ impl CloudApiClient {
                 let request = client.build_multipart_request(Method::PUT, &endpoint, form)?;
                 let response = client.execute(request).await?;
                 Ok(response.text().await?)
+            }
+        })
+    }
+
+    fn create_application_build(
+        &self,
+        build_service_path: String,
+        request_json: String,
+        image_contexts: Vec<(String, Vec<u8>)>,
+    ) -> PyResult<String> {
+        self.run_with_retry(5, move |client| {
+            let build_service_path = build_service_path.clone();
+            let request_json = request_json.clone();
+            let image_contexts = image_contexts.clone();
+            async move {
+                eprintln!(
+                    "Rust CloudApiClient.create_application_build called via {} with {} image contexts",
+                    build_service_path,
+                    image_contexts.len()
+                );
+                let request: CreateApplicationBuildRequest = serde_json::from_str(&request_json)?;
+                let image_contexts: Vec<ApplicationBuildContext> = image_contexts
+                    .into_iter()
+                    .map(|(context_tar_part_name, context_tar_gz)| ApplicationBuildContext {
+                        context_tar_part_name,
+                        context_tar_gz,
+                    })
+                    .collect();
+                let images_client = ImagesClient::new(client.clone());
+                let response = images_client
+                    .create_application_build(
+                        &build_service_path,
+                        &request,
+                        &image_contexts,
+                    )
+                    .await?;
+                Ok(serde_json::to_string(&response)?)
             }
         })
     }

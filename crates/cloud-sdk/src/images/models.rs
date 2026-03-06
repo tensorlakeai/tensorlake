@@ -247,6 +247,74 @@ impl StreamLogsRequest {
     }
 }
 
+#[derive(Builder, Clone, Debug, Serialize, Deserialize)]
+pub struct CreateApplicationBuildImageRequest {
+    #[builder(setter(into))]
+    pub key: String,
+    #[builder(setter(into))]
+    pub name: String,
+    #[builder(setter(into))]
+    pub context_tar_part_name: String,
+    #[builder(setter(into))]
+    pub context_sha256: String,
+    #[builder(default, setter(into))]
+    pub function_names: Vec<String>,
+}
+
+impl CreateApplicationBuildImageRequest {
+    pub fn builder() -> CreateApplicationBuildImageRequestBuilder {
+        CreateApplicationBuildImageRequestBuilder::default()
+    }
+}
+
+#[derive(Builder, Clone, Debug, Serialize, Deserialize)]
+pub struct CreateApplicationBuildRequest {
+    #[builder(setter(into))]
+    pub name: String,
+    #[builder(setter(into))]
+    pub version: String,
+    #[builder(default, setter(into))]
+    pub images: Vec<CreateApplicationBuildImageRequest>,
+}
+
+impl CreateApplicationBuildRequest {
+    pub fn builder() -> CreateApplicationBuildRequestBuilder {
+        CreateApplicationBuildRequestBuilder::default()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ApplicationBuildContext {
+    pub context_tar_part_name: String,
+    pub context_tar_gz: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApplicationBuildImageResponse {
+    pub id: String,
+    pub app_version_id: Option<String>,
+    pub key: Option<String>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub function_names: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApplicationBuildResponse {
+    pub id: String,
+    pub organization_id: Option<String>,
+    pub project_id: Option<String>,
+    pub name: String,
+    pub version: String,
+    pub status: Option<String>,
+    pub image_builds: Vec<ApplicationBuildImageResponse>,
+}
+
 /// Type of image build operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ImageBuildOperationType {
