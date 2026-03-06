@@ -6,18 +6,9 @@ import tensorlake.cli._common as common_module
 from tensorlake.cli._common import Context
 
 
-class _FakeRustCloudClient:
+class _FakeCloudClient:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
-
-    def introspect_api_key_json(self):
-        return json.dumps(
-            {
-                "id": "key-id",
-                "projectId": "proj-1",
-                "organizationId": "org-1",
-            }
-        )
 
     def list_secrets_json(self, organization_id, project_id, page_size):
         assert organization_id == "org-1"
@@ -36,6 +27,11 @@ class _FakeRustCloudClient:
         return None
 
 
+class _FailIntrospectCloudClient(_FakeCloudClient):
+    def introspect_api_key_json(self):
+        raise RuntimeError("introspection unavailable")
+
+
 class TestContext(unittest.TestCase):
     def test_default_resolves_cloud_url_from_api_url(self):
         context = Context.default(api_url="https://api.tensorlake.dev", api_key="key")
@@ -46,30 +42,17 @@ class TestContext(unittest.TestCase):
         self.assertEqual(context.cloud_url, "https://cloud.tensorlake.ai")
 
     def test_rust_cloud_client_uses_api_key(self):
-        with (
-            patch.object(common_module, "_RUST_CLOUD_CLIENT_AVAILABLE", True),
-            patch.object(
-                common_module,
-                "RustCloudApiClient",
-                _FakeRustCloudClient,
-            ),
-        ):
+        with patch.object(common_module, "CloudClient", _FakeCloudClient):
             context = Context.default(api_key="api-key")
             client = context.rust_cloud_client
 
-            self.assertIsInstance(client, _FakeRustCloudClient)
+            self.assertIsInstance(client, _FakeCloudClient)
             self.assertEqual(client.kwargs["api_key"], "api-key")
             self.assertEqual(client.kwargs["api_url"], "https://api.tensorlake.ai")
+            self.assertEqual(client.kwargs["namespace"], "default")
 
     def test_rust_cloud_client_uses_pat(self):
-        with (
-            patch.object(common_module, "_RUST_CLOUD_CLIENT_AVAILABLE", True),
-            patch.object(
-                common_module,
-                "RustCloudApiClient",
-                _FakeRustCloudClient,
-            ),
-        ):
+        with patch.object(common_module, "CloudClient", _FakeCloudClient):
             context = Context.default(
                 personal_access_token="pat-token",
                 organization_id="org-1",
@@ -77,8 +60,24 @@ class TestContext(unittest.TestCase):
             )
             client = context.rust_cloud_client
 
-            self.assertIsInstance(client, _FakeRustCloudClient)
+            self.assertIsInstance(client, _FakeCloudClient)
             self.assertEqual(client.kwargs["api_key"], "pat-token")
+            self.assertEqual(client.kwargs["organization_id"], "org-1")
+            self.assertEqual(client.kwargs["project_id"], "proj-1")
+
+    def test_rust_cloud_client_with_api_key_does_not_forward_org_project_scope(self):
+        with patch.object(common_module, "CloudClient", _FakeCloudClient):
+            context = Context.default(
+                api_key="api-key",
+                organization_id="org-1",
+                project_id="proj-1",
+            )
+            client = context.rust_cloud_client
+
+            self.assertIsInstance(client, _FakeCloudClient)
+            self.assertEqual(client.kwargs["api_key"], "api-key")
+            self.assertIsNone(client.kwargs["organization_id"])
+            self.assertIsNone(client.kwargs["project_id"])
 
     def test_rust_cloud_client_requires_authentication(self):
         context = Context.default()
@@ -86,17 +85,30 @@ class TestContext(unittest.TestCase):
             _ = context.rust_cloud_client
 
     def test_list_secret_names_uses_rust_client(self):
-        with (
-            patch.object(common_module, "_RUST_CLOUD_CLIENT_AVAILABLE", True),
-            patch.object(
-                common_module,
-                "RustCloudApiClient",
-                _FakeRustCloudClient,
-            ),
-        ):
-            context = Context.default(api_key="api-key")
+        with patch.object(common_module, "CloudClient", _FakeCloudClient):
+            context = Context.default(
+                api_key="api-key",
+                organization_id="org-1",
+                project_id="proj-1",
+            )
             secret_names = context.list_secret_names(page_size=100)
             self.assertEqual(secret_names, ["SECRET_A", "SECRET_B"])
+
+    def test_list_secret_names_uses_provided_org_project_without_introspection(self):
+        with patch.object(common_module, "CloudClient", _FailIntrospectCloudClient):
+            context = Context.default(
+                api_key="api-key",
+                organization_id="org-1",
+                project_id="proj-1",
+            )
+            secret_names = context.list_secret_names(page_size=100)
+
+            self.assertEqual(secret_names, ["SECRET_A", "SECRET_B"])
+
+    def test_list_secret_names_without_org_or_project_returns_empty(self):
+        with patch.object(common_module, "CloudClient", _FakeCloudClient):
+            context = Context.default(api_key="api-key")
+            self.assertEqual(context.list_secret_names(page_size=100), [])
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ use crate::commands::init::run_init_flow;
 use crate::config::files::save_credentials;
 use crate::config::resolver;
 use crate::error::{CliError, Result};
+use crate::http;
 use crate::project::detection::find_project_root;
 
 /// Result of a successful login flow.
@@ -16,7 +17,9 @@ pub struct LoginResult {
 pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginResult> {
     let login_start_url = format!("{}/platform/cli/login/start", ctx.api_url);
 
-    let http = reqwest::Client::new();
+    let http = http::client_builder()
+        .build()
+        .map_err(|e| CliError::auth(format!("failed to initialize HTTP client: {}", e)))?;
     let resp = http
         .post(&login_start_url)
         .send()

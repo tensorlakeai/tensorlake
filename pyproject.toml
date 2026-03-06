@@ -1,6 +1,6 @@
 [project]
 name = "tensorlake"
-version = "0.4.7"
+version = "0.4.11"
 description = "Tensorlake SDK for Document Ingestion API and Serverless Applications"
 readme = "README.md"
 authors = [{ name = "Tensorlake Inc.", email = "support@tensorlake.ai" }]
@@ -27,7 +27,10 @@ manifest-path = "crates/cli/Cargo.toml"
 module-name = "tensorlake"
 python-source = "src"
 data = "tensorlake.data"
-include = [{ path = "LICENSE", format = "sdist" }]
+include = [
+    { path = "LICENSE", format = "sdist" },
+    { path = "src/tensorlake/_cloud_sdk*.so", format = "wheel" },
+]
 strip = true
 
 [tool.black]

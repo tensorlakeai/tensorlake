@@ -45,8 +45,22 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
     let stdout = child.stdout.take().expect("stdout was piped");
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
+    let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
 
-    while let Some(line) = lines.next_line().await.map_err(CliError::Io)? {
+    loop {
+        let maybe_line = tokio::select! {
+            line_result = lines.next_line() => line_result,
+            _ = &mut ctrl_c => {
+                terminate_child(&mut child).await?;
+                return Err(CliError::Cancelled);
+            }
+        }
+        .map_err(CliError::Io)?;
+
+        let Some(line) = maybe_line else {
+            break;
+        };
+
         let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
             // Non-JSON line — pass through to stderr
             eprintln!("{}", line);
@@ -144,15 +158,15 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown error");
                 eprintln!("Error: {}", message);
-                if let Some(details) = event.get("details").and_then(|v| v.as_str()) {
-                    if !details.is_empty() {
-                        eprintln!("{}", details);
-                    }
+                if let Some(details) = event.get("details").and_then(|v| v.as_str())
+                    && !details.is_empty()
+                {
+                    eprintln!("{}", details);
                 }
-                if let Some(traceback) = event.get("traceback").and_then(|v| v.as_str()) {
-                    if !traceback.is_empty() {
-                        eprintln!("\nPython traceback:\n{}", traceback);
-                    }
+                if let Some(traceback) = event.get("traceback").and_then(|v| v.as_str())
+                    && !traceback.is_empty()
+                {
+                    eprintln!("\nPython traceback:\n{}", traceback);
                 }
             }
             _ => {
@@ -169,5 +183,16 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
         return Err(CliError::ExitCode(code));
     }
 
+    Ok(())
+}
+
+async fn terminate_child(child: &mut tokio::process::Child) -> Result<()> {
+    // Best-effort cancellation of the spawned Python process when the user presses Ctrl+C.
+    match child.start_kill() {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::InvalidInput => {}
+        Err(err) => return Err(CliError::Io(err)),
+    }
+    let _ = child.wait().await;
     Ok(())
 }

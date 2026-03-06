@@ -13,18 +13,24 @@ from .common import get_doc_ai_base_url
 from .models import DocumentAIError, ErrorCode, ErrorResponse, MimeType, Region
 
 try:
-    from tensorlake_rust_cloud_sdk import (
-        CloudDocumentAIClient as RustCloudDocumentAIClient,
-    )
-    from tensorlake_rust_cloud_sdk import (
+    from tensorlake._cloud_sdk import CloudDocumentAIClient as RustCloudDocumentAIClient
+    from tensorlake._cloud_sdk import (
         CloudDocumentAIClientError as RustCloudDocumentAIClientError,
     )
 
     _RUST_DOCUMENT_AI_CLIENT_AVAILABLE = True
 except Exception:
-    RustCloudDocumentAIClient = None
-    RustCloudDocumentAIClientError = None
-    _RUST_DOCUMENT_AI_CLIENT_AVAILABLE = False
+    try:
+        from _cloud_sdk import CloudDocumentAIClient as RustCloudDocumentAIClient
+        from _cloud_sdk import (
+            CloudDocumentAIClientError as RustCloudDocumentAIClientError,
+        )
+
+        _RUST_DOCUMENT_AI_CLIENT_AVAILABLE = True
+    except Exception:
+        RustCloudDocumentAIClient = None
+        RustCloudDocumentAIClientError = None
+        _RUST_DOCUMENT_AI_CLIENT_AVAILABLE = False
 
 
 class _RustHTTPResponse:

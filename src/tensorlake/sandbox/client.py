@@ -34,16 +34,22 @@ from .models import (
 )
 
 try:
-    from tensorlake_rust_cloud_sdk import CloudSandboxClient as RustCloudSandboxClient
-    from tensorlake_rust_cloud_sdk import (
+    from tensorlake._cloud_sdk import CloudSandboxClient as RustCloudSandboxClient
+    from tensorlake._cloud_sdk import (
         CloudSandboxClientError as RustCloudSandboxClientError,
     )
 
     _RUST_SANDBOX_CLIENT_AVAILABLE = True
 except Exception:
-    RustCloudSandboxClient = None
-    RustCloudSandboxClientError = None
-    _RUST_SANDBOX_CLIENT_AVAILABLE = False
+    try:
+        from _cloud_sdk import CloudSandboxClient as RustCloudSandboxClient
+        from _cloud_sdk import CloudSandboxClientError as RustCloudSandboxClientError
+
+        _RUST_SANDBOX_CLIENT_AVAILABLE = True
+    except Exception:
+        RustCloudSandboxClient = None
+        RustCloudSandboxClientError = None
+        _RUST_SANDBOX_CLIENT_AVAILABLE = False
 
 
 def _parse_rust_client_error_fields(

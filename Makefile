@@ -1,8 +1,9 @@
 all: build
 
-build: build_proto
+build:
 	@rm -rf dist
 	@poetry install --with=dev
+	@$(MAKE) build_cloud_sdk
 	@poetry build
 	@cp tensorlake.data/scripts/* $$(poetry env info --path)/bin/ 2>/dev/null || true
 
@@ -24,12 +25,16 @@ build_proto:
 	@poetry run black ${PROTO_DIR_PATH}
 	@poetry run isort ${PROTO_DIR_PATH} --profile black
 
+# Build the Rust Cloud SDK PyO3 extension and install it as tensorlake._cloud_sdk
+build_cloud_sdk:
+	@poetry run maturin develop --manifest-path crates/rust-cloud-sdk-py/Cargo.toml
+
+# Legacy alias
+build_rust_py_client: build_cloud_sdk
+
 fmt:
 	@poetry run black .
 	@poetry run isort . --profile black
-
-build_rust_py_client:
-	@poetry run maturin develop --manifest-path crates/rust-cloud-sdk-py/Cargo.toml
 
 check:
 	@poetry run black --check .
@@ -42,7 +47,7 @@ test_document_ai:
 	cd tests && ./run_tests.sh --document-ai
 
 test_sandbox:
-	@poetry run maturin develop --manifest-path crates/rust-cloud-sdk-py/Cargo.toml
+	@$(MAKE) build_cloud_sdk
 	cd tests/sandbox && poetry run python test_lifecycle.py -v
 
-.PHONY: all build build_proto fmt build_rust_py_client test test_document_ai test_sandbox
+.PHONY: all build build_proto build_cloud_sdk build_rust_py_client fmt test test_document_ai test_sandbox

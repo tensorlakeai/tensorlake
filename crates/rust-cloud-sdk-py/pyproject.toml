@@ -4,11 +4,11 @@ build-backend = "maturin"
 
 [project]
 name = "tensorlake-rust-cloud-sdk"
-version = "0.1.0"
+version = "0.4.11"
 description = "PyO3 bindings for Tensorlake Rust cloud client"
 requires-python = ">=3.10"
 
 [tool.maturin]
 bindings = "pyo3"
-module-name = "tensorlake_rust_cloud_sdk"
+module-name = "tensorlake._cloud_sdk"
 manifest-path = "Cargo.toml"

@@ -34,18 +34,24 @@ if TYPE_CHECKING:
     from .client import SandboxClient
 
 try:
-    from tensorlake_rust_cloud_sdk import (
+    from tensorlake._cloud_sdk import (
         CloudSandboxClientError as RustCloudSandboxClientError,
     )
-    from tensorlake_rust_cloud_sdk import (
+    from tensorlake._cloud_sdk import (
         CloudSandboxProxyClient as RustCloudSandboxProxyClient,
     )
 
     _RUST_SANDBOX_PROXY_CLIENT_AVAILABLE = True
 except Exception:
-    RustCloudSandboxProxyClient = None
-    RustCloudSandboxClientError = None
-    _RUST_SANDBOX_PROXY_CLIENT_AVAILABLE = False
+    try:
+        from _cloud_sdk import CloudSandboxClientError as RustCloudSandboxClientError
+        from _cloud_sdk import CloudSandboxProxyClient as RustCloudSandboxProxyClient
+
+        _RUST_SANDBOX_PROXY_CLIENT_AVAILABLE = True
+    except Exception:
+        RustCloudSandboxProxyClient = None
+        RustCloudSandboxClientError = None
+        _RUST_SANDBOX_PROXY_CLIENT_AVAILABLE = False
 
 
 def _parse_rust_client_error_fields(

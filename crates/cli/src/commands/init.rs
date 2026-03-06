@@ -3,6 +3,7 @@ use std::path::Path;
 use crate::auth::context::CliContext;
 use crate::config::files::{load_credentials, load_local_config, save_local_config};
 use crate::error::{CliError, Result};
+use crate::http;
 use crate::project::detection::{find_project_root, get_detection_reason};
 
 /// Run the init flow to select organization and project.
@@ -52,7 +53,7 @@ pub async fn run_init_flow(
         eprintln!("initializing TensorLake configuration...\n");
     }
 
-    let http = reqwest::Client::new();
+    let http = http::client_builder().build().map_err(CliError::Http)?;
 
     // Step 1: Fetch organizations
     let orgs_resp = http

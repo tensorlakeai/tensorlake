@@ -13,14 +13,17 @@ from .common import get_doc_ai_base_url
 from .models import Region
 
 try:
-    from tensorlake_rust_cloud_sdk import (
-        CloudDocumentAIClient as RustCloudDocumentAIClient,
-    )
+    from tensorlake._cloud_sdk import CloudDocumentAIClient as RustCloudDocumentAIClient
 
     _RUST_DOCUMENT_AI_CLIENT_AVAILABLE = True
 except Exception:
-    RustCloudDocumentAIClient = None
-    _RUST_DOCUMENT_AI_CLIENT_AVAILABLE = False
+    try:
+        from _cloud_sdk import CloudDocumentAIClient as RustCloudDocumentAIClient
+
+        _RUST_DOCUMENT_AI_CLIENT_AVAILABLE = True
+    except Exception:
+        RustCloudDocumentAIClient = None
+        _RUST_DOCUMENT_AI_CLIENT_AVAILABLE = False
 
 
 class FileInfo(BaseModel):

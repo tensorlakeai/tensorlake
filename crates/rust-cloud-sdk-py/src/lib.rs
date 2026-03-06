@@ -1,5 +1,7 @@
 #![allow(unexpected_cfgs)]
 #![allow(unsafe_op_in_unsafe_fn)]
+// PyO3 macro expansion currently triggers false-positive `useless_conversion` lints.
+#![allow(clippy::useless_conversion)]
 
 use std::future::Future;
 use std::io::Write;
@@ -19,17 +21,9 @@ use tensorlake_cloud_sdk::sandboxes::{SandboxProxyClient, SandboxesClient};
 use tensorlake_cloud_sdk::{Client, ClientBuilder, error::SdkError};
 use tokio::runtime::Runtime;
 
-create_exception!(tensorlake_rust_cloud_sdk, CloudApiClientError, PyException);
-create_exception!(
-    tensorlake_rust_cloud_sdk,
-    CloudSandboxClientError,
-    PyException
-);
-create_exception!(
-    tensorlake_rust_cloud_sdk,
-    CloudDocumentAIClientError,
-    PyException
-);
+create_exception!(_cloud_sdk, CloudApiClientError, PyException);
+create_exception!(_cloud_sdk, CloudSandboxClientError, PyException);
+create_exception!(_cloud_sdk, CloudDocumentAIClientError, PyException);
 
 const DEFAULT_HTTP_REQUEST_TIMEOUT_SEC: f64 = 5.0;
 
@@ -314,6 +308,7 @@ impl CloudApiClient {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_image_build(
         &self,
         build_service_path: String,
@@ -1277,7 +1272,7 @@ fn is_localhost_api_url(api_url: &str) -> bool {
 }
 
 #[pymodule]
-fn tensorlake_rust_cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add(
         "CloudApiClientError",
         _py.get_type_bound::<CloudApiClientError>(),
