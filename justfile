@@ -34,6 +34,9 @@ test-crate crate:
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
+clippy-fix:
+    cargo clippy --fix --workspace --allow-dirty
+
 # Format all Rust code
 fmt-rust:
     cargo fmt --all
@@ -53,13 +56,13 @@ clean-rust:
 
 # Format Python code (Black + isort)
 fmt-python:
-    black src/tensorlake --extend-exclude vendor
-    isort src/tensorlake --profile black --extend-skip vendor
+    poetry run black src/tensorlake --extend-exclude vendor
+    poetry run isort src/tensorlake --profile black --extend-skip vendor
 
 # Check Python formatting without modifying
 check-python-fmt:
-    black --check src/tensorlake --extend-exclude vendor
-    isort --check src/tensorlake --profile black --extend-skip vendor
+    poetry run black --check src/tensorlake --extend-exclude vendor
+    poetry run isort --check src/tensorlake --profile black --extend-skip vendor
 
 # ─── Maturin (Python + Rust packaging) ───────────────────────────────────────
 

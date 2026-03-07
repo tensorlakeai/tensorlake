@@ -102,6 +102,36 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Build Docker images for applications defined in an application file
+    BuildImages {
+        /// Path to the application .py file
+        application_file_path: String,
+
+        /// Remote registry to push images to (e.g. ghcr.io/myorg, 123456789012.dkr.ecr.region.amazonaws.com)
+        #[arg(short, long)]
+        repository: Option<String>,
+
+        /// Tag to use for built images (overrides the tag defined in the image)
+        #[arg(short, long)]
+        tag: Option<String>,
+
+        /// Build only the image with this name
+        #[arg(short = 'i', long)]
+        image_name: Option<String>,
+
+        /// Name for the build stage added to the FROM directive as AS <stage> (default: tensorlake-image)
+        #[arg(short, long, default_value = "tensorlake-image")]
+        stage: String,
+
+        /// Path to a MiniJinja template file; the variable `tensorlake_image` is set to the generated Dockerfile
+        #[arg(long)]
+        template: Option<String>,
+
+        /// Push built images to the registry after building
+        #[arg(long)]
+        push: bool,
+    },
+
     /// Parse a document and print markdown
     Parse {
         /// Arguments passed to the parse Python module
@@ -336,6 +366,26 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
         Commands::Deploy { args } => {
             ensure_auth_and_project(ctx).await?;
             commands::deploy::run(ctx, &args).await
+        }
+        Commands::BuildImages {
+            application_file_path,
+            repository,
+            tag,
+            image_name,
+            stage,
+            template,
+            push,
+        } => {
+            commands::build_images::run(
+                &application_file_path,
+                repository.as_deref(),
+                tag.as_deref(),
+                image_name.as_deref(),
+                &stage,
+                template.as_deref(),
+                push,
+            )
+            .await
         }
         Commands::Parse { args } => commands::parse::run(ctx, &args).await,
         Commands::Secrets(subcmd) => {

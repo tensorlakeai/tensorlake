@@ -36,6 +36,15 @@ urlencoding = "2.1"
 # Crypto & encoding
 sha2 = "0.10"
 hex = "0.4"
+base64 = "0.22"
+
+# Docker
+bollard = "0.20"
+docker-credentials-config = "0.1.0"
+http-body-util = "0.1"
+
+# Templating
+minijinja = "2"
 
 # Data types
 bytes = "1.11.1"
@@ -68,3 +77,8 @@ crossterm = "0.29"
 
 # Python bindings
 pyo3 = { version = "0.22", features = ["abi3-py310", "extension-module"] }
+
+[profile.release]
+codegen-units = 1
+strip = true
+lto = true
