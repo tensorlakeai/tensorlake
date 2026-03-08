@@ -29,6 +29,7 @@ class Application(BaseModel):
     version: str
     tombstoned: bool = False
     created_at: int | None = None
+    cron_schedule: str | None = None
 
 
 class RequestError(BaseModel):
