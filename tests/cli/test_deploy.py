@@ -202,6 +202,24 @@ class TestDeployEntrypoints(unittest.TestCase):
                     '{"id":"app-build-1","organization_id":"org-1","project_id":"proj-1","name":"app_fn","version":"v1","status":"building","image_builds":[]}'
                 )
 
+            def application_build_info_json(
+                self,
+                build_service_path: str,
+                application_build_id: str,
+            ) -> str:
+                return (
+                    '{"id":"app-build-1","organization_id":"org-1","project_id":"proj-1","name":"app_fn","version":"v1","status":"succeeded","image_builds":[]}'
+                )
+
+            def stream_build_logs_to_stderr_prefixed(
+                self,
+                build_service_path: str,
+                build_id: str,
+                prefix: str,
+                color: str | None = None,
+            ) -> None:
+                return None
+
         cloud_client = FakeCloudClient()
         auth = SimpleNamespace(
             api_url="https://api.tensorlake.ai",

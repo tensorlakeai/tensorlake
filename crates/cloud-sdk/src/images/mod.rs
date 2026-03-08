@@ -150,6 +150,36 @@ impl ImagesClient {
         Ok(response.json::<ApplicationBuildResponse>().await?)
     }
 
+    pub async fn application_build_info(
+        &self,
+        build_service_path: &str,
+        application_build_id: &str,
+    ) -> Result<ApplicationBuildResponse, SdkError> {
+        let path = format!(
+            "{}/{}",
+            build_service_path.trim_end_matches('/'),
+            application_build_id
+        );
+        let request = self.client.request(Method::GET, &path).build()?;
+        let response = self.client.execute(request).await?;
+        Ok(response.json::<ApplicationBuildResponse>().await?)
+    }
+
+    pub async fn cancel_application_build(
+        &self,
+        build_service_path: &str,
+        application_build_id: &str,
+    ) -> Result<ApplicationBuildResponse, SdkError> {
+        let path = format!(
+            "{}/{}/cancel",
+            build_service_path.trim_end_matches('/'),
+            application_build_id
+        );
+        let request = self.client.request(Method::POST, &path).build()?;
+        let response = self.client.execute(request).await?;
+        Ok(response.json::<ApplicationBuildResponse>().await?)
+    }
+
     /// Submit a build request to the build service.
     async fn submit_build_request(
         &self,
@@ -460,14 +490,14 @@ fn create_application_build_form(
     );
 
     for image in &request.images {
-        let context = contexts_by_part_name.get(image.context_tar_part_name.as_str()).ok_or_else(
-            || {
+        let context = contexts_by_part_name
+            .get(image.context_tar_part_name.as_str())
+            .ok_or_else(|| {
                 ImagesError::InvalidBuildRequest(format!(
                     "missing image context for part '{}'",
                     image.context_tar_part_name
                 ))
-            },
-        )?;
+            })?;
 
         form = form.part(
             image.context_tar_part_name.clone(),

@@ -4,6 +4,7 @@
 #![allow(clippy::useless_conversion)]
 #![allow(clippy::too_many_arguments)]
 
+use std::error::Error as StdError;
 use std::future::Future;
 use std::io::Write;
 use std::time::Duration;
@@ -90,7 +91,7 @@ impl CloudApiClient {
         upgrade_running_requests: bool,
     ) -> PyResult<()> {
         let namespace = self.namespace.clone();
-        self.run_with_retry(5, move |client| {
+        self.run_with_retry(2, move |client| {
             let namespace = namespace.clone();
             let manifest_json = manifest_json.clone();
             let code_zip = code_zip.clone();
@@ -388,6 +389,42 @@ impl CloudApiClient {
         })
     }
 
+    fn application_build_info_json(
+        &self,
+        build_service_path: String,
+        application_build_id: String,
+    ) -> PyResult<String> {
+        self.run_with_retry(5, move |client| {
+            let build_service_path = build_service_path.clone();
+            let application_build_id = application_build_id.clone();
+            async move {
+                let images_client = ImagesClient::new(client.clone());
+                let response = images_client
+                    .application_build_info(&build_service_path, &application_build_id)
+                    .await?;
+                Ok(serde_json::to_string(&response)?)
+            }
+        })
+    }
+
+    fn cancel_application_build(
+        &self,
+        build_service_path: String,
+        application_build_id: String,
+    ) -> PyResult<String> {
+        self.run_with_retry(5, move |client| {
+            let build_service_path = build_service_path.clone();
+            let application_build_id = application_build_id.clone();
+            async move {
+                let images_client = ImagesClient::new(client.clone());
+                let response = images_client
+                    .cancel_application_build(&build_service_path, &application_build_id)
+                    .await?;
+                Ok(serde_json::to_string(&response)?)
+            }
+        })
+    }
+
     fn build_info_json(&self, build_service_path: String, build_id: String) -> PyResult<String> {
         self.run_with_retry(5, move |client| {
             let path = format!(
@@ -418,44 +455,69 @@ impl CloudApiClient {
 
     fn stream_build_logs_json(
         &self,
+        py: Python<'_>,
         build_service_path: String,
         build_id: String,
     ) -> PyResult<Vec<String>> {
-        self.run_with_retry(10, move |client| {
-            let path = format!(
-                "{}/builds/{build_id}/logs",
-                build_service_path.trim_end_matches('/')
-            );
-            async move {
-                let mut stream = client.build_event_source_request::<Value>(&path).await?;
-                let mut events: Vec<String> = Vec::new();
-                while let Some(event) = stream.next().await {
-                    let event = event?;
-                    events.push(serde_json::to_string(&event)?);
+        py.allow_threads(|| {
+            self.run_with_retry(2, move |client| {
+                let path = build_logs_path(&build_service_path, &build_id);
+                async move {
+                    let mut events: Vec<String> = Vec::new();
+                    stream_build_log_events(client, &path, |event| {
+                        events.push(serde_json::to_string(&event)?);
+                        Ok(())
+                    })
+                    .await?;
+                    Ok(events)
                 }
-                Ok(events)
-            }
+            })
         })
     }
 
     fn stream_build_logs_to_stderr(
         &self,
+        py: Python<'_>,
         build_service_path: String,
         build_id: String,
     ) -> PyResult<()> {
-        self.run_with_retry(10, move |client| {
-            let path = format!(
-                "{}/builds/{build_id}/logs",
-                build_service_path.trim_end_matches('/')
-            );
-            async move {
-                let mut stream = client.build_event_source_request::<Value>(&path).await?;
-                while let Some(event) = stream.next().await {
-                    let event = event?;
-                    print_build_log_event_to_stderr(&event);
+        py.allow_threads(|| {
+            self.run_with_retry(2, move |client| {
+                let path = build_logs_path(&build_service_path, &build_id);
+                async move {
+                    stream_build_log_events(client, &path, |event| {
+                        print_build_log_event_to_stderr(event, None);
+                        Ok(())
+                    })
+                    .await?;
+                    Ok(())
                 }
-                Ok(())
-            }
+            })
+        })
+    }
+
+    #[pyo3(signature = (build_service_path, build_id, prefix, color=None))]
+    fn stream_build_logs_to_stderr_prefixed(
+        &self,
+        py: Python<'_>,
+        build_service_path: String,
+        build_id: String,
+        prefix: String,
+        color: Option<String>,
+    ) -> PyResult<()> {
+        py.allow_threads(|| {
+            self.run_with_retry(2, move |client| {
+                let path = build_logs_path(&build_service_path, &build_id);
+                let log_prefix = LogPrefix::new(prefix.clone(), color.clone());
+                async move {
+                    stream_build_log_events(client, &path, |event| {
+                        print_build_log_event_to_stderr(event, Some(&log_prefix));
+                        Ok(())
+                    })
+                    .await?;
+                    Ok(())
+                }
+            })
         })
     }
 
@@ -1107,25 +1169,45 @@ fn into_py_error(error: SdkError) -> PyErr {
             CloudApiClientError::new_err(("remote_api", Some(status.as_u16()), message))
         }
         SdkError::Http(http_error) => {
+            let message = format_error_chain(&http_error);
             if http_error.is_timeout() {
-                CloudApiClientError::new_err(("remote_api", Some(504u16), http_error.to_string()))
+                CloudApiClientError::new_err(("connection", Option::<u16>::None, message))
             } else if http_error.is_connect() {
-                CloudApiClientError::new_err(("remote_api", Some(503u16), http_error.to_string()))
+                CloudApiClientError::new_err(("connection", Option::<u16>::None, message))
             } else {
-                CloudApiClientError::new_err((
-                    "internal",
-                    Option::<u16>::None,
-                    http_error.to_string(),
-                ))
+                CloudApiClientError::new_err(("internal", Option::<u16>::None, message))
             }
         }
-        SdkError::Middleware(middleware_error) => CloudApiClientError::new_err((
-            "internal",
-            Option::<u16>::None,
-            middleware_error.to_string(),
-        )),
+        SdkError::Middleware(middleware_error) => {
+            let message = format_error_chain(&middleware_error);
+            let lower = message.to_lowercase();
+            if lower.contains("connect")
+                || lower.contains("connection refused")
+                || lower.contains("dns")
+                || lower.contains("timed out")
+                || lower.contains("timeout")
+            {
+                CloudApiClientError::new_err(("connection", Option::<u16>::None, message))
+            } else {
+                CloudApiClientError::new_err(("internal", Option::<u16>::None, message))
+            }
+        }
         other => CloudApiClientError::new_err(("internal", Option::<u16>::None, other.to_string())),
     }
+}
+
+fn format_error_chain(error: &dyn StdError) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let cause_message = cause.to_string();
+        if !cause_message.is_empty() {
+            message.push_str(": ");
+            message.push_str(&cause_message);
+        }
+        source = cause.source();
+    }
+    message
 }
 
 fn into_sandbox_py_error(error: SdkError) -> PyErr {
@@ -1224,13 +1306,78 @@ fn into_document_ai_py_error(error: SdkError) -> PyErr {
     }
 }
 
-fn print_build_log_event_to_stderr(event: &Value) {
+fn build_logs_path(build_service_path: &str, build_id: &str) -> String {
+    format!(
+        "{}/builds/{build_id}/logs",
+        build_service_path.trim_end_matches('/')
+    )
+}
+
+async fn stream_build_log_events<F>(
+    client: Client,
+    path: &str,
+    mut on_event: F,
+) -> Result<(), SdkError>
+where
+    F: FnMut(&Value) -> Result<(), SdkError>,
+{
+    let mut stream = client.build_event_source_request::<Value>(path).await?;
+    while let Some(event) = stream.next().await {
+        let event = event?;
+        on_event(&event)?;
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct LogPrefix {
+    label: String,
+    color_code: Option<&'static str>,
+}
+
+impl LogPrefix {
+    fn new(label: String, color: Option<String>) -> Self {
+        Self {
+            label,
+            color_code: color.as_deref().and_then(ansi_color_code),
+        }
+    }
+
+    fn render(&self) -> String {
+        match self.color_code {
+            Some(color_code) => format!("{color_code}{}:\x1b[0m ", self.label),
+            None => format!("{}: ", self.label),
+        }
+    }
+}
+
+fn ansi_color_code(color: &str) -> Option<&'static str> {
+    match color {
+        "magenta" => Some("\x1b[35m"),
+        "cyan" => Some("\x1b[36m"),
+        "green" => Some("\x1b[32m"),
+        "yellow" => Some("\x1b[33m"),
+        "blue" => Some("\x1b[34m"),
+        "white" => Some("\x1b[37m"),
+        "red" => Some("\x1b[31m"),
+        "bright_magenta" => Some("\x1b[95m"),
+        "bright_cyan" => Some("\x1b[96m"),
+        "bright_green" => Some("\x1b[92m"),
+        "bright_yellow" => Some("\x1b[93m"),
+        "bright_blue" => Some("\x1b[94m"),
+        "bright_white" => Some("\x1b[97m"),
+        "bright_red" => Some("\x1b[91m"),
+        _ => None,
+    }
+}
+
+fn print_build_log_event_to_stderr(event: &Value, prefix: Option<&LogPrefix>) {
     let build_status = event
         .get("build_status")
         .and_then(Value::as_str)
         .unwrap_or_default();
     if build_status == "pending" {
-        eprintln!("Build waiting in queue...");
+        print_prefixed_to_stderr("Build waiting in queue...", prefix, true);
         return;
     }
 
@@ -1244,27 +1391,49 @@ fn print_build_log_event_to_stderr(event: &Value) {
         .unwrap_or_default();
 
     match stream {
-        "stdout" => {
-            eprint!("{message}");
-            let _ = std::io::stderr().flush();
-        }
-        "stderr" => eprintln!("{message}"),
+        "stdout" => print_prefixed_to_stderr(message, prefix, false),
+        "stderr" => print_prefixed_to_stderr(message, prefix, true),
         "info" => {
             let timestamp = event
                 .get("timestamp")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             if timestamp.is_empty() {
-                eprintln!("{message}");
+                print_prefixed_to_stderr(message, prefix, true);
             } else {
-                eprintln!("{timestamp}: {message}");
+                print_prefixed_to_stderr(&format!("{timestamp}: {message}"), prefix, true);
             }
         }
         _ => {
             if !message.is_empty() {
-                eprintln!("{message}");
+                print_prefixed_to_stderr(message, prefix, true);
             }
         }
+    }
+}
+
+fn print_prefixed_to_stderr(message: &str, prefix: Option<&LogPrefix>, newline: bool) {
+    let rendered_prefix = prefix.map(LogPrefix::render).unwrap_or_default();
+    let mut stderr = std::io::stderr();
+
+    let chunks: Vec<&str> = if message.is_empty() {
+        vec![""]
+    } else {
+        message.split_inclusive('\n').collect()
+    };
+
+    for chunk in chunks {
+        if rendered_prefix.is_empty() {
+            let _ = write!(stderr, "{chunk}");
+        } else {
+            let _ = write!(stderr, "{rendered_prefix}{chunk}");
+        }
+    }
+
+    if newline && !message.ends_with('\n') {
+        let _ = writeln!(stderr);
+    } else {
+        let _ = stderr.flush();
     }
 }
 
