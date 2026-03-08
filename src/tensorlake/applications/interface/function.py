@@ -52,6 +52,7 @@ class _ApplicationConfiguration:
     retries: Retries
     region: str | None
     version: str
+    cron_schedule: str | None
 
 
 class Function:
