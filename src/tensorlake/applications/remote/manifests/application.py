@@ -50,7 +50,6 @@ class ApplicationManifest(BaseModel):
     version: str
     functions: Dict[str, FunctionManifest]
     entrypoint: EntryPointManifest
-    cron_schedule: str | None = None
 
     def model_dump_json(self, **kwargs: Any) -> str:
         # exclude_unset=True to avoid sending default None values.
@@ -95,7 +94,6 @@ def create_application_manifest(
         tags=app_config.tags,
         version=app_config.version,
         functions=function_manifests,
-        cron_schedule=app_config.cron_schedule,
         entrypoint=EntryPointManifest(
             function_name=application_function._function_config.function_name,
             input_serializer=function_input_serializer(
