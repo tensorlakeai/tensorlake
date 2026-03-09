@@ -131,6 +131,11 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown error");
                 eprintln!("❌ Image '{}' build failed: {}", image, error);
+                if let Some(traceback) = event.get("traceback").and_then(|v| v.as_str())
+                    && !traceback.is_empty()
+                {
+                    eprintln!("\nPython traceback:\n{}", traceback);
+                }
             }
             "deployed" => {
                 let application = event

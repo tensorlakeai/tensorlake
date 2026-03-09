@@ -32,10 +32,7 @@ install-dev-release:
 # Requires: pip and maturin available outside any virtualenv.
 # After running, ensure ~/.local/bin is on your PATH.
 install-global:
-	@pip3 install --user -e .
-	@mkdir -p ~/.local/bin
-	@cp tensorlake.data/scripts/* ~/.local/bin/
-	@chmod +x ~/.local/bin/tensorlake-*
+	@pip3 install --user --break-system-packages -e .
 	@echo "Done. Make sure ~/.local/bin is on your PATH."
 	@echo "  fish: fish_add_path ~/.local/bin"
 	@echo "  bash/zsh: export PATH=\"\$$HOME/.local/bin:\$$PATH\""
@@ -83,4 +80,43 @@ test_sandbox:
 	@$(MAKE) build_cloud_sdk
 	cd tests/sandbox && poetry run python test_lifecycle.py -v
 
-.PHONY: all build build_proto build_cloud_sdk build_rust_py_client fmt check test test_document_ai test_sandbox install-dev install-dev-release install-global
+# Replicates the PyPI publish workflow locally: builds the _cloud_sdk Rust
+# extension, bundles its .so into the main wheel, then installs into a
+# temporary venv and verifies imports — all without touching PyPI.
+build_release:
+	@rm -rf dist dist-cloud-sdk
+	@echo "--- Building Cloud SDK extension ---"
+	@poetry run maturin build --manifest-path crates/rust-cloud-sdk-py/Cargo.toml --release --out dist-cloud-sdk
+	@echo "--- Bundling .so into src/tensorlake/ ---"
+	@poetry run python -c "\
+import zipfile, pathlib; \
+d = pathlib.Path('src/tensorlake'); \
+[p.unlink() for p in [*d.glob('_cloud_sdk*.so'), *d.glob('_cloud_sdk*.pyd')]]; \
+w = next(pathlib.Path('dist-cloud-sdk').glob('tensorlake_rust_cloud_sdk-*.whl')); \
+members = [x for x in zipfile.ZipFile(w).namelist() if pathlib.Path(x).name.startswith('_cloud_sdk') and (x.endswith('.so') or x.endswith('.pyd'))]; \
+t = d / pathlib.Path(members[0]).name; \
+t.write_bytes(zipfile.ZipFile(w).read(members[0])); \
+print(f'Bundled {members[0]} -> {t}')"
+	@echo "--- Building main wheel ---"
+	@poetry run maturin build --release --out dist
+	@echo "--- Removing bundled .so from source tree ---"
+	@poetry run python -c "import pathlib; [p.unlink() for p in [*pathlib.Path('src/tensorlake').glob('_cloud_sdk*.so'), *pathlib.Path('src/tensorlake').glob('_cloud_sdk*.pyd')]]"
+	@echo "--- Verifying wheel in a clean venv ---"
+	@rm -rf /tmp/tensorlake-verify
+	@poetry run python -m venv /tmp/tensorlake-verify
+	@/tmp/tensorlake-verify/bin/pip install --quiet dist/tensorlake-*.whl
+	@/tmp/tensorlake-verify/bin/python -c "import tensorlake._cloud_sdk; print('OK: tensorlake._cloud_sdk')"
+	@/tmp/tensorlake-verify/bin/python -c "from tensorlake.cli.deploy import deploy_entrypoint; print('OK: tensorlake.cli.deploy')"
+	@/tmp/tensorlake-verify/bin/python -c "from tensorlake.cli.build_images import main; print('OK: tensorlake.cli.build_images')"
+	@rm -rf /tmp/tensorlake-verify
+	@echo "--- Done. Wheel is in dist/ ---"
+
+bump_version:
+	@test -n "$(VERSION)" || (echo "Usage: make bump_version VERSION=x.y.z" && exit 1)
+	@for f in pyproject.toml Cargo.toml crates/rust-cloud-sdk-py/pyproject.toml; do \
+		python3 -c "import re, pathlib; p = pathlib.Path('$$f'); p.write_text(re.sub(r'^version = \"[^\"]*\"', 'version = \"$(VERSION)\"', p.read_text(), count=1, flags=re.MULTILINE))"; \
+		echo "  Updated $$f"; \
+	done
+	@echo "Version bumped to $(VERSION)"
+
+.PHONY: all build build_proto build_cloud_sdk build_rust_py_client fmt check test test_document_ai test_sandbox install-dev install-dev-release install-global build_release bump_version
