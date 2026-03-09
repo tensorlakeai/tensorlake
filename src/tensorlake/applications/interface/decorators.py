@@ -57,13 +57,11 @@ class _ApplicationDecorator(_Decorator):
         tags: Dict[str, str],
         retries: Retries,
         region: str | None,
-        cron_schedule: str | None,
     ):
         super().__init__()
         self._tags: Dict[str, str] = tags
         self._retries: Retries = retries
         self._region: str | None = region
-        self._cron_schedule: str | None = cron_schedule
 
     def __call__(self, fn: _Decorator | Callable | Function) -> Function | _Decorator:
         fn: Function | _Decorator = self.create_function(fn)
@@ -80,7 +78,6 @@ class _ApplicationDecorator(_Decorator):
             version=nanoid(
                 alphabet="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
             ),
-            cron_schedule=self._cron_schedule,
         )
 
         return fn
@@ -90,14 +87,12 @@ def application(
     tags: Dict[str, str] = {},
     retries: Retries = Retries(),
     region: Literal["us-east-1", "eu-west-1"] | None = None,
-    cron_schedule: str | None = None,
 ) -> _ApplicationDecorator:
     return _ApplicationDecorator(
         # NB: the first argument here is used during pre-deployment validation.
         tags=tags,
         retries=retries,
         region=region,
-        cron_schedule=cron_schedule,
     )
 
 
