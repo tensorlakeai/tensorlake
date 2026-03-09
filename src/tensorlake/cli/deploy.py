@@ -182,7 +182,7 @@ def deploy(
         sys.exit(1)
 
     _deploy_applications(
-        api_client=auth.rust_cloud_client,
+        api_client=auth.cloud_client,
         api_url=auth.api_url,
         application_file_path=application_file_path,
         upgrade_running_requests=upgrade_running_requests,
