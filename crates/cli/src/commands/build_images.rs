@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::process::Stdio;
 
 use bollard::Docker;
@@ -45,6 +44,10 @@ pub async fn run(
         ))
     })?;
 
+    let docker_config = DockerConfig::load()
+        .await
+        .map_err(|e| CliError::Other(anyhow::anyhow!("Failed to load Docker config: {e}")))?;
+
     for ctx in &images {
         let local_name = format!("{}:{}", ctx.name, ctx.tag);
 
@@ -62,7 +65,7 @@ pub async fn run(
         }
 
         eprintln!("\n📦 Building `{}`...", local_name);
-        build_image(&docker, &local_name, Bytes::from(context_data)).await?;
+        build_image(&docker, &docker_config, &local_name, Bytes::from(context_data)).await?;
         eprintln!("✅ Built `{}`", local_name);
 
         if push {
@@ -92,7 +95,7 @@ pub async fn run(
             }
 
             eprintln!("⬆️  Pushing `{}`...", target_full);
-            push_image(&docker, &target_repo, &target_tag).await?;
+            push_image(&docker, &docker_config, &target_repo, &target_tag).await?;
             eprintln!("✅ Pushed `{}`", target_full);
         }
     }
@@ -244,15 +247,18 @@ async fn collect_image_contexts(
     Ok(images)
 }
 
-async fn build_image(docker: &Docker, image_name: &str, context: Bytes) -> Result<()> {
+async fn build_image(docker: &Docker, docker_config: &DockerConfig, image_name: &str, context: Bytes) -> Result<()> {
     let options = BuildImageOptions {
         t: Some(image_name.to_string()),
         rm: true,
         ..Default::default()
     };
 
+    let all = docker_config.all_credentials();
+    let credentials = if all.is_empty() { None } else { Some(all) };
+
     let body = Either::Left(Full::new(context));
-    let mut stream = docker.build_image(options, None::<HashMap<_, _>>, Some(body));
+    let mut stream = docker.build_image(options, credentials, Some(body));
 
     while let Some(result) = stream.next().await {
         match result {
@@ -279,12 +285,9 @@ async fn build_image(docker: &Docker, image_name: &str, context: Bytes) -> Resul
     Ok(())
 }
 
-async fn push_image(docker: &Docker, repository: &str, tag: &str) -> Result<()> {
+async fn push_image(docker: &Docker, docker_config: &DockerConfig, repository: &str, tag: &str) -> Result<()> {
     let registry = image_registry(repository);
-    let config = DockerConfig::load()
-        .await
-        .map_err(|e| CliError::Other(anyhow::anyhow!("Failed to load Docker config: {e}")))?;
-    let credentials = config.credentials_for_registry(&registry);
+    let credentials = docker_config.credentials_for_registry(&registry);
 
     let options = PushImageOptions {
         tag: Some(tag.to_string()),
