@@ -1,7 +1,6 @@
 import unittest
 from io import StringIO
-from unittest.mock import AsyncMock, MagicMock
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from tensorlake.builder import ApplicationBuildImageRequest, ApplicationBuildRequest
 from tensorlake.builder.client_v2 import (
@@ -52,7 +51,10 @@ class TestImageBuilderV2Client(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(builder._build_single.await_count, 3)
         self.assertEqual(
-            [call.kwargs["function_name"] for call in builder._build_single.await_args_list],
+            [
+                call.kwargs["function_name"]
+                for call in builder._build_single.await_args_list
+            ],
             ["fn-1", "fn-2", "fn-3"],
         )
         self.assertEqual(

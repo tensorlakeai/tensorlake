@@ -134,14 +134,6 @@ impl ImagesClient {
         request: &CreateApplicationBuildRequest,
         image_contexts: &[ApplicationBuildContext],
     ) -> Result<ApplicationBuildResponse, SdkError> {
-        eprintln!(
-            "Rust ImagesClient::create_application_build called for {}@{} via {} with {} image contexts",
-            request.name,
-            request.version,
-            build_service_path,
-            image_contexts.len()
-        );
-
         let form = create_application_build_form(request, image_contexts)?;
         let request =
             self.client

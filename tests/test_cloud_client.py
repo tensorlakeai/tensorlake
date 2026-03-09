@@ -1,8 +1,8 @@
 import unittest
 from unittest.mock import patch
 
-from tensorlake.applications.interface.exceptions import InternalError
 from tensorlake import cloud_client
+from tensorlake.applications.interface.exceptions import InternalError
 
 
 class FakeRustClientError(Exception):

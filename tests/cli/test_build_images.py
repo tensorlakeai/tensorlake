@@ -294,7 +294,9 @@ class TestBuildImages(unittest.TestCase):
                 return_value=auth,
             ),
             patch.object(
-                build_images_module.deploy_module, "mk_builder", return_value=MagicMock()
+                build_images_module.deploy_module,
+                "mk_builder",
+                return_value=MagicMock(),
             ),
             patch.object(
                 build_images_module.deploy_module,
@@ -327,7 +329,9 @@ class TestBuildImages(unittest.TestCase):
                     "v3",
                 ],
             ),
-            patch.object(build_images_module, "build_images_with_builder") as build_with_builder,
+            patch.object(
+                build_images_module, "build_images_with_builder"
+            ) as build_with_builder,
         ):
             build_images_module.main()
 

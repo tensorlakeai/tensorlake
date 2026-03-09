@@ -25,6 +25,7 @@ for _module_name in ("tensorlake._cloud_sdk", "_cloud_sdk"):
 
 _API_KEY_ENV_VAR = "TENSORLAKE_API_KEY"
 
+
 def _raise_as_tensorlake_error(e: Exception) -> None:
     """Convert Rust SDK exceptions into the TensorlakeError hierarchy."""
     # Lazy import to avoid circular dependency with applications package.

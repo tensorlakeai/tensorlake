@@ -1,5 +1,5 @@
-import json
 import asyncio
+import json
 import unittest
 from unittest.mock import MagicMock
 
@@ -8,7 +8,9 @@ from tensorlake.builder.client_v3 import ImageBuilderV3Client
 
 
 class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
-    async def test_build_translates_request_with_image_contexts_and_parses_response(self):
+    async def test_build_translates_request_with_image_contexts_and_parses_response(
+        self,
+    ):
         cloud_client = MagicMock()
         cloud_client.create_application_build.return_value = json.dumps(
             {
@@ -91,7 +93,7 @@ class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
                         context_sha256="sha-b",
                         function_names=["fn-3"],
                         context_tar_gz=b"context-b",
-                    )
+                    ),
                 ],
             )
         )
@@ -116,7 +118,7 @@ class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
                             "context_tar_part_name": "img-2",
                             "context_sha256": "sha-b",
                             "function_names": ["fn-3"],
-                        }
+                        },
                     ],
                 }
             ),
@@ -228,7 +230,9 @@ class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
                 ],
             }
         )
-        cloud_client.stream_build_logs_to_stderr_prefixed.side_effect = asyncio.CancelledError
+        cloud_client.stream_build_logs_to_stderr_prefixed.side_effect = (
+            asyncio.CancelledError
+        )
         cloud_client.cancel_application_build.return_value = json.dumps(
             {
                 "id": "app-build-1",

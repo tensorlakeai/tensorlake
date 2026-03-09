@@ -151,10 +151,6 @@ class ImageBuilderV3Client:
         return normalized_path
 
     async def build(self, request: ApplicationBuildRequest) -> ApplicationBuildResult:
-        print(
-            f"Python ImageBuilderV3Client.build called for {request.name}@{request.version}",
-            file=sys.stderr,
-        )
         request_json = json.dumps(
             {
                 "name": request.name,
@@ -171,9 +167,7 @@ class ImageBuilderV3Client:
                 ],
             }
         )
-        image_contexts = [
-            (image.key, image.context_tar_gz) for image in request.images
-        ]
+        image_contexts = [(image.key, image.context_tar_gz) for image in request.images]
         response_json = await asyncio.to_thread(
             self._cloud_client.create_application_build,
             self._build_service_path,
@@ -244,12 +238,16 @@ class ImageBuilderV3Client:
         final_result: ApplicationBuildResult,
     ) -> None:
         summary = BuildSummary(total=len(reporters))
-        final_builds = {image_build.id: image_build for image_build in final_result.image_builds}
+        final_builds = {
+            image_build.id: image_build for image_build in final_result.image_builds
+        }
 
         click.echo(file=sys.stderr)
         click.secho("Image build summary:", bold=True, err=True)
         for reporter in reporters.values():
-            status = reporter.print_final_result(final_builds.get(reporter.image_build_id))
+            status = reporter.print_final_result(
+                final_builds.get(reporter.image_build_id)
+            )
             if status == "succeeded":
                 summary.succeeded += 1
             elif status == "failed":

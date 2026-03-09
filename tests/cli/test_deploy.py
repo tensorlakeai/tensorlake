@@ -156,7 +156,9 @@ class TestDeployEntrypoints(unittest.TestCase):
                 "_build_context_from_env",
                 return_value=self._make_auth_context(),
             ),
-            patch.object(deploy_module, "mk_builder", return_value=MagicMock()) as mk_builder,
+            patch.object(
+                deploy_module, "mk_builder", return_value=MagicMock()
+            ) as mk_builder,
             patch.object(deploy_module, "load_code"),
             patch.object(
                 deploy_module, "validate_loaded_applications", return_value=[]
@@ -198,18 +200,14 @@ class TestDeployEntrypoints(unittest.TestCase):
                 image_contexts: list[tuple[str, bytes]],
             ) -> str:
                 self.calls.append((build_service_path, request_json, image_contexts))
-                return (
-                    '{"id":"app-build-1","organization_id":"org-1","project_id":"proj-1","name":"app_fn","version":"v1","status":"building","image_builds":[]}'
-                )
+                return '{"id":"app-build-1","organization_id":"org-1","project_id":"proj-1","name":"app_fn","version":"v1","status":"building","image_builds":[]}'
 
             def application_build_info_json(
                 self,
                 build_service_path: str,
                 application_build_id: str,
             ) -> str:
-                return (
-                    '{"id":"app-build-1","organization_id":"org-1","project_id":"proj-1","name":"app_fn","version":"v1","status":"succeeded","image_builds":[]}'
-                )
+                return '{"id":"app-build-1","organization_id":"org-1","project_id":"proj-1","name":"app_fn","version":"v1","status":"succeeded","image_builds":[]}'
 
             def stream_build_logs_to_stderr_prefixed(
                 self,
@@ -246,7 +244,7 @@ class TestDeployEntrypoints(unittest.TestCase):
                     context_sha256="sha-b",
                     function_names=["fn-2", "fn-3"],
                     context_tar_gz=b"context-b",
-                )
+                ),
             ],
         )
         app = object()
@@ -263,7 +261,9 @@ class TestDeployEntrypoints(unittest.TestCase):
             patch.object(deploy_module, "list_secret_names", return_value=[]),
             patch.object(deploy_module, "_warning_missing_secrets", return_value=[]),
             patch.object(deploy_module, "get_functions", return_value=functions),
-            patch.object(deploy_module, "filter_applications", return_value=iter([app])),
+            patch.object(
+                deploy_module, "filter_applications", return_value=iter([app])
+            ),
             patch.object(
                 deploy_module,
                 "collect_application_build_request",
