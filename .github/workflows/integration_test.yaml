@@ -9,6 +9,9 @@ on:
       TENSORLAKE_API_URL:
         required: true
 
+permissions:
+  contents: read
+
 jobs:
   integration-test:
     name: Integration test against TestPyPI
