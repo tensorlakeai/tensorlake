@@ -1,6 +1,6 @@
 import os
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from tensorlake.cli import build_images as build_images_module
 
@@ -251,6 +251,90 @@ class TestBuildImages(unittest.TestCase):
         event = emit.call_args.args[0]
         self.assertEqual(event["type"], "error")
         self.assertIn("nonexistent", event["message"])
+
+    def test_build_images_with_builder_uses_deploy_builder_flow(self):
+        auth = MagicMock()
+        builder = MagicMock()
+        functions = [MagicMock()]
+
+        with (
+            patch.object(build_images_module, "load_code"),
+            patch.object(build_images_module, "get_functions", return_value=functions),
+            patch.object(
+                build_images_module.deploy_module,
+                "_build_context_from_env",
+                return_value=auth,
+            ),
+            patch.object(
+                build_images_module.deploy_module, "mk_builder", return_value=builder
+            ) as mk_builder,
+            patch.object(
+                build_images_module.deploy_module,
+                "_prepare_images",
+                new_callable=AsyncMock,
+            ) as prepare_images,
+        ):
+            build_images_module.build_images_with_builder(
+                application_file_path="my_app.py",
+                image_builder_version="v3",
+            )
+
+        mk_builder.assert_called_once_with("v3", auth)
+        prepare_images.assert_called_once_with(builder, functions)
+
+    def test_build_images_with_builder_emits_error_on_exception(self):
+        auth = MagicMock()
+
+        with (
+            patch.object(build_images_module, "load_code"),
+            patch.object(build_images_module, "get_functions", return_value=[]),
+            patch.object(
+                build_images_module.deploy_module,
+                "_build_context_from_env",
+                return_value=auth,
+            ),
+            patch.object(
+                build_images_module.deploy_module, "mk_builder", return_value=MagicMock()
+            ),
+            patch.object(
+                build_images_module.deploy_module,
+                "_prepare_images",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("boom"),
+            ),
+            patch.object(build_images_module, "_emit") as emit,
+        ):
+            with self.assertRaises(SystemExit) as exc:
+                build_images_module.build_images_with_builder(
+                    application_file_path="my_app.py",
+                    image_builder_version="v3",
+                )
+
+        self.assertEqual(exc.exception.code, 1)
+        event = emit.call_args.args[0]
+        self.assertEqual(event["type"], "error")
+        self.assertIn("build-images failed", event["message"])
+        self.assertIn("RuntimeError: boom", event["details"])
+
+    def test_main_entrypoint_uses_builder_mode_when_requested(self):
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "tensorlake-build-images",
+                    "my_app.py",
+                    "--image-builder-version",
+                    "v3",
+                ],
+            ),
+            patch.object(build_images_module, "build_images_with_builder") as build_with_builder,
+        ):
+            build_images_module.main()
+
+        build_with_builder.assert_called_once_with(
+            application_file_path="my_app.py",
+            image_builder_version="v3",
+        )
 
     def test_main_entrypoint_emits_error_for_unhandled_exception(self):
         with (
