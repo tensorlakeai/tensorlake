@@ -1,0 +1,54 @@
+name: Integration test against TestPyPI
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      TENSORLAKE_API_KEY:
+        required: true
+      TENSORLAKE_API_URL:
+        required: true
+
+jobs:
+  integration-test:
+    name: Integration test against TestPyPI
+    environment: dev
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write test application
+        run: |
+          SUFFIX=$(openssl rand -hex 6)
+          cat > /tmp/test_app.py << EOF
+          from tensorlake.applications import Image, application, function
+
+          image = Image(name="test-image-${SUFFIX}", base_image="python:3.11-slim")
+
+          @application()
+          @function(image=image)
+          def hello_${SUFFIX}(name: str) -> str:
+              return f"Hello, {name}!"
+          EOF
+
+      - name: Run integration tests in Docker
+        run: |
+          docker run --rm \
+            -e TENSORLAKE_API_KEY="${{ secrets.TENSORLAKE_API_KEY }}" \
+            -e TENSORLAKE_API_URL="${{ secrets.TENSORLAKE_API_URL }}" \
+            -v /tmp/test_app.py:/test_app.py \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            python:3.11-slim bash -c '
+              set -e
+
+              echo "--- Installing tensorlake from TestPyPI ---"
+              pip install --index-url https://test.pypi.org/simple/ \
+                          --extra-index-url https://pypi.org/simple/ \
+                          tensorlake
+
+              echo "--- 1. Build images ---"
+              tl build-images /test_app.py
+
+              echo "--- 2. Deploy ---"
+              tl deploy /test_app.py
+
+              echo "--- All integration tests passed ---"
+            '

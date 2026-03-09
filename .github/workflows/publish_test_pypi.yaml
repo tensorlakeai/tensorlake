@@ -2,6 +2,7 @@ name: Release Tensorlake SDK package to TestPyPi.
 
 on:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: write
@@ -147,3 +148,11 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
+
+  integration-test:
+    name: Integration test against TestPyPI
+    needs: [publish]
+    uses: ./.github/workflows/integration_test.yaml
+    secrets:
+      TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
+      TENSORLAKE_API_URL: ${{ secrets.TENSORLAKE_API_URL }}
