@@ -125,9 +125,78 @@ jobs:
           name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
           path: dist
 
+  publish-test-pypi:
+    name: Publish to TestPyPI
+    needs: [build-sdist, build-wheels]
+    runs-on: ubuntu-latest
+    environment:
+      name: test-pypi
+      url: https://test.pypi.org/p/tensorlake
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  integration-test:
+    name: Integration test against TestPyPI
+    environment: dev
+    needs: [publish-test-pypi]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write test application
+        run: |
+          SUFFIX=$(openssl rand -hex 6)
+          cat > /tmp/test_app.py << EOF
+          from tensorlake.applications import Image, application, function
+
+          image = Image(name="test-image-${SUFFIX}", base_image="python:3.11-slim")
+
+          @application()
+          @function(image=image)
+          def hello_${SUFFIX}(name: str) -> str:
+              return f"Hello, {name}!"
+          EOF
+
+      - name: Run integration tests in Docker
+        run: |
+          docker run --rm \
+            -e TENSORLAKE_API_KEY="${{ secrets.TENSORLAKE_API_KEY }}" \
+            -e TENSORLAKE_API_URL="${{ secrets.TENSORLAKE_API_URL }}" \
+            -v /tmp/test_app.py:/test_app.py \
+            python:3.11-slim bash -c '
+              set -e
+
+              echo "--- Installing tensorlake from TestPyPI ---"
+              pip install --index-url https://test.pypi.org/simple/ \
+                          --extra-index-url https://pypi.org/simple/ \
+                          tensorlake
+
+              echo "--- Installing Docker CLI (needed by build-images) ---"
+              apt-get update -qq && apt-get install -y -qq docker.io
+
+              echo "--- 1. Build images ---"
+              tl build-images /test_app.py
+
+              echo "--- 2. Deploy ---"
+              tl deploy /test_app.py
+
+              echo "--- All integration tests passed ---"
+            '
+
   publish:
     name: Publish to PyPI
-    needs: [build-sdist, build-wheels]
+    needs: [integration-test]
     runs-on: ubuntu-latest
     environment:
       name: pypi
