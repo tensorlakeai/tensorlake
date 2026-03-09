@@ -74,22 +74,31 @@ class ImageBuilderV2Client:
         return cls(cloud_client=client, build_service_path=build_service_path)
 
     async def build_collection(
-        self, context_collection: dict[Image, BuildContext]
+        self,
+        context_collection: dict[Image, BuildContext],
+        extra_env_vars: list[tuple[str, str]] | None = None,
     ) -> dict[str, str]:
         print("Building images...", file=sys.stderr)
 
         builds = {}
         for image, context in context_collection.items():
             print(f"Building {image.name}", file=sys.stderr)
-            build = await self.build(context, image)
+            build = await self.build(context, image, extra_env_vars=extra_env_vars)
             print(f"Built {image.name} with hash {image_hash(image)}", file=sys.stderr)
             builds[image_hash(image)] = build.id
 
         return builds
 
-    async def build(self, context: BuildContext, image: Image) -> BuildInfo:
+    async def build(
+        self,
+        context: BuildContext,
+        image: Image,
+        extra_env_vars: list[tuple[str, str]] | None = None,
+    ) -> BuildInfo:
         _fd, context_file_path = tempfile.mkstemp()
-        create_image_context_file(image, context_file_path)
+        create_image_context_file(
+            image, context_file_path, extra_env_vars=extra_env_vars
+        )
 
         print(
             f"{image.name}: Posting {os.path.getsize(context_file_path)} bytes of context to build service....",

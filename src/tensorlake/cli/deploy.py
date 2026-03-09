@@ -94,6 +94,17 @@ def _onprem_enabled() -> bool:
     }
 
 
+def _parse_build_envs(raw: str | None) -> list[tuple[str, str]]:
+    if not raw:
+        return []
+    result = []
+    for line in raw.splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            result.append((key.strip(), value.strip()))
+    return result
+
+
 def deploy(
     application_file_path: str,
     parallel_builds: bool,
@@ -172,8 +183,10 @@ def deploy(
     if missing:
         _emit({"type": "missing_secrets", "count": len(missing)})
 
+    extra_env_vars = _parse_build_envs(os.environ.get("TENSORLAKE_BUILD_ENVS"))
+
     try:
-        asyncio.run(_prepare_images_v2(builder_v2, functions))
+        asyncio.run(_prepare_images_v2(builder_v2, functions, extra_env_vars))
     except KeyboardInterrupt:
         _emit({"type": "error", "message": "build cancelled by user"})
         sys.exit(1)
@@ -190,7 +203,11 @@ def deploy(
     )
 
 
-async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: list[Function]):
+async def _prepare_images_v2(
+    builder: ImageBuilderV2Client,
+    functions: list[Function],
+    extra_env_vars: list[tuple[str, str]] | None = None,
+):
     images: dict[Image, ImageInformation] = image_infos()
     for application in filter_applications(functions):
         fn_config: _FunctionConfiguration = application._function_config
@@ -208,6 +225,7 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: list[Func
                             function_name=function._function_config.function_name,
                         ),
                         image_info.image,
+                        extra_env_vars=extra_env_vars,
                     )
                 except (asyncio.CancelledError, KeyboardInterrupt) as error:
                     raise error

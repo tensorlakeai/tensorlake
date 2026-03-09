@@ -27,6 +27,7 @@ pub async fn run(
     stage: &str,
     template: Option<&str>,
     push: bool,
+    build_envs: &[String],
 ) -> Result<()> {
     let images = collect_image_contexts(application_file_path, tag, image_name).await?;
 
@@ -52,20 +53,24 @@ pub async fn run(
         let local_name = format!("{}:{}", ctx.name, ctx.tag);
 
         let mut context_data: Vec<u8> = Vec::new();
-        if let Some(template_path) = template {
-            let dockerfile = ctx.image.dockerfile_content(&ctx.sdk_version, Some(stage));
-            let rendered = render_template(template_path, &dockerfile)?;
-            ctx.image
-                .create_context_archive_with_dockerfile(&mut context_data, &rendered)
-                .map_err(CliError::Io)?;
-        } else {
-            ctx.image
-                .create_context_archive(&mut context_data, &ctx.sdk_version, Some(stage))
-                .map_err(CliError::Io)?;
-        }
+        let dockerfile = ctx.image.dockerfile_content(&ctx.sdk_version, Some(stage));
+        let dockerfile = inject_build_envs(dockerfile, build_envs);
+        let dockerfile = match template {
+            Some(template_path) => render_template(template_path, &dockerfile)?,
+            None => dockerfile,
+        };
+        ctx.image
+            .create_context_archive_with_dockerfile(&mut context_data, &dockerfile)
+            .map_err(CliError::Io)?;
 
         eprintln!("\n📦 Building `{}`...", local_name);
-        build_image(&docker, &docker_config, &local_name, Bytes::from(context_data)).await?;
+        build_image(
+            &docker,
+            &docker_config,
+            &local_name,
+            Bytes::from(context_data),
+        )
+        .await?;
         eprintln!("✅ Built `{}`", local_name);
 
         if push {
@@ -101,6 +106,25 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// Inject extra ENV directives into a Dockerfile after the PIP_BREAK_SYSTEM_PACKAGES line.
+fn inject_build_envs(dockerfile: String, build_envs: &[String]) -> String {
+    if build_envs.is_empty() {
+        return dockerfile;
+    }
+    let env_lines: String = build_envs
+        .iter()
+        .filter_map(|e| {
+            let (key, val) = e.split_once('=')?;
+            Some(format!("ENV {}={}", key.trim(), val.trim()))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    dockerfile.replace(
+        "ENV PIP_BREAK_SYSTEM_PACKAGES=1",
+        &format!("ENV PIP_BREAK_SYSTEM_PACKAGES=1\n{}", env_lines),
+    )
 }
 
 /// Render a MiniJinja template, exposing `tensorlake_image` as the Dockerfile content.
@@ -247,7 +271,12 @@ async fn collect_image_contexts(
     Ok(images)
 }
 
-async fn build_image(docker: &Docker, docker_config: &DockerConfig, image_name: &str, context: Bytes) -> Result<()> {
+async fn build_image(
+    docker: &Docker,
+    docker_config: &DockerConfig,
+    image_name: &str,
+    context: Bytes,
+) -> Result<()> {
     let options = BuildImageOptions {
         t: Some(image_name.to_string()),
         rm: true,
@@ -285,7 +314,12 @@ async fn build_image(docker: &Docker, docker_config: &DockerConfig, image_name: 
     Ok(())
 }
 
-async fn push_image(docker: &Docker, docker_config: &DockerConfig, repository: &str, tag: &str) -> Result<()> {
+async fn push_image(
+    docker: &Docker,
+    docker_config: &DockerConfig,
+    repository: &str,
+    tag: &str,
+) -> Result<()> {
     let registry = image_registry(repository);
     let credentials = docker_config.credentials_for_registry(&registry);
 

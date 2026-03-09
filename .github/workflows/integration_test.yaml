@@ -45,10 +45,14 @@ jobs:
                           tensorlake
 
               echo "--- 1. Build images ---"
-              tl build-images /test_app.py
+              tl build-images /test_app.py \
+                --build-env PIP_INDEX_URL=https://test.pypi.org/simple/ \
+                --build-env PIP_EXTRA_INDEX_URL=https://pypi.org/simple/
 
               echo "--- 2. Deploy ---"
-              tl deploy /test_app.py
+              tl deploy /test_app.py \
+                --build-env PIP_INDEX_URL=https://test.pypi.org/simple/ \
+                --build-env PIP_EXTRA_INDEX_URL=https://pypi.org/simple/
 
               echo "--- All integration tests passed ---"
             '

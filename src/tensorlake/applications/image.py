@@ -38,8 +38,25 @@ def image_infos() -> Dict[Image, ImageInformation]:
     return image_infos
 
 
-def create_image_context_file(img: Image, file_path: str) -> None:
+def create_image_context_file(
+    img: Image,
+    file_path: str,
+    extra_env_vars: List[tuple] | None = None,
+) -> None:
     """Create a tar.gz file containing the Dockerfile and all necessary files for building the image"""
+    if extra_env_vars:
+        import gzip
+        import io
+        import tarfile
+
+        content = dockerfile_content(img, extra_env_vars=extra_env_vars).encode("utf-8")
+        with gzip.open(file_path, "wb") as gz:
+            with tarfile.open(fileobj=gz, mode="w") as tar:
+                info = tarfile.TarInfo(name="Dockerfile")
+                info.size = len(content)
+                tar.addfile(info, io.BytesIO(content))
+        return
+
     try:
         from tensorlake._cloud_sdk import (
             create_image_context_file as _rust_create_image_context_file,
@@ -62,7 +79,7 @@ def create_image_context_file(img: Image, file_path: str) -> None:
     )
 
 
-def dockerfile_content(img: Image) -> str:
+def dockerfile_content(img: Image, extra_env_vars: List[tuple] | None = None) -> str:
     """Generate the Dockerfile content based on the build operations."""
     dockerfile_lines: List[str] = [
         f"FROM {img._base_image}",
@@ -71,6 +88,10 @@ def dockerfile_content(img: Image) -> str:
         # like Ubuntu 24.04. This env var allows pip to install packages globally.
         "ENV PIP_BREAK_SYSTEM_PACKAGES=1",
     ]
+
+    if extra_env_vars:
+        for key, value in extra_env_vars:
+            dockerfile_lines.append(f"ENV {key}={value}")
 
     for op in img._build_operations:
         dockerfile_lines.append(_render_build_op(op))
