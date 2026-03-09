@@ -40,9 +40,14 @@ def image_infos() -> Dict[Image, ImageInformation]:
 
 def create_image_context_file(img: Image, file_path: str) -> None:
     """Create a tar.gz file containing the Dockerfile and all necessary files for building the image"""
-    from tensorlake_rust_cloud_sdk import (
-        create_image_context_file as _rust_create_image_context_file,
-    )
+    try:
+        from tensorlake._cloud_sdk import (
+            create_image_context_file as _rust_create_image_context_file,
+        )
+    except ImportError:
+        from _cloud_sdk import (
+            create_image_context_file as _rust_create_image_context_file,
+        )
 
     _rust_create_image_context_file(
         base_image=img._base_image,

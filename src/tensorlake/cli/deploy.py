@@ -191,18 +191,19 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: list[Func
                 except (asyncio.CancelledError, KeyboardInterrupt) as error:
                     raise error
                 except Exception as error:
-                    _emit(
-                        {
-                            "type": "build_failed",
-                            "image": image_info.image.name,
-                            "error": _format_error_message(
-                                f"image '{image_info.image.name}' build failed",
-                                error,
-                            )
-                            + ". "
-                            f"check your Image() configuration and try again.",
-                        }
-                    )
+                    event = {
+                        "type": "build_failed",
+                        "image": image_info.image.name,
+                        "error": _format_error_message(
+                            f"image '{image_info.image.name}' build failed",
+                            error,
+                        )
+                        + ". "
+                        f"check your Image() configuration and try again.",
+                    }
+                    if _debug_enabled():
+                        event["traceback"] = traceback.format_exc()
+                    _emit(event)
                     sys.exit(1)
 
     _emit({"type": "build_done"})
