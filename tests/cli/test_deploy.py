@@ -1,3 +1,4 @@
+import asyncio
 import os
 import unittest
 from types import SimpleNamespace
@@ -14,6 +15,16 @@ class TestDeployHelpers(unittest.TestCase):
         )
         self.assertEqual(message, "build failed (RuntimeError)")
         self.assertNotIn("secret", message)
+
+    def test_format_build_failure_message_includes_inner_error(self):
+        message = deploy_module._format_build_failure_message(
+            "parser-image",
+            RuntimeError("404 Not Found: POST /images/v3/applications"),
+        )
+        self.assertEqual(
+            message,
+            "image 'parser-image' build failed: 404 Not Found: POST /images/v3/applications. check your Image() configuration and try again.",
+        )
 
     def test_build_context_from_env_passes_expected_values(self):
         expected_context = object()
@@ -325,6 +336,36 @@ class TestDeployEntrypoints(unittest.TestCase):
             deploy_module.deploy_entrypoint()
 
         self.assertEqual(deploy.call_args.kwargs["image_builder_version"], "v3")
+
+    def test_prepare_images_emits_inner_build_error_message(self):
+        builder = MagicMock()
+        builder.build = AsyncMock(
+            side_effect=deploy_module.ApplicationImageBuildError(
+                image_name="parser-image",
+                error=RuntimeError("404 Not Found: POST /images/v3/applications"),
+            )
+        )
+
+        with (
+            patch.object(deploy_module, "filter_applications", return_value=[object()]),
+            patch.object(
+                deploy_module,
+                "collect_application_build_request",
+                return_value=MagicMock(),
+            ),
+            patch.object(deploy_module, "_emit") as emit,
+        ):
+            with self.assertRaises(SystemExit) as exc:
+                asyncio.run(deploy_module._prepare_images(builder, ["fn"]))
+
+        self.assertEqual(exc.exception.code, 1)
+        emit.assert_called_once_with(
+            {
+                "type": "build_failed",
+                "image": "parser-image",
+                "error": "image 'parser-image' build failed: 404 Not Found: POST /images/v3/applications. check your Image() configuration and try again.",
+            }
+        )
 
 
 if __name__ == "__main__":
