@@ -364,7 +364,12 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
         } => commands::init::run(ctx, directory.as_deref(), no_confirm).await,
         Commands::New { name, force } => commands::new::run(&name, force),
         Commands::Deploy { args } => {
-            ensure_auth_and_project(ctx).await?;
+            let onprem = std::env::var("TENSORLAKE_ONPREM")
+                .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                .unwrap_or(false);
+            if !onprem {
+                ensure_auth_and_project(ctx).await?;
+            }
             commands::deploy::run(ctx, &args).await
         }
         Commands::BuildImages {

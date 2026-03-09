@@ -85,14 +85,21 @@ def _warning_missing_secrets(auth: Context, secrets: list[str]) -> list[str]:
     return [s for s in secrets if s not in existing]
 
 
+def _onprem_enabled() -> bool:
+    return os.environ.get("TENSORLAKE_ONPREM", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def deploy(
     application_file_path: str,
     parallel_builds: bool,
     upgrade_running_requests: bool,
 ):
     """Deploys applications to Tensorlake Cloud, emitting NDJSON events to stdout."""
-    auth = _build_context_from_env()
-
     _emit(
         {
             "type": "status",
@@ -138,19 +145,32 @@ def deploy(
         _emit({"type": "validation_failed"})
         sys.exit(1)
 
+    functions: list[Function] = get_functions()
+
+    if _onprem_enabled():
+        deploy_applications(
+            applications_file_path=application_file_path,
+            upgrade_running_requests=upgrade_running_requests,
+            load_source_dir_modules=False,
+        )
+        _emit({"type": "done"})
+        return
+
+    auth = _build_context_from_env()
+
+    # Create builder client with proper authentication
+    bearer_token = auth.api_key or auth.personal_access_token
+    builder_v2 = ImageBuilderV2Client(
+        build_service=os.getenv("TENSORLAKE_BUILD_SERVICE")
+        or f"{auth.api_url}/images/v2",
+        api_key=bearer_token,
+        organization_id=auth.organization_id if not auth.api_key else None,
+        project_id=auth.project_id if not auth.api_key else None,
+    )
+
     missing = _warning_missing_secrets(auth, list(list_secret_names()))
     if missing:
         _emit({"type": "missing_secrets", "count": len(missing)})
-
-    functions: list[Function] = get_functions()
-
-    build_service = os.getenv("TENSORLAKE_BUILD_SERVICE") or f"{auth.api_url}/images/v2"
-    parsed = urlparse(build_service)
-    build_service_path = parsed.path.rstrip("/") or "/images/v2"
-    builder_v2 = ImageBuilderV2Client(
-        cloud_client=auth.cloud_client,
-        build_service_path=build_service_path,
-    )
 
     try:
         asyncio.run(_prepare_images_v2(builder_v2, functions))
@@ -162,7 +182,8 @@ def deploy(
         sys.exit(1)
 
     _deploy_applications(
-        auth=auth,
+        api_client=auth.cloud_client,
+        api_url=auth.api_url,
         application_file_path=application_file_path,
         upgrade_running_requests=upgrade_running_requests,
         functions=functions,
@@ -210,7 +231,8 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: list[Func
 
 
 def _deploy_applications(
-    auth: Context,
+    api_client,
+    api_url: str,
     application_file_path: str,
     upgrade_running_requests: bool,
     functions: list[Function],
@@ -228,7 +250,7 @@ def _deploy_applications(
         for application_function in filter_applications(functions):
             application_function: Function
             curl_command: str | None = example_application_curl_command(
-                api_url=auth.api_url,
+                api_url=api_url,
                 application=application_function,
                 file_paths=None,
             )
