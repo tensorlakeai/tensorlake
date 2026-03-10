@@ -3,6 +3,9 @@ name: Release Tensorlake SDK package.
 on:
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 permissions:
   contents: read
 
@@ -10,8 +13,16 @@ jobs:
   build-sdist:
     name: Build source distribution
     runs-on: namespace-profile-rust-builder-amd64
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Extract version from pyproject.toml
+        id: version
+        run: |
+          version=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$version" >> $GITHUB_OUTPUT
 
       - name: Build sdist
         uses: PyO3/maturin-action@v1
@@ -63,6 +74,7 @@ jobs:
         env:
           # ring's AArch64 assembly requires __ARM_ARCH; manylinux2014 cross GCC 4.8 doesn't define it.
           CFLAGS_aarch64_unknown_linux_gnu: ${{ runner.os == 'Linux' && matrix.platform.target == 'aarch64' && '-D__ARM_ARCH=8' || '' }}
+          CARGO_TARGET_DIR: target
         with:
           target: ${{ matrix.platform.target }}
           args: --manifest-path crates/rust-cloud-sdk-py/Cargo.toml --release --out dist-cloud-sdk -i ${{ matrix.platform.cloud_sdk_interpreter }}
@@ -105,6 +117,7 @@ jobs:
         env:
           # ring's AArch64 assembly requires __ARM_ARCH; manylinux2014 cross GCC 4.8 doesn't define it.
           CFLAGS_aarch64_unknown_linux_gnu: ${{ runner.os == 'Linux' && matrix.platform.target == 'aarch64' && '-D__ARM_ARCH=8' || '' }}
+          CARGO_TARGET_DIR: target
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist
@@ -129,20 +142,9 @@ jobs:
           name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
           path: dist
 
-  test-pypi-and-integration-test:
-    name: Publish to TestPyPI and run integration tests
-    needs: [build-sdist, build-wheels]
-    permissions:
-      id-token: write
-      contents: read
-    uses: ./.github/workflows/publish_test_pypi.yaml
-    secrets:
-      TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
-      TENSORLAKE_API_URL: ${{ secrets.TENSORLAKE_API_URL }}
-
   publish:
     name: Publish to PyPI
-    needs: [test-pypi-and-integration-test]
+    needs: [build-sdist, build-wheels]
     runs-on: ubuntu-latest
     environment:
       name: pypi
