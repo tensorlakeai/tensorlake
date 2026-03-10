@@ -1,6 +1,6 @@
 [project]
 name = "tensorlake"
-version = "0.4.16"
+version = "0.4.17"
 description = "Tensorlake SDK for Document Ingestion API and Serverless Applications"
 readme = "README.md"
 authors = [{ name = "Tensorlake Inc.", email = "support@tensorlake.ai" }]
@@ -9,7 +9,6 @@ dependencies = [
     "httpx[http2]>=0.27.2,<1.0",
     "pydantic>=2.0,<3.0",
     "httpx-sse>=0.4.1",
-    "click>=8.1,<9.0",
     "grpcio>=1.40.0,<2.0.0",
     "grpcio-tools>=1.40.0,<2.0.0",
 ]

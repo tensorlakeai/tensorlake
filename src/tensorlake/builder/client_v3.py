@@ -4,7 +4,6 @@ import sys
 from dataclasses import dataclass
 from typing import Annotated
 
-import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from tensorlake.builder import ApplicationBuildRequest
@@ -110,6 +109,59 @@ _IMAGE_NAME_PREFIX_COLORS: list[str] = [
     "bright_red",
 ]
 
+_ANSI_COLOR_CODES: dict[str, str] = {
+    "red": "31",
+    "green": "32",
+    "yellow": "33",
+    "blue": "34",
+    "magenta": "35",
+    "cyan": "36",
+    "white": "37",
+    "bright_red": "91",
+    "bright_green": "92",
+    "bright_yellow": "93",
+    "bright_blue": "94",
+    "bright_magenta": "95",
+    "bright_cyan": "96",
+    "bright_white": "97",
+}
+
+
+def _styled_text(
+    message: str,
+    *,
+    stream,
+    color: str | None = None,
+    bold: bool = False,
+) -> str:
+    if not hasattr(stream, "isatty") or not stream.isatty():
+        return message
+
+    codes: list[str] = []
+    if bold:
+        codes.append("1")
+    if color is not None and color in _ANSI_COLOR_CODES:
+        codes.append(_ANSI_COLOR_CODES[color])
+    if not codes:
+        return message
+    return f"\033[{';'.join(codes)}m{message}\033[0m"
+
+
+def _print_message(
+    message: str,
+    *,
+    err: bool = False,
+    nl: bool = True,
+    color: str | None = None,
+    bold: bool = False,
+) -> None:
+    stream = sys.stderr if err else sys.stdout
+    stream.write(
+        _styled_text(message, stream=stream, color=color, bold=bold)
+        + ("\n" if nl else "")
+    )
+    stream.flush()
+
 
 @dataclass
 class BuildSummary:
@@ -184,7 +236,12 @@ class _ImageBuildReporter:
 
     def _print_prefix(self, err: bool) -> None:
         if _ImageBuildReporter._instance_count > 1:
-            click.secho(f"{self._display_name}: ", nl=False, err=err, fg=self._color)
+            _print_message(
+                f"{self._display_name}: ",
+                nl=False,
+                err=err,
+                color=self._color,
+            )
 
     def _print_message(
         self,
@@ -194,7 +251,7 @@ class _ImageBuildReporter:
         nl: bool = True,
     ) -> None:
         self._print_prefix(err)
-        click.secho(message, err=err, nl=nl)
+        _print_message(message, err=err, nl=nl)
 
 
 class ImageBuilderV3Client:
@@ -314,8 +371,8 @@ class ImageBuilderV3Client:
             image_build.id: image_build for image_build in final_result.image_builds
         }
 
-        click.echo(file=sys.stderr)
-        click.secho("Image build summary:", bold=True, err=True)
+        _print_message("", err=True)
+        _print_message("Image build summary:", bold=True, err=True)
         for reporter in reporters.values():
             status = reporter.print_final_result(
                 final_builds.get(reporter.image_build_id)
@@ -329,8 +386,8 @@ class ImageBuilderV3Client:
             else:
                 summary.unknown += 1
 
-        click.echo(file=sys.stderr)
-        click.secho(
+        _print_message("", err=True)
+        _print_message(
             (
                 f"total={summary.total} "
                 f"succeeded={summary.succeeded} "

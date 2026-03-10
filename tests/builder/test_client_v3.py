@@ -251,7 +251,7 @@ class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
             )()
         )["img-build-1"]
 
-        with patch("tensorlake.builder.client_v3.click.secho") as secho:
+        with patch("tensorlake.builder.client_v3._print_message") as print_message:
             reporter.print_log_event(
                 BuildLogEvent(
                     image_build_id="img-build-1",
@@ -275,7 +275,7 @@ class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
 
         waiting_calls = [
             call
-            for call in secho.call_args_list
+            for call in print_message.call_args_list
             if call.args and call.args[0] == "Build waiting in queue..."
         ]
         self.assertEqual(len(waiting_calls), 2)
