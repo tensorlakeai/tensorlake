@@ -2,18 +2,38 @@ name: Release Tensorlake SDK package to TestPyPi.
 
 on:
   workflow_dispatch:
+    inputs:
+      skip_build:
+        description: Skip building wheels (use already-uploaded artifacts)
+        type: boolean
+        default: false
+      version:
+        description: Version for integration tests (required when skip_build is true)
+        type: string
   workflow_call:
+    inputs:
+      skip_build:
+        description: Skip building wheels (use already-uploaded artifacts)
+        type: boolean
+        default: false
+      version:
+        description: Version for integration tests (required when skip_build is true)
+        type: string
     secrets:
       TENSORLAKE_API_KEY:
         required: true
       TENSORLAKE_API_URL:
         required: true
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 permissions:
   contents: read
 
 jobs:
   build-sdist:
+    if: ${{ !inputs.skip_build }}
     name: Build source distribution
     runs-on: namespace-profile-rust-builder-amd64
     outputs:
@@ -40,6 +60,7 @@ jobs:
           path: dist
 
   build-wheels:
+    if: ${{ !inputs.skip_build }}
     name: Build wheels on ${{ matrix.platform.os }} (${{ matrix.platform.target }})
     runs-on: ${{ matrix.platform.os }}
     strategy:
@@ -77,6 +98,7 @@ jobs:
         env:
           # ring's AArch64 assembly requires __ARM_ARCH; manylinux2014 cross GCC 4.8 doesn't define it.
           CFLAGS_aarch64_unknown_linux_gnu: ${{ runner.os == 'Linux' && matrix.platform.target == 'aarch64' && '-D__ARM_ARCH=8' || '' }}
+          CARGO_TARGET_DIR: target
         with:
           target: ${{ matrix.platform.target }}
           args: --manifest-path crates/rust-cloud-sdk-py/Cargo.toml --release --out dist-cloud-sdk -i ${{ matrix.platform.cloud_sdk_interpreter }}
@@ -119,6 +141,7 @@ jobs:
         env:
           # ring's AArch64 assembly requires __ARM_ARCH; manylinux2014 cross GCC 4.8 doesn't define it.
           CFLAGS_aarch64_unknown_linux_gnu: ${{ runner.os == 'Linux' && matrix.platform.target == 'aarch64' && '-D__ARM_ARCH=8' || '' }}
+          CARGO_TARGET_DIR: target
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist
@@ -144,6 +167,7 @@ jobs:
           path: dist
 
   publish:
+    if: ${{ !cancelled() && !failure() }}
     name: Publish to TestPyPI
     needs: [build-sdist, build-wheels]
     runs-on: ubuntu-latest
@@ -167,11 +191,12 @@ jobs:
           repository-url: https://test.pypi.org/legacy/
 
   integration-test:
+    if: ${{ !cancelled() && !failure() }}
     name: Integration test against TestPyPI
     needs: [publish, build-sdist]
     uses: ./.github/workflows/integration_test.yaml
     with:
-      version: ${{ needs.build-sdist.outputs.version }}
+      version: ${{ inputs.skip_build && inputs.version || needs.build-sdist.outputs.version }}
     secrets:
       TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
       TENSORLAKE_API_URL: ${{ secrets.TENSORLAKE_API_URL }}
