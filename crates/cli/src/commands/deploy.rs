@@ -4,12 +4,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 
-pub async fn run(ctx: &CliContext, remaining_args: &[String], build_envs: &[String]) -> Result<()> {
+pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
     let mut cmd = tokio::process::Command::new("tensorlake-deploy");
     cmd.args(remaining_args);
-    if !build_envs.is_empty() {
-        cmd.env("TENSORLAKE_BUILD_ENVS", build_envs.join("\n"));
-    }
 
     // Pass auth context via environment
     cmd.env("TENSORLAKE_API_URL", &ctx.api_url);

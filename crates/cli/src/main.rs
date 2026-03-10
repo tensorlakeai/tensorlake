@@ -97,13 +97,9 @@ enum Commands {
 
     /// Deploy applications to Tensorlake Cloud
     Deploy {
-        /// Arguments passed to the deploy Python module
+        /// Arguments passed to the deploy Python module (use --build-env KEY=VALUE to inject ENV directives into generated Dockerfiles)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
-
-        /// Environment variable to inject into the generated Dockerfile as an ENV directive (KEY=VALUE, repeatable)
-        #[arg(long = "build-env", value_name = "KEY=VALUE")]
-        build_envs: Vec<String>,
     },
 
     /// Build Docker images for applications defined in an application file
@@ -371,14 +367,14 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             no_confirm,
         } => commands::init::run(ctx, directory.as_deref(), no_confirm).await,
         Commands::New { name, force } => commands::new::run(&name, force),
-        Commands::Deploy { args, build_envs } => {
+        Commands::Deploy { args } => {
             let onprem = std::env::var("TENSORLAKE_ONPREM")
                 .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
                 .unwrap_or(false);
             if !onprem {
                 ensure_auth_and_project(ctx).await?;
             }
-            commands::deploy::run(ctx, &args, &build_envs).await
+            commands::deploy::run(ctx, &args).await
         }
         Commands::BuildImages {
             application_file_path,
