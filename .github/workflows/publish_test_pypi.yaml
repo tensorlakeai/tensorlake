@@ -189,6 +189,7 @@ jobs:
         with:
           verbose: true
           repository-url: https://test.pypi.org/legacy/
+          attestations: false
 
   integration-test:
     if: ${{ !cancelled() && !failure() }}
