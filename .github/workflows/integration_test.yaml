@@ -47,7 +47,7 @@ jobs:
           docker run --rm \
             -e TENSORLAKE_API_KEY="${{ secrets.TENSORLAKE_API_KEY }}" \
             -e TENSORLAKE_API_URL="${{ secrets.TENSORLAKE_API_URL }}" \
-            -v /tmp/test_app.py:/test_app.py \
+            -v /tmp/test_app.py:/tmp/test_app.py \
             -v /var/run/docker.sock:/var/run/docker.sock \
             python:3.11-slim bash -c '
               set -e
@@ -58,12 +58,12 @@ jobs:
                           tensorlake==${{ inputs.version }}
 
               echo "--- 1. Build images ---"
-              tl build-images /test_app.py \
+              tl build-images /tmp/test_app.py \
                 --build-env PIP_INDEX_URL=https://test.pypi.org/simple/ \
                 --build-env PIP_EXTRA_INDEX_URL=https://pypi.org/simple/
 
               echo "--- 2. Deploy ---"
-              tl deploy /test_app.py \
+              tl deploy /tmp/test_app.py \
                 --build-env PIP_INDEX_URL=https://test.pypi.org/simple/ \
                 --build-env PIP_EXTRA_INDEX_URL=https://pypi.org/simple/
 
