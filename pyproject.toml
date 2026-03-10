@@ -1,6 +1,6 @@
 [project]
 name = "tensorlake"
-version = "0.4.16-rc5"
+version = "0.4.16"
 description = "Tensorlake SDK for Document Ingestion API and Serverless Applications"
 readme = "README.md"
 authors = [{ name = "Tensorlake Inc.", email = "support@tensorlake.ai" }]
