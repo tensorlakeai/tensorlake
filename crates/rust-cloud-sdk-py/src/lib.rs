@@ -363,11 +363,6 @@ impl CloudApiClient {
             let request_json = request_json.clone();
             let image_contexts = image_contexts.clone();
             async move {
-                eprintln!(
-                    "Rust CloudApiClient.create_application_build called via {} with {} image contexts",
-                    build_service_path,
-                    image_contexts.len()
-                );
                 let request: CreateApplicationBuildRequest = serde_json::from_str(&request_json)?;
                 let image_contexts: Vec<ApplicationBuildContext> = image_contexts
                     .into_iter()

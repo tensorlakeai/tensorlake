@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tensorlake.applications import Function, Image
+from tensorlake.applications.applications import functions_for_application
 from tensorlake.applications.image import create_image_context_file
 
 
@@ -30,7 +31,7 @@ def collect_application_build_request(
     image_requests: dict[Image, ApplicationBuildImageRequest] = {}
     image_functions: dict[Image, list[str]] = {}
 
-    for function in _functions_for_application(application, functions):
+    for function in functions_for_application(application, functions):
         image = function._function_config.image
         if image not in image_requests:
             context_tar_gz = build_image_context(image)
@@ -50,16 +51,6 @@ def collect_application_build_request(
         version=application._application_config.version,
         images=list(image_requests.values()),
     )
-
-
-def _functions_for_application(
-    application: Function, functions: list[Function]
-) -> list[Function]:
-    return [
-        function
-        for function in functions
-        if function is application or function._application_config is None
-    ]
 
 
 def build_image_context(image: Image) -> bytes:

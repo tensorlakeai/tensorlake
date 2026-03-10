@@ -1,4 +1,4 @@
-from typing import Generator, Iterator
+from collections.abc import Generator, Iterator
 
 from .interface.function import Function, _is_application_function
 from .interface.request import Request
@@ -19,6 +19,25 @@ def filter_applications(
         if not _is_application_function(function):
             continue
         yield function
+
+
+def functions_for_application(
+    application: Function,
+    functions: Iterator[Function],
+) -> list[Function]:
+    """Returns functions included in the application build request.
+
+    This is intentionally broader than the application's reachable function graph.
+    Today deploy packaging/runtime ships all non-application Tensorlake functions for
+    each application and does not derive a smaller server-side closure. Keeping the
+    builder aligned with that behavior is safer than doing client-side graph pruning,
+    even though it can build more images than strictly necessary.
+    """
+    return [
+        function
+        for function in functions
+        if function is application or not _is_application_function(function)
+    ]
 
 
 def run_application(
