@@ -1,29 +1,8 @@
 name: Release Tensorlake SDK package to TestPyPi.
 
 on:
+  pull_request:
   workflow_dispatch:
-    inputs:
-      skip_build:
-        description: Skip building wheels (use already-uploaded artifacts)
-        type: boolean
-        default: false
-      version:
-        description: Version for integration tests (required when skip_build is true)
-        type: string
-  workflow_call:
-    inputs:
-      skip_build:
-        description: Skip building wheels (use already-uploaded artifacts)
-        type: boolean
-        default: false
-      version:
-        description: Version for integration tests (required when skip_build is true)
-        type: string
-    secrets:
-      TENSORLAKE_API_KEY:
-        required: true
-      TENSORLAKE_API_URL:
-        required: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -32,20 +11,29 @@ permissions:
   contents: read
 
 jobs:
-  build-sdist:
-    if: ${{ !inputs.skip_build }}
-    name: Build source distribution
-    runs-on: namespace-profile-rust-builder-amd64
+  prepare:
+    name: Generate dev version
+    runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract version from pyproject.toml
+      - name: Generate dev version
         id: version
         run: |
-          version=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
-          echo "version=$version" >> $GITHUB_OUTPUT
+          base=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "version=${base}-dev$(date +%s)" >> $GITHUB_OUTPUT
+
+  build-sdist:
+    needs: [prepare]
+    name: Build source distribution
+    runs-on: namespace-profile-rust-builder-amd64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bump version
+        run: make bump_version VERSION=${{ needs.prepare.outputs.version }}
 
       - name: Build sdist
         uses: PyO3/maturin-action@v1
@@ -60,7 +48,7 @@ jobs:
           path: dist
 
   build-wheels:
-    if: ${{ !inputs.skip_build }}
+    needs: [prepare]
     name: Build wheels on ${{ matrix.platform.os }} (${{ matrix.platform.target }})
     runs-on: ${{ matrix.platform.os }}
     strategy:
@@ -83,6 +71,9 @@ jobs:
             cloud_sdk_interpreter: python3.10
     steps:
       - uses: actions/checkout@v4
+
+      - name: Bump version
+        run: make bump_version VERSION=${{ needs.prepare.outputs.version }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -167,7 +158,6 @@ jobs:
           path: dist
 
   publish:
-    if: ${{ !cancelled() && !failure() }}
     name: Publish to TestPyPI
     needs: [build-sdist, build-wheels]
     runs-on: ubuntu-latest
@@ -192,12 +182,11 @@ jobs:
           attestations: false
 
   integration-test:
-    if: ${{ !cancelled() && !failure() }}
     name: Integration test against TestPyPI
-    needs: [publish, build-sdist]
+    needs: [publish, prepare]
     uses: ./.github/workflows/integration_test.yaml
     with:
-      version: ${{ inputs.skip_build && inputs.version || needs.build-sdist.outputs.version }}
+      version: ${{ needs.prepare.outputs.version }}
     secrets:
       TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
       TENSORLAKE_API_URL: ${{ secrets.TENSORLAKE_API_URL }}
