@@ -100,6 +100,18 @@ def _warning_missing_secrets(auth: Context, secrets: list[str]) -> list[str]:
     return [s for s in secrets if s not in existing]
 
 
+def _parse_build_envs(build_envs: list[str]) -> list[tuple[str, str]]:
+    parsed_build_envs: list[tuple[str, str]] = []
+    for build_env in build_envs:
+        key, separator, value = build_env.partition("=")
+        if separator != "=" or not key:
+            raise ValueError(
+                f"invalid --build-env value '{build_env}'; expected KEY=VALUE"
+            )
+        parsed_build_envs.append((key, value))
+    return parsed_build_envs
+
+
 def _onprem_enabled() -> bool:
     return os.environ.get("TENSORLAKE_ONPREM", "").lower() in {
         "1",
@@ -137,6 +149,7 @@ def deploy(
     application_file_path: str,
     upgrade_running_requests: bool,
     image_builder_version: str = "v2",
+    build_envs: list[tuple[str, str]] | None = None,
 ):
     """Deploys applications to Tensorlake Cloud, emitting NDJSON events to stdout."""
     _emit(
@@ -203,7 +216,7 @@ def deploy(
 
     builder = mk_builder(image_builder_version, auth)
     try:
-        asyncio.run(_prepare_images(builder, functions))
+        asyncio.run(_prepare_images(builder, functions, build_envs))
     except KeyboardInterrupt:
         _emit({"type": "error", "message": "build cancelled by user"})
         sys.exit(1)
@@ -220,11 +233,19 @@ def deploy(
     )
 
 
-async def _prepare_images(builder, functions: list[Function]):
+async def _prepare_images(
+    builder,
+    functions: list[Function],
+    build_envs: list[tuple[str, str]] | None = None,
+):
     for application in filter_applications(functions):
         try:
             await builder.build(
-                collect_application_build_request(application, functions)
+                collect_application_build_request(
+                    application,
+                    functions,
+                    build_env_vars=build_envs,
+                )
             )
         except (asyncio.CancelledError, KeyboardInterrupt) as error:
             raise error
@@ -314,6 +335,13 @@ def deploy_entrypoint():
         default="v2",
         help="Select image builder version",
     )
+    parser.add_argument(
+        "--build-env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Environment variable to inject into generated Dockerfiles (repeatable)",
+    )
     args = parser.parse_args()
 
     try:
@@ -321,6 +349,7 @@ def deploy_entrypoint():
             application_file_path=args.application_file_path,
             upgrade_running_requests=args.upgrade_running_requests,
             image_builder_version=args.image_builder_version,
+            build_envs=_parse_build_envs(args.build_env),
         )
     except SystemExit:
         raise

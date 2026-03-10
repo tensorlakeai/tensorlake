@@ -26,7 +26,9 @@ class ApplicationBuildRequest:
 
 
 def collect_application_build_request(
-    application: Function, functions: list[Function]
+    application: Function,
+    functions: list[Function],
+    build_env_vars: list[tuple[str, str]] | None = None,
 ) -> ApplicationBuildRequest:
     image_requests: dict[Image, ApplicationBuildImageRequest] = {}
     image_functions: dict[Image, list[str]] = {}
@@ -34,7 +36,7 @@ def collect_application_build_request(
     for function in functions_for_application(application, functions):
         image = function._function_config.image
         if image not in image_requests:
-            context_tar_gz = build_image_context(image)
+            context_tar_gz = build_image_context(image, extra_env_vars=build_env_vars)
             image_requests[image] = ApplicationBuildImageRequest(
                 key=image._id,
                 name=image.name,
@@ -53,12 +55,19 @@ def collect_application_build_request(
     )
 
 
-def build_image_context(image: Image) -> bytes:
+def build_image_context(
+    image: Image,
+    extra_env_vars: list[tuple[str, str]] | None = None,
+) -> bytes:
     fd, context_file_path = tempfile.mkstemp()
     os.close(fd)
 
     try:
-        create_image_context_file(image, context_file_path)
+        create_image_context_file(
+            image,
+            context_file_path,
+            extra_env_vars=extra_env_vars,
+        )
         return Path(context_file_path).read_bytes()
     finally:
         if os.path.exists(context_file_path):

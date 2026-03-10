@@ -23,7 +23,7 @@ def isolated_registry():
         yield
 
 
-def fake_create_image_context_file(image, file_path):
+def fake_create_image_context_file(image, file_path, extra_env_vars=None):
     with open(file_path, "wb") as handle:
         handle.write(f"context:{image._id}".encode())
 
@@ -140,7 +140,10 @@ class TestDeployHelpers(unittest.TestCase):
 
             all_functions = [default_helper, custom_helper, default_image_app]
 
-            def fake_build_image_context(image):
+            image_context_calls = []
+
+            def fake_build_image_context(image, extra_env_vars=None):
+                image_context_calls.append((image, extra_env_vars))
                 return f"context:{image._id}".encode()
 
             with patch.object(
@@ -149,10 +152,25 @@ class TestDeployHelpers(unittest.TestCase):
                 side_effect=fake_build_image_context,
             ):
                 request = builder_module.collect_application_build_request(
-                    default_image_app, all_functions
+                    default_image_app,
+                    all_functions,
+                    build_env_vars=[("PIP_INDEX_URL", "https://test.pypi.org/simple/")],
                 )
 
         images = {image.key: image for image in request.images}
+        self.assertEqual(
+            image_context_calls,
+            [
+                (
+                    default_helper._function_config.image,
+                    [("PIP_INDEX_URL", "https://test.pypi.org/simple/")],
+                ),
+                (
+                    custom_image,
+                    [("PIP_INDEX_URL", "https://test.pypi.org/simple/")],
+                ),
+            ],
+        )
         self.assertEqual(
             set(images), {default_helper._function_config.image._id, custom_image._id}
         )
@@ -782,7 +800,7 @@ class TestDeployEntrypoints(unittest.TestCase):
         )
         functions = [application, helper]
 
-        def fake_build_image_context(image):
+        def fake_build_image_context(image, extra_env_vars=None):
             return f"context:{image._id}".encode()
 
         with (
@@ -869,6 +887,10 @@ class TestDeployEntrypoints(unittest.TestCase):
                     "my_app.py",
                     "--image-builder-version",
                     "v3",
+                    "--build-env",
+                    "PIP_INDEX_URL=https://test.pypi.org/simple/",
+                    "--build-env",
+                    "PIP_EXTRA_INDEX_URL=https://pypi.org/simple/",
                 ],
             ),
             patch.object(deploy_module, "deploy") as deploy,
@@ -876,6 +898,13 @@ class TestDeployEntrypoints(unittest.TestCase):
             deploy_module.deploy_entrypoint()
 
         self.assertEqual(deploy.call_args.kwargs["image_builder_version"], "v3")
+        self.assertEqual(
+            deploy.call_args.kwargs["build_envs"],
+            [
+                ("PIP_INDEX_URL", "https://test.pypi.org/simple/"),
+                ("PIP_EXTRA_INDEX_URL", "https://pypi.org/simple/"),
+            ],
+        )
 
     def test_prepare_images_emits_inner_build_error_message(self):
         builder = MagicMock()
