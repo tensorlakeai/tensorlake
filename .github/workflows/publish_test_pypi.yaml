@@ -2,6 +2,7 @@ name: Release Tensorlake SDK package to TestPyPi.
 
 on:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: write
@@ -11,9 +12,17 @@ permissions:
 jobs:
   build-sdist:
     name: Build source distribution
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-rust-builder-amd64
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Extract version from pyproject.toml
+        id: version
+        run: |
+          version=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$version" >> $GITHUB_OUTPUT
 
       - name: Build sdist
         uses: PyO3/maturin-action@v1
@@ -34,11 +43,11 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - os: ubuntu-latest
+          - os: namespace-profile-rust-builder-amd64
             target: x86_64
             manylinux: auto
             cloud_sdk_interpreter: /opt/python/cp310-cp310/bin/python
-          - os: ubuntu-latest
+          - os: namespace-profile-rust-builder-amd64
             target: aarch64
             manylinux: auto
             cloud_sdk_interpreter: python3
@@ -56,15 +65,20 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Cache Rust build artifacts (macOS)
+        if: runner.os == 'macOS'
+        uses: Swatinem/rust-cache@v2
+
       - name: Build Cloud SDK wheel
         uses: PyO3/maturin-action@v1
         env:
           # ring's AArch64 assembly requires __ARM_ARCH; manylinux2014 cross GCC 4.8 doesn't define it.
-          CFLAGS_aarch64_unknown_linux_gnu: ${{ matrix.platform.os == 'ubuntu-latest' && matrix.platform.target == 'aarch64' && '-D__ARM_ARCH=8' || '' }}
+          CFLAGS_aarch64_unknown_linux_gnu: ${{ runner.os == 'Linux' && matrix.platform.target == 'aarch64' && '-D__ARM_ARCH=8' || '' }}
         with:
           target: ${{ matrix.platform.target }}
           args: --manifest-path crates/rust-cloud-sdk-py/Cargo.toml --release --out dist-cloud-sdk -i ${{ matrix.platform.cloud_sdk_interpreter }}
           manylinux: ${{ matrix.platform.manylinux || 'auto' }}
+          sccache: 'true'
 
       - name: Bundle Cloud SDK extension into tensorlake wheel
         run: |
@@ -101,14 +115,15 @@ jobs:
         uses: PyO3/maturin-action@v1
         env:
           # ring's AArch64 assembly requires __ARM_ARCH; manylinux2014 cross GCC 4.8 doesn't define it.
-          CFLAGS_aarch64_unknown_linux_gnu: ${{ matrix.platform.os == 'ubuntu-latest' && matrix.platform.target == 'aarch64' && '-D__ARM_ARCH=8' || '' }}
+          CFLAGS_aarch64_unknown_linux_gnu: ${{ runner.os == 'Linux' && matrix.platform.target == 'aarch64' && '-D__ARM_ARCH=8' || '' }}
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist
           manylinux: ${{ matrix.platform.manylinux || 'auto' }}
+          sccache: 'true'
 
       - name: Verify wheel imports Rust Cloud SDK extension
-        if: ${{ !(matrix.platform.os == 'ubuntu-latest' && matrix.platform.target == 'aarch64') }}
+        if: ${{ !(runner.os == 'Linux' && matrix.platform.target == 'aarch64') }}
         run: |
           python -m venv /tmp/wheel-verify
           source /tmp/wheel-verify/bin/activate
@@ -146,4 +161,15 @@ jobs:
       - name: Publish to TestPyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
+          verbose: true
           repository-url: https://test.pypi.org/legacy/
+
+  integration-test:
+    name: Integration test against TestPyPI
+    needs: [publish, build-sdist]
+    uses: ./.github/workflows/integration_test.yaml
+    with:
+      version: ${{ needs.build-sdist.outputs.version }}
+    secrets:
+      TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
+      TENSORLAKE_API_URL: ${{ secrets.TENSORLAKE_API_URL }}

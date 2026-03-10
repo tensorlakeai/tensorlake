@@ -94,10 +94,23 @@ def _onprem_enabled() -> bool:
     }
 
 
+def _parse_build_envs(build_envs: list[str] | None) -> list[tuple[str, str]] | None:
+    if not build_envs:
+        return None
+    result = []
+    for item in build_envs:
+        if "=" not in item:
+            continue
+        key, _, val = item.partition("=")
+        result.append((key.strip(), val.strip()))
+    return result or None
+
+
 def deploy(
     application_file_path: str,
     parallel_builds: bool,
     upgrade_running_requests: bool,
+    build_envs: list[str] | None = None,
 ):
     """Deploys applications to Tensorlake Cloud, emitting NDJSON events to stdout."""
     _emit(
@@ -158,22 +171,16 @@ def deploy(
 
     auth = _build_context_from_env()
 
-    # Create builder client with proper authentication
-    bearer_token = auth.api_key or auth.personal_access_token
-    builder_v2 = ImageBuilderV2Client(
-        build_service=os.getenv("TENSORLAKE_BUILD_SERVICE")
-        or f"{auth.api_url}/images/v2",
-        api_key=bearer_token,
-        organization_id=auth.organization_id if not auth.api_key else None,
-        project_id=auth.project_id if not auth.api_key else None,
-    )
+    builder_v2 = ImageBuilderV2Client.from_env()
 
     missing = _warning_missing_secrets(auth, list(list_secret_names()))
     if missing:
         _emit({"type": "missing_secrets", "count": len(missing)})
 
+    extra_env_vars = _parse_build_envs(build_envs)
+
     try:
-        asyncio.run(_prepare_images_v2(builder_v2, functions))
+        asyncio.run(_prepare_images_v2(builder_v2, functions, extra_env_vars))
     except KeyboardInterrupt:
         _emit({"type": "error", "message": "build cancelled by user"})
         sys.exit(1)
@@ -190,7 +197,11 @@ def deploy(
     )
 
 
-async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: list[Function]):
+async def _prepare_images_v2(
+    builder: ImageBuilderV2Client,
+    functions: list[Function],
+    extra_env_vars: list[tuple[str, str]] | None = None,
+):
     images: dict[Image, ImageInformation] = image_infos()
     for application in filter_applications(functions):
         fn_config: _FunctionConfiguration = application._function_config
@@ -208,6 +219,7 @@ async def _prepare_images_v2(builder: ImageBuilderV2Client, functions: list[Func
                             function_name=function._function_config.function_name,
                         ),
                         image_info.image,
+                        extra_env_vars=extra_env_vars,
                     )
                 except (asyncio.CancelledError, KeyboardInterrupt) as error:
                     raise error
@@ -244,7 +256,7 @@ def _deploy_applications(
             applications_file_path=application_file_path,
             upgrade_running_requests=upgrade_running_requests,
             load_source_dir_modules=False,
-            api_client=auth.cloud_client,
+            api_client=api_client,
         )
 
         for application_function in filter_applications(functions):
@@ -301,6 +313,14 @@ def deploy_entrypoint():
         default=False,
         help="Upgrade requests that are already queued or running",
     )
+    parser.add_argument(
+        "--build-env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        dest="build_envs",
+        help="Inject an ENV directive into generated Dockerfiles (repeatable)",
+    )
     args = parser.parse_args()
 
     try:
@@ -308,6 +328,7 @@ def deploy_entrypoint():
             application_file_path=args.application_file_path,
             parallel_builds=args.parallel_builds,
             upgrade_running_requests=args.upgrade_running_requests,
+            build_envs=args.build_envs or None,
         )
     except SystemExit:
         raise

@@ -97,7 +97,7 @@ enum Commands {
 
     /// Deploy applications to Tensorlake Cloud
     Deploy {
-        /// Arguments passed to the deploy Python module
+        /// Arguments passed to the deploy Python module (use --build-env KEY=VALUE to inject ENV directives into generated Dockerfiles)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -130,6 +130,10 @@ enum Commands {
         /// Push built images to the registry after building
         #[arg(long)]
         push: bool,
+
+        /// Environment variable to inject into the generated Dockerfile as an ENV directive (KEY=VALUE, repeatable)
+        #[arg(long = "build-env", value_name = "KEY=VALUE")]
+        build_envs: Vec<String>,
     },
 
     /// Parse a document and print markdown
@@ -380,6 +384,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             stage,
             template,
             push,
+            build_envs,
         } => {
             commands::build_images::run(
                 &application_file_path,
@@ -389,6 +394,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 &stage,
                 template.as_deref(),
                 push,
+                &build_envs,
             )
             .await
         }
