@@ -3,11 +3,14 @@ name: Release Tensorlake SDK package to TestPyPi.
 on:
   workflow_dispatch:
   workflow_call:
+    secrets:
+      TENSORLAKE_API_KEY:
+        required: true
+      TENSORLAKE_API_URL:
+        required: true
 
 permissions:
-  contents: write
-  actions: write
-  packages: write
+  contents: read
 
 jobs:
   build-sdist:
@@ -149,7 +152,6 @@ jobs:
       url: https://test.pypi.org/p/tensorlake
     permissions:
       id-token: write
-      contents: read
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4

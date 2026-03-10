@@ -4,9 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  actions: write
-  packages: write
+  contents: read
 
 jobs:
   build-sdist:
@@ -138,6 +136,9 @@ jobs:
       id-token: write
       contents: read
     uses: ./.github/workflows/publish_test_pypi.yaml
+    secrets:
+      TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
+      TENSORLAKE_API_URL: ${{ secrets.TENSORLAKE_API_URL }}
 
   publish:
     name: Publish to PyPI
@@ -148,7 +149,6 @@ jobs:
       url: https://pypi.org/p/tensorlake
     permissions:
       id-token: write
-      contents: read
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
