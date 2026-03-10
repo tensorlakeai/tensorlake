@@ -31,7 +31,6 @@ def _raise_as_tensorlake_error(e: Exception) -> None:
     from tensorlake.applications.interface.exceptions import (
         InternalError,
         RemoteAPIError,
-        RemoteTransportError,
         SDKUsageError,
         TensorlakeError,
     )
@@ -65,7 +64,7 @@ def _raise_as_tensorlake_error(e: Exception) -> None:
         elif status_code is not None:
             raise RemoteAPIError(status_code=status_code, message=message) from None
         elif kind == "connection":
-            raise RemoteTransportError(
+            raise InternalError(
                 f"Connection error while communicating with Tensorlake API: {message}"
             ) from None
         elif kind == "sdk_usage":

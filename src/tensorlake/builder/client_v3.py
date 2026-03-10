@@ -12,7 +12,6 @@ from tensorlake.builder.client_v2 import ApplicationImageBuildError
 from tensorlake.builder.log_events import BuildLogEvent, emit_build_log_event
 from tensorlake.cloud_client import CloudClient
 
-
 NonEmptyString = Annotated[str, Field(min_length=1)]
 Sha256Hex = Annotated[str, Field(pattern=r"^[0-9a-fA-F]{64}$")]
 

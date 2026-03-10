@@ -58,18 +58,13 @@ def create_image_context_file(
         return
 
     try:
-        from tensorlake_rust_cloud_sdk import (
+        from tensorlake._cloud_sdk import (
             create_image_context_file as _rust_create_image_context_file,
         )
     except ImportError:
-        try:
-            from tensorlake._cloud_sdk import (
-                create_image_context_file as _rust_create_image_context_file,
-            )
-        except ImportError:
-            from _cloud_sdk import (
-                create_image_context_file as _rust_create_image_context_file,
-            )
+        from _cloud_sdk import (
+            create_image_context_file as _rust_create_image_context_file,
+        )
 
     _rust_create_image_context_file(
         base_image=img._base_image,

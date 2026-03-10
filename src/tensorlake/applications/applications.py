@@ -22,22 +22,17 @@ def filter_applications(
 
 
 def functions_for_application(
-    application: Function,
+    _application: Function,
     functions: Iterator[Function],
 ) -> list[Function]:
-    """Returns functions included in the application build request.
+    """Returns all loaded functions for the application build request.
 
-    This is intentionally broader than the application's reachable function graph.
-    Today deploy packaging/runtime ships all non-application Tensorlake functions for
-    each application and does not derive a smaller server-side closure. Keeping the
-    builder aligned with that behavior is safer than doing client-side graph pruning,
-    even though it can build more images than strictly necessary.
+    We cannot reliably determine application membership statically, and one
+    application can call another application's function at runtime. For
+    compatibility with deploy/runtime packaging, each application build includes
+    all loaded Tensorlake functions.
     """
-    return [
-        function
-        for function in functions
-        if function is application or not _is_application_function(function)
-    ]
+    return list(functions)
 
 
 def run_application(

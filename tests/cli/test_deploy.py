@@ -28,6 +28,10 @@ def fake_create_image_context_file(image, file_path):
         handle.write(f"context:{image._id}".encode())
 
 
+def expected_context_sha(image):
+    return hashlib.sha256(f"context:{image._id}".encode()).hexdigest()
+
+
 class FakeV3CloudClient:
     def __init__(self):
         self.calls = []
@@ -392,196 +396,7 @@ class TestDeployEntrypoints(unittest.TestCase):
         self.assertEqual(deployed_event["application"], "app-one")
         self.assertEqual(deployed_event["curl_command"], "curl https://example.test")
 
-    def test_deploy_v3_path_builds_each_application_without_other_application_images(
-        self,
-    ):
-        cloud_client = FakeV3CloudClient()
-        auth = SimpleNamespace(
-            api_url="https://api.tensorlake.ai",
-            api_key="api-key",
-            personal_access_token=None,
-            organization_id="org-1",
-            project_id="proj-1",
-            cloud_client=cloud_client,
-        )
-        with isolated_registry():
-            image_a = Image(name="image-a")
-            image_b = Image(name="image-b")
-            image_shared = Image(name="image-shared")
-
-            @function(image=image_shared)
-            def shared_worker(payload):
-                return payload
-
-            @application()
-            @function(image=image_a)
-            def app_one(payload):
-                return shared_worker(payload)
-
-            @application()
-            @function(image=image_b)
-            def app_two(payload):
-                return shared_worker(payload)
-
-            functions = [shared_worker, app_one, app_two]
-
-            with (
-                self._successful_deploy_patches(auth, functions),
-                patch.object(
-                    builder_module,
-                    "create_image_context_file",
-                    side_effect=fake_create_image_context_file,
-                ),
-                patch.object(deploy_module, "_deploy_applications"),
-                patch.object(deploy_module, "_emit"),
-            ):
-                deploy_module.deploy(
-                    application_file_path="my_app.py",
-                    upgrade_running_requests=False,
-                    image_builder_version="v3",
-                )
-
-        self.assertEqual(len(cloud_client.calls), 2)
-
-        first_build_service_path, first_request_json, first_image_contexts = (
-            cloud_client.calls[0]
-        )
-        first_request = json.loads(first_request_json)
-        self.assertEqual(first_build_service_path, "/images/v3/applications")
-        self.assertEqual(first_request["name"], app_one._function_config.function_name)
-        self.assertEqual(
-            {image["context_tar_part_name"] for image in first_request["images"]},
-            {image_a._id, image_shared._id},
-        )
-        self.assertEqual(
-            {
-                image["context_sha256"]
-                for image in first_request["images"]
-                if image["context_tar_part_name"] == image_a._id
-            },
-            {hashlib.sha256(f"context:{image_a._id}".encode()).hexdigest()},
-        )
-        self.assertEqual(
-            {
-                image["context_sha256"]
-                for image in first_request["images"]
-                if image["context_tar_part_name"] == image_shared._id
-            },
-            {hashlib.sha256(f"context:{image_shared._id}".encode()).hexdigest()},
-        )
-        self.assertEqual(
-            first_image_contexts,
-            [
-                (image_shared._id, f"context:{image_shared._id}".encode()),
-                (image_a._id, f"context:{image_a._id}".encode()),
-            ],
-        )
-        self.assertEqual(
-            cloud_client.create_responses["app-build-1"]["status"], "building"
-        )
-        self.assertEqual(
-            [
-                image["status"]
-                for image in cloud_client.create_responses["app-build-1"][
-                    "image_builds"
-                ]
-            ],
-            ["pending", "pending"],
-        )
-
-        second_build_service_path, second_request_json, second_image_contexts = (
-            cloud_client.calls[1]
-        )
-        second_request = json.loads(second_request_json)
-        self.assertEqual(second_build_service_path, "/images/v3/applications")
-        self.assertEqual(second_request["name"], app_two._function_config.function_name)
-        self.assertEqual(
-            {image["context_tar_part_name"] for image in second_request["images"]},
-            {image_b._id, image_shared._id},
-        )
-        self.assertEqual(
-            {
-                image["context_sha256"]
-                for image in second_request["images"]
-                if image["context_tar_part_name"] == image_b._id
-            },
-            {hashlib.sha256(f"context:{image_b._id}".encode()).hexdigest()},
-        )
-        self.assertEqual(
-            {
-                image["context_sha256"]
-                for image in second_request["images"]
-                if image["context_tar_part_name"] == image_shared._id
-            },
-            {hashlib.sha256(f"context:{image_shared._id}".encode()).hexdigest()},
-        )
-        self.assertEqual(
-            second_image_contexts,
-            [
-                (image_shared._id, f"context:{image_shared._id}".encode()),
-                (image_b._id, f"context:{image_b._id}".encode()),
-            ],
-        )
-        self.assertEqual(
-            cloud_client.create_responses["app-build-2"]["status"], "building"
-        )
-        self.assertEqual(
-            [
-                image["status"]
-                for image in cloud_client.create_responses["app-build-2"][
-                    "image_builds"
-                ]
-            ],
-            ["pending", "pending"],
-        )
-        self.assertEqual(
-            cloud_client.application_build_info_calls,
-            [
-                ("/images/v3/applications", "app-build-1"),
-                ("/images/v3/applications", "app-build-2"),
-            ],
-        )
-        self.assertEqual(cloud_client._responses["app-build-1"]["status"], "succeeded")
-        self.assertEqual(cloud_client._responses["app-build-2"]["status"], "succeeded")
-        self.assertEqual(
-            {
-                (
-                    build_service_path,
-                    build_id,
-                    prefix,
-                    color,
-                )
-                for build_service_path, build_id, prefix, color in cloud_client.stream_calls
-            },
-            {
-                (
-                    "/images/v3",
-                    f"img-build-app-build-1-{image_shared._id}",
-                    f"{app_one._function_config.function_name}/image-shared",
-                    "magenta",
-                ),
-                (
-                    "/images/v3",
-                    f"img-build-app-build-1-{image_a._id}",
-                    f"{app_one._function_config.function_name}/image-a",
-                    "cyan",
-                ),
-                (
-                    "/images/v3",
-                    f"img-build-app-build-2-{image_shared._id}",
-                    f"{app_two._function_config.function_name}/image-shared",
-                    "magenta",
-                ),
-                (
-                    "/images/v3",
-                    f"img-build-app-build-2-{image_b._id}",
-                    f"{app_two._function_config.function_name}/image-b",
-                    "cyan",
-                ),
-            },
-        )
-
-    def test_deploy_v3_path_keeps_non_application_functions_for_compatibility(self):
+    def test_deploy_v3_path_builds_all_functions_for_each_application(self):
         cloud_client = FakeV3CloudClient()
         auth = SimpleNamespace(
             api_url="https://api.tensorlake.ai",
@@ -668,11 +483,28 @@ class TestDeployEntrypoints(unittest.TestCase):
 
         self.assertEqual(len(cloud_client.calls), 2)
 
-        analyzer_request = json.loads(cloud_client.calls[0][1])
+        analyzer_build_service_path, analyzer_request_json, analyzer_image_contexts = (
+            cloud_client.calls[0]
+        )
+        self.assertEqual(analyzer_build_service_path, "/images/v3/applications")
+
+        analyzer_request = json.loads(analyzer_request_json)
+        self.assertEqual(
+            analyzer_request["name"], finance_analyzer._function_config.function_name
+        )
         analyzer_images = {
             image["context_tar_part_name"]: image
             for image in analyzer_request["images"]
         }
+        self.assertEqual(
+            set(analyzer_image_contexts),
+            {
+                (default_image._id, f"context:{default_image._id}".encode()),
+                (parser_image._id, f"context:{parser_image._id}".encode()),
+                (agent_image._id, f"context:{agent_image._id}".encode()),
+                (code_exec_image._id, f"context:{code_exec_image._id}".encode()),
+            },
+        )
         self.assertEqual(
             set(analyzer_images),
             {
@@ -680,6 +512,18 @@ class TestDeployEntrypoints(unittest.TestCase):
                 parser_image._id,
                 agent_image._id,
                 code_exec_image._id,
+            },
+        )
+        self.assertEqual(
+            {
+                image_key: image["context_sha256"]
+                for image_key, image in analyzer_images.items()
+            },
+            {
+                default_image._id: expected_context_sha(default_image),
+                parser_image._id: expected_context_sha(parser_image),
+                agent_image._id: expected_context_sha(agent_image),
+                code_exec_image._id: expected_context_sha(code_exec_image),
             },
         )
         self.assertEqual(
@@ -700,6 +544,7 @@ class TestDeployEntrypoints(unittest.TestCase):
                 run_finance_agent._function_config.function_name,
                 execute_sql_query._function_config.function_name,
                 run_query_agent._function_config.function_name,
+                finance_query._function_config.function_name,
             },
         )
         self.assertEqual(
@@ -721,10 +566,23 @@ class TestDeployEntrypoints(unittest.TestCase):
             },
         )
         self.assertEqual(
+            {
+                image_key: image["context_sha256"]
+                for image_key, image in query_images.items()
+            },
+            {
+                default_image._id: expected_context_sha(default_image),
+                parser_image._id: expected_context_sha(parser_image),
+                agent_image._id: expected_context_sha(agent_image),
+                code_exec_image._id: expected_context_sha(code_exec_image),
+            },
+        )
+        self.assertEqual(
             set(query_images[default_image._id]["function_names"]),
             {
                 get_extraction_schema._function_config.function_name,
                 get_document_content._function_config.function_name,
+                finance_analyzer._function_config.function_name,
             },
         )
         self.assertEqual(
@@ -743,6 +601,93 @@ class TestDeployEntrypoints(unittest.TestCase):
         self.assertEqual(
             query_images[code_exec_image._id]["function_names"],
             [execute_code._function_config.function_name],
+        )
+        self.assertEqual(
+            cloud_client.create_responses["app-build-1"]["status"], "building"
+        )
+        self.assertEqual(
+            cloud_client.create_responses["app-build-2"]["status"], "building"
+        )
+        self.assertEqual(
+            len(cloud_client.create_responses["app-build-1"]["image_builds"]), 4
+        )
+        self.assertEqual(
+            len(cloud_client.create_responses["app-build-2"]["image_builds"]), 4
+        )
+        self.assertTrue(
+            all(
+                image["status"] == "pending"
+                for image in cloud_client.create_responses["app-build-1"][
+                    "image_builds"
+                ]
+            )
+        )
+        self.assertTrue(
+            all(
+                image["status"] == "pending"
+                for image in cloud_client.create_responses["app-build-2"][
+                    "image_builds"
+                ]
+            )
+        )
+        self.assertEqual(
+            cloud_client.application_build_info_calls,
+            [
+                ("/images/v3/applications", "app-build-1"),
+                ("/images/v3/applications", "app-build-2"),
+            ],
+        )
+        self.assertEqual(
+            {
+                (
+                    build_service_path,
+                    build_id,
+                    prefix,
+                )
+                for build_service_path, build_id, prefix, _color in cloud_client.stream_calls
+            },
+            {
+                (
+                    "/images/v3",
+                    f"img-build-app-build-1-{default_image._id}",
+                    f"{finance_analyzer._function_config.function_name}/default",
+                ),
+                (
+                    "/images/v3",
+                    f"img-build-app-build-1-{parser_image._id}",
+                    f"{finance_analyzer._function_config.function_name}/parser-image",
+                ),
+                (
+                    "/images/v3",
+                    f"img-build-app-build-1-{agent_image._id}",
+                    f"{finance_analyzer._function_config.function_name}/agent-image",
+                ),
+                (
+                    "/images/v3",
+                    f"img-build-app-build-1-{code_exec_image._id}",
+                    f"{finance_analyzer._function_config.function_name}/code-exec-image",
+                ),
+                (
+                    "/images/v3",
+                    f"img-build-app-build-2-{default_image._id}",
+                    f"{finance_query._function_config.function_name}/default",
+                ),
+                (
+                    "/images/v3",
+                    f"img-build-app-build-2-{parser_image._id}",
+                    f"{finance_query._function_config.function_name}/parser-image",
+                ),
+                (
+                    "/images/v3",
+                    f"img-build-app-build-2-{agent_image._id}",
+                    f"{finance_query._function_config.function_name}/agent-image",
+                ),
+                (
+                    "/images/v3",
+                    f"img-build-app-build-2-{code_exec_image._id}",
+                    f"{finance_query._function_config.function_name}/code-exec-image",
+                ),
+            },
         )
 
     def test_deploy_v2_path_builds_images_and_then_deploys(self):
@@ -855,11 +800,6 @@ class TestDeployEntrypoints(unittest.TestCase):
                 builder_module,
                 "build_image_context",
                 side_effect=fake_build_image_context,
-            ),
-            patch.object(
-                builder_module,
-                "functions_for_application",
-                return_value=[application, helper],
             ),
             patch.object(deploy_module, "_deploy_applications") as deploy_apps,
             patch.object(deploy_module, "_emit") as emit,
