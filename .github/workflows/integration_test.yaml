@@ -2,7 +2,17 @@ name: Integration test against TestPyPI
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: Version of Tensorlake to test
+        required: true
   workflow_call:
+    inputs:
+      version:
+        description: Version of Tensorlake to test
+        required: true
+        type: string
+
     secrets:
       TENSORLAKE_API_KEY:
         required: true
@@ -45,7 +55,7 @@ jobs:
               echo "--- Installing tensorlake from TestPyPI ---"
               pip install --index-url https://test.pypi.org/simple/ \
                           --extra-index-url https://pypi.org/simple/ \
-                          tensorlake
+                          tensorlake==${{ inputs.version }}
 
               echo "--- 1. Build images ---"
               tl build-images /test_app.py \

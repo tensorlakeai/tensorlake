@@ -13,8 +13,16 @@ jobs:
   build-sdist:
     name: Build source distribution
     runs-on: namespace-profile-rust-builder-amd64
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Extract version from pyproject.toml
+        id: version
+        run: |
+          version=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$version" >> $GITHUB_OUTPUT
 
       - name: Build sdist
         uses: PyO3/maturin-action@v1
@@ -158,8 +166,10 @@ jobs:
 
   integration-test:
     name: Integration test against TestPyPI
-    needs: [publish]
+    needs: [publish, build-sdist]
     uses: ./.github/workflows/integration_test.yaml
+    with:
+      version: ${{ needs.build-sdist.outputs.version }}
     secrets:
       TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
       TENSORLAKE_API_URL: ${{ secrets.TENSORLAKE_API_URL }}
