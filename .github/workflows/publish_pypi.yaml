@@ -134,6 +134,9 @@ jobs:
   test-pypi-and-integration-test:
     name: Publish to TestPyPI and run integration tests
     needs: [build-sdist, build-wheels]
+    permissions:
+      id-token: write
+      contents: read
     uses: ./.github/workflows/publish_test_pypi.yaml
 
   publish:
