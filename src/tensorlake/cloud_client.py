@@ -5,7 +5,6 @@ should use CloudClient. The Rust SDK handles HTTP, auth, and serialization.
 """
 
 import importlib
-import os
 
 _IMPORT_ERROR: Exception | None = None
 _RustClient = None
@@ -32,6 +31,7 @@ def _raise_as_tensorlake_error(e: Exception) -> None:
     from tensorlake.applications.interface.exceptions import (
         InternalError,
         RemoteAPIError,
+        RemoteTransportError,
         SDKUsageError,
         TensorlakeError,
     )
@@ -65,9 +65,9 @@ def _raise_as_tensorlake_error(e: Exception) -> None:
         elif status_code is not None:
             raise RemoteAPIError(status_code=status_code, message=message) from None
         elif kind == "connection":
-            raise InternalError(
+            raise RemoteTransportError(
                 f"Connection error while communicating with Tensorlake API: {message}"
-            ) from e
+            ) from None
         elif kind == "sdk_usage":
             raise SDKUsageError(message) from None
         else:

@@ -1,10 +1,11 @@
 import asyncio
+import hashlib
 import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from tensorlake.builder import ApplicationBuildImageRequest, ApplicationBuildRequest
+from tensorlake import builder as builder_module
 from tensorlake.cli import deploy as deploy_module
 
 
@@ -107,7 +108,6 @@ class TestDeployEntrypoints(unittest.TestCase):
             with self.assertRaises(SystemExit) as exc:
                 deploy_module.deploy(
                     application_file_path="my_app.py",
-                    parallel_builds=False,
                     upgrade_running_requests=False,
                 )
 
@@ -150,7 +150,6 @@ class TestDeployEntrypoints(unittest.TestCase):
             with self.assertRaises(SystemExit) as exc:
                 deploy_module.deploy(
                     application_file_path="my_app.py",
-                    parallel_builds=False,
                     upgrade_running_requests=False,
                 )
 
@@ -161,11 +160,13 @@ class TestDeployEntrypoints(unittest.TestCase):
 
     def test_deploy_runs_build_and_deploy_flow(self):
         prepare_images = AsyncMock()
+        auth = self._make_auth_context()
+        application = SimpleNamespace(_name="app-one")
         with (
             patch.object(
                 deploy_module,
                 "_build_context_from_env",
-                return_value=self._make_auth_context(),
+                return_value=auth,
             ),
             patch.object(
                 deploy_module, "mk_builder", return_value=MagicMock()
@@ -180,26 +181,44 @@ class TestDeployEntrypoints(unittest.TestCase):
             patch.object(deploy_module, "_warning_missing_secrets", return_value=[]),
             patch.object(deploy_module, "get_functions", return_value=["fn"]),
             patch.object(deploy_module, "_prepare_images", prepare_images),
-            patch.object(deploy_module, "_deploy_applications") as deploy_apps,
-            patch.object(deploy_module, "_emit"),
+            patch.object(deploy_module, "deploy_applications") as deploy_apps,
+            patch.object(
+                deploy_module,
+                "filter_applications",
+                return_value=iter([application]),
+            ),
+            patch.object(
+                deploy_module,
+                "example_application_curl_command",
+                return_value="curl https://example.test",
+            ),
+            patch.object(deploy_module, "_emit") as emit,
         ):
             deploy_module.deploy(
                 application_file_path="my_app.py",
-                parallel_builds=True,
                 upgrade_running_requests=True,
             )
 
         prepare_images.assert_awaited_once()
         mk_builder.assert_called_once()
-        deploy_apps.assert_called_once()
-        call_kwargs = deploy_apps.call_args.kwargs
-        self.assertEqual(
-            call_kwargs["application_file_path"], os.path.abspath("my_app.py")
+        deploy_apps.assert_called_once_with(
+            applications_file_path=os.path.abspath("my_app.py"),
+            upgrade_running_requests=True,
+            load_source_dir_modules=False,
+            api_client=auth.cloud_client,
         )
-        self.assertTrue(call_kwargs["upgrade_running_requests"])
-        self.assertEqual(call_kwargs["functions"], ["fn"])
+        deployed_event = next(
+            call.args[0]
+            for call in emit.call_args_list
+            if call.args[0]["type"] == "deployed"
+        )
+        self.assertEqual(deployed_event["type"], "deployed")
+        self.assertEqual(deployed_event["application"], "app-one")
+        self.assertEqual(deployed_event["curl_command"], "curl https://example.test")
 
-    def test_deploy_v3_path_reaches_cloud_client_create_application_build(self):
+    def test_deploy_v3_path_builds_each_application_without_other_application_images(
+        self,
+    ):
         class FakeCloudClient:
             def __init__(self):
                 self.calls = []
@@ -238,28 +257,36 @@ class TestDeployEntrypoints(unittest.TestCase):
             project_id="proj-1",
             cloud_client=cloud_client,
         )
-        request = ApplicationBuildRequest(
-            name="app_fn",
-            version="v1",
-            images=[
-                ApplicationBuildImageRequest(
-                    key="img-1",
-                    name="image-a",
-                    context_sha256="sha-a",
-                    function_names=["fn-1"],
-                    context_tar_gz=b"context-a",
-                ),
-                ApplicationBuildImageRequest(
-                    key="img-2",
-                    name="image-b",
-                    context_sha256="sha-b",
-                    function_names=["fn-2", "fn-3"],
-                    context_tar_gz=b"context-b",
-                ),
-            ],
+        image_a = MagicMock()
+        image_a._id = "img-1"
+        image_a.name = "image-a"
+
+        image_b = MagicMock()
+        image_b._id = "img-2"
+        image_b.name = "image-b"
+
+        image_shared = MagicMock()
+        image_shared._id = "img-shared"
+        image_shared.name = "image-shared"
+
+        app_one = SimpleNamespace(
+            _function_config=SimpleNamespace(function_name="app-one", image=image_a),
+            _application_config=SimpleNamespace(version="v1"),
         )
-        app = object()
-        functions = [app]
+        app_two = SimpleNamespace(
+            _function_config=SimpleNamespace(function_name="app-two", image=image_b),
+            _application_config=SimpleNamespace(version="v2"),
+        )
+        shared_worker = SimpleNamespace(
+            _function_config=SimpleNamespace(
+                function_name="shared-worker", image=image_shared
+            ),
+            _application_config=None,
+        )
+        functions = [app_one, app_two, shared_worker]
+
+        def fake_build_image_context(image):
+            return f"context:{image._id}".encode()
 
         with (
             patch.object(deploy_module, "_build_context_from_env", return_value=auth),
@@ -273,35 +300,61 @@ class TestDeployEntrypoints(unittest.TestCase):
             patch.object(deploy_module, "_warning_missing_secrets", return_value=[]),
             patch.object(deploy_module, "get_functions", return_value=functions),
             patch.object(
-                deploy_module, "filter_applications", return_value=iter([app])
+                builder_module,
+                "build_image_context",
+                side_effect=fake_build_image_context,
             ),
-            patch.object(
-                deploy_module,
-                "collect_application_build_request",
-                return_value=request,
-            ) as collect_request,
             patch.object(deploy_module, "_deploy_applications"),
             patch.object(deploy_module, "_emit"),
         ):
             deploy_module.deploy(
                 application_file_path="my_app.py",
-                parallel_builds=False,
                 upgrade_running_requests=False,
                 image_builder_version="v3",
             )
 
-        collect_request.assert_called_once_with(app, functions)
-        self.assertEqual(len(cloud_client.calls), 1)
-        build_service_path, request_json, image_contexts = cloud_client.calls[0]
-        self.assertEqual(build_service_path, "/images/v3/applications")
-        self.assertIn('"name": "app_fn"', request_json)
-        self.assertIn('"context_tar_part_name": "img-1"', request_json)
-        self.assertIn('"context_tar_part_name": "img-2"', request_json)
-        self.assertIn('"context_sha256": "sha-a"', request_json)
-        self.assertIn('"context_sha256": "sha-b"', request_json)
+        self.assertEqual(len(cloud_client.calls), 2)
+
+        first_build_service_path, first_request_json, first_image_contexts = (
+            cloud_client.calls[0]
+        )
+        self.assertEqual(first_build_service_path, "/images/v3/applications")
+        self.assertIn('"name": "app-one"', first_request_json)
+        self.assertIn('"context_tar_part_name": "img-1"', first_request_json)
+        self.assertIn('"context_tar_part_name": "img-shared"', first_request_json)
+        self.assertNotIn('"context_tar_part_name": "img-2"', first_request_json)
+        self.assertIn(
+            f'"context_sha256": "{hashlib.sha256(b"context:img-1").hexdigest()}"',
+            first_request_json,
+        )
+        self.assertIn(
+            f'"context_sha256": "{hashlib.sha256(b"context:img-shared").hexdigest()}"',
+            first_request_json,
+        )
         self.assertEqual(
-            image_contexts,
-            [("img-1", b"context-a"), ("img-2", b"context-b")],
+            first_image_contexts,
+            [("img-1", b"context:img-1"), ("img-shared", b"context:img-shared")],
+        )
+
+        second_build_service_path, second_request_json, second_image_contexts = (
+            cloud_client.calls[1]
+        )
+        self.assertEqual(second_build_service_path, "/images/v3/applications")
+        self.assertIn('"name": "app-two"', second_request_json)
+        self.assertIn('"context_tar_part_name": "img-2"', second_request_json)
+        self.assertIn('"context_tar_part_name": "img-shared"', second_request_json)
+        self.assertNotIn('"context_tar_part_name": "img-1"', second_request_json)
+        self.assertIn(
+            f'"context_sha256": "{hashlib.sha256(b"context:img-2").hexdigest()}"',
+            second_request_json,
+        )
+        self.assertIn(
+            f'"context_sha256": "{hashlib.sha256(b"context:img-shared").hexdigest()}"',
+            second_request_json,
+        )
+        self.assertEqual(
+            second_image_contexts,
+            [("img-2", b"context:img-2"), ("img-shared", b"context:img-shared")],
         )
 
     def test_deploy_entrypoint_emits_error_for_unhandled_exception(self):

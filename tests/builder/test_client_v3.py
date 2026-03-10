@@ -1,10 +1,14 @@
 import asyncio
 import json
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from tensorlake.builder import ApplicationBuildImageRequest, ApplicationBuildRequest
 from tensorlake.builder.client_v3 import ImageBuilderV3Client
+from tensorlake.builder.log_events import BuildLogEvent
+
+SHA_A = "a" * 64
+SHA_B = "b" * 64
 
 
 class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
@@ -43,27 +47,34 @@ class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
                 "name": "app_fn",
                 "version": "v1",
                 "status": "succeeded",
+                "created_at": "2026-03-07T10:00:00Z",
+                "updated_at": "2026-03-07T10:02:00Z",
+                "finished_at": "2026-03-07T10:03:00Z",
                 "image_builds": [
                     {
                         "id": "img-build-1",
-                        "app_version_id": "app-version-1",
                         "key": "img-1",
                         "name": "image-a",
                         "description": "Image A",
+                        "context_sha256": SHA_A,
                         "created_at": "2026-03-07T10:00:00Z",
                         "updated_at": "2026-03-07T10:02:00Z",
                         "finished_at": "2026-03-07T10:03:00Z",
+                        "image_uri": "registry.example.com/app/image-a:latest",
+                        "image_digest": "sha256:image-a",
                         "function_names": ["fn-1", "fn-2"],
                         "status": "succeeded",
                     },
                     {
                         "id": "img-build-2",
-                        "app_version_id": "app-version-1",
                         "key": "img-2",
                         "name": "image-b",
+                        "context_sha256": SHA_B,
                         "created_at": "2026-03-07T10:00:00Z",
                         "updated_at": "2026-03-07T10:02:00Z",
                         "finished_at": "2026-03-07T10:03:00Z",
+                        "image_uri": "registry.example.com/app/image-b:latest",
+                        "image_digest": "sha256:image-b",
                         "function_names": ["fn-3"],
                         "status": "succeeded",
                     },
@@ -83,14 +94,14 @@ class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
                     ApplicationBuildImageRequest(
                         key="img-1",
                         name="image-a",
-                        context_sha256="sha-a",
+                        context_sha256=SHA_A,
                         function_names=["fn-1", "fn-2"],
                         context_tar_gz=b"context-a",
                     ),
                     ApplicationBuildImageRequest(
                         key="img-2",
                         name="image-b",
-                        context_sha256="sha-b",
+                        context_sha256=SHA_B,
                         function_names=["fn-3"],
                         context_tar_gz=b"context-b",
                     ),
@@ -100,32 +111,34 @@ class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
 
         cloud_client.create_application_build.assert_called_once_with(
             "/images/v3/applications",
-            json.dumps(
-                {
-                    "name": "app_fn",
-                    "version": "v1",
-                    "images": [
-                        {
-                            "key": "img-1",
-                            "name": "image-a",
-                            "context_tar_part_name": "img-1",
-                            "context_sha256": "sha-a",
-                            "function_names": ["fn-1", "fn-2"],
-                        },
-                        {
-                            "key": "img-2",
-                            "name": "image-b",
-                            "context_tar_part_name": "img-2",
-                            "context_sha256": "sha-b",
-                            "function_names": ["fn-3"],
-                        },
-                    ],
-                }
-            ),
+            cloud_client.create_application_build.call_args.args[1],
             [("img-1", b"context-a"), ("img-2", b"context-b")],
         )
+        self.assertEqual(
+            json.loads(cloud_client.create_application_build.call_args.args[1]),
+            {
+                "name": "app_fn",
+                "version": "v1",
+                "images": [
+                    {
+                        "key": "img-1",
+                        "name": "image-a",
+                        "context_tar_part_name": "img-1",
+                        "context_sha256": SHA_A,
+                        "function_names": ["fn-1", "fn-2"],
+                    },
+                    {
+                        "key": "img-2",
+                        "name": "image-b",
+                        "context_tar_part_name": "img-2",
+                        "context_sha256": SHA_B,
+                        "function_names": ["fn-3"],
+                    },
+                ],
+            },
+        )
         cloud_client.stream_build_logs_to_stderr_prefixed.assert_any_call(
-            "/images/v3", "img-build-1", "image-a[img-1]", "magenta"
+            "/images/v3", "img-build-1", "app_fn/image-a", "magenta"
         )
         cloud_client.application_build_info_json.assert_called_once_with(
             "/images/v3/applications",
@@ -139,8 +152,11 @@ class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "succeeded")
         self.assertEqual(len(result.image_builds), 2)
         self.assertEqual(result.image_builds[0].id, "img-build-1")
-        self.assertEqual(result.image_builds[0].app_version_id, "app-version-1")
         self.assertEqual(result.image_builds[0].description, "Image A")
+        self.assertEqual(
+            result.image_builds[0].image_uri,
+            "registry.example.com/app/image-a:latest",
+        )
         self.assertEqual(result.image_builds[0].status, "succeeded")
 
     async def test_build_raises_application_image_build_error_for_failed_image(self):
@@ -160,6 +176,8 @@ class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
                         "key": "img-1",
                         "name": "image-a",
                         "status": "building",
+                        "created_at": "2026-03-07T10:00:00Z",
+                        "updated_at": "2026-03-07T10:01:00Z",
                         "function_names": ["fn-1"],
                     }
                 ],
@@ -173,14 +191,22 @@ class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
                 "name": "app_fn",
                 "version": "v1",
                 "status": "failed",
+                "created_at": "2026-03-07T10:00:00Z",
+                "updated_at": "2026-03-07T10:02:00Z",
+                "finished_at": "2026-03-07T10:03:00Z",
                 "image_builds": [
                     {
                         "id": "img-build-1",
-                        "app_version_id": "app-version-1",
                         "key": "img-1",
                         "name": "image-a",
+                        "context_sha256": SHA_A,
                         "status": "failed",
                         "error_message": "docker build failed",
+                        "image_uri": "registry.example.com/app/image-a:latest",
+                        "image_digest": None,
+                        "created_at": "2026-03-07T10:00:00Z",
+                        "updated_at": "2026-03-07T10:02:00Z",
+                        "finished_at": "2026-03-07T10:03:00Z",
                         "function_names": ["fn-1"],
                     }
                 ],
@@ -200,7 +226,7 @@ class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
                         ApplicationBuildImageRequest(
                             key="img-1",
                             name="image-a",
-                            context_sha256="sha-a",
+                            context_sha256=SHA_A,
                             function_names=["fn-1"],
                             context_tar_gz=b"context-a",
                         )
@@ -225,6 +251,8 @@ class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
                         "key": "img-1",
                         "name": "image-a",
                         "status": "building",
+                        "created_at": "2026-03-07T10:00:00Z",
+                        "updated_at": "2026-03-07T10:01:00Z",
                         "function_names": ["fn-1"],
                     }
                 ],
@@ -241,6 +269,9 @@ class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
                 "name": "app_fn",
                 "version": "v1",
                 "status": "canceled",
+                "created_at": "2026-03-07T10:00:00Z",
+                "updated_at": "2026-03-07T10:02:00Z",
+                "finished_at": "2026-03-07T10:03:00Z",
                 "image_builds": [],
             }
         )
@@ -258,7 +289,7 @@ class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
                         ApplicationBuildImageRequest(
                             key="img-1",
                             name="image-a",
-                            context_sha256="sha-a",
+                            context_sha256=SHA_A,
                             function_names=["fn-1"],
                             context_tar_gz=b"context-a",
                         )
@@ -270,6 +301,161 @@ class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
             "/images/v3/applications",
             "app-build-1",
         )
+
+    async def test_stream_build_logs_falls_back_to_json_events(self):
+        cloud_client = MagicMock()
+        cloud_client.stream_build_logs_to_stderr_prefixed.side_effect = RuntimeError(
+            "sse stream failed"
+        )
+        cloud_client.stream_build_logs_json.return_value = [
+            json.dumps(
+                {
+                    "image_build_id": "img-build-1",
+                    "timestamp": "2026-03-07T10:01:00Z",
+                    "stream": "stdout",
+                    "message": "step 1",
+                    "sequence_number": 1,
+                    "build_status": "building",
+                }
+            )
+        ]
+        builder = ImageBuilderV3Client(
+            cloud_client=cloud_client,
+            build_service_path="/images/v3/applications",
+        )
+        reporter = builder._build_reporters(
+            type(
+                "Result",
+                (),
+                {
+                    "image_builds": [
+                        type(
+                            "ImageBuild",
+                            (),
+                            {
+                                "id": "img-build-1",
+                                "key": "img-1",
+                                "name": "image-a",
+                                "status": "pending",
+                            },
+                        )()
+                    ],
+                    "name": "app_fn",
+                },
+            )()
+        )["img-build-1"]
+
+        with patch.object(reporter, "print_log_event") as print_log_event:
+            await builder._stream_build_logs(reporter)
+
+        cloud_client.stream_build_logs_to_stderr_prefixed.assert_called_once_with(
+            "/images/v3",
+            "img-build-1",
+            "app_fn/image-a",
+            "magenta",
+        )
+        cloud_client.stream_build_logs_json.assert_called_once_with(
+            "/images/v3",
+            "img-build-1",
+        )
+        print_log_event.assert_called_once()
+        self.assertEqual(
+            print_log_event.call_args.args[0],
+            BuildLogEvent(
+                image_build_id="img-build-1",
+                timestamp="2026-03-07T10:01:00Z",
+                stream="stdout",
+                message="step 1",
+                sequence_number=1,
+                build_status="building",
+            ),
+        )
+
+    def test_reporter_print_log_event_handles_pending_and_enqueued(self):
+        builder = ImageBuilderV3Client(
+            cloud_client=MagicMock(),
+            build_service_path="/images/v3/applications",
+        )
+        reporter = builder._build_reporters(
+            type(
+                "Result",
+                (),
+                {
+                    "image_builds": [
+                        type(
+                            "ImageBuild",
+                            (),
+                            {
+                                "id": "img-build-1",
+                                "key": "img-1",
+                                "name": "image-a",
+                                "status": "pending",
+                            },
+                        )()
+                    ],
+                    "name": "app_fn",
+                },
+            )()
+        )["img-build-1"]
+
+        with patch("tensorlake.builder.client_v3.click.secho") as secho:
+            reporter.print_log_event(
+                BuildLogEvent(
+                    image_build_id="img-build-1",
+                    timestamp="2026-03-07T10:01:00Z",
+                    stream="info",
+                    message="queued",
+                    sequence_number=1,
+                    build_status="pending",
+                )
+            )
+            reporter.print_log_event(
+                BuildLogEvent(
+                    image_build_id="img-build-1",
+                    timestamp="2026-03-07T10:02:00Z",
+                    stream="info",
+                    message="still queued",
+                    sequence_number=2,
+                    build_status="enqueued",
+                )
+            )
+
+        waiting_calls = [
+            call
+            for call in secho.call_args_list
+            if call.args and call.args[0] == "Build waiting in queue..."
+        ]
+        self.assertEqual(len(waiting_calls), 2)
+
+    async def test_build_rejects_duplicate_function_names_across_images(self):
+        builder = ImageBuilderV3Client(
+            cloud_client=MagicMock(),
+            build_service_path="/images/v3/applications",
+        )
+
+        with self.assertRaisesRegex(ValueError, "function_names must be unique"):
+            await builder.build(
+                ApplicationBuildRequest(
+                    name="app_fn",
+                    version="v1",
+                    images=[
+                        ApplicationBuildImageRequest(
+                            key="img-1",
+                            name="image-a",
+                            context_sha256="a" * 64,
+                            function_names=["fn-shared"],
+                            context_tar_gz=b"context-a",
+                        ),
+                        ApplicationBuildImageRequest(
+                            key="img-2",
+                            name="image-b",
+                            context_sha256="b" * 64,
+                            function_names=["fn-shared"],
+                            context_tar_gz=b"context-b",
+                        ),
+                    ],
+                )
+            )
 
 
 if __name__ == "__main__":

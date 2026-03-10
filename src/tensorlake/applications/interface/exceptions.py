@@ -45,7 +45,14 @@ class RequestError(RequestFailed):
         return self.args[0]
 
 
-class RemoteAPIError(TensorlakeError):
+class RemoteError(TensorlakeError):
+    """Raised when communication with a remote Tensorlake service failed."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
+class RemoteAPIError(RemoteError):
     """Raised when a remote Tensorlake Applications API call failed."""
 
     def __init__(self, status_code: int, message: str) -> None:
@@ -54,6 +61,13 @@ class RemoteAPIError(TensorlakeError):
 
     def __str__(self):
         return f"{super().__str__()} (Status Code: {self.status_code})"
+
+
+class RemoteTransportError(RemoteError):
+    """Raised when a remote Tensorlake request failed before receiving a response."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
 
 
 class SDKUsageError(TensorlakeError):

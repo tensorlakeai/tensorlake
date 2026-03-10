@@ -2,36 +2,95 @@ import asyncio
 import json
 import sys
 from dataclasses import dataclass
+from typing import Annotated
 
 import click
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from tensorlake.builder import ApplicationBuildRequest
 from tensorlake.builder.client_v2 import ApplicationImageBuildError
+from tensorlake.builder.log_events import BuildLogEvent, emit_build_log_event
 from tensorlake.cloud_client import CloudClient
 
 
+NonEmptyString = Annotated[str, Field(min_length=1)]
+Sha256Hex = Annotated[str, Field(pattern=r"^[0-9a-fA-F]{64}$")]
+
+
+class CreateApplicationBuildImagePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    key: NonEmptyString
+    name: str | None = None
+    description: str | None = None
+    context_tar_part_name: NonEmptyString
+    context_sha256: Sha256Hex
+    function_names: Annotated[list[NonEmptyString], Field(min_length=1)]
+
+
+class CreateApplicationBuildPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: NonEmptyString
+    version: NonEmptyString
+    images: Annotated[list[CreateApplicationBuildImagePayload], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def validate_unique_fields(self) -> "CreateApplicationBuildPayload":
+        image_keys = [image.key for image in self.images]
+        if len(image_keys) != len(set(image_keys)):
+            raise ValueError("image keys must be unique within an application build")
+
+        context_part_names = [image.context_tar_part_name for image in self.images]
+        if len(context_part_names) != len(set(context_part_names)):
+            raise ValueError(
+                "context_tar_part_name values must be unique within an application build"
+            )
+
+        function_names = [
+            function_name
+            for image in self.images
+            for function_name in image.function_names
+        ]
+        if len(function_names) != len(set(function_names)):
+            raise ValueError(
+                "function_names must be unique across images in an application build"
+            )
+
+        return self
+
+
 class ApplicationBuildImageResult(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
     id: str
     app_version_id: str | None = None
     key: str | None = None
     name: str | None = None
     description: str | None = None
+    context_sha256: str | None = None
     status: str
     error_message: str | None = None
+    image_uri: str | None = None
+    image_digest: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
     finished_at: str | None = None
-    function_names: list[str] | None = None
+    function_names: list[str] = Field(default_factory=list)
 
 
 class ApplicationBuildResult(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
     id: str
-    organization_id: str | None = None
-    project_id: str | None = None
+    organization_id: str
+    project_id: str
     name: str
     version: str
-    status: str | None = None
+    status: str
+    created_at: str | None = None
+    updated_at: str | None = None
+    finished_at: str | None = None
     image_builds: list[ApplicationBuildImageResult]
 
 
@@ -65,24 +124,21 @@ class BuildSummary:
 class _ImageBuildReporter:
     _instance_count = 0
 
-    def __init__(self, info: ApplicationBuildImageResult):
+    def __init__(self, application_name: str, info: ApplicationBuildImageResult):
         self._info = info
         self._last_seen_status = info.status
-        self._display_name = self._build_display_name(info)
+        self._display_name = self._build_display_name(application_name, info)
         self._color = _IMAGE_NAME_PREFIX_COLORS[
             _ImageBuildReporter._instance_count % len(_IMAGE_NAME_PREFIX_COLORS)
         ]
         _ImageBuildReporter._instance_count += 1
 
     @staticmethod
-    def _build_display_name(info: ApplicationBuildImageResult) -> str:
-        if info.name and info.key:
-            return f"{info.name}[{info.key}]"
-        if info.name:
-            return info.name
-        if info.key:
-            return info.key
-        return info.id[:12]
+    def _build_display_name(
+        application_name: str, info: ApplicationBuildImageResult
+    ) -> str:
+        image_name = info.name or "image"
+        return f"{application_name}/{image_name}"
 
     @property
     def display_name(self) -> str:
@@ -118,6 +174,15 @@ class _ImageBuildReporter:
 
         return status
 
+    def print_log_event(self, event: BuildLogEvent) -> None:
+        self._last_seen_status = event.build_status
+        emit_build_log_event(
+            event,
+            emit_message=lambda message: self._print_message(message, err=True),
+            emit_stderr_message=lambda message: self._print_message(message, err=True),
+            emit_stdout_message=lambda message: self._print_message(message, nl=False),
+        )
+
     def _print_prefix(self, err: bool) -> None:
         if _ImageBuildReporter._instance_count > 1:
             click.secho(f"{self._display_name}: ", nl=False, err=err, fg=self._color)
@@ -151,22 +216,21 @@ class ImageBuilderV3Client:
         return normalized_path
 
     async def build(self, request: ApplicationBuildRequest) -> ApplicationBuildResult:
-        request_json = json.dumps(
-            {
-                "name": request.name,
-                "version": request.version,
-                "images": [
-                    {
-                        "key": image.key,
-                        "name": image.name,
-                        "context_tar_part_name": image.key,
-                        "context_sha256": image.context_sha256,
-                        "function_names": image.function_names,
-                    }
-                    for image in request.images
-                ],
-            }
+        request_payload = CreateApplicationBuildPayload(
+            name=request.name,
+            version=request.version,
+            images=[
+                CreateApplicationBuildImagePayload(
+                    key=image.key,
+                    name=image.name,
+                    context_tar_part_name=image.key,
+                    context_sha256=image.context_sha256,
+                    function_names=image.function_names,
+                )
+                for image in request.images
+            ],
         )
+        request_json = request_payload.model_dump_json(exclude_none=True)
         image_contexts = [(image.key, image.context_tar_gz) for image in request.images]
         response_json = await asyncio.to_thread(
             self._cloud_client.create_application_build,
@@ -174,21 +238,21 @@ class ImageBuilderV3Client:
             request_json,
             image_contexts,
         )
-        result = ApplicationBuildResult.model_validate_json(response_json)
-        reporters = self._build_reporters(result)
+        created_result = ApplicationBuildResult.model_validate_json(response_json)
+        reporters = self._build_reporters(created_result)
 
         try:
             await asyncio.gather(
                 *[
                     self._stream_build_logs(reporters[image_build.id])
-                    for image_build in result.image_builds
+                    for image_build in created_result.image_builds
                 ]
             )
         except (asyncio.CancelledError, KeyboardInterrupt):
-            await self._cancel_application_build(result.id)
+            await self._cancel_application_build(created_result.id)
             raise
 
-        final_result = await self._application_build_info(result.id)
+        final_result = await self._application_build_info(created_result.id)
         self._print_summary(reporters, final_result)
         self._raise_for_failed_builds(final_result)
         return final_result
@@ -199,7 +263,7 @@ class ImageBuilderV3Client:
     ) -> dict[str, _ImageBuildReporter]:
         _ImageBuildReporter._instance_count = 0
         return {
-            image_build.id: _ImageBuildReporter(image_build)
+            image_build.id: _ImageBuildReporter(result.name, image_build)
             for image_build in result.image_builds
         }
 
@@ -224,13 +288,22 @@ class ImageBuilderV3Client:
         return ApplicationBuildResult.model_validate_json(response_json)
 
     async def _stream_build_logs(self, reporter: _ImageBuildReporter) -> None:
-        await asyncio.to_thread(
-            self._cloud_client.stream_build_logs_to_stderr_prefixed,
-            self._image_service_path,
-            reporter.image_build_id,
-            reporter.display_name,
-            reporter.color,
-        )
+        try:
+            await asyncio.to_thread(
+                self._cloud_client.stream_build_logs_to_stderr_prefixed,
+                self._image_service_path,
+                reporter.image_build_id,
+                reporter.display_name,
+                reporter.color,
+            )
+        except Exception:
+            events_json: list[str] = await asyncio.to_thread(
+                self._cloud_client.stream_build_logs_json,
+                self._image_service_path,
+                reporter.image_build_id,
+            )
+            for event_json in events_json:
+                reporter.print_log_event(BuildLogEvent.model_validate_json(event_json))
 
     @staticmethod
     def _print_summary(
