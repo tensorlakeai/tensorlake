@@ -256,7 +256,7 @@ def _deploy_applications(
             applications_file_path=application_file_path,
             upgrade_running_requests=upgrade_running_requests,
             load_source_dir_modules=False,
-            api_client=auth.cloud_client,
+            api_client=api_client,
         )
 
         for application_function in filter_applications(functions):
