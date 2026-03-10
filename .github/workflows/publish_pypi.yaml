@@ -142,23 +142,9 @@ jobs:
           name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
           path: dist
 
-  test-pypi-and-integration-test:
-    name: Publish to TestPyPI and run integration tests
-    needs: [build-sdist, build-wheels]
-    permissions:
-      id-token: write
-      contents: read
-    uses: ./.github/workflows/publish_test_pypi.yaml
-    with:
-      skip_build: true
-      version: ${{ needs.build-sdist.outputs.version }}
-    secrets:
-      TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
-      TENSORLAKE_API_URL: ${{ secrets.TENSORLAKE_API_URL }}
-
   publish:
     name: Publish to PyPI
-    needs: [test-pypi-and-integration-test]
+    needs: [build-sdist, build-wheels]
     runs-on: ubuntu-latest
     environment:
       name: pypi
