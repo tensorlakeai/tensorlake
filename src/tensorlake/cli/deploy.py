@@ -171,15 +171,7 @@ def deploy(
 
     auth = _build_context_from_env()
 
-    # Create builder client with proper authentication
-    bearer_token = auth.api_key or auth.personal_access_token
-    builder_v2 = ImageBuilderV2Client(
-        build_service=os.getenv("TENSORLAKE_BUILD_SERVICE")
-        or f"{auth.api_url}/images/v2",
-        api_key=bearer_token,
-        organization_id=auth.organization_id if not auth.api_key else None,
-        project_id=auth.project_id if not auth.api_key else None,
-    )
+    builder_v2 = ImageBuilderV2Client.from_env()
 
     missing = _warning_missing_secrets(auth, list(list_secret_names()))
     if missing:
