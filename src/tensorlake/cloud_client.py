@@ -63,10 +63,14 @@ def _raise_as_tensorlake_error(e: Exception) -> None:
             ) from None
         elif status_code is not None:
             raise RemoteAPIError(status_code=status_code, message=message) from None
+        elif kind == "connection":
+            raise InternalError(
+                f"Connection error while communicating with Tensorlake API: {message}"
+            ) from None
         elif kind == "sdk_usage":
             raise SDKUsageError(message) from None
         else:
-            raise InternalError(message) from None
+            raise InternalError(message) from e
 
     raise InternalError(str(e)) from e
 
@@ -259,6 +263,47 @@ class CloudClient:
         except Exception as e:
             _raise_as_tensorlake_error(e)
 
+    def create_application_build(
+        self,
+        build_service_path: str,
+        request_json: str,
+        image_contexts: list[tuple[str, bytes]],
+    ) -> str:
+        try:
+            return self._client.create_application_build(
+                build_service_path,
+                request_json,
+                image_contexts,
+            )
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def application_build_info_json(
+        self,
+        build_service_path: str,
+        application_build_id: str,
+    ) -> str:
+        try:
+            return self._client.application_build_info_json(
+                build_service_path,
+                application_build_id,
+            )
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def cancel_application_build(
+        self,
+        build_service_path: str,
+        application_build_id: str,
+    ) -> str:
+        try:
+            return self._client.cancel_application_build(
+                build_service_path,
+                application_build_id,
+            )
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
     def build_info_json(self, build_service_path: str, build_id: str) -> str:
         try:
             return self._client.build_info_json(build_service_path, build_id)
@@ -284,5 +329,22 @@ class CloudClient:
     ) -> None:
         try:
             self._client.stream_build_logs_to_stderr(build_service_path, build_id)
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def stream_build_logs_to_stderr_prefixed(
+        self,
+        build_service_path: str,
+        build_id: str,
+        prefix: str,
+        color: str | None = None,
+    ) -> None:
+        try:
+            self._client.stream_build_logs_to_stderr_prefixed(
+                build_service_path,
+                build_id,
+                prefix,
+                color,
+            )
         except Exception as e:
             _raise_as_tensorlake_error(e)

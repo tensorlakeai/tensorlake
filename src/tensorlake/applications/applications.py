@@ -1,4 +1,4 @@
-from typing import Generator, Iterator
+from collections.abc import Generator, Iterator
 
 from .interface.function import Function, _is_application_function
 from .interface.request import Request
@@ -19,6 +19,20 @@ def filter_applications(
         if not _is_application_function(function):
             continue
         yield function
+
+
+def functions_for_application(
+    _application: Function,
+    functions: Iterator[Function],
+) -> list[Function]:
+    """Returns all loaded functions for the application build request.
+
+    We cannot reliably determine application membership statically, and one
+    application can call another application's function at runtime. For
+    compatibility with deploy/runtime packaging, each application build includes
+    all loaded Tensorlake functions.
+    """
+    return list(functions)
 
 
 def run_application(

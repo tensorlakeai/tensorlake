@@ -30,9 +30,9 @@
 //! images_client.build_image(build_request);
 //! ```
 
-use std::{pin::Pin, time::Duration};
+use std::{collections::HashMap, pin::Pin, time::Duration};
 
-use crate::{client::Client, error::SdkError};
+use crate::{client::Client, error::SdkError, images::error::ImagesError};
 use futures::stream::Stream;
 use reqwest::{
     Method,
@@ -126,6 +126,50 @@ impl ImagesClient {
     ) -> Result<ImageBuildResult, SdkError> {
         let build_info = self.submit_build_request(&request).await?;
         self.poll_build_status(&build_info.id).await
+    }
+
+    pub async fn create_application_build(
+        &self,
+        build_service_path: &str,
+        request: &CreateApplicationBuildRequest,
+        image_contexts: &[ApplicationBuildContext],
+    ) -> Result<ApplicationBuildResponse, SdkError> {
+        let form = create_application_build_form(request, image_contexts)?;
+        let request =
+            self.client
+                .build_multipart_request(Method::POST, build_service_path, form)?;
+        let response = self.client.execute(request).await?;
+        Ok(response.json::<ApplicationBuildResponse>().await?)
+    }
+
+    pub async fn application_build_info(
+        &self,
+        build_service_path: &str,
+        application_build_id: &str,
+    ) -> Result<ApplicationBuildResponse, SdkError> {
+        let path = format!(
+            "{}/{}",
+            build_service_path.trim_end_matches('/'),
+            application_build_id
+        );
+        let request = self.client.request(Method::GET, &path).build()?;
+        let response = self.client.execute(request).await?;
+        Ok(response.json::<ApplicationBuildResponse>().await?)
+    }
+
+    pub async fn cancel_application_build(
+        &self,
+        build_service_path: &str,
+        application_build_id: &str,
+    ) -> Result<ApplicationBuildResponse, SdkError> {
+        let path = format!(
+            "{}/{}/cancel",
+            build_service_path.trim_end_matches('/'),
+            application_build_id
+        );
+        let request = self.client.request(Method::POST, &path).build()?;
+        let response = self.client.execute(request).await?;
+        Ok(response.json::<ApplicationBuildResponse>().await?)
     }
 
     /// Submit a build request to the build service.
@@ -409,6 +453,66 @@ impl ImagesClient {
             .await?;
         Ok(stream)
     }
+}
+
+fn create_application_build_form(
+    request: &CreateApplicationBuildRequest,
+    image_contexts: &[ApplicationBuildContext],
+) -> Result<Form, SdkError> {
+    let mut contexts_by_part_name: HashMap<&str, &ApplicationBuildContext> = HashMap::new();
+    for context in image_contexts {
+        if contexts_by_part_name
+            .insert(context.context_tar_part_name.as_str(), context)
+            .is_some()
+        {
+            return Err(ImagesError::InvalidBuildRequest(format!(
+                "duplicate image context part name '{}'",
+                context.context_tar_part_name
+            ))
+            .into());
+        }
+    }
+
+    let app_version_json = serde_json::to_vec(request)?;
+    let mut form = Form::new().part(
+        "app_version",
+        Part::bytes(app_version_json)
+            .file_name("app_version")
+            .mime_str("application/json")?,
+    );
+
+    for image in &request.images {
+        let context = contexts_by_part_name
+            .get(image.context_tar_part_name.as_str())
+            .ok_or_else(|| {
+                ImagesError::InvalidBuildRequest(format!(
+                    "missing image context for part '{}'",
+                    image.context_tar_part_name
+                ))
+            })?;
+
+        form = form.part(
+            image.context_tar_part_name.clone(),
+            Part::bytes(context.context_tar_gz.clone())
+                .file_name(format!("{}.tar.gz", image.context_tar_part_name)),
+        );
+    }
+
+    for context in image_contexts {
+        if !request
+            .images
+            .iter()
+            .any(|image| image.context_tar_part_name == context.context_tar_part_name)
+        {
+            return Err(ImagesError::InvalidBuildRequest(format!(
+                "unexpected image context for part '{}'",
+                context.context_tar_part_name
+            ))
+            .into());
+        }
+    }
+
+    Ok(form)
 }
 
 type ImageBuildLogStream = Pin<Box<dyn Stream<Item = Result<LogEntry, SdkError>> + Send>>;

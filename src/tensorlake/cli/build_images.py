@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import importlib.metadata
 import json
 import os
@@ -6,7 +7,9 @@ import sys
 import traceback
 
 from tensorlake.applications.image import ImageInformation, image_infos
+from tensorlake.applications.registry import get_functions
 from tensorlake.applications.remote.code.loader import load_code
+from tensorlake.cli import deploy as deploy_module
 
 
 def _emit(obj):
@@ -112,6 +115,63 @@ def build_images(
     _emit({"type": "done"})
 
 
+def build_images_with_builder(
+    application_file_path: str,
+    image_builder_version: str,
+):
+    """Load application file and build images via the configured remote image builder."""
+    try:
+        application_file_path = os.path.abspath(application_file_path)
+        load_code(application_file_path)
+    except SyntaxError as e:
+        _emit(
+            {
+                "type": "error",
+                "message": f"syntax error in {e.filename}, line {e.lineno}: {e.msg}",
+            }
+        )
+        sys.exit(1)
+    except ImportError as e:
+        _emit(
+            {
+                "type": "error",
+                "message": "failed to import application file. make sure all dependencies are installed in your current environment.",
+                "details": f"{type(e).__name__}: {e}",
+            }
+        )
+        sys.exit(1)
+    except Exception as e:
+        event = {
+            "type": "error",
+            "message": f"failed to load {application_file_path}",
+            "details": f"{type(e).__name__}: {e}",
+        }
+        if _debug_enabled():
+            event["traceback"] = traceback.format_exc()
+        _emit(event)
+        sys.exit(1)
+
+    auth = deploy_module._build_context_from_env()
+    functions = get_functions()
+    builder = deploy_module.mk_builder(image_builder_version, auth)
+
+    try:
+        asyncio.run(deploy_module._prepare_images(builder, functions))
+    except KeyboardInterrupt:
+        _emit({"type": "error", "message": "build cancelled by user"})
+        sys.exit(1)
+    except Exception as e:
+        event = {
+            "type": "error",
+            "message": f"build-images failed ({type(e).__name__})",
+            "details": f"{type(e).__name__}: {e}",
+        }
+        if _debug_enabled():
+            event["traceback"] = traceback.format_exc()
+        _emit(event)
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Emit image definitions for images defined in a Tensorlake application file"
@@ -132,14 +192,26 @@ def main():
         default=None,
         help="Build only the image with this name",
     )
+    parser.add_argument(
+        "--image-builder-version",
+        choices=["v2", "v3"],
+        default=None,
+        help="Build images through the remote image builder instead of emitting definitions",
+    )
     args = parser.parse_args()
 
     try:
-        build_images(
-            application_file_path=args.application_file_path,
-            tag=args.tag,
-            image_name=args.image_name,
-        )
+        if args.image_builder_version is None:
+            build_images(
+                application_file_path=args.application_file_path,
+                tag=args.tag,
+                image_name=args.image_name,
+            )
+        else:
+            build_images_with_builder(
+                application_file_path=args.application_file_path,
+                image_builder_version=args.image_builder_version,
+            )
     except SystemExit:
         raise
     except Exception as e:
