@@ -277,7 +277,14 @@ class TestDeployEntrypoints(unittest.TestCase):
         )
 
     @contextmanager
-    def _successful_deploy_patches(self, auth, functions):
+    def _successful_deploy_patches(
+        self,
+        auth,
+        functions,
+        *,
+        declared_secret_names=None,
+        missing_secret_names=None,
+    ):
         with (
             patch.object(deploy_module, "_build_context_from_env", return_value=auth),
             patch.object(deploy_module, "load_code"),
@@ -286,8 +293,16 @@ class TestDeployEntrypoints(unittest.TestCase):
             ),
             patch.object(deploy_module, "format_validation_messages", return_value=[]),
             patch.object(deploy_module, "has_error_message", return_value=False),
-            patch.object(deploy_module, "list_secret_names", return_value=[]),
-            patch.object(deploy_module, "_warning_missing_secrets", return_value=[]),
+            patch.object(
+                deploy_module,
+                "list_secret_names",
+                return_value=declared_secret_names or [],
+            ),
+            patch.object(
+                deploy_module,
+                "_warning_missing_secrets",
+                return_value=missing_secret_names or [],
+            ),
             patch.object(deploy_module, "get_functions", return_value=functions),
         ):
             yield
@@ -413,6 +428,41 @@ class TestDeployEntrypoints(unittest.TestCase):
         self.assertEqual(deployed_event["type"], "deployed")
         self.assertEqual(deployed_event["application"], "app-one")
         self.assertEqual(deployed_event["curl_command"], "curl https://example.test")
+
+    def test_deploy_emits_missing_secret_names(self):
+        prepare_images = AsyncMock()
+        auth = self._make_auth_context()
+        with (
+            self._successful_deploy_patches(
+                auth,
+                ["fn"],
+                declared_secret_names=["EXISTING", "MISSING_ONE", "MISSING_TWO"],
+                missing_secret_names=["MISSING_ONE", "MISSING_TWO"],
+            ),
+            patch.object(
+                deploy_module, "mk_builder", return_value=MagicMock()
+            ),
+            patch.object(deploy_module, "_prepare_images", prepare_images),
+            patch.object(deploy_module, "deploy_applications"),
+            patch.object(
+                deploy_module,
+                "filter_applications",
+                return_value=iter([]),
+            ),
+            patch.object(deploy_module, "_emit") as emit,
+        ):
+            deploy_module.deploy(
+                application_file_path="my_app.py",
+                upgrade_running_requests=False,
+            )
+
+        missing_event = next(
+            call.args[0]
+            for call in emit.call_args_list
+            if call.args[0]["type"] == "missing_secrets"
+        )
+        self.assertEqual(missing_event["count"], 2)
+        self.assertEqual(missing_event["names"], ["MISSING_ONE", "MISSING_TWO"])
 
     def test_deploy_v3_path_builds_all_functions_for_each_application(self):
         cloud_client = FakeV3CloudClient()
