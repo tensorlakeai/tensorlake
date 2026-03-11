@@ -318,12 +318,16 @@ mod tests {
         let raw_request = execute_and_capture_request(test_ctx(
             "http://unused",
             None,
-            Some("tl_pat_test"),
+            Some("fake_test_pat_for_header_assertions_only"),
             Some("org-123"),
             Some("proj-456"),
         ));
 
-        assert!(raw_request.contains("authorization: bearer tl_pat_test"));
+        assert!(
+            raw_request.contains(
+                "authorization: bearer fake_test_pat_for_header_assertions_only"
+            )
+        );
         assert!(raw_request.contains("x-forwarded-organization-id: org-123"));
         assert!(raw_request.contains("x-forwarded-project-id: proj-456"));
     }
@@ -332,13 +336,17 @@ mod tests {
     fn secrets_client_does_not_include_scope_headers_for_api_key() {
         let raw_request = execute_and_capture_request(test_ctx(
             "http://unused",
-            Some("tl_api_key_test"),
+            Some("fake_test_api_key_for_header_assertions_only"),
             None,
             Some("org-123"),
             Some("proj-456"),
         ));
 
-        assert!(raw_request.contains("authorization: bearer tl_api_key_test"));
+        assert!(
+            raw_request.contains(
+                "authorization: bearer fake_test_api_key_for_header_assertions_only"
+            )
+        );
         assert!(!raw_request.contains("x-forwarded-organization-id:"));
         assert!(!raw_request.contains("x-forwarded-project-id:"));
     }
