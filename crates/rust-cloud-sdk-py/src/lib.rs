@@ -450,69 +450,60 @@ impl CloudApiClient {
 
     fn stream_build_logs_json(
         &self,
-        py: Python<'_>,
         build_service_path: String,
         build_id: String,
     ) -> PyResult<Vec<String>> {
-        py.allow_threads(|| {
-            self.run_with_retry(2, move |client| {
-                let path = build_logs_path(&build_service_path, &build_id);
-                async move {
-                    let mut events: Vec<String> = Vec::new();
-                    stream_build_log_events(client, &path, |event| {
-                        events.push(serde_json::to_string(&event)?);
-                        Ok(())
-                    })
-                    .await?;
-                    Ok(events)
-                }
-            })
+        self.run_with_retry(2, move |client| {
+            let path = build_logs_path(&build_service_path, &build_id);
+            async move {
+                let mut events: Vec<String> = Vec::new();
+                stream_build_log_events(client, &path, |event| {
+                    events.push(serde_json::to_string(&event)?);
+                    Ok(())
+                })
+                .await?;
+                Ok(events)
+            }
         })
     }
 
     fn stream_build_logs_to_stderr(
         &self,
-        py: Python<'_>,
         build_service_path: String,
         build_id: String,
     ) -> PyResult<()> {
-        py.allow_threads(|| {
-            self.run_with_retry(2, move |client| {
-                let path = build_logs_path(&build_service_path, &build_id);
-                async move {
-                    stream_build_log_events(client, &path, |event| {
-                        print_build_log_event_to_stderr(event, None);
-                        Ok(())
-                    })
-                    .await?;
+        self.run_with_retry(2, move |client| {
+            let path = build_logs_path(&build_service_path, &build_id);
+            async move {
+                stream_build_log_events(client, &path, |event| {
+                    print_build_log_event_to_stderr(event, None);
                     Ok(())
-                }
-            })
+                })
+                .await?;
+                Ok(())
+            }
         })
     }
 
     #[pyo3(signature = (build_service_path, build_id, prefix, color=None))]
     fn stream_build_logs_to_stderr_prefixed(
         &self,
-        py: Python<'_>,
         build_service_path: String,
         build_id: String,
         prefix: String,
         color: Option<String>,
     ) -> PyResult<()> {
-        py.allow_threads(|| {
-            self.run_with_retry(2, move |client| {
-                let path = build_logs_path(&build_service_path, &build_id);
-                let log_prefix = LogPrefix::new(prefix.clone(), color.clone());
-                async move {
-                    stream_build_log_events(client, &path, |event| {
-                        print_build_log_event_to_stderr(event, Some(&log_prefix));
-                        Ok(())
-                    })
-                    .await?;
+        self.run_with_retry(2, move |client| {
+            let path = build_logs_path(&build_service_path, &build_id);
+            let log_prefix = LogPrefix::new(prefix.clone(), color.clone());
+            async move {
+                stream_build_log_events(client, &path, |event| {
+                    print_build_log_event_to_stderr(event, Some(&log_prefix));
                     Ok(())
-                }
-            })
+                })
+                .await?;
+                Ok(())
+            }
         })
     }
 
@@ -897,7 +888,7 @@ impl CloudSandboxProxyClient {
             let path = path.clone();
             async move { client.read_file(&path).await }
         })?;
-        Ok(pyo3::types::PyBytes::new_bound(py, &data).into())
+        Ok(pyo3::types::PyBytes::new(py, &data).into())
     }
 
     fn write_file(&self, path: String, content: Vec<u8>) -> PyResult<()> {
@@ -1526,15 +1517,15 @@ fn create_image_context_file(
 fn _cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add(
         "CloudApiClientError",
-        _py.get_type_bound::<CloudApiClientError>(),
+        _py.get_type::<CloudApiClientError>(),
     )?;
     module.add(
         "CloudSandboxClientError",
-        _py.get_type_bound::<CloudSandboxClientError>(),
+        _py.get_type::<CloudSandboxClientError>(),
     )?;
     module.add(
         "CloudDocumentAIClientError",
-        _py.get_type_bound::<CloudDocumentAIClientError>(),
+        _py.get_type::<CloudDocumentAIClientError>(),
     )?;
     module.add_class::<CloudApiClient>()?;
     module.add_class::<CloudSandboxClient>()?;
