@@ -1,5 +1,5 @@
 use comfy_table::Cell;
-use tensorlake_cloud_sdk::Sdk;
+use tensorlake_cloud_sdk::{Client, ClientBuilder};
 use tensorlake_cloud_sdk::error::SdkError;
 use tensorlake_cloud_sdk::secrets::SecretsClient;
 use tensorlake_cloud_sdk::secrets::models::{
@@ -163,9 +163,23 @@ fn org_and_project(ctx: &CliContext) -> Result<(String, String)> {
 }
 
 fn secrets_client(ctx: &CliContext) -> Result<SecretsClient> {
+    Ok(SecretsClient::new(secrets_http_client(ctx)?))
+}
+
+fn secrets_http_client(ctx: &CliContext) -> Result<Client> {
     let token = ctx.bearer_token()?;
-    let sdk = Sdk::new(&ctx.api_url, &token)?;
-    Ok(sdk.secrets())
+    let mut builder = ClientBuilder::new(&ctx.api_url).bearer_token(&token);
+    let use_scope_headers = ctx.personal_access_token.is_some() && ctx.api_key.is_none();
+
+    if use_scope_headers
+        && let (Some(organization_id), Some(project_id)) = (
+        ctx.effective_organization_id(),
+        ctx.effective_project_id(),
+    ) {
+        builder = builder.scope(&organization_id, &project_id);
+    }
+
+    builder.build().map_err(Into::into)
 }
 
 fn parse_remote_message(raw: &str) -> String {
@@ -229,5 +243,111 @@ fn map_unset_sdk_error(error: SdkError) -> CliError {
             "permission denied. set TENSORLAKE_API_KEY with required permissions, or run 'tl init'.",
         ),
         other => CliError::from(other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::secrets_http_client;
+    use crate::auth::context::CliContext;
+    use crate::config::resolver::ResolvedConfig;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+
+    fn test_ctx(
+        api_url: &str,
+        api_key: Option<&str>,
+        personal_access_token: Option<&str>,
+        organization_id: Option<&str>,
+        project_id: Option<&str>,
+    ) -> CliContext {
+        CliContext::from_resolved(ResolvedConfig {
+            api_url: api_url.to_string(),
+            cloud_url: "https://cloud.tensorlake.ai".to_string(),
+            namespace: "default".to_string(),
+            api_key: api_key.map(str::to_string),
+            personal_access_token: personal_access_token.map(str::to_string),
+            organization_id: organization_id.map(str::to_string),
+            project_id: project_id.map(str::to_string),
+            debug: false,
+        })
+    }
+
+    fn execute_and_capture_request(ctx: CliContext) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0_u8; 4096];
+            let bytes_read = stream.read(&mut buf).unwrap();
+            tx.send(String::from_utf8_lossy(&buf[..bytes_read]).to_string())
+                .unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+
+        let request_ctx = test_ctx(
+            &format!("http://{}", address),
+            ctx.api_key.as_deref(),
+            ctx.personal_access_token.as_deref(),
+            ctx.organization_id.as_deref(),
+            ctx.project_id.as_deref(),
+        );
+
+        let client = secrets_http_client(&request_ctx).unwrap();
+        let request = client
+            .build_get_json_request("/platform/v1/test", None)
+            .unwrap();
+
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { client.execute_raw(request).await.unwrap() });
+
+        let raw_request = rx.recv().unwrap().to_lowercase();
+        server.join().unwrap();
+        raw_request
+    }
+
+    #[test]
+    fn secrets_client_includes_scope_headers_for_pat() {
+        let raw_request = execute_and_capture_request(test_ctx(
+            "http://unused",
+            None,
+            Some("fake_test_pat_for_header_assertions_only"),
+            Some("org-123"),
+            Some("proj-456"),
+        ));
+
+        assert!(
+            raw_request.contains(
+                "authorization: bearer fake_test_pat_for_header_assertions_only"
+            )
+        );
+        assert!(raw_request.contains("x-forwarded-organization-id: org-123"));
+        assert!(raw_request.contains("x-forwarded-project-id: proj-456"));
+    }
+
+    #[test]
+    fn secrets_client_does_not_include_scope_headers_for_api_key() {
+        let raw_request = execute_and_capture_request(test_ctx(
+            "http://unused",
+            Some("fake_test_api_key_for_header_assertions_only"),
+            None,
+            Some("org-123"),
+            Some("proj-456"),
+        ));
+
+        assert!(
+            raw_request.contains(
+                "authorization: bearer fake_test_api_key_for_header_assertions_only"
+            )
+        );
+        assert!(!raw_request.contains("x-forwarded-organization-id:"));
+        assert!(!raw_request.contains("x-forwarded-project-id:"));
     }
 }

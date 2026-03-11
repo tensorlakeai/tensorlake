@@ -212,7 +212,7 @@ def deploy(
 
     missing = _warning_missing_secrets(auth, list(list_secret_names()))
     if missing:
-        _emit({"type": "missing_secrets", "count": len(missing)})
+        _emit({"type": "missing_secrets", "count": len(missing), "names": missing})
 
     builder = mk_builder(image_builder_version, auth)
     try:
