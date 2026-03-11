@@ -897,7 +897,7 @@ impl CloudSandboxProxyClient {
             let path = path.clone();
             async move { client.read_file(&path).await }
         })?;
-        Ok(pyo3::types::PyBytes::new(py, &data).into())
+        Ok(pyo3::types::PyBytes::new_bound(py, &data).into())
     }
 
     fn write_file(&self, path: String, content: Vec<u8>) -> PyResult<()> {
