@@ -12,6 +12,62 @@ SHA_B = "b" * 64
 
 
 class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _make_reporter(cloud_client: MagicMock, *, image_name: str = "image-a"):
+        builder = ImageBuilderV3Client(
+            cloud_client=cloud_client,
+            build_service_path="/images/v3/applications",
+        )
+        reporter = builder._build_reporters(
+            type(
+                "Result",
+                (),
+                {
+                    "image_builds": [
+                        type(
+                            "ImageBuild",
+                            (),
+                            {
+                                "id": "img-build-1",
+                                "key": "img-1",
+                                "name": image_name,
+                                "status": "pending",
+                            },
+                        )()
+                    ],
+                    "name": "app_fn",
+                },
+            )()
+        )["img-build-1"]
+        return builder, reporter
+
+    async def _assert_stream_build_logs_event(self, event_payload: dict) -> None:
+        cloud_client = MagicMock()
+        cloud_client.stream_build_logs_to_stderr_prefixed.side_effect = RuntimeError(
+            "sse stream failed"
+        )
+        cloud_client.stream_build_logs_json.return_value = [
+            json.dumps(event_payload),
+        ]
+        builder, reporter = self._make_reporter(cloud_client)
+
+        with patch.object(reporter, "print_log_event") as print_log_event:
+            await builder._stream_build_logs(reporter)
+
+        cloud_client.stream_build_logs_to_stderr_prefixed.assert_called_once_with(
+            "/images/v3",
+            "img-build-1",
+            "app_fn/image-a",
+            "magenta",
+        )
+        cloud_client.stream_build_logs_json.assert_called_once_with(
+            "/images/v3",
+            "img-build-1",
+        )
+        print_log_event.assert_called_once_with(
+            BuildLogEvent(**event_payload),
+        )
+
     async def test_build_raises_application_image_build_error_for_failed_image(self):
         cloud_client = MagicMock()
         cloud_client.create_application_build.return_value = json.dumps(
@@ -156,27 +212,44 @@ class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_stream_build_logs_falls_back_to_json_events(self):
-        cloud_client = MagicMock()
-        cloud_client.stream_build_logs_to_stderr_prefixed.side_effect = RuntimeError(
-            "sse stream failed"
+        await self._assert_stream_build_logs_event(
+            {
+                "image_build_id": "img-build-1",
+                "timestamp": "2026-03-07T10:01:00Z",
+                "stream": "stdout",
+                "message": "step 1",
+                "sequence_number": 1,
+                "build_status": "building",
+            }
         )
-        cloud_client.stream_build_logs_json.return_value = [
-            json.dumps(
-                {
-                    "image_build_id": "img-build-1",
-                    "timestamp": "2026-03-07T10:01:00Z",
-                    "stream": "stdout",
-                    "message": "step 1",
-                    "sequence_number": 1,
-                    "build_status": "building",
-                }
-            )
-        ]
+
+    async def test_stream_build_logs_handles_single_terminal_event_for_finished_builds(
+        self,
+    ):
+        for build_status, message in (
+            ("succeeded", "Build finished successfully."),
+            ("failed", "Build failed."),
+            ("canceled", "Build canceled."),
+        ):
+            with self.subTest(build_status=build_status):
+                await self._assert_stream_build_logs_event(
+                    {
+                        "image_build_id": "img-build-1",
+                        "timestamp": "2026-03-10T12:00:00Z",
+                        "stream": "info",
+                        "message": message,
+                        "sequence_number": -1,
+                        "build_status": build_status,
+                    }
+                )
+
+    def test_build_reporters_disambiguates_duplicate_image_names(self):
         builder = ImageBuilderV3Client(
-            cloud_client=cloud_client,
+            cloud_client=MagicMock(),
             build_service_path="/images/v3/applications",
         )
-        reporter = builder._build_reporters(
+
+        reporters = builder._build_reporters(
             type(
                 "Result",
                 (),
@@ -188,40 +261,39 @@ class TestImageBuilderV3Client(unittest.IsolatedAsyncioTestCase):
                             {
                                 "id": "img-build-1",
                                 "key": "img-1",
-                                "name": "image-a",
+                                "name": "default",
+                                "function_names": ["deploy_template"],
                                 "status": "pending",
                             },
-                        )()
+                        )(),
+                        type(
+                            "ImageBuild",
+                            (),
+                            {
+                                "id": "img-build-2",
+                                "key": "img-2",
+                                "name": "default",
+                                "function_names": [
+                                    "discover_template_files",
+                                    "fetch_file",
+                                    "deploy_via_cli",
+                                ],
+                                "status": "pending",
+                            },
+                        )(),
                     ],
-                    "name": "app_fn",
+                    "name": "deploy_template",
                 },
             )()
-        )["img-build-1"]
-
-        with patch.object(reporter, "print_log_event") as print_log_event:
-            await builder._stream_build_logs(reporter)
-
-        cloud_client.stream_build_logs_to_stderr_prefixed.assert_called_once_with(
-            "/images/v3",
-            "img-build-1",
-            "app_fn/image-a",
-            "magenta",
         )
-        cloud_client.stream_build_logs_json.assert_called_once_with(
-            "/images/v3",
-            "img-build-1",
-        )
-        print_log_event.assert_called_once()
+
         self.assertEqual(
-            print_log_event.call_args.args[0],
-            BuildLogEvent(
-                image_build_id="img-build-1",
-                timestamp="2026-03-07T10:01:00Z",
-                stream="stdout",
-                message="step 1",
-                sequence_number=1,
-                build_status="building",
-            ),
+            reporters["img-build-1"].display_name,
+            "deploy_template/default [deploy_template]",
+        )
+        self.assertEqual(
+            reporters["img-build-2"].display_name,
+            "deploy_template/default [discover_template_files+2]",
         )
 
     def test_reporter_print_log_event_handles_pending_and_enqueued(self):

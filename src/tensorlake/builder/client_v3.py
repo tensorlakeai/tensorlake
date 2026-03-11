@@ -175,10 +175,20 @@ class BuildSummary:
 class _ImageBuildReporter:
     _instance_count = 0
 
-    def __init__(self, application_name: str, info: ApplicationBuildImageResult):
+    def __init__(
+        self,
+        application_name: str,
+        info: ApplicationBuildImageResult,
+        *,
+        disambiguate_name: bool = False,
+    ):
         self._info = info
         self._last_seen_status = info.status
-        self._display_name = self._build_display_name(application_name, info)
+        self._display_name = self._build_display_name(
+            application_name,
+            info,
+            disambiguate_name=disambiguate_name,
+        )
         self._color = _IMAGE_NAME_PREFIX_COLORS[
             _ImageBuildReporter._instance_count % len(_IMAGE_NAME_PREFIX_COLORS)
         ]
@@ -186,10 +196,24 @@ class _ImageBuildReporter:
 
     @staticmethod
     def _build_display_name(
-        application_name: str, info: ApplicationBuildImageResult
+        application_name: str,
+        info: ApplicationBuildImageResult,
+        *,
+        disambiguate_name: bool = False,
     ) -> str:
         image_name = info.name or "image"
-        return f"{application_name}/{image_name}"
+        display_name = f"{application_name}/{image_name}"
+        if not disambiguate_name:
+            return display_name
+
+        if len(info.function_names) == 1:
+            qualifier = info.function_names[0]
+        elif len(info.function_names) > 1:
+            qualifier = f"{info.function_names[0]}+{len(info.function_names) - 1}"
+        else:
+            qualifier = info.key or info.id
+
+        return f"{display_name} [{qualifier}]"
 
     @property
     def display_name(self) -> str:
@@ -318,8 +342,20 @@ class ImageBuilderV3Client:
         result: ApplicationBuildResult,
     ) -> dict[str, _ImageBuildReporter]:
         _ImageBuildReporter._instance_count = 0
+        image_name_counts: dict[str, int] = {}
+        for image_build in result.image_builds:
+            image_name = image_build.name or "image"
+            image_name_counts[image_name] = image_name_counts.get(image_name, 0) + 1
+
         return {
-            image_build.id: _ImageBuildReporter(result.name, image_build)
+            image_build.id: _ImageBuildReporter(
+                result.name,
+                image_build,
+                disambiguate_name=image_name_counts.get(
+                    image_build.name or "image", 0
+                )
+                > 1,
+            )
             for image_build in result.image_builds
         }
 

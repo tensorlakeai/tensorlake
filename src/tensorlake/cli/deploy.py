@@ -148,7 +148,7 @@ def mk_builder(version: str, auth: Context):
 def deploy(
     application_file_path: str,
     upgrade_running_requests: bool,
-    image_builder_version: str = "v2",
+    image_builder_version: str = "v3",
     build_envs: list[tuple[str, str]] | None = None,
 ):
     """Deploys applications to Tensorlake Cloud, emitting NDJSON events to stdout."""
@@ -332,7 +332,7 @@ def deploy_entrypoint():
     parser.add_argument(
         "--image-builder-version",
         choices=["v2", "v3"],
-        default="v2",
+        default="v3",
         help="Select image builder version",
     )
     parser.add_argument(

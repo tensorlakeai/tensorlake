@@ -954,6 +954,15 @@ class TestDeployEntrypoints(unittest.TestCase):
             ],
         )
 
+    def test_deploy_entrypoint_defaults_to_v3_image_builder(self):
+        with (
+            patch("sys.argv", ["tensorlake-deploy", "my_app.py"]),
+            patch.object(deploy_module, "deploy") as deploy,
+        ):
+            deploy_module.deploy_entrypoint()
+
+        self.assertEqual(deploy.call_args.kwargs["image_builder_version"], "v3")
+
     def test_prepare_images_emits_inner_build_error_message(self):
         builder = MagicMock()
         builder.build = AsyncMock(
