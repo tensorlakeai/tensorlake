@@ -8,6 +8,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
+  id-token: write
   contents: read
 
 jobs:
@@ -187,6 +188,4 @@ jobs:
     uses: ./.github/workflows/integration_test.yaml
     with:
       version: ${{ needs.prepare.outputs.version }}
-    secrets:
-      TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
-      TENSORLAKE_API_URL: ${{ secrets.TENSORLAKE_API_URL }}
+    secrets: inherit

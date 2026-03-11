@@ -3,7 +3,7 @@ members = ["crates/cloud-sdk", "crates/cli", "crates/rust-cloud-sdk-py"]
 resolver = "3"
 
 [workspace.package]
-version = "0.4.17"
+version = "0.4.18"
 authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
 edition = "2024"
 license = "Apache-2.0"
@@ -49,7 +49,7 @@ minijinja = "2"
 # Data types
 bytes = "1.11.1"
 chrono = { version = "0.4.44", features = ["serde"] }
-uuid = { version = "1.21.0", features = ["serde"] }
+uuid = { version = "1.22.0", features = ["serde"] }
 
 # Utilities
 thiserror = "2.0.18"
@@ -76,7 +76,7 @@ open = "5"
 crossterm = "0.29"
 
 # Python bindings
-pyo3 = { version = "0.22", features = ["abi3-py310", "extension-module"] }
+pyo3 = { version = "0.28.2", features = ["abi3-py310", "extension-module"] }
 
 [profile.release]
 codegen-units = 1

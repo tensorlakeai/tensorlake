@@ -13,13 +13,8 @@ on:
         required: true
         type: string
 
-    secrets:
-      TENSORLAKE_API_KEY:
-        required: true
-      TENSORLAKE_API_URL:
-        required: true
-
 permissions:
+  id-token: write
   contents: read
 
 jobs:
@@ -42,11 +37,39 @@ jobs:
               return f"Hello, {name}!"
           EOF
 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: github-actions-integration-test
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Start Indexify Server
+        uses: JarvusInnovations/background-action@v1
+        with:
+          run: |
+            docker run -i -a stdout -a stderr --rm \
+              --network host \
+              --name indexify-server \
+              ${{ steps.login-ecr.outputs.registry }}/indexify-server:latest &
+          wait-on: |
+            tcp:localhost:8900
+          tail: true
+          wait-for: 30s
+          log-output: true
+          log-output-if: true
+
       - name: Run integration tests in Docker
         run: |
           docker run --rm \
+            --network host \
+            -e TENSORLAKE_API_URL="http://localhost:8900" \
             -e TENSORLAKE_API_KEY="${{ secrets.TENSORLAKE_API_KEY }}" \
-            -e TENSORLAKE_API_URL="${{ secrets.TENSORLAKE_API_URL }}" \
+            -e TENSORLAKE_ONPREM=true \
             -v /tmp/test_app.py:/tmp/test_app.py \
             -v /var/run/docker.sock:/var/run/docker.sock \
             python:3.11-slim bash -c '
