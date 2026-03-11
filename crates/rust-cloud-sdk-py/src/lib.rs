@@ -892,11 +892,12 @@ impl CloudSandboxProxyClient {
         })
     }
 
-    fn read_file_bytes(&self, path: String) -> PyResult<Vec<u8>> {
-        self.run_with_retry(5, move |client| {
+    fn read_file_bytes(&self, py: Python<'_>, path: String) -> PyResult<Py<pyo3::types::PyBytes>> {
+        let data: Vec<u8> = self.run_with_retry(5, move |client| {
             let path = path.clone();
             async move { client.read_file(&path).await }
-        })
+        })?;
+        Ok(pyo3::types::PyBytes::new(py, &data).into())
     }
 
     fn write_file(&self, path: String, content: Vec<u8>) -> PyResult<()> {
