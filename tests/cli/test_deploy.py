@@ -439,9 +439,7 @@ class TestDeployEntrypoints(unittest.TestCase):
                 declared_secret_names=["EXISTING", "MISSING_ONE", "MISSING_TWO"],
                 missing_secret_names=["MISSING_ONE", "MISSING_TWO"],
             ),
-            patch.object(
-                deploy_module, "mk_builder", return_value=MagicMock()
-            ),
+            patch.object(deploy_module, "mk_builder", return_value=MagicMock()),
             patch.object(deploy_module, "_prepare_images", prepare_images),
             patch.object(deploy_module, "deploy_applications"),
             patch.object(
