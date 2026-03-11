@@ -91,7 +91,7 @@ impl CloudApiClient {
         upgrade_running_requests: bool,
     ) -> PyResult<()> {
         let namespace = self.namespace.clone();
-        self.run_with_retry(2, move |client| {
+        self.run_with_retry(5, move |client| {
             let namespace = namespace.clone();
             let manifest_json = manifest_json.clone();
             let code_zip = code_zip.clone();

@@ -42,6 +42,20 @@ jobs:
               return f"Hello, {name}!"
           EOF
 
+      - name: Wait for API server to be ready
+        run: |
+          echo "Waiting for API server at ${{ secrets.TENSORLAKE_API_URL }} to be ready..."
+          for i in $(seq 1 30); do
+            if curl -s -o /dev/null -w "%{http_code}" "${{ secrets.TENSORLAKE_API_URL }}" | grep -q "200"; then
+              echo "API server is ready"
+              exit 0
+            fi
+            echo "Attempt $i/30: API server not ready, retrying in 10s..."
+            sleep 10
+          done
+          echo "API server did not become ready in time"
+          exit 1
+
       - name: Run integration tests in Docker
         run: |
           docker run --rm \
