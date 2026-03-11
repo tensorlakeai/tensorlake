@@ -109,7 +109,7 @@ class CreateSandboxRequest(BaseModel):
 class SandboxPoolRequest(BaseModel):
     """Request payload for creating or updating a sandbox pool."""
 
-    image: str
+    image: str | None = None
     resources: ContainerResourcesInfo
     secret_names: list[str] | None = None
     timeout_secs: int = 0
