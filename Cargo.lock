@@ -2450,6 +2450,7 @@ dependencies = [
  "serde_with",
  "sha2",
  "tar",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",

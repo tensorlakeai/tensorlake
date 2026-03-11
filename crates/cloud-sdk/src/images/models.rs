@@ -369,15 +369,15 @@ impl Image {
     }
 
     /// Calculate the hash for this image, matching the Python implementation.
-    pub fn image_hash(&self, sdk_version: &str) -> String {
+    pub fn image_hash(&self, sdk_version: &str) -> io::Result<String> {
         let mut hasher = Sha256::new();
         hasher.update(self.name.as_bytes());
         hasher.update(self.base_image.as_bytes());
         for op in &self.build_operations {
-            add_build_op_to_hasher(op, &mut hasher);
+            add_build_op_to_hasher(op, &mut hasher)?;
         }
         hasher.update(sdk_version.as_bytes());
-        hex::encode(hasher.finalize())
+        Ok(hex::encode(hasher.finalize()))
     }
 
     /// Generate the Dockerfile content for this image.
@@ -488,10 +488,12 @@ fn render_build_operation(op: &ImageBuildOperation) -> String {
     let options = if op.options.is_empty() {
         String::new()
     } else {
+        let mut sorted_opts: Vec<_> = op.options.iter().collect();
+        sorted_opts.sort_by_key(|(k, _)| (*k).clone());
         format!(
             " {}",
-            op.options
-                .iter()
+            sorted_opts
+                .into_iter()
                 .map(|(k, v)| format!("--{}={}", k, v))
                 .collect::<Vec<_>>()
                 .join(" ")
@@ -546,7 +548,7 @@ fn is_inside_git_dir(path: &str) -> bool {
         .any(|c| c.as_os_str() == ".git")
 }
 
-fn add_build_op_to_hasher(op: &ImageBuildOperation, hasher: &mut Sha256) {
+fn add_build_op_to_hasher(op: &ImageBuildOperation, hasher: &mut Sha256) -> io::Result<()> {
     hasher.update(op.operation_type.to_string().as_bytes());
 
     match op.operation_type {
@@ -559,25 +561,33 @@ fn add_build_op_to_hasher(op: &ImageBuildOperation, hasher: &mut Sha256) {
         }
         ImageBuildOperationType::COPY => {
             if let Some(src) = op.args.first() {
-                hash_directory(src, hasher);
+                hash_directory(src, hasher)?;
             }
         }
     }
+    Ok(())
 }
 
-fn hash_directory(path: &str, hasher: &mut Sha256) {
+fn hash_directory(path: &str, hasher: &mut Sha256) -> io::Result<()> {
     use std::fs;
     use std::io::Read;
 
-    fn visit_dir(dir: &std::path::Path, hasher: &mut Sha256) -> io::Result<()> {
+    fn visit_dir(
+        dir: &std::path::Path,
+        base: &std::path::Path,
+        hasher: &mut Sha256,
+    ) -> io::Result<()> {
         if dir.is_dir() {
-            let entries = fs::read_dir(dir)?;
+            let mut entries: Vec<_> = fs::read_dir(dir)?
+                .collect::<Result<Vec<_>, _>>()?;
+            entries.sort_by_key(|e| e.path());
             for entry in entries {
-                let entry = entry?;
                 let path = entry.path();
                 if path.is_dir() {
-                    visit_dir(&path, hasher)?;
+                    visit_dir(&path, base, hasher)?;
                 } else {
+                    let rel = path.strip_prefix(base).unwrap_or(&path);
+                    hasher.update(rel.to_string_lossy().as_bytes());
                     let mut file = fs::File::open(&path)?;
                     let mut buffer = [0u8; 1024];
                     loop {
@@ -595,6 +605,84 @@ fn hash_directory(path: &str, hasher: &mut Sha256) {
 
     let path = std::path::Path::new(path);
     if path.exists() {
-        visit_dir(path, hasher).unwrap();
+        visit_dir(path, path, hasher)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hash_directory_is_deterministic() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create files in non-alphabetical order
+        std::fs::write(dir.path().join("z.txt"), b"zzz").unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"aaa").unwrap();
+        std::fs::write(dir.path().join("m.txt"), b"mmm").unwrap();
+
+        let image = Image::builder()
+            .name("test")
+            .base_image("python:3.10")
+            .build_operations(vec![ImageBuildOperation::builder()
+                .operation_type(ImageBuildOperationType::COPY)
+                .args(vec![dir.path().to_string_lossy().into_owned()])
+                .build()
+                .unwrap()])
+            .build()
+            .unwrap();
+
+        let h1 = image.image_hash("1.0.0").unwrap();
+        let h2 = image.image_hash("1.0.0").unwrap();
+        assert_eq!(h1, h2, "hash must be deterministic across calls");
+    }
+
+    #[test]
+    fn test_render_build_operation_options_are_sorted() {
+        let op = ImageBuildOperation::builder()
+            .operation_type(ImageBuildOperationType::COPY)
+            .args(vec!["src/".into(), "/app/".into()])
+            .options(HashMap::from([
+                ("from".into(), "builder".into()),
+                ("chown".into(), "1000:1000".into()),
+                ("chmod".into(), "755".into()),
+            ]))
+            .build()
+            .unwrap();
+
+        let rendered = render_build_operation(&op);
+        assert_eq!(
+            rendered,
+            "COPY --chmod=755 --chown=1000:1000 --from=builder src/ /app/"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_hash_directory_returns_error_on_io_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("unreadable.txt");
+        std::fs::write(&file_path, b"secret").unwrap();
+        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let image = Image::builder()
+            .name("test")
+            .base_image("python:3.10")
+            .build_operations(vec![ImageBuildOperation::builder()
+                .operation_type(ImageBuildOperationType::COPY)
+                .args(vec![dir.path().to_string_lossy().into_owned()])
+                .build()
+                .unwrap()])
+            .build()
+            .unwrap();
+
+        let result = image.image_hash("1.0.0");
+        assert!(result.is_err(), "should return error for unreadable file");
+
+        // Restore permissions so tempdir cleanup succeeds
+        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
 }
