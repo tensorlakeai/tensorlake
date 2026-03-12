@@ -181,7 +181,7 @@ impl ImagesClient {
         request
             .image
             .create_context_archive(&mut context_data, &request.sdk_version, None)?;
-        let image_hash = request.image.image_hash(&request.sdk_version);
+        let image_hash = request.image.image_hash(&request.sdk_version)?;
         let form = Form::new()
             .text("graph_name", request.application_name.clone())
             .text("graph_version", request.application_version.clone())
