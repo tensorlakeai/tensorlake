@@ -17,6 +17,27 @@ env:
   TENSORLAKE_API_URL: http://localhost:8900
 
 jobs:
+  rust_tests:
+    name: Rust workspace tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Rust workspace tests
+        run: cargo test --workspace
+
   run_tests:
     name: Lint and test
     runs-on: ubuntu-latest-xlarge

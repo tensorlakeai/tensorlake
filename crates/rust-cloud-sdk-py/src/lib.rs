@@ -448,60 +448,69 @@ impl CloudApiClient {
 
     fn stream_build_logs_json(
         &self,
+        py: Python<'_>,
         build_service_path: String,
         build_id: String,
     ) -> PyResult<Vec<String>> {
-        self.run_with_retry(2, move |client| {
-            let path = build_logs_path(&build_service_path, &build_id);
-            async move {
-                let mut events: Vec<String> = Vec::new();
-                stream_build_log_events(client, &path, |event| {
-                    events.push(serde_json::to_string(&event)?);
-                    Ok(())
-                })
-                .await?;
-                Ok(events)
-            }
+        py.detach(|| {
+            self.run_with_retry(2, move |client| {
+                let path = build_logs_path(&build_service_path, &build_id);
+                async move {
+                    let mut events: Vec<String> = Vec::new();
+                    stream_build_log_events(client, &path, |event| {
+                        events.push(serde_json::to_string(&event)?);
+                        Ok(())
+                    })
+                    .await?;
+                    Ok(events)
+                }
+            })
         })
     }
 
     fn stream_build_logs_to_stderr(
         &self,
+        py: Python<'_>,
         build_service_path: String,
         build_id: String,
     ) -> PyResult<()> {
-        self.run_with_retry(2, move |client| {
-            let path = build_logs_path(&build_service_path, &build_id);
-            async move {
-                stream_build_log_events(client, &path, |event| {
-                    print_build_log_event_to_stderr(event, None);
+        py.detach(|| {
+            self.run_with_retry(2, move |client| {
+                let path = build_logs_path(&build_service_path, &build_id);
+                async move {
+                    stream_build_log_events(client, &path, |event| {
+                        print_build_log_event_to_stderr(event, None);
+                        Ok(())
+                    })
+                    .await?;
                     Ok(())
-                })
-                .await?;
-                Ok(())
-            }
+                }
+            })
         })
     }
 
     #[pyo3(signature = (build_service_path, build_id, prefix, color=None))]
     fn stream_build_logs_to_stderr_prefixed(
         &self,
+        py: Python<'_>,
         build_service_path: String,
         build_id: String,
         prefix: String,
         color: Option<String>,
     ) -> PyResult<()> {
-        self.run_with_retry(2, move |client| {
-            let path = build_logs_path(&build_service_path, &build_id);
-            let log_prefix = LogPrefix::new(prefix.clone(), color.clone());
-            async move {
-                stream_build_log_events(client, &path, |event| {
-                    print_build_log_event_to_stderr(event, Some(&log_prefix));
+        py.detach(|| {
+            self.run_with_retry(2, move |client| {
+                let path = build_logs_path(&build_service_path, &build_id);
+                let log_prefix = LogPrefix::new(prefix.clone(), color.clone());
+                async move {
+                    stream_build_log_events(client, &path, |event| {
+                        print_build_log_event_to_stderr(event, Some(&log_prefix));
+                        Ok(())
+                    })
+                    .await?;
                     Ok(())
-                })
-                .await?;
-                Ok(())
-            }
+                }
+            })
         })
     }
 
