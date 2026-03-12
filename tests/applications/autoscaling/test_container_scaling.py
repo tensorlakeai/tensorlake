@@ -143,6 +143,10 @@ def burst_limited_function(x: int) -> int:
 class TestWarmContainerBehavior(unittest.TestCase):
     """Test warm_containers behavior: pre-allocated containers for low latency."""
 
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     def test_warm_containers_provide_faster_cold_start(self):
         """Verify warm containers reduce initial allocation latency (remote only).
 
@@ -150,7 +154,6 @@ class TestWarmContainerBehavior(unittest.TestCase):
         - Function WITHOUT warm: Cold start latency for first request
         - Function WITH warm: Warm containers already allocated, faster start
         """
-        deploy_applications(__file__)
 
         # First request to function without warm - expect cold start
         cold_start_times = []
@@ -185,7 +188,6 @@ class TestWarmContainerBehavior(unittest.TestCase):
         - Function WITH warm=5: Can handle 5 concurrent requests immediately
         - Function WITHOUT warm: Must scale up on-demand, higher latency
         """
-        deploy_applications(__file__)
 
         # Test concurrent requests without warm containers
         start = time.time()
@@ -223,6 +225,10 @@ class TestWarmContainerBehavior(unittest.TestCase):
 class TestMinContainerBehavior(unittest.TestCase):
     """Test min_containers behavior: guaranteed minimum capacity."""
 
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_min_containers_always_available(self, _: str, is_remote: bool):
         """Verify min_containers are always available.
@@ -231,8 +237,6 @@ class TestMinContainerBehavior(unittest.TestCase):
         - Function with min=2: At least 2 containers always running
         - First requests should be fast (no cold start if within min)
         """
-        if is_remote:
-            deploy_applications(__file__)
 
         # Make requests that should hit pre-allocated min containers
         times = []
@@ -258,7 +262,6 @@ class TestMinContainerBehavior(unittest.TestCase):
         Only runs remote: concurrent local execution doesn't support shared
         runtime hooks from multiple threads.
         """
-        deploy_applications(__file__)
 
         # Should handle multiple concurrent requests immediately
         with ThreadPoolExecutor(max_workers=6) as executor:
@@ -280,6 +283,10 @@ class TestMinContainerBehavior(unittest.TestCase):
 class TestMaxContainerBehavior(unittest.TestCase):
     """Test max_containers behavior: scaling limits and backpressure."""
 
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     def test_max_containers_limits_concurrent_execution(self):
         """Verify max_containers enforces scaling limit.
 
@@ -287,7 +294,6 @@ class TestMaxContainerBehavior(unittest.TestCase):
         - Function with max=3: Can handle at most 3 concurrent executions
         - Additional requests queue or experience higher latency
         """
-        deploy_applications(__file__)
 
         # Send 6 concurrent requests to function with max=3
         # Requests should queue due to max limit
@@ -321,7 +327,6 @@ class TestMaxContainerBehavior(unittest.TestCase):
         - Can scale up to 2 total
         - Burst of 4 requests should queue (only 2 can run concurrently)
         """
-        deploy_applications(__file__)
 
         start = time.time()
         with ThreadPoolExecutor(max_workers=4) as executor:
@@ -349,6 +354,10 @@ class TestMaxContainerBehavior(unittest.TestCase):
 class TestAutoscalingCombinations(unittest.TestCase):
     """Test combinations of min, max, and warm parameters."""
 
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     def test_all_parameters_work_together(self):
         """Verify min + max + warm work together correctly.
 
@@ -360,7 +369,6 @@ class TestAutoscalingCombinations(unittest.TestCase):
         Only runs remote: concurrent local execution doesn't support shared
         runtime hooks from multiple threads.
         """
-        deploy_applications(__file__)
 
         # Should handle 5 concurrent requests immediately (min + warm)
         with ThreadPoolExecutor(max_workers=5) as executor:
@@ -388,7 +396,6 @@ class TestAutoscalingCombinations(unittest.TestCase):
         Only runs remote: concurrent local execution doesn't support shared
         runtime hooks from multiple threads.
         """
-        deploy_applications(__file__)
 
         # Test scaling up to max
         with ThreadPoolExecutor(max_workers=10) as executor:
@@ -406,6 +413,10 @@ class TestAutoscalingCombinations(unittest.TestCase):
 class TestScalingSemantics(unittest.TestCase):
     """Test the semantic difference between functions with and without warm."""
 
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     def test_with_warm_maintains_buffer_above_demand(self):
         """Verify functions WITH warm maintain buffer above demand.
 
@@ -413,7 +424,6 @@ class TestScalingSemantics(unittest.TestCase):
         - Function WITH warm: System maintains (current_demand + warm) containers
         - Sequential requests remain fast (warm buffer maintained)
         """
-        deploy_applications(__file__)
 
         # Make sequential requests - warm buffer should be maintained
         times = []
@@ -437,8 +447,6 @@ class TestScalingSemantics(unittest.TestCase):
         - Function WITHOUT warm: Scales up on-demand, scales down when idle
         - May see cold starts between requests if scaled down
         """
-        deploy_applications(__file__)
-
         # Make requests with gaps to allow scale-down
         times = []
         for i in range(3):
@@ -459,6 +467,10 @@ class TestScalingSemantics(unittest.TestCase):
 class TestEdgeCases(unittest.TestCase):
     """Test edge cases and boundary conditions."""
 
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_warm_greater_than_max_is_bounded(self, _: str, is_remote: bool):
         """Verify warm is bounded by max_containers.
@@ -467,9 +479,6 @@ class TestEdgeCases(unittest.TestCase):
         - If warm > max, system creates at most max containers
         - max_warm_function: max=5, warm=2 → creates min(max, warm) = 2
         """
-        if is_remote:
-            deploy_applications(__file__)
-
         # Should work correctly with warm bounded by max
         request: Request = run_application(max_warm_function, is_remote, 5)
         self.assertEqual(request.output(), 40)
@@ -477,9 +486,6 @@ class TestEdgeCases(unittest.TestCase):
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_zero_values_handled_correctly(self, _: str, is_remote: bool):
         """Verify functions with None/default values work correctly."""
-        if is_remote:
-            deploy_applications(__file__)
-
         # Function with no autoscaling params should work
         request: Request = run_application(no_autoscaling_function, is_remote, 0)
         self.assertEqual(request.output(), 0)

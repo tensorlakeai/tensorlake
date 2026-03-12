@@ -1,23 +1,20 @@
 import time
 
-from ..interface.futures import Future
+from ..interface.futures import FunctionCallFuture
 from ..metadata import FunctionCallMetadata
-from .future_run.return_output_future_metadata import ReturnOutputFutureMetadata
-
-UserFutureMetadataType = FunctionCallMetadata | ReturnOutputFutureMetadata | None
 
 
-class LocalFuture:
+class LocalFunctionCallFuture:
     """Represents an SDK Future with additional metadata used by LocalRunner."""
 
     def __init__(
         self,
-        future: Future,
-        future_metadata: UserFutureMetadataType,
+        future: FunctionCallFuture,
+        future_metadata: FunctionCallMetadata,
         start_delay: float | None,
     ) -> None:
-        self._future: Future = future
-        self._future_metadata: UserFutureMetadataType = future_metadata
+        self._future: FunctionCallFuture = future
+        self._future_metadata: FunctionCallMetadata = future_metadata
         self._start_time: float | None = (
             None if start_delay is None else (time.time() + start_delay)
         )
@@ -27,11 +24,11 @@ class LocalFuture:
         self._output_consumer_future_ids: list[str] = []
 
     @property
-    def future(self) -> Future:
+    def future(self) -> FunctionCallFuture:
         return self._future
 
     @property
-    def future_metadata(self) -> UserFutureMetadataType:
+    def future_metadata(self) -> FunctionCallMetadata:
         return self._future_metadata
 
     @property

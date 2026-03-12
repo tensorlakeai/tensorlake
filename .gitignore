@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 indexify_storage
+dataplane-state
 
 # C extensions
 *.so

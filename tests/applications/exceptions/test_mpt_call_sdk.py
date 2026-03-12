@@ -105,11 +105,12 @@ def application_mt_wait_future(_: str) -> str:
 
 
 class TestCallSDKFromChildThread(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_error_on_get_context(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             application_mt_get_context,
             is_remote,
@@ -119,9 +120,6 @@ class TestCallSDKFromChildThread(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_error_on_run_future(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             application_mt_run_future,
             is_remote,
@@ -131,9 +129,6 @@ class TestCallSDKFromChildThread(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_error_on_wait_future(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             application_mt_wait_future,
             is_remote,
@@ -182,11 +177,12 @@ def application_mp_run_future(_: str) -> str:
 
 
 class TestCallSDKFromChildProcess(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_error_on_get_context(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             application_mp_get_context,
             is_remote,
@@ -196,9 +192,6 @@ class TestCallSDKFromChildProcess(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_error_on_run_future(self, _, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             application_mp_run_future,
             is_remote,

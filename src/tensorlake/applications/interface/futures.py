@@ -9,7 +9,7 @@ from tensorlake.vendor.nanoid.nanoid import generate as nanoid_generate
 from ..runtime_hooks import await_future as runtime_hook_await_future
 from ..runtime_hooks import coroutine_to_future as runtime_hook_coroutine_to_future
 from ..runtime_hooks import register_coroutine as runtime_hook_register_coroutine
-from ..runtime_hooks import run_futures as runtime_hook_run_futures
+from ..runtime_hooks import run_future as runtime_hook_run_future
 from ..runtime_hooks import wait_futures as runtime_hook_wait_futures
 from .exceptions import InternalError, SDKUsageError, TensorlakeError
 
@@ -92,8 +92,13 @@ class Future:
                 f"Attempt to run Future that is already started: {self}"
             )
         self._run_hook_was_called = True
-        runtime_hook_run_futures(futures=[self])
-        return self
+
+        try:
+            runtime_hook_run_future(future=self)
+            return self
+        except TensorlakeError as e:
+            self._set_exception(e)
+            raise
 
     def run_later(self, start_delay: float) -> "Future":
         """Runs this Future after the given delay in seconds and returns it.
@@ -272,48 +277,20 @@ class Future:
         return pretty_print(self)
 
 
-class _FutureListKind(Enum):
-    MAP_OPERATION = 0
-
-
-@dataclass
-class _FutureListMetadata:
-    kind: _FutureListKind
-    # Not None for MAP_OPERATION kind.
-    function_name: str | None
-
-    @property
-    def durability_key(self) -> str:
-        if self.kind == _FutureListKind.MAP_OPERATION:
-            return f"MAP_OPERATION:{self.function_name}"
-        else:
-            return f"UNKNOWN_KIND:{self.kind}"
-
-
-class ListFuture(Future):
-    """A Future that represents a list of other Futures.
-
-    Allows to pass a list of Futures and values as a single list argument to a Tensorlake Function.
-    Cannot be returned from a Tensorlake Function as a tail call (Server can't resolve it).
-    """
+class MapFuture(Future):
+    """A Future that represents a Map Operation."""
 
     def __init__(
         self,
         id: str,
-        items: "list[Any | _TensorlakeFutureWrapper[Future]] | _TensorlakeFutureWrapper[ListFuture]",
-        metadata: _FutureListMetadata,
+        items: "list[Any | _TensorlakeFutureWrapper[Future]] | _TensorlakeFutureWrapper[Future]",
+        function_name: str,
     ):
         super().__init__(id=id)
-        self._items: "list[Any | _TensorlakeFutureWrapper[Future]] | _TensorlakeFutureWrapper[ListFuture]" = (items)
-        self._metadata: _FutureListMetadata = metadata
-
-    @property
-    def _kind_str(self) -> str:
-        """Returns a human readable representation of the ListFuture kind."""
-        if self._metadata.kind == _FutureListKind.MAP_OPERATION:
-            return "Tensorlake Map Operation"
-        else:
-            return "Tensorlake ListFuture"
+        # Either a user constructed list of items to map over or just a Future that resolves to a list of items to map over.
+        # A future i.e. can be another map operation of a function call that produces a list.
+        self._items: "list[Any | _TensorlakeFutureWrapper[Future]] | _TensorlakeFutureWrapper[Future]" = (items)
+        self._function_name: str = function_name
 
     def __repr__(self) -> str:
         # Shows exact structure of the Future. Used for debug logging.
@@ -333,19 +310,16 @@ def _make_map_operation_future(
     function_name: str,
     items: (
         Iterable[Any | _TensorlakeFutureWrapper[Future]]
-        | _TensorlakeFutureWrapper[ListFuture]
+        | _TensorlakeFutureWrapper[Future]
     ),
-) -> ListFuture:
-    items: list[Any | Future] | ListFuture = items
-    if not isinstance(_unwrap_future(items), ListFuture):
+) -> MapFuture:
+    items: list[Any | Future] | Future = items
+    if not isinstance(_unwrap_future(items), Future):
         items = list(items)  # should be iterable
-    return ListFuture(
+    return MapFuture(
         id=_request_scoped_id(),
         items=items,
-        metadata=_FutureListMetadata(
-            kind=_FutureListKind.MAP_OPERATION,
-            function_name=function_name,
-        ),
+        function_name=function_name,
     )
 
 
@@ -396,7 +370,7 @@ class ReduceOperationFuture(Future):
         function_name: str,
         items: (
             list[Any | _TensorlakeFutureWrapper[Future]]
-            | _TensorlakeFutureWrapper[ListFuture]
+            | _TensorlakeFutureWrapper[Future]
         ),
         initial: Any | _TensorlakeFutureWrapper[Future] | _InitialMissingType,
     ):
@@ -404,7 +378,7 @@ class ReduceOperationFuture(Future):
         self._function_name: str = function_name
         self._items: (
             list[Any | _TensorlakeFutureWrapper[Future]]
-            | _TensorlakeFutureWrapper[ListFuture]
+            | _TensorlakeFutureWrapper[Future]
         ) = items
         self._initial: Any | _TensorlakeFutureWrapper[Future] | _InitialMissingType = (
             initial
@@ -426,11 +400,11 @@ def _make_reduce_operation_future(
     function_name: str,
     items: (
         Iterable[Any | _TensorlakeFutureWrapper[Future]]
-        | _TensorlakeFutureWrapper[ListFuture]
+        | _TensorlakeFutureWrapper[Future]
     ),
     initial: Any | _TensorlakeFutureWrapper[Future] | _InitialMissingType,
 ) -> ReduceOperationFuture:
-    if not isinstance(_unwrap_future(items), ListFuture):
+    if not isinstance(_unwrap_future(items), Future):
         items = list(items)
     return ReduceOperationFuture(
         id=_request_scoped_id(),
@@ -465,7 +439,10 @@ def _wrap_future_into_coroutine(future: Future) -> Coroutine[Any, Any, Any]:
 
 
 def _unwrap_future(value: Any | _TensorlakeFutureWrapper[Future]) -> Any | Future:
-    """Unwraps a Future from the given value if it's a future wrapper. Otherwise, returns the value itself."""
+    """Unwraps a Future from the given value if it's a future wrapper. Otherwise, returns the value itself.
+
+    Doesn't raise any exceptions.
+    """
     if isinstance(value, Future):
         return value
 

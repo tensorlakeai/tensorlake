@@ -124,10 +124,12 @@ async def async_futures_as_coroutines_tail_call(x: int) -> int:
 
 
 class TestFuturesConsumeFutures(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_sync(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             sync_three_futures_consume_same_future,
             is_remote,
@@ -137,8 +139,6 @@ class TestFuturesConsumeFutures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_sync_tail_call(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             sync_three_futures_consume_same_future_tail_call,
             is_remote,
@@ -148,8 +148,6 @@ class TestFuturesConsumeFutures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_sync_three_futures_consume_same_future,
             is_remote,
@@ -159,8 +157,6 @@ class TestFuturesConsumeFutures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_tail_call(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_three_futures_consume_same_future_tail_call,
             is_remote,
@@ -170,8 +166,6 @@ class TestFuturesConsumeFutures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_coroutine_tail_call(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_three_futures_consume_same_future_coroutine_tail_call,
             is_remote,
@@ -181,8 +175,6 @@ class TestFuturesConsumeFutures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_sync_futures_as_coroutines_tail_call(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_sync_futures_as_coroutines_tail_call,
             is_remote,
@@ -192,8 +184,6 @@ class TestFuturesConsumeFutures(unittest.TestCase):
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_async_futures_as_coroutines_tail_call(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application(
             async_futures_as_coroutines_tail_call,
             is_remote,

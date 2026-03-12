@@ -3,9 +3,8 @@ from typing import Any
 from .futures import (
     FunctionCallFuture,
     Future,
-    ListFuture,
+    MapFuture,
     ReduceOperationFuture,
-    _FutureListKind,
     _InitialMissing,
     _InitialMissingType,
     _TensorlakeFutureWrapper,
@@ -29,7 +28,7 @@ def pretty_print(
     Doesn't raise any exceptions.
     """
     unwrapped: Future | Any = _unwrap_future(obj)
-    if isinstance(unwrapped, ListFuture):
+    if isinstance(unwrapped, MapFuture):
         return _pretty_print_list_future(unwrapped, indent, char_limit)
     elif isinstance(unwrapped, FunctionCallFuture):
         return _pretty_print_function_call_future(unwrapped, indent, char_limit)
@@ -46,18 +45,13 @@ def pretty_print(
             return f"<unprintable object of type {type(obj)}>"
 
 
-def _pretty_print_list_future(future: ListFuture, indent: int, char_limit: int) -> str:
-    if future._metadata.kind == _FutureListKind.MAP_OPERATION:
-        prefix: str = (
-            f"Tensorlake Map Operation Future of '{future._metadata.function_name}' over "
-        )
-    else:
-        prefix: str = f"Tensorlake List Future of "
+def _pretty_print_list_future(future: MapFuture, indent: int, char_limit: int) -> str:
+    prefix: str = f"Tensorlake Map Operation Future of '{future._function_name}' over "
 
-    items: list[_TensorlakeFutureWrapper[Future] | Any] | ListFuture = _unwrap_future(
+    items: list[_TensorlakeFutureWrapper[Future] | Any] | MapFuture = _unwrap_future(
         future._items
     )
-    if isinstance(items, ListFuture):
+    if isinstance(items, MapFuture):
         return prefix + pretty_print(
             items, indent=indent, char_limit=char_limit - len(prefix)
         )
@@ -175,10 +169,10 @@ def _pretty_print_reduce_operation_future(
     initial: Future | Any | _InitialMissingType = _unwrap_future(future._initial)
     has_initial: bool = future._initial is not _InitialMissing
 
-    items: list[_TensorlakeFutureWrapper[Future] | Any] | ListFuture = _unwrap_future(
+    items: list[_TensorlakeFutureWrapper[Future] | Any] | MapFuture = _unwrap_future(
         future._items
     )
-    if isinstance(items, ListFuture):
+    if isinstance(items, MapFuture):
         return prefix + pretty_print(
             items, indent=indent, char_limit=char_limit - len(prefix)
         )

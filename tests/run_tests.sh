@@ -7,13 +7,6 @@ if [[ -z "$TENSORLAKE_API_URL" ]]; then
     exit 1
 fi
 
-echo "Building Rust Cloud SDK Python bindings..."
-poetry run maturin develop --manifest-path ../crates/rust-cloud-sdk-py/Cargo.toml
-if [ $? -ne 0 ]; then
-  echo "Failed to build Rust Cloud SDK Python bindings." 1>&2
-  exit 1
-fi
-
 enable_fe_test_suite=false
 enable_applications_test_suite=false
 enable_cli_test_suite=false
@@ -56,6 +49,13 @@ run_test_suite() {
 
 # cd to the script's directory.
 cd "$(dirname "$0")"
+
+echo "Building Rust Cloud SDK Python bindings..."
+poetry run maturin develop --manifest-path ../crates/rust-cloud-sdk-py/Cargo.toml
+if [ $? -ne 0 ]; then
+  echo "Failed to build Rust Cloud SDK Python bindings." 1>&2
+  exit 1
+fi
 
 summary_file=".run_tests_summary.txt"
 rm -f $summary_file

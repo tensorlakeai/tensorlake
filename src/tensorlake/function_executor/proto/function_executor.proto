@@ -165,6 +165,8 @@ message AllocationFunctionCallWatcher {
     optional string id = 3;
     // root_function_call_id from ExecutionPlanUpdates of an already started allocation function call.
     optional string root_function_call_id = 4;
+    // Optional timestamp for when to timeout the watcher.
+    optional google.protobuf.Timestamp deadline = 5;
 }
 
 message AllocationRequestStatePrepareReadOperation {}
@@ -314,6 +316,14 @@ message AllocationOutputBLOB {
     optional BLOB blob = 2;
 }
 
+enum AllocationFunctionCallFailureReason {
+    ALLOCATION_FUNCTION_CALL_FAILURE_REASON_UNKNOWN = 0;
+    ALLOCATION_FUNCTION_CALL_FAILURE_REASON_INTERNAL_ERROR = 1;
+    ALLOCATION_FUNCTION_CALL_FAILURE_REASON_FUNCTION_ERROR = 2;
+    ALLOCATION_FUNCTION_CALL_FAILURE_REASON_REQUEST_ERROR = 3;
+    ALLOCATION_FUNCTION_CALL_FAILURE_REASON_WATCHER_TIMEOUT = 4;
+}
+
 message AllocationFunctionCallResult {
     // Deprecated: Use watcher_id to match the result to the watcher.
     // TODO: Delete this field once all FEs use watcher_id.
@@ -321,6 +331,7 @@ message AllocationFunctionCallResult {
     optional string function_call_id = 1;
     optional string watcher_id = 7;
     optional AllocationOutcomeCode outcome_code = 2;
+    optional AllocationFunctionCallFailureReason failure_reason = 8;
     optional SerializedObjectInsideBLOB value_output = 3;
     optional BLOB value_blob = 4;
     optional SerializedObjectInsideBLOB request_error_output = 5;

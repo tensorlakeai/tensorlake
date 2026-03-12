@@ -93,36 +93,36 @@ def clear_await_future_hook() -> None:
     __await_future = None
 
 
-__run_futures: Callable[[List[Future]], None] = None
+__run_future: Callable[[Future], None] = None
 
 
-def run_futures(futures: List[Future]) -> None:
-    """Starts running the given futures in background.
+def run_future(future: Future) -> None:
+    """Starts running the given future in background.
 
-    Future results are set when the futures complete.
+    Future result is set when the future completes.
     """
-    global __run_futures
-    if __run_futures is None:
+    global __run_future
+    if __run_future is None:
         _raise_multiprocessing_usage_error()
 
-    return __run_futures(futures)
+    return __run_future(future)
 
 
-def set_run_futures_hook(hook: Any) -> None:
-    global __run_futures
-    if __run_futures is not None:
-        raise InternalError("__run_futures runtime hook already initialized")
+def set_run_future_hook(hook: Any) -> None:
+    global __run_future
+    if __run_future is not None:
+        raise InternalError("__run_future runtime hook already initialized")
 
-    __run_futures = hook
+    __run_future = hook
 
 
-def clear_run_futures_hook() -> None:
-    """Clears the __run_futures runtime hook if set.
+def clear_run_future_hook() -> None:
+    """Clears the __run_future runtime hook if set.
 
     Never raises.
     """
-    global __run_futures
-    __run_futures = None
+    global __run_future
+    __run_future = None
 
 
 __register_coroutine: Callable[[Coroutine, Future], None] = None

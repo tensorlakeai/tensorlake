@@ -8,7 +8,7 @@ from typing import Any
 
 from ...interface.exceptions import InternalError, TensorlakeError
 from ...interface.futures import Future
-from ..future import LocalFuture
+from ..future import LocalFunctionCallFuture
 
 
 @dataclass
@@ -37,7 +37,7 @@ class LocalFutureRun:
 
     def __init__(
         self,
-        local_future: LocalFuture,
+        local_future: LocalFunctionCallFuture,
         result_queue: SimpleQueue,
         thread_pool: ThreadPoolExecutor,
     ):
@@ -59,7 +59,7 @@ class LocalFutureRun:
         self._std_future: StdFuture = self._thread_pool.submit(self._future_entry_point)
 
     @property
-    def local_future(self) -> LocalFuture:
+    def local_future(self) -> LocalFunctionCallFuture:
         return self._local_future
 
     @property

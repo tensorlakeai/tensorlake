@@ -25,13 +25,15 @@ def function_1(_: str) -> str:
 
 
 class TestRedefineFunctionInSameFile(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     def test_applications_are_valid(self):
         self.assertEqual(validate_loaded_applications(), [])
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_function_redefined_successfully(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
         request: Request = run_application("function_1", is_remote, "1")
         self.assertEqual(request.output(), "function_1_redefined")
 

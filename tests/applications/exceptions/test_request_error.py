@@ -30,11 +30,12 @@ def end_func(_: str) -> str:
 
 
 class TestRequestError(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        deploy_applications(__file__)
+
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_expected_exception(self, _: str, is_remote: bool):
-        if is_remote:
-            deploy_applications(__file__)
-
         request: Request = run_application(
             start_func,
             is_remote,

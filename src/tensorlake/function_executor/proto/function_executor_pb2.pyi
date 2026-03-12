@@ -1,6 +1,7 @@
+import datetime
+from collections.abc import Iterable as _Iterable
+from collections.abc import Mapping as _Mapping
 from typing import ClassVar as _ClassVar
-from typing import Iterable as _Iterable
-from typing import Mapping as _Mapping
 from typing import Optional as _Optional
 from typing import Union as _Union
 
@@ -48,6 +49,26 @@ class AllocationFailureReason(int, metaclass=_enum_type_wrapper.EnumTypeWrapper)
     ALLOCATION_FAILURE_REASON_FUNCTION_ERROR: _ClassVar[AllocationFailureReason]
     ALLOCATION_FAILURE_REASON_REQUEST_ERROR: _ClassVar[AllocationFailureReason]
 
+class AllocationFunctionCallFailureReason(
+    int, metaclass=_enum_type_wrapper.EnumTypeWrapper
+):
+    __slots__ = ()
+    ALLOCATION_FUNCTION_CALL_FAILURE_REASON_UNKNOWN: _ClassVar[
+        AllocationFunctionCallFailureReason
+    ]
+    ALLOCATION_FUNCTION_CALL_FAILURE_REASON_INTERNAL_ERROR: _ClassVar[
+        AllocationFunctionCallFailureReason
+    ]
+    ALLOCATION_FUNCTION_CALL_FAILURE_REASON_FUNCTION_ERROR: _ClassVar[
+        AllocationFunctionCallFailureReason
+    ]
+    ALLOCATION_FUNCTION_CALL_FAILURE_REASON_REQUEST_ERROR: _ClassVar[
+        AllocationFunctionCallFailureReason
+    ]
+    ALLOCATION_FUNCTION_CALL_FAILURE_REASON_WATCHER_TIMEOUT: _ClassVar[
+        AllocationFunctionCallFailureReason
+    ]
+
 SERIALIZED_OBJECT_ENCODING_UNKNOWN: SerializedObjectEncoding
 SERIALIZED_OBJECT_ENCODING_UTF8_JSON: SerializedObjectEncoding
 SERIALIZED_OBJECT_ENCODING_UTF8_TEXT: SerializedObjectEncoding
@@ -67,6 +88,19 @@ ALLOCATION_FAILURE_REASON_UNKNOWN: AllocationFailureReason
 ALLOCATION_FAILURE_REASON_INTERNAL_ERROR: AllocationFailureReason
 ALLOCATION_FAILURE_REASON_FUNCTION_ERROR: AllocationFailureReason
 ALLOCATION_FAILURE_REASON_REQUEST_ERROR: AllocationFailureReason
+ALLOCATION_FUNCTION_CALL_FAILURE_REASON_UNKNOWN: AllocationFunctionCallFailureReason
+ALLOCATION_FUNCTION_CALL_FAILURE_REASON_INTERNAL_ERROR: (
+    AllocationFunctionCallFailureReason
+)
+ALLOCATION_FUNCTION_CALL_FAILURE_REASON_FUNCTION_ERROR: (
+    AllocationFunctionCallFailureReason
+)
+ALLOCATION_FUNCTION_CALL_FAILURE_REASON_REQUEST_ERROR: (
+    AllocationFunctionCallFailureReason
+)
+ALLOCATION_FUNCTION_CALL_FAILURE_REASON_WATCHER_TIMEOUT: (
+    AllocationFunctionCallFailureReason
+)
 
 class Empty(_message.Message):
     __slots__ = ()
@@ -257,21 +291,32 @@ class AllocationFunctionCall(_message.Message):
     ) -> None: ...
 
 class AllocationFunctionCallWatcher(_message.Message):
-    __slots__ = ("watcher_id", "function_call_id", "id", "root_function_call_id")
+    __slots__ = (
+        "watcher_id",
+        "function_call_id",
+        "id",
+        "root_function_call_id",
+        "deadline",
+    )
     WATCHER_ID_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_CALL_ID_FIELD_NUMBER: _ClassVar[int]
     ID_FIELD_NUMBER: _ClassVar[int]
     ROOT_FUNCTION_CALL_ID_FIELD_NUMBER: _ClassVar[int]
+    DEADLINE_FIELD_NUMBER: _ClassVar[int]
     watcher_id: str
     function_call_id: str
     id: str
     root_function_call_id: str
+    deadline: _timestamp_pb2.Timestamp
     def __init__(
         self,
         watcher_id: _Optional[str] = ...,
         function_call_id: _Optional[str] = ...,
         id: _Optional[str] = ...,
         root_function_call_id: _Optional[str] = ...,
+        deadline: _Optional[
+            _Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]
+        ] = ...,
     ) -> None: ...
 
 class AllocationRequestStatePrepareReadOperation(_message.Message):
@@ -462,7 +507,9 @@ class ExecutionPlanUpdates(_message.Message):
         self,
         updates: _Optional[_Iterable[_Union[ExecutionPlanUpdate, _Mapping]]] = ...,
         root_function_call_id: _Optional[str] = ...,
-        start_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ...,
+        start_at: _Optional[
+            _Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]
+        ] = ...,
     ) -> None: ...
 
 class AllocationResult(_message.Message):
@@ -564,6 +611,7 @@ class AllocationFunctionCallResult(_message.Message):
         "function_call_id",
         "watcher_id",
         "outcome_code",
+        "failure_reason",
         "value_output",
         "value_blob",
         "request_error_output",
@@ -572,6 +620,7 @@ class AllocationFunctionCallResult(_message.Message):
     FUNCTION_CALL_ID_FIELD_NUMBER: _ClassVar[int]
     WATCHER_ID_FIELD_NUMBER: _ClassVar[int]
     OUTCOME_CODE_FIELD_NUMBER: _ClassVar[int]
+    FAILURE_REASON_FIELD_NUMBER: _ClassVar[int]
     VALUE_OUTPUT_FIELD_NUMBER: _ClassVar[int]
     VALUE_BLOB_FIELD_NUMBER: _ClassVar[int]
     REQUEST_ERROR_OUTPUT_FIELD_NUMBER: _ClassVar[int]
@@ -579,6 +628,7 @@ class AllocationFunctionCallResult(_message.Message):
     function_call_id: str
     watcher_id: str
     outcome_code: AllocationOutcomeCode
+    failure_reason: AllocationFunctionCallFailureReason
     value_output: SerializedObjectInsideBLOB
     value_blob: BLOB
     request_error_output: SerializedObjectInsideBLOB
@@ -588,6 +638,9 @@ class AllocationFunctionCallResult(_message.Message):
         function_call_id: _Optional[str] = ...,
         watcher_id: _Optional[str] = ...,
         outcome_code: _Optional[_Union[AllocationOutcomeCode, str]] = ...,
+        failure_reason: _Optional[
+            _Union[AllocationFunctionCallFailureReason, str]
+        ] = ...,
         value_output: _Optional[_Union[SerializedObjectInsideBLOB, _Mapping]] = ...,
         value_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
         request_error_output: _Optional[
