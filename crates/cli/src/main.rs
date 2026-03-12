@@ -221,9 +221,9 @@ enum SbxCommands {
         #[arg(long)]
         snapshot: Option<String>,
 
-        /// Wait for sandbox to be running
-        #[arg(long, default_value = "true")]
-        wait: bool,
+        /// Return immediately after creation instead of waiting for the sandbox to be running
+        #[arg(long)]
+        no_wait: bool,
     },
 
     /// Execute a command in a sandbox
@@ -439,7 +439,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     timeout,
                     entrypoint,
                     snapshot,
-                    wait,
+                    no_wait,
                 } => {
                     commands::sbx::create::run(
                         ctx,
@@ -450,7 +450,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         timeout,
                         &entrypoint,
                         snapshot.as_deref(),
-                        wait,
+                        !no_wait,
                     )
                     .await
                 }
