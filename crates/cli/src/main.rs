@@ -260,15 +260,8 @@ enum SbxCommands {
         dest: String,
     },
 
-    /// Snapshot a sandbox's filesystem
-    Snapshot {
-        /// Sandbox ID
-        sandbox_id: String,
-
-        /// Max seconds to wait
-        #[arg(short, long, default_value = "300")]
-        timeout: f64,
-    },
+    /// Create a snapshot or list snapshots
+    Snapshot(SnapshotArgs),
 
     /// Create a sandbox, run a command, and stream output
     Run {
@@ -321,6 +314,25 @@ enum SbxCommands {
         #[arg(short, long, default_value = "/bin/bash")]
         shell: String,
     },
+}
+
+#[derive(Parser)]
+struct SnapshotArgs {
+    #[command(subcommand)]
+    command: Option<SnapshotCommands>,
+
+    /// Sandbox ID
+    sandbox_id: Option<String>,
+
+    /// Max seconds to wait
+    #[arg(short, long, default_value = "300", requires = "sandbox_id")]
+    timeout: f64,
+}
+
+#[derive(Subcommand)]
+enum SnapshotCommands {
+    /// List all snapshots
+    Ls,
 }
 
 #[tokio::main]
@@ -462,10 +474,15 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     .await
                 }
                 SbxCommands::Cp { src, dest } => commands::sbx::cp::run(ctx, &src, &dest).await,
-                SbxCommands::Snapshot {
-                    sandbox_id,
-                    timeout,
-                } => commands::sbx::snapshot::run(ctx, &sandbox_id, timeout).await,
+                SbxCommands::Snapshot(snapshot_args) => match snapshot_args.command {
+                    Some(SnapshotCommands::Ls) => commands::sbx::snapshot_ls::run(ctx).await,
+                    None => {
+                        let sandbox_id = snapshot_args.sandbox_id.ok_or_else(|| {
+                            CliError::usage("snapshot requires a sandbox ID or the 'ls' subcommand")
+                        })?;
+                        commands::sbx::snapshot::run(ctx, &sandbox_id, snapshot_args.timeout).await
+                    }
+                },
                 SbxCommands::Run {
                     command,
                     args,
