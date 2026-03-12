@@ -3,6 +3,9 @@ import subprocess
 import sys
 import tempfile
 
+from agents import Agent, Runner
+from agents.tool import WebSearchTool, function_tool
+
 from tensorlake.applications import Image, application, function, run_local_application
 
 # Define the image with necessary OpenAI dependencies.
@@ -26,9 +29,6 @@ def get_weather_tool(city: str) -> str:
     Returns:
         A string describing the current weather conditions.
     """
-    from agents import Agent, Runner
-    from agents.tool import WebSearchTool
-
     print(f"Getting weather for: {city}")
 
     agent = Agent(
@@ -41,6 +41,7 @@ def get_weather_tool(city: str) -> str:
     return result.final_output.strip()
 
 
+@function_tool
 @function(
     image=FUNCTION_CONTAINER_IMAGE,
     description="Suggests an activity based on the weather using Web Search",
@@ -56,9 +57,6 @@ def get_activity_tool(city: str, weather: str) -> str:
     Returns:
         A suggested activity for the given weather.
     """
-    from agents import Agent, Runner
-    from agents.tool import WebSearchTool
-
     print(f"Finding activity for {city} with weather: {weather}")
 
     agent = Agent(
@@ -98,6 +96,7 @@ def run_unsafe_python_code(python_code: str) -> str:
         os.remove(temp_file_path)
 
 
+@function_tool
 @function(
     image=FUNCTION_CONTAINER_IMAGE,
     description="Creates a final guide with appropriate temperature units",
@@ -114,8 +113,6 @@ def create_guide_tool(city: str, weather: str, activity: str) -> str:
     Returns:
         A friendly city guide for the user.
     """
-    from agents import Agent, Runner
-    from agents.tool import function_tool
 
     @function_tool
     def convert_to_celsius_tool(python_code: str) -> float:
@@ -139,8 +136,7 @@ def create_guide_tool(city: str, weather: str, activity: str) -> str:
     )
 
     result = Runner.run_sync(
-        agent,
-        f"City: {city}\nWeather (F): {weather}\nActivity: {activity}",
+        agent, f"City: {city}\nWeather (F): {weather}\nActivity: {activity}"
     )
     return result.final_output.strip()
 
@@ -160,32 +156,14 @@ def city_guide_app(city: str) -> str:
     2. Get activity based on weather using Web Search.
     3. Create final guide with appropriate units.
     """
-    from agents import Agent, Runner
-    from agents.tool import function_tool
-
-    @function_tool
-    def weather(city: str) -> str:
-        """Get the weather for a city in Fahrenheit."""
-        return get_weather_tool(city)
-
-    @function_tool
-    def activity(city: str, weather: str) -> str:
-        """Suggest an activity based on the weather."""
-        return get_activity_tool(city, weather)
-
-    @function_tool
-    def guide(city: str, weather: str, activity: str) -> str:
-        """Create a city guide with appropriate temperature units."""
-        return create_guide_tool(city, weather, activity)
-
     agent = Agent(
         name="Guide Creator",
-        instructions="You are a helpful travel assistant. Use the `weather`, `activity`, and `guide` "
-        "tools to generate a city guide for the given city. Do not modify what the `guide` tool returns.",
+        instructions="You are a helpful travel assistant. Use the `get_weather_tool`, `get_activity_tool`, and `create_guide_tool` "
+        "tools to generate a city guide for the given city. Do not modify what the create_guide_tool returns.",
         tools=[
-            weather,
-            activity,
-            guide,
+            get_weather_tool,
+            get_activity_tool,
+            create_guide_tool,
         ],
     )
 
