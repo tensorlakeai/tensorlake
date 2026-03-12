@@ -22,6 +22,7 @@ rustls = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+eventsource-stream = { workspace = true }
 toml = { workspace = true }
 dirs = { workspace = true }
 comfy-table = { workspace = true }
