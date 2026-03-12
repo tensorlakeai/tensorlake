@@ -189,10 +189,19 @@ enum ApplicationsCommands {
 #[derive(Subcommand)]
 enum SbxCommands {
     /// List all sandboxes
-    Ls,
+    Ls {
+        /// Include sandboxes with status `terminated`
+        #[arg(long)]
+        all: bool,
 
-    /// Stop (terminate) one or more sandboxes
-    Stop {
+        /// Show only sandboxes with status `running`
+        #[arg(long)]
+        running: bool,
+    },
+
+    /// Terminate one or more sandboxes
+    #[command(name = "terminate", alias = "stop")]
+    Terminate {
         /// Sandbox IDs
         #[arg(required = true)]
         sandbox_ids: Vec<String>,
@@ -466,9 +475,9 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
         Commands::Sbx(subcmd) => {
             ensure_auth_and_project(ctx).await?;
             match subcmd {
-                SbxCommands::Ls => commands::sbx::ls::run(ctx).await,
-                SbxCommands::Stop { sandbox_ids } => {
-                    commands::sbx::stop::run(ctx, &sandbox_ids).await
+                SbxCommands::Ls { all, running } => commands::sbx::ls::run(ctx, running, all).await,
+                SbxCommands::Terminate { sandbox_ids } => {
+                    commands::sbx::terminate::run(ctx, &sandbox_ids).await
                 }
                 SbxCommands::New {
                     image,

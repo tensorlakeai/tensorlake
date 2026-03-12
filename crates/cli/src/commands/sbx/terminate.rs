@@ -16,14 +16,14 @@ pub async fn run(ctx: &CliContext, sandbox_ids: &[String]) -> Result<()> {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             return Err(CliError::Other(anyhow::anyhow!(
-                "failed to stop sandbox {} (HTTP {}): {}",
+                "failed to terminate sandbox {} (HTTP {}): {}",
                 sandbox_id,
                 status,
                 body
             )));
         }
 
-        println!("Stopped sandbox {}", sandbox_id);
+        println!("Terminated sandbox {}", sandbox_id);
     }
 
     Ok(())
