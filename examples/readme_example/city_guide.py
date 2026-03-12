@@ -11,6 +11,7 @@ FUNCTION_CONTAINER_IMAGE = Image(
 ).run("pip install openai openai-agents")
 
 
+@function_tool
 @function(
     image=FUNCTION_CONTAINER_IMAGE,
     description="Gets the weather for a city in Fahrenheit",
@@ -116,6 +117,7 @@ def create_guide_tool(city: str, weather: str, activity: str) -> str:
     from agents import Agent, Runner
     from agents.tool import function_tool
 
+    @function_tool
     def convert_to_celsius_tool(python_code: str) -> float:
         """Converts a temperature from Fahrenheit to Celsius using the provided Python code.
 
@@ -133,7 +135,7 @@ def create_guide_tool(city: str, weather: str, activity: str) -> str:
         instructions="You are a helpful travel assistant. Determine if the city typically uses Celsius, if so use the `convert_to_celsius_tool` tool to "
         "convert the temperature in the weather description to Celsius. Only include either Fahrenheit or Celsius in the final output, "
         "depending on what the city typically uses. Then combine the weather and activity into a short, friendly guide for the user.",
-        tools=[function_tool(convert_to_celsius_tool)],
+        tools=[convert_to_celsius_tool],
     )
 
     result = Runner.run_sync(
@@ -161,14 +163,29 @@ def city_guide_app(city: str) -> str:
     from agents import Agent, Runner
     from agents.tool import function_tool
 
+    @function_tool
+    def weather(city: str) -> str:
+        """Get the weather for a city in Fahrenheit."""
+        return get_weather_tool(city)
+
+    @function_tool
+    def activity(city: str, weather: str) -> str:
+        """Suggest an activity based on the weather."""
+        return get_activity_tool(city, weather)
+
+    @function_tool
+    def guide(city: str, weather: str, activity: str) -> str:
+        """Create a city guide with appropriate temperature units."""
+        return create_guide_tool(city, weather, activity)
+
     agent = Agent(
         name="Guide Creator",
-        instructions="You are a helpful travel assistant. Use the `get_weather_tool`, `get_activity_tool`, and `create_guide_tool` "
-        "tools to generate a city guide for the given city. Do not modify what the create_guide_tool returns.",
+        instructions="You are a helpful travel assistant. Use the `weather`, `activity`, and `guide` "
+        "tools to generate a city guide for the given city. Do not modify what the `guide` tool returns.",
         tools=[
-            function_tool(get_weather_tool),
-            function_tool(get_activity_tool),
-            function_tool(create_guide_tool),
+            weather,
+            activity,
+            guide,
         ],
     )
 
