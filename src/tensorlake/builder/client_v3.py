@@ -351,9 +351,7 @@ class ImageBuilderV3Client:
             image_build.id: _ImageBuildReporter(
                 result.name,
                 image_build,
-                disambiguate_name=image_name_counts.get(
-                    image_build.name or "image", 0
-                )
+                disambiguate_name=image_name_counts.get(image_build.name or "image", 0)
                 > 1,
             )
             for image_build in result.image_builds
