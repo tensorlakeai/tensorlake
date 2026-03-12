@@ -366,18 +366,16 @@ impl CloudApiClient {
                 let request: CreateApplicationBuildRequest = serde_json::from_str(&request_json)?;
                 let image_contexts: Vec<ApplicationBuildContext> = image_contexts
                     .into_iter()
-                    .map(|(context_tar_part_name, context_tar_gz)| ApplicationBuildContext {
-                        context_tar_part_name,
-                        context_tar_gz,
-                    })
+                    .map(
+                        |(context_tar_part_name, context_tar_gz)| ApplicationBuildContext {
+                            context_tar_part_name,
+                            context_tar_gz,
+                        },
+                    )
                     .collect();
                 let images_client = ImagesClient::new(client.clone());
                 let response = images_client
-                    .create_application_build(
-                        &build_service_path,
-                        &request,
-                        &image_contexts,
-                    )
+                    .create_application_build(&build_service_path, &request, &image_contexts)
                     .await?;
                 Ok(serde_json::to_string(&response)?)
             }
@@ -1515,10 +1513,7 @@ fn create_image_context_file(
 
 #[pymodule]
 fn _cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add(
-        "CloudApiClientError",
-        _py.get_type::<CloudApiClientError>(),
-    )?;
+    module.add("CloudApiClientError", _py.get_type::<CloudApiClientError>())?;
     module.add(
         "CloudSandboxClientError",
         _py.get_type::<CloudSandboxClientError>(),

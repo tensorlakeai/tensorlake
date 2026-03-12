@@ -1,10 +1,10 @@
 use comfy_table::Cell;
-use tensorlake_cloud_sdk::{Client, ClientBuilder};
 use tensorlake_cloud_sdk::error::SdkError;
 use tensorlake_cloud_sdk::secrets::SecretsClient;
 use tensorlake_cloud_sdk::secrets::models::{
     DeleteSecretRequest, ListSecretsRequest, NewSecret, UpsertSecret, UpsertSecretRequest,
 };
+use tensorlake_cloud_sdk::{Client, ClientBuilder};
 
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
@@ -172,10 +172,9 @@ fn secrets_http_client(ctx: &CliContext) -> Result<Client> {
     let use_scope_headers = ctx.personal_access_token.is_some() && ctx.api_key.is_none();
 
     if use_scope_headers
-        && let (Some(organization_id), Some(project_id)) = (
-        ctx.effective_organization_id(),
-        ctx.effective_project_id(),
-    ) {
+        && let (Some(organization_id), Some(project_id)) =
+            (ctx.effective_organization_id(), ctx.effective_project_id())
+    {
         builder = builder.scope(&organization_id, &project_id);
     }
 
@@ -324,9 +323,7 @@ mod tests {
         ));
 
         assert!(
-            raw_request.contains(
-                "authorization: bearer fake_test_pat_for_header_assertions_only"
-            )
+            raw_request.contains("authorization: bearer fake_test_pat_for_header_assertions_only")
         );
         assert!(raw_request.contains("x-forwarded-organization-id: org-123"));
         assert!(raw_request.contains("x-forwarded-project-id: proj-456"));
@@ -343,9 +340,8 @@ mod tests {
         ));
 
         assert!(
-            raw_request.contains(
-                "authorization: bearer fake_test_api_key_for_header_assertions_only"
-            )
+            raw_request
+                .contains("authorization: bearer fake_test_api_key_for_header_assertions_only")
         );
         assert!(!raw_request.contains("x-forwarded-organization-id:"));
         assert!(!raw_request.contains("x-forwarded-project-id:"));

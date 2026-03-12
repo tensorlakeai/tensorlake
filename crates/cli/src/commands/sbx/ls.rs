@@ -1,7 +1,7 @@
 use comfy_table::Cell;
 
 use crate::auth::context::CliContext;
-use crate::commands::sbx::sandbox_endpoint;
+use crate::commands::sbx::{created_at_sort_key, format_created_at, sandbox_endpoint};
 use crate::error::{CliError, Result};
 use crate::output::table::new_table;
 
@@ -22,12 +22,18 @@ pub async fn run(ctx: &CliContext) -> Result<()> {
     }
 
     let body: serde_json::Value = resp.json().await.map_err(CliError::Http)?;
-    let sandboxes = body
+    let mut sandboxes = body
         .get("sandboxes")
         .or_else(|| body.get("items"))
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
+
+    sandboxes.sort_by(|a, b| {
+        let a_created_at = created_at_sort_key(a.get("created_at"));
+        let b_created_at = created_at_sort_key(b.get("created_at"));
+        b_created_at.cmp(&a_created_at)
+    });
 
     if sandboxes.is_empty() {
         println!("No sandboxes found.");
@@ -70,7 +76,7 @@ pub async fn run(ctx: &CliContext) -> Result<()> {
             .map(|v| format!("{} MB", v))
             .unwrap_or_else(|| "-".to_string());
 
-        let created_at = s.get("created_at").and_then(|v| v.as_str()).unwrap_or("-");
+        let created_at = format_created_at(s.get("created_at"));
 
         table.add_row(vec![
             Cell::new(id),

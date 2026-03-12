@@ -4,10 +4,12 @@ pub mod exec;
 pub mod ls;
 pub mod run;
 pub mod snapshot;
+pub mod snapshot_ls;
 pub mod ssh;
 
 use crate::auth::context::CliContext;
 use crate::error::Result;
+use chrono::{DateTime, Local, TimeZone, Utc};
 
 /// Build the lifecycle API base URL for sandbox CRUD operations.
 ///
@@ -104,4 +106,88 @@ pub fn parse_env_vars(env: &[String]) -> Result<Option<serde_json::Value>> {
         );
     }
     Ok(Some(serde_json::Value::Object(map)))
+}
+
+pub fn format_created_at(value: Option<&serde_json::Value>) -> String {
+    let Some(timestamp) = created_at_sort_key(value) else {
+        return "-".to_string();
+    };
+
+    let now = Utc::now();
+    let age = now.signed_duration_since(timestamp);
+
+    if age < chrono::TimeDelta::zero() || age > chrono::TimeDelta::days(5) {
+        return timestamp
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M")
+            .to_string();
+    }
+
+    if age < chrono::TimeDelta::minutes(1) {
+        let seconds = age.num_seconds().max(0);
+        return format_relative(seconds, "sec");
+    }
+
+    if age < chrono::TimeDelta::hours(1) {
+        return format_relative(age.num_minutes(), "min");
+    }
+
+    if age < chrono::TimeDelta::days(1) {
+        return format_relative(age.num_hours(), "hr");
+    }
+
+    format_relative(age.num_days(), "day")
+}
+
+fn format_relative(value: i64, unit: &str) -> String {
+    let suffix = if unit == "day" && value != 1 { "s" } else { "" };
+    format!("{value} {unit}{suffix} ago")
+}
+
+pub fn created_at_sort_key(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
+    match value? {
+        serde_json::Value::String(timestamp) => DateTime::parse_from_rfc3339(timestamp)
+            .ok()
+            .map(|dt| dt.with_timezone(&Utc)),
+        serde_json::Value::Number(timestamp) => parse_numeric_timestamp(timestamp.as_f64()?),
+        _ => None,
+    }
+}
+
+fn parse_numeric_timestamp(timestamp: f64) -> Option<DateTime<Utc>> {
+    let seconds = if timestamp > 1e15 {
+        timestamp / 1_000_000.0
+    } else if timestamp > 1e12 {
+        timestamp / 1_000.0
+    } else {
+        timestamp
+    };
+
+    let whole_seconds = seconds.trunc() as i64;
+    let nanos = ((seconds.fract() * 1_000_000_000.0).round() as u32).min(999_999_999);
+    Utc.timestamp_opt(whole_seconds, nanos).single()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_created_at;
+    use chrono::{Duration, Utc};
+
+    #[test]
+    fn format_created_at_uses_relative_time_for_recent_timestamps() {
+        let timestamp = serde_json::Value::String((Utc::now() - Duration::minutes(3)).to_rfc3339());
+        let formatted = format_created_at(Some(&timestamp));
+
+        assert_eq!(formatted, "3 min ago");
+    }
+
+    #[test]
+    fn format_created_at_uses_absolute_time_after_five_days() {
+        let timestamp = serde_json::Value::String((Utc::now() - Duration::days(6)).to_rfc3339());
+        let formatted = format_created_at(Some(&timestamp));
+
+        assert!(!formatted.ends_with("ago"));
+        assert!(formatted.contains('-'));
+        assert!(formatted.contains(':'));
+    }
 }
