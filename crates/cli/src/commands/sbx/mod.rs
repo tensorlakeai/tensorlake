@@ -5,7 +5,9 @@ pub mod ls;
 pub mod run;
 pub mod snapshot;
 pub mod snapshot_ls;
+pub mod snapshot_rm;
 pub mod ssh;
+pub mod stop;
 
 use crate::auth::context::CliContext;
 use crate::error::Result;

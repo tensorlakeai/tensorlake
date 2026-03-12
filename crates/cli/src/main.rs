@@ -191,6 +191,13 @@ enum SbxCommands {
     /// List all sandboxes
     Ls,
 
+    /// Stop (terminate) one or more sandboxes
+    Stop {
+        /// Sandbox IDs
+        #[arg(required = true)]
+        sandbox_ids: Vec<String>,
+    },
+
     /// Create a new sandbox
     New {
         /// Container image
@@ -333,6 +340,13 @@ struct SnapshotArgs {
 enum SnapshotCommands {
     /// List all snapshots
     Ls,
+
+    /// Delete one or more snapshots
+    Rm {
+        /// Snapshot IDs
+        #[arg(required = true)]
+        snapshot_ids: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -431,6 +445,9 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             ensure_auth_and_project(ctx).await?;
             match subcmd {
                 SbxCommands::Ls => commands::sbx::ls::run(ctx).await,
+                SbxCommands::Stop { sandbox_ids } => {
+                    commands::sbx::stop::run(ctx, &sandbox_ids).await
+                }
                 SbxCommands::New {
                     image,
                     cpus,
@@ -476,6 +493,9 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 SbxCommands::Cp { src, dest } => commands::sbx::cp::run(ctx, &src, &dest).await,
                 SbxCommands::Snapshot(snapshot_args) => match snapshot_args.command {
                     Some(SnapshotCommands::Ls) => commands::sbx::snapshot_ls::run(ctx).await,
+                    Some(SnapshotCommands::Rm { snapshot_ids }) => {
+                        commands::sbx::snapshot_rm::run(ctx, &snapshot_ids).await
+                    }
                     None => {
                         let sandbox_id = snapshot_args.sandbox_id.ok_or_else(|| {
                             CliError::usage("snapshot requires a sandbox ID or the 'ls' subcommand")
