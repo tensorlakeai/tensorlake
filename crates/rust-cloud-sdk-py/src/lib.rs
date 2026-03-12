@@ -452,7 +452,7 @@ impl CloudApiClient {
         build_service_path: String,
         build_id: String,
     ) -> PyResult<Vec<String>> {
-        py.allow_threads(|| {
+        py.detach(|| {
             self.run_with_retry(2, move |client| {
                 let path = build_logs_path(&build_service_path, &build_id);
                 async move {
@@ -474,7 +474,7 @@ impl CloudApiClient {
         build_service_path: String,
         build_id: String,
     ) -> PyResult<()> {
-        py.allow_threads(|| {
+        py.detach(|| {
             self.run_with_retry(2, move |client| {
                 let path = build_logs_path(&build_service_path, &build_id);
                 async move {
@@ -498,7 +498,7 @@ impl CloudApiClient {
         prefix: String,
         color: Option<String>,
     ) -> PyResult<()> {
-        py.allow_threads(|| {
+        py.detach(|| {
             self.run_with_retry(2, move |client| {
                 let path = build_logs_path(&build_service_path, &build_id);
                 let log_prefix = LogPrefix::new(prefix.clone(), color.clone());

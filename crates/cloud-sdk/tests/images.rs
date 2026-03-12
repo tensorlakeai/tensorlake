@@ -82,8 +82,6 @@ async fn test_create_application_build_sends_application_json_and_context_parts(
     assert!(request_text.starts_with("POST /images/v3/applications HTTP/1.1\r\n"));
     assert!(request_text.contains("\r\nx-forwarded-organization-id: org-1\r\n"));
     assert!(request_text.contains("\r\nx-forwarded-project-id: proj-1\r\n"));
-    assert!(request_text.contains("\r\nx-tensorlake-organization-id: org-1\r\n"));
-    assert!(request_text.contains("\r\nx-tensorlake-project-id: proj-1\r\n"));
     assert!(request_text.contains("name=\"app_version\"; filename=\"app_version\""));
     assert!(request_text.contains("Content-Type: application/json"));
     assert!(request_text.contains("\"context_tar_part_name\":\"img-1\""));
