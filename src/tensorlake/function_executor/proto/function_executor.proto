@@ -5,10 +5,6 @@ import "tensorlake/function_executor/proto/status.proto";
 
 package function_executor_service;
 
-// The messages should not use any Python SDK objects. Only Function Executor implemented
-// in Python is allowed to import Python SDK to run customer functions. This ensures that
-// all the other components can be written in any language.
-
 // The standard Empty message.
 message Empty {}
 
@@ -156,10 +152,6 @@ message AllocationFunctionCall {
 // A presence of a watcher means that customer code is blocked waiting
 // for the watcher's function call to finish.
 message AllocationFunctionCallWatcher {
-    // Deprecated: Use id to match the watcher.
-    optional string watcher_id = 1;
-    // Deprecated: Use root_function_call_id.
-    optional string function_call_id = 2;
     // ID of the watcher in AllocationState, unique per allocation.
     // New watchers are detected by comparing IDs.
     optional string id = 3;
@@ -201,13 +193,16 @@ message AllocationState {
     //
     // If a not finished function call gets removed from this list then
     // it doesn't get cancelled by the client. ExecutionPlanUpdates are immutable.
+    // Deprecated: use allocation execution and event log RPCs.
     repeated AllocationFunctionCall function_calls = 3;
     // Watchers for function calls started by the allocation.
+    // Deprecated: use allocation execution and event log RPCs.
     repeated AllocationFunctionCallWatcher function_call_watchers = 4;
     // Request state operations.
     repeated AllocationRequestStateOperation request_state_operations = 7;
 
     // Optional allocation result. Set when allocation finishes.
+    // Deprecated: use allocation execution and event log RPCs.
     AllocationResult result = 5;
     // Required state hash.
     optional string sha256_hash = 6;
@@ -245,21 +240,10 @@ message FunctionCall {
     optional bytes call_metadata = 4;
 }
 
-// Deprecated: SDK now generates an equivalent chain of function calls for a reduce operation.
-message ReduceOp {
-    optional string id = 1;
-    // Contains at least two items.
-    repeated FunctionArg collection = 2;
-    optional FunctionRef reducer = 3;
-    optional bytes call_metadata = 4;
-}
-
 
 message ExecutionPlanUpdate {
   oneof op {
     FunctionCall function_call = 10;
-    // Deprecated, see ReduceOp message.
-    ReduceOp     reduce        = 12;
   }
 }
 
@@ -276,7 +260,9 @@ message AllocationResult {
     optional AllocationFailureReason failure_reason = 2;
     oneof outputs {
         SerializedObjectInsideBLOB value = 3;
+        // Deprecated: use tail_function_call_id.
         ExecutionPlanUpdates updates = 4;
+        string tail_function_call_id = 9;
     }
     // The function_outputs_blob with uploaded function outputs.
     optional BLOB uploaded_function_outputs_blob = 5;
@@ -316,22 +302,11 @@ message AllocationOutputBLOB {
     optional BLOB blob = 2;
 }
 
-enum AllocationFunctionCallFailureReason {
-    ALLOCATION_FUNCTION_CALL_FAILURE_REASON_UNKNOWN = 0;
-    ALLOCATION_FUNCTION_CALL_FAILURE_REASON_INTERNAL_ERROR = 1;
-    ALLOCATION_FUNCTION_CALL_FAILURE_REASON_FUNCTION_ERROR = 2;
-    ALLOCATION_FUNCTION_CALL_FAILURE_REASON_REQUEST_ERROR = 3;
-    ALLOCATION_FUNCTION_CALL_FAILURE_REASON_WATCHER_TIMEOUT = 4;
-}
-
 message AllocationFunctionCallResult {
-    // Deprecated: Use watcher_id to match the result to the watcher.
-    // TODO: Delete this field once all FEs use watcher_id.
     // root_function_call_id from ExecutionPlanUpdates of the function call.
     optional string function_call_id = 1;
     optional string watcher_id = 7;
     optional AllocationOutcomeCode outcome_code = 2;
-    optional AllocationFunctionCallFailureReason failure_reason = 8;
     optional SerializedObjectInsideBLOB value_output = 3;
     optional BLOB value_blob = 4;
     optional SerializedObjectInsideBLOB request_error_output = 5;
@@ -339,8 +314,7 @@ message AllocationFunctionCallResult {
 }
 
 message AllocationFunctionCallCreationResult {
-    // Deprecated: Use allocation_function_call_id to match the result to the function call.
-    // From ExecutionPlanUpdates.root_function_call_id.
+    // root_function_call_id from ExecutionPlanUpdates.
     optional string function_call_id = 1;
     // allocation_function_call_id from AllocationFunctionCall.
     optional string allocation_function_call_id = 3;
@@ -376,15 +350,157 @@ message AllocationUpdate {
     optional string allocation_id = 1;
     oneof update {
         // Function call result if the function call is watched by allocation.
+        // Deprecated: use allocation AllocationEventLog API.
         AllocationFunctionCallResult function_call_result = 2;
-        // TODO: Delete output_blob_deprecated once all FEs can use both
-        // output_blob_deprecated and output_blob.
-        BLOB output_blob_deprecated = 3;
         AllocationOutputBLOB output_blob = 4;
         AllocationRequestStateOperationResult request_state_operation_result = 5;
         // Result of creating a function call requested by the allocation.
         AllocationFunctionCallCreationResult function_call_creation_result = 6;
     }
+}
+
+// === Allocation Execution Log ===
+//
+// Execution events describe what happened in the allocation while executing its function call.
+// These are the proto-level representations of AllocationEventLoop output events.
+
+// An execution event describing a function call creation by the allocation's user code.
+message AllocationExecutionEventCreateFunctionCall {
+    // function_call_id is updates.root_function_call_id.
+    optional ExecutionPlanUpdates updates = 1;
+    // BLOB where serialized function arguments from updates are stored.
+    // SerializedObjectInsideBLOB args in updates reference offsets within this BLOB.
+    // Optional, not set if no function arguments in updates.
+    optional BLOB args_blob = 2;
+}
+
+// An execution event describing a user code side failure while creating a function call.
+message AllocationExecutionEventFunctionCallCreationFailed {
+    optional string function_call_id = 1;
+    // SDK metadata for function call creation error.
+    optional bytes metadata = 2;
+}
+
+// An execution event describing a function call watcher creation by the allocation's user code.
+// The watcher means the user code is blocked waiting for the watched function call to finish.
+message AllocationExecutionEventCreateFunctionCallWatcher {
+    // ID of the function call to watch.
+    optional string function_call_id = 1;
+    // Optional deadline for the watcher. The watcher times out if the function call
+    // doesn't finish before the deadline.
+    optional google.protobuf.Timestamp deadline = 2;
+}
+
+// An execution event describing the allocation finishing.
+// This is the last event in the execution log. No further events are produced after this.
+message AllocationExecutionEventFinishAllocation {
+    optional AllocationOutcomeCode outcome_code = 1;
+    optional AllocationFailureReason failure_reason = 2;
+    oneof outputs {
+        // Serialized return value. Stored inside uploaded_function_outputs_blob.
+        SerializedObjectInsideBLOB value = 3;
+        // Tail function call id if tail call.
+        string tail_call_durable_id = 4;
+    }
+    // BLOB with uploaded function outputs, set when value output is present.
+    optional BLOB uploaded_function_outputs_blob = 5;
+    // Serialized request error payload if allocation failed with request error.
+    // Stored inside uploaded_request_error_blob.
+    optional SerializedObjectInsideBLOB request_error_output = 6;
+    // BLOB with uploaded request error output, if any.
+    optional BLOB uploaded_request_error_blob = 7;
+}
+
+// A single execution event in the allocation execution log.
+message AllocationExecutionEvent {
+    oneof event {
+        AllocationExecutionEventCreateFunctionCall create_function_call = 1;
+        AllocationExecutionEventFunctionCallCreationFailed function_call_creation_failed = 2;
+        AllocationExecutionEventCreateFunctionCallWatcher create_function_call_watcher = 3;
+        AllocationExecutionEventFinishAllocation finish_allocation = 4;
+    }
+}
+
+message GetAllocationExecutionLogBatchRequest {
+    optional string allocation_id = 1;
+}
+
+message GetAllocationExecutionLogBatchResponse {
+    repeated AllocationExecutionEvent events = 1;
+}
+
+message AdvanceAllocationExecutionLogBatchRequest {
+    optional string allocation_id = 1;
+}
+
+// === Allocation Event Log ===
+//
+// Allocation events describe what happened in the request and possibly in the whole world
+// that is relevant for the allocation. These are the proto-level representations of
+// AllocationEventLoop input events.
+
+// An event notifying that a function call has been created on the server (or failed to create).
+message AllocationEventFunctionCallCreated {
+    // ID of the function call that was created.
+    optional string function_call_id = 1;
+    // OK if the function call was created successfully.
+    optional google.rpc.Status status = 2;
+    // This is the same metadata that the FE/SDK sent when requesting the function call creation
+    // and when sending AllocationExecutionEventFunctionCallCreationFailed.
+    optional bytes metadata = 3;
+}
+
+enum FunctionCallWatcherStatus {
+    FUNCTION_CALL_WATCHER_STATUS_UNKNOWN = 0;
+    FUNCTION_CALL_WATCHER_STATUS_COMPLETED = 1;
+    // Watcher timed out, the function call is still running.
+    FUNCTION_CALL_WATCHER_STATUS_TIMEDOUT = 2;
+}
+
+// An event delivering the result of a watched function call.
+message AllocationEventFunctionCallWatcherResult {
+    // ID of the function call that completed.
+    optional string function_call_id = 1;
+    optional AllocationOutcomeCode outcome_code = 2;
+    optional FunctionCallWatcherStatus watcher_status = 3;
+    // Set on success: serialized return value stored inside value_blob.
+    optional SerializedObjectInsideBLOB value_output = 4;
+    optional BLOB value_blob = 5;
+    // Set on request error: serialized request error stored inside request_error_blob.
+    optional SerializedObjectInsideBLOB request_error_output = 6;
+    optional BLOB request_error_blob = 7;
+}
+
+// A single event in the allocation event log.
+message AllocationEvent {
+    // Monotonical logical clock for ordering of events. Not continuous.
+    optional uint64 clock = 1;
+    oneof event {
+        AllocationEventFunctionCallCreated function_call_created = 2;
+        AllocationEventFunctionCallWatcherResult function_call_watcher_result = 3;
+    }
+}
+
+// FE sends a read request to say what event it needs next.
+// indexify-dataplane streams these requests via watch_allocation_event_log_reads.
+message ReadAllocationEventLogRequest {
+    optional string allocation_id = 1;
+    uint64 after_clock = 2; // 0 is the beginning of the log
+    optional uint32 max_entries = 3; // Pagination limit
+}
+
+// Response to a ReadAllocationEventLogRequest, containing the requested event.
+message ReadAllocationEventLogResponse {
+    optional string allocation_id = 1;
+    repeated AllocationEvent entries = 2;
+    // Clock of the last returned entry.
+    optional uint64 last_clock = 3;
+    // True if more entries exist after last_clock.
+    optional bool has_more = 4;
+}
+
+message WatchAllocationEventLogReads {
+    optional string allocation_id = 1;
 }
 
 message HealthCheckRequest {}
@@ -420,13 +536,37 @@ service FunctionExecutor {
     rpc list_allocations(ListAllocationsRequest) returns (ListAllocationsResponse);
     // Creates and starts the allocation specified in the request.
     rpc create_allocation(CreateAllocationRequest) returns (Empty);
+    // Deletes the allocation. The allocation must be finished before calling this method.
+    rpc delete_allocation(DeleteAllocationRequest) returns (Empty);
+
+    // Allocation state RPCs. Only used for indexify-dataplane services.
+    //
     // Streams updates of the allocation state until allocation finishes.
     // If allocation is finished, streams the final state and closes the stream.
     rpc watch_allocation_state(WatchAllocationStateRequest) returns (stream AllocationState);
-    // Deletes the allocation. The allocation must be finished before calling this method.
-    rpc delete_allocation(DeleteAllocationRequest) returns (Empty);
     // Send an update to an allocation.
     rpc send_allocation_update(AllocationUpdate) returns (Empty);
+
+    // Allocation execution log. Allocation execution log is a strictly ordered append only sequence of events
+    // describing what happened in the allocation while executing its function call. If the user code in the function call
+    // is deterministic then its allocation execution log is the same across different allocation runs of the same
+    // function call.
+    //
+    // Returns current allocation execution log batch. Blocks if there is no log batch yet.
+    // Each batch only contains closely related execution events, i.e. all function calls of a map operation.
+    rpc get_allocation_execution_log_batch(GetAllocationExecutionLogBatchRequest) returns (GetAllocationExecutionLogBatchResponse);
+    // Advances the current allocation execution log batch to the next one.
+    rpc advance_allocation_execution_log_batch(AdvanceAllocationExecutionLogBatchRequest) returns (Empty);
+
+    // Allocation event log. Allocation event log is a strictly ordered append only sequence of all events happening in
+    // the request and possibly in the whole world that are relevant for the allocation.
+    //
+    // Streams allocation event log read requests coming from the FE. Only one stream per allocation is allowed.
+    // FE sends one read request at a time. FE doesn't send a new read request until the response for an already
+    // sent request gets delivered to it. FE re-sends its pending read request when indexify-dataplane creates the stream.
+    rpc watch_allocation_event_log_reads(WatchAllocationEventLogReads) returns (stream ReadAllocationEventLogRequest);
+    rpc send_allocation_event_log_read_response(ReadAllocationEventLogResponse) returns (Empty);
+
     // Health check method to check if the FE is able to run allocations.
     // The FE should be initialized before calling this method.
     rpc check_health(HealthCheckRequest) returns (HealthCheckResponse);

@@ -80,9 +80,7 @@ class AllocationStateWrapper:
     ) -> None:
         with self._allocation_state_update_lock:
             watcher = AllocationFunctionCallWatcher(
-                watcher_id=id,
                 id=id,
-                function_call_id=root_function_call_id,
                 root_function_call_id=root_function_call_id,
             )
             if deadline is not None:

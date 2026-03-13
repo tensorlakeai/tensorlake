@@ -60,7 +60,6 @@ from ..proto.function_executor_pb2 import (
     BLOB,
     Allocation,
     AllocationFunctionCallCreationResult,
-    AllocationFunctionCallFailureReason,
     AllocationFunctionCallResult,
     AllocationOutcomeCode,
     AllocationOutputBLOB,
@@ -135,8 +134,7 @@ _ServerEvent = (
 @dataclass
 class _OutputBLOBRequestInfo:
     # Not None once the BLOB is ready to be used.
-    # BLOB type use here is deprecated.
-    blob: BLOB | AllocationOutputBLOB | None
+    blob: AllocationOutputBLOB | None
     # Set only once after the BLOB is set.
     blob_available: threading.Event
 
@@ -262,17 +260,9 @@ class AllocationRunner:
                     result=update.function_call_result,
                 )
             )
-        elif update.HasField("output_blob_deprecated") or update.HasField(
-            "output_blob"
-        ):
-            blob: BLOB | AllocationOutputBLOB | None = None
-            blob_id: str | None = None
-            if update.HasField("output_blob_deprecated"):
-                blob = update.output_blob_deprecated
-                blob_id = blob.id
-            else:
-                blob = update.output_blob
-                blob_id = blob.blob.id
+        elif update.HasField("output_blob"):
+            blob: AllocationOutputBLOB = update.output_blob
+            blob_id: str = blob.blob.id
 
             if blob_id not in self._output_blob_requests:
                 self._logger.error(
@@ -443,12 +433,13 @@ class AllocationRunner:
                 exception = RequestError(
                     message=serialized_request_error.data.decode("utf-8")
                 )
-            elif (
-                fc_result.HasField("failure_reason")
-                and fc_result.failure_reason
-                == AllocationFunctionCallFailureReason.ALLOCATION_FUNCTION_CALL_FAILURE_REASON_WATCHER_TIMEOUT
-            ):
-                exception = TimeoutError()
+            # TODO: Implement this branch with allocation event log protocol.
+            # elif (
+            #     fc_result.HasField("failure_reason")
+            #     and fc_result.failure_reason
+            #     == AllocationFunctionCallFailureReason.ALLOCATION_FUNCTION_CALL_FAILURE_REASON_WATCHER_TIMEOUT
+            # ):
+            #     exception = TimeoutError()
             else:
                 exception = FunctionError("Function call failed")
         else:
@@ -693,11 +684,8 @@ class AllocationRunner:
                 )
 
         if output_event.tail_call is not None:
-            output_pb: ExecutionPlanUpdates = ExecutionPlanUpdates(
-                root_function_call_id=output_event.tail_call.durable_id,
-            )
             return self._result_helper.from_function_output(
-                output=output_pb, uploaded_outputs_blob=None
+                output=output_event.tail_call.durable_id, uploaded_outputs_blob=None
             )
 
         # Regular value output. This is user code (serialization).

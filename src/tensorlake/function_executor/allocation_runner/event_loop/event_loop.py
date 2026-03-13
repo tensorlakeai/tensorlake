@@ -80,9 +80,9 @@ class _FutureInfo:
     function_call_created: threading.Event
     # Idempotency check in case we wait for the same Future concurrently.
     watcher_created: bool
-    # Set when the function call of this Future finished (or failed).
+    # True when the function call of this Future finished (or failed).
     # This means that the Future is fully completed and all its state is final.
-    function_call_finished: threading.Event
+    function_call_finished: bool
     # Callbacks invoked by input event thread when function_call_finished is set.
     # Used by _await_future_runtime_hook to deterministically resume asyncio coroutines.
     function_call_finished_callbacks: list[Callable[[], None]]
@@ -508,13 +508,11 @@ class AllocationEventLoop:
 
                 # Scan for newly completed futures.
                 newly_done: list[tuple[Future, _FutureInfo]] = [
-                    (f, fi) for f, fi in pending if fi.function_call_finished.is_set()
+                    (f, fi) for f, fi in pending if fi.function_call_finished
                 ]
                 done_infos.extend(newly_done)
                 pending = [
-                    (f, fi)
-                    for f, fi in pending
-                    if not fi.function_call_finished.is_set()
+                    (f, fi) for f, fi in pending if not fi.function_call_finished
                 ]
 
                 # Check exit condition based on return_when.
@@ -641,7 +639,7 @@ class AllocationEventLoop:
             future=future,
             function_call_created=threading.Event(),
             watcher_created=False,
-            function_call_finished=threading.Event(),
+            function_call_finished=False,
             function_call_finished_callbacks=[],
             completion_order=-1,
         )
@@ -841,13 +839,7 @@ class AllocationEventLoop:
         # Wake up all runtime hooks blocked on threading.Event.wait() or asyncio await.
         for future_info in self._future_infos_by_durable_id.values():
             future_info.function_call_created.set()
-            future_info.function_call_finished.set()
-            callbacks = future_info.function_call_finished_callbacks
-            future_info.function_call_finished_callbacks = []
-            for callback in callbacks:
-                callback()
-        with self.function_call_completed:
-            self.function_call_completed.notify_all()
+            self._complete_function_call(future_info)
 
     def _process_input_event_function_call_created(
         self, event: InputEventFunctionCallCreated
@@ -903,17 +895,19 @@ class AllocationEventLoop:
         # Future result is set, we can remove the Future from tracking.
         del self._future_infos_by_durable_id[self._future_durable_id[future._id]]
         del self._future_durable_id[future._id]
+        self._complete_function_call(future_info)
 
+        # Safe to process next input event immediately: the Future was removed from tracking
+        # above, so no subsequent input event can modify it. The runtime hook holds a local
+        # reference to future_info and reads the Future's final state set before this signal.
+
+    def _complete_function_call(self, future_info: _FutureInfo) -> None:
         future_info.completion_order = self.function_call_completion_counter
         self.function_call_completion_counter += 1
-        future_info.function_call_finished.set()
+        future_info.function_call_finished = True
         callbacks = future_info.function_call_finished_callbacks
         future_info.function_call_finished_callbacks = []
         for callback in callbacks:
             callback()
         with self.function_call_completed:
             self.function_call_completed.notify_all()
-
-        # Safe to process next input event immediately: the Future was removed from tracking
-        # above, so no subsequent input event can modify it. The runtime hook holds a local
-        # reference to future_info and reads the Future's final state set before this signal.

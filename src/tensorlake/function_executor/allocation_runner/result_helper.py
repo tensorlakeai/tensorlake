@@ -75,9 +75,14 @@ class ResultHelper:
 
     def from_function_output(
         self,
-        output: SerializedObjectInsideBLOB | ExecutionPlanUpdates,
+        output: SerializedObjectInsideBLOB | str,
         uploaded_outputs_blob: BLOBProto | None,
     ) -> AllocationResult:
+        """Creates an AllocationResult representing a successful function execution with the given output.
+
+        If output is SerializedObjectInsideBLOB, it's set in the value field of the result. If output is a string,
+        it's set as the tail_function_call_id of the result.
+        """
         result = AllocationResult(
             outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
             uploaded_function_outputs_blob=uploaded_outputs_blob,
@@ -86,6 +91,12 @@ class ResultHelper:
         if isinstance(output, SerializedObjectInsideBLOB):
             result.value.CopyFrom(output)
         else:
-            result.updates.CopyFrom(output)
+            result.tail_function_call_id = output
+            # Deprecated
+            result.updates.CopyFrom(
+                ExecutionPlanUpdates(
+                    root_function_call_id=output,
+                )
+            )
 
         return result
