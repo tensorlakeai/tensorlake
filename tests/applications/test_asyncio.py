@@ -6,7 +6,6 @@ import parameterized
 import validate_all_applications
 
 from tensorlake.applications import (
-    Future,
     Request,
     RequestError,
     application,

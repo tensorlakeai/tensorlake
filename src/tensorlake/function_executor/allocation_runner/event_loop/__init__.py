@@ -4,6 +4,7 @@ from .event_loop import (
 from .input_events import (
     InputEventEmergencyShutdown,
     InputEventFunctionCallCreated,
+    InputEventFunctionCallWatcherCreated,
     InputEventFunctionCallWatcherResult,
     InputEventType,
 )
@@ -29,6 +30,7 @@ __all__ = [
     "InputEventEmergencyShutdown",
     "OutputEventFinishAllocation",
     "FunctionCallRef",
+    "InputEventFunctionCallWatcherCreated",
     "InputEventFunctionCallWatcherResult",
     "SpecialFunctionCallSettings",
     "SPLITTER_INPUT_MODE",

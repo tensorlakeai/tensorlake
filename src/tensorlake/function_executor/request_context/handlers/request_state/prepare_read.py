@@ -24,4 +24,4 @@ class PrepareReadHandler(BasePrepareReadHandler):
             )
 
         allocation_info: AllocationInfo = self._allocation_infos[request.allocation_id]
-        return allocation_info.runner.run_request_context_operation(request)
+        return allocation_info.runner.request_state.prepare_read(request)
