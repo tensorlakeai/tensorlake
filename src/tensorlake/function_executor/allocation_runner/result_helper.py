@@ -111,10 +111,9 @@ class ResultHelper:
         )
 
     def to_finish_event_from_user_exception(
-        self, details: AllocationEventDetails, exception: BaseException
+        self,
     ) -> AllocationExecutionEventFinishAllocation:
-        log_user_event_function_call_failed(details, exception)
-        self._logger.info("function raised an exception")
+        """Builds the execution event proto. Does not log — caller must also call from_user_exception."""
         return AllocationExecutionEventFinishAllocation(
             outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,
             failure_reason=AllocationFailureReason.ALLOCATION_FAILURE_REASON_FUNCTION_ERROR,
@@ -122,13 +121,10 @@ class ResultHelper:
 
     def to_finish_event_from_request_error(
         self,
-        details: AllocationEventDetails,
-        request_error: RequestError,
         request_error_output: SerializedObjectInsideBLOB,
         uploaded_request_error_blob: BLOBProto,
     ) -> AllocationExecutionEventFinishAllocation:
-        log_user_event_function_call_failed(details, request_error)
-        self._logger.info("function raised a request error")
+        """Builds the execution event proto. Does not log — caller must also call from_request_error."""
         return AllocationExecutionEventFinishAllocation(
             outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,
             failure_reason=AllocationFailureReason.ALLOCATION_FAILURE_REASON_REQUEST_ERROR,

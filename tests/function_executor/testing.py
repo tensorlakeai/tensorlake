@@ -237,6 +237,7 @@ class AllocationTestDriver:
 
     def _handle_allocation_state_blobs(self) -> None:
         """Watches allocation state and handles output_blob_requests."""
+        responded_blob_ids: set[str] = set()
         try:
             allocation_states: Iterator[AllocationState] = (
                 self._stub.watch_allocation_state(
@@ -246,6 +247,9 @@ class AllocationTestDriver:
             for allocation_state in allocation_states:
                 for blob_request in allocation_state.output_blob_requests:
                     blob_request: AllocationOutputBLOBRequest
+                    if blob_request.id in responded_blob_ids:
+                        continue
+                    responded_blob_ids.add(blob_request.id)
                     blob: BLOB = create_tmp_blob(
                         id=blob_request.id,
                         chunks_count=1,
@@ -260,9 +264,8 @@ class AllocationTestDriver:
                             ),
                         )
                     )
-                if AllocationState.DESCRIPTOR.fields_by_name["result"].number:
-                    if allocation_state.HasField("result"):
-                        break
+                if allocation_state.HasField("result"):
+                    break
         except grpc.RpcError:
             pass  # Stream closed, allocation done
 

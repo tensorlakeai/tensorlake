@@ -45,6 +45,7 @@ from tensorlake.applications.user_data_serializer import (
 )
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     BLOB,
+    AdvanceAllocationExecutionLogBatchRequest,
     Allocation,
     AllocationEvent,
     AllocationEventFunctionCallCreated,
@@ -55,8 +56,10 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     AllocationExecutionEventFinishAllocation,
     AllocationFailureReason,
     AllocationOutcomeCode,
+    AllocationOutputBLOB,
     AllocationOutputBLOBRequest,
     AllocationState,
+    AllocationUpdate,
     BLOBChunk,
     CreateAllocationRequest,
     DeleteAllocationRequest,
@@ -66,6 +69,7 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     FunctionCallWatcherStatus,
     FunctionInputs,
     FunctionRef,
+    GetAllocationExecutionLogBatchRequest,
     InitializationFailureReason,
     InitializationOutcomeCode,
     InitializeResponse,
@@ -73,6 +77,7 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     SerializedObjectEncoding,
     SerializedObjectInsideBLOB,
     SerializedObjectManifest,
+    WatchAllocationStateRequest,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
     FunctionExecutorStub,
@@ -901,80 +906,110 @@ class TestRunAllocation(unittest.TestCase):
                 )
 
                 allocation_id: str = "test-allocation-id"
-                stub.create_allocation(
-                    CreateAllocationRequest(
-                        allocation=Allocation(
-                            request_id="123",
-                            function_call_id="test-function-call",
-                            allocation_id=allocation_id,
-                            inputs=FunctionInputs(
-                                args=[
-                                    SerializedObjectInsideBLOB(
-                                        manifest=SerializedObjectManifest(
-                                            encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
-                                            encoding_version=0,
-                                            size=len(serialized_arg_metadata)
-                                            + len(serialized_arg),
-                                            metadata_size=len(serialized_arg_metadata),
-                                            sha256_hash=hashlib.sha256(
-                                                serialized_arg_metadata + serialized_arg
-                                            ).hexdigest(),
+                request = CreateAllocationRequest(
+                    allocation=Allocation(
+                        request_id="123",
+                        function_call_id="test-function-call",
+                        allocation_id=allocation_id,
+                        inputs=FunctionInputs(
+                            args=[
+                                SerializedObjectInsideBLOB(
+                                    manifest=SerializedObjectManifest(
+                                        encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_PICKLE,
+                                        encoding_version=0,
+                                        size=len(serialized_arg_metadata)
+                                        + len(serialized_arg),
+                                        metadata_size=len(serialized_arg_metadata),
+                                        sha256_hash=hashlib.sha256(
+                                            serialized_arg_metadata + serialized_arg
+                                        ).hexdigest(),
+                                    ),
+                                    offset=0,
+                                )
+                            ],
+                            arg_blobs=[input_blob],
+                            function_call_metadata=serialize_metadata(
+                                FunctionCallMetadata(
+                                    id="returns_argument_call",
+                                    function_name="returns_argument",
+                                    output_serializer_name_override=None,
+                                    output_type_hint_override=None,
+                                    has_output_type_hint_override=False,
+                                    args=[
+                                        FunctionCallArgumentMetadata(
+                                            value_id="arg_id",
                                         ),
-                                        offset=0,
-                                    )
-                                ],
-                                arg_blobs=[input_blob],
-                                function_call_metadata=serialize_metadata(
-                                    FunctionCallMetadata(
-                                        id="returns_argument_call",
-                                        function_name="returns_argument",
-                                        output_serializer_name_override=None,
-                                        output_type_hint_override=None,
-                                        has_output_type_hint_override=False,
-                                        args=[
-                                            FunctionCallArgumentMetadata(
-                                                value_id="arg_id",
-                                            ),
-                                        ],
-                                        kwargs={},
-                                        is_map_splitter=False,
-                                        is_reduce_splitter=False,
-                                        splitter_function_name=None,
-                                        splitter_input_mode=None,
-                                        is_map_concat=False,
-                                    )
-                                ),
-                                request_error_blob=create_request_error_blob(),
+                                    ],
+                                    kwargs={},
+                                    is_map_splitter=False,
+                                    is_reduce_splitter=False,
+                                    splitter_function_name=None,
+                                    splitter_input_mode=None,
+                                    is_map_concat=False,
+                                )
                             ),
+                            request_error_blob=create_request_error_blob(),
                         ),
                     ),
                 )
+                stub.create_allocation(request)
 
-                # Use the driver. It auto-handles output_blob_requests with
-                # single-chunk blobs by default.
-                # For this test we need multi-chunk blobs, so we use
-                # a custom state watcher approach but still use the
-                # execution log for the result.
-                # We'll use AllocationTestDriver with custom blob handling.
-                # Actually, the driver's _handle_allocation_state_blobs creates
-                # single-chunk blobs. For this test we need 10-chunk blobs.
-                # Let's use the lower-level approach.
+                # Manually handle multi-chunk blobs via watch_allocation_state
+                # and read the result from the execution log.
+                function_output_blob: BLOB | None = None
 
-                driver = AllocationTestDriver(stub, allocation_id)
-                # Override blob handling: we'll handle blobs in a separate thread
-                # with multi-chunk support.
+                def handle_blobs():
+                    nonlocal function_output_blob
+                    allocation_states = stub.watch_allocation_state(
+                        WatchAllocationStateRequest(allocation_id=allocation_id),
+                    )
+                    for allocation_state in allocation_states:
+                        if len(allocation_state.output_blob_requests) > 0:
+                            blob_request = allocation_state.output_blob_requests[0]
+                            function_output_blob = create_tmp_blob(
+                                id=blob_request.id,
+                                chunks_count=10,
+                                chunk_size=1024,
+                            )
+                            stub.send_allocation_update(
+                                AllocationUpdate(
+                                    allocation_id=allocation_id,
+                                    output_blob=AllocationOutputBLOB(
+                                        status=Status(code=grpc.StatusCode.OK.value[0]),
+                                        blob=function_output_blob,
+                                    ),
+                                )
+                            )
+                        if allocation_state.HasField("result"):
+                            break
 
-                # Actually, for this test the AllocationTestDriver creates
-                # single-chunk blobs, but the FE doesn't care about chunk count
-                # when uploading - it just uploads to whatever blob it receives.
-                # The test verifies that uploaded chunks have correct etags/sizes.
-                # With single-chunk blobs, the output will still have the right data.
-                # But the original test verified multi-chunk upload behavior.
-                # Let's just run with the driver's default handling and verify
-                # the output is correct. The chunk verification is less relevant
-                # with the new protocol since blob handling hasn't changed.
+                blob_thread = threading.Thread(target=handle_blobs, daemon=True)
+                blob_thread.start()
 
-                finish_event = driver.run()
+                # Read result from execution log.
+                finish_event = None
+                while True:
+                    response = stub.get_allocation_execution_log_batch(
+                        GetAllocationExecutionLogBatchRequest(
+                            allocation_id=allocation_id,
+                        )
+                    )
+                    if len(response.events) == 0:
+                        break
+                    for event in response.events:
+                        if event.HasField("finish_allocation"):
+                            finish_event = event.finish_allocation
+                    stub.advance_allocation_execution_log_batch(
+                        AdvanceAllocationExecutionLogBatchRequest(
+                            allocation_id=allocation_id,
+                        )
+                    )
+                    if finish_event is not None:
+                        break
+
+                blob_thread.join(timeout=5)
+                self.assertIsNotNone(finish_event)
+                self.assertIsNotNone(function_output_blob)
 
                 self.assertEqual(
                     finish_event.outcome_code,
@@ -982,7 +1017,6 @@ class TestRunAllocation(unittest.TestCase):
                 )
                 self.assertFalse(finish_event.HasField("request_error_output"))
                 self.assertTrue(finish_event.HasField("value"))
-                self.assertTrue(finish_event.HasField("uploaded_function_outputs_blob"))
 
                 output: bytes = download_and_deserialize_so(
                     self,
@@ -990,6 +1024,46 @@ class TestRunAllocation(unittest.TestCase):
                     finish_event.uploaded_function_outputs_blob,
                 )
                 self.assertEqual(arg, output)
+
+                output_serialized_object: SerializedObjectInsideBLOB = (
+                    finish_event.value
+                )
+                self.assertEqual(output_serialized_object.offset, 0)
+                self.assertEqual(
+                    output_serialized_object.manifest.size
+                    - output_serialized_object.manifest.metadata_size,
+                    len(serialized_arg),
+                )
+
+                # Verify that output BLOB chunks exactly match the output data
+                # and the original BLOB chunks.
+                chunks_count: int = output_serialized_object.manifest.size // 1024 + 1
+                self.assertEqual(
+                    len(finish_event.uploaded_function_outputs_blob.chunks),
+                    chunks_count,
+                )
+                etags: List[str] = []
+                for ix, uploaded_chunk in enumerate(
+                    finish_event.uploaded_function_outputs_blob.chunks
+                ):
+                    uploaded_chunk: BLOBChunk
+                    if ix < chunks_count - 1:
+                        self.assertEqual(uploaded_chunk.size, 1024)
+                    else:
+                        # The 1 extra byte that should go to 6th chunk + Pickle
+                        # header + value metadata. Both should fit into the last
+                        # chunk.
+                        self.assertEqual(
+                            uploaded_chunk.size,
+                            output_serialized_object.manifest.size % 1024,
+                        )
+                    self.assertIsNotNone(uploaded_chunk.etag)
+                    self.assertNotIn(uploaded_chunk.etag, etags)
+                    etags.append(uploaded_chunk.etag)
+                    self.assertEqual(
+                        uploaded_chunk.uri,
+                        function_output_blob.chunks[ix].uri,
+                    )
 
     def test_function_raises_error(self):
         with FunctionExecutorProcessContextManager(capture_std_outputs=True) as process:

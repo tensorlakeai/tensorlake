@@ -601,6 +601,7 @@ class AllocationRunner:
                         exc_info=e,
                     )
                     self._event_loop.add_input_event(InputEventEmergencyShutdown())
+                    break
 
             if execution_events:
                 self._execution_log_buffer.add_batch(execution_events)
@@ -663,9 +664,7 @@ class AllocationRunner:
                     )
                 except BaseException:
                     finish_event = (
-                        self._result_helper.to_finish_event_from_user_exception(
-                            self._allocation_event_details, output_event.user_exception
-                        )
+                        self._result_helper.to_finish_event_from_user_exception()
                     )
                     alloc_result = self._result_helper.from_user_exception(
                         self._allocation_event_details, output_event.user_exception
@@ -683,8 +682,6 @@ class AllocationRunner:
                     logger=self._logger,
                 )
                 finish_event = self._result_helper.to_finish_event_from_request_error(
-                    details=self._allocation_event_details,
-                    request_error=output_event.user_exception,
                     request_error_output=request_error_so,
                     uploaded_request_error_blob=uploaded_output_blob,
                 )
@@ -699,9 +696,7 @@ class AllocationRunner:
                     alloc_result,
                 )
             else:
-                finish_event = self._result_helper.to_finish_event_from_user_exception(
-                    self._allocation_event_details, output_event.user_exception
-                )
+                finish_event = self._result_helper.to_finish_event_from_user_exception()
                 alloc_result = self._result_helper.from_user_exception(
                     self._allocation_event_details, output_event.user_exception
                 )
@@ -738,9 +733,7 @@ class AllocationRunner:
                 ),
             )
         except BaseException as e:
-            finish_event = self._result_helper.to_finish_event_from_user_exception(
-                self._allocation_event_details, e
-            )
+            finish_event = self._result_helper.to_finish_event_from_user_exception()
             alloc_result = self._result_helper.from_user_exception(
                 self._allocation_event_details, e
             )
