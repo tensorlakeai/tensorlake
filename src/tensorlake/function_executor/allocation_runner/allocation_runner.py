@@ -191,6 +191,10 @@ class AllocationRunner:
         )
 
     @property
+    def allocation_state(self) -> AllocationStateWrapper:
+        return self._allocation_state
+
+    @property
     def event_loop(self) -> AllocationEventLoop:
         return self._event_loop
 
@@ -210,29 +214,12 @@ class AllocationRunner:
     def allocation_progress(self) -> AllocationProgress:
         return self._allocation_progress
 
-    def wait_allocation_state_update(
-        self, last_seen_hash: str | None
-    ) -> AllocationState:
-        """Returns copy of the current allocation state when it's updated."""
-        return self._allocation_state.wait_for_update(last_seen_hash)
-
     def run(self) -> None:
         """Runs the allocation in a separate thread.
 
         When the allocation is finished, sets it .result field.
         """
         self._run_allocation_thread.start()
-
-    # finished() and is_terminal_state() need to be consistent with each other.
-    # So once we return a terminal state to client and it calls delete_allocation,
-    # finished() must return True.
-    @property
-    def finished(self) -> bool:
-        return self._allocation_state.has_result()
-
-    @classmethod
-    def is_terminal_state(cls, state: AllocationState) -> bool:
-        return state.HasField("result")
 
     def deliver_allocation_update(self, update: AllocationUpdate) -> None:
         # No need for any locks because we never block here so we hold GIL non stop.
@@ -252,10 +239,6 @@ class AllocationRunner:
             ]
             blob_request_info.blob = blob
             blob_request_info.blob_available.set()
-        elif update.HasField("request_state_operation_result"):
-            self._request_state.deliver_operation_result(
-                update.request_state_operation_result
-            )
         else:
             self._logger.error(
                 "received unexpected allocation update",

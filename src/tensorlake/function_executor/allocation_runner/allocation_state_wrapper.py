@@ -14,6 +14,7 @@ from ..proto.function_executor_pb2 import (
 
 
 class AllocationStateWrapper:
+    """Thread-safe wrapper around AllocationState proto used to update it and notify about updates to it."""
     def __init__(self) -> None:
         self._allocation_state_update_lock: threading.Condition = threading.Condition()
         self._allocation_state: AllocationState = AllocationState(
@@ -79,6 +80,10 @@ class AllocationStateWrapper:
             )
             self._update_hash()
             self._allocation_state_update_lock.notify_all()
+
+    @staticmethod
+    def is_terminal_state(state: AllocationState) -> bool:
+        return state.HasField("result")
 
     def wait_for_update(self, last_seen_hash: str | None) -> AllocationState:
         """Returns copy of the current allocation state when it's updated."""

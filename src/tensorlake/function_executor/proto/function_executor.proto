@@ -184,6 +184,10 @@ message AllocationRequestStateOperation {
     }
 }
 
+// AllocationState contains the current state of the allocation wrt
+// dataplane services an allocation might use during its execution.
+// FE updates the state while indexify-dataplane reconciles the state
+// and performs necessary operations like creating BLOBs.
 message AllocationState {
     // Optional current allocation progress.
     optional AllocationProgress progress = 1;

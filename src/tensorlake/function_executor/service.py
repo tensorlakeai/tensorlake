@@ -45,6 +45,7 @@ from tensorlake.applications.runtime_hooks import (
 
 from .allocation_info import AllocationInfo
 from .allocation_runner.allocation_runner import AllocationRunner
+from .allocation_runner.allocation_state_wrapper import AllocationStateWrapper
 from .allocation_runner.contextvars import get_allocation_id_context_variable
 from .health_check import HealthCheckHandler
 from .info import info_response_kv_args
@@ -313,11 +314,11 @@ class Service(FunctionExecutorServicer):
         last_seen_hash: str | None = None
         while True:
             allocation_state: AllocationState = (
-                allocation_info.runner.wait_allocation_state_update(last_seen_hash)
+                allocation_info.runner.allocation_state.wait_for_update(last_seen_hash)
             )
             last_seen_hash = allocation_state.sha256_hash
             yield allocation_state
-            if AllocationRunner.is_terminal_state(allocation_state):
+            if AllocationStateWrapper.is_terminal_state(allocation_state):
                 break
 
     def send_allocation_update(
@@ -332,13 +333,18 @@ class Service(FunctionExecutorServicer):
             )
 
         allocation_info: AllocationInfo = self._allocation_infos[request.allocation_id]
-        if allocation_info.runner.finished:
+        if allocation_info.runner.allocation_state.has_result():
             context.abort(
                 grpc.StatusCode.FAILED_PRECONDITION,
                 f"Allocation {request.allocation_id} is already finished",
             )
 
-        allocation_info.runner.deliver_allocation_update(request)
+        if request.HasField("request_state_operation_result"):
+            allocation_info.runner.request_state.deliver_operation_result(
+                request.request_state_operation_result
+            )
+        else:
+            allocation_info.runner.deliver_allocation_update(request)
         return Empty()
 
     def get_allocation_execution_log_batch(
@@ -403,7 +409,7 @@ class Service(FunctionExecutorServicer):
             )
 
         allocation_info: AllocationInfo = self._allocation_infos[request.allocation_id]
-        if not allocation_info.runner.finished:
+        if not allocation_info.runner.allocation_state.has_result():
             context.abort(
                 grpc.StatusCode.FAILED_PRECONDITION,
                 f"Allocation {request.allocation_id} is still running and cannot be deleted",
