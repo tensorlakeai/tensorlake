@@ -2,7 +2,6 @@ import datetime
 import pickle
 import threading
 import time
-from dataclasses import dataclass
 from typing import Any
 
 import grpc
@@ -28,9 +27,6 @@ from tensorlake.applications.function.user_data_serializer import (
     deserialize_value_with_metadata,
     function_output_serializer,
 )
-from tensorlake.applications.interface.futures import (
-    _request_scoped_id,
-)
 from tensorlake.applications.internal_logger import InternalLogger
 from tensorlake.applications.metadata import (
     FunctionCallMetadata,
@@ -51,10 +47,8 @@ from ..proto.function_executor_pb2 import (
     AllocationExecutionEventFinishAllocation,
     AllocationExecutionEventFunctionCallCreationFailed,
     AllocationOutcomeCode,
-    AllocationOutputBLOB,
     AllocationResult,
     AllocationState,
-    AllocationUpdate,
     ExecutionPlanUpdates,
     FunctionCallWatcherStatus,
     FunctionRef,
@@ -66,6 +60,7 @@ from ..user_events import (
     log_user_event_allocations_started,
 )
 from .allocation_state_wrapper import AllocationStateWrapper
+from .blob_manager import AllocationBLOBManager
 from .download import download_function_arguments, download_serialized_objects
 from .event_log_reader import EventLogReader, EventLogReaderStopped
 from .event_loop import (
@@ -99,14 +94,6 @@ from .upload import (
     upload_serialized_objects_to_blob,
 )
 from .value import SerializedValue, Value
-
-
-@dataclass
-class _OutputBLOBRequestInfo:
-    # Not None once the BLOB is ready to be used.
-    blob: AllocationOutputBLOB | None
-    # Set only once after the BLOB is set.
-    blob_available: threading.Event
 
 
 class AllocationRunner:
@@ -178,8 +165,10 @@ class AllocationRunner:
             None
         )
 
-        # BLOB ID -> _OutputBLOBRequestInfo.
-        self._output_blob_requests: dict[str, _OutputBLOBRequestInfo] = {}
+        self._blob_manager: AllocationBLOBManager = AllocationBLOBManager(
+            allocation_state=self._allocation_state,
+            logger=logger,
+        )
 
         # Event loop for running user code and managing Futures.
         self._event_loop: AllocationEventLoop = AllocationEventLoop(
@@ -214,36 +203,16 @@ class AllocationRunner:
     def allocation_progress(self) -> AllocationProgress:
         return self._allocation_progress
 
+    @property
+    def blob_manager(self) -> AllocationBLOBManager:
+        return self._blob_manager
+
     def run(self) -> None:
         """Runs the allocation in a separate thread.
 
         When the allocation is finished, sets it .result field.
         """
         self._run_allocation_thread.start()
-
-    def deliver_allocation_update(self, update: AllocationUpdate) -> None:
-        # No need for any locks because we never block here so we hold GIL non stop.
-        if update.HasField("output_blob"):
-            blob: AllocationOutputBLOB = update.output_blob
-            blob_id: str = blob.blob.id
-
-            if blob_id not in self._output_blob_requests:
-                self._logger.error(
-                    "received output blob update for unknown blob request",
-                    blob_id=blob_id,
-                )
-                return
-
-            blob_request_info: _OutputBLOBRequestInfo = self._output_blob_requests[
-                blob_id
-            ]
-            blob_request_info.blob = blob
-            blob_request_info.blob_available.set()
-        else:
-            self._logger.error(
-                "received unexpected allocation update",
-                update=str(update),
-            )
 
     def _process_server_events(self) -> None:
         """Reads AllocationEvent protos via EventLogReader, converts to InputEvents.
@@ -397,38 +366,6 @@ class AllocationRunner:
                 exception=exception,
             )
         )
-
-    def _get_new_output_blob(self, size: int) -> BLOB:
-        """Returns new BLOB to upload function outputs to.
-
-        Raises exception on error.
-        """
-        blob_id: str = _request_scoped_id()
-        blob_request_info: _OutputBLOBRequestInfo = _OutputBLOBRequestInfo(
-            blob=None,
-            blob_available=threading.Event(),
-        )
-        self._output_blob_requests[blob_id] = blob_request_info
-        self._allocation_state.add_output_blob_request(id=blob_id, size=size)
-
-        blob_request_info.blob_available.wait()
-
-        self._allocation_state.remove_output_blob_request(id=blob_id)
-        del self._output_blob_requests[blob_id]
-
-        if isinstance(blob_request_info.blob, AllocationOutputBLOB):
-            if blob_request_info.blob.status.code != grpc.StatusCode.OK.value[0]:
-                self._logger.error(
-                    "received output blob with error status",
-                    blob_id=blob_request_info.blob.blob.id,
-                    status=blob_request_info.blob.status,
-                )
-                raise RuntimeError(
-                    f"Failed to create output BLOB: {blob_request_info.blob.status}"
-                )
-            return blob_request_info.blob.blob
-        else:
-            return blob_request_info.blob
 
     def _run_allocation(self) -> None:
         alloc_result: AllocationResult = self._result_helper.internal_error()
@@ -692,7 +629,7 @@ class AllocationRunner:
             }
         )
         serialized_output = serialized_objects[serialized_output_value.metadata.id]
-        outputs_blob: BLOB = self._get_new_output_blob(
+        outputs_blob: BLOB = self._blob_manager.get_new_output_blob(
             size=sum(len(data) for data in blob_data)
         )
         uploaded_output_blob = upload_serialized_objects_to_blob(
@@ -752,7 +689,7 @@ class AllocationRunner:
             serialized_objects, blob_data = serialized_values_to_serialized_objects(
                 serialized_values=serialized_values
             )
-            args_blob: BLOB = self._get_new_output_blob(
+            args_blob: BLOB = self._blob_manager.get_new_output_blob(
                 size=sum(len(data) for data in blob_data)
             )
             uploaded_args_blob = upload_serialized_objects_to_blob(

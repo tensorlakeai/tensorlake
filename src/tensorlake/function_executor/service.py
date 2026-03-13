@@ -344,7 +344,7 @@ class Service(FunctionExecutorServicer):
                 request.request_state_operation_result
             )
         else:
-            allocation_info.runner.deliver_allocation_update(request)
+            allocation_info.runner.blob_manager.deliver_update(request)
         return Empty()
 
     def get_allocation_execution_log_batch(
