@@ -2,20 +2,14 @@ import hashlib
 import threading
 from typing import Any, Callable, Iterable
 
-from google.protobuf.timestamp_pb2 import Timestamp
-
 from tensorlake.applications import InternalError
 
 from ..proto.function_executor_pb2 import (
-    BLOB,
-    AllocationFunctionCall,
-    AllocationFunctionCallWatcher,
     AllocationOutputBLOBRequest,
     AllocationProgress,
     AllocationRequestStateOperation,
     AllocationResult,
     AllocationState,
-    ExecutionPlanUpdates,
 )
 
 
@@ -48,55 +42,6 @@ class AllocationStateWrapper:
     def has_result(self) -> bool:
         with self._allocation_state_update_lock:
             return self._allocation_state.HasField("result")
-
-    def add_function_call(
-        self,
-        id: str,
-        execution_plan_updates: ExecutionPlanUpdates,
-        args_blob: BLOB | None,
-    ) -> None:
-        with self._allocation_state_update_lock:
-            self._allocation_state.function_calls.append(
-                AllocationFunctionCall(
-                    id=id,
-                    updates=execution_plan_updates,
-                    args_blob=args_blob,
-                )
-            )
-            self._update_hash()
-            self._allocation_state_update_lock.notify_all()
-
-    def delete_function_call(self, id: str) -> None:
-        with self._allocation_state_update_lock:
-            _remove_repeated_field_item(
-                lambda fc: fc.id == id,
-                self._allocation_state.function_calls,
-            )
-            self._update_hash()
-            self._allocation_state_update_lock.notify_all()
-
-    def add_function_call_watcher(
-        self, id: str, root_function_call_id: str, deadline: Timestamp | None
-    ) -> None:
-        with self._allocation_state_update_lock:
-            watcher = AllocationFunctionCallWatcher(
-                id=id,
-                root_function_call_id=root_function_call_id,
-            )
-            if deadline is not None:
-                watcher.deadline.CopyFrom(deadline)
-            self._allocation_state.function_call_watchers.append(watcher)
-            self._update_hash()
-            self._allocation_state_update_lock.notify_all()
-
-    def delete_function_call_watcher(self, id: str) -> None:
-        with self._allocation_state_update_lock:
-            _remove_repeated_field_item(
-                lambda fcw: fcw.id == id,
-                self._allocation_state.function_call_watchers,
-            )
-            self._update_hash()
-            self._allocation_state_update_lock.notify_all()
 
     def add_output_blob_request(self, id: str, size: int) -> None:
         with self._allocation_state_update_lock:

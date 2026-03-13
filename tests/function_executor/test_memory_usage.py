@@ -18,6 +18,7 @@ from tensorlake.applications import (
 )
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     Allocation,
+    AllocationExecutionEventFinishAllocation,
     AllocationOutcomeCode,
     CreateAllocationRequest,
     InitializationOutcomeCode,

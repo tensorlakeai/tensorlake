@@ -7,6 +7,7 @@ from tensorlake.function_executor.user_events import (
 
 from ..proto.function_executor_pb2 import BLOB as BLOBProto
 from ..proto.function_executor_pb2 import (
+    AllocationExecutionEventFinishAllocation,
     AllocationFailureReason,
     AllocationOutcomeCode,
     AllocationResult,
@@ -100,3 +101,52 @@ class ResultHelper:
             )
 
         return result
+
+    def to_finish_event_internal_error(
+        self,
+    ) -> AllocationExecutionEventFinishAllocation:
+        return AllocationExecutionEventFinishAllocation(
+            outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,
+            failure_reason=AllocationFailureReason.ALLOCATION_FAILURE_REASON_INTERNAL_ERROR,
+        )
+
+    def to_finish_event_from_user_exception(
+        self, details: AllocationEventDetails, exception: BaseException
+    ) -> AllocationExecutionEventFinishAllocation:
+        log_user_event_function_call_failed(details, exception)
+        self._logger.info("function raised an exception")
+        return AllocationExecutionEventFinishAllocation(
+            outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,
+            failure_reason=AllocationFailureReason.ALLOCATION_FAILURE_REASON_FUNCTION_ERROR,
+        )
+
+    def to_finish_event_from_request_error(
+        self,
+        details: AllocationEventDetails,
+        request_error: RequestError,
+        request_error_output: SerializedObjectInsideBLOB,
+        uploaded_request_error_blob: BLOBProto,
+    ) -> AllocationExecutionEventFinishAllocation:
+        log_user_event_function_call_failed(details, request_error)
+        self._logger.info("function raised a request error")
+        return AllocationExecutionEventFinishAllocation(
+            outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,
+            failure_reason=AllocationFailureReason.ALLOCATION_FAILURE_REASON_REQUEST_ERROR,
+            request_error_output=request_error_output,
+            uploaded_request_error_blob=uploaded_request_error_blob,
+        )
+
+    def to_finish_event_from_function_output(
+        self,
+        output: SerializedObjectInsideBLOB | str,
+        uploaded_outputs_blob: BLOBProto | None,
+    ) -> AllocationExecutionEventFinishAllocation:
+        event = AllocationExecutionEventFinishAllocation(
+            outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS,
+            uploaded_function_outputs_blob=uploaded_outputs_blob,
+        )
+        if isinstance(output, SerializedObjectInsideBLOB):
+            event.value.CopyFrom(output)
+        else:
+            event.tail_call_durable_id = output
+        return event

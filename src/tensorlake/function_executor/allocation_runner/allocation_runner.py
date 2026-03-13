@@ -1,5 +1,5 @@
 import datetime
-import queue
+import pickle
 import threading
 import time
 from dataclasses import dataclass
@@ -59,14 +59,20 @@ from tensorlake.applications.user_data_serializer import (
 from ..proto.function_executor_pb2 import (
     BLOB,
     Allocation,
-    AllocationFunctionCallCreationResult,
-    AllocationFunctionCallResult,
+    AllocationEventFunctionCallCreated,
+    AllocationEventFunctionCallWatcherResult,
+    AllocationExecutionEvent,
+    AllocationExecutionEventCreateFunctionCall,
+    AllocationExecutionEventCreateFunctionCallWatcher,
+    AllocationExecutionEventFinishAllocation,
+    AllocationExecutionEventFunctionCallCreationFailed,
     AllocationOutcomeCode,
     AllocationOutputBLOB,
     AllocationResult,
     AllocationState,
     AllocationUpdate,
     ExecutionPlanUpdates,
+    FunctionCallWatcherStatus,
     FunctionRef,
     SerializedObjectInsideBLOB,
 )
@@ -77,6 +83,7 @@ from ..user_events import (
 )
 from .allocation_state_wrapper import AllocationStateWrapper
 from .download import download_function_arguments, download_serialized_objects
+from .event_log_reader import EventLogReader, EventLogReaderStopped
 from .event_loop import (
     AllocationEventLoop,
     InputEventEmergencyShutdown,
@@ -89,6 +96,7 @@ from .event_loop import (
     OutputEventType,
     SpecialFunctionCallSettings,
 )
+from .execution_log_buffer import ExecutionLogBuffer
 from .request_context.progress import AllocationProgress
 from .request_context.request_state import AllocationRequestState
 from .result_helper import ResultHelper
@@ -107,28 +115,6 @@ from .upload import (
     upload_serialized_objects_to_blob,
 )
 from .value import SerializedValue, Value
-
-
-@dataclass
-class _ServerEventFunctionCallCreationResult:
-    result: AllocationFunctionCallCreationResult
-
-
-@dataclass
-class _ServerEventFunctionCallResult:
-    result: AllocationFunctionCallResult
-
-
-@dataclass
-class _ServerEventStopProcessingThread:
-    pass  # A placeholder event just to stop the thread
-
-
-_ServerEvent = (
-    _ServerEventFunctionCallCreationResult
-    | _ServerEventFunctionCallResult
-    | _ServerEventStopProcessingThread
-)
 
 
 @dataclass
@@ -187,6 +173,10 @@ class AllocationRunner:
             function=function,
             logger=self._logger,
         )
+        self._execution_log_buffer: ExecutionLogBuffer = ExecutionLogBuffer()
+        self._event_log_reader: EventLogReader = EventLogReader(
+            allocation_id=allocation.allocation_id,
+        )
         self._run_allocation_thread: threading.Thread = threading.Thread(
             target=self._run_allocation,
             daemon=True,
@@ -206,8 +196,6 @@ class AllocationRunner:
 
         # BLOB ID -> _OutputBLOBRequestInfo.
         self._output_blob_requests: dict[str, _OutputBLOBRequestInfo] = {}
-        # Queue for events coming from Server.
-        self._server_event_queue: queue.Queue[_ServerEvent] = queue.Queue()
 
         # Event loop for running user code and managing Futures.
         self._event_loop: AllocationEventLoop = AllocationEventLoop(
@@ -221,6 +209,14 @@ class AllocationRunner:
     @property
     def event_loop(self) -> AllocationEventLoop:
         return self._event_loop
+
+    @property
+    def execution_log_buffer(self) -> ExecutionLogBuffer:
+        return self._execution_log_buffer
+
+    @property
+    def event_log_reader(self) -> EventLogReader:
+        return self._event_log_reader
 
     def wait_allocation_state_update(
         self, last_seen_hash: str | None
@@ -248,19 +244,7 @@ class AllocationRunner:
 
     def deliver_allocation_update(self, update: AllocationUpdate) -> None:
         # No need for any locks because we never block here so we hold GIL non stop.
-        if update.HasField("function_call_creation_result"):
-            self._server_event_queue.put(
-                _ServerEventFunctionCallCreationResult(
-                    result=update.function_call_creation_result,
-                )
-            )
-        elif update.HasField("function_call_result"):
-            self._server_event_queue.put(
-                _ServerEventFunctionCallResult(
-                    result=update.function_call_result,
-                )
-            )
-        elif update.HasField("output_blob"):
+        if update.HasField("output_blob"):
             blob: AllocationOutputBLOB = update.output_blob
             blob_id: str = blob.blob.id
 
@@ -319,100 +303,114 @@ class AllocationRunner:
             )
 
     def _process_server_events(self) -> None:
-        """Processes Server events from server event queue.
+        """Reads AllocationEvent protos via EventLogReader, converts to InputEvents.
 
         Doesn't raise any exceptions.
         """
+        after_clock: int = 0
         while True:
-            event: _ServerEvent = self._server_event_queue.get()
             try:
-                if self._process_server_event(event):
-                    break
+                response = self._event_log_reader.read(
+                    after_clock=after_clock, max_entries=None
+                )
+            except EventLogReaderStopped:
+                break
+            try:
+                for entry in response.entries:
+                    self._process_allocation_event(entry)
+                if response.HasField("last_clock"):
+                    after_clock = response.last_clock
             except BaseException as e:
-                # NB: If an exception is raised in a Server event handler, we should not report it
-                # to event loop as an "internal error" input event because the original Server event
+                # NB: If an exception is raised in an event handler, we should not report it
+                # to event loop as an "internal error" input event because the original event
                 # that we failed to process might be a "success" event. If we report "internal error"
-                # here then we'll diverge user code execution from the Server event history which is
-                # a durable execution bug. Instead we have to not report "internal error" to user code
-                # here and instead just stop it immediately using emergency shutdown event.
+                # here then we'll diverge user code execution from the event history which is
+                # a durable execution bug. Instead we just stop it immediately.
                 self._logger.error(
-                    "Error while processing server event, sending emergency shutdown to event loop",
-                    event=str(event),
+                    "Error processing allocation event, sending emergency shutdown to event loop",
                     exc_info=e,
                 )
                 self._event_loop.add_input_event(InputEventEmergencyShutdown())
 
         self._logger.info("stopping server event processing thread")
 
-    def _process_server_event(self, event: _ServerEvent) -> bool:
-        if isinstance(event, _ServerEventFunctionCallCreationResult):
-            self._process_server_event_function_call_creation_result(event)
-        elif isinstance(event, _ServerEventFunctionCallResult):
-            self._process_server_event_function_call_result(event)
-        elif isinstance(event, _ServerEventStopProcessingThread):
-            return True
+    def _process_allocation_event(self, entry) -> None:
+        """Processes a single AllocationEvent entry from the event log.
+
+        Raises Exception on internal error.
+        """
+        if entry.HasField("function_call_created"):
+            self._process_event_function_call_created(entry.function_call_created)
+        elif entry.HasField("function_call_watcher_result"):
+            self._process_event_function_call_watcher_result(
+                entry.function_call_watcher_result
+            )
         else:
             self._logger.error(
-                "received unknown server event type",
-                event_type=str(type(event)),
-                event=str(event),
+                "received unknown allocation event type",
+                event=str(entry),
             )
-        return False
 
-    def _process_server_event_function_call_creation_result(
-        self, event: _ServerEventFunctionCallCreationResult
+    def _process_event_function_call_created(
+        self, event: AllocationEventFunctionCallCreated
     ) -> None:
-        """Processes function call creation result event from Server.
+        """Processes function call created event from the event log.
 
-        Raises Exception on internal error while processing the event.
+        Raises Exception on internal error.
         """
-        fc_creation_result: AllocationFunctionCallCreationResult = event.result
-        self._allocation_state.delete_function_call(
-            id=fc_creation_result.allocation_function_call_id
-        )
-
-        exception: InternalError | None = None
-        if fc_creation_result.status.code != grpc.StatusCode.OK.value[0]:
+        exception: TensorlakeError | None = None
+        if (
+            event.HasField("status")
+            and event.status.code != grpc.StatusCode.OK.value[0]
+        ):
+            # Check if there's pickled error metadata from a creation failure.
+            if event.HasField("metadata") and len(event.metadata) > 0:
+                try:
+                    exception = pickle.loads(event.metadata)
+                except BaseException:
+                    exception = InternalError("Failed to start function call")
+            else:
+                exception = InternalError("Failed to start function call")
             self._logger.error(
                 "child future function call creation failed",
-                future_fn_call_id=fc_creation_result.function_call_id,
-                future_alloc_fn_call_id=fc_creation_result.allocation_function_call_id,
-                status=fc_creation_result.status,
+                future_fn_call_id=event.function_call_id,
+                status=event.status,
             )
-            exception = InternalError("Failed to start function call")
         else:
             self._logger.info(
                 "started child function call future",
-                future_fn_call_id=fc_creation_result.function_call_id,
-                future_alloc_fn_call_id=fc_creation_result.allocation_function_call_id,
+                future_fn_call_id=event.function_call_id,
             )
 
         self._event_loop.add_input_event(
             InputEventFunctionCallCreated(
-                durable_id=fc_creation_result.function_call_id,
+                durable_id=event.function_call_id,
                 exception=exception,
             )
         )
 
-    def _process_server_event_function_call_result(
-        self, event: _ServerEventFunctionCallResult
+    def _process_event_function_call_watcher_result(
+        self, event: AllocationEventFunctionCallWatcherResult
     ) -> None:
-        """Processes function call result event from Server.
+        """Processes function call watcher result event from the event log.
 
-        Raises Exception on internal error while processing the event.
+        Raises Exception on internal error.
         """
-        self._allocation_state.delete_function_call_watcher(id=event.result.watcher_id)
-
         output: Any = None
         exception: TensorlakeError | None = None
-        fc_result: AllocationFunctionCallResult = event.result
+
         if (
-            fc_result.outcome_code
-            == AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS
+            event.HasField("watcher_status")
+            and event.watcher_status
+            == FunctionCallWatcherStatus.FUNCTION_CALL_WATCHER_STATUS_TIMEDOUT
+        ):
+            exception = TimeoutError()
+        elif (
+            event.outcome_code == AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_SUCCESS
         ):
             serialized_output: SerializedValue = download_serialized_objects(
-                serialized_objects=[fc_result.value_output],
-                serialized_object_blobs=[fc_result.value_blob],
+                serialized_objects=[event.value_output],
+                serialized_object_blobs=[event.value_blob],
                 blob_store=self._blob_store,
                 logger=self._logger,
             )[0]
@@ -420,47 +418,38 @@ class AllocationRunner:
                 serialized_output.data, serialized_output.metadata
             )
         elif (
-            fc_result.outcome_code
-            == AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE
+            event.outcome_code == AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE
         ):
-            if fc_result.HasField("request_error_output"):
+            if event.HasField("request_error_output"):
                 serialized_request_error: SerializedValue = download_serialized_objects(
-                    serialized_objects=[fc_result.request_error_output],
-                    serialized_object_blobs=[fc_result.request_error_blob],
+                    serialized_objects=[event.request_error_output],
+                    serialized_object_blobs=[event.request_error_blob],
                     blob_store=self._blob_store,
                     logger=self._logger,
                 )[0]
                 exception = RequestError(
                     message=serialized_request_error.data.decode("utf-8")
                 )
-            # TODO: Implement this branch with allocation event log protocol.
-            # elif (
-            #     fc_result.HasField("failure_reason")
-            #     and fc_result.failure_reason
-            #     == AllocationFunctionCallFailureReason.ALLOCATION_FUNCTION_CALL_FAILURE_REASON_WATCHER_TIMEOUT
-            # ):
-            #     exception = TimeoutError()
             else:
                 exception = FunctionError("Function call failed")
         else:
             self._logger.error(
-                f"Unexpected outcome code in function call result: {fc_result.outcome_code}"
+                f"Unexpected outcome code in function call watcher result: {event.outcome_code}"
             )
             raise InternalError(
-                f"Unexpected outcome code in function call result: "
-                f"{fc_result.outcome_code}"
+                f"Unexpected outcome code in function call watcher result: "
+                f"{event.outcome_code}"
             )
 
         self._logger.info(
             "child future completed",
-            future_fn_call_id=fc_result.function_call_id,
-            future_watcher_id=fc_result.watcher_id,
+            future_fn_call_id=event.function_call_id,
             success=exception is None,
         )
 
         self._event_loop.add_input_event(
             InputEventFunctionCallWatcherResult(
-                function_call_durable_id=fc_result.function_call_id,
+                function_call_durable_id=event.function_call_id,
                 output=output,
                 exception=exception,
             )
@@ -533,7 +522,8 @@ class AllocationRunner:
         # Blocks here until event loop finishes and cleans up its resources.
         alloc_result = self._process_event_loop_output_events()
 
-        self._server_event_queue.put(_ServerEventStopProcessingThread())
+        self._event_log_reader.stop()
+        self._execution_log_buffer.stop()
         if self._process_server_events_thread.is_alive():
             try:
                 self._logger.info(
@@ -591,59 +581,65 @@ class AllocationRunner:
         Doesn't raise any exceptions.
         """
         while True:
-            # We don't need to add the batch events to server log atomically here because we'll remove all batch events
-            # starting from the first one from the event history on replay to clean this up.
             batch: OutputEventBatch = self._event_loop.wait_for_output_event_batch()
+            execution_events: list[AllocationExecutionEvent] = []
+            alloc_result: AllocationResult | None = None
+
             for output_event in batch.events:
-                alloc_result: AllocationResult | None = None
                 try:
-                    alloc_result = self._process_event_loop_output_event(output_event)
+                    exec_event, result = self._convert_output_event_to_execution_event(
+                        output_event
+                    )
+                    if exec_event is not None:
+                        execution_events.append(exec_event)
+                    if result is not None:
+                        alloc_result = result
                 except BaseException as e:
-                    # NB: If an exception is raised in an event loop output event handler, we should not report it
-                    # to event loop as an "internal error" input event because the original Server event
-                    # that we failed to process might be a "success" event. If we report "internal error"
-                    # here then we'll diverge user code execution from the Server event history which is
-                    # a durable execution bug. Instead we have to not report "internal error" to user code
-                    # here and instead just stop it immediately using emergency shutdown event.
                     self._logger.error(
                         "Error while processing event loop output event, sending emergency shutdown to event loop",
                         event=str(output_event),
                         exc_info=e,
                     )
-                    # TODO: Pass the first event in the batch as the cause of the allocation failure so when we replay
-                    # Server removes event history events starting from the first in the failed batch. This is to ensure
-                    # replay correctness.
                     self._event_loop.add_input_event(InputEventEmergencyShutdown())
 
-                if alloc_result is not None:
-                    return alloc_result
+            if execution_events:
+                self._execution_log_buffer.add_batch(execution_events)
 
-    def _process_event_loop_output_event(
+            if alloc_result is not None:
+                return alloc_result
+
+    def _convert_output_event_to_execution_event(
         self, output_event: OutputEventType
-    ) -> AllocationResult | None:
-        """Processes a single event loop output event.
+    ) -> tuple[AllocationExecutionEvent | None, AllocationResult | None]:
+        """Converts a single event loop output event to an execution event proto.
 
-        Returns an AllocationResult if the allocation should finish after processing this event.
-        Raises Exception on internal error while processing the event.
+        Returns (execution_event, alloc_result). execution_event is None if no event should be added.
+        alloc_result is not None only for FinishAllocation events.
+        Raises Exception on internal error.
         """
         if isinstance(output_event, OutputEventFinishAllocation):
-            return self._process_event_loop_output_event_finish_allocation(output_event)
+            exec_event, alloc_result = (
+                self._convert_finish_allocation_to_execution_event(output_event)
+            )
+            return exec_event, alloc_result
         elif isinstance(output_event, OutputEventCreateFunctionCall):
-            return self._process_event_loop_output_event_call_function(output_event)
+            return self._convert_call_function_to_execution_event(output_event), None
         elif isinstance(output_event, OutputEventCreateFunctionCallWatcher):
-            return self._process_event_loop_output_event_add_watcher(output_event)
+            return self._convert_add_watcher_to_execution_event(output_event), None
         else:
             self._logger.error(
                 "received unknown output event from event loop",
                 event_type=str(type(output_event)),
                 event=str(output_event),
             )
+            return None, None
 
-    def _process_event_loop_output_event_finish_allocation(
+    def _convert_finish_allocation_to_execution_event(
         self, output_event: OutputEventFinishAllocation
-    ) -> AllocationResult:
-        """Processes OutputEventFinishAllocation: finishes the allocation with the given output or exception.
+    ) -> tuple[AllocationExecutionEvent | None, AllocationResult]:
+        """Converts OutputEventFinishAllocation to an execution event and AllocationResult.
 
+        Returns (execution_event, alloc_result). execution_event may be None for internal errors.
         Raises Exception on internal error while processing the event.
         """
         if output_event.internal_exception is not None:
@@ -651,7 +647,12 @@ class AllocationRunner:
                 "allocation finished with internal error",
                 exc_info=output_event.internal_exception,
             )
-            return self._result_helper.internal_error()
+            finish_event = self._result_helper.to_finish_event_internal_error()
+            alloc_result = self._result_helper.internal_error()
+            return (
+                AllocationExecutionEvent(finish_allocation=finish_event),
+                alloc_result,
+            )
 
         if output_event.user_exception is not None:
             if isinstance(output_event.user_exception, RequestError):
@@ -661,8 +662,17 @@ class AllocationRunner:
                         "utf-8"
                     )
                 except BaseException:
-                    return self._result_helper.from_user_exception(
+                    finish_event = (
+                        self._result_helper.to_finish_event_from_user_exception(
+                            self._allocation_event_details, output_event.user_exception
+                        )
+                    )
+                    alloc_result = self._result_helper.from_user_exception(
                         self._allocation_event_details, output_event.user_exception
+                    )
+                    return (
+                        AllocationExecutionEvent(finish_allocation=finish_event),
+                        alloc_result,
                     )
 
                 # This is internal FE code.
@@ -672,20 +682,44 @@ class AllocationRunner:
                     blob_store=self._blob_store,
                     logger=self._logger,
                 )
-                return self._result_helper.from_request_error(
+                finish_event = self._result_helper.to_finish_event_from_request_error(
                     details=self._allocation_event_details,
                     request_error=output_event.user_exception,
                     request_error_output=request_error_so,
                     uploaded_request_error_blob=uploaded_output_blob,
                 )
+                alloc_result = self._result_helper.from_request_error(
+                    details=self._allocation_event_details,
+                    request_error=output_event.user_exception,
+                    request_error_output=request_error_so,
+                    uploaded_request_error_blob=uploaded_output_blob,
+                )
+                return (
+                    AllocationExecutionEvent(finish_allocation=finish_event),
+                    alloc_result,
+                )
             else:
-                return self._result_helper.from_user_exception(
+                finish_event = self._result_helper.to_finish_event_from_user_exception(
                     self._allocation_event_details, output_event.user_exception
+                )
+                alloc_result = self._result_helper.from_user_exception(
+                    self._allocation_event_details, output_event.user_exception
+                )
+                return (
+                    AllocationExecutionEvent(finish_allocation=finish_event),
+                    alloc_result,
                 )
 
         if output_event.tail_call is not None:
-            return self._result_helper.from_function_output(
+            finish_event = self._result_helper.to_finish_event_from_function_output(
                 output=output_event.tail_call.durable_id, uploaded_outputs_blob=None
+            )
+            alloc_result = self._result_helper.from_function_output(
+                output=output_event.tail_call.durable_id, uploaded_outputs_blob=None
+            )
+            return (
+                AllocationExecutionEvent(finish_allocation=finish_event),
+                alloc_result,
             )
 
         # Regular value output. This is user code (serialization).
@@ -704,8 +738,15 @@ class AllocationRunner:
                 ),
             )
         except BaseException as e:
-            return self._result_helper.from_user_exception(
+            finish_event = self._result_helper.to_finish_event_from_user_exception(
                 self._allocation_event_details, e
+            )
+            alloc_result = self._result_helper.from_user_exception(
+                self._allocation_event_details, e
+            )
+            return (
+                AllocationExecutionEvent(finish_allocation=finish_event),
+                alloc_result,
             )
 
         # This is internal FE code.
@@ -726,16 +767,23 @@ class AllocationRunner:
             logger=self._logger,
         )
 
-        return self._result_helper.from_function_output(
+        finish_event = self._result_helper.to_finish_event_from_function_output(
             output=serialized_output, uploaded_outputs_blob=uploaded_output_blob
         )
+        alloc_result = self._result_helper.from_function_output(
+            output=serialized_output, uploaded_outputs_blob=uploaded_output_blob
+        )
+        return (
+            AllocationExecutionEvent(finish_allocation=finish_event),
+            alloc_result,
+        )
 
-    def _process_event_loop_output_event_call_function(
+    def _convert_call_function_to_execution_event(
         self, output_event: OutputEventCreateFunctionCall
-    ) -> AllocationResult | None:
-        """Processes an OutputEventCreateFunctionCall: serialize, upload, create on server.
+    ) -> AllocationExecutionEvent | None:
+        """Converts OutputEventCreateFunctionCall to an execution event.
 
-        Returns an AllocationResult if the allocation should finish after this event due to a user error.
+        Returns None if the event should not be added to the execution log (e.g. serialization error).
         Raises Exception on internal error.
         """
         # This is user code.
@@ -748,16 +796,18 @@ class AllocationRunner:
                 )
             )
         except SerializationError as e:
-            # TODO: When FE log oriented protocol is available, send this event with pickled SerializationError
-            # exception to Server so Server adds it to event history to ensure the same order of delivery to user
-            # code on replay.
-            self._event_loop.add_input_event(
-                InputEventFunctionCallCreated(
-                    durable_id=output_event.durable_id,
-                    exception=e,
+            # Send function_call_creation_failed event with pickled error so server can
+            # add it to event log for deterministic replay.
+            try:
+                pickled_error: bytes = pickle.dumps(e)
+            except BaseException:
+                pickled_error = b""
+            return AllocationExecutionEvent(
+                function_call_creation_failed=AllocationExecutionEventFunctionCallCreationFailed(
+                    function_call_id=output_event.durable_id,
+                    metadata=pickled_error,
                 )
             )
-            return
 
         # This is our code.
         serialized_objects: dict[str, SerializedObjectInsideBLOB] = {}
@@ -786,10 +836,6 @@ class AllocationRunner:
             output_event.special_settings is not None
             and output_event.special_settings.splitter_function_name is not None
         ):
-            # Non-tail-call splitters have to use their splitter function output serializer.
-            # i.e. an application function with json output serializer doing reduce
-            # operation with reduce function that returns a non-json-serializable
-            # (but picklable) object.
             splitter_function: Function = get_function(
                 output_event.special_settings.splitter_function_name
             )
@@ -826,27 +872,25 @@ class AllocationRunner:
             )
             execution_plan_pb.start_at.CopyFrom(start_at)
 
-        alloc_function_call_id: str = _request_scoped_id()
         self._logger.info(
             "starting child future",
             future_fn_call_id=output_event.durable_id,
-            future_alloc_fn_call_id=alloc_function_call_id,
-        )
-        self._allocation_state.add_function_call(
-            id=alloc_function_call_id,
-            execution_plan_updates=execution_plan_pb,
-            args_blob=uploaded_args_blob,
         )
 
-    def _process_event_loop_output_event_add_watcher(
+        return AllocationExecutionEvent(
+            create_function_call=AllocationExecutionEventCreateFunctionCall(
+                updates=execution_plan_pb,
+                args_blob=uploaded_args_blob,
+            )
+        )
+
+    def _convert_add_watcher_to_execution_event(
         self, output_event: OutputEventCreateFunctionCallWatcher
-    ) -> AllocationResult | None:
-        """Processes an OutputEventCreateFunctionCallWatcher: register watcher.
+    ) -> AllocationExecutionEvent:
+        """Converts OutputEventCreateFunctionCallWatcher to an execution event.
 
-        Returns an AllocationResult if the allocation should finish after this event due to a user error.
         Raises Exception on internal error.
         """
-        function_call_watcher_id: str = _request_scoped_id()
         durable_id: str = output_event.function_call_durable_id
 
         deadline: Timestamp | None = None
@@ -857,15 +901,19 @@ class AllocationRunner:
                 + datetime.timedelta(seconds=output_event.deadline - time.monotonic())
             )
 
-        self._allocation_state.add_function_call_watcher(
-            id=function_call_watcher_id,
-            root_function_call_id=durable_id,
-            deadline=deadline,
-        )
         self._logger.info(
             "waiting for child future completion",
             future_fn_call_id=durable_id,
-            future_watcher_id=function_call_watcher_id,
+        )
+
+        watcher_event = AllocationExecutionEventCreateFunctionCallWatcher(
+            function_call_id=durable_id,
+        )
+        if deadline is not None:
+            watcher_event.deadline.CopyFrom(deadline)
+
+        return AllocationExecutionEvent(
+            create_function_call_watcher=watcher_event,
         )
 
     def _read_function_call_metadata(

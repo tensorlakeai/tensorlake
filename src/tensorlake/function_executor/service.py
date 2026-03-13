@@ -50,6 +50,7 @@ from .health_check import HealthCheckHandler
 from .info import info_response_kv_args
 from .message_validators import InitializeRequestValidator, validate_new_allocation
 from .proto.function_executor_pb2 import (
+    AdvanceAllocationExecutionLogBatchRequest,
     Allocation,
     AllocationState,
     AllocationUpdate,
@@ -57,6 +58,8 @@ from .proto.function_executor_pb2 import (
     DeleteAllocationRequest,
     Empty,
     FunctionRef,
+    GetAllocationExecutionLogBatchRequest,
+    GetAllocationExecutionLogBatchResponse,
     HealthCheckRequest,
     HealthCheckResponse,
     InfoRequest,
@@ -67,6 +70,9 @@ from .proto.function_executor_pb2 import (
     InitializeResponse,
     ListAllocationsRequest,
     ListAllocationsResponse,
+    ReadAllocationEventLogRequest,
+    ReadAllocationEventLogResponse,
+    WatchAllocationEventLogReads,
     WatchAllocationStateRequest,
 )
 from .proto.function_executor_pb2_grpc import FunctionExecutorServicer
@@ -334,6 +340,56 @@ class Service(FunctionExecutorServicer):
 
         allocation_info.runner.deliver_allocation_update(request)
         return Empty()
+
+    def get_allocation_execution_log_batch(
+        self,
+        request: GetAllocationExecutionLogBatchRequest,
+        context: grpc.ServicerContext,
+    ) -> GetAllocationExecutionLogBatchResponse:
+        runner = self._get_runner_or_abort(request.allocation_id, context)
+        batch = runner.execution_log_buffer.get_current_batch()
+        if batch is None:
+            return GetAllocationExecutionLogBatchResponse(events=[])
+        return GetAllocationExecutionLogBatchResponse(events=batch)
+
+    def advance_allocation_execution_log_batch(
+        self,
+        request: AdvanceAllocationExecutionLogBatchRequest,
+        context: grpc.ServicerContext,
+    ) -> Empty:
+        runner = self._get_runner_or_abort(request.allocation_id, context)
+        runner.execution_log_buffer.advance()
+        return Empty()
+
+    def watch_allocation_event_log_reads(
+        self, request: WatchAllocationEventLogReads, context: grpc.ServicerContext
+    ) -> Generator[ReadAllocationEventLogRequest, None, None]:
+        runner = self._get_runner_or_abort(request.allocation_id, context)
+        while True:
+            read_request = runner.event_log_reader.get_next_read_request()
+            if read_request is None:
+                break
+            yield read_request
+
+    def send_allocation_event_log_read_response(
+        self,
+        request: ReadAllocationEventLogResponse,
+        context: grpc.ServicerContext,
+    ) -> Empty:
+        runner = self._get_runner_or_abort(request.allocation_id, context)
+        runner.event_log_reader.deliver_read_response(request)
+        return Empty()
+
+    def _get_runner_or_abort(
+        self, allocation_id: str, context: grpc.ServicerContext
+    ) -> AllocationRunner:
+        """Returns the AllocationRunner for the given allocation ID, or aborts with NOT_FOUND."""
+        if allocation_id not in self._allocation_infos:
+            context.abort(
+                grpc.StatusCode.NOT_FOUND,
+                f"Allocation {allocation_id} not found",
+            )
+        return self._allocation_infos[allocation_id].runner
 
     def delete_allocation(
         self, request: DeleteAllocationRequest, context: grpc.ServicerContext
