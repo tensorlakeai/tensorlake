@@ -26,4 +26,4 @@ class ProgressUpdateHandler(BaseProgressUpdateHandler):
             )
 
         allocation_info: AllocationInfo = self._allocation_infos[request.allocation_id]
-        return allocation_info.runner.run_request_context_operation(request)
+        return allocation_info.runner.allocation_progress.update(request)

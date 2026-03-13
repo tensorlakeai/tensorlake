@@ -36,22 +36,6 @@ from tensorlake.applications.metadata import (
     FunctionCallMetadata,
 )
 from tensorlake.applications.registry import get_function
-from tensorlake.applications.request_context.http_server.handlers.progress_update import (
-    FunctionProgressUpdateRequest,
-    FunctionProgressUpdateResponse,
-)
-from tensorlake.applications.request_context.http_server.handlers.request_state.commit_write import (
-    CommitWriteRequest,
-    CommitWriteResponse,
-)
-from tensorlake.applications.request_context.http_server.handlers.request_state.prepare_read import (
-    PrepareReadRequest,
-    PrepareReadResponse,
-)
-from tensorlake.applications.request_context.http_server.handlers.request_state.prepare_write import (
-    PrepareWriteRequest,
-    PrepareWriteResponse,
-)
 from tensorlake.applications.user_data_serializer import (
     UserDataSerializer,
 )
@@ -218,6 +202,14 @@ class AllocationRunner:
     def event_log_reader(self) -> EventLogReader:
         return self._event_log_reader
 
+    @property
+    def request_state(self) -> AllocationRequestState:
+        return self._request_state
+
+    @property
+    def allocation_progress(self) -> AllocationProgress:
+        return self._allocation_progress
+
     def wait_allocation_state_update(
         self, last_seen_hash: str | None
     ) -> AllocationState:
@@ -268,38 +260,6 @@ class AllocationRunner:
             self._logger.error(
                 "received unexpected allocation update",
                 update=str(update),
-            )
-
-    def run_request_context_operation(
-        self,
-        operation: (
-            PrepareWriteRequest
-            | PrepareReadRequest
-            | CommitWriteRequest
-            | FunctionProgressUpdateRequest
-        ),
-    ) -> (
-        PrepareWriteResponse
-        | PrepareReadResponse
-        | CommitWriteResponse
-        | FunctionProgressUpdateResponse
-    ):
-        """Runs the given request context operation and returns its result.
-
-        Blocks until the operation completes.
-        Raises exception on error.
-        """
-        if isinstance(operation, PrepareReadRequest):
-            return self._request_state.prepare_read(operation)
-        elif isinstance(operation, PrepareWriteRequest):
-            return self._request_state.prepare_write(operation)
-        elif isinstance(operation, CommitWriteRequest):
-            return self._request_state.commit_write(operation)
-        elif isinstance(operation, FunctionProgressUpdateRequest):
-            return self._allocation_progress.update(operation)
-        else:
-            raise RuntimeError(
-                f"Unknown request context operation type: {type(operation)}"
             )
 
     def _process_server_events(self) -> None:
