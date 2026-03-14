@@ -11,7 +11,6 @@ from tensorlake.applications.internal_logger import InternalLogger
 from ..proto.function_executor_pb2 import (
     BLOB,
     AllocationOutputBLOB,
-    AllocationUpdate,
 )
 from .allocation_state_wrapper import AllocationStateWrapper
 
@@ -35,29 +34,23 @@ class AllocationBLOBManager:
         # BLOB ID -> _OutputBLOBRequestInfo.
         self._output_blob_requests: dict[str, _OutputBLOBRequestInfo] = {}
 
-    def deliver_update(self, update: AllocationUpdate) -> None:
-        # No need for any locks because we never block here so we hold GIL non stop.
-        if update.HasField("output_blob"):
-            blob: AllocationOutputBLOB = update.output_blob
-            blob_id: str = blob.blob.id
+    def deliver_output_blob(self, output_blob: AllocationOutputBLOB) -> None:
+        """Delivers an output blob response to the pending get_new_output_blob() call.
 
-            if blob_id not in self._output_blob_requests:
-                self._logger.error(
-                    "received output blob update for unknown blob request",
-                    blob_id=blob_id,
-                )
-                return
+        No need for any locks because we never block here so we hold the CPython GIL non stop.
+        """
+        blob_id: str = output_blob.blob.id
 
-            blob_request_info: _OutputBLOBRequestInfo = self._output_blob_requests[
-                blob_id
-            ]
-            blob_request_info.blob = blob
-            blob_request_info.blob_available.set()
-        else:
+        if blob_id not in self._output_blob_requests:
             self._logger.error(
-                "received unexpected allocation update",
-                update=str(update),
+                "received output blob update for unknown blob request",
+                blob_id=blob_id,
             )
+            return
+
+        blob_request_info: _OutputBLOBRequestInfo = self._output_blob_requests[blob_id]
+        blob_request_info.blob = output_blob
+        blob_request_info.blob_available.set()
 
     def get_new_output_blob(self, size: int) -> BLOB:
         """Returns new BLOB to upload function outputs to.
@@ -77,16 +70,12 @@ class AllocationBLOBManager:
         self._allocation_state.remove_output_blob_request(id=blob_id)
         del self._output_blob_requests[blob_id]
 
-        if isinstance(blob_request_info.blob, AllocationOutputBLOB):
-            if blob_request_info.blob.status.code != grpc.StatusCode.OK.value[0]:
-                self._logger.error(
-                    "received output blob with error status",
-                    blob_id=blob_request_info.blob.blob.id,
-                    status=blob_request_info.blob.status,
-                )
-                raise RuntimeError(
-                    f"Failed to create output BLOB: {blob_request_info.blob.status}"
-                )
-            return blob_request_info.blob.blob
-        else:
-            return blob_request_info.blob
+        blob: AllocationOutputBLOB = blob_request_info.blob
+        if blob.status.code != grpc.StatusCode.OK.value[0]:
+            self._logger.error(
+                "received output blob with error status",
+                blob_id=blob.blob.id,
+                status=blob.status,
+            )
+            raise RuntimeError(f"Failed to create output BLOB: {blob.status}")
+        return blob.blob

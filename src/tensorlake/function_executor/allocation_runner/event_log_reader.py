@@ -62,14 +62,9 @@ class EventLogReader:
         """Blocks until a read request is available. Returns None when stopped.
 
         Called by watch_allocation_event_log_reads RPC handler.
+        stop() enqueues a None sentinel to unblock this call.
         """
-        while True:
-            try:
-                request = self._read_request_queue.get(timeout=1.0)
-                return request
-            except queue.Empty:
-                if self._stopped:
-                    return None
+        return self._read_request_queue.get()
 
     def deliver_read_response(self, response: ReadAllocationEventLogResponse) -> None:
         """Delivers the response for the pending read() call.

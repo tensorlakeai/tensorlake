@@ -136,31 +136,6 @@ message AllocationOutputBLOBRequest {
     optional uint64 size = 2;
 }
 
-message AllocationFunctionCall {
-    // ID of the function call in AllocationState, unique per allocation.
-    // New function calls are detected by comparing IDs.
-    // This is different from function call IDs in ExecutionPlanUpdates.
-    optional string id = 3;
-    optional ExecutionPlanUpdates updates = 1;
-    // SerializedObjectInsideBLOB arguments from the execution
-    // plan are stored inside this BLOB.
-    // Optional, not set if no function arguments in updates.
-    optional BLOB args_blob = 2;
-}
-
-// Watcher for a function call started by the allocation.
-// A presence of a watcher means that customer code is blocked waiting
-// for the watcher's function call to finish.
-message AllocationFunctionCallWatcher {
-    // ID of the watcher in AllocationState, unique per allocation.
-    // New watchers are detected by comparing IDs.
-    optional string id = 3;
-    // root_function_call_id from ExecutionPlanUpdates of an already started allocation function call.
-    optional string root_function_call_id = 4;
-    // Optional timestamp for when to timeout the watcher.
-    optional google.protobuf.Timestamp deadline = 5;
-}
-
 message AllocationRequestStatePrepareReadOperation {}
 
 message AllocationRequestStatePrepareWriteOperation {
@@ -193,21 +168,8 @@ message AllocationState {
     optional AllocationProgress progress = 1;
     // Requests for writable BLOBs so allocation can upload data there.
     repeated AllocationOutputBLOBRequest output_blob_requests = 2;
-    // Function calls started by the allocation.
-    //
-    // If a not finished function call gets removed from this list then
-    // it doesn't get cancelled by the client. ExecutionPlanUpdates are immutable.
-    // Deprecated: use allocation execution and event log RPCs.
-    repeated AllocationFunctionCall function_calls = 3;
-    // Watchers for function calls started by the allocation.
-    // Deprecated: use allocation execution and event log RPCs.
-    repeated AllocationFunctionCallWatcher function_call_watchers = 4;
     // Request state operations.
     repeated AllocationRequestStateOperation request_state_operations = 7;
-
-    // Optional allocation result. Set when allocation finishes.
-    // Deprecated: use allocation execution and event log RPCs.
-    AllocationResult result = 5;
     // Required state hash.
     optional string sha256_hash = 6;
 }
@@ -264,8 +226,6 @@ message AllocationResult {
     optional AllocationFailureReason failure_reason = 2;
     oneof outputs {
         SerializedObjectInsideBLOB value = 3;
-        // Deprecated: use tail_function_call_id.
-        ExecutionPlanUpdates updates = 4;
         string tail_function_call_id = 9;
     }
     // The function_outputs_blob with uploaded function outputs.
@@ -306,25 +266,6 @@ message AllocationOutputBLOB {
     optional BLOB blob = 2;
 }
 
-message AllocationFunctionCallResult {
-    // root_function_call_id from ExecutionPlanUpdates of the function call.
-    optional string function_call_id = 1;
-    optional string watcher_id = 7;
-    optional AllocationOutcomeCode outcome_code = 2;
-    optional SerializedObjectInsideBLOB value_output = 3;
-    optional BLOB value_blob = 4;
-    optional SerializedObjectInsideBLOB request_error_output = 5;
-    optional BLOB request_error_blob = 6;
-}
-
-message AllocationFunctionCallCreationResult {
-    // root_function_call_id from ExecutionPlanUpdates.
-    optional string function_call_id = 1;
-    // allocation_function_call_id from AllocationFunctionCall.
-    optional string allocation_function_call_id = 3;
-    optional google.rpc.Status status = 2;
-}
-
 message AllocationRequestStatePrepareReadOperationResult {
     // A readable BLOB with the value of the requested key.
     // Reading the BLOB will fail if the state key doesn't exist.
@@ -353,13 +294,8 @@ message AllocationUpdate {
     // Target allocation ID.
     optional string allocation_id = 1;
     oneof update {
-        // Function call result if the function call is watched by allocation.
-        // Deprecated: use allocation AllocationEventLog API.
-        AllocationFunctionCallResult function_call_result = 2;
         AllocationOutputBLOB output_blob = 4;
         AllocationRequestStateOperationResult request_state_operation_result = 5;
-        // Result of creating a function call requested by the allocation.
-        AllocationFunctionCallCreationResult function_call_creation_result = 6;
     }
 }
 
@@ -489,7 +425,7 @@ message AllocationEvent {
 // indexify-dataplane streams these requests via watch_allocation_event_log_reads.
 message ReadAllocationEventLogRequest {
     optional string allocation_id = 1;
-    uint64 after_clock = 2; // 0 is the beginning of the log
+    optional uint64 after_clock = 2; // 0 is the beginning of the log
     optional uint32 max_entries = 3; // Pagination limit
 }
 

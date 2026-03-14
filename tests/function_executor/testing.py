@@ -25,7 +25,6 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     AllocationExecutionEventFinishAllocation,
     AllocationOutputBLOB,
     AllocationOutputBLOBRequest,
-    AllocationResult,
     AllocationState,
     AllocationUpdate,
     BLOBChunk,
@@ -264,8 +263,6 @@ class AllocationTestDriver:
                             ),
                         )
                     )
-                if allocation_state.HasField("result"):
-                    break
         except grpc.RpcError:
             pass  # Stream closed, allocation done
 

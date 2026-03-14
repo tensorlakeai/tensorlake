@@ -48,7 +48,6 @@ from ..proto.function_executor_pb2 import (
     AllocationExecutionEventFunctionCallCreationFailed,
     AllocationOutcomeCode,
     AllocationResult,
-    AllocationState,
     ExecutionPlanUpdates,
     FunctionCallWatcherStatus,
     FunctionRef,
@@ -58,6 +57,7 @@ from ..user_events import (
     AllocationEventDetails,
     log_user_event_allocations_finished,
     log_user_event_allocations_started,
+    log_user_event_function_call_failed,
 )
 from .allocation_state_wrapper import AllocationStateWrapper
 from .blob_manager import AllocationBLOBManager
@@ -380,8 +380,10 @@ class AllocationRunner:
             )
         finally:
             self._allocation.result.CopyFrom(alloc_result)
-            # This must be the last thing we do. Immeditately after this the allocation can be deleted.
-            self._allocation_state.set_result(alloc_result)
+            self._event_log_reader.stop()
+            self._execution_log_buffer.stop()
+            # This must be the last thing we do. Immediately after this the allocation can be deleted.
+            self._allocation_state.set_finished()
             log_user_event_allocations_finished([self._allocation_event_details])
 
     def __run_allocation(self) -> AllocationResult:
@@ -400,7 +402,9 @@ class AllocationRunner:
         )
         self._process_server_events_thread.start()
         # Blocks here until event loop finishes and cleans up its resources.
-        alloc_result = self._process_event_loop_output_events()
+        finish_event: AllocationExecutionEventFinishAllocation = (
+            self._process_event_loop_output_events()
+        )
 
         self._event_log_reader.stop()
         self._execution_log_buffer.stop()
@@ -418,7 +422,7 @@ class AllocationRunner:
         self._logger.info("waiting for event loop to finish")
         self._event_loop.join()
 
-        return alloc_result
+        return self._result_helper.result_from_finish_event(finish_event)
 
     def _prepare_allocation_run(self) -> AllocationResult | None:
         """Prepares allocation for running.
@@ -455,7 +459,9 @@ class AllocationRunner:
             )
             return self._result_helper.internal_error()
 
-    def _process_event_loop_output_events(self) -> AllocationResult:
+    def _process_event_loop_output_events(
+        self,
+    ) -> AllocationExecutionEventFinishAllocation:
         """Processes output events from the event loop until allocation completes.
 
         Doesn't raise any exceptions.
@@ -463,17 +469,17 @@ class AllocationRunner:
         while True:
             batch: OutputEventBatch = self._event_loop.wait_for_output_event_batch()
             execution_events: list[AllocationExecutionEvent] = []
-            alloc_result: AllocationResult | None = None
+            finish_event: AllocationExecutionEventFinishAllocation | None = None
 
             for output_event in batch.events:
                 try:
-                    exec_event, result = self._convert_output_event_to_execution_event(
+                    exec_event = self._convert_output_event_to_execution_event(
                         output_event
                     )
                     if exec_event is not None:
                         execution_events.append(exec_event)
-                    if result is not None:
-                        alloc_result = result
+                        if exec_event.HasField("finish_allocation"):
+                            finish_event = exec_event.finish_allocation
                 except BaseException as e:
                     self._logger.error(
                         "Error while processing event loop output event, sending emergency shutdown to event loop",
@@ -486,41 +492,36 @@ class AllocationRunner:
             if execution_events:
                 self._execution_log_buffer.add_batch(execution_events)
 
-            if alloc_result is not None:
-                return alloc_result
+            if finish_event is not None:
+                return finish_event
 
     def _convert_output_event_to_execution_event(
         self, output_event: OutputEventType
-    ) -> tuple[AllocationExecutionEvent | None, AllocationResult | None]:
+    ) -> AllocationExecutionEvent | None:
         """Converts a single event loop output event to an execution event proto.
 
-        Returns (execution_event, alloc_result). execution_event is None if no event should be added.
-        alloc_result is not None only for FinishAllocation events.
+        Returns None if no event should be added to the execution log.
         Raises Exception on internal error.
         """
         if isinstance(output_event, OutputEventFinishAllocation):
-            exec_event, alloc_result = (
-                self._convert_finish_allocation_to_execution_event(output_event)
-            )
-            return exec_event, alloc_result
+            return self._convert_finish_allocation_to_execution_event(output_event)
         elif isinstance(output_event, OutputEventCreateFunctionCall):
-            return self._convert_call_function_to_execution_event(output_event), None
+            return self._convert_call_function_to_execution_event(output_event)
         elif isinstance(output_event, OutputEventCreateFunctionCallWatcher):
-            return self._convert_add_watcher_to_execution_event(output_event), None
+            return self._convert_add_watcher_to_execution_event(output_event)
         else:
             self._logger.error(
                 "received unknown output event from event loop",
                 event_type=str(type(output_event)),
                 event=str(output_event),
             )
-            return None, None
+            return None
 
     def _convert_finish_allocation_to_execution_event(
         self, output_event: OutputEventFinishAllocation
-    ) -> tuple[AllocationExecutionEvent | None, AllocationResult]:
-        """Converts OutputEventFinishAllocation to an execution event and AllocationResult.
+    ) -> AllocationExecutionEvent:
+        """Converts OutputEventFinishAllocation to an execution event.
 
-        Returns (execution_event, alloc_result). execution_event may be None for internal errors.
         Raises Exception on internal error while processing the event.
         """
         if output_event.internal_exception is not None:
@@ -528,11 +529,8 @@ class AllocationRunner:
                 "allocation finished with internal error",
                 exc_info=output_event.internal_exception,
             )
-            finish_event = self._result_helper.to_finish_event_internal_error()
-            alloc_result = self._result_helper.internal_error()
-            return (
-                AllocationExecutionEvent(finish_allocation=finish_event),
-                alloc_result,
+            return AllocationExecutionEvent(
+                finish_allocation=self._result_helper.to_finish_event_internal_error()
             )
 
         if output_event.user_exception is not None:
@@ -543,15 +541,9 @@ class AllocationRunner:
                         "utf-8"
                     )
                 except BaseException:
-                    finish_event = (
-                        self._result_helper.to_finish_event_from_user_exception()
-                    )
-                    alloc_result = self._result_helper.from_user_exception(
-                        self._allocation_event_details, output_event.user_exception
-                    )
-                    return (
-                        AllocationExecutionEvent(finish_allocation=finish_event),
-                        alloc_result,
+                    self._log_user_exception(output_event.user_exception)
+                    return AllocationExecutionEvent(
+                        finish_allocation=self._result_helper.to_finish_event_from_user_exception()
                     )
 
                 # This is internal FE code.
@@ -561,40 +553,25 @@ class AllocationRunner:
                     blob_store=self._blob_store,
                     logger=self._logger,
                 )
-                finish_event = self._result_helper.to_finish_event_from_request_error(
-                    request_error_output=request_error_so,
-                    uploaded_request_error_blob=uploaded_output_blob,
-                )
-                alloc_result = self._result_helper.from_request_error(
-                    details=self._allocation_event_details,
-                    request_error=output_event.user_exception,
-                    request_error_output=request_error_so,
-                    uploaded_request_error_blob=uploaded_output_blob,
-                )
-                return (
-                    AllocationExecutionEvent(finish_allocation=finish_event),
-                    alloc_result,
+                self._log_user_exception(output_event.user_exception)
+                return AllocationExecutionEvent(
+                    finish_allocation=self._result_helper.to_finish_event_from_request_error(
+                        request_error_output=request_error_so,
+                        uploaded_request_error_blob=uploaded_output_blob,
+                    )
                 )
             else:
-                finish_event = self._result_helper.to_finish_event_from_user_exception()
-                alloc_result = self._result_helper.from_user_exception(
-                    self._allocation_event_details, output_event.user_exception
-                )
-                return (
-                    AllocationExecutionEvent(finish_allocation=finish_event),
-                    alloc_result,
+                self._log_user_exception(output_event.user_exception)
+                return AllocationExecutionEvent(
+                    finish_allocation=self._result_helper.to_finish_event_from_user_exception()
                 )
 
         if output_event.tail_call is not None:
-            finish_event = self._result_helper.to_finish_event_from_function_output(
-                output=output_event.tail_call.durable_id, uploaded_outputs_blob=None
-            )
-            alloc_result = self._result_helper.from_function_output(
-                output=output_event.tail_call.durable_id, uploaded_outputs_blob=None
-            )
-            return (
-                AllocationExecutionEvent(finish_allocation=finish_event),
-                alloc_result,
+            return AllocationExecutionEvent(
+                finish_allocation=self._result_helper.to_finish_event_from_function_output(
+                    output=output_event.tail_call.durable_id,
+                    uploaded_outputs_blob=None,
+                )
             )
 
         # Regular value output. This is user code (serialization).
@@ -613,13 +590,9 @@ class AllocationRunner:
                 ),
             )
         except BaseException as e:
-            finish_event = self._result_helper.to_finish_event_from_user_exception()
-            alloc_result = self._result_helper.from_user_exception(
-                self._allocation_event_details, e
-            )
-            return (
-                AllocationExecutionEvent(finish_allocation=finish_event),
-                alloc_result,
+            self._log_user_exception(e)
+            return AllocationExecutionEvent(
+                finish_allocation=self._result_helper.to_finish_event_from_user_exception()
             )
 
         # This is internal FE code.
@@ -640,16 +613,17 @@ class AllocationRunner:
             logger=self._logger,
         )
 
-        finish_event = self._result_helper.to_finish_event_from_function_output(
-            output=serialized_output, uploaded_outputs_blob=uploaded_output_blob
+        return AllocationExecutionEvent(
+            finish_allocation=self._result_helper.to_finish_event_from_function_output(
+                output=serialized_output,
+                uploaded_outputs_blob=uploaded_output_blob,
+            )
         )
-        alloc_result = self._result_helper.from_function_output(
-            output=serialized_output, uploaded_outputs_blob=uploaded_output_blob
-        )
-        return (
-            AllocationExecutionEvent(finish_allocation=finish_event),
-            alloc_result,
-        )
+
+    def _log_user_exception(self, exception: BaseException) -> None:
+        """Logs a user exception during allocation execution."""
+        log_user_event_function_call_failed(self._allocation_event_details, exception)
+        self._logger.info("function raised an exception")
 
     def _convert_call_function_to_execution_event(
         self, output_event: OutputEventCreateFunctionCall
@@ -858,8 +832,9 @@ class AllocationRunner:
                     function_instance_arg=self._function_instance_arg,
                 )
             except DeserializationError as e:
-                return self._result_helper.from_user_exception(
-                    self._allocation_event_details, e
+                self._log_user_exception(e)
+                return self._result_helper.result_from_finish_event(
+                    self._result_helper.to_finish_event_from_user_exception()
                 )
         else:
             # Regular function call created by SDK.
@@ -869,8 +844,9 @@ class AllocationRunner:
                     serialized_args
                 )
             except BaseException as e:
-                return self._result_helper.from_user_exception(
-                    self._allocation_event_details, e
+                self._log_user_exception(e)
+                return self._result_helper.result_from_finish_event(
+                    self._result_helper.to_finish_event_from_user_exception()
                 )
 
             # This is internal FE code.

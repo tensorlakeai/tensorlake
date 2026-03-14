@@ -45,7 +45,6 @@ from tensorlake.applications.runtime_hooks import (
 
 from .allocation_info import AllocationInfo
 from .allocation_runner.allocation_runner import AllocationRunner
-from .allocation_runner.allocation_state_wrapper import AllocationStateWrapper
 from .allocation_runner.contextvars import get_allocation_id_context_variable
 from .health_check import HealthCheckHandler
 from .info import info_response_kv_args
@@ -313,13 +312,13 @@ class Service(FunctionExecutorServicer):
         # Stream allocation state updates until the allocation completes.
         last_seen_hash: str | None = None
         while True:
-            allocation_state: AllocationState = (
+            allocation_state: AllocationState | None = (
                 allocation_info.runner.allocation_state.wait_for_update(last_seen_hash)
             )
+            if allocation_state is None:
+                break
             last_seen_hash = allocation_state.sha256_hash
             yield allocation_state
-            if AllocationStateWrapper.is_terminal_state(allocation_state):
-                break
 
     def send_allocation_update(
         self, request: AllocationUpdate, context: grpc.ServicerContext
@@ -333,7 +332,7 @@ class Service(FunctionExecutorServicer):
             )
 
         allocation_info: AllocationInfo = self._allocation_infos[request.allocation_id]
-        if allocation_info.runner.allocation_state.has_result():
+        if allocation_info.runner.allocation_state.finished:
             context.abort(
                 grpc.StatusCode.FAILED_PRECONDITION,
                 f"Allocation {request.allocation_id} is already finished",
@@ -343,8 +342,13 @@ class Service(FunctionExecutorServicer):
             allocation_info.runner.request_state.deliver_operation_result(
                 request.request_state_operation_result
             )
+        elif request.HasField("output_blob"):
+            allocation_info.runner.blob_manager.deliver_output_blob(request.output_blob)
         else:
-            allocation_info.runner.blob_manager.deliver_update(request)
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                f"Unknown update type in AllocationUpdate for allocation {request.allocation_id}",
+            )
         return Empty()
 
     def get_allocation_execution_log_batch(
@@ -409,7 +413,7 @@ class Service(FunctionExecutorServicer):
             )
 
         allocation_info: AllocationInfo = self._allocation_infos[request.allocation_id]
-        if not allocation_info.runner.allocation_state.has_result():
+        if not allocation_info.runner.allocation_state.finished:
             context.abort(
                 grpc.StatusCode.FAILED_PRECONDITION,
                 f"Allocation {request.allocation_id} is still running and cannot be deleted",

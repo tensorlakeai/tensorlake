@@ -1,4 +1,5 @@
 import threading
+from collections import deque
 
 from ..proto.function_executor_pb2 import AllocationExecutionEvent
 
@@ -12,7 +13,7 @@ class ExecutionLogBuffer:
 
     def __init__(self):
         self._condition: threading.Condition = threading.Condition()
-        self._batches: list[list[AllocationExecutionEvent]] = []
+        self._batches: deque[list[AllocationExecutionEvent]] = deque()
         self._stopped: bool = False
 
     def add_batch(self, events: list[AllocationExecutionEvent]) -> None:
@@ -34,7 +35,7 @@ class ExecutionLogBuffer:
         """Pops the front batch. Called by RPC handler after processing."""
         with self._condition:
             if len(self._batches) > 0:
-                self._batches.pop(0)
+                self._batches.popleft()
 
     def stop(self) -> None:
         """Unblocks get_current_batch when allocation is shutting down."""

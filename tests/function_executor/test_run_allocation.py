@@ -980,8 +980,6 @@ class TestRunAllocation(unittest.TestCase):
                                     ),
                                 )
                             )
-                        if allocation_state.HasField("result"):
-                            break
 
                 blob_thread = threading.Thread(target=handle_blobs, daemon=True)
                 blob_thread.start()
