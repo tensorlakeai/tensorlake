@@ -10,7 +10,6 @@ pub async fn run(
     image: Option<&str>,
     cpus: f64,
     memory: i64,
-    disk: i64,
     timeout: Option<f64>,
     workdir: Option<&str>,
     env: &[String],
@@ -28,7 +27,6 @@ pub async fn run(
         "resources": {
             "cpus": cpus,
             "memory_mb": memory,
-            "ephemeral_disk_mb": disk,
         },
     });
     if let Some(img) = image {

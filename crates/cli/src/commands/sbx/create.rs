@@ -8,7 +8,6 @@ pub async fn run(
     image: Option<&str>,
     cpus: f64,
     memory: i64,
-    disk: i64,
     timeout: Option<i64>,
     entrypoint: &[String],
     snapshot_id: Option<&str>,
@@ -21,7 +20,6 @@ pub async fn run(
         "resources": {
             "cpus": cpus,
             "memory_mb": memory,
-            "ephemeral_disk_mb": disk,
         },
     });
     if let Some(img) = image {

@@ -578,8 +578,7 @@ fn hash_directory(path: &str, hasher: &mut Sha256) -> io::Result<()> {
         hasher: &mut Sha256,
     ) -> io::Result<()> {
         if dir.is_dir() {
-            let mut entries: Vec<_> = fs::read_dir(dir)?
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
             entries.sort_by_key(|e| e.path());
             for entry in entries {
                 let path = entry.path();
@@ -625,11 +624,13 @@ mod tests {
         let image = Image::builder()
             .name("test")
             .base_image("python:3.10")
-            .build_operations(vec![ImageBuildOperation::builder()
-                .operation_type(ImageBuildOperationType::COPY)
-                .args(vec![dir.path().to_string_lossy().into_owned()])
-                .build()
-                .unwrap()])
+            .build_operations(vec![
+                ImageBuildOperation::builder()
+                    .operation_type(ImageBuildOperationType::COPY)
+                    .args(vec![dir.path().to_string_lossy().into_owned()])
+                    .build()
+                    .unwrap(),
+            ])
             .build()
             .unwrap();
 
@@ -671,11 +672,13 @@ mod tests {
         let image = Image::builder()
             .name("test")
             .base_image("python:3.10")
-            .build_operations(vec![ImageBuildOperation::builder()
-                .operation_type(ImageBuildOperationType::COPY)
-                .args(vec![dir.path().to_string_lossy().into_owned()])
-                .build()
-                .unwrap()])
+            .build_operations(vec![
+                ImageBuildOperation::builder()
+                    .operation_type(ImageBuildOperationType::COPY)
+                    .args(vec![dir.path().to_string_lossy().into_owned()])
+                    .build()
+                    .unwrap(),
+            ])
             .build()
             .unwrap();
 
