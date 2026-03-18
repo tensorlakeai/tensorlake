@@ -5,7 +5,7 @@ use crate::commands::sbx::{created_at_sort_key, format_created_at, sandbox_endpo
 use crate::error::{CliError, Result};
 use crate::output::table::new_table;
 
-pub async fn run(ctx: &CliContext) -> Result<()> {
+pub async fn run(ctx: &CliContext, running_only: bool, include_terminated: bool) -> Result<()> {
     let client = ctx.client()?;
     let url = sandbox_endpoint(ctx, "sandboxes");
 
@@ -28,6 +28,23 @@ pub async fn run(ctx: &CliContext) -> Result<()> {
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
+
+    let terminated_hidden = if include_terminated {
+        0
+    } else {
+        sandboxes
+            .iter()
+            .filter(|sandbox| is_terminated_sandbox(sandbox))
+            .count()
+    };
+
+    if !include_terminated {
+        sandboxes.retain(is_non_terminated_sandbox);
+    }
+
+    if running_only {
+        sandboxes.retain(is_running_sandbox);
+    }
 
     sandboxes.sort_by(|a, b| {
         let a_created_at = created_at_sort_key(a.get("created_at"));
@@ -91,7 +108,68 @@ pub async fn run(ctx: &CliContext) -> Result<()> {
 
     println!("{table}");
     let count = sandboxes.len();
-    println!("{} sandbox{}", count, if count != 1 { "es" } else { "" });
+    println!(
+        "{} sandbox{}, {} terminated hidden (use --all to show)",
+        count,
+        if count != 1 { "es" } else { "" },
+        terminated_hidden
+    );
 
     Ok(())
+}
+
+fn is_running_sandbox(sandbox: &serde_json::Value) -> bool {
+    sandbox
+        .get("status")
+        .and_then(|v| v.as_str())
+        .is_some_and(|status| status.eq_ignore_ascii_case("running"))
+}
+
+fn is_non_terminated_sandbox(sandbox: &serde_json::Value) -> bool {
+    !is_terminated_sandbox(sandbox)
+}
+
+fn is_terminated_sandbox(sandbox: &serde_json::Value) -> bool {
+    sandbox
+        .get("status")
+        .and_then(|v| v.as_str())
+        .is_some_and(|status| status.eq_ignore_ascii_case("terminated"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_non_terminated_sandbox, is_running_sandbox, is_terminated_sandbox};
+
+    #[test]
+    fn running_filter_matches_only_running_status() {
+        let running = serde_json::json!({ "status": "running" });
+        let terminated = serde_json::json!({ "status": "terminated" });
+        let pending = serde_json::json!({ "status": "pending" });
+
+        assert!(is_running_sandbox(&running));
+        assert!(!is_running_sandbox(&terminated));
+        assert!(!is_running_sandbox(&pending));
+    }
+
+    #[test]
+    fn default_filter_hides_terminated_sandboxes() {
+        let running = serde_json::json!({ "status": "running" });
+        let terminated = serde_json::json!({ "status": "terminated" });
+        let pending = serde_json::json!({ "status": "pending" });
+
+        assert!(is_non_terminated_sandbox(&running));
+        assert!(!is_non_terminated_sandbox(&terminated));
+        assert!(is_non_terminated_sandbox(&pending));
+    }
+
+    #[test]
+    fn terminated_filter_matches_only_terminated_status() {
+        let running = serde_json::json!({ "status": "running" });
+        let terminated = serde_json::json!({ "status": "terminated" });
+        let pending = serde_json::json!({ "status": "pending" });
+
+        assert!(!is_terminated_sandbox(&running));
+        assert!(is_terminated_sandbox(&terminated));
+        assert!(!is_terminated_sandbox(&pending));
+    }
 }

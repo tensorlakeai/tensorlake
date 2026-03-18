@@ -7,8 +7,10 @@ pub mod resume;
 pub mod run;
 pub mod snapshot;
 pub mod snapshot_ls;
+pub mod snapshot_rm;
 pub mod ssh;
 pub mod suspend;
+pub mod terminate;
 
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
