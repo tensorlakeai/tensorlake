@@ -2408,6 +2408,7 @@ dependencies = [
  "dialoguer",
  "dirs",
  "docker-credentials-config",
+ "eventsource-stream",
  "futures",
  "http-body-util",
  "indicatif",
