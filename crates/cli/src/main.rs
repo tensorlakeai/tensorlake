@@ -222,6 +222,26 @@ enum SbxCommands {
         no_wait: bool,
     },
 
+    /// Suspend a running sandbox
+    Suspend {
+        /// Sandbox ID
+        sandbox_id: String,
+
+        /// Return immediately after sending the suspend request instead of waiting for the sandbox to be suspended
+        #[arg(long)]
+        no_wait: bool,
+    },
+
+    /// Resume a suspended sandbox
+    Resume {
+        /// Sandbox ID
+        sandbox_id: String,
+
+        /// Return immediately after sending the resume request instead of waiting for the sandbox to be running
+        #[arg(long)]
+        no_wait: bool,
+    },
+
     /// Execute a command in a sandbox
     Exec {
         /// Sandbox ID
@@ -258,6 +278,16 @@ enum SbxCommands {
 
     /// Create a snapshot or list snapshots
     Snapshot(SnapshotArgs),
+
+    /// Clone a running sandbox via snapshot
+    Clone {
+        /// Source sandbox ID
+        sandbox_id: String,
+
+        /// Max seconds to wait for snapshot completion
+        #[arg(short, long, default_value = "300")]
+        timeout: f64,
+    },
 
     /// Create a sandbox, run a command, and stream output
     Run {
@@ -444,6 +474,14 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     )
                     .await
                 }
+                SbxCommands::Suspend {
+                    sandbox_id,
+                    no_wait,
+                } => commands::sbx::suspend::run(ctx, &sandbox_id, !no_wait).await,
+                SbxCommands::Resume {
+                    sandbox_id,
+                    no_wait,
+                } => commands::sbx::resume::run(ctx, &sandbox_id, !no_wait).await,
                 SbxCommands::Exec {
                     sandbox_id,
                     command,
@@ -473,6 +511,10 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         commands::sbx::snapshot::run(ctx, &sandbox_id, snapshot_args.timeout).await
                     }
                 },
+                SbxCommands::Clone {
+                    sandbox_id,
+                    timeout,
+                } => commands::sbx::clone::run(ctx, &sandbox_id, timeout).await,
                 SbxCommands::Run {
                     command,
                     args,

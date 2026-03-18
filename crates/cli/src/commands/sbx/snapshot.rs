@@ -2,7 +2,7 @@ use crate::auth::context::CliContext;
 use crate::commands::sbx::sandbox_endpoint;
 use crate::error::{CliError, Result};
 
-pub async fn run(ctx: &CliContext, sandbox_id: &str, timeout: f64) -> Result<()> {
+pub async fn create_snapshot(ctx: &CliContext, sandbox_id: &str, timeout: f64) -> Result<String> {
     let client = ctx.client()?;
 
     eprintln!("Snapshotting sandbox {}...", sandbox_id);
@@ -38,7 +38,13 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, timeout: f64) -> Result<()>
 
     eprintln!("Snapshot {} initiated ({})", snapshot_id, status);
 
-    // Poll until complete
+    if status == "completed" {
+        eprintln!("Snapshot completed");
+        return Ok(snapshot_id.to_string());
+    }
+
+    eprint!("Waiting for snapshot to complete...");
+
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs_f64(timeout);
 
     loop {
@@ -69,15 +75,15 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, timeout: f64) -> Result<()>
             if current_status == "completed" {
                 let size_bytes = info.get("size_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
                 let size_mb = size_bytes as f64 / (1024.0 * 1024.0);
-                eprintln!("Snapshot completed ({:.1} MB)", size_mb);
-                println!("{}", snapshot_id);
-                return Ok(());
+                eprintln!(" completed ({:.1} MB)", size_mb);
+                return Ok(snapshot_id.to_string());
             }
             if current_status == "failed" {
                 let error = info
                     .get("error")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown error");
+                eprintln!(" failed");
                 return Err(CliError::Other(anyhow::anyhow!(
                     "Snapshot failed: {}",
                     error
@@ -88,4 +94,10 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, timeout: f64) -> Result<()>
         eprint!(".");
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
+}
+
+pub async fn run(ctx: &CliContext, sandbox_id: &str, timeout: f64) -> Result<()> {
+    let snapshot_id = create_snapshot(ctx, sandbox_id, timeout).await?;
+    println!("{}", snapshot_id);
+    Ok(())
 }
