@@ -1,15 +1,19 @@
+pub mod clone;
 pub mod cp;
 pub mod create;
 pub mod exec;
 pub mod ls;
+pub mod resume;
 pub mod run;
 pub mod snapshot;
 pub mod snapshot_ls;
 pub mod ssh;
+pub mod suspend;
 
 use crate::auth::context::CliContext;
-use crate::error::Result;
+use crate::error::{CliError, Result};
 use chrono::{DateTime, Local, TimeZone, Utc};
+use tokio::time::{Duration, Instant};
 
 /// Build the lifecycle API base URL for sandbox CRUD operations.
 ///
@@ -23,6 +27,65 @@ pub fn sandbox_endpoint(ctx: &CliContext, endpoint: &str) -> String {
         )
     } else {
         format!("{}/{}", ctx.api_url, endpoint)
+    }
+}
+
+pub const DEFAULT_SANDBOX_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
+const SANDBOX_WAIT_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+pub async fn wait_for_sandbox_status(
+    ctx: &CliContext,
+    sandbox_id: &str,
+    waiting_message: &str,
+    target_status: &str,
+    timeout: Duration,
+) -> Result<String> {
+    let client = ctx.client()?;
+
+    eprint!("{waiting_message}...");
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        if Instant::now() > deadline {
+            eprintln!(" timed out");
+            return Err(CliError::Other(anyhow::anyhow!(
+                "Sandbox {} did not reach '{}' within {}s",
+                sandbox_id,
+                target_status,
+                timeout.as_secs()
+            )));
+        }
+
+        let info_resp = client
+            .get(sandbox_endpoint(ctx, &format!("sandboxes/{sandbox_id}")))
+            .send()
+            .await
+            .map_err(CliError::Http)?;
+
+        if info_resp.status().is_success() {
+            let info: serde_json::Value = info_resp.json().await.map_err(CliError::Http)?;
+            let current_status = info
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            if current_status == target_status {
+                eprintln!(" {current_status}");
+                return Ok(current_status);
+            }
+
+            if current_status == "terminated" && target_status != "terminated" {
+                eprintln!(" terminated");
+                return Err(CliError::Other(anyhow::anyhow!(
+                    "Sandbox terminated while waiting to reach '{}'",
+                    target_status
+                )));
+            }
+        }
+
+        eprint!(".");
+        tokio::time::sleep(SANDBOX_WAIT_POLL_INTERVAL).await;
     }
 }
 

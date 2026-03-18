@@ -205,10 +205,6 @@ enum SbxCommands {
         #[arg(long, default_value = "512")]
         memory: i64,
 
-        /// Ephemeral disk in MB
-        #[arg(long, default_value = "1024")]
-        disk: i64,
-
         /// Timeout in seconds
         #[arg(long)]
         timeout: Option<i64>,
@@ -222,6 +218,26 @@ enum SbxCommands {
         snapshot: Option<String>,
 
         /// Return immediately after creation instead of waiting for the sandbox to be running
+        #[arg(long)]
+        no_wait: bool,
+    },
+
+    /// Suspend a running sandbox
+    Suspend {
+        /// Sandbox ID
+        sandbox_id: String,
+
+        /// Return immediately after sending the suspend request instead of waiting for the sandbox to be suspended
+        #[arg(long)]
+        no_wait: bool,
+    },
+
+    /// Resume a suspended sandbox
+    Resume {
+        /// Sandbox ID
+        sandbox_id: String,
+
+        /// Return immediately after sending the resume request instead of waiting for the sandbox to be running
         #[arg(long)]
         no_wait: bool,
     },
@@ -263,6 +279,16 @@ enum SbxCommands {
     /// Create a snapshot or list snapshots
     Snapshot(SnapshotArgs),
 
+    /// Clone a running sandbox via snapshot
+    Clone {
+        /// Source sandbox ID
+        sandbox_id: String,
+
+        /// Max seconds to wait for snapshot completion
+        #[arg(short, long, default_value = "300")]
+        timeout: f64,
+    },
+
     /// Create a sandbox, run a command, and stream output
     Run {
         /// Command to execute
@@ -283,10 +309,6 @@ enum SbxCommands {
         /// Memory in MB
         #[arg(long, default_value = "512")]
         memory: i64,
-
-        /// Ephemeral disk in MB
-        #[arg(long, default_value = "1024")]
-        disk: i64,
 
         /// Command timeout in seconds
         #[arg(short, long)]
@@ -435,7 +457,6 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     image,
                     cpus,
                     memory,
-                    disk,
                     timeout,
                     entrypoint,
                     snapshot,
@@ -446,7 +467,6 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         image.as_deref(),
                         cpus,
                         memory,
-                        disk,
                         timeout,
                         &entrypoint,
                         snapshot.as_deref(),
@@ -454,6 +474,14 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     )
                     .await
                 }
+                SbxCommands::Suspend {
+                    sandbox_id,
+                    no_wait,
+                } => commands::sbx::suspend::run(ctx, &sandbox_id, !no_wait).await,
+                SbxCommands::Resume {
+                    sandbox_id,
+                    no_wait,
+                } => commands::sbx::resume::run(ctx, &sandbox_id, !no_wait).await,
                 SbxCommands::Exec {
                     sandbox_id,
                     command,
@@ -483,13 +511,16 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         commands::sbx::snapshot::run(ctx, &sandbox_id, snapshot_args.timeout).await
                     }
                 },
+                SbxCommands::Clone {
+                    sandbox_id,
+                    timeout,
+                } => commands::sbx::clone::run(ctx, &sandbox_id, timeout).await,
                 SbxCommands::Run {
                     command,
                     args,
                     image,
                     cpus,
                     memory,
-                    disk,
                     timeout,
                     workdir,
                     env,
@@ -502,7 +533,6 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         image.as_deref(),
                         cpus,
                         memory,
-                        disk,
                         timeout,
                         workdir.as_deref(),
                         &env,
