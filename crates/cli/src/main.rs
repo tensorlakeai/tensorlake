@@ -143,6 +143,10 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Manage cron schedules for applications
+    #[command(subcommand)]
+    Cron(CronCommands),
+
     /// Manage secrets
     #[command(subcommand)]
     Secrets(SecretsCommands),
@@ -171,6 +175,44 @@ enum SecretsCommands {
         /// Secret names to unset
         #[arg(required = true)]
         secret_names: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum CronCommands {
+    /// Create a cron schedule for an application
+    Create {
+        /// Application name
+        application: String,
+
+        /// Cron expression (5-field, minimum 60-second interval, e.g. "0 * * * *")
+        #[arg(short, long)]
+        schedule: String,
+
+        /// Inline JSON to send as input on every invocation
+        #[arg(long, conflicts_with = "input_file")]
+        input_json: Option<String>,
+
+        /// Path to a file whose bytes are sent as input on every invocation
+        #[arg(long, conflicts_with = "input_json")]
+        input_file: Option<String>,
+    },
+
+    /// List cron schedules for an application
+    #[command(name = "ls")]
+    List {
+        /// Application name
+        application: String,
+    },
+
+    /// Delete a cron schedule
+    #[command(name = "rm")]
+    Delete {
+        /// Application name
+        application: String,
+
+        /// Schedule ID to delete
+        schedule_id: String,
     },
 }
 
@@ -456,6 +498,33 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             .await
         }
         Commands::Parse { args } => commands::parse::run(ctx, &args).await,
+        Commands::Cron(subcmd) => {
+            ensure_auth_and_project(ctx).await?;
+            match subcmd {
+                CronCommands::Create {
+                    application,
+                    schedule,
+                    input_json,
+                    input_file,
+                } => {
+                    commands::cron::create(
+                        ctx,
+                        &application,
+                        &schedule,
+                        input_json.as_deref(),
+                        input_file.as_deref(),
+                    )
+                    .await
+                }
+                CronCommands::List { application } => {
+                    commands::cron::list(ctx, &application).await
+                }
+                CronCommands::Delete {
+                    application,
+                    schedule_id,
+                } => commands::cron::delete(ctx, &application, &schedule_id).await,
+            }
+        }
         Commands::Secrets(subcmd) => {
             ensure_auth_and_project(ctx).await?;
             match subcmd {
