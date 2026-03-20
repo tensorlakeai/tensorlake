@@ -3,6 +3,7 @@ pub mod cp;
 pub mod create;
 pub mod exec;
 pub mod ls;
+pub mod port;
 pub mod resume;
 pub mod run;
 pub mod snapshot;
