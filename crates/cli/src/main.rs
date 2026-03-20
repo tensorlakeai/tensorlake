@@ -403,7 +403,7 @@ enum PortCommands {
         sandbox_id: String,
 
         /// Ports to expose
-        #[arg(required = true)]
+        #[arg(required = true, value_parser = parse_user_port)]
         ports: Vec<u16>,
     },
 
@@ -413,9 +413,25 @@ enum PortCommands {
         sandbox_id: String,
 
         /// Ports to remove
-        #[arg(required = true)]
+        #[arg(required = true, value_parser = parse_user_port)]
         ports: Vec<u16>,
     },
+}
+
+fn parse_user_port(value: &str) -> std::result::Result<u16, String> {
+    let port: u16 = value
+        .parse()
+        .map_err(|_| format!("invalid port '{value}'"))?;
+
+    if port == 0 {
+        return Err("port must be between 1 and 65535".to_string());
+    }
+
+    if port == 9501 {
+        return Err("port 9501 is reserved for sandbox management".to_string());
+    }
+
+    Ok(port)
 }
 
 #[tokio::main]
@@ -674,6 +690,20 @@ mod tests {
     #[test]
     fn sbx_port_rm_requires_ports() {
         let result = Cli::try_parse_from(["tl", "sbx", "port", "rm", "sbx-123"]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sbx_port_expose_rejects_zero() {
+        let result = Cli::try_parse_from(["tl", "sbx", "port", "expose", "sbx-123", "0"]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sbx_port_rm_rejects_management_port() {
+        let result = Cli::try_parse_from(["tl", "sbx", "port", "rm", "sbx-123", "9501"]);
 
         assert!(result.is_err());
     }
