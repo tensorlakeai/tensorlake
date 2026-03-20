@@ -12,6 +12,11 @@ on:
           - dev
           - prod
 
+  pull_request:
+    paths:
+      - "typescript/**"
+      - ".github/workflows/typescript_sdk.yaml"
+
   push:
     branches:
       - "main"
@@ -48,35 +53,11 @@ jobs:
       - name: Run unit tests
         run: npm test
 
-  integration-tests-dispatch:
-    if: github.event_name == 'workflow_dispatch'
-    name: Integration tests (manual)
+  integration-tests:
+    name: Integration tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: ${{ inputs.environment }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run integration tests
-        run: npm run test:integration
-        env:
-          TENSORLAKE_API_URL: ${{ secrets.TENSORLAKE_API_URL }}
-          TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
-
-  integration-tests-main:
-    if: github.ref == 'refs/heads/main' && github.event_name != 'workflow_dispatch'
-    name: Integration tests (main branch)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    environment: prod
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'prod' }}
     steps:
       - uses: actions/checkout@v4
 
