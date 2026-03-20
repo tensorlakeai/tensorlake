@@ -2398,6 +2398,7 @@ name = "tensorlake-cli"
 version = "0.4.22"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "bollard",
  "bytes",
  "chrono",
