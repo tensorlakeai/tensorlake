@@ -64,9 +64,6 @@ jobs:
             target: aarch64
             manylinux: auto
             cloud_sdk_interpreter: python3
-          - os: macos-15-intel
-            target: x86_64
-            cloud_sdk_interpreter: python3.10
           - os: macos-14
             target: aarch64
             cloud_sdk_interpreter: python3.10
