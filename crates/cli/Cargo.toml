@@ -42,3 +42,4 @@ docker-credentials-config = { workspace = true }
 bytes = { workspace = true }
 http-body-util = { workspace = true }
 minijinja = { workspace = true }
+base64 = { workspace = true }

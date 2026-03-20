@@ -67,12 +67,14 @@
 //! ```
 
 pub mod applications;
+pub mod cron;
 pub mod document_ai;
 pub mod error;
 pub mod images;
 pub mod sandboxes;
 pub mod secrets;
 use applications::*;
+use cron::*;
 use document_ai::*;
 use images::*;
 use sandboxes::*;
@@ -278,5 +280,10 @@ impl Sdk {
     /// ```
     pub fn secrets(&self) -> SecretsClient {
         SecretsClient::new(self.client.clone())
+    }
+
+    /// Get a client for managing cron schedules for applications.
+    pub fn cron(&self) -> CronClient {
+        CronClient::new(self.client.clone())
     }
 }

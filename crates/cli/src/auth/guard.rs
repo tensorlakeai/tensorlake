@@ -10,7 +10,15 @@ use crate::project::detection::find_project_root;
 pub async fn ensure_auth_and_project(ctx: &mut CliContext) -> Result<()> {
     if !ctx.has_authentication() {
         eprintln!("It seems like you're not logged in. Let's log you in...\n");
-        let login_result = run_login_flow(ctx, true).await?;
+        let login_result = match run_login_flow(ctx, true).await {
+            Ok(result) => result,
+            Err(CliError::Cancelled) => {
+                return Err(CliError::auth(
+                    "Login cancelled. Set TENSORLAKE_API_KEY or run 'tl login' to authenticate.",
+                ));
+            }
+            Err(e) => return Err(e),
+        };
 
         // Reload context with new credentials and org/project from login flow
         let resolved = resolver::resolve(
