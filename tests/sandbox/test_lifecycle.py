@@ -23,7 +23,7 @@ from tensorlake.sandbox import (
 
 _SANDBOX_IMAGE = "docker.io/library/alpine:latest"
 _SANDBOX_CPUS = 0.2
-_SANDBOX_MEMORY_MB = 100
+_SANDBOX_MEMORY_MB = 512
 _SANDBOX_DISK_MB = 1024
 
 
@@ -229,11 +229,11 @@ class TestPoolLifecycle(BaseSandboxTest):
             pool_id=self.__class__.pool_id,
             image=_SANDBOX_IMAGE,
             cpus=_SANDBOX_CPUS,
-            memory_mb=200,
+            memory_mb=768,
             ephemeral_disk_mb=_SANDBOX_DISK_MB,
             warm_containers=1,
         )
-        self.assertEqual(updated.resources.memory_mb, 200)
+        self.assertEqual(updated.resources.memory_mb, 768)
         self.assertEqual(updated.warm_containers, 1)
 
     def test_5_delete_pool(self):
