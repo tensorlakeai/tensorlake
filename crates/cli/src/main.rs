@@ -310,6 +310,10 @@ enum SbxCommands {
         times: NonZeroUsize,
     },
 
+    /// Manage user-exposed sandbox ports
+    #[command(subcommand)]
+    Port(PortCommands),
+
     /// Create a sandbox, run a command, and stream output
     Run {
         /// Command to execute
@@ -382,6 +386,35 @@ enum SnapshotCommands {
         /// Snapshot IDs
         #[arg(required = true)]
         snapshot_ids: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PortCommands {
+    /// List user-exposed ports for a sandbox
+    Ls {
+        /// Sandbox ID
+        sandbox_id: String,
+    },
+
+    /// Expose one or more ports and enable unauthenticated access
+    Expose {
+        /// Sandbox ID
+        sandbox_id: String,
+
+        /// Ports to expose
+        #[arg(required = true)]
+        ports: Vec<u16>,
+    },
+
+    /// Remove one or more exposed ports
+    Rm {
+        /// Sandbox ID
+        sandbox_id: String,
+
+        /// Ports to remove
+        #[arg(required = true)]
+        ports: Vec<u16>,
     },
 }
 
@@ -550,6 +583,17 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     timeout,
                     times,
                 } => commands::sbx::clone::run(ctx, &sandbox_id, timeout, times.get()).await,
+                SbxCommands::Port(port_cmd) => match port_cmd {
+                    PortCommands::Ls { sandbox_id } => {
+                        commands::sbx::port::list(ctx, &sandbox_id).await
+                    }
+                    PortCommands::Expose { sandbox_id, ports } => {
+                        commands::sbx::port::expose(ctx, &sandbox_id, &ports).await
+                    }
+                    PortCommands::Rm { sandbox_id, ports } => {
+                        commands::sbx::port::remove(ctx, &sandbox_id, &ports).await
+                    }
+                },
                 SbxCommands::Run {
                     command,
                     args,
@@ -610,6 +654,26 @@ mod tests {
     #[test]
     fn clone_times_rejects_zero() {
         let result = Cli::try_parse_from(["tl", "sbx", "clone", "sbx-123", "--times", "0"]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sbx_port_expose_parses_ports() {
+        let cli = Cli::try_parse_from(["tl", "sbx", "port", "expose", "sbx-123", "8080", "3000"])
+            .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Port(PortCommands::Expose { ports, .. })) => {
+                assert_eq!(ports, vec![8080, 3000]);
+            }
+            _ => panic!("expected sbx port expose command"),
+        }
+    }
+
+    #[test]
+    fn sbx_port_rm_requires_ports() {
+        let result = Cli::try_parse_from(["tl", "sbx", "port", "rm", "sbx-123"]);
 
         assert!(result.is_err());
     }
