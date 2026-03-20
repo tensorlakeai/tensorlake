@@ -7,6 +7,7 @@ mod output;
 mod project;
 
 use clap::{Parser, Subcommand};
+use std::num::NonZeroUsize;
 
 use auth::context::CliContext;
 use auth::guard::ensure_auth_and_project;
@@ -303,6 +304,10 @@ enum SbxCommands {
         /// Max seconds to wait for snapshot completion
         #[arg(short, long, default_value = "300")]
         timeout: f64,
+
+        /// Number of copies to create from the same snapshot
+        #[arg(long, default_value = "1")]
+        times: NonZeroUsize,
     },
 
     /// Create a sandbox, run a command, and stream output
@@ -543,7 +548,8 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 SbxCommands::Clone {
                     sandbox_id,
                     timeout,
-                } => commands::sbx::clone::run(ctx, &sandbox_id, timeout).await,
+                    times,
+                } => commands::sbx::clone::run(ctx, &sandbox_id, timeout, times.get()).await,
                 SbxCommands::Run {
                     command,
                     args,
@@ -574,5 +580,37 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clone_times_defaults_to_one() {
+        let cli = Cli::try_parse_from(["tl", "sbx", "clone", "sbx-123"]).unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Clone { times, .. }) => assert_eq!(times.get(), 1),
+            _ => panic!("expected sbx clone command"),
+        }
+    }
+
+    #[test]
+    fn clone_times_parses_explicit_value() {
+        let cli = Cli::try_parse_from(["tl", "sbx", "clone", "sbx-123", "--times", "3"]).unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Clone { times, .. }) => assert_eq!(times.get(), 3),
+            _ => panic!("expected sbx clone command"),
+        }
+    }
+
+    #[test]
+    fn clone_times_rejects_zero() {
+        let result = Cli::try_parse_from(["tl", "sbx", "clone", "sbx-123", "--times", "0"]);
+
+        assert!(result.is_err());
     }
 }
