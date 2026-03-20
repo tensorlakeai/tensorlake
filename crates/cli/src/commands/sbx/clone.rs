@@ -11,15 +11,14 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, timeout: f64, times: usize)
 
     let snapshot_id = snapshot::create_snapshot(ctx, sandbox_id, timeout).await?;
 
+    let mut cloned_ids = Vec::with_capacity(times);
+
     for copy_index in 0..times {
-        if times == 1 {
-            eprintln!("Creating new sandbox from snapshot {}...", snapshot_id);
-        } else {
+        if times > 1 {
             eprintln!(
-                "Creating sandbox {}/{} from snapshot {}...",
+                "Creating clone {}/{}...",
                 copy_index + 1,
                 times,
-                snapshot_id
             );
         }
 
@@ -33,6 +32,14 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, timeout: f64, times: usize)
         .await?;
 
         println!("{}", cloned_sandbox_id);
+        cloned_ids.push(cloned_sandbox_id);
+    }
+
+    if times > 1 {
+        eprintln!();
+        for (i, id) in cloned_ids.iter().enumerate() {
+            eprintln!("  Sandbox {}: {}", i + 1, id);
+        }
     }
 
     Ok(())

@@ -43,13 +43,13 @@ pub async fn create_snapshot(ctx: &CliContext, sandbox_id: &str, timeout: f64) -
         return Ok(snapshot_id.to_string());
     }
 
-    eprint!("Waiting for snapshot to complete...");
+    let spinner = crate::commands::sbx::new_spinner("Waiting for snapshot to complete...");
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs_f64(timeout);
 
     loop {
         if tokio::time::Instant::now() > deadline {
-            eprintln!(" timed out");
+            spinner.finish_with_message("Waiting for snapshot to complete... timed out");
             return Err(CliError::Other(anyhow::anyhow!(
                 "Snapshot did not complete within {}s",
                 timeout
@@ -63,7 +63,7 @@ pub async fn create_snapshot(ctx: &CliContext, sandbox_id: &str, timeout: f64) -
             .map_err(CliError::Http)?;
 
         if info_resp.status().as_u16() == 404 {
-            eprintln!("Snapshot not found: {}", snapshot_id);
+            spinner.finish_with_message(format!("Snapshot not found: {}", snapshot_id));
             eprintln!("  The server may not support snapshot status polling.");
             return Err(CliError::ExitCode(1));
         }
@@ -75,7 +75,10 @@ pub async fn create_snapshot(ctx: &CliContext, sandbox_id: &str, timeout: f64) -
             if current_status == "completed" {
                 let size_bytes = info.get("size_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
                 let size_mb = size_bytes as f64 / (1024.0 * 1024.0);
-                eprintln!(" completed ({:.1} MB)", size_mb);
+                spinner.finish_with_message(format!(
+                    "Snapshot completed ({:.1} MB)",
+                    size_mb
+                ));
                 return Ok(snapshot_id.to_string());
             }
             if current_status == "failed" {
@@ -83,7 +86,7 @@ pub async fn create_snapshot(ctx: &CliContext, sandbox_id: &str, timeout: f64) -
                     .get("error")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown error");
-                eprintln!(" failed");
+                spinner.finish_with_message("Snapshot failed");
                 return Err(CliError::Other(anyhow::anyhow!(
                     "Snapshot failed: {}",
                     error
@@ -91,7 +94,6 @@ pub async fn create_snapshot(ctx: &CliContext, sandbox_id: &str, timeout: f64) -
             }
         }
 
-        eprint!(".");
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 }
