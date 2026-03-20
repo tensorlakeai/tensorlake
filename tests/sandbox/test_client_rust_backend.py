@@ -48,6 +48,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         request_json = json.loads(fake.create_request_json)
         self.assertEqual(request_json["image"], "python:3.11")
         self.assertEqual(request_json["resources"]["cpus"], 2.0)
+        self.assertEqual(request_json["resources"]["memory_mb"], 2048)
 
     def test_list_uses_rust_backend(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
