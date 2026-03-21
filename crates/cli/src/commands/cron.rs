@@ -1,9 +1,9 @@
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use comfy_table::Cell;
-use tensorlake_cloud_sdk::error::SdkError;
+use tensorlake_cloud_sdk::ClientBuilder;
 use tensorlake_cloud_sdk::cron::CronClient;
-use tensorlake_cloud_sdk::{ClientBuilder};
+use tensorlake_cloud_sdk::error::SdkError;
 
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
@@ -30,9 +30,9 @@ fn map_sdk_error(error: SdkError) -> CliError {
         SdkError::Authentication(_) => {
             CliError::auth("authentication failed. set TENSORLAKE_API_KEY or run 'tl login'.")
         }
-        SdkError::Authorization(_) => CliError::auth(
-            "permission denied. check your API key permissions or run 'tl init'.",
-        ),
+        SdkError::Authorization(_) => {
+            CliError::auth("permission denied. check your API key permissions or run 'tl init'.")
+        }
         SdkError::ServerError { status, message } => {
             let code = status.as_u16();
             if (400..500).contains(&code) {
@@ -109,7 +109,13 @@ pub async fn list(ctx: &CliContext, application: &str) -> Result<()> {
         return Ok(());
     }
 
-    let mut table = new_table(&["ID", "Expression", "Next Run (UTC)", "Last Run (UTC)", "Status"]);
+    let mut table = new_table(&[
+        "ID",
+        "Expression",
+        "Next Run (UTC)",
+        "Last Run (UTC)",
+        "Status",
+    ]);
     for s in &resp.schedules {
         let next = ms_to_display(s.next_fire_time_ms);
         let last = s
@@ -145,6 +151,9 @@ pub async fn delete(ctx: &CliContext, application: &str, schedule_id: &str) -> R
         .await
         .map_err(map_sdk_error)?;
 
-    println!("Cron schedule '{}' deleted from '{}'", schedule_id, application);
+    println!(
+        "Cron schedule '{}' deleted from '{}'",
+        schedule_id, application
+    );
     Ok(())
 }

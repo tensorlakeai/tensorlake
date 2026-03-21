@@ -59,35 +59,14 @@ pub async fn run(
         .to_string();
 
     // Wait for sandbox to start (lifecycle API)
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        if tokio::time::Instant::now() > deadline {
-            return Err(CliError::Other(anyhow::anyhow!(
-                "Sandbox did not start within 120s"
-            )));
-        }
-        let info_resp = client
-            .get(sandbox_endpoint(ctx, &format!("sandboxes/{}", sandbox_id)))
-            .send()
-            .await
-            .map_err(CliError::Http)?;
-
-        if info_resp.status().is_success() {
-            let info: serde_json::Value = info_resp.json().await.map_err(CliError::Http)?;
-            let status = info.get("status").and_then(|v| v.as_str()).unwrap_or("");
-            if status == "running" {
-                break;
-            }
-            if status == "terminated" {
-                return Err(CliError::Other(anyhow::anyhow!(
-                    "Sandbox terminated during startup"
-                )));
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    }
-
-    eprintln!("Sandbox {} is running.", sandbox_id);
+    crate::commands::sbx::wait_for_sandbox_status(
+        ctx,
+        &sandbox_id,
+        "Waiting for sandbox to start",
+        "running",
+        crate::commands::sbx::DEFAULT_SANDBOX_WAIT_TIMEOUT,
+    )
+    .await?;
 
     // Run exec (proxy API)
     let result =

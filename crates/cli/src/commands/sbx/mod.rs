@@ -36,6 +36,19 @@ pub fn sandbox_endpoint(ctx: &CliContext, endpoint: &str) -> String {
 pub const DEFAULT_SANDBOX_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 const SANDBOX_WAIT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+pub fn new_spinner(message: &str) -> indicatif::ProgressBar {
+    let spinner = indicatif::ProgressBar::new_spinner();
+    spinner.set_style(
+        indicatif::ProgressStyle::default_spinner()
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+            .template("{spinner} {msg}")
+            .unwrap(),
+    );
+    spinner.set_message(message.to_string());
+    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+    spinner
+}
+
 pub async fn wait_for_sandbox_status(
     ctx: &CliContext,
     sandbox_id: &str,
@@ -45,12 +58,12 @@ pub async fn wait_for_sandbox_status(
 ) -> Result<String> {
     let client = ctx.client()?;
 
-    eprint!("{waiting_message}...");
+    let spinner = new_spinner(&format!("{}...", waiting_message));
 
     let deadline = Instant::now() + timeout;
     loop {
         if Instant::now() > deadline {
-            eprintln!(" timed out");
+            spinner.finish_with_message(format!("{} timed out", waiting_message));
             return Err(CliError::Other(anyhow::anyhow!(
                 "Sandbox {} did not reach '{}' within {}s",
                 sandbox_id,
@@ -74,12 +87,12 @@ pub async fn wait_for_sandbox_status(
                 .to_string();
 
             if current_status == target_status {
-                eprintln!(" {current_status}");
+                spinner.finish_with_message(format!("{} {}", waiting_message, current_status));
                 return Ok(current_status);
             }
 
             if current_status == "terminated" && target_status != "terminated" {
-                eprintln!(" terminated");
+                spinner.finish_with_message(format!("{} terminated", waiting_message));
                 return Err(CliError::Other(anyhow::anyhow!(
                     "Sandbox terminated while waiting to reach '{}'",
                     target_status
@@ -87,7 +100,6 @@ pub async fn wait_for_sandbox_status(
             }
         }
 
-        eprint!(".");
         tokio::time::sleep(SANDBOX_WAIT_POLL_INTERVAL).await;
     }
 }
