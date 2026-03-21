@@ -570,9 +570,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     )
                     .await
                 }
-                CronCommands::List { application } => {
-                    commands::cron::list(ctx, &application).await
-                }
+                CronCommands::List { application } => commands::cron::list(ctx, &application).await,
                 CronCommands::Delete {
                     application,
                     schedule_id,

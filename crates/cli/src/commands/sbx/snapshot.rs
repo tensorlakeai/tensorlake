@@ -75,10 +75,7 @@ pub async fn create_snapshot(ctx: &CliContext, sandbox_id: &str, timeout: f64) -
             if current_status == "completed" {
                 let size_bytes = info.get("size_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
                 let size_mb = size_bytes as f64 / (1024.0 * 1024.0);
-                spinner.finish_with_message(format!(
-                    "Snapshot completed ({:.1} MB)",
-                    size_mb
-                ));
+                spinner.finish_with_message(format!("Snapshot completed ({:.1} MB)", size_mb));
                 return Ok(snapshot_id.to_string());
             }
             if current_status == "failed" {

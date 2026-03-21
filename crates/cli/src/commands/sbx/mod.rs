@@ -87,10 +87,7 @@ pub async fn wait_for_sandbox_status(
                 .to_string();
 
             if current_status == target_status {
-                spinner.finish_with_message(format!(
-                    "{} {}",
-                    waiting_message, current_status
-                ));
+                spinner.finish_with_message(format!("{} {}", waiting_message, current_status));
                 return Ok(current_status);
             }
 
