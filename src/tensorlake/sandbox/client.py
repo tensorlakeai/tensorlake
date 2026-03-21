@@ -494,7 +494,7 @@ class SandboxClient:
 
     def create_pool(
         self,
-        image: str,
+        image: str | None = None,
         cpus: float = 1.0,
         memory_mb: int = 2048,
         ephemeral_disk_mb: int = 1024,

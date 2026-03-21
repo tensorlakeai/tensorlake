@@ -318,7 +318,7 @@ impl SandboxProxyClient {
                 match event {
                     Ok(msg) => match serde_json::from_str::<OutputEvent>(&msg.data) {
                         Ok(evt) => Some(Ok(evt)),
-                        Err(error) => Some(Err(SdkError::Json(error))),
+                        Err(_) => None, // Skip non-output events (e.g. heartbeats)
                     },
                     Err(error) => Some(Err(SdkError::EventSourceError(error.to_string()))),
                 }
