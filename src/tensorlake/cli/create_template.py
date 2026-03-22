@@ -273,6 +273,10 @@ def create_template(
 
     infos = image_infos()
     image = _select_image(infos, image_name)
+
+    # Default template name to image name if not provided.
+    if not template_name:
+        template_name = image.name
     _emit({"type": "status", "message": f"Selected image: {image.name}"})
 
     # 2. Create sandbox.
@@ -364,8 +368,8 @@ def create_template_entrypoint():
     parser.add_argument(
         "--name",
         "-n",
-        required=True,
-        help="Template name (must be unique per project)",
+        default=None,
+        help="Template name (defaults to image name, must be unique per project)",
     )
     args = parser.parse_args()
 
