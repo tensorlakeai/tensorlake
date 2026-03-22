@@ -3,7 +3,7 @@
 
 </h1>
 
-<p align="center">Secure cloud sandboxes and durable serverless applications for AI agents</p>
+<p align="center">Build agents with sandboxes and serverless orchestration runtime</p>
 <div align="center">
 
 
@@ -15,17 +15,18 @@
 
 </div>
 
-## Products
+Tensorlake is a compute infrastructure platform for building agentic applications with sandboxes. 
 
-- **[Sandboxes](#sandboxes)** — Secure, isolated cloud environments for running code. Spin up a sandbox in seconds, execute commands, transfer files, and manage processes — from the CLI or Python SDK.
+The Sandbox API creates MicroVM sandboxes which you can use to run agents, or use them as an isolated environment for running tools or LLM generated code.
 
-- **[Applications](#applications)** — Deploy durable, serverless agentic applications and workflows with automatic scaling and fault tolerance.
-
----
+In addition to stateful VMs, you can also add long running orchestration capabilites to Agents using a serverless funtion runtime with fan-out capabilities.
 
 ## Sandboxes
 
-Sandboxes are secure, isolated cloud environments for running arbitrary code. Each sandbox is a lightweight container with its own filesystem, network, and process space. Use them to give your AI agents a safe place to execute code, run tools, or interact with the outside world.
+Tensorlake Sandboxes are stateful Firecracker VMs. 
+* Sandboxes can be snapshotted at any point to create durable memory and file-system checkpoints
+* Running sandboxes can be cloned to create immutables copies instantaneously across machines.
+* Sandboxes can be suspended when they are inactive and resumed without losing any memory and file system state.
 
 ### Installation
 
@@ -63,7 +64,7 @@ tensorlake sbx ssh <sandbox-id>
 tensorlake sbx terminate <sandbox-id>
 ```
 
-### Create a Sandbox Programmatically (Python SDK)
+### Create a Sandbox Programmatically
 
 ```python
 from tensorlake.sandbox import SandboxClient
@@ -120,17 +121,13 @@ sandbox = client.connect(resp.sandbox_id)
 
 ---
 
-## Applications
+## Orchestrate
 
-Deploy agentic applications on a distributed runtime with automatic scaling and durable execution — applications restart from where they crashed automatically. You can build with any Python framework. Agents are exposed as HTTP APIs like web applications.
-
-- **No Queues**: We manage state and orchestration
-- **Zero Infra**: Write Python, deploy to Tensorlake
-- **Progress Updates**: Applications can run for any amount of time and stream updates to users.
+Create orchestration APIs on a distributed runtime with automatic scaling, fan-out capabilities and built-in tracking. The orchestration APIs can be invoked using HTTP requests or using the Python SDK.
 
 ### Quickstart
 
-Decorate your entrypoint with `@application()` and functions with `@function()` for checkpointing and sandboxed execution. Each function runs in its own isolated sandbox.
+Decorate your entrypoint with `@application()` and functions with `@function()`. Each function runs in its own isolated sandbox.
 
 **Example**: City guide using OpenAI Agents with web search and code execution:
 
@@ -183,19 +180,17 @@ def city_guide_app(city: str) -> str:
     return result.final_output.strip()
 ```
 
-> **Note**: This is a simplified version. See the complete example at [examples/readme_example/city_guide.py](examples/readme_example/city_guide.py) for the full implementation including activity suggestions and agent orchestration.
-
-#### Deploy to Tensorlake Cloud
+#### Deploy to Tensorlake
 
 1. Set your API keys:
 ```bash
 export TENSORLAKE_API_KEY="your-api-key"
-tensorlake secrets set OPENAI_API_KEY "your-openai-key"
+tl secrets set OPENAI_API_KEY "your-openai-key"
 ```
 
 2. Deploy:
 ```bash
-tensorlake deploy examples/readme_example/city_guide.py
+tl deploy examples/readme_example/city_guide.py
 ```
 
 #### Call via HTTP
@@ -217,19 +212,11 @@ curl https://api.tensorlake.ai/applications/city_guide_app \
   -H "Accept: text/event-stream" \
   --json '"San Francisco"'
 
-# Send files
-curl https://api.tensorlake.ai/applications/my_pdf_processor \
-  -H "Authorization: Bearer $TENSORLAKE_API_KEY" \
-  -H "Content-Type: application/pdf" \
-  --data-binary @document.pdf
 ```
 
 ---
 
 ## Learn More
 
-* [Sandbox Documentation](https://docs.tensorlake.ai)
-* [Applications Documentation](https://docs.tensorlake.ai/applications/quickstart)
-* [Programming Concepts](https://docs.tensorlake.ai/applications/compute)
-* [Dependencies & Images](https://docs.tensorlake.ai/applications/images)
-* [Open Source Compute Engine](https://docs.tensorlake.ai/opensource/indexify)
+* [Sandbox Documentation](https://docs.tensorlake.ai/sandboxes/introduction)
+* [Orchestrate Documentation](https://docs.tensorlake.ai/applications/quickstart)
