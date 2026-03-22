@@ -23,7 +23,7 @@ In addition to stateful VMs, you can also add long running orchestration capabil
 
 ## Sandboxes
 
-Tensorlake Sandboxes are stateful Firecracker VMs. 
+Tensorlake Sandboxes are stateful Firecracker VMs with some dynamic capabilites:
 * Sandboxes can be snapshotted at any point to create durable memory and file-system checkpoints
 * Running sandboxes can be cloned to create immutables copies instantaneously across machines.
 * Sandboxes can be suspended when they are inactive and resumed without losing any memory and file system state.
