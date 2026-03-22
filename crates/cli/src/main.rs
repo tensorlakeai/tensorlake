@@ -273,8 +273,12 @@ enum SbxCommands {
         entrypoint: Vec<String>,
 
         /// Create from a snapshot ID
-        #[arg(long)]
+        #[arg(long, conflicts_with = "template")]
         snapshot: Option<String>,
+
+        /// Create from a template name
+        #[arg(long, conflicts_with = "snapshot")]
+        template: Option<String>,
 
         /// Return immediately after creation instead of waiting for the sandbox to be running
         #[arg(long)]
@@ -402,6 +406,13 @@ enum SbxCommands {
         /// Shell to use
         #[arg(short, long, default_value = "/bin/bash")]
         shell: String,
+    },
+
+    /// Create a sandbox template from an application image definition
+    CreateTemplate {
+        /// Arguments passed to the create-template Python module
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 }
 
@@ -607,6 +618,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     timeout,
                     entrypoint,
                     snapshot,
+                    template,
                     no_wait,
                 } => {
                     commands::sbx::create::run(
@@ -617,6 +629,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         timeout,
                         &entrypoint,
                         snapshot.as_deref(),
+                        template.as_deref(),
                         !no_wait,
                     )
                     .await
@@ -704,6 +717,9 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 }
                 SbxCommands::Ssh { sandbox_id, shell } => {
                     commands::sbx::ssh::run(ctx, &sandbox_id, &shell).await
+                }
+                SbxCommands::CreateTemplate { args } => {
+                    commands::sbx::create_template::run(ctx, &args).await
                 }
             }
         }
