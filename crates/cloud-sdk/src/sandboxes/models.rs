@@ -40,7 +40,8 @@ pub struct CreateSandboxRequest {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SandboxPoolRequest {
-    pub image: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
     pub resources: ContainerResourcesInfo,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret_names: Option<Vec<String>>,
