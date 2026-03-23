@@ -766,9 +766,9 @@ class SandboxClient:
                 sandbox._owns_sandbox = True
                 sandbox._lifecycle_client = self
                 return sandbox
-            if info.status == SandboxStatus.TERMINATED:
+            if info.status in (SandboxStatus.SUSPENDED, SandboxStatus.TERMINATED):
                 raise SandboxError(
-                    f"Sandbox {result.sandbox_id} terminated during startup"
+                    f"Sandbox {result.sandbox_id} became {info.status.value} during startup"
                 )
             # Poll at 0.5s — balances responsiveness against API load.
             time.sleep(0.5)
