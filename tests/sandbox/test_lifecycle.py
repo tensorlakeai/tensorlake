@@ -642,13 +642,13 @@ class TestPoolDeletion(BaseSandboxTest):
 
 class TestSandboxTimeout(BaseSandboxTest):
     """Verify that a sandbox claimed from a pool with a short timeout
-    is automatically terminated after the timeout elapses.
+    is automatically suspended after the timeout elapses.
 
     1. Create a pool with timeout_secs=30 and warm_containers=1.
     2. Wait for the warm container, then claim a sandbox.
     3. Verify the sandbox reaches Running.
     4. Wait 35 seconds for the timeout to expire.
-    5. Verify the sandbox transitions to Terminated.
+    5. Verify the sandbox transitions to Suspended.
     """
 
     pool_id: str | None = None
@@ -701,9 +701,9 @@ class TestSandboxTimeout(BaseSandboxTest):
         )
         self.assertEqual(status, SandboxStatus.RUNNING)
 
-    def test_4_sandbox_terminated_after_timeout(self):
-        """Wait beyond the 30s timeout and verify the sandbox is terminated
-        with a Success(Timeout) outcome."""
+    def test_4_sandbox_suspended_after_timeout(self):
+        """Wait beyond the 30s timeout and verify the sandbox is suspended
+        without a terminal outcome."""
         self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_3")
 
         # Wait long enough for the 30s timeout to expire.
@@ -712,20 +712,21 @@ class TestSandboxTimeout(BaseSandboxTest):
         status = _poll_sandbox_status(
             self.client,
             self.__class__.sandbox_id,
-            SandboxStatus.TERMINATED,
+            SandboxStatus.SUSPENDED,
             timeout=30,
         )
-        self.assertEqual(status, SandboxStatus.TERMINATED)
+        self.assertEqual(status, SandboxStatus.SUSPENDED)
 
         info = self.client.get(self.__class__.sandbox_id)
-        self.assertEqual(
+        self.assertIsNone(
             info.outcome,
-            "Success(Timeout)",
-            "Sandbox should be terminated due to timeout, not user deletion or failure",
+            "Suspended sandboxes should not report a terminal outcome",
         )
 
     def test_5_cleanup(self):
-        self.__class__.sandbox_id = None
+        if self.__class__.sandbox_id:
+            self.client.delete(self.__class__.sandbox_id)
+            self.__class__.sandbox_id = None
         if self.__class__.pool_id:
             time.sleep(2)
             self.client.delete_pool(self.__class__.pool_id)
