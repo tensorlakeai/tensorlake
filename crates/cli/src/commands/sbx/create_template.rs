@@ -92,10 +92,7 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
                     .get("template_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let name = event
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let name = event.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 eprintln!("✅ Template '{}' registered ({})", name, template_id);
             }
             "done" => {

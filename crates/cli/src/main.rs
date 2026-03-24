@@ -1,4 +1,5 @@
 mod auth;
+mod cache;
 mod commands;
 mod config;
 mod error;
@@ -139,9 +140,16 @@ enum Commands {
 
     /// Parse a document and print markdown
     Parse {
-        /// Arguments passed to the parse Python module
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        /// Local file path or HTTP/HTTPS URL
+        path_or_url: String,
+
+        /// Pages to parse, e.g. '1', '1-5', or '1,2,10'. Default: all pages.
+        #[arg(long)]
+        pages: Option<String>,
+
+        /// Ignore local cache and re-parse the document
+        #[arg(long)]
+        ignore_cache: bool,
     },
 
     /// Manage cron schedules for applications
@@ -562,7 +570,11 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             )
             .await
         }
-        Commands::Parse { args } => commands::parse::run(ctx, &args).await,
+        Commands::Parse {
+            path_or_url,
+            pages,
+            ignore_cache,
+        } => commands::parse::run(ctx, &path_or_url, pages.as_deref(), ignore_cache).await,
         Commands::Cron(subcmd) => {
             ensure_auth_and_project(ctx).await?;
             match subcmd {
