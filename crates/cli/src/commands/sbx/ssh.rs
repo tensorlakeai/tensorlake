@@ -1,7 +1,5 @@
 use crate::auth::context::CliContext;
-use crate::commands::sbx::{
-    DEFAULT_SANDBOX_WAIT_TIMEOUT, sandbox_endpoint, sandbox_proxy_base, wait_for_sandbox_status,
-};
+use crate::commands::sbx::sandbox_proxy_base;
 use crate::error::{CliError, Result};
 use crate::http;
 
@@ -9,8 +7,6 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return Err(CliError::usage("ssh requires an interactive terminal"));
     }
-
-    resume_sandbox_if_suspended(ctx, sandbox_id).await?;
 
     let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
 
@@ -59,6 +55,8 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
     // correct terminal type (e.g. tmux-256color inside tmux).
     let term_val = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
 
+    // Let the first PTY request trigger the existing server-side wake-up path
+    // for suspended sandboxes instead of resuming from the CLI first.
     // Create PTY session via proxy API
     let pty_resp = client
         .post(format!("{}/api/v1/pty", proxy_base))
@@ -95,12 +93,13 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
         .and_then(|v| v.as_str())
         .ok_or_else(|| CliError::Other(anyhow::anyhow!("missing token in PTY response")))?;
 
-    // Build WebSocket URL from proxy base (token sent via header, not query
-    // string, to avoid leaking it into proxy/CDN access logs).
+    // Include the PTY token in both the header and query string for now. The
+    // daemon accepts either form, and the query parameter keeps production
+    // proxies that don't forward the custom header from breaking SSH.
     let ws_base = proxy_base
         .replace("https://", "wss://")
         .replace("http://", "ws://");
-    let ws_url = format!("{}/api/v1/pty/{}/ws", ws_base, session_id);
+    let ws_url = format!("{}/api/v1/pty/{}/ws?token={}", ws_base, session_id, token);
 
     // Connect WebSocket
     use tokio_tungstenite::tungstenite;
@@ -262,77 +261,4 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
     }
 
     Ok(())
-}
-
-async fn resume_sandbox_if_suspended(ctx: &CliContext, sandbox_id: &str) -> Result<()> {
-    let client = ctx.client()?;
-    let info_url = sandbox_endpoint(ctx, &format!("sandboxes/{sandbox_id}"));
-    let info_resp = client.get(&info_url).send().await.map_err(CliError::Http)?;
-
-    // Preserve the existing SSH flow when sandbox status lookup is unavailable.
-    if !info_resp.status().is_success() {
-        return Ok(());
-    }
-
-    let info: serde_json::Value = info_resp.json().await.map_err(CliError::Http)?;
-    if !should_resume_before_ssh(info.get("status").and_then(|value| value.as_str())) {
-        return Ok(());
-    }
-
-    eprintln!(
-        "Sandbox {} is suspended; resuming before SSH...",
-        sandbox_id
-    );
-
-    let resume_resp = client
-        .post(sandbox_endpoint(
-            ctx,
-            &format!("sandboxes/{sandbox_id}/resume"),
-        ))
-        .send()
-        .await
-        .map_err(CliError::Http)?;
-
-    if !resume_resp.status().is_success() {
-        let status = resume_resp.status();
-        let body = resume_resp.text().await.unwrap_or_default();
-        return Err(CliError::Other(anyhow::anyhow!(
-            "failed to resume sandbox before SSH (HTTP {}): {}",
-            status,
-            body
-        )));
-    }
-
-    wait_for_sandbox_status(
-        ctx,
-        sandbox_id,
-        "Waiting for sandbox to resume",
-        "running",
-        DEFAULT_SANDBOX_WAIT_TIMEOUT,
-    )
-    .await?;
-
-    Ok(())
-}
-
-fn should_resume_before_ssh(status: Option<&str>) -> bool {
-    status.is_some_and(|status| status.eq_ignore_ascii_case("suspended"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::should_resume_before_ssh;
-
-    #[test]
-    fn ssh_resumes_suspended_sandboxes() {
-        assert!(should_resume_before_ssh(Some("suspended")));
-        assert!(should_resume_before_ssh(Some("SUSPENDED")));
-    }
-
-    #[test]
-    fn ssh_leaves_other_sandbox_states_unchanged() {
-        assert!(!should_resume_before_ssh(Some("running")));
-        assert!(!should_resume_before_ssh(Some("pending")));
-        assert!(!should_resume_before_ssh(None));
-    }
 }

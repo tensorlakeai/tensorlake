@@ -261,7 +261,7 @@ enum SbxCommands {
         cpus: f64,
 
         /// Memory in MB
-        #[arg(long, default_value = "512")]
+        #[arg(long, default_value = "1024")]
         memory: i64,
 
         /// Timeout in seconds
@@ -378,7 +378,7 @@ enum SbxCommands {
         cpus: f64,
 
         /// Memory in MB
-        #[arg(long, default_value = "512")]
+        #[arg(long, default_value = "1024")]
         memory: i64,
 
         /// Command timeout in seconds
