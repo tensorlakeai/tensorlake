@@ -1,13 +1,14 @@
 import importlib
 import os
 import sys
+from types import ModuleType
 from typing import Generator, Set
 
 from ...interface import InternalError
 
 
-def load_code(application_file_path: str) -> None:
-    """Loads the supplied python file with application.
+def load_code(application_file_path: str) -> ModuleType:
+    """Load the supplied Python file and return its imported module.
 
     The supplied path must be absolute.
     """
@@ -31,7 +32,7 @@ def load_code(application_file_path: str) -> None:
 
     # Note: the same module can be imported multiple times using different import paths.
     # In this case user gets a warning message.
-    importlib.import_module(module_import_name)
+    return importlib.import_module(module_import_name)
 
 
 # Allow soft links in code directory. This allows users to include dirs and files
