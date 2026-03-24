@@ -48,7 +48,8 @@ class DataplaneProcessContextManager:
     The binary location is resolved via the ``DATAPLANE_BIN`` environment
     variable (default: ``indexify-dataplane``).
 
-    A temporary YAML config and state file are created and cleaned up on exit.
+    A temporary YAML config and state directory are created and cleaned up on
+    exit.
     """
 
     def __init__(
@@ -68,22 +69,24 @@ class DataplaneProcessContextManager:
         assert self._proxy_port is not None, "Dataplane not started"
         return self._proxy_port
 
-    def _generate_config(self, config_path: str, state_path: str) -> None:
+    def _generate_config(self, config_path: str, state_dir: str) -> None:
         self._proxy_port = find_free_port()
         self._monitoring_port = find_free_port()
+        snapshot_dir = os.path.join(os.path.dirname(config_path), "snapshots")
 
         config = (
             f"env: local\n"
             f'server_addr: "{self._server_addr}"\n'
-            f"driver:\n"
+            f"sandbox_driver:\n"
             f"  type: {self._driver_type}\n"
+            f'  snapshot_local_dir: "{snapshot_dir}"\n'
             f"http_proxy:\n"
             f"  port: {self._proxy_port}\n"
             f'  listen_addr: "0.0.0.0"\n'
             f'  advertise_address: "127.0.0.1:{self._proxy_port}"\n'
             f"monitoring:\n"
             f"  port: {self._monitoring_port}\n"
-            f'state_file: "{state_path}"\n'
+            f'state_dir: "{state_dir}"\n'
         )
 
         # Add resource overrides from env vars (for simulating CI constraints)
@@ -106,8 +109,8 @@ class DataplaneProcessContextManager:
         """Start the dataplane process."""
         self._tmpdir = tempfile.TemporaryDirectory(prefix="sandbox-test-dp-")
         config_path = os.path.join(self._tmpdir.name, "config.yaml")
-        state_path = os.path.join(self._tmpdir.name, "state.json")
-        self._generate_config(config_path, state_path)
+        state_dir = os.path.join(self._tmpdir.name, "state")
+        self._generate_config(config_path, state_dir)
 
         binary = os.environ.get("DATAPLANE_BIN", "indexify-dataplane")
         print(f"Starting dataplane: {binary} --config {config_path}", flush=True)
