@@ -456,7 +456,12 @@ class Sandbox:
             _raise_as_sandbox_error(e)
 
     def pty_ws_url(self, session_id: str, token: str) -> str:
-        """Construct the WebSocket URL for a PTY session."""
+        """Construct the WebSocket URL for a PTY session.
+
+        The token is NOT included in the URL query string to avoid leaking it
+        into proxy/CDN access logs. Callers should send the token via the
+        ``X-PTY-Token`` header on the WebSocket upgrade request instead.
+        """
         base = self._base_url.rstrip("/")
         if base.startswith("https://"):
             ws_base = "wss://" + base[8:]
@@ -464,7 +469,7 @@ class Sandbox:
             ws_base = "ws://" + base[7:]
         else:
             ws_base = base
-        return f"{ws_base}/api/v1/pty/{session_id}/ws?token={token}"
+        return f"{ws_base}/api/v1/pty/{session_id}/ws"
 
     # --- Health and info ---
 
