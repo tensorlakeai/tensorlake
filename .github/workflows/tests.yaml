@@ -204,9 +204,13 @@ jobs:
         uses: JarvusInnovations/background-action@v1
         with:
           run: |
+            mkdir -p /tmp/indexify-server-storage/indexify_storage/blobs
             docker run -i -a stdout -a stderr --rm \
               --network host \
+              --user "$(id -u):$(id -g)" \
               --name indexify-server \
+              -v /tmp/indexify-server-storage:/tmp/indexify-server-storage \
+              -w /tmp/indexify-server-storage \
               ${{ steps.login-ecr.outputs.registry }}/indexify-server:latest  &
           wait-on: |
             tcp:localhost:8900
@@ -221,15 +225,16 @@ jobs:
           cat > /tmp/dataplane/config.yaml <<'YAML'
           env: local
           server_addr: "http://localhost:8901"
-          driver:
+          sandbox_driver:
             type: docker
+            snapshot_local_dir: "/tmp/dataplane/snapshots"
           http_proxy:
             port: 8902
             listen_addr: "0.0.0.0"
             advertise_address: "127.0.0.1:8902"
           monitoring:
             port: 8903
-          state_file: "/tmp/dataplane/state.json"
+          state_dir: "/tmp/dataplane/state"
           YAML
 
       - name: Start Background Indexify Dataplane
