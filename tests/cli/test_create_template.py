@@ -30,12 +30,22 @@ class TestCreateTemplate(unittest.TestCase):
         snapshot = SimpleNamespace(snapshot_id="snap-1")
 
         with (
-            patch.object(create_template_module, "_build_context_from_env", return_value=ctx),
+            patch.object(
+                create_template_module, "_build_context_from_env", return_value=ctx
+            ),
             patch.object(create_template_module, "load_code", return_value=module),
             patch.object(create_template_module, "image_infos", return_value={}),
             patch.object(create_template_module, "_execute_operations"),
-            patch.object(create_template_module, "dockerfile_content", return_value="FROM python:3.11-slim"),
-            patch.object(create_template_module, "_register_template", return_value={"id": "tpl-1"}) as register_template,
+            patch.object(
+                create_template_module,
+                "dockerfile_content",
+                return_value="FROM python:3.11-slim",
+            ),
+            patch.object(
+                create_template_module,
+                "_register_template",
+                return_value={"id": "tpl-1"},
+            ) as register_template,
             patch.object(create_template_module, "_emit"),
             patch.object(create_template_module, "SandboxClient") as sandbox_client_cls,
         ):
