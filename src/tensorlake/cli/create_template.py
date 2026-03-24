@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import traceback
+from types import ModuleType
 
 import httpx
 
@@ -11,7 +12,7 @@ from tensorlake.applications.image import (
     dockerfile_content,
     image_infos,
 )
-from tensorlake.applications.interface.image import _ImageBuildOperationType
+from tensorlake.applications.interface.image import Image, _ImageBuildOperationType
 from tensorlake.applications.remote.code.loader import load_code
 from tensorlake.cli._common import Context
 from tensorlake.sandbox import Sandbox, SandboxClient
@@ -78,6 +79,27 @@ def _select_image(infos: dict, image_name: str | None):
         }
     )
     sys.exit(1)
+
+
+def _discover_module_images(module: ModuleType | None) -> dict:
+    """Discover top-level Image objects from a loaded Python module."""
+    if module is None:
+        return {}
+
+    infos = {}
+    for value in vars(module).values():
+        if isinstance(value, Image):
+            infos[value] = ImageInformation(image=value, functions=[])
+
+    return infos
+
+
+def _collect_image_infos(module: ModuleType | None) -> dict:
+    """Collect images referenced by functions and standalone module images."""
+    infos = image_infos().copy()
+    for image, info in _discover_module_images(module).items():
+        infos.setdefault(image, info)
+    return infos
 
 
 def _run_streaming(
@@ -242,7 +264,7 @@ def create_template(
     # 1. Load code & discover images.
     _emit({"type": "status", "message": f"Loading {application_file_path}..."})
     try:
-        load_code(os.path.abspath(application_file_path))
+        module = load_code(os.path.abspath(application_file_path))
     except SyntaxError as e:
         _emit(
             {
@@ -271,7 +293,7 @@ def create_template(
         _emit(event)
         sys.exit(1)
 
-    infos = image_infos()
+    infos = _collect_image_infos(module)
     image = _select_image(infos, image_name)
 
     # Default template name to image name if not provided.
@@ -280,7 +302,7 @@ def create_template(
     _emit({"type": "status", "message": f"Selected image: {image.name}"})
 
     # 2. Create sandbox.
-    _emit({"type": "status", "message": "Creating sandbox (2 CPUs, 2048 MB)..."})
+    _emit({"type": "status", "message": "Creating sandbox (2 CPUs, 4096 MB)..."})
     sandbox_client = SandboxClient(
         api_url=ctx.api_url,
         api_key=ctx.api_key or ctx.personal_access_token,
@@ -293,7 +315,7 @@ def create_template(
         sandbox = sandbox_client.create_and_connect(
             image=image._base_image,
             cpus=2,
-            memory_mb=2048,
+            memory_mb=4096,
         )
         _emit(
             {
