@@ -6,7 +6,6 @@ from tensorlake.applications.interface.function import (
     Function,
     _FunctionConfiguration,
 )
-from tensorlake.applications.interface.image import Image
 from tensorlake.applications.internal_logger import InternalLogger
 from tensorlake.applications.registry import (
     _function_registry,
@@ -35,6 +34,7 @@ from tensorlake.function_executor.allocation_runner.event_loop import (
     OutputEventFinishAllocation,
     SpecialFunctionCallSettings,
 )
+from tensorlake.image import Image
 
 
 def _is_map_concat(cmd: OutputEventCreateFunctionCall) -> bool:

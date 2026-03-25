@@ -57,14 +57,14 @@ pub async fn create_with_request(
     Ok(sandbox_id)
 }
 
-/// Resolve a template name to its snapshot ID by querying the Platform API.
-async fn resolve_template(ctx: &CliContext, template_name: &str) -> Result<String> {
+/// Resolve an image name to its snapshot ID by querying the Platform API.
+async fn resolve_image(ctx: &CliContext, image_name: &str) -> Result<String> {
     let org_id = ctx
         .effective_organization_id()
-        .ok_or_else(|| CliError::auth("Organization ID is required for --template"))?;
+        .ok_or_else(|| CliError::auth("Organization ID is required for --image"))?;
     let proj_id = ctx
         .effective_project_id()
-        .ok_or_else(|| CliError::auth("Project ID is required for --template"))?;
+        .ok_or_else(|| CliError::auth("Project ID is required for --image"))?;
 
     let client = ctx.client()?;
     let url = format!(
@@ -78,7 +78,7 @@ async fn resolve_template(ctx: &CliContext, template_name: &str) -> Result<Strin
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         return Err(CliError::Other(anyhow::anyhow!(
-            "failed to list templates (HTTP {}): {}",
+            "failed to list images (HTTP {}): {}",
             status,
             body
         )));
@@ -88,49 +88,41 @@ async fn resolve_template(ctx: &CliContext, template_name: &str) -> Result<Strin
     let items = result
         .get("items")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| CliError::Other(anyhow::anyhow!("unexpected template list response")))?;
+        .ok_or_else(|| CliError::Other(anyhow::anyhow!("unexpected image list response")))?;
 
     for item in items {
         let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        if name == template_name {
+        if name == image_name {
             let snapshot_id = item
                 .get("snapshotId")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| {
-                    CliError::Other(anyhow::anyhow!(
-                        "template '{}' has no snapshotId",
-                        template_name
-                    ))
+                    CliError::Other(anyhow::anyhow!("image '{}' has no snapshotId", image_name))
                 })?;
-            eprintln!(
-                "Resolved template '{}' → snapshot {}",
-                template_name, snapshot_id
-            );
+            eprintln!("Resolved image '{}' → snapshot {}", image_name, snapshot_id);
             return Ok(snapshot_id.to_string());
         }
     }
 
     Err(CliError::Other(anyhow::anyhow!(
-        "template '{}' not found",
-        template_name
+        "image '{}' not found",
+        image_name
     )))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn run(
     ctx: &CliContext,
-    image: Option<&str>,
     cpus: f64,
     memory: i64,
     timeout: Option<i64>,
     entrypoint: &[String],
     snapshot_id: Option<&str>,
-    template_name: Option<&str>,
+    image_name: Option<&str>,
     wait: bool,
 ) -> Result<()> {
-    // Resolve --template to a snapshot ID if provided.
-    let resolved_snapshot = match template_name {
-        Some(name) => Some(resolve_template(ctx, name).await?),
+    // Resolve --image to a snapshot ID if provided.
+    let resolved_snapshot = match image_name {
+        Some(name) => Some(resolve_image(ctx, name).await?),
         None => None,
     };
     let effective_snapshot = snapshot_id.or(resolved_snapshot.as_deref());
@@ -141,9 +133,6 @@ pub async fn run(
             "memory_mb": memory,
         },
     });
-    if let Some(img) = image {
-        body["image"] = serde_json::Value::String(img.to_string());
-    }
     if let Some(t) = timeout {
         body["timeout_secs"] = serde_json::Value::Number(t.into());
     }

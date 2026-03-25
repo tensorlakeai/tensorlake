@@ -5,7 +5,7 @@ use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 
 pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
-    let mut cmd = tokio::process::Command::new("tensorlake-create-template");
+    let mut cmd = tokio::process::Command::new("tensorlake-create-sandbox-image");
     cmd.args(remaining_args);
 
     // Pass auth context via environment
@@ -34,7 +34,7 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
     let mut child = cmd.spawn().map_err(|e: std::io::Error| {
         if e.kind() == std::io::ErrorKind::NotFound {
             CliError::usage(
-                "'tensorlake-create-template' not found on PATH. \
+                "'tensorlake-create-sandbox-image' not found on PATH. \
                  Install the Python tensorlake package: pip install tensorlake",
             )
         } else {
@@ -87,13 +87,10 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
                     .unwrap_or("");
                 eprintln!("📸 Snapshot created: {}", snapshot_id);
             }
-            "template_created" => {
-                let template_id = event
-                    .get("template_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+            "image_registered" => {
+                let image_id = event.get("image_id").and_then(|v| v.as_str()).unwrap_or("");
                 let name = event.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                eprintln!("✅ Template '{}' registered ({})", name, template_id);
+                eprintln!("✅ Image '{}' registered ({})", name, image_id);
             }
             "done" => {
                 // Success — nothing extra to print
