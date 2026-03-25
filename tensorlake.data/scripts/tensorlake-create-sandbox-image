@@ -1,4 +1,0 @@
-#!/usr/bin/env python3
-from tensorlake.cli.create_sandbox_image import create_sandbox_image_entrypoint
-
-create_sandbox_image_entrypoint()

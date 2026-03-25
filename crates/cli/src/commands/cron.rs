@@ -15,12 +15,11 @@ fn cron_client(ctx: &CliContext) -> Result<CronClient> {
     let token = ctx.bearer_token()?;
     let mut builder = ClientBuilder::new(&ctx.api_url).bearer_token(&token);
     let use_scope_headers = ctx.personal_access_token.is_some() && ctx.api_key.is_none();
-    if use_scope_headers {
-        if let (Some(org), Some(proj)) =
+    if use_scope_headers
+        && let (Some(org), Some(proj)) =
             (ctx.effective_organization_id(), ctx.effective_project_id())
-        {
-            builder = builder.scope(&org, &proj);
-        }
+    {
+        builder = builder.scope(&org, &proj);
     }
     Ok(CronClient::new(builder.build().map_err(CliError::from)?))
 }

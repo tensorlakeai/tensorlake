@@ -500,18 +500,24 @@ fn render_build_operation(op: &ImageBuildOperation) -> String {
         )
     };
 
-    let body = match op.operation_type {
+    match op.operation_type {
+        // Each arg in a RUN list is a separate shell command → one RUN line each.
+        ImageBuildOperationType::RUN => op
+            .args
+            .iter()
+            .map(|cmd| format!("RUN{} {}", options, cmd))
+            .collect::<Vec<_>>()
+            .join("\n"),
         ImageBuildOperationType::ENV => {
-            if op.args.len() >= 2 {
+            let body = if op.args.len() >= 2 {
                 format!("{}=\"{}\"", op.args[0], op.args[1])
             } else {
                 op.args.join(" ")
-            }
+            };
+            format!("ENV{} {}", options, body)
         }
-        _ => op.args.join(" "),
-    };
-
-    format!("{}{} {}", op.operation_type, options, body)
+        _ => format!("{}{} {}", op.operation_type, options, op.args.join(" ")),
+    }
 }
 
 fn add_path_to_archive<W: Write>(tar: &mut tar::Builder<W>, src: &str) -> io::Result<()> {

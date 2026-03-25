@@ -1,4 +1,0 @@
-#!/usr/bin/env python3
-from tensorlake.cli.build_images import main
-
-main()

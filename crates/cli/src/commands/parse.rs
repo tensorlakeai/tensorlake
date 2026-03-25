@@ -42,11 +42,9 @@ pub async fn run(
     let cache_key = format!("{}|pages:{}", cache_identity, page_key);
     let cache = KvCache::new("parse");
 
-    if !ignore_cache {
-        if let Some(cached) = cache.get(&cache_key).await {
-            println!("{}", cached);
-            return Ok(());
-        }
+    if !ignore_cache && let Some(cached) = cache.get(&cache_key).await {
+        println!("{}", cached);
+        return Ok(());
     }
 
     // Resolve to file_id (upload) or keep as file_url.

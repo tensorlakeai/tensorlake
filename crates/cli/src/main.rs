@@ -6,6 +6,7 @@ mod error;
 mod http;
 mod output;
 mod project;
+mod python_ast;
 
 use clap::{Parser, Subcommand};
 use std::num::NonZeroUsize;
@@ -414,9 +415,16 @@ enum SbxCommands {
 
     /// Register a sandbox image from a Python file definition
     CreateImage {
-        /// Arguments passed to the create-image Python module
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        /// Path to the application .py file
+        application_file_path: String,
+
+        /// Name of the image to use (required if multiple images exist)
+        #[arg(short = 'i', long)]
+        image_name: Option<String>,
+
+        /// Image name to register (defaults to the image name)
+        #[arg(short = 'n', long)]
+        template_name: Option<String>,
     },
 }
 
@@ -724,8 +732,18 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 SbxCommands::Ssh { sandbox_id, shell } => {
                     commands::sbx::ssh::run(ctx, &sandbox_id, &shell).await
                 }
-                SbxCommands::CreateImage { args } => {
-                    commands::sbx::create_sandbox_image::run(ctx, &args).await
+                SbxCommands::CreateImage {
+                    application_file_path,
+                    image_name,
+                    template_name,
+                } => {
+                    commands::sbx::create_sandbox_image::run(
+                        ctx,
+                        &application_file_path,
+                        image_name.as_deref(),
+                        template_name.as_deref(),
+                    )
+                    .await
                 }
             }
         }

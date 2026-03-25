@@ -30,6 +30,7 @@ test-rust:
 test-crate crate:
     cargo test -p {{crate}}
 
+
 # Run clippy lints on all crates
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
