@@ -51,5 +51,5 @@ pre-commit = "^4.5.1"
 # wheels are available (old versions required building from source).
 grpcio = "^1.68.0"
 grpcio-tools = "^1.68.0"
-setuptools = "^69.0.0"
+setuptools = "^78.1.1"
 maturin = ">=1.9,<2.0"
