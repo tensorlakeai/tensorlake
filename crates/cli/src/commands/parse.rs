@@ -1,105 +1,195 @@
-use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use eventsource_stream::Eventsource;
+use futures::StreamExt;
+use reqwest::header::ACCEPT;
+use sha2::{Digest, Sha256};
 
 use crate::auth::context::CliContext;
+use crate::cache::KvCache;
 use crate::error::{CliError, Result};
 
-pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
-    let mut cmd = tokio::process::Command::new("tensorlake-parse");
-    cmd.args(remaining_args);
+pub async fn run(
+    ctx: &CliContext,
+    path_or_url: &str,
+    pages: Option<&str>,
+    ignore_cache: bool,
+) -> Result<()> {
+    let client = ctx.client()?;
+    let base = format!("{}/documents/v2", ctx.api_url.trim_end_matches('/'));
+    let page_key = pages
+        .map(|p| p.trim().to_string())
+        .unwrap_or_else(|| "all".to_string());
 
-    // Pass auth context via environment
-    cmd.env("TENSORLAKE_API_URL", &ctx.api_url);
-    if let Some(key) = &ctx.api_key {
-        cmd.env("TENSORLAKE_API_KEY", key);
-    }
-    if let Some(pat) = &ctx.personal_access_token {
-        cmd.env("TENSORLAKE_PAT", pat);
-    }
+    let is_url = path_or_url.starts_with("http://") || path_or_url.starts_with("https://");
 
-    cmd.stdin(Stdio::inherit())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
-
-    let mut child = cmd.spawn().map_err(|e: std::io::Error| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            CliError::usage(
-                "'tensorlake-parse' not found on PATH. \
-                 Install the Python tensorlake package: pip install tensorlake",
-            )
-        } else {
-            CliError::Io(e)
+    // Determine cache identity and, for local files, read contents now (needed for hash).
+    let (cache_identity, file_upload) = if is_url {
+        (format!("url:{}", path_or_url), None)
+    } else {
+        let path = std::path::Path::new(path_or_url);
+        if !path.exists() || !path.is_file() {
+            return Err(CliError::usage(format!("File not found: {}", path_or_url)));
         }
-    })?;
+        let contents = tokio::fs::read(path).await.map_err(CliError::Io)?;
+        let hash = hex::encode(Sha256::digest(&contents));
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("document")
+            .to_string();
+        (format!("file:{}", hash), Some((filename, contents)))
+    };
 
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let reader = BufReader::new(stdout);
-    let mut lines = reader.lines();
-    let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
+    let cache_key = format!("{}|pages:{}", cache_identity, page_key);
+    let cache = KvCache::new("parse");
 
-    loop {
-        let maybe_line = tokio::select! {
-            line_result = lines.next_line() => line_result,
-            _ = &mut ctrl_c => {
-                terminate_child(&mut child).await?;
-                return Err(CliError::Cancelled);
-            }
-        }
-        .map_err(CliError::Io)?;
-
-        let Some(line) = maybe_line else {
-            break;
-        };
-
-        let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
-            eprintln!("{}", line);
-            continue;
-        };
-
-        let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-        match event_type {
-            "status" => {
-                let message = event.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                eprintln!("{}", message);
-            }
-            "cached" => {
-                // Cache hit — silent, output follows
-            }
-            "output" => {
-                let content = event.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                println!("{}", content); // Markdown to stdout
-            }
-            "error" => {
-                let message = event
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown error");
-                eprintln!("Error: {}", message);
-            }
-            _ => {
-                eprintln!("{}", line);
-            }
+    if !ignore_cache {
+        if let Some(cached) = cache.get(&cache_key).await {
+            println!("{}", cached);
+            return Ok(());
         }
     }
 
-    let status = child.wait().await.map_err(CliError::Io)?;
+    // Resolve to file_id (upload) or keep as file_url.
+    let source = if let Some((filename, contents)) = file_upload {
+        eprintln!("Uploading {}...", filename);
+        let form = reqwest::multipart::Form::new().part(
+            "file",
+            reqwest::multipart::Part::bytes(contents).file_name(filename),
+        );
+        let resp = client
+            .put(format!("{}/files", base))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(CliError::Http)?;
 
-    if !status.success() {
-        let code = status.code().unwrap_or(1);
-        return Err(CliError::ExitCode(code));
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let msg = resp.text().await.unwrap_or_default();
+            return Err(CliError::usage(format!(
+                "Upload failed ({}): {}",
+                status, msg
+            )));
+        }
+
+        let body: serde_json::Value = resp.json().await.map_err(CliError::Http)?;
+        let file_id = body["file_id"]
+            .as_str()
+            .ok_or_else(|| CliError::usage("Upload response missing file_id"))?
+            .to_string();
+        ParseSource::FileId(file_id)
+    } else {
+        ParseSource::Url(path_or_url.to_string())
+    };
+
+    eprintln!("Parsing...");
+
+    // Build parse request body.
+    let mut parse_body = serde_json::json!({
+        "parsing_options": {
+            "chunking_strategy": "fragment",
+            "table_output_mode": "markdown"
+        }
+    });
+    match &source {
+        ParseSource::FileId(id) => {
+            parse_body["file_id"] = serde_json::Value::String(id.clone());
+        }
+        ParseSource::Url(url) => {
+            parse_body["file_url"] = serde_json::Value::String(url.clone());
+        }
     }
+    if let Some(pages) = pages {
+        let trimmed = pages.trim();
+        if !trimmed.is_empty() {
+            parse_body["page_range"] = serde_json::Value::String(trimmed.to_string());
+        }
+    }
+
+    let parse_resp = client
+        .post(format!("{}/parse", base))
+        .json(&parse_body)
+        .send()
+        .await
+        .map_err(CliError::Http)?;
+
+    if !parse_resp.status().is_success() {
+        let status = parse_resp.status();
+        let msg = parse_resp.text().await.unwrap_or_default();
+        return Err(CliError::usage(format!(
+            "Parse request failed ({}): {}",
+            status, msg
+        )));
+    }
+
+    let parse_resp_body: serde_json::Value = parse_resp.json().await.map_err(CliError::Http)?;
+    let parse_id = parse_resp_body["parse_id"]
+        .as_str()
+        .ok_or_else(|| CliError::usage("Parse response missing parse_id"))?
+        .to_string();
+
+    // Stream SSE events until parse_done or parse_failed.
+    let sse_resp = client
+        .get(format!("{}/parse/{}", base, parse_id))
+        .header(ACCEPT, "text/event-stream")
+        .send()
+        .await
+        .map_err(CliError::Http)?;
+
+    if !sse_resp.status().is_success() {
+        let status = sse_resp.status();
+        let msg = sse_resp.text().await.unwrap_or_default();
+        return Err(CliError::usage(format!(
+            "SSE stream failed ({}): {}",
+            status, msg
+        )));
+    }
+
+    let stream = sse_resp.bytes_stream().eventsource();
+    futures::pin_mut!(stream);
+
+    let mut result: Option<String> = None;
+
+    while let Some(event) = stream.next().await {
+        let event = event.map_err(|e| CliError::usage(format!("SSE stream error: {}", e)))?;
+
+        match event.event.as_str() {
+            "parse_done" => {
+                let data: serde_json::Value =
+                    serde_json::from_str(&event.data).unwrap_or(serde_json::Value::Null);
+                let markdown = data["chunks"]
+                    .as_array()
+                    .map(|chunks| {
+                        chunks
+                            .iter()
+                            .filter_map(|c| c["content"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n\n")
+                    })
+                    .unwrap_or_default();
+                result = Some(markdown);
+                break;
+            }
+            "parse_failed" => {
+                let data: serde_json::Value =
+                    serde_json::from_str(&event.data).unwrap_or(serde_json::Value::Null);
+                let err = data["error"].as_str().unwrap_or("unknown error");
+                return Err(CliError::usage(format!("Parse failed: {}", err)));
+            }
+            _ => {} // parse_update, parse_queued — ignore
+        }
+    }
+
+    let markdown =
+        result.ok_or_else(|| CliError::usage("Parse stream ended without a result event"))?;
+
+    cache.set(&cache_key, &markdown).await;
+    println!("{}", markdown);
 
     Ok(())
 }
 
-async fn terminate_child(child: &mut tokio::process::Child) -> Result<()> {
-    // Best-effort cancellation of the spawned Python process when the user presses Ctrl+C.
-    match child.start_kill() {
-        Ok(()) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::InvalidInput => {}
-        Err(err) => return Err(CliError::Io(err)),
-    }
-    let _ = child.wait().await;
-    Ok(())
+enum ParseSource {
+    FileId(String),
+    Url(String),
 }

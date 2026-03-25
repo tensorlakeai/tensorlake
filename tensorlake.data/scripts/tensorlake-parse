@@ -1,4 +1,0 @@
-#!/usr/bin/env python3
-from tensorlake.cli.parse import parse_entrypoint
-
-parse_entrypoint()
