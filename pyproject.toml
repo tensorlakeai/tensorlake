@@ -1,6 +1,6 @@
 [project]
 name = "tensorlake"
-version = "0.4.28"
+version = "0.4.29"
 description = "Tensorlake SDK for Document Ingestion API and Serverless Applications"
 readme = "README.md"
 authors = [{ name = "Tensorlake Inc.", email = "support@tensorlake.ai" }]
@@ -32,6 +32,7 @@ include = [
 ]
 
 [tool.black]
+target-version = ["py310"]
 extend_exclude = "vendor"
 
 [tool.isort]
@@ -39,11 +40,11 @@ profile = "black"
 extend_skip = ["vendor"]
 
 [tool.poetry.group.dev.dependencies]
-black = "25.11.0"
+black = "26.3.1"
 parameterized = "^0.9.0"
 respx = "^0.22.0"
 psutil = "^7.2.2"
-isort = "^7.0.0"
+isort = "^8.0.0"
 pre-commit = "^4.5.1"
 # grpcio is forward compatible within the major version, so stubs generated
 # with any 1.x version work with all 1.x runtimes (including the minimum

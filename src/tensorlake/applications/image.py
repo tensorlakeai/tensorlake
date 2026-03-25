@@ -1,21 +1,15 @@
-"""Container image utilities that are not part of the SDK interface."""
+"""Application image utilities that are not part of the SDK interface."""
 
-import hashlib
 import importlib
 import json
-import logging
-import os
-import pathlib
 from dataclasses import dataclass
-from typing import Any, Dict, List
-from urllib.parse import urlparse
+from typing import Dict, List
 
-from .interface import Function, Image, InternalError
-from .interface.image import _ImageBuildOperation, _ImageBuildOperationType
+from tensorlake.image import Image
+from tensorlake.image.utils import _SDK_VERSION, dockerfile_content
+
+from .interface import Function
 from .registry import get_functions
-
-_HASH_BUFF_SIZE: int = 1024**2
-_SDK_VERSION: str = importlib.metadata.version("tensorlake")
 
 
 @dataclass
@@ -77,91 +71,3 @@ def create_image_context_file(
         ),
         file_path=file_path,
     )
-
-
-def dockerfile_content(img: Image, extra_env_vars: List[tuple] | None = None) -> str:
-    """Generate the Dockerfile content based on the build operations."""
-    dockerfile_lines: List[str] = [
-        f"FROM {img._base_image}",
-        "WORKDIR /app",
-        # Handle externally-managed environments (PEP 668) on modern Linux distros
-        # like Ubuntu 24.04. This env var allows pip to install packages globally.
-        "ENV PIP_BREAK_SYSTEM_PACKAGES=1",
-    ]
-
-    if extra_env_vars:
-        for key, value in extra_env_vars:
-            dockerfile_lines.append(f"ENV {key}={value}")
-
-    for op in img._build_operations:
-        dockerfile_lines.append(_render_build_op(op))
-
-    # Run tensorlake install after all user commands. There's implicit dependency
-    # of tensorlake install success on user commands right now.
-    dockerfile_lines.append(f"RUN pip install tensorlake=={_SDK_VERSION}")
-
-    return "\n".join(dockerfile_lines)
-
-
-def image_hash(img: Image) -> str:
-    hasher: Any = hashlib.sha256(img._name.encode())
-    hasher.update(img._base_image.encode())
-    for op in img._build_operations:
-        _add_build_op_to_hasher(op, hasher)
-
-    hasher.update(_SDK_VERSION.encode())
-
-    return hasher.hexdigest()
-
-
-def _is_url(path: str) -> bool:
-    return urlparse(path).scheme in ("http", "https")
-
-
-def _is_git_repo_url(path: str) -> bool:
-    parsed = urlparse(path)
-    return parsed.scheme == "git" or (
-        parsed.hostname
-        and (parsed.hostname == "github.com" or parsed.hostname.endswith(".github.com"))
-    )
-
-
-def _is_inside_git_dir(path: str) -> bool:
-    parts = os.path.normpath(path).split(os.sep)
-    return ".git" in parts
-
-
-def _add_build_op_to_hasher(op: _ImageBuildOperation, hasher: Any) -> None:
-    hasher.update(op.type.name.encode())
-
-    if op.type in (
-        _ImageBuildOperationType.RUN,
-        _ImageBuildOperationType.ADD,
-        _ImageBuildOperationType.ENV,
-    ):
-        for arg in op.args:
-            hasher.update(arg.encode())
-
-    elif op.type == _ImageBuildOperationType.COPY:
-        for root, dirs, files in os.walk(op.args[0]):
-            for file in files:
-                filename = pathlib.Path(root, file)
-                with open(filename, "rb") as fp:
-                    data: bytes = fp.read(_HASH_BUFF_SIZE)
-                    while data:
-                        hasher.update(data)
-                        data = fp.read(_HASH_BUFF_SIZE)
-    else:
-        raise InternalError(
-            f"Unknown build operation type {_ImageBuildOperationType.name(op.type)}"
-        )
-
-
-def _render_build_op(op: _ImageBuildOperation) -> str:
-    options: str = " " + " ".join([f"--{k}={v}" for k, v in op.options.items()])
-    if op.type == _ImageBuildOperationType.ENV:
-        body: str = f'{op.args[0]}="{op.args[1]}"'
-    else:
-        body: str = " ".join(op.args)
-
-    return f"{op.type.name}{options}{body}"

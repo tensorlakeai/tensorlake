@@ -260,10 +260,6 @@ enum SbxCommands {
 
     /// Create a new sandbox
     New {
-        /// Container image
-        #[arg(short, long)]
-        image: Option<String>,
-
         /// Number of CPUs
         #[arg(long, default_value = "1.0")]
         cpus: f64,
@@ -281,12 +277,12 @@ enum SbxCommands {
         entrypoint: Vec<String>,
 
         /// Create from a snapshot ID
-        #[arg(long, conflicts_with = "template")]
+        #[arg(long, conflicts_with = "image")]
         snapshot: Option<String>,
 
-        /// Create from a template name
+        /// Create from a registered image name
         #[arg(long, conflicts_with = "snapshot")]
-        template: Option<String>,
+        image: Option<String>,
 
         /// Return immediately after creation instead of waiting for the sandbox to be running
         #[arg(long)]
@@ -416,9 +412,9 @@ enum SbxCommands {
         shell: String,
     },
 
-    /// Create a sandbox template from an application image definition
-    CreateTemplate {
-        /// Arguments passed to the create-template Python module
+    /// Register a sandbox image from a Python file definition
+    CreateImage {
+        /// Arguments passed to the create-image Python module
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -624,24 +620,22 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     commands::sbx::terminate::run(ctx, &sandbox_ids).await
                 }
                 SbxCommands::New {
-                    image,
                     cpus,
                     memory,
                     timeout,
                     entrypoint,
                     snapshot,
-                    template,
+                    image,
                     no_wait,
                 } => {
                     commands::sbx::create::run(
                         ctx,
-                        image.as_deref(),
                         cpus,
                         memory,
                         timeout,
                         &entrypoint,
                         snapshot.as_deref(),
-                        template.as_deref(),
+                        image.as_deref(),
                         !no_wait,
                     )
                     .await
@@ -730,8 +724,8 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 SbxCommands::Ssh { sandbox_id, shell } => {
                     commands::sbx::ssh::run(ctx, &sandbox_id, &shell).await
                 }
-                SbxCommands::CreateTemplate { args } => {
-                    commands::sbx::create_template::run(ctx, &args).await
+                SbxCommands::CreateImage { args } => {
+                    commands::sbx::create_sandbox_image::run(ctx, &args).await
                 }
             }
         }

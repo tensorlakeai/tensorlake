@@ -1,5 +1,6 @@
 from typing import Any, Callable, Dict, List, Literal, TypeVar
 
+from tensorlake.image import Image
 from tensorlake.vendor.nanoid import generate as nanoid
 
 from ..registry import (
@@ -13,7 +14,6 @@ from .function import (
     _function_name,
     _FunctionConfiguration,
 )
-from .image import Image
 from .retries import Retries
 
 

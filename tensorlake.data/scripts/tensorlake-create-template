@@ -1,4 +1,0 @@
-#!/usr/bin/env python3
-from tensorlake.cli.create_template import create_template_entrypoint
-
-create_template_entrypoint()

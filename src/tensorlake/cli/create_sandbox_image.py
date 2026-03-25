@@ -7,14 +7,11 @@ from types import ModuleType
 
 import httpx
 
-from tensorlake.applications.image import (
-    ImageInformation,
-    dockerfile_content,
-    image_infos,
-)
-from tensorlake.applications.interface.image import Image, _ImageBuildOperationType
 from tensorlake.applications.remote.code.loader import load_code
 from tensorlake.cli._common import Context
+from tensorlake.image import Image
+from tensorlake.image.image import _ImageBuildOperationType
+from tensorlake.image.utils import dockerfile_content
 from tensorlake.sandbox import Sandbox, SandboxClient
 from tensorlake.sandbox.models import ProcessStatus
 
@@ -45,20 +42,40 @@ def _build_context_from_env() -> Context:
     )
 
 
-def _select_image(infos: dict, image_name: str | None):
+def _discover_module_images(module: ModuleType | None) -> dict[str, Image]:
+    """Discover top-level Image objects from a loaded Python module."""
+    if module is None:
+        return {}
+
+    images: dict[str, Image] = {}
+    for value in vars(module).values():
+        if isinstance(value, Image):
+            if value.name in images:
+                _emit(
+                    {
+                        "type": "error",
+                        "message": f"Duplicate image name '{value.name}'. Each image must have a unique name.",
+                    }
+                )
+                sys.exit(1)
+            images[value.name] = value
+
+    return images
+
+
+def _select_image(images: dict[str, Image], image_name: str | None) -> Image:
     """Select an Image object from discovered images.
 
     If image_name is given, find by name. Otherwise auto-select if only one exists.
     """
-    if not infos:
-        _emit({"type": "error", "message": "No images found in application file"})
+    if not images:
+        _emit({"type": "error", "message": "No images found in image file"})
         sys.exit(1)
 
     if image_name is None:
-        if len(infos) == 1:
-            info: ImageInformation = next(iter(infos.values()))
-            return info.image
-        names = [info.image.name for info in infos.values()]
+        if len(images) == 1:
+            return next(iter(images.values()))
+        names = list(images.keys())
         _emit(
             {
                 "type": "error",
@@ -67,11 +84,10 @@ def _select_image(infos: dict, image_name: str | None):
         )
         sys.exit(1)
 
-    for info in infos.values():
-        if info.image.name == image_name:
-            return info.image
+    if image_name in images:
+        return images[image_name]
 
-    names = [info.image.name for info in infos.values()]
+    names = list(images.keys())
     _emit(
         {
             "type": "error",
@@ -79,27 +95,6 @@ def _select_image(infos: dict, image_name: str | None):
         }
     )
     sys.exit(1)
-
-
-def _discover_module_images(module: ModuleType | None) -> dict:
-    """Discover top-level Image objects from a loaded Python module."""
-    if module is None:
-        return {}
-
-    infos = {}
-    for value in vars(module).values():
-        if isinstance(value, Image):
-            infos[value] = ImageInformation(image=value, functions=[])
-
-    return infos
-
-
-def _collect_image_infos(module: ModuleType | None) -> dict:
-    """Collect images referenced by functions and standalone module images."""
-    infos = image_infos().copy()
-    for image, info in _discover_module_images(module).items():
-        infos.setdefault(image, info)
-    return infos
 
 
 def _run_streaming(
@@ -226,10 +221,8 @@ def _execute_operations(sandbox: Sandbox, image):
             )
 
 
-def _register_template(
-    ctx: Context, name: str, dockerfile: str, snapshot_id: str
-) -> dict:
-    """POST to Platform API through the ingress to register the template."""
+def _register_image(ctx: Context, name: str, dockerfile: str, snapshot_id: str) -> dict:
+    """POST to Platform API through the ingress to register the image."""
     org_id = ctx.organization_id
     proj_id = ctx.project_id
     if not org_id or not proj_id:
@@ -254,17 +247,18 @@ def _register_template(
     return resp.json()
 
 
-def create_template(
-    application_file_path: str,
+def create_sandbox_image(
+    image_file_path: str,
     image_name: str | None,
-    template_name: str,
+    cpus: float,
+    memory_mb: int,
 ):
     ctx = _build_context_from_env()
 
     # 1. Load code & discover images.
-    _emit({"type": "status", "message": f"Loading {application_file_path}..."})
+    _emit({"type": "status", "message": f"Loading {image_file_path}..."})
     try:
-        module = load_code(os.path.abspath(application_file_path))
+        module = load_code(os.path.abspath(image_file_path))
     except SyntaxError as e:
         _emit(
             {
@@ -277,7 +271,7 @@ def create_template(
         _emit(
             {
                 "type": "error",
-                "message": "Failed to import application file. Make sure all dependencies are installed.",
+                "message": "Failed to import image file. Make sure all dependencies are installed.",
                 "details": f"{type(e).__name__}: {e}",
             }
         )
@@ -285,7 +279,7 @@ def create_template(
     except Exception as e:
         event = {
             "type": "error",
-            "message": f"Failed to load {application_file_path}",
+            "message": f"Failed to load {image_file_path}",
             "details": f"{type(e).__name__}: {e}",
         }
         if _debug_enabled():
@@ -293,16 +287,13 @@ def create_template(
         _emit(event)
         sys.exit(1)
 
-    infos = _collect_image_infos(module)
-    image = _select_image(infos, image_name)
+    images = _discover_module_images(module)
+    image = _select_image(images, image_name)
 
-    # Default template name to image name if not provided.
-    if not template_name:
-        template_name = image.name
     _emit({"type": "status", "message": f"Selected image: {image.name}"})
 
     # 2. Create sandbox.
-    _emit({"type": "status", "message": "Creating sandbox (2 CPUs, 4096 MB)..."})
+    _emit({"type": "status", "message": "Creating sandbox..."})
     sandbox_client = SandboxClient(
         api_url=ctx.api_url,
         api_key=ctx.api_key or ctx.personal_access_token,
@@ -314,8 +305,8 @@ def create_template(
     try:
         sandbox = sandbox_client.create_and_connect(
             image=image._base_image,
-            cpus=2,
-            memory_mb=4096,
+            cpus=cpus,
+            memory_mb=memory_mb,
         )
         _emit(
             {
@@ -340,16 +331,14 @@ def create_template(
         # 5. Generate dockerfile text.
         dockerfile = dockerfile_content(image)
 
-        # 6. Register template via Platform API.
-        _emit({"type": "status", "message": "Registering template..."})
-        result = _register_template(
-            ctx, template_name, dockerfile, snapshot.snapshot_id
-        )
+        # 6. Register image via Platform API.
+        _emit({"type": "status", "message": "Registering image..."})
+        result = _register_image(ctx, image.name, dockerfile, snapshot.snapshot_id)
         _emit(
             {
-                "type": "template_created",
-                "template_id": result.get("id", ""),
-                "name": template_name,
+                "type": "image_registered",
+                "image_id": result.get("id", ""),
+                "name": image.name,
                 "snapshot_id": snapshot.snapshot_id,
             }
         )
@@ -359,7 +348,7 @@ def create_template(
     except Exception as e:
         event = {
             "type": "error",
-            "message": f"Template creation failed: {type(e).__name__}: {e}",
+            "message": f"Image registration failed: {type(e).__name__}: {e}",
         }
         if _debug_enabled():
             event["traceback"] = traceback.format_exc()
@@ -373,36 +362,44 @@ def create_template(
                 pass
 
 
-def create_template_entrypoint():
+def create_sandbox_image_entrypoint():
     parser = argparse.ArgumentParser(
-        description="Create a sandbox template from an application image definition"
+        description="Register a sandbox image from a Python file"
     )
     parser.add_argument(
-        "application_file_path",
-        help="Path to the application .py file",
+        "image_file_path",
+        help="Path to the image Python file",
     )
     parser.add_argument(
         "--image-name",
         "-i",
         default=None,
-        help="Name of the image to use (required if multiple images exist)",
+        help="Name of the image to use (required if multiple images exist in the file)",
     )
     parser.add_argument(
-        "--name",
-        "-n",
-        default=None,
-        help="Template name (defaults to image name, must be unique per project)",
+        "--cpus",
+        type=float,
+        default=2.0,
+        help="CPUs for the build sandbox that installs dependencies and builds the image (default: 2.0)",
+    )
+    parser.add_argument(
+        "--memory",
+        type=int,
+        default=4096,
+        help="Memory in MB for the build sandbox that installs dependencies and builds the image (default: 4096)",
     )
     args = parser.parse_args()
 
     try:
-        create_template(args.application_file_path, args.image_name, args.name)
+        create_sandbox_image(
+            args.image_file_path, args.image_name, args.cpus, args.memory
+        )
     except SystemExit:
         raise
     except Exception as e:
         event = {
             "type": "error",
-            "message": f"create-template failed ({type(e).__name__})",
+            "message": f"create-sandbox-image failed ({type(e).__name__})",
             "details": f"{type(e).__name__}: {e}",
         }
         if _debug_enabled():
@@ -412,4 +409,4 @@ def create_template_entrypoint():
 
 
 if __name__ == "__main__":
-    create_template_entrypoint()
+    create_sandbox_image_entrypoint()

@@ -4,6 +4,8 @@ from collections.abc import Coroutine
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List
 
+from tensorlake.image import Image
+
 from .exceptions import SDKUsageError
 from .futures import (
     FunctionCallFuture,
@@ -17,7 +19,6 @@ from .futures import (
     _request_scoped_id,
     _wrap_future_into_coroutine,
 )
-from .image import Image
 from .retries import Retries
 
 

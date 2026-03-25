@@ -15,25 +15,25 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
     if let Ok(token) = ctx.bearer_token() {
         headers.insert(
             reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", token)
-                .parse()
-                .map_err(|e| CliError::Other(anyhow::anyhow!("invalid bearer token header: {}", e)))?,
+            format!("Bearer {}", token).parse().map_err(|e| {
+                CliError::Other(anyhow::anyhow!("invalid bearer token header: {}", e))
+            })?,
         );
     }
     if let Some(org_id) = ctx.effective_organization_id() {
         headers.insert(
             "X-Forwarded-Organization-Id",
-            org_id
-                .parse()
-                .map_err(|e| CliError::Other(anyhow::anyhow!("invalid organization id header: {}", e)))?,
+            org_id.parse().map_err(|e| {
+                CliError::Other(anyhow::anyhow!("invalid organization id header: {}", e))
+            })?,
         );
     }
     if let Some(proj_id) = ctx.effective_project_id() {
         headers.insert(
             "X-Forwarded-Project-Id",
-            proj_id
-                .parse()
-                .map_err(|e| CliError::Other(anyhow::anyhow!("invalid project id header: {}", e)))?,
+            proj_id.parse().map_err(|e| {
+                CliError::Other(anyhow::anyhow!("invalid project id header: {}", e))
+            })?,
         );
     }
     if let Some(ref host) = host_override {
