@@ -44,7 +44,7 @@ pub async fn run(
 
     if !ignore_cache {
         if let Some(cached) = cache.get(&cache_key).await {
-            print!("{}", cached);
+            println!("{}", cached);
             return Ok(());
         }
     }
@@ -184,7 +184,7 @@ pub async fn run(
         result.ok_or_else(|| CliError::usage("Parse stream ended without a result event"))?;
 
     cache.set(&cache_key, &markdown).await;
-    print!("{}", markdown);
+    println!("{}", markdown);
 
     Ok(())
 }
