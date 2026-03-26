@@ -138,6 +138,18 @@ pub struct ListSandboxPoolsResponse {
     pub pools: Vec<SandboxPoolInfo>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotContentMode {
+    Full,
+    FilesystemOnly,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CreateSnapshotRequest {
+    pub snapshot_content_mode: SnapshotContentMode,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CreateSnapshotResponse {
     pub snapshot_id: String,

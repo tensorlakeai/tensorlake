@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from tensorlake.cli import create_sandbox_image as create_sandbox_image_module
 from tensorlake.image import Image
+from tensorlake.sandbox.models import SnapshotContentMode
 
 BUILD_CPUS = 2.0
 BUILD_MEMORY_MB = 4096
@@ -78,6 +79,10 @@ class TestCreateSandboxImage(unittest.TestCase):
             cpus=BUILD_CPUS,
             memory_mb=BUILD_MEMORY_MB,
         )
+        sandbox_client.snapshot_and_wait.assert_called_once_with(
+            "sbx-1",
+            content_mode=SnapshotContentMode.FILESYSTEM_ONLY,
+        )
         register_image.assert_called_once_with(
             ctx,
             "data-tools",
@@ -149,4 +154,8 @@ class TestCreateSandboxImage(unittest.TestCase):
             image="python:3.12-slim",
             cpus=BUILD_CPUS,
             memory_mb=BUILD_MEMORY_MB,
+        )
+        sandbox_client.snapshot_and_wait.assert_called_once_with(
+            "sbx-1",
+            content_mode=SnapshotContentMode.FILESYSTEM_ONLY,
         )

@@ -48,6 +48,13 @@ class SnapshotStatus(str, Enum):
     FAILED = "failed"
 
 
+class SnapshotContentMode(str, Enum):
+    """Content mode for snapshot creation."""
+
+    FULL = "full"
+    FILESYSTEM_ONLY = "filesystem_only"
+
+
 class ContainerResourcesInfo(BaseModel):
     """Container resource configuration."""
 

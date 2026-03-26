@@ -10,11 +10,11 @@ use serde_json::Value;
 use crate::{client::Client, error::SdkError};
 
 use models::{
-    CreateSandboxPoolResponse, CreateSandboxRequest, CreateSandboxResponse, CreateSnapshotResponse,
-    DaemonInfo, HealthResponse, ListDirectoryResponse, ListProcessesResponse,
-    ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse, OutputEvent,
-    OutputResponse, ProcessInfo, SandboxInfo, SandboxPoolInfo, SandboxPoolRequest,
-    SendSignalResponse, SnapshotInfo,
+    CreateSandboxPoolResponse, CreateSandboxRequest, CreateSandboxResponse, CreateSnapshotRequest,
+    CreateSnapshotResponse, DaemonInfo, HealthResponse, ListDirectoryResponse,
+    ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse,
+    OutputEvent, OutputResponse, ProcessInfo, SandboxInfo, SandboxPoolInfo, SandboxPoolRequest,
+    SendSignalResponse, SnapshotContentMode, SnapshotInfo,
 };
 
 /// A client for managing sandbox lifecycle, pool, and snapshot APIs.
@@ -98,9 +98,18 @@ impl SandboxesClient {
         Ok(())
     }
 
-    pub async fn snapshot(&self, sandbox_id: &str) -> Result<CreateSnapshotResponse, SdkError> {
+    pub async fn snapshot(
+        &self,
+        sandbox_id: &str,
+        content_mode: SnapshotContentMode,
+    ) -> Result<CreateSnapshotResponse, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/snapshot"));
-        let req = self.client.request(Method::POST, &uri).build()?;
+        let request = CreateSnapshotRequest {
+            snapshot_content_mode: content_mode,
+        };
+        let req = self
+            .client
+            .build_post_json_request(Method::POST, &uri, &request)?;
         let resp = self.client.execute(req).await?;
         Self::parse_json(resp).await
     }

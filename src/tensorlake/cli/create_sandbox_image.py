@@ -13,7 +13,7 @@ from tensorlake.image import Image
 from tensorlake.image.image import _ImageBuildOperationType
 from tensorlake.image.utils import dockerfile_content
 from tensorlake.sandbox import Sandbox, SandboxClient
-from tensorlake.sandbox.models import ProcessStatus
+from tensorlake.sandbox.models import ProcessStatus, SnapshotContentMode
 
 
 def _emit(obj):
@@ -320,7 +320,10 @@ def create_sandbox_image(
 
         # 4. Snapshot.
         _emit({"type": "status", "message": "Creating snapshot..."})
-        snapshot = sandbox_client.snapshot_and_wait(sandbox.sandbox_id)
+        snapshot = sandbox_client.snapshot_and_wait(
+            sandbox.sandbox_id,
+            content_mode=SnapshotContentMode.FILESYSTEM_ONLY,
+        )
         _emit(
             {
                 "type": "snapshot_created",
