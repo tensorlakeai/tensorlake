@@ -23,10 +23,15 @@ In addition to stateful VMs, you can also add long running orchestration capabil
 
 ## Sandboxes
 
-Tensorlake Sandboxes are stateful Firecracker VMs with some dynamic capabilites:
-* Sandboxes can be snapshotted at any point to create durable memory and file-system checkpoints
-* Running sandboxes can be cloned to create immutables copies instantaneously across machines.
-* Sandboxes can be suspended when they are inactive and resumed without losing any memory and file system state.
+Tensorlake Sandboxes are stateful Firecracker MicroVMs built for instant, stateful execution environments for AI agents — spin up millions of VMs with near-SSD filesystem performance.
+
+### Key capabilities
+* **Fastest Filesystem I/O** — Block-based storage achieving near-SSD speeds inside virtual machines. In SQLite benchmarks (2 vCPUs, 4 GB RAM), Tensorlake completes in **2.45s** vs Vercel 3.00s (1.2×), E2B 3.92s (1.6×), Modal 4.66s (1.9×), and Daytona 5.51s (2.2×).
+* **Fast startup** — Sandboxes created in under a second via Lattice, a dynamic cluster scheduler.
+* **Snapshots & cloning** — Snapshot at any point to create durable memory and filesystem checkpoints; clone running sandboxes instantaneously across machines.
+* **Auto suspend/resume** — Sandboxes suspend when idle and resume in under a second without losing any memory or filesystem state.
+* **Live migration** — Sandboxes automatically move between machines during updates with only a brief pause of a few seconds.
+* **Scale** — Supports up to 5 million sandboxes in a single project.
 
 ### Installation
 
