@@ -1,6 +1,6 @@
 [project]
 name = "tensorlake"
-version = "0.4.29"
+version = "0.4.30"
 description = "Tensorlake SDK for Document Ingestion API and Serverless Applications"
 readme = "README.md"
 authors = [{ name = "Tensorlake Inc.", email = "support@tensorlake.ai" }]
@@ -29,6 +29,7 @@ data = "tensorlake.data"
 include = [
     { path = "LICENSE", format = "sdist" },
     { path = "src/tensorlake/_cloud_sdk*.so", format = "wheel" },
+    { path = "src/tensorlake/_cloud_sdk*.pyd", format = "wheel" },
 ]
 
 [tool.black]

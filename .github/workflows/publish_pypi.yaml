@@ -54,6 +54,9 @@ jobs:
           - os: macos-14
             target: aarch64
             cloud_sdk_interpreter: python3.10
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            cloud_sdk_interpreter: python
     steps:
       - uses: actions/checkout@v4
 
@@ -80,34 +83,7 @@ jobs:
 
       - name: Bundle Cloud SDK extension into tensorlake wheel
         run: |
-          python - <<'PY'
-          from pathlib import Path
-          import zipfile
-
-          out_dir = Path("src/tensorlake")
-          for pattern in ("_cloud_sdk*.so", "_cloud_sdk*.pyd"):
-              for path in out_dir.glob(pattern):
-                  path.unlink()
-
-          wheel = next(Path("dist-cloud-sdk").glob("tensorlake_rust_cloud_sdk-*.whl"))
-          if "abi3" not in wheel.name:
-              raise RuntimeError(
-                  f"Cloud SDK wheel must be abi3 for Python 3.10+ compatibility, got: {wheel.name}"
-              )
-          with zipfile.ZipFile(wheel) as zf:
-              members = [
-                  m
-                  for m in zf.namelist()
-                  if Path(m).name.startswith("_cloud_sdk")
-                  and (m.endswith(".so") or m.endswith(".pyd"))
-              ]
-              if len(members) != 1:
-                  raise RuntimeError(f"Expected exactly one _cloud_sdk extension in {wheel}, got {members}")
-              member = members[0]
-              target = out_dir / Path(member).name
-              target.write_bytes(zf.read(member))
-              print(f"Bundled {member} -> {target}")
-          PY
+          python .github/scripts/bundle_cloud_sdk_wheel.py "dist-cloud-sdk/tensorlake_rust_cloud_sdk-*.whl" src/tensorlake --require-abi3
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -124,14 +100,7 @@ jobs:
       - name: Verify wheel imports Rust Cloud SDK extension
         if: ${{ !(runner.os == 'Linux' && matrix.platform.target == 'aarch64') }}
         run: |
-          python -m venv /tmp/wheel-verify
-          source /tmp/wheel-verify/bin/activate
-          python -m pip install --upgrade pip
-          python -m pip install dist/tensorlake-*.whl
-          python - <<'PY'
-          import tensorlake._cloud_sdk
-          print("Imported tensorlake._cloud_sdk successfully")
-          PY
+          python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy tensorlake.cli.build_images
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
