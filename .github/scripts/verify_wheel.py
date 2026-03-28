@@ -52,7 +52,10 @@ def main() -> int:
         )
 
         import_script = "\n".join(
-            [*(f"import {module}" for module in args.modules), f'print("Verified imports:", {args.modules!r})']
+            [
+                *(f"import {module}" for module in args.modules),
+                f'print("Verified imports:", {args.modules!r})',
+            ]
         )
         subprocess.run(
             [
