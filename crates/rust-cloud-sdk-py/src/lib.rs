@@ -1164,9 +1164,7 @@ fn into_py_error(error: SdkError) -> PyErr {
         }
         SdkError::Http(http_error) => {
             let message = format_error_chain(&http_error);
-            if http_error.is_timeout() {
-                CloudApiClientError::new_err(("connection", Option::<u16>::None, message))
-            } else if http_error.is_connect() {
+            if http_error.is_timeout() || http_error.is_connect() {
                 CloudApiClientError::new_err(("connection", Option::<u16>::None, message))
             } else {
                 CloudApiClientError::new_err(("internal", Option::<u16>::None, message))
