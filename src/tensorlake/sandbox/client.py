@@ -238,6 +238,7 @@ class SandboxClient:
         allow_out: list[str] | None = None,
         deny_out: list[str] | None = None,
         snapshot_id: str | None = None,
+        name: str | None = None,
     ) -> CreateSandboxResponse:
         """Create a new standalone sandbox.
 
@@ -261,6 +262,8 @@ class SandboxClient:
                 When set, image, resources, entrypoint, and secrets
                 are inherited from the snapshot unless explicitly
                 overridden.
+            name: Optional name for the sandbox. Named sandboxes support
+                suspend/resume. When absent the sandbox is ephemeral.
 
         Returns:
             CreateSandboxResponse with sandbox_id and status
@@ -289,6 +292,7 @@ class SandboxClient:
             entrypoint=entrypoint,
             network=network,
             snapshot_id=snapshot_id,
+            name=name,
         )
 
         try:
@@ -706,6 +710,7 @@ class SandboxClient:
         snapshot_id: str | None = None,
         proxy_url: str | None = None,
         startup_timeout: float = 60,
+        name: str | None = None,
     ) -> "Sandbox":
         """Create a sandbox, wait for it to start, and return a connected Sandbox.
 
@@ -733,6 +738,8 @@ class SandboxClient:
             snapshot_id: ID of a completed snapshot to restore from
             proxy_url: Override the sandbox proxy URL
             startup_timeout: Max seconds to wait for Running status (default 60)
+            name: Optional name for the sandbox. Named sandboxes support
+                suspend/resume. When absent the sandbox is ephemeral.
 
         Returns:
             Connected Sandbox instance (auto-terminates in context manager)
@@ -756,6 +763,7 @@ class SandboxClient:
                 allow_out=allow_out,
                 deny_out=deny_out,
                 snapshot_id=snapshot_id,
+                name=name,
             )
 
         deadline = time.time() + startup_timeout

@@ -36,6 +36,10 @@ pub struct CreateSandboxRequest {
     pub network: Option<NetworkConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
+    /// Optional name for the sandbox. Named sandboxes support suspend/resume.
+    /// When absent the sandbox is ephemeral.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -86,6 +90,9 @@ pub struct SandboxInfo {
     pub created_at: Option<serde_json::Value>,
     #[serde(default)]
     pub terminated_at: Option<serde_json::Value>,
+    /// User-provided name. Present only on named (non-ephemeral) sandboxes.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

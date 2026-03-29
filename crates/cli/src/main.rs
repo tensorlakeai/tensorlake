@@ -262,6 +262,10 @@ enum SbxCommands {
 
     /// Create a new sandbox
     New {
+        /// Optional name for the sandbox. Named sandboxes support suspend/resume.
+        /// Omit to create an ephemeral sandbox (no suspend/resume).
+        name: Option<String>,
+
         /// Number of CPUs (default: 1.0 for new sandboxes, inherited for snapshot restores)
         #[arg(long)]
         cpus: Option<f64>,
@@ -685,6 +689,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     commands::sbx::terminate::run(ctx, &sandbox_ids).await
                 }
                 SbxCommands::New {
+                    name,
                     cpus,
                     memory,
                     timeout,
@@ -700,6 +705,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 } => {
                     commands::sbx::create::run(
                         ctx,
+                        name.as_deref(),
                         cpus,
                         memory,
                         timeout,

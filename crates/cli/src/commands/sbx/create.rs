@@ -62,6 +62,7 @@ pub async fn create_with_request(
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     ctx: &CliContext,
+    name: Option<&str>,
     cpus: Option<f64>,
     memory: Option<i64>,
     timeout: Option<i64>,
@@ -84,6 +85,9 @@ pub async fn run(
 
     let mut body =
         build_create_request_body(cpus, memory, timeout, entrypoint, effective_snapshot);
+    if let Some(n) = name {
+        body["name"] = serde_json::Value::String(n.to_string());
+    }
 
     if !ports.is_empty() {
         body["exposed_ports"] = serde_json::json!(ports);
