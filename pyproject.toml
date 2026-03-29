@@ -29,6 +29,7 @@ data = "tensorlake.data"
 include = [
     { path = "LICENSE", format = "sdist" },
     { path = "src/tensorlake/_cloud_sdk*.so", format = "wheel" },
+    { path = "src/tensorlake/_cloud_sdk*.pyd", format = "wheel" },
 ]
 
 [tool.black]

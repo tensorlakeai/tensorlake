@@ -81,34 +81,20 @@ test_sandbox:
 	cd tests/sandbox && poetry run python test_lifecycle.py -v
 
 # Replicates the PyPI publish workflow locally: builds the _cloud_sdk Rust
-# extension, bundles its .so into the main wheel, then installs into a
+# extension, bundles its native module into the main wheel, then installs into a
 # temporary venv and verifies imports — all without touching PyPI.
 build_release:
 	@rm -rf dist dist-cloud-sdk
 	@echo "--- Building Cloud SDK extension ---"
 	@poetry run maturin build --manifest-path crates/rust-cloud-sdk-py/Cargo.toml --release --out dist-cloud-sdk
-	@echo "--- Bundling .so into src/tensorlake/ ---"
-	@poetry run python -c "\
-import zipfile, pathlib; \
-d = pathlib.Path('src/tensorlake'); \
-[p.unlink() for p in [*d.glob('_cloud_sdk*.so'), *d.glob('_cloud_sdk*.pyd')]]; \
-w = next(pathlib.Path('dist-cloud-sdk').glob('tensorlake_rust_cloud_sdk-*.whl')); \
-members = [x for x in zipfile.ZipFile(w).namelist() if pathlib.Path(x).name.startswith('_cloud_sdk') and (x.endswith('.so') or x.endswith('.pyd'))]; \
-t = d / pathlib.Path(members[0]).name; \
-t.write_bytes(zipfile.ZipFile(w).read(members[0])); \
-print(f'Bundled {members[0]} -> {t}')"
+	@echo "--- Bundling native Cloud SDK extension into src/tensorlake/ ---"
+	@poetry run python .github/scripts/bundle_cloud_sdk_wheel.py "dist-cloud-sdk/tensorlake_rust_cloud_sdk-*.whl" src/tensorlake --require-abi3
 	@echo "--- Building main wheel ---"
 	@poetry run maturin build --release --out dist
-	@echo "--- Removing bundled .so from source tree ---"
+	@echo "--- Removing bundled native module from source tree ---"
 	@poetry run python -c "import pathlib; [p.unlink() for p in [*pathlib.Path('src/tensorlake').glob('_cloud_sdk*.so'), *pathlib.Path('src/tensorlake').glob('_cloud_sdk*.pyd')]]"
 	@echo "--- Verifying wheel in a clean venv ---"
-	@rm -rf /tmp/tensorlake-verify
-	@poetry run python -m venv /tmp/tensorlake-verify
-	@/tmp/tensorlake-verify/bin/pip install --quiet dist/tensorlake-*.whl
-	@/tmp/tensorlake-verify/bin/python -c "import tensorlake._cloud_sdk; print('OK: tensorlake._cloud_sdk')"
-	@/tmp/tensorlake-verify/bin/python -c "from tensorlake.cli.deploy import deploy_entrypoint; print('OK: tensorlake.cli.deploy')"
-	@/tmp/tensorlake-verify/bin/python -c "from tensorlake.cli.build_images import main; print('OK: tensorlake.cli.build_images')"
-	@rm -rf /tmp/tensorlake-verify
+	@poetry run python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy tensorlake.cli.build_images
 	@echo "--- Done. Wheel is in dist/ ---"
 
 bump_version:
