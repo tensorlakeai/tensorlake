@@ -472,6 +472,20 @@ enum SbxCommands {
         shell: String,
     },
 
+    /// Tunnel a local TCP port into a sandbox over WebSocket
+    Tunnel {
+        /// Sandbox ID
+        sandbox_id: String,
+
+        /// Remote port inside the sandbox
+        #[arg(value_parser = parse_tcp_port)]
+        remote_port: u16,
+
+        /// Local port to listen on (defaults to the remote port)
+        #[arg(long, value_parser = parse_tcp_port)]
+        listen_port: Option<u16>,
+    },
+
     /// Manage sandbox images
     #[command(subcommand)]
     Image(ImageCommands),
@@ -559,16 +573,22 @@ enum PortCommands {
 }
 
 fn parse_user_port(value: &str) -> std::result::Result<u16, String> {
+    let port = parse_tcp_port(value)?;
+
+    if port == 9501 {
+        return Err("port 9501 is reserved for sandbox management".to_string());
+    }
+
+    Ok(port)
+}
+
+fn parse_tcp_port(value: &str) -> std::result::Result<u16, String> {
     let port: u16 = value
         .parse()
         .map_err(|_| format!("invalid port '{value}'"))?;
 
     if port == 0 {
         return Err("port must be between 1 and 65535".to_string());
-    }
-
-    if port == 9501 {
-        return Err("port 9501 is reserved for sandbox management".to_string());
     }
 
     Ok(port)
@@ -854,6 +874,11 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         commands::sbx::image::describe::run(ctx, &name_or_id).await
                     }
                 },
+                SbxCommands::Tunnel {
+                    sandbox_id,
+                    remote_port,
+                    listen_port,
+                } => commands::sbx::tunnel::run(ctx, &sandbox_id, remote_port, listen_port).await,
             }
         }
     }
@@ -920,6 +945,40 @@ mod tests {
     #[test]
     fn sbx_port_rm_rejects_management_port() {
         let result = Cli::try_parse_from(["tl", "sbx", "port", "rm", "sbx-123", "9501"]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sbx_tunnel_parses_remote_and_listen_ports() {
+        let cli = Cli::try_parse_from([
+            "tl",
+            "sbx",
+            "tunnel",
+            "sbx-123",
+            "5900",
+            "--listen-port",
+            "15900",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Tunnel {
+                sandbox_id,
+                remote_port,
+                listen_port,
+            }) => {
+                assert_eq!(sandbox_id, "sbx-123");
+                assert_eq!(remote_port, 5900);
+                assert_eq!(listen_port, Some(15900));
+            }
+            _ => panic!("expected sbx tunnel command"),
+        }
+    }
+
+    #[test]
+    fn sbx_tunnel_rejects_zero_port() {
+        let result = Cli::try_parse_from(["tl", "sbx", "tunnel", "sbx-123", "0"]);
 
         assert!(result.is_err());
     }

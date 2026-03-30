@@ -14,6 +14,7 @@ pub mod snapshot_rm;
 pub mod ssh;
 pub mod suspend;
 pub mod terminate;
+pub mod tunnel;
 
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
