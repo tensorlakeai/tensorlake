@@ -24,7 +24,7 @@ jobs:
         id: version
         run: |
           base=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
-          echo "version=${base}-dev$(date +%s)" >> $GITHUB_OUTPUT
+          echo "version=${base}.dev$(date +%s)" >> $GITHUB_OUTPUT
 
   build-sdist:
     needs: [prepare]
