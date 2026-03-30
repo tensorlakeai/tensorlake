@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "tensorlake-rust-cloud-sdk"
-version = "0.4.30"
+version = "0.4.31"
 description = "PyO3 bindings for Tensorlake Rust cloud client"
 requires-python = ">=3.10"
 
