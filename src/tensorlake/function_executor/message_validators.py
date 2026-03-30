@@ -20,7 +20,6 @@ def validate_new_allocation(allocation: Allocation):
         .required_field("function_call_id")
         .required_field("allocation_id")
         .required_field("inputs")
-        .not_set_field("result")
     )
 
     # Validate allocation inputs

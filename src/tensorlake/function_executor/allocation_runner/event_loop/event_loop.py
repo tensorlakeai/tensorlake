@@ -40,6 +40,7 @@ from .durable_id import future_durable_id
 from .input_events import (
     InputEventEmergencyShutdown,
     InputEventFunctionCallCreated,
+    InputEventFunctionCallWatcherCreated,
     InputEventFunctionCallWatcherResult,
     InputEventType,
     _InputEventStopInputEventProcessing,
@@ -79,10 +80,12 @@ class _FutureInfo:
     # Set when the function call of this Future was created (or failed to get created).
     function_call_created: threading.Event
     # Idempotency check in case we wait for the same Future concurrently.
-    watcher_created: bool
-    # Set when the function call of this Future finished (or failed).
+    watcher_creation_started: bool
+    # Set when the function call watcher was created (or failed to get created).
+    watcher_created: threading.Event
+    # True when the function call of this Future finished (or failed).
     # This means that the Future is fully completed and all its state is final.
-    function_call_finished: threading.Event
+    function_call_finished: bool
     # Callbacks invoked by input event thread when function_call_finished is set.
     # Used by _await_future_runtime_hook to deterministically resume asyncio coroutines.
     function_call_finished_callbacks: list[Callable[[], None]]
@@ -488,7 +491,10 @@ class AllocationEventLoop:
                 # 2. This is deterministic because we take a "snapshot" of deterministic Futures state here.
                 return already_done, already_not_done
 
-        # Create watchers for all non-done futures.
+        # Create watchers for all not done futures.
+        futures_that_need_watchers: list[Future] = [f for f in futures if not f.done()]
+        self._create_watchers(futures_that_need_watchers, deadline)
+
         pending: list[tuple[Future, _FutureInfo]] = []
         for future in futures:
             if future.done():
@@ -497,7 +503,6 @@ class AllocationEventLoop:
             future_info: _FutureInfo = self._future_infos_by_durable_id[
                 self._future_durable_id[future._id]
             ]
-            self._create_future_watcher(future, deadline)
             pending.append((future, future_info))
 
         # Parallel wait loop: wait for completion notifications from input event thread.
@@ -508,13 +513,11 @@ class AllocationEventLoop:
 
                 # Scan for newly completed futures.
                 newly_done: list[tuple[Future, _FutureInfo]] = [
-                    (f, fi) for f, fi in pending if fi.function_call_finished.is_set()
+                    (f, fi) for f, fi in pending if fi.function_call_finished
                 ]
                 done_infos.extend(newly_done)
                 pending = [
-                    (f, fi)
-                    for f, fi in pending
-                    if not fi.function_call_finished.is_set()
+                    (f, fi) for f, fi in pending if not fi.function_call_finished
                 ]
 
                 # Check exit condition based on return_when.
@@ -585,7 +588,7 @@ class AllocationEventLoop:
             )
         )
 
-        self._create_future_watcher(future, deadline=None)
+        self._create_watchers([future], deadline=None)
 
         # Input event thread calls user_aio_loop.call_soon_threadsafe(user_aio_loop_future.set_result, None)
         yield from user_aio_loop_future.__await__()
@@ -640,8 +643,9 @@ class AllocationEventLoop:
         future_info: _FutureInfo = _FutureInfo(
             future=future,
             function_call_created=threading.Event(),
-            watcher_created=False,
-            function_call_finished=threading.Event(),
+            watcher_creation_started=False,
+            watcher_created=threading.Event(),
+            function_call_finished=False,
             function_call_finished_callbacks=[],
             completion_order=-1,
         )
@@ -794,24 +798,37 @@ class AllocationEventLoop:
         else:
             return value
 
-    def _create_future_watcher(self, future: Future, deadline: float | None) -> None:
-        """Creates a watcher for the supplied Future if it's not created yet.
+    def _create_watchers(self, futures: list[Future], deadline: float | None) -> None:
+        """Creates watchers for the supplied Futures.
+
+        Skips Futures whose watchers have already been started (idempotent).
+        Blocks until all watcher creations complete. If a watcher creation fails,
+        then the exception is set on the corresponding Future.
 
         Raises Exception on unexpected internal error.
         """
-        future_info: _FutureInfo = self._future_infos_by_durable_id[
-            self._future_durable_id[future._id]
-        ]
-
-        if not future_info.watcher_created:
-            future_info.watcher_created = True
-            cmd: OutputEventCreateFunctionCallWatcher = (
-                OutputEventCreateFunctionCallWatcher(
-                    function_call_durable_id=self._future_durable_id[future._id],
-                    deadline=deadline,
+        output_events: list[OutputEventCreateFunctionCallWatcher] = []
+        pending_durable_ids: list[str] = []
+        for future in futures:
+            future_info: _FutureInfo = self._future_infos_by_durable_id[
+                self._future_durable_id[future._id]
+            ]
+            if not future_info.watcher_creation_started:
+                future_info.watcher_creation_started = True
+                output_events.append(
+                    OutputEventCreateFunctionCallWatcher(
+                        function_call_durable_id=self._future_durable_id[future._id],
+                        deadline=deadline,
+                    )
                 )
-            )
-            self._output_event_queue.put(OutputEventBatch(events=[cmd]))
+                pending_durable_ids.append(self._future_durable_id[future._id])
+
+        if len(output_events) > 0:
+            self._output_event_queue.put(OutputEventBatch(events=output_events))
+
+        for durable_id in pending_durable_ids:
+            self._future_infos_by_durable_id[durable_id].watcher_created.wait()
+            self._check_emergency_shutdown()
 
     def _process_input_events(self) -> None:
         while True:
@@ -822,6 +839,8 @@ class AllocationEventLoop:
                 return self._process_input_event_emergency_shutdown(input_event)
             elif isinstance(input_event, InputEventFunctionCallCreated):
                 self._process_input_event_function_call_created(input_event)
+            elif isinstance(input_event, InputEventFunctionCallWatcherCreated):
+                self._process_input_event_function_call_watcher_created(input_event)
             elif isinstance(input_event, InputEventFunctionCallWatcherResult):
                 self._process_input_event_function_call_watcher_result(input_event)
             else:
@@ -841,13 +860,8 @@ class AllocationEventLoop:
         # Wake up all runtime hooks blocked on threading.Event.wait() or asyncio await.
         for future_info in self._future_infos_by_durable_id.values():
             future_info.function_call_created.set()
-            future_info.function_call_finished.set()
-            callbacks = future_info.function_call_finished_callbacks
-            future_info.function_call_finished_callbacks = []
-            for callback in callbacks:
-                callback()
-        with self.function_call_completed:
-            self.function_call_completed.notify_all()
+            future_info.watcher_created.set()
+            self._complete_function_call(future_info)
 
     def _process_input_event_function_call_created(
         self, event: InputEventFunctionCallCreated
@@ -861,8 +875,7 @@ class AllocationEventLoop:
             event.durable_id
         )
         if future_info is None:
-            # Info because this might be some stale event we're not interested about anymore.
-            self._logger.info(
+            self._logger.warning(
                 "Function call created event received for unknown durable ID",
                 durable_id=event.durable_id,
             )
@@ -873,8 +886,29 @@ class AllocationEventLoop:
         future_info.function_call_created.set()
         # Safe to process next input event immediately: each Future's state is written
         # at most once per event type, and subsequent events operate on different Futures.
-        # No InputEventFunctionCallWatcherResult can arrive for this Future yet because
-        # no watcher has been created (watchers are created after _create_function_calls returns).
+
+    def _process_input_event_function_call_watcher_created(
+        self, event: InputEventFunctionCallWatcherCreated
+    ) -> None:
+        """Processes function call watcher created event.
+
+        Doesn't raise any exceptions.
+        """
+        future_info: _FutureInfo | None = self._future_infos_by_durable_id.get(
+            event.durable_id
+        )
+        if future_info is None:
+            self._logger.info(
+                "Function call watcher created event received for unknown durable ID",
+                durable_id=event.durable_id,
+            )
+            return
+
+        if event.exception is not None:
+            future_info.future._set_exception(event.exception)
+        future_info.watcher_created.set()
+        # Safe to process next input event immediately: each Future's state is written
+        # at most once per event type, and subsequent events operate on different Futures.
 
     def _process_input_event_function_call_watcher_result(
         self, event: InputEventFunctionCallWatcherResult
@@ -903,17 +937,19 @@ class AllocationEventLoop:
         # Future result is set, we can remove the Future from tracking.
         del self._future_infos_by_durable_id[self._future_durable_id[future._id]]
         del self._future_durable_id[future._id]
+        self._complete_function_call(future_info)
 
+        # Safe to process next input event immediately: the Future was removed from tracking
+        # above, so no subsequent input event can modify it. The runtime hook holds a local
+        # reference to future_info and reads the Future's final state set before this signal.
+
+    def _complete_function_call(self, future_info: _FutureInfo) -> None:
         future_info.completion_order = self.function_call_completion_counter
         self.function_call_completion_counter += 1
-        future_info.function_call_finished.set()
+        future_info.function_call_finished = True
         callbacks = future_info.function_call_finished_callbacks
         future_info.function_call_finished_callbacks = []
         for callback in callbacks:
             callback()
         with self.function_call_completed:
             self.function_call_completed.notify_all()
-
-        # Safe to process next input event immediately: the Future was removed from tracking
-        # above, so no subsequent input event can modify it. The runtime hook holds a local
-        # reference to future_info and reads the Future's final state set before this signal.

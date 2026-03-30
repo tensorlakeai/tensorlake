@@ -50,13 +50,17 @@ from .health_check import HealthCheckHandler
 from .info import info_response_kv_args
 from .message_validators import InitializeRequestValidator, validate_new_allocation
 from .proto.function_executor_pb2 import (
+    AdvanceAllocationExecutionLogBatchRequest,
     Allocation,
+    AllocationExecutionEvent,
     AllocationState,
     AllocationUpdate,
     CreateAllocationRequest,
     DeleteAllocationRequest,
     Empty,
     FunctionRef,
+    GetAllocationExecutionLogBatchRequest,
+    GetAllocationExecutionLogBatchResponse,
     HealthCheckRequest,
     HealthCheckResponse,
     InfoRequest,
@@ -67,6 +71,9 @@ from .proto.function_executor_pb2 import (
     InitializeResponse,
     ListAllocationsRequest,
     ListAllocationsResponse,
+    ReadAllocationEventLogRequest,
+    ReadAllocationEventLogResponse,
+    WatchAllocationEventLogReads,
     WatchAllocationStateRequest,
 )
 from .proto.function_executor_pb2_grpc import FunctionExecutorServicer
@@ -100,7 +107,7 @@ class Service(FunctionExecutorServicer):
     def initialize(
         self, request: InitializeRequest, context: grpc.ServicerContext
     ) -> InitializeResponse:
-        start_time = time.monotonic()
+        start_time: float = time.monotonic()
         self._logger.info("initializing function executor service")
 
         InitializeRequestValidator(request).check()
@@ -293,61 +300,117 @@ class Service(FunctionExecutorServicer):
     def watch_allocation_state(
         self, request: WatchAllocationStateRequest, context: grpc.ServicerContext
     ) -> Generator[AllocationState, None, None]:
-        # No need to lock self._allocation_infos because we're not blocking here so we
-        # hold GIL non stop.
-        if request.allocation_id not in self._allocation_infos:
-            context.abort(
-                grpc.StatusCode.NOT_FOUND,
-                f"Allocation {request.allocation_id} not found",
-            )
-
-        allocation_info: AllocationInfo = self._allocation_infos[request.allocation_id]
+        runner: AllocationRunner = self._get_runner_or_abort(
+            request.allocation_id, context
+        )
 
         # Stream allocation state updates until the allocation completes.
         last_seen_hash: str | None = None
         while True:
-            allocation_state: AllocationState = (
-                allocation_info.runner.wait_allocation_state_update(last_seen_hash)
+            allocation_state: AllocationState | None = (
+                runner.allocation_state.wait_for_update(last_seen_hash)
             )
+            if allocation_state is None:
+                break
             last_seen_hash = allocation_state.sha256_hash
             yield allocation_state
-            if AllocationRunner.is_terminal_state(allocation_state):
-                break
 
     def send_allocation_update(
         self, request: AllocationUpdate, context: grpc.ServicerContext
     ) -> Empty:
-        # No need to lock self._allocation_infos because we're not blocking here so we
-        # hold GIL non stop.
-        if request.allocation_id not in self._allocation_infos:
-            context.abort(
-                grpc.StatusCode.NOT_FOUND,
-                f"Allocation {request.allocation_id} not found",
-            )
-
-        allocation_info: AllocationInfo = self._allocation_infos[request.allocation_id]
-        if allocation_info.runner.finished:
+        runner: AllocationRunner = self._get_runner_or_abort(
+            request.allocation_id, context
+        )
+        if runner.allocation_state.finished:
             context.abort(
                 grpc.StatusCode.FAILED_PRECONDITION,
                 f"Allocation {request.allocation_id} is already finished",
             )
 
-        allocation_info.runner.deliver_allocation_update(request)
+        if request.HasField("request_state_operation_result"):
+            runner.request_state.deliver_operation_result(
+                request.request_state_operation_result
+            )
+        elif request.HasField("output_blob"):
+            runner.blob_manager.deliver_output_blob(request.output_blob)
+        else:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                f"Unknown update type in AllocationUpdate for allocation {request.allocation_id}",
+            )
         return Empty()
+
+    def get_allocation_execution_log_batch(
+        self,
+        request: GetAllocationExecutionLogBatchRequest,
+        context: grpc.ServicerContext,
+    ) -> GetAllocationExecutionLogBatchResponse:
+        runner: AllocationRunner = self._get_runner_or_abort(
+            request.allocation_id, context
+        )
+        batch: list[AllocationExecutionEvent] | None = (
+            runner.execution_log_buffer.get_current_batch()
+        )
+        if batch is None:
+            # This should never happen normally because the previous
+            # log batch must contain "finish allocation" event.
+            return GetAllocationExecutionLogBatchResponse(events=[])
+        return GetAllocationExecutionLogBatchResponse(events=batch)
+
+    def advance_allocation_execution_log_batch(
+        self,
+        request: AdvanceAllocationExecutionLogBatchRequest,
+        context: grpc.ServicerContext,
+    ) -> Empty:
+        runner: AllocationRunner = self._get_runner_or_abort(
+            request.allocation_id, context
+        )
+        runner.execution_log_buffer.advance()
+        return Empty()
+
+    def watch_allocation_event_log_reads(
+        self, request: WatchAllocationEventLogReads, context: grpc.ServicerContext
+    ) -> Generator[ReadAllocationEventLogRequest, None, None]:
+        runner: AllocationRunner = self._get_runner_or_abort(
+            request.allocation_id, context
+        )
+        while True:
+            read_request: ReadAllocationEventLogRequest | None = (
+                runner.event_log_reader.get_next_read_request()
+            )
+            if read_request is None:
+                break
+            yield read_request
+
+    def send_allocation_event_log_read_response(
+        self,
+        request: ReadAllocationEventLogResponse,
+        context: grpc.ServicerContext,
+    ) -> Empty:
+        runner: AllocationRunner = self._get_runner_or_abort(
+            request.allocation_id, context
+        )
+        runner.event_log_reader.deliver_read_response(request)
+        return Empty()
+
+    def _get_runner_or_abort(
+        self, allocation_id: str, context: grpc.ServicerContext
+    ) -> AllocationRunner:
+        """Returns the AllocationRunner for the given allocation ID, or aborts with NOT_FOUND."""
+        if allocation_id not in self._allocation_infos:
+            context.abort(
+                grpc.StatusCode.NOT_FOUND,
+                f"Allocation {allocation_id} not found",
+            )
+        return self._allocation_infos[allocation_id].runner
 
     def delete_allocation(
         self, request: DeleteAllocationRequest, context: grpc.ServicerContext
     ) -> Empty:
-        # No need to lock self._allocation_infos because we're not blocking here so we
-        # hold GIL non stop.
-        if request.allocation_id not in self._allocation_infos:
-            context.abort(
-                grpc.StatusCode.NOT_FOUND,
-                f"Allocation {request.allocation_id} not found",
-            )
-
-        allocation_info: AllocationInfo = self._allocation_infos[request.allocation_id]
-        if not allocation_info.runner.finished:
+        runner: AllocationRunner = self._get_runner_or_abort(
+            request.allocation_id, context
+        )
+        if not runner.allocation_state.finished:
             context.abort(
                 grpc.StatusCode.FAILED_PRECONDITION,
                 f"Allocation {request.allocation_id} is still running and cannot be deleted",

@@ -29,13 +29,13 @@ from tensorlake.applications.user_data_serializer import (
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     BLOB,
     Allocation,
+    AllocationExecutionEventFinishAllocation,
     AllocationOutcomeCode,
     AllocationRequestStateCommitWriteOperationResult,
     AllocationRequestStateOperation,
     AllocationRequestStateOperationResult,
     AllocationRequestStatePrepareReadOperationResult,
     AllocationRequestStatePrepareWriteOperationResult,
-    AllocationResult,
     AllocationState,
     AllocationUpdate,
     CreateAllocationRequest,
@@ -196,7 +196,7 @@ class TestSetRequestState(unittest.TestCase):
                         )
                         break
 
-                alloc_result: AllocationResult = (
+                alloc_result: AllocationExecutionEventFinishAllocation = (
                     wait_result_of_allocation_that_returns_output(
                         allocation_id,
                         self,
@@ -288,7 +288,7 @@ class TestSetRequestState(unittest.TestCase):
                         )
                         break
 
-                alloc_result: AllocationResult = (
+                alloc_result: AllocationExecutionEventFinishAllocation = (
                     wait_result_of_allocation_that_returns_output(
                         allocation_id,
                         self,
@@ -444,7 +444,7 @@ class TestGetRequestState(unittest.TestCase):
                         else:
                             break
 
-                alloc_result: AllocationResult = (
+                alloc_result: AllocationExecutionEventFinishAllocation = (
                     wait_result_of_allocation_that_returns_output(
                         allocation_id,
                         self,
@@ -544,7 +544,7 @@ class TestGetRequestState(unittest.TestCase):
                         else:
                             break
 
-                alloc_result: AllocationResult = (
+                alloc_result: AllocationExecutionEventFinishAllocation = (
                     wait_result_of_allocation_that_returns_output(
                         allocation_id,
                         self,
@@ -644,7 +644,7 @@ class TestGetRequestState(unittest.TestCase):
                         else:
                             break
 
-                alloc_result: AllocationResult = (
+                alloc_result: AllocationExecutionEventFinishAllocation = (
                     wait_result_of_allocation_that_returns_output(
                         allocation_id,
                         self,
