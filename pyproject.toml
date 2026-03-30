@@ -9,8 +9,7 @@ dependencies = [
     "httpx[http2]>=0.27.2,<1.0",
     "pydantic>=2.0,<3.0",
     "grpcio>=1.76.0,<2.0.0",
-    "protobuf>=5.26.1,<6.0.0",
-    "googleapis-common-protos>=1.56.0,<2.0.0",
+    "protobuf>=6.31.1,<7.0.0",
 ]
 
 [project.urls]
@@ -54,5 +53,6 @@ pre-commit = "^4.5.1"
 # install at runtime (>=1.76.0 per the runtime dependency).
 grpcio = "^1.76.0"
 grpcio-tools = "^1.76.0"
+protobuf = "^6.31.1"
 setuptools = "^69.0.0"
 maturin = ">=1.9,<2.0"
