@@ -106,6 +106,7 @@ enum Commands {
     },
 
     /// Build Docker images for applications defined in an application file
+    #[clap(hide = true)]
     BuildImages {
         /// Path to the application .py file
         application_file_path: String,
