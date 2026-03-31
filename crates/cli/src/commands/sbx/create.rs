@@ -98,8 +98,7 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
     };
     let effective_snapshot = snapshot_id.or(resolved_snapshot.as_deref());
 
-    let mut body =
-        build_create_request_body(cpus, memory, timeout, entrypoint, effective_snapshot);
+    let mut body = build_create_request_body(cpus, memory, timeout, entrypoint, effective_snapshot);
     if let Some(n) = name {
         body["name"] = serde_json::Value::String(n.to_string());
     }

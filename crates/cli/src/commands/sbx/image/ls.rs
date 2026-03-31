@@ -20,7 +20,10 @@ pub async fn run(ctx: &CliContext) -> Result<()> {
     for item in &items {
         let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("-");
         let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("-");
-        let snapshot_id = item.get("snapshotId").and_then(|v| v.as_str()).unwrap_or("-");
+        let snapshot_id = item
+            .get("snapshotId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-");
 
         table.add_row(vec![Cell::new(name), Cell::new(id), Cell::new(snapshot_id)]);
     }
