@@ -148,9 +148,17 @@ jobs:
           repository-url: https://test.pypi.org/legacy/
           attestations: false
 
+  wait-for-propagation:
+    name: Wait for TestPyPI propagation
+    needs: [publish]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sleep 60s for TestPyPI index propagation
+        run: sleep 60
+
   integration-test:
     name: Integration test against TestPyPI
-    needs: [publish, prepare]
+    needs: [wait-for-propagation, prepare]
     uses: ./.github/workflows/integration_test.yaml
     with:
       version: ${{ needs.prepare.outputs.version }}
