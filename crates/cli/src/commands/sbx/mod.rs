@@ -1,8 +1,8 @@
 pub mod clone;
 pub mod cp;
 pub mod create;
-pub mod create_sandbox_image;
 pub mod exec;
+pub mod image;
 pub mod ls;
 pub mod port;
 pub mod resume;

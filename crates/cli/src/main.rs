@@ -262,13 +262,13 @@ enum SbxCommands {
 
     /// Create a new sandbox
     New {
-        /// Number of CPUs
-        #[arg(long, default_value = "1.0")]
-        cpus: f64,
+        /// Number of CPUs (default: 1.0 for new sandboxes, inherited for snapshot restores)
+        #[arg(long)]
+        cpus: Option<f64>,
 
-        /// Memory in MB
-        #[arg(long, default_value = "1024")]
-        memory: i64,
+        /// Memory in MB (default: 1024 for new sandboxes, inherited for snapshot restores)
+        #[arg(long)]
+        memory: Option<i64>,
 
         /// Timeout in seconds
         #[arg(long)]
@@ -454,18 +454,34 @@ enum SbxCommands {
         shell: String,
     },
 
+    /// Manage sandbox images
+    #[command(subcommand)]
+    Image(ImageCommands),
+}
+
+#[derive(Subcommand)]
+enum ImageCommands {
     /// Register a sandbox image from a Python file definition
-    CreateImage {
-        /// Path to the application .py file
-        application_file_path: String,
+    Create {
+        /// Path to the image Python file
+        image_file_path: String,
 
         /// Name of the image to use (required if multiple images exist)
         #[arg(short = 'i', long)]
         image_name: Option<String>,
 
-        /// Image name to register (defaults to the image name)
+        /// Registered image name (defaults to the image name from the file)
         #[arg(short = 'n', long)]
-        template_name: Option<String>,
+        registered_name: Option<String>,
+    },
+
+    /// List all sandbox images
+    Ls,
+
+    /// Show details for a sandbox image
+    Describe {
+        /// Image name or ID
+        name_or_id: String,
     },
 }
 
@@ -793,19 +809,25 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 SbxCommands::Ssh { sandbox_id, shell } => {
                     commands::sbx::ssh::run(ctx, &sandbox_id, &shell).await
                 }
-                SbxCommands::CreateImage {
-                    application_file_path,
-                    image_name,
-                    template_name,
-                } => {
-                    commands::sbx::create_sandbox_image::run(
-                        ctx,
-                        &application_file_path,
-                        image_name.as_deref(),
-                        template_name.as_deref(),
-                    )
-                    .await
-                }
+                SbxCommands::Image(image_cmd) => match image_cmd {
+                    ImageCommands::Create {
+                        image_file_path,
+                        image_name,
+                        registered_name,
+                    } => {
+                        commands::sbx::image::create::run(
+                            ctx,
+                            &image_file_path,
+                            image_name.as_deref(),
+                            registered_name.as_deref(),
+                        )
+                        .await
+                    }
+                    ImageCommands::Ls => commands::sbx::image::ls::run(ctx).await,
+                    ImageCommands::Describe { name_or_id } => {
+                        commands::sbx::image::describe::run(ctx, &name_or_id).await
+                    }
+                },
             }
         }
     }
