@@ -135,12 +135,12 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
         println!("{}", sandbox_id);
     }
     if is_tty {
-        print_post_create_tip(ctx, &sandbox_id);
+        print_post_create_tip(ctx, &sandbox_id, name.is_none());
     }
     Ok(())
 }
 
-fn print_post_create_tip(ctx: &CliContext, sandbox_id: &str) {
+fn print_post_create_tip(ctx: &CliContext, sandbox_id: &str, is_ephemeral: bool) {
     let (proxy_url, host_header) = sandbox_proxy_base(ctx, sandbox_id);
     let host_flag = host_header
         .as_deref()
@@ -151,6 +151,9 @@ fn print_post_create_tip(ctx: &CliContext, sandbox_id: &str) {
     eprintln!("Get started:");
     eprintln!("  tl sbx ssh {sandbox_id}");
     eprintln!("  tl sbx exec {sandbox_id} -- bash -c \"echo Hello, World!\"");
+    if is_ephemeral {
+        eprintln!("  tl sbx name {sandbox_id} <name>  # make persistent (enables suspend/resume)");
+    }
 
     let tips: Vec<(&str, String)> = vec![
         (
