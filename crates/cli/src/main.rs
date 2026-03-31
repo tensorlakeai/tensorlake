@@ -412,11 +412,27 @@ enum SbxCommands {
         shell: String,
     },
 
+    /// Manage sandbox images
+    #[command(subcommand)]
+    Image(ImageCommands),
+}
+
+#[derive(Subcommand)]
+enum ImageCommands {
     /// Register a sandbox image from a Python file definition
-    CreateImage {
+    Create {
         /// Arguments passed to the create-image Python module
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+
+    /// List all sandbox images
+    Ls,
+
+    /// Show details for a sandbox image
+    Describe {
+        /// Image name or ID
+        name_or_id: String,
     },
 }
 
@@ -724,9 +740,15 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 SbxCommands::Ssh { sandbox_id, shell } => {
                     commands::sbx::ssh::run(ctx, &sandbox_id, &shell).await
                 }
-                SbxCommands::CreateImage { args } => {
-                    commands::sbx::create_sandbox_image::run(ctx, &args).await
-                }
+                SbxCommands::Image(image_cmd) => match image_cmd {
+                    ImageCommands::Create { args } => {
+                        commands::sbx::image::create::run(ctx, &args).await
+                    }
+                    ImageCommands::Ls => commands::sbx::image::ls::run(ctx).await,
+                    ImageCommands::Describe { name_or_id } => {
+                        commands::sbx::image::describe::run(ctx, &name_or_id).await
+                    }
+                },
             }
         }
     }

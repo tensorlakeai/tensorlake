@@ -72,7 +72,7 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
         match event_type {
             "status" => {
                 let message = event.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                eprintln!("⚙️  {}", message);
+                eprintln!("\u{2699}\u{fe0f}  {}", message);
             }
             "build_log" => {
                 let message = event.get("message").and_then(|v| v.as_str()).unwrap_or("");
@@ -85,12 +85,12 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
                     .get("snapshot_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                eprintln!("📸 Snapshot created: {}", snapshot_id);
+                eprintln!("\u{1f4f8} Snapshot created: {}", snapshot_id);
             }
             "image_registered" => {
                 let image_id = event.get("image_id").and_then(|v| v.as_str()).unwrap_or("");
                 let name = event.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                eprintln!("✅ Image '{}' registered ({})", name, image_id);
+                eprintln!("\u{2705} Image '{}' registered ({})", name, image_id);
             }
             "done" => {
                 // Success — nothing extra to print
