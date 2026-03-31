@@ -40,7 +40,7 @@ pub async fn run(ctx: &CliContext, src: &str, dest: &str) -> Result<()> {
     }
     if src_sbx.is_none() && dest_sbx.is_none() {
         return Err(CliError::usage(
-            "One of src or dest must be a sandbox path (sandbox_id:/path).",
+            "One of src or dest must be a sandbox path (sandbox_id_or_name:/path).",
         ));
     }
 

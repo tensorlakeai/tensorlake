@@ -255,13 +255,20 @@ enum SbxCommands {
     /// Terminate one or more sandboxes
     #[command(name = "terminate", alias = "stop")]
     Terminate {
-        /// Sandbox IDs
+        /// Sandbox IDs or names
         #[arg(required = true)]
         sandbox_ids: Vec<String>,
     },
 
     /// Create a new sandbox
     New {
+        /// Optional name for the sandbox. Named sandboxes support suspend/resume.
+        /// Omit to create an ephemeral sandbox (no suspend/resume). When provided, must start
+        /// with a lowercase letter, contain only lowercase letters, digits, and hyphens, not end
+        /// with a hyphen, max 63 chars. Names that are exactly 21 lowercase alphanumeric
+        /// characters are rejected (ambiguous with sandbox IDs).
+        name: Option<String>,
+
         /// Number of CPUs (default: 1.0 for new sandboxes, inherited for snapshot restores)
         #[arg(long)]
         cpus: Option<f64>,
@@ -313,7 +320,7 @@ enum SbxCommands {
 
     /// Suspend a running sandbox
     Suspend {
-        /// Sandbox ID
+        /// Sandbox ID or name
         sandbox_id: String,
 
         /// Return immediately after sending the suspend request instead of waiting for the sandbox to be suspended
@@ -323,7 +330,7 @@ enum SbxCommands {
 
     /// Resume a suspended sandbox
     Resume {
-        /// Sandbox ID
+        /// Sandbox ID or name
         sandbox_id: String,
 
         /// Return immediately after sending the resume request instead of waiting for the sandbox to be running
@@ -333,7 +340,7 @@ enum SbxCommands {
 
     /// Execute a command in a sandbox
     Exec {
-        /// Sandbox ID
+        /// Sandbox ID or name
         sandbox_id: String,
 
         /// Command to execute
@@ -358,10 +365,10 @@ enum SbxCommands {
 
     /// Copy files between local and sandbox
     Cp {
-        /// Source path (sandbox_id:/path or local path)
+        /// Source path (sandbox_id_or_name:/path or local path)
         src: String,
 
-        /// Destination path (sandbox_id:/path or local path)
+        /// Destination path (sandbox_id_or_name:/path or local path)
         dest: String,
     },
 
@@ -370,7 +377,7 @@ enum SbxCommands {
 
     /// Clone a running sandbox via snapshot
     Clone {
-        /// Source sandbox ID
+        /// Source sandbox ID or name
         sandbox_id: String,
 
         /// Max seconds to wait for snapshot completion
@@ -444,9 +451,20 @@ enum SbxCommands {
         network_deny: Vec<String>,
     },
 
+    /// Set or update the name of a sandbox
+    Name {
+        /// Sandbox ID or current name
+        sandbox_id: String,
+
+        /// New name to assign. Rules: start with a lowercase letter, contain only lowercase
+        /// letters, digits, and hyphens, not end with a hyphen, max 63 chars. Names that are
+        /// exactly 21 lowercase alphanumeric characters are rejected (ambiguous with sandbox IDs).
+        new_name: String,
+    },
+
     /// Interactive shell in a sandbox
     Ssh {
-        /// Sandbox ID
+        /// Sandbox ID or name
         sandbox_id: String,
 
         /// Shell to use
@@ -490,7 +508,7 @@ struct SnapshotArgs {
     #[command(subcommand)]
     command: Option<SnapshotCommands>,
 
-    /// Sandbox ID
+    /// Sandbox ID or name
     sandbox_id: Option<String>,
 
     /// Max seconds to wait
@@ -515,13 +533,13 @@ enum SnapshotCommands {
 enum PortCommands {
     /// List user-exposed ports for a sandbox
     Ls {
-        /// Sandbox ID
+        /// Sandbox ID or name
         sandbox_id: String,
     },
 
     /// Expose one or more ports and enable unauthenticated access
     Expose {
-        /// Sandbox ID
+        /// Sandbox ID or name
         sandbox_id: String,
 
         /// Ports to expose
@@ -531,7 +549,7 @@ enum PortCommands {
 
     /// Remove one or more exposed ports
     Rm {
-        /// Sandbox ID
+        /// Sandbox ID or name
         sandbox_id: String,
 
         /// Ports to remove
@@ -619,16 +637,16 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             push,
             build_envs,
         } => {
-            commands::build_images::run(
-                &application_file_path,
-                repository.as_deref(),
-                tag.as_deref(),
-                image_name.as_deref(),
-                &stage,
-                template.as_deref(),
+            commands::build_images::run(commands::build_images::BuildImageArgs {
+                application_file_path: &application_file_path,
+                repository: repository.as_deref(),
+                tag: tag.as_deref(),
+                image_name: image_name.as_deref(),
+                stage: &stage,
+                template: template.as_deref(),
                 push,
-                &build_envs,
-            )
+                build_envs: &build_envs,
+            })
             .await
         }
         Commands::Parse {
@@ -685,6 +703,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     commands::sbx::terminate::run(ctx, &sandbox_ids).await
                 }
                 SbxCommands::New {
+                    name,
                     cpus,
                     memory,
                     timeout,
@@ -700,21 +719,28 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 } => {
                     commands::sbx::create::run(
                         ctx,
-                        cpus,
-                        memory,
-                        timeout,
-                        &entrypoint,
-                        snapshot.as_deref(),
-                        image.as_deref(),
-                        !no_wait,
-                        &ports,
-                        allow_unauthenticated_access,
-                        no_internet,
-                        &network_allow,
-                        &network_deny,
+                        commands::sbx::create::CreateArgs {
+                            name: name.as_deref(),
+                            cpus,
+                            memory,
+                            timeout,
+                            entrypoint: &entrypoint,
+                            snapshot_id: snapshot.as_deref(),
+                            image_name: image.as_deref(),
+                            wait: !no_wait,
+                            ports: &ports,
+                            allow_unauthenticated_access,
+                            no_internet,
+                            network_allow: &network_allow,
+                            network_deny: &network_deny,
+                        },
                     )
                     .await
                 }
+                SbxCommands::Name {
+                    sandbox_id,
+                    new_name,
+                } => commands::sbx::name::run(ctx, &sandbox_id, &new_name).await,
                 SbxCommands::Suspend {
                     sandbox_id,
                     no_wait,

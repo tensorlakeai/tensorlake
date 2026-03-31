@@ -31,9 +31,7 @@ pub async fn run(ctx: &CliContext, name_or_id: &str) -> Result<()> {
         }
         super::find_image_item_in_paginated_list(ctx, &client, &base_url, name_or_id)
             .await?
-            .ok_or_else(|| {
-                CliError::Other(anyhow::anyhow!("image '{}' not found", name_or_id))
-            })?
+            .ok_or_else(|| CliError::Other(anyhow::anyhow!("image '{}' not found", name_or_id)))?
     } else {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
@@ -52,7 +50,10 @@ pub async fn run(ctx: &CliContext, name_or_id: &str) -> Result<()> {
 fn print_image_details(item: &serde_json::Value) {
     let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("-");
     let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("-");
-    let snapshot_id = item.get("snapshotId").and_then(|v| v.as_str()).unwrap_or("-");
+    let snapshot_id = item
+        .get("snapshotId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("-");
 
     println!("Name:        {}", name);
     println!("ID:          {}", id);

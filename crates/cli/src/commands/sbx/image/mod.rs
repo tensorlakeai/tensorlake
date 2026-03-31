@@ -30,17 +30,27 @@ pub async fn resolve_image(ctx: &CliContext, image_name: &str) -> Result<String>
     let direct_url = format!("{}/{}", base_url, image_name);
 
     if ctx.debug {
-        eprintln!("DEBUG resolve_image: trying direct lookup GET {}", direct_url);
+        eprintln!(
+            "DEBUG resolve_image: trying direct lookup GET {}",
+            direct_url
+        );
     }
 
-    let direct_resp = client.get(&direct_url).send().await.map_err(CliError::Http)?;
+    let direct_resp = client
+        .get(&direct_url)
+        .send()
+        .await
+        .map_err(CliError::Http)?;
     if direct_resp.status().is_success() {
         let result: serde_json::Value = direct_resp.json().await.map_err(CliError::Http)?;
         if let Some(snapshot_id) = snapshot_id_from_item(&result, image_name)? {
             if ctx.debug {
                 eprintln!("DEBUG resolve_image: direct lookup succeeded");
             }
-            eprintln!("Resolved image '{}' -> snapshot {}", image_name, snapshot_id);
+            eprintln!(
+                "Resolved image '{}' -> snapshot {}",
+                image_name, snapshot_id
+            );
             return Ok(snapshot_id);
         }
         return Err(CliError::Other(anyhow::anyhow!(
@@ -72,7 +82,10 @@ pub async fn resolve_image(ctx: &CliContext, image_name: &str) -> Result<String>
     if ctx.debug {
         eprintln!("DEBUG resolve_image: paginated list lookup succeeded");
     }
-    eprintln!("Resolved image '{}' -> snapshot {}", image_name, snapshot_id);
+    eprintln!(
+        "Resolved image '{}' -> snapshot {}",
+        image_name, snapshot_id
+    );
     Ok(snapshot_id)
 }
 
@@ -202,10 +215,7 @@ pub fn item_matches_image_ref(item: &serde_json::Value, image_ref: &str) -> bool
     id == image_ref || name == image_ref
 }
 
-pub fn snapshot_id_from_item(
-    item: &serde_json::Value,
-    image_ref: &str,
-) -> Result<Option<String>> {
+pub fn snapshot_id_from_item(item: &serde_json::Value, image_ref: &str) -> Result<Option<String>> {
     let snapshot_id = item.get("snapshotId").and_then(|v| v.as_str());
     match snapshot_id {
         Some(snapshot_id) => Ok(Some(snapshot_id.to_string())),
@@ -257,7 +267,8 @@ mod tests {
 
     #[test]
     fn absolute_api_url_resolves_relative_next_link() {
-        let next = "/platform/v1/organizations/org/projects/proj/sandbox-templates?pageSize=100&next=abc";
+        let next =
+            "/platform/v1/organizations/org/projects/proj/sandbox-templates?pageSize=100&next=abc";
         assert_eq!(
             absolute_api_url("https://api.tensorlake.dev", next),
             format!("https://api.tensorlake.dev{}", next)

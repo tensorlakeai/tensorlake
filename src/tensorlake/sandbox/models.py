@@ -105,6 +105,7 @@ class CreateSandboxRequest(BaseModel):
     entrypoint: list[str] | None = None
     network: NetworkConfig | None = None
     snapshot_id: str | None = None
+    name: str | None = None
 
 
 class SandboxPoolRequest(BaseModel):
@@ -145,6 +146,7 @@ class SandboxInfo(BaseModel):
     outcome: str | None = None
     created_at: OptionalTimestamp = None
     terminated_at: OptionalTimestamp = None
+    name: str | None = None
 
     model_config = {"populate_by_name": True}
 

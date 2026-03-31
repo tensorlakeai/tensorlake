@@ -59,22 +59,38 @@ pub async fn create_with_request(
     Ok(sandbox_id)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn run(
-    ctx: &CliContext,
-    cpus: Option<f64>,
-    memory: Option<i64>,
-    timeout: Option<i64>,
-    entrypoint: &[String],
-    snapshot_id: Option<&str>,
-    image_name: Option<&str>,
-    wait: bool,
-    ports: &[u16],
-    allow_unauthenticated_access: bool,
-    no_internet: bool,
-    network_allow: &[String],
-    network_deny: &[String],
-) -> Result<()> {
+pub struct CreateArgs<'a> {
+    pub name: Option<&'a str>,
+    pub cpus: Option<f64>,
+    pub memory: Option<i64>,
+    pub timeout: Option<i64>,
+    pub entrypoint: &'a [String],
+    pub snapshot_id: Option<&'a str>,
+    pub image_name: Option<&'a str>,
+    pub wait: bool,
+    pub ports: &'a [u16],
+    pub allow_unauthenticated_access: bool,
+    pub no_internet: bool,
+    pub network_allow: &'a [String],
+    pub network_deny: &'a [String],
+}
+
+pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
+    let CreateArgs {
+        name,
+        cpus,
+        memory,
+        timeout,
+        entrypoint,
+        snapshot_id,
+        image_name,
+        wait,
+        ports,
+        allow_unauthenticated_access,
+        no_internet,
+        network_allow,
+        network_deny,
+    } = args;
     // Resolve --image to a snapshot ID if provided.
     let resolved_snapshot = match image_name {
         Some(name) => Some(resolve_image(ctx, name).await?),
@@ -82,8 +98,10 @@ pub async fn run(
     };
     let effective_snapshot = snapshot_id.or(resolved_snapshot.as_deref());
 
-    let mut body =
-        build_create_request_body(cpus, memory, timeout, entrypoint, effective_snapshot);
+    let mut body = build_create_request_body(cpus, memory, timeout, entrypoint, effective_snapshot);
+    if let Some(n) = name {
+        body["name"] = serde_json::Value::String(n.to_string());
+    }
 
     if !ports.is_empty() {
         body["exposed_ports"] = serde_json::json!(ports);
@@ -116,12 +134,12 @@ pub async fn run(
         println!("{}", sandbox_id);
     }
     if is_tty {
-        print_post_create_tip(ctx, &sandbox_id);
+        print_post_create_tip(ctx, &sandbox_id, name.is_none());
     }
     Ok(())
 }
 
-fn print_post_create_tip(ctx: &CliContext, sandbox_id: &str) {
+fn print_post_create_tip(ctx: &CliContext, sandbox_id: &str, is_ephemeral: bool) {
     let (proxy_url, host_header) = sandbox_proxy_base(ctx, sandbox_id);
     let host_flag = host_header
         .as_deref()
@@ -132,6 +150,9 @@ fn print_post_create_tip(ctx: &CliContext, sandbox_id: &str) {
     eprintln!("Get started:");
     eprintln!("  tl sbx ssh {sandbox_id}");
     eprintln!("  tl sbx exec {sandbox_id} -- bash -c \"echo Hello, World!\"");
+    if is_ephemeral {
+        eprintln!("  tl sbx name {sandbox_id} <name>  # make persistent (enables suspend/resume)");
+    }
 
     let tips: Vec<(&str, String)> = vec![
         (

@@ -16,17 +16,28 @@ struct ImageBuildContext {
     sdk_version: String,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn run(
-    application_file_path: &str,
-    repository: Option<&str>,
-    tag: Option<&str>,
-    image_name: Option<&str>,
-    stage: &str,
-    template: Option<&str>,
-    push: bool,
-    build_envs: &[String],
-) -> Result<()> {
+pub struct BuildImageArgs<'a> {
+    pub application_file_path: &'a str,
+    pub repository: Option<&'a str>,
+    pub tag: Option<&'a str>,
+    pub image_name: Option<&'a str>,
+    pub stage: &'a str,
+    pub template: Option<&'a str>,
+    pub push: bool,
+    pub build_envs: &'a [String],
+}
+
+pub async fn run(args: BuildImageArgs<'_>) -> Result<()> {
+    let BuildImageArgs {
+        application_file_path,
+        repository,
+        tag,
+        image_name,
+        stage,
+        template,
+        push,
+        build_envs,
+    } = args;
     let images = collect_image_contexts(application_file_path, tag, image_name).await?;
 
     if images.is_empty() {

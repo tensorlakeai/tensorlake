@@ -34,11 +34,12 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, wait: bool) -> Result<()> {
             DEFAULT_SANDBOX_WAIT_TIMEOUT,
         )
         .await?;
-        if is_tty {
-            eprintln!("Sandbox {} is running.", sandbox_id);
-        }
     }
 
-    println!("{sandbox_id}");
+    if is_tty {
+        eprintln!("Sandbox {} is running.", sandbox_id);
+    } else {
+        println!("{sandbox_id}");
+    }
     Ok(())
 }

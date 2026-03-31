@@ -39,8 +39,7 @@ pub async fn run(
     eprintln!("\u{2699}\u{fe0f}  Sandbox {} is running", sandbox_id);
 
     // 4. Execute build operations (always terminate sandbox on exit).
-    let inner_result =
-        run_build_and_register(ctx, &sandbox_id, image_def, &effective_name).await;
+    let inner_result = run_build_and_register(ctx, &sandbox_id, image_def, &effective_name).await;
 
     // Always attempt sandbox termination, even on error.
     let _ = terminate_sandbox(ctx, &sandbox_id).await;
@@ -69,10 +68,7 @@ async fn run_build_and_register(
     // 7. Register image via Platform API.
     eprintln!("\u{2699}\u{fe0f}  Registering image...");
     let image_id = register_image(ctx, image_name, &dockerfile, &snapshot_id).await?;
-    eprintln!(
-        "\u{2705} Image '{}' registered ({})",
-        image_name, image_id
-    );
+    eprintln!("\u{2705} Image '{}' registered ({})", image_name, image_id);
 
     Ok(())
 }
