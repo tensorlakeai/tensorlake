@@ -1,3 +1,5 @@
+use std::process::Stdio;
+
 use bollard::Docker;
 use bollard::query_parameters::{BuildImageOptions, PushImageOptions, TagImageOptions};
 use bytes::Bytes;
@@ -5,7 +7,8 @@ use docker_credentials_config::{DockerConfig, image_registry};
 use futures::StreamExt;
 use http_body_util::{Either, Full};
 use minijinja::Environment;
-use tensorlake_cloud_sdk::images::models::{Image, ImageBuildOperation, ImageBuildOperationType};
+use tensorlake_cloud_sdk::images::models::{Image, ImageBuildOperation};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::error::{CliError, Result};
 
@@ -16,17 +19,28 @@ struct ImageBuildContext {
     sdk_version: String,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn run(
-    application_file_path: &str,
-    repository: Option<&str>,
-    tag: Option<&str>,
-    image_name: Option<&str>,
-    stage: &str,
-    template: Option<&str>,
-    push: bool,
-    build_envs: &[String],
-) -> Result<()> {
+pub struct BuildImageArgs<'a> {
+    pub application_file_path: &'a str,
+    pub repository: Option<&'a str>,
+    pub tag: Option<&'a str>,
+    pub image_name: Option<&'a str>,
+    pub stage: &'a str,
+    pub template: Option<&'a str>,
+    pub push: bool,
+    pub build_envs: &'a [String],
+}
+
+pub async fn run(args: BuildImageArgs<'_>) -> Result<()> {
+    let BuildImageArgs {
+        application_file_path,
+        repository,
+        tag,
+        image_name,
+        stage,
+        template,
+        push,
+        build_envs,
+    } = args;
     let images = collect_image_contexts(application_file_path, tag, image_name).await?;
 
     if images.is_empty() {
@@ -149,91 +163,124 @@ fn render_template(template_path: &str, dockerfile: &str) -> Result<String> {
         })
 }
 
-/// Parse the application file using the Rust Python AST parser and return
-/// the image definitions needed to drive the Docker build.
+/// Spawn the Python wrapper and collect image definitions as NDJSON.
 async fn collect_image_contexts(
     application_file_path: &str,
     tag: Option<&str>,
     image_name: Option<&str>,
 ) -> Result<Vec<ImageBuildContext>> {
-    let path = std::path::Path::new(application_file_path);
-    if !path.is_file() {
-        return Err(CliError::usage(format!(
-            "Application file not found: {}",
-            application_file_path
-        )));
+    let mut cmd = tokio::process::Command::new("tensorlake-build-images");
+    cmd.arg(application_file_path);
+    if let Some(t) = tag {
+        cmd.args(["--tag", t]);
     }
-
-    let app_dir = path.parent().unwrap_or(std::path::Path::new("."));
-    let image_defs = crate::python_ast::collect_images(path, app_dir);
-
-    if image_defs.is_empty() {
-        return Err(CliError::usage(format!(
-            "No Image definitions found in '{}'",
-            application_file_path
-        )));
+    if let Some(n) = image_name {
+        cmd.args(["--image-name", n]);
     }
+    if std::env::var("TENSORLAKE_DEBUG").is_ok() {
+        cmd.env("TENSORLAKE_DEBUG", "1");
+    }
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
 
-    let sdk_version = env!("CARGO_PKG_VERSION");
-    let mut result = Vec::new();
-
-    for def in image_defs {
-        if let Some(filter) = image_name
-            && def.name != filter
-        {
-            continue;
+    let mut child = cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            CliError::usage(
+                "'tensorlake-build-images' not found on PATH. \
+                 Install the Python tensorlake package: pip install tensorlake",
+            )
+        } else {
+            CliError::Io(e)
         }
+    })?;
 
-        let effective_tag = tag.unwrap_or(&def.tag).to_string();
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let reader = BufReader::new(stdout);
+    let mut lines = reader.lines();
+    let mut images = Vec::new();
 
-        let operations: Vec<ImageBuildOperation> = def
-            .operations
-            .iter()
-            .filter_map(|op| {
-                let op_type = match op.op_type.as_str() {
-                    "RUN" => ImageBuildOperationType::RUN,
-                    "COPY" => ImageBuildOperationType::COPY,
-                    "ADD" => ImageBuildOperationType::ADD,
-                    "ENV" => ImageBuildOperationType::ENV,
-                    _ => return None,
-                };
-                ImageBuildOperation::builder()
-                    .operation_type(op_type)
-                    .args(op.args.clone())
-                    .options(op.options.clone())
+    while let Some(line) = lines.next_line().await.map_err(CliError::Io)? {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
+            eprintln!("{}", line);
+            continue;
+        };
+
+        match event.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+            "image" => {
+                let name = event
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let tag = event
+                    .get("tag")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("latest")
+                    .to_string();
+                let base_image = event
+                    .get("base_image")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let sdk_version = event
+                    .get("sdk_version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let operations: Vec<ImageBuildOperation> = event
+                    .get("operations")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+
+                let image = Image::builder()
+                    .name(name.clone())
+                    .base_image(base_image)
+                    .build_operations(operations)
                     .build()
-                    .ok()
-            })
-            .collect();
+                    .map_err(|e| {
+                        CliError::Other(anyhow::anyhow!("Failed to build image definition: {e}"))
+                    })?;
 
-        let image = Image::builder()
-            .name(def.name.clone())
-            .base_image(def.base_image.clone())
-            .build_operations(operations)
-            .build()
-            .map_err(|e| {
-                CliError::Other(anyhow::anyhow!("Failed to build image definition: {e}"))
-            })?;
-
-        result.push(ImageBuildContext {
-            name: def.name,
-            tag: effective_tag,
-            image,
-            sdk_version: sdk_version.to_string(),
-        });
+                images.push(ImageBuildContext {
+                    name,
+                    tag,
+                    image,
+                    sdk_version,
+                });
+            }
+            "done" => {}
+            "error" => {
+                let message = event
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error");
+                eprintln!("Error: {}", message);
+                if let Some(details) = event.get("details").and_then(|v| v.as_str())
+                    && !details.is_empty()
+                {
+                    eprintln!("{}", details);
+                }
+                if let Some(tb) = event.get("traceback").and_then(|v| v.as_str())
+                    && !tb.is_empty()
+                {
+                    eprintln!("\nPython traceback:\n{}", tb);
+                }
+                let _ = child.wait().await;
+                return Err(CliError::ExitCode(1));
+            }
+            _ => {
+                eprintln!("{}", line);
+            }
+        }
     }
 
-    if result.is_empty() {
-        return Err(CliError::usage(match image_name {
-            Some(n) => format!(
-                "No image named '{}' found in '{}'",
-                n, application_file_path
-            ),
-            None => format!("No images found in '{}'", application_file_path),
-        }));
+    let status = child.wait().await.map_err(CliError::Io)?;
+    if !status.success() {
+        return Err(CliError::ExitCode(status.code().unwrap_or(1)));
     }
 
-    Ok(result)
+    Ok(images)
 }
 
 async fn build_image(
