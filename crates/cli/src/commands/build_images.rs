@@ -19,6 +19,7 @@ struct ImageBuildContext {
     sdk_version: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     application_file_path: &str,
     repository: Option<&str>,

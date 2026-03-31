@@ -287,6 +287,26 @@ enum SbxCommands {
         /// Return immediately after creation instead of waiting for the sandbox to be running
         #[arg(long)]
         no_wait: bool,
+
+        /// Expose a port via the sandbox proxy (can be repeated)
+        #[arg(long = "expose", value_parser = parse_user_port)]
+        ports: Vec<u16>,
+
+        /// Allow unauthenticated proxy access to this sandbox
+        #[arg(long, hide = true)]
+        allow_unauthenticated_access: bool,
+
+        /// Block all outbound internet access
+        #[arg(long)]
+        no_internet: bool,
+
+        /// Allow outbound traffic to this IP or CIDR (can be repeated)
+        #[arg(long = "network-allow")]
+        network_allow: Vec<String>,
+
+        /// Deny outbound traffic to this IP or CIDR (can be repeated)
+        #[arg(long = "network-deny")]
+        network_deny: Vec<String>,
     },
 
     /// Suspend a running sandbox
@@ -400,6 +420,26 @@ enum SbxCommands {
         /// Keep sandbox after command exits
         #[arg(long)]
         keep: bool,
+
+        /// Expose a port via the sandbox proxy (can be repeated)
+        #[arg(long = "expose", value_parser = parse_user_port)]
+        ports: Vec<u16>,
+
+        /// Allow unauthenticated proxy access to this sandbox
+        #[arg(long, hide = true)]
+        allow_unauthenticated_access: bool,
+
+        /// Block all outbound internet access
+        #[arg(long)]
+        no_internet: bool,
+
+        /// Allow outbound traffic to this IP or CIDR (can be repeated)
+        #[arg(long = "network-allow")]
+        network_allow: Vec<String>,
+
+        /// Deny outbound traffic to this IP or CIDR (can be repeated)
+        #[arg(long = "network-deny")]
+        network_deny: Vec<String>,
     },
 
     /// Interactive shell in a sandbox
@@ -627,6 +667,11 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     snapshot,
                     image,
                     no_wait,
+                    ports,
+                    allow_unauthenticated_access,
+                    no_internet,
+                    network_allow,
+                    network_deny,
                 } => {
                     commands::sbx::create::run(
                         ctx,
@@ -637,6 +682,11 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         snapshot.as_deref(),
                         image.as_deref(),
                         !no_wait,
+                        &ports,
+                        allow_unauthenticated_access,
+                        no_internet,
+                        &network_allow,
+                        &network_deny,
                     )
                     .await
                 }
@@ -706,6 +756,11 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     workdir,
                     env,
                     keep,
+                    ports,
+                    allow_unauthenticated_access,
+                    no_internet,
+                    network_allow,
+                    network_deny,
                 } => {
                     commands::sbx::run::run(
                         ctx,
@@ -718,6 +773,11 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         workdir.as_deref(),
                         &env,
                         keep,
+                        &ports,
+                        allow_unauthenticated_access,
+                        no_internet,
+                        &network_allow,
+                        &network_deny,
                     )
                     .await
                 }

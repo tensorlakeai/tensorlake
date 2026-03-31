@@ -14,6 +14,11 @@ pub async fn run(
     workdir: Option<&str>,
     env: &[String],
     keep: bool,
+    ports: &[u16],
+    allow_unauthenticated_access: bool,
+    no_internet: bool,
+    network_allow: &[String],
+    network_deny: &[String],
 ) -> Result<()> {
     let client = ctx.client()?;
 
@@ -31,6 +36,26 @@ pub async fn run(
     });
     if let Some(img) = image {
         create_body["image"] = serde_json::Value::String(img.to_string());
+    }
+    if !ports.is_empty() {
+        create_body["exposed_ports"] = serde_json::json!(ports);
+    }
+    if allow_unauthenticated_access {
+        create_body["allow_unauthenticated_access"] = serde_json::Value::Bool(true);
+    }
+    let has_network = no_internet || !network_allow.is_empty() || !network_deny.is_empty();
+    if has_network {
+        let mut network = serde_json::json!({});
+        if no_internet {
+            network["allow_internet_access"] = serde_json::Value::Bool(false);
+        }
+        if !network_allow.is_empty() {
+            network["allow_out"] = serde_json::json!(network_allow);
+        }
+        if !network_deny.is_empty() {
+            network["deny_out"] = serde_json::json!(network_deny);
+        }
+        create_body["network"] = network;
     }
 
     let create_resp = client

@@ -8,7 +8,10 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, wait: bool) -> Result<()> {
     let client = ctx.client()?;
     let url = sandbox_endpoint(ctx, &format!("sandboxes/{sandbox_id}/suspend"));
 
-    eprintln!("Suspending sandbox {}...", sandbox_id);
+    let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    if is_tty {
+        eprintln!("Suspending sandbox {}...", sandbox_id);
+    }
 
     let resp = client.post(&url).send().await.map_err(CliError::Http)?;
 
@@ -31,6 +34,9 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, wait: bool) -> Result<()> {
             DEFAULT_SANDBOX_WAIT_TIMEOUT,
         )
         .await?;
+        if is_tty {
+            eprintln!("Sandbox {} suspended.", sandbox_id);
+        }
     }
 
     println!("{sandbox_id}");

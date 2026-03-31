@@ -58,13 +58,20 @@ pub async fn wait_for_sandbox_status(
     timeout: Duration,
 ) -> Result<String> {
     let client = ctx.client()?;
+    let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
 
-    let spinner = new_spinner(&format!("{}...", waiting_message));
+    let spinner = if is_tty {
+        Some(new_spinner(&format!("{}...", waiting_message)))
+    } else {
+        None
+    };
 
     let deadline = Instant::now() + timeout;
     loop {
         if Instant::now() > deadline {
-            spinner.finish_with_message(format!("{} timed out", waiting_message));
+            if let Some(ref s) = spinner {
+                s.finish_and_clear();
+            }
             return Err(CliError::Other(anyhow::anyhow!(
                 "Sandbox {} did not reach '{}' within {}s",
                 sandbox_id,
@@ -88,12 +95,16 @@ pub async fn wait_for_sandbox_status(
                 .to_string();
 
             if current_status == target_status {
-                spinner.finish_with_message(format!("{} {}", waiting_message, current_status));
+                if let Some(ref s) = spinner {
+                    s.finish_and_clear();
+                }
                 return Ok(current_status);
             }
 
             if current_status == "terminated" && target_status != "terminated" {
-                spinner.finish_with_message(format!("{} terminated", waiting_message));
+                if let Some(ref s) = spinner {
+                    s.finish_and_clear();
+                }
                 return Err(CliError::Other(anyhow::anyhow!(
                     "Sandbox terminated while waiting to reach '{}'",
                     target_status
