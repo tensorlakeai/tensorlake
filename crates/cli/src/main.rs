@@ -448,6 +448,15 @@ enum SbxCommands {
         network_deny: Vec<String>,
     },
 
+    /// Set or update the name of a sandbox
+    Name {
+        /// Sandbox ID or current name
+        sandbox_id: String,
+
+        /// New name to assign (must match [a-z][a-z0-9-]*, max 63 chars)
+        new_name: String,
+    },
+
     /// Interactive shell in a sandbox
     Ssh {
         /// Sandbox ID or name
@@ -723,6 +732,10 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     )
                     .await
                 }
+                SbxCommands::Name {
+                    sandbox_id,
+                    new_name,
+                } => commands::sbx::name::run(ctx, &sandbox_id, &new_name).await,
                 SbxCommands::Suspend {
                     sandbox_id,
                     no_wait,
