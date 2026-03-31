@@ -2,19 +2,27 @@ use crate::auth::context::CliContext;
 use crate::commands::sbx::sandbox_endpoint;
 use crate::error::{CliError, Result};
 
-pub async fn create_snapshot(ctx: &CliContext, sandbox_id: &str, timeout: f64) -> Result<String> {
+pub async fn create_snapshot(
+    ctx: &CliContext,
+    sandbox_id: &str,
+    timeout: f64,
+    content_mode: Option<&str>,
+) -> Result<String> {
     let client = ctx.client()?;
 
     eprintln!("Snapshotting sandbox {}...", sandbox_id);
 
-    let resp = client
-        .post(sandbox_endpoint(
-            ctx,
-            &format!("sandboxes/{}/snapshot", sandbox_id),
-        ))
-        .send()
-        .await
-        .map_err(CliError::Http)?;
+    let url = sandbox_endpoint(ctx, &format!("sandboxes/{}/snapshot", sandbox_id));
+    let request = client.post(url);
+    let resp = if let Some(mode) = content_mode {
+        request
+            .json(&serde_json::json!({"snapshot_content_mode": mode}))
+            .send()
+            .await
+            .map_err(CliError::Http)?
+    } else {
+        request.send().await.map_err(CliError::Http)?
+    };
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -96,7 +104,7 @@ pub async fn create_snapshot(ctx: &CliContext, sandbox_id: &str, timeout: f64) -
 }
 
 pub async fn run(ctx: &CliContext, sandbox_id: &str, timeout: f64) -> Result<()> {
-    let snapshot_id = create_snapshot(ctx, sandbox_id, timeout).await?;
+    let snapshot_id = create_snapshot(ctx, sandbox_id, timeout, None).await?;
     println!("{}", snapshot_id);
     Ok(())
 }

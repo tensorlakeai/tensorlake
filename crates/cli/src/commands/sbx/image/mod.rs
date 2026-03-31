@@ -1,0 +1,266 @@
+pub mod create;
+pub mod describe;
+pub mod ls;
+
+use crate::auth::context::CliContext;
+use crate::error::{CliError, Result};
+
+/// Build the sandbox-templates API base URL for the current org/project.
+pub fn templates_base_url(ctx: &CliContext) -> Result<(String, String, String)> {
+    let org_id = ctx
+        .effective_organization_id()
+        .ok_or_else(|| CliError::auth("Organization ID is required for --image"))?;
+    let proj_id = ctx
+        .effective_project_id()
+        .ok_or_else(|| CliError::auth("Project ID is required for --image"))?;
+    let base = format!(
+        "{}/platform/v1/organizations/{}/projects/{}/sandbox-templates",
+        ctx.api_url.trim_end_matches('/'),
+        org_id,
+        proj_id
+    );
+    Ok((base, org_id, proj_id))
+}
+
+/// Resolve an image name or ID to its snapshot ID.
+/// Tries direct GET first, falls back to paginated list.
+pub async fn resolve_image(ctx: &CliContext, image_name: &str) -> Result<String> {
+    let (base_url, _, _) = templates_base_url(ctx)?;
+    let client = ctx.client()?;
+    let direct_url = format!("{}/{}", base_url, image_name);
+
+    if ctx.debug {
+        eprintln!("DEBUG resolve_image: trying direct lookup GET {}", direct_url);
+    }
+
+    let direct_resp = client.get(&direct_url).send().await.map_err(CliError::Http)?;
+    if direct_resp.status().is_success() {
+        let result: serde_json::Value = direct_resp.json().await.map_err(CliError::Http)?;
+        if let Some(snapshot_id) = snapshot_id_from_item(&result, image_name)? {
+            if ctx.debug {
+                eprintln!("DEBUG resolve_image: direct lookup succeeded");
+            }
+            eprintln!("Resolved image '{}' -> snapshot {}", image_name, snapshot_id);
+            return Ok(snapshot_id);
+        }
+        return Err(CliError::Other(anyhow::anyhow!(
+            "image '{}' has no snapshotId",
+            image_name
+        )));
+    }
+    if direct_resp.status().as_u16() != 404 {
+        let status = direct_resp.status();
+        let body = direct_resp.text().await.unwrap_or_default();
+        return Err(CliError::Other(anyhow::anyhow!(
+            "failed to fetch image '{}' (HTTP {}): {}",
+            image_name,
+            status,
+            body
+        )));
+    }
+
+    if ctx.debug {
+        eprintln!(
+            "DEBUG resolve_image: direct lookup returned 404, falling back to paginated list"
+        );
+    }
+
+    let snapshot_id = find_image_in_paginated_list(ctx, &client, &base_url, image_name)
+        .await?
+        .ok_or_else(|| CliError::Other(anyhow::anyhow!("image '{}' not found", image_name)))?;
+
+    if ctx.debug {
+        eprintln!("DEBUG resolve_image: paginated list lookup succeeded");
+    }
+    eprintln!("Resolved image '{}' -> snapshot {}", image_name, snapshot_id);
+    Ok(snapshot_id)
+}
+
+/// Page through the list, returning just the snapshot ID.
+pub async fn find_image_in_paginated_list(
+    ctx: &CliContext,
+    client: &reqwest::Client,
+    base_url: &str,
+    image_ref: &str,
+) -> Result<Option<String>> {
+    let item = find_image_item_in_paginated_list(ctx, client, base_url, image_ref).await?;
+    match item {
+        Some(ref item) => snapshot_id_from_item(item, image_ref),
+        None => Ok(None),
+    }
+}
+
+/// Page through the list, returning the full JSON item if found.
+pub async fn find_image_item_in_paginated_list(
+    ctx: &CliContext,
+    client: &reqwest::Client,
+    base_url: &str,
+    image_ref: &str,
+) -> Result<Option<serde_json::Value>> {
+    let mut url = format!("{}?pageSize=100", base_url);
+
+    let mut page = 0u32;
+    loop {
+        page += 1;
+        if ctx.debug {
+            eprintln!(
+                "DEBUG find_image_in_paginated_list: page {} GET {}",
+                page, url
+            );
+        }
+
+        let resp = client.get(&url).send().await.map_err(CliError::Http)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(CliError::Other(anyhow::anyhow!(
+                "failed to list images (HTTP {}): {}",
+                status,
+                body
+            )));
+        }
+
+        let result: serde_json::Value = resp.json().await.map_err(CliError::Http)?;
+
+        if let Some(item) = find_image_item_in_page(&result, image_ref) {
+            return Ok(Some(item));
+        }
+
+        let next = result
+            .get("pagination")
+            .and_then(|v| v.get("next"))
+            .and_then(|v| v.as_str());
+        let Some(next) = next else {
+            break;
+        };
+
+        url = absolute_api_url(&ctx.api_url, next);
+    }
+
+    Ok(None)
+}
+
+/// Collect all items across all pages.
+pub async fn list_all_images(
+    ctx: &CliContext,
+    client: &reqwest::Client,
+    base_url: &str,
+) -> Result<Vec<serde_json::Value>> {
+    let mut url = format!("{}?pageSize=100", base_url);
+    let mut all_items: Vec<serde_json::Value> = Vec::new();
+
+    loop {
+        let resp = client.get(&url).send().await.map_err(CliError::Http)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(CliError::Other(anyhow::anyhow!(
+                "failed to list images (HTTP {}): {}",
+                status,
+                body
+            )));
+        }
+
+        let result: serde_json::Value = resp.json().await.map_err(CliError::Http)?;
+
+        if let Some(items) = result.get("items").and_then(|v| v.as_array()) {
+            all_items.extend(items.iter().cloned());
+        }
+
+        let next = result
+            .get("pagination")
+            .and_then(|v| v.get("next"))
+            .and_then(|v| v.as_str());
+        let Some(next) = next else {
+            break;
+        };
+
+        url = absolute_api_url(&ctx.api_url, next);
+    }
+
+    Ok(all_items)
+}
+
+fn find_image_item_in_page(
+    result: &serde_json::Value,
+    image_ref: &str,
+) -> Option<serde_json::Value> {
+    let items = result.get("items").and_then(|v| v.as_array())?;
+    for item in items {
+        if item_matches_image_ref(item, image_ref) {
+            return Some(item.clone());
+        }
+    }
+    None
+}
+
+pub fn item_matches_image_ref(item: &serde_json::Value, image_ref: &str) -> bool {
+    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    id == image_ref || name == image_ref
+}
+
+pub fn snapshot_id_from_item(
+    item: &serde_json::Value,
+    image_ref: &str,
+) -> Result<Option<String>> {
+    let snapshot_id = item.get("snapshotId").and_then(|v| v.as_str());
+    match snapshot_id {
+        Some(snapshot_id) => Ok(Some(snapshot_id.to_string())),
+        None => Err(CliError::Other(anyhow::anyhow!(
+            "image '{}' has no snapshotId",
+            image_ref
+        ))),
+    }
+}
+
+pub fn absolute_api_url(api_url: &str, next: &str) -> String {
+    if next.starts_with("http://") || next.starts_with("https://") {
+        next.to_string()
+    } else {
+        format!("{}{}", api_url.trim_end_matches('/'), next)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{absolute_api_url, item_matches_image_ref, snapshot_id_from_item};
+    use serde_json::json;
+
+    #[test]
+    fn item_matches_image_ref_matches_name_or_id() {
+        let item = json!({
+            "id": "sandbox_template_123",
+            "name": "k3s-base",
+            "snapshotId": "snap-1"
+        });
+
+        assert!(item_matches_image_ref(&item, "sandbox_template_123"));
+        assert!(item_matches_image_ref(&item, "k3s-base"));
+        assert!(!item_matches_image_ref(&item, "other"));
+    }
+
+    #[test]
+    fn snapshot_id_from_item_reads_single_template_response() {
+        let item = json!({
+            "id": "sandbox_template_123",
+            "name": "k3s-base",
+            "snapshotId": "snap-1"
+        });
+
+        let snapshot_id = snapshot_id_from_item(&item, "sandbox_template_123")
+            .expect("single item lookup should succeed");
+        assert_eq!(snapshot_id.as_deref(), Some("snap-1"));
+    }
+
+    #[test]
+    fn absolute_api_url_resolves_relative_next_link() {
+        let next = "/platform/v1/organizations/org/projects/proj/sandbox-templates?pageSize=100&next=abc";
+        assert_eq!(
+            absolute_api_url("https://api.tensorlake.dev", next),
+            format!("https://api.tensorlake.dev{}", next)
+        );
+    }
+}
