@@ -48,7 +48,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         request_json = json.loads(fake.create_request_json)
         self.assertEqual(request_json["image"], "python:3.11")
         self.assertEqual(request_json["resources"]["cpus"], 2.0)
-        self.assertEqual(request_json["resources"]["memory_mb"], 2048)
+        self.assertEqual(request_json["resources"]["memory_mb"], 1024)
         self.assertEqual(request_json["resources"]["ephemeral_disk_mb"], 1024)
 
     def test_create_from_snapshot_omits_resources_without_overrides(self):

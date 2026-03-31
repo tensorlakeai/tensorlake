@@ -247,7 +247,7 @@ class SandboxClient:
             image: Container image to use
             cpus: Number of CPUs to allocate. Defaults to 1.0 for non-snapshot
                 creates; omitted for snapshot restores unless explicitly set.
-            memory_mb: Memory in megabytes. Defaults to 2048 for non-snapshot
+            memory_mb: Memory in megabytes. Defaults to 1024 for non-snapshot
                 creates; omitted for snapshot restores unless explicitly set.
             ephemeral_disk_mb: Ephemeral disk space in megabytes. Defaults to
                 1024 for non-snapshot creates; omitted for snapshot restores
@@ -516,7 +516,7 @@ class SandboxClient:
         self,
         image: str | None = None,
         cpus: float = 1.0,
-        memory_mb: int = 2048,
+        memory_mb: int = 1024,
         ephemeral_disk_mb: int = 1024,
         secret_names: list[str] | None = None,
         timeout_secs: int = 0,
@@ -608,7 +608,7 @@ class SandboxClient:
         pool_id: str,
         image: str,
         cpus: float = 1.0,
-        memory_mb: int = 2048,
+        memory_mb: int = 1024,
         ephemeral_disk_mb: int = 1024,
         secret_names: list[str] | None = None,
         timeout_secs: int = 0,
@@ -737,7 +737,7 @@ class SandboxClient:
             image: Container image to use (optional if using pool)
             cpus: Number of CPUs to allocate. Defaults to 1.0 for non-snapshot
                 creates; omitted for snapshot restores unless explicitly set.
-            memory_mb: Memory in megabytes. Defaults to 2048 for non-snapshot
+            memory_mb: Memory in megabytes. Defaults to 1024 for non-snapshot
                 creates; omitted for snapshot restores unless explicitly set.
             ephemeral_disk_mb: Ephemeral disk space in megabytes. Defaults to
                 1024 for non-snapshot creates; omitted for snapshot restores
@@ -816,7 +816,7 @@ class SandboxClient:
         if snapshot_id is None:
             return CreateSandboxResourcesRequest(
                 cpus=1.0 if cpus is None else cpus,
-                memory_mb=2048 if memory_mb is None else memory_mb,
+                memory_mb=1024 if memory_mb is None else memory_mb,
                 ephemeral_disk_mb=(
                     1024 if ephemeral_disk_mb is None else ephemeral_disk_mb
                 ),

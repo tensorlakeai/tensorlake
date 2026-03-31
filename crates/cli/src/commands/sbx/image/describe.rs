@@ -58,26 +58,41 @@ fn print_image_details(item: &serde_json::Value) {
     println!("ID:          {}", id);
     println!("Snapshot ID: {}", snapshot_id);
 
-    // Print any additional fields we haven't explicitly handled
+    // Print additional fields, skipping the ones already shown above.
+    // Dockerfile gets special multi-line formatting.
     if let Some(obj) = item.as_object() {
         for (key, value) in obj {
             match key.as_str() {
                 "name" | "id" | "snapshotId" => {}
+                "dockerfile" => {
+                    if let Some(df) = value.as_str() {
+                        print_dockerfile(df);
+                    }
+                }
                 _ => {
                     let display = match value {
                         serde_json::Value::String(s) => s.clone(),
                         other => other.to_string(),
                     };
-                    // Capitalize first letter of key for display
-                    let label: String = key
-                        .chars()
-                        .next()
-                        .map(|c| c.to_uppercase().to_string())
-                        .unwrap_or_default()
-                        + &key[1..];
-                    println!("{:<12} {}", format!("{}:", label), display);
+                    let label = capitalize_key(key);
+                    println!("{:<13}{}", format!("{}:", label), display);
                 }
             }
         }
+    }
+}
+
+fn print_dockerfile(dockerfile: &str) {
+    println!("Dockerfile:");
+    for line in dockerfile.lines() {
+        println!("  {}", line);
+    }
+}
+
+fn capitalize_key(key: &str) -> String {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
     }
 }
