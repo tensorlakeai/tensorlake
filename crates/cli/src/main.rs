@@ -463,16 +463,16 @@ enum SbxCommands {
 enum ImageCommands {
     /// Register a sandbox image from a Python file definition
     Create {
-        /// Path to the application .py file
-        application_file_path: String,
+        /// Path to the image Python file
+        image_file_path: String,
 
         /// Name of the image to use (required if multiple images exist)
         #[arg(short = 'i', long)]
         image_name: Option<String>,
 
-        /// Image name to register (defaults to the image name)
+        /// Registered image name (defaults to the image name from the file)
         #[arg(short = 'n', long)]
-        template_name: Option<String>,
+        registered_name: Option<String>,
     },
 
     /// List all sandbox images
@@ -811,15 +811,15 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 }
                 SbxCommands::Image(image_cmd) => match image_cmd {
                     ImageCommands::Create {
-                        application_file_path,
+                        image_file_path,
                         image_name,
-                        template_name,
+                        registered_name,
                     } => {
                         commands::sbx::image::create::run(
                             ctx,
-                            &application_file_path,
+                            &image_file_path,
                             image_name.as_deref(),
-                            template_name.as_deref(),
+                            registered_name.as_deref(),
                         )
                         .await
                     }

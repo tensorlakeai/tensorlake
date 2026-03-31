@@ -11,22 +11,22 @@ use crate::python_ast::{self, ImageDef, OpDef};
 
 pub async fn run(
     ctx: &CliContext,
-    application_file_path: &str,
+    image_file_path: &str,
     image_name: Option<&str>,
-    template_name: Option<&str>,
+    registered_name: Option<&str>,
 ) -> Result<()> {
     // 1. Parse the Python file for Image definitions.
-    let abs_path = tokio::fs::canonicalize(application_file_path)
+    let abs_path = tokio::fs::canonicalize(image_file_path)
         .await
-        .map_err(|e| CliError::usage(format!("Cannot read '{}': {}", application_file_path, e)))?;
+        .map_err(|e| CliError::usage(format!("Cannot read '{}': {}", image_file_path, e)))?;
     let app_dir = abs_path.parent().unwrap_or(&abs_path).to_path_buf();
 
-    eprintln!("\u{2699}\u{fe0f}  Loading {}...", application_file_path);
+    eprintln!("\u{2699}\u{fe0f}  Loading {}...", image_file_path);
     let image_defs = python_ast::collect_images(&abs_path, &app_dir);
 
     // 2. Select the image.
     let image_def = select_image(&image_defs, image_name)?;
-    let effective_template_name = template_name.unwrap_or(&image_def.name).to_string();
+    let effective_name = registered_name.unwrap_or(&image_def.name).to_string();
     eprintln!("\u{2699}\u{fe0f}  Selected image: {}", image_def.name);
 
     // 3. Create sandbox.
@@ -40,7 +40,7 @@ pub async fn run(
 
     // 4. Execute build operations (always terminate sandbox on exit).
     let inner_result =
-        run_build_and_register(ctx, &sandbox_id, image_def, &effective_template_name).await;
+        run_build_and_register(ctx, &sandbox_id, image_def, &effective_name).await;
 
     // Always attempt sandbox termination, even on error.
     let _ = terminate_sandbox(ctx, &sandbox_id).await;
@@ -52,7 +52,7 @@ async fn run_build_and_register(
     ctx: &CliContext,
     sandbox_id: &str,
     image_def: &ImageDef,
-    template_name: &str,
+    image_name: &str,
 ) -> Result<()> {
     execute_operations(ctx, sandbox_id, image_def).await?;
 
@@ -66,12 +66,12 @@ async fn run_build_and_register(
     let image = build_cloud_sdk_image(image_def)?;
     let dockerfile = image.dockerfile_content(sdk_version, None);
 
-    // 7. Register template via Platform API.
-    eprintln!("\u{2699}\u{fe0f}  Registering template...");
-    let template_id = register_template(ctx, template_name, &dockerfile, &snapshot_id).await?;
+    // 7. Register image via Platform API.
+    eprintln!("\u{2699}\u{fe0f}  Registering image...");
+    let image_id = register_image(ctx, image_name, &dockerfile, &snapshot_id).await?;
     eprintln!(
-        "\u{2705} Template '{}' registered ({})",
-        template_name, template_id
+        "\u{2705} Image '{}' registered ({})",
+        image_name, image_id
     );
 
     Ok(())
@@ -241,8 +241,8 @@ async fn upload_bytes(
     Ok(())
 }
 
-/// Register the template via the Platform API.
-async fn register_template(
+/// Register the image via the Platform API.
+async fn register_image(
     ctx: &CliContext,
     name: &str,
     dockerfile: &str,
@@ -268,20 +268,20 @@ async fn register_template(
         let status = resp.status();
         let msg = resp.text().await.unwrap_or_default();
         return Err(CliError::Other(anyhow::anyhow!(
-            "Template registration failed (HTTP {}): {}",
+            "Image registration failed (HTTP {}): {}",
             status,
             msg
         )));
     }
 
     let result: serde_json::Value = resp.json().await.map_err(CliError::Http)?;
-    let template_id = result
+    let image_id = result
         .get("id")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
 
-    Ok(template_id)
+    Ok(image_id)
 }
 
 /// Terminate the sandbox, ignoring errors (best-effort cleanup).
