@@ -8,6 +8,16 @@ pub struct ContainerResourcesInfo {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CreateSandboxResourcesRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ephemeral_disk_mb: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NetworkConfig {
     #[serde(default = "default_allow_internet_access")]
     pub allow_internet_access: bool,
@@ -25,7 +35,8 @@ fn default_allow_internet_access() -> bool {
 pub struct CreateSandboxRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
-    pub resources: ContainerResourcesInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<CreateSandboxResourcesRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret_names: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]

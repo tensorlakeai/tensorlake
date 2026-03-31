@@ -19,6 +19,7 @@ from .models import (
     ContainerResourcesInfo,
     CreateSandboxPoolResponse,
     CreateSandboxRequest,
+    CreateSandboxResourcesRequest,
     CreateSandboxResponse,
     CreateSnapshotResponse,
     ListSandboxesResponse,
@@ -229,9 +230,9 @@ class SandboxClient:
     def create(
         self,
         image: str | None = None,
-        cpus: float = 1.0,
-        memory_mb: int = 2048,
-        ephemeral_disk_mb: int = 1024,
+        cpus: float | None = None,
+        memory_mb: int | None = None,
+        ephemeral_disk_mb: int | None = None,
         secret_names: list[str] | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
@@ -244,9 +245,13 @@ class SandboxClient:
 
         Args:
             image: Container image to use
-            cpus: Number of CPUs to allocate
-            memory_mb: Memory in megabytes
-            ephemeral_disk_mb: Ephemeral disk space in megabytes
+            cpus: Number of CPUs to allocate. Defaults to 1.0 for non-snapshot
+                creates; omitted for snapshot restores unless explicitly set.
+            memory_mb: Memory in megabytes. Defaults to 2048 for non-snapshot
+                creates; omitted for snapshot restores unless explicitly set.
+            ephemeral_disk_mb: Ephemeral disk space in megabytes. Defaults to
+                1024 for non-snapshot creates; omitted for snapshot restores
+                unless explicitly set.
             secret_names: List of secret names to inject
             timeout_secs: Timeout in seconds (optional)
             entrypoint: Custom entrypoint command (optional)
@@ -278,13 +283,16 @@ class SandboxClient:
                 deny_out=deny_out or [],
             )
 
+        resources = self._build_create_resources(
+            cpus=cpus,
+            memory_mb=memory_mb,
+            ephemeral_disk_mb=ephemeral_disk_mb,
+            snapshot_id=snapshot_id,
+        )
+
         request_model = CreateSandboxRequest(
             image=image,
-            resources=ContainerResourcesInfo(
-                cpus=cpus,
-                memory_mb=memory_mb,
-                ephemeral_disk_mb=ephemeral_disk_mb,
-            ),
+            resources=resources,
             secret_names=secret_names,
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
@@ -705,9 +713,9 @@ class SandboxClient:
     def create_and_connect(
         self,
         image: str | None = None,
-        cpus: float = 1.0,
-        memory_mb: int = 2048,
-        ephemeral_disk_mb: int = 1024,
+        cpus: float | None = None,
+        memory_mb: int | None = None,
+        ephemeral_disk_mb: int | None = None,
         secret_names: list[str] | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
@@ -727,9 +735,13 @@ class SandboxClient:
 
         Args:
             image: Container image to use (optional if using pool)
-            cpus: Number of CPUs to allocate
-            memory_mb: Memory in megabytes
-            ephemeral_disk_mb: Ephemeral disk space in megabytes
+            cpus: Number of CPUs to allocate. Defaults to 1.0 for non-snapshot
+                creates; omitted for snapshot restores unless explicitly set.
+            memory_mb: Memory in megabytes. Defaults to 2048 for non-snapshot
+                creates; omitted for snapshot restores unless explicitly set.
+            ephemeral_disk_mb: Ephemeral disk space in megabytes. Defaults to
+                1024 for non-snapshot creates; omitted for snapshot restores
+                unless explicitly set.
             secret_names: List of secret names to inject
             timeout_secs: Timeout in seconds (optional)
             entrypoint: Custom entrypoint command (optional)
@@ -792,4 +804,29 @@ class SandboxClient:
             pass
         raise SandboxError(
             f"Sandbox {result.sandbox_id} did not start within {startup_timeout}s"
+        )
+
+    @staticmethod
+    def _build_create_resources(
+        cpus: float | None,
+        memory_mb: int | None,
+        ephemeral_disk_mb: int | None,
+        snapshot_id: str | None,
+    ) -> CreateSandboxResourcesRequest | None:
+        if snapshot_id is None:
+            return CreateSandboxResourcesRequest(
+                cpus=1.0 if cpus is None else cpus,
+                memory_mb=2048 if memory_mb is None else memory_mb,
+                ephemeral_disk_mb=(
+                    1024 if ephemeral_disk_mb is None else ephemeral_disk_mb
+                ),
+            )
+
+        if cpus is None and memory_mb is None and ephemeral_disk_mb is None:
+            return None
+
+        return CreateSandboxResourcesRequest(
+            cpus=cpus,
+            memory_mb=memory_mb,
+            ephemeral_disk_mb=ephemeral_disk_mb,
         )

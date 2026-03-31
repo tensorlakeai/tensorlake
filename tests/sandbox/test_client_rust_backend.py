@@ -49,6 +49,31 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertEqual(request_json["image"], "python:3.11")
         self.assertEqual(request_json["resources"]["cpus"], 2.0)
         self.assertEqual(request_json["resources"]["memory_mb"], 2048)
+        self.assertEqual(request_json["resources"]["ephemeral_disk_mb"], 1024)
+
+    def test_create_from_snapshot_omits_resources_without_overrides(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FakeRustClient()
+        client._rust_client = fake
+
+        response = client.create(snapshot_id="snap-1")
+
+        self.assertEqual(response.sandbox_id, "sbx-1")
+        request_json = json.loads(fake.create_request_json)
+        self.assertEqual(request_json["snapshot_id"], "snap-1")
+        self.assertNotIn("resources", request_json)
+
+    def test_create_from_snapshot_sends_only_explicit_resource_overrides(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FakeRustClient()
+        client._rust_client = fake
+
+        response = client.create(snapshot_id="snap-1", cpus=2.5)
+
+        self.assertEqual(response.sandbox_id, "sbx-1")
+        request_json = json.loads(fake.create_request_json)
+        self.assertEqual(request_json["snapshot_id"], "snap-1")
+        self.assertEqual(request_json["resources"], {"cpus": 2.5})
 
     def test_list_uses_rust_backend(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")

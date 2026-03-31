@@ -261,12 +261,12 @@ enum SbxCommands {
     /// Create a new sandbox
     New {
         /// Number of CPUs
-        #[arg(long, default_value = "1.0")]
-        cpus: f64,
+        #[arg(long)]
+        cpus: Option<f64>,
 
         /// Memory in MB
-        #[arg(long, default_value = "1024")]
-        memory: i64,
+        #[arg(long)]
+        memory: Option<i64>,
 
         /// Timeout in seconds
         #[arg(long)]
