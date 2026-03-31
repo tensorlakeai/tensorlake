@@ -1,3 +1,9 @@
+use std::io::ErrorKind;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
 use anyhow::{Context, anyhow};
 use futures::{SinkExt, StreamExt};
 use reqwest::header::{AUTHORIZATION, HOST, HeaderMap, HeaderName, HeaderValue};
@@ -153,43 +159,84 @@ async fn relay_connection(
     let (mut tcp_read, mut tcp_write) = stream.into_split();
     let (mut ws_write, mut ws_read) = ws_stream.split();
     let (ws_sender, mut ws_receiver) = mpsc::channel::<Message>(32);
+    let close_started = Arc::new(AtomicBool::new(false));
 
+    let writer_close_started = close_started.clone();
     let writer = tokio::spawn(async move {
         while let Some(message) = ws_receiver.recv().await {
-            ws_write.send(message).await?;
+            if matches!(message, Message::Close(_)) {
+                writer_close_started.store(true, Ordering::Relaxed);
+            }
+            match ws_write.send(message).await {
+                Ok(()) => {}
+                Err(error)
+                    if is_expected_tunnel_shutdown_error(
+                        &error,
+                        writer_close_started.load(Ordering::Relaxed),
+                    ) =>
+                {
+                    break;
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
-        let _ = ws_write.close().await;
+
+        if let Err(error) = ws_write.close().await
+            && !is_expected_tunnel_shutdown_error(
+                &error,
+                writer_close_started.load(Ordering::Relaxed),
+            )
+        {
+            return Err(error.into());
+        }
+
         Ok::<(), anyhow::Error>(())
     });
 
     let tcp_sender = ws_sender.clone();
+    let tcp_close_started = close_started.clone();
     let mut tcp_to_ws = tokio::spawn(async move {
         let mut buffer = [0u8; TUNNEL_BUFFER_SIZE];
         loop {
             let read = tcp_read.read(&mut buffer).await?;
             if read == 0 {
+                tcp_close_started.store(true, Ordering::Relaxed);
                 let _ = tcp_sender.send(Message::Close(None)).await;
                 return Ok::<(), anyhow::Error>(());
             }
 
-            tcp_sender
+            if tcp_sender
                 .send(Message::Binary(buffer[..read].to_vec().into()))
                 .await
-                .map_err(|_| anyhow!("websocket writer closed"))?;
+                .is_err()
+            {
+                if tcp_close_started.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                return Err(anyhow!("websocket writer closed"));
+            }
         }
     });
 
     let ws_sender_for_control = ws_sender.clone();
+    let ws_close_started = close_started.clone();
     let mut ws_to_tcp = tokio::spawn(async move {
         while let Some(message) = ws_read.next().await {
-            match message? {
-                Message::Binary(data) => {
-                    tcp_write.write_all(data.as_ref()).await?;
+            match message {
+                Ok(Message::Binary(data)) => {
+                    if let Err(error) = tcp_write.write_all(data.as_ref()).await {
+                        if ws_close_started.load(Ordering::Relaxed)
+                            && is_expected_tcp_shutdown_error(&error)
+                        {
+                            break;
+                        }
+                        return Err(error.into());
+                    }
                 }
-                Message::Text(_) => {
+                Ok(Message::Text(_)) => {
                     return Err(anyhow!("received unexpected text frame from tunnel"));
                 }
-                Message::Ping(payload) => {
+                Ok(Message::Ping(payload)) => {
                     if ws_sender_for_control
                         .send(Message::Pong(payload))
                         .await
@@ -198,13 +245,30 @@ async fn relay_connection(
                         break;
                     }
                 }
-                Message::Pong(_) => {}
-                Message::Close(_) => break,
+                Ok(Message::Pong(_)) => {}
+                Ok(Message::Close(_)) => {
+                    ws_close_started.store(true, Ordering::Relaxed);
+                    break;
+                }
+                Err(error)
+                    if is_expected_tunnel_shutdown_error(
+                        &error,
+                        ws_close_started.load(Ordering::Relaxed),
+                    ) =>
+                {
+                    break;
+                }
+                Err(error) => return Err(error.into()),
                 _ => {}
             }
         }
 
-        tcp_write.shutdown().await?;
+        if let Err(error) = tcp_write.shutdown().await
+            && !(ws_close_started.load(Ordering::Relaxed) && is_expected_tcp_shutdown_error(&error))
+        {
+            return Err(error.into());
+        }
+
         Ok::<(), anyhow::Error>(())
     });
 
@@ -248,4 +312,119 @@ fn join_task(
     result: std::result::Result<anyhow::Result<()>, tokio::task::JoinError>,
 ) -> anyhow::Result<anyhow::Result<()>> {
     result.map_err(|error| anyhow!("tunnel task failed: {}", error))
+}
+
+fn is_expected_tunnel_shutdown_error(error: &tungstenite::Error, closing_initiated: bool) -> bool {
+    match error {
+        tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed => true,
+        tungstenite::Error::Protocol(
+            tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+        ) => closing_initiated,
+        tungstenite::Error::Io(io_error) => {
+            closing_initiated && is_expected_tcp_shutdown_error(io_error)
+        }
+        _ => false,
+    }
+}
+
+fn is_expected_tcp_shutdown_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        ErrorKind::BrokenPipe
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::UnexpectedEof
+            | ErrorKind::NotConnected
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use futures::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio_tungstenite::{
+        accept_async, connect_async,
+        tungstenite::{self, Message, error::ProtocolError},
+    };
+
+    use super::{is_expected_tunnel_shutdown_error, relay_connection};
+
+    #[test]
+    fn reset_without_close_is_only_expected_after_shutdown_starts() {
+        let error = tungstenite::Error::Protocol(ProtocolError::ResetWithoutClosingHandshake);
+
+        assert!(!is_expected_tunnel_shutdown_error(&error, false));
+        assert!(is_expected_tunnel_shutdown_error(&error, true));
+    }
+
+    #[tokio::test]
+    async fn relay_connection_handles_remote_close_cleanly() {
+        let app_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let app_addr = app_listener.local_addr().unwrap();
+        let app_client = tokio::spawn(async move { TcpStream::connect(app_addr).await.unwrap() });
+        let (mut app_server, _) = app_listener.accept().await.unwrap();
+        let app_client = app_client.await.unwrap();
+
+        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_addr = ws_listener.local_addr().unwrap();
+        let ws_server = tokio::spawn(async move {
+            let (stream, _) = ws_listener.accept().await.unwrap();
+            let mut ws_server = accept_async(stream).await.unwrap();
+            ws_server.send(Message::Close(None)).await.unwrap();
+        });
+
+        let (ws_client, _) = connect_async(format!("ws://{}", ws_addr)).await.unwrap();
+        let relay = tokio::spawn(async move { relay_connection(app_client, ws_client).await });
+
+        let mut buf = [0u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(1), app_server.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(read, 0);
+        assert!(relay.await.unwrap().is_ok());
+        ws_server.await.unwrap();
+    }
+
+    #[allow(deprecated)]
+    #[tokio::test]
+    async fn relay_connection_treats_reset_after_local_close_as_clean_shutdown() {
+        let app_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let app_addr = app_listener.local_addr().unwrap();
+        let app_relay = tokio::spawn(async move { TcpStream::connect(app_addr).await.unwrap() });
+        let (mut app_server, _) = app_listener.accept().await.unwrap();
+        let app_relay = app_relay.await.unwrap();
+
+        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_addr = ws_listener.local_addr().unwrap();
+        let ws_server = tokio::spawn(async move {
+            let (stream, _) = ws_listener.accept().await.unwrap();
+            let mut ws_server = accept_async(stream).await.unwrap();
+
+            let _ = tokio::time::timeout(Duration::from_secs(1), ws_server.next()).await;
+            ws_server
+                .get_mut()
+                .set_linger(Some(Duration::ZERO))
+                .unwrap();
+            drop(ws_server);
+        });
+
+        let (ws_client, _) = connect_async(format!("ws://{}", ws_addr)).await.unwrap();
+        let relay = tokio::spawn(async move { relay_connection(app_relay, ws_client).await });
+
+        app_server.shutdown().await.unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), relay)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_ok()
+        );
+        ws_server.await.unwrap();
+    }
 }
