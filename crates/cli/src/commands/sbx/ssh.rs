@@ -4,6 +4,7 @@ use crate::auth::context::CliContext;
 use crate::commands::sbx::sandbox_proxy_base;
 use crate::error::{CliError, Result};
 use crate::http;
+use tokio::sync::mpsc;
 
 const OP_DATA: u8 = 0x00;
 const OP_RESIZE: u8 = 0x01;
@@ -154,7 +155,7 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
         }
     }
     crossterm::terminal::enable_raw_mode()?;
-    let _raw_guard = RawModeGuard;
+    let mut raw_guard = Some(RawModeGuard);
 
     // Send READY to tell the server to flush buffered output.
     ws_write
@@ -162,7 +163,7 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
         .await
         .map_err(|e| CliError::Other(anyhow::anyhow!("failed to send READY: {}", e)))?;
 
-    let result = async {
+    let (result, needs_prompt_newline) = async {
         // Spawn reader task (WebSocket -> stdout)
         let mut reader_handle = tokio::spawn(async move {
             let mut exit_code: Option<i32> = None;
@@ -194,6 +195,32 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
             exit_code
         });
 
+        // Read stdin on a separate task so remote close/exit is not blocked on
+        // a terminal read future that only wakes once the user types again.
+        let (stdin_tx, mut stdin_rx) = mpsc::channel::<std::io::Result<Vec<u8>>>(8);
+        let stdin_reader = tokio::spawn(async move {
+            let mut stdin = tokio::io::stdin();
+            let mut buf = [0u8; 4096];
+
+            loop {
+                match stdin.read(&mut buf).await {
+                    Ok(0) => {
+                        let _ = stdin_tx.send(Ok(Vec::new())).await;
+                        break;
+                    }
+                    Ok(n) => {
+                        if stdin_tx.send(Ok(buf[..n].to_vec())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = stdin_tx.send(Err(error)).await;
+                        break;
+                    }
+                }
+            }
+        });
+
         // Listen for Ctrl+C on every platform. Window resize notifications are
         // only available through SIGWINCH on Unix, so Windows builds skip that
         // branch and keep the session functional without dynamic resize events.
@@ -206,28 +233,28 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
         .expect("failed to register SIGWINCH handler");
 
         // Main loop: stdin -> WebSocket
-        let mut stdin = tokio::io::stdin();
-        let mut buf = [0u8; 4096];
         let mut server_exit_code: Option<i32> = None;
+        let mut terminated_by_remote = false;
 
         #[cfg(unix)]
         loop {
             tokio::select! {
-                result = stdin.read(&mut buf) => {
-                    match result {
-                        Ok(0) => break,
-                        Ok(n) => {
+                maybe_stdin = stdin_rx.recv() => {
+                    match maybe_stdin {
+                        Some(Ok(data)) if data.is_empty() => break,
+                        Some(Ok(data)) => {
                             let mut msg = vec![OP_DATA];
-                            msg.extend_from_slice(&buf[..n]);
+                            msg.extend_from_slice(&data);
                             if ws_write.send(tungstenite::Message::Binary(msg.into())).await.is_err() {
                                 break;
                             }
                         }
-                        Err(_) => break,
+                        Some(Err(_)) | None => break,
                     }
                 }
                 exit_code = &mut reader_handle => {
                     server_exit_code = exit_code.unwrap_or(None);
+                    terminated_by_remote = true;
                     break;
                 }
                 _ = sigwinch.recv() => {
@@ -248,21 +275,22 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
         #[cfg(not(unix))]
         loop {
             tokio::select! {
-                result = stdin.read(&mut buf) => {
-                    match result {
-                        Ok(0) => break,
-                        Ok(n) => {
+                maybe_stdin = stdin_rx.recv() => {
+                    match maybe_stdin {
+                        Some(Ok(data)) if data.is_empty() => break,
+                        Some(Ok(data)) => {
                             let mut msg = vec![OP_DATA];
-                            msg.extend_from_slice(&buf[..n]);
+                            msg.extend_from_slice(&data);
                             if ws_write.send(tungstenite::Message::Binary(msg.into())).await.is_err() {
                                 break;
                             }
                         }
-                        Err(_) => break,
+                        Some(Err(_)) | None => break,
                     }
                 }
                 exit_code = &mut reader_handle => {
                     server_exit_code = exit_code.unwrap_or(None);
+                    terminated_by_remote = true;
                     break;
                 }
                 _ = &mut ctrl_c => {
@@ -277,22 +305,30 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
             .send(tungstenite::Message::Close(None))
             .await;
 
+        // Restore cooked mode before any shutdown wait so typed input is not
+        // swallowed if the process takes a brief moment to finish closing.
+        drop(raw_guard.take());
+
         // If the reader hasn't finished yet, give it a short grace period to
         // receive a server-side exit signal or close frame. Abort afterwards so
         // local disconnects do not hang indefinitely on a broken close handshake.
         if server_exit_code.is_none() {
-            server_exit_code = wait_for_reader_shutdown(&mut reader_handle).await?;
+            let (exit_code, reader_completed) = wait_for_reader_shutdown(&mut reader_handle).await?;
+            server_exit_code = exit_code;
+            terminated_by_remote = terminated_by_remote || reader_completed;
         }
 
-        Ok::<Option<i32>, CliError>(server_exit_code)
+        stdin_reader.abort();
+
+        Ok::<(Option<i32>, bool), CliError>((server_exit_code, !terminated_by_remote))
     }
     .await?;
 
-    // Terminal is restored by _raw_guard Drop.
-    drop(_raw_guard);
+    drop(raw_guard.take());
 
-    // Print a newline so the outer shell prompt starts on a clean line.
-    eprintln!();
+    if needs_prompt_newline {
+        eprintln!();
+    }
 
     if let Some(code) = result
         && code != 0
@@ -321,14 +357,15 @@ fn parse_legacy_exit_code(reason: &str) -> Option<i32> {
 
 async fn wait_for_reader_shutdown(
     reader_handle: &mut tokio::task::JoinHandle<Option<i32>>,
-) -> Result<Option<i32>> {
+) -> Result<(Option<i32>, bool)> {
     match tokio::time::timeout(PTY_CLOSE_WAIT_TIMEOUT, &mut *reader_handle).await {
         Ok(join_result) => join_result
+            .map(|exit_code| (exit_code, true))
             .map_err(|error| CliError::Other(anyhow::anyhow!("PTY reader task failed: {}", error))),
         Err(_) => {
             reader_handle.abort();
             let _ = reader_handle.await;
-            Ok(None)
+            Ok((None, false))
         }
     }
 }
@@ -384,7 +421,7 @@ mod tests {
         .expect("reader shutdown should be bounded")
         .unwrap();
 
-        assert_eq!(result, None);
+        assert_eq!(result, (None, false));
         assert!(reader_handle.is_finished());
     }
 }
