@@ -280,7 +280,7 @@ enum SbxCommands {
         #[arg(long, conflicts_with = "image")]
         snapshot: Option<String>,
 
-        /// Create from a registered image name
+        /// Create from a registered image name or sandbox template ID
         #[arg(long, conflicts_with = "snapshot")]
         image: Option<String>,
 
