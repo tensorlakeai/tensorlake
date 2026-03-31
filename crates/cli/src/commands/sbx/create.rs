@@ -1,5 +1,4 @@
 use crate::auth::context::CliContext;
-use crate::commands::sbx::image::resolve_image;
 use crate::commands::sbx::{
     DEFAULT_SANDBOX_WAIT_TIMEOUT, apply_proxy_access_settings, sandbox_endpoint,
     sandbox_proxy_base, wait_for_sandbox_status,
@@ -92,14 +91,9 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
         network_allow,
         network_deny,
     } = args;
-    // Resolve --image to a snapshot ID if provided.
-    let resolved_snapshot = match image_name {
-        Some(name) => Some(resolve_image(ctx, name).await?),
-        None => None,
-    };
-    let effective_snapshot = snapshot_id.or(resolved_snapshot.as_deref());
 
-    let mut body = build_create_request_body(cpus, memory, timeout, entrypoint, effective_snapshot);
+    let mut body =
+        build_create_request_body(cpus, memory, timeout, entrypoint, snapshot_id, image_name);
     if let Some(n) = name {
         body["name"] = serde_json::Value::String(n.to_string());
     }
@@ -206,6 +200,7 @@ fn build_create_request_body(
     timeout: Option<i64>,
     entrypoint: &[String],
     snapshot_id: Option<&str>,
+    image_name: Option<&str>,
 ) -> serde_json::Value {
     let mut body = serde_json::json!({});
 
@@ -231,6 +226,9 @@ fn build_create_request_body(
     if let Some(t) = timeout {
         body["timeout_secs"] = serde_json::Value::Number(t.into());
     }
+    if let Some(image_name) = image_name {
+        body["image"] = serde_json::Value::String(image_name.to_string());
+    }
     if !entrypoint.is_empty() {
         body["entrypoint"] = serde_json::json!(entrypoint);
     }
@@ -244,7 +242,7 @@ mod tests {
 
     #[test]
     fn create_body_uses_defaults_without_snapshot() {
-        let body = build_create_request_body(None, None, None, &[], None);
+        let body = build_create_request_body(None, None, None, &[], None, None);
 
         assert_eq!(body["resources"]["cpus"], 1.0);
         assert_eq!(body["resources"]["memory_mb"], 1024);
@@ -253,7 +251,7 @@ mod tests {
 
     #[test]
     fn create_body_omits_resources_for_snapshot_without_overrides() {
-        let body = build_create_request_body(None, None, None, &[], Some("snap-1"));
+        let body = build_create_request_body(None, None, None, &[], Some("snap-1"), None);
 
         assert_eq!(body["snapshot_id"], "snap-1");
         assert!(body.get("resources").is_none());
@@ -261,10 +259,19 @@ mod tests {
 
     #[test]
     fn create_body_includes_only_explicit_snapshot_overrides() {
-        let body = build_create_request_body(Some(2.5), None, None, &[], Some("snap-1"));
+        let body =
+            build_create_request_body(Some(2.5), None, None, &[], Some("snap-1"), None);
 
         assert_eq!(body["snapshot_id"], "snap-1");
         assert_eq!(body["resources"]["cpus"], 2.5);
         assert!(body["resources"].get("memory_mb").is_none());
+    }
+
+    #[test]
+    fn create_body_passes_image_name_through_to_server() {
+        let body = build_create_request_body(None, None, None, &[], None, Some("ubuntu-minimal"));
+
+        assert_eq!(body["image"], "ubuntu-minimal");
+        assert!(body.get("snapshot_id").is_none());
     }
 }
