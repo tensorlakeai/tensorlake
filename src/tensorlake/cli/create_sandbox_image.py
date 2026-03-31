@@ -226,7 +226,7 @@ def _register_image(
     name: str,
     dockerfile: str,
     snapshot_id: str,
-    snapshot_uri: str | None = None,
+    snapshot_uri: str,
 ) -> dict:
     """POST to Platform API through the ingress to register the image."""
     org_id = ctx.organization_id
@@ -247,9 +247,12 @@ def _register_image(
         headers["X-Forwarded-Organization-Id"] = org_id
         headers["X-Forwarded-Project-Id"] = proj_id
 
-    body: dict = {"name": name, "dockerfile": dockerfile, "snapshotId": snapshot_id}
-    if snapshot_uri:
-        body["snapshotUri"] = snapshot_uri
+    body = {
+        "name": name,
+        "dockerfile": dockerfile,
+        "snapshotId": snapshot_id,
+        "snapshotUri": snapshot_uri,
+    }
     resp = httpx.post(url, json=body, headers=headers, timeout=30.0)
     resp.raise_for_status()
     return resp.json()
@@ -341,6 +344,10 @@ def create_sandbox_image(
 
         # 6. Register image via Platform API.
         _emit({"type": "status", "message": "Registering image..."})
+        if not snapshot.snapshot_uri:
+            raise RuntimeError(
+                f"Snapshot {snapshot.snapshot_id} completed without a snapshot URI"
+            )
         result = _register_image(
             ctx, image.name, dockerfile, snapshot.snapshot_id, snapshot.snapshot_uri
         )

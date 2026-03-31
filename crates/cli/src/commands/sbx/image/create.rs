@@ -56,9 +56,9 @@ async fn run_build_and_register(
     execute_operations(ctx, sandbox_id, image_def).await?;
 
     // 5. Snapshot (filesystem only — skip memory for faster snapshots).
-    let snapshot_id =
-        sbx::snapshot::create_snapshot(ctx, sandbox_id, 300.0, Some("filesystem_only")).await?;
-    eprintln!("\u{1f4f8} Snapshot created: {}", snapshot_id);
+    let snapshot =
+        sbx::snapshot::create_snapshot_with_details(ctx, sandbox_id, 300.0, Some("filesystem_only")).await?;
+    eprintln!("\u{1f4f8} Snapshot created: {}", snapshot.snapshot_id);
 
     // 6. Build Dockerfile text.
     let sdk_version = env!("CARGO_PKG_VERSION");
@@ -67,7 +67,14 @@ async fn run_build_and_register(
 
     // 7. Register image via Platform API.
     eprintln!("\u{2699}\u{fe0f}  Registering image...");
-    let image_id = register_image(ctx, image_name, &dockerfile, &snapshot_id).await?;
+    let image_id = register_image(
+        ctx,
+        image_name,
+        &dockerfile,
+        &snapshot.snapshot_id,
+        &snapshot.snapshot_uri,
+    )
+    .await?;
     eprintln!("\u{2705} Image '{}' registered ({})", image_name, image_id);
 
     Ok(())
@@ -243,6 +250,7 @@ async fn register_image(
     name: &str,
     dockerfile: &str,
     snapshot_id: &str,
+    snapshot_uri: &str,
 ) -> Result<String> {
     let (base_url, _, _) = super::templates_base_url(ctx)?;
 
@@ -251,6 +259,7 @@ async fn register_image(
         "name": name,
         "dockerfile": dockerfile,
         "snapshotId": snapshot_id,
+        "snapshotUri": snapshot_uri,
     });
 
     let resp = client

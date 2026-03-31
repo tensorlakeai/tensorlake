@@ -37,7 +37,10 @@ class TestCreateSandboxImage(unittest.TestCase):
         ctx = MagicMock()
         sandbox = MagicMock()
         sandbox.sandbox_id = "sbx-1"
-        snapshot = SimpleNamespace(snapshot_id="snap-1")
+        snapshot = SimpleNamespace(
+            snapshot_id="snap-1",
+            snapshot_uri="s3://snapshots/snap-1.tar.zst",
+        )
 
         with (
             patch.object(
@@ -83,6 +86,7 @@ class TestCreateSandboxImage(unittest.TestCase):
             "data-tools",
             "FROM python:3.11-slim",
             "snap-1",
+            "s3://snapshots/snap-1.tar.zst",
         )
         sandbox.terminate.assert_called_once_with()
 
@@ -109,7 +113,10 @@ class TestCreateSandboxImage(unittest.TestCase):
         ctx = MagicMock()
         sandbox = MagicMock()
         sandbox.sandbox_id = "sbx-1"
-        snapshot = SimpleNamespace(snapshot_id="snap-1")
+        snapshot = SimpleNamespace(
+            snapshot_id="snap-1",
+            snapshot_uri="s3://snapshots/snap-1.tar.zst",
+        )
 
         with (
             patch.object(
