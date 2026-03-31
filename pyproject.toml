@@ -1,6 +1,6 @@
 [project]
 name = "tensorlake"
-version = "0.4.30"
+version = "0.4.32"
 description = "Tensorlake SDK for Document Ingestion API and Serverless Applications"
 readme = "README.md"
 authors = [{ name = "Tensorlake Inc.", email = "support@tensorlake.ai" }]
@@ -8,8 +8,8 @@ requires-python = ">=3.10"
 dependencies = [
     "httpx[http2]>=0.27.2,<1.0",
     "pydantic>=2.0,<3.0",
-    "grpcio>=1.40.0,<2.0.0",
-    "grpcio-tools>=1.40.0,<2.0.0",
+    "grpcio>=1.76.0,<2.0.0",
+    "protobuf>=6.31.1,<7.0.0",
 ]
 
 [project.urls]
@@ -29,6 +29,7 @@ data = "tensorlake.data"
 include = [
     { path = "LICENSE", format = "sdist" },
     { path = "src/tensorlake/_cloud_sdk*.so", format = "wheel" },
+    { path = "src/tensorlake/_cloud_sdk*.pyd", format = "wheel" },
 ]
 
 [tool.black]
@@ -46,11 +47,12 @@ respx = "^0.22.0"
 psutil = "^7.2.2"
 isort = "^8.0.0"
 pre-commit = "^4.5.1"
-# grpcio is forward compatible within the major version, so stubs generated
-# with any 1.x version work with all 1.x runtimes (including the minimum
-# required by users: >=1.40.0). Pin to a recent release to ensure Python 3.14
-# wheels are available (old versions required building from source).
-grpcio = "^1.68.0"
-grpcio-tools = "^1.68.0"
+# grpcio is forward compatible within the major version. The minimum version
+# must match GRPC_GENERATED_VERSION in the committed proto stubs so that
+# `make build_proto` regenerates stubs that are compatible with what users
+# install at runtime (>=1.76.0 per the runtime dependency).
+grpcio = "^1.76.0"
+grpcio-tools = "^1.76.0"
+protobuf = "^6.31.1"
 setuptools = "^69.0.0"
 maturin = ">=1.9,<2.0"

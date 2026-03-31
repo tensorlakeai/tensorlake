@@ -2,9 +2,10 @@ import hashlib
 import os
 import subprocess
 import tempfile
+import threading
 import unittest
-from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Iterator, List
 
 import grpc
 
@@ -19,9 +20,11 @@ from tensorlake.applications.user_data_serializer import (
 )
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     BLOB,
+    AdvanceAllocationExecutionLogBatchRequest,
+    AllocationExecutionEvent,
+    AllocationExecutionEventFinishAllocation,
     AllocationOutputBLOB,
     AllocationOutputBLOBRequest,
-    AllocationResult,
     AllocationState,
     AllocationUpdate,
     BLOBChunk,
@@ -29,12 +32,17 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     DeleteAllocationRequest,
     FunctionInputs,
     FunctionRef,
+    GetAllocationExecutionLogBatchRequest,
+    GetAllocationExecutionLogBatchResponse,
     InitializeRequest,
     InitializeResponse,
+    ReadAllocationEventLogRequest,
+    ReadAllocationEventLogResponse,
     SerializedObject,
     SerializedObjectEncoding,
     SerializedObjectInsideBLOB,
     SerializedObjectManifest,
+    WatchAllocationEventLogReads,
     WatchAllocationStateRequest,
 )
 from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
@@ -148,6 +156,187 @@ def initialize(
     )
 
 
+class AllocationTestDriver:
+    """Test helper that drives the FE allocation protocol as a client.
+
+    Manages three concurrent concerns:
+    1. watch_allocation_state for output_blob_requests (still needed)
+    2. get_allocation_execution_log_batch / advance for execution events
+    3. watch_allocation_event_log_reads / send_allocation_event_log_read_response for event log
+    """
+
+    def __init__(self, stub: FunctionExecutorStub, allocation_id: str):
+        self._stub: FunctionExecutorStub = stub
+        self._allocation_id: str = allocation_id
+        self._all_execution_events: list[AllocationExecutionEvent] = []
+        self._finish_event: AllocationExecutionEventFinishAllocation | None = None
+        self._finished: threading.Event = threading.Event()
+        self._error: BaseException | None = None
+        # Queue of event log responses to send back to FE.
+        self._event_log_responses: list[ReadAllocationEventLogResponse] = []
+        self._event_log_response_available: threading.Event = threading.Event()
+
+    @property
+    def all_execution_events(self) -> list[AllocationExecutionEvent]:
+        return self._all_execution_events
+
+    @property
+    def finish_event(self) -> AllocationExecutionEventFinishAllocation | None:
+        return self._finish_event
+
+    def enqueue_event_log_response(
+        self, response: ReadAllocationEventLogResponse
+    ) -> None:
+        """Enqueue a response to be sent to FE when it makes a read request."""
+        self._event_log_responses.append(response)
+        self._event_log_response_available.set()
+
+    def run(
+        self,
+        on_execution_event_batch: (
+            Callable[[list[AllocationExecutionEvent], "AllocationTestDriver"], None]
+            | None
+        ) = None,
+    ) -> AllocationExecutionEventFinishAllocation:
+        """Drives the allocation to completion.
+
+        on_execution_event_batch is called for each execution log batch.
+        Returns the FinishAllocation event.
+        """
+        threads: list[threading.Thread] = []
+
+        # Thread 1: AllocationState watcher for output_blob_requests
+        blob_handler_thread = threading.Thread(
+            target=self._handle_allocation_state_blobs, daemon=True
+        )
+        threads.append(blob_handler_thread)
+
+        # Thread 2: Execution log consumer
+        exec_log_thread = threading.Thread(
+            target=self._consume_execution_log,
+            args=(on_execution_event_batch,),
+            daemon=True,
+        )
+        threads.append(exec_log_thread)
+
+        # Thread 3: Event log read watcher + responder
+        event_log_thread = threading.Thread(target=self._handle_event_log, daemon=True)
+        threads.append(event_log_thread)
+
+        for t in threads:
+            t.start()
+
+        # Wait for allocation to finish (FinishAllocation event received).
+        self._finished.wait(timeout=30)
+
+        if self._error is not None:
+            raise self._error
+
+        return self._finish_event
+
+    def _handle_allocation_state_blobs(self) -> None:
+        """Watches allocation state and handles output_blob_requests."""
+        responded_blob_ids: set[str] = set()
+        try:
+            allocation_states: Iterator[AllocationState] = (
+                self._stub.watch_allocation_state(
+                    WatchAllocationStateRequest(allocation_id=self._allocation_id),
+                )
+            )
+            for allocation_state in allocation_states:
+                for blob_request in allocation_state.output_blob_requests:
+                    blob_request: AllocationOutputBLOBRequest
+                    if blob_request.id in responded_blob_ids:
+                        continue
+                    responded_blob_ids.add(blob_request.id)
+                    blob: BLOB = create_tmp_blob(
+                        id=blob_request.id,
+                        chunks_count=1,
+                        chunk_size=blob_request.size,
+                    )
+                    self._stub.send_allocation_update(
+                        AllocationUpdate(
+                            allocation_id=self._allocation_id,
+                            output_blob=AllocationOutputBLOB(
+                                status=Status(code=grpc.StatusCode.OK.value[0]),
+                                blob=blob,
+                            ),
+                        )
+                    )
+        except grpc.RpcError:
+            pass  # Stream closed, allocation done
+
+    def _consume_execution_log(
+        self,
+        on_execution_event_batch: (
+            Callable[[list[AllocationExecutionEvent], "AllocationTestDriver"], None]
+            | None
+        ),
+    ) -> None:
+        """Pulls execution log batches until FinishAllocation."""
+        try:
+            while True:
+                response: GetAllocationExecutionLogBatchResponse = (
+                    self._stub.get_allocation_execution_log_batch(
+                        GetAllocationExecutionLogBatchRequest(
+                            allocation_id=self._allocation_id,
+                        )
+                    )
+                )
+                if len(response.events) == 0:
+                    # Stopped with no more data.
+                    break
+
+                self._all_execution_events.extend(response.events)
+
+                if on_execution_event_batch is not None:
+                    on_execution_event_batch(list(response.events), self)
+
+                # Check if any event is FinishAllocation.
+                for event in response.events:
+                    if event.HasField("finish_allocation"):
+                        self._finish_event = event.finish_allocation
+                        self._finished.set()
+
+                self._stub.advance_allocation_execution_log_batch(
+                    AdvanceAllocationExecutionLogBatchRequest(
+                        allocation_id=self._allocation_id,
+                    )
+                )
+
+                if self._finish_event is not None:
+                    break
+        except grpc.RpcError:
+            pass  # Stream closed
+        except BaseException as e:
+            self._error = e
+            self._finished.set()
+
+    def _handle_event_log(self) -> None:
+        """Watches for event log read requests from FE and sends responses."""
+        try:
+            read_requests = self._stub.watch_allocation_event_log_reads(
+                WatchAllocationEventLogReads(
+                    allocation_id=self._allocation_id,
+                )
+            )
+            for read_request in read_requests:
+                read_request: ReadAllocationEventLogRequest
+                # Wait until a response is available.
+                while True:
+                    if self._finished.is_set():
+                        return
+                    if self._event_log_responses:
+                        response = self._event_log_responses.pop(0)
+                        if not self._event_log_responses:
+                            self._event_log_response_available.clear()
+                        self._stub.send_allocation_event_log_read_response(response)
+                        break
+                    self._event_log_response_available.wait(timeout=0.1)
+        except grpc.RpcError:
+            pass  # Stream closed
+
+
 def run_allocation(
     stub: FunctionExecutorStub,
     request: CreateAllocationRequest,
@@ -165,7 +354,8 @@ def run_allocation_that_returns_output(
     stub: FunctionExecutorStub,
     request: CreateAllocationRequest,
     timeout_sec: float | None = None,
-) -> AllocationResult:
+) -> AllocationExecutionEventFinishAllocation:
+    """Runs allocation and returns the FinishAllocation execution event."""
     stub.create_allocation(request)
     return wait_result_of_allocation_that_returns_output(
         request.allocation.allocation_id,
@@ -180,65 +370,21 @@ def wait_result_of_allocation_that_returns_output(
     test_case: unittest.TestCase,
     stub: FunctionExecutorStub,
     timeout_sec: float | None,
-) -> AllocationResult:
-    current_allocation_state: str = "wait_blob_request"
-
-    allocation_states: Iterator[AllocationState] = stub.watch_allocation_state(
-        WatchAllocationStateRequest(allocation_id=allocation_id),
-        timeout=timeout_sec,
-    )
-
-    for allocation_state in allocation_states:
-        allocation_state: AllocationState
-
-        if current_allocation_state == "wait_blob_request":
-            if len(allocation_state.output_blob_requests) == 0:
-                continue  # Received empty initial AllocationState, keep waiting.
-
-            test_case.assertEqual(len(allocation_state.output_blob_requests), 1)
-            function_output_blob_request: AllocationOutputBLOBRequest = (
-                allocation_state.output_blob_requests[0]
-            )
-            function_output_blob: BLOB = create_tmp_blob(
-                id=function_output_blob_request.id,
-                chunks_count=1,
-                chunk_size=function_output_blob_request.size,
-            )
-            stub.send_allocation_update(
-                AllocationUpdate(
-                    allocation_id=allocation_id,
-                    output_blob=AllocationOutputBLOB(
-                        status=Status(code=grpc.StatusCode.OK.value[0]),
-                        blob=function_output_blob,
-                    ),
-                )
-            )
-            current_allocation_state = "wait_blob_deletion"
-
-        if current_allocation_state == "wait_blob_deletion":
-            if len(allocation_state.output_blob_requests) == 0:
-                current_allocation_state = "wait_result"
-
-        if current_allocation_state == "wait_result":
-            if allocation_state.HasField("result"):
-                return allocation_state.result
+) -> AllocationExecutionEventFinishAllocation:
+    """Waits for allocation to finish and returns the FinishAllocation execution event."""
+    driver = AllocationTestDriver(stub, allocation_id)
+    return driver.run()
 
 
 def run_allocation_that_fails(
     stub: FunctionExecutorStub,
     request: CreateAllocationRequest,
     timeout_sec: float | None = None,
-) -> AllocationResult:
-    allocation_states: Iterator[AllocationState] = run_allocation(
-        stub,
-        request=request,
-        timeout_sec=timeout_sec,
-    )
-    for allocation_state in allocation_states:
-        allocation_state: AllocationState
-
-        if allocation_state.HasField("result"):
-            return allocation_state.result
+) -> AllocationExecutionEventFinishAllocation:
+    """Runs allocation expected to fail. Returns the FinishAllocation execution event."""
+    stub.create_allocation(request)
+    driver = AllocationTestDriver(stub, request.allocation.allocation_id)
+    return driver.run()
 
 
 def delete_allocation(

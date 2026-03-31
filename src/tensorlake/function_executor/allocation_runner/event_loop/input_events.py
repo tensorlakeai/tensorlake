@@ -12,6 +12,13 @@ class InputEventFunctionCallCreated:
 
 
 @dataclass(frozen=True)
+class InputEventFunctionCallWatcherCreated:
+    durable_id: str
+    # Not None if creating the watcher failed.
+    exception: TensorlakeError | None
+
+
+@dataclass(frozen=True)
 class InputEventFunctionCallWatcherResult:
     """Result of a CreateFunctionCallWatcherRequest.
 
@@ -47,6 +54,7 @@ class _InputEventStopInputEventProcessing:
 
 InputEventType = (
     InputEventFunctionCallCreated
+    | InputEventFunctionCallWatcherCreated
     | InputEventFunctionCallWatcherResult
     | InputEventEmergencyShutdown
     | _InputEventStopInputEventProcessing

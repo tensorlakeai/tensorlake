@@ -27,6 +27,7 @@ from tensorlake.function_executor.allocation_runner.event_loop import (
     AllocationEventLoop,
     FunctionCallRef,
     InputEventFunctionCallCreated,
+    InputEventFunctionCallWatcherCreated,
     InputEventFunctionCallWatcherResult,
     OutputEventBatch,
     OutputEventCreateFunctionCall,
@@ -133,24 +134,37 @@ class _EventLoopDriver:
             for cmd in batch.events:
                 if isinstance(cmd, OutputEventFinishAllocation):
                     return cmd
-                result = self._make_result(cmd)
-                self.loop.add_input_event(result)
+                results = self._make_results(cmd)
+                for result in results:
+                    self.loop.add_input_event(result)
 
-    def _make_result(self, cmd):
+    def _make_results(self, cmd) -> list:
         if self.result_callback is not None:
-            return self.result_callback(cmd)
+            result = self.result_callback(cmd)
+            if isinstance(result, list):
+                return result
+            return [result]
 
         if isinstance(cmd, OutputEventCreateFunctionCall):
-            return InputEventFunctionCallCreated(
-                durable_id=cmd.durable_id,
-                exception=None,
-            )
+            return [
+                InputEventFunctionCallCreated(
+                    durable_id=cmd.durable_id,
+                    exception=None,
+                )
+            ]
         elif isinstance(cmd, OutputEventCreateFunctionCallWatcher):
-            return InputEventFunctionCallWatcherResult(
-                function_call_durable_id=cmd.function_call_durable_id,
-                output=f"result_for_{cmd.function_call_durable_id}",
-                exception=None,
-            )
+            return [
+                InputEventFunctionCallWatcherCreated(
+                    durable_id=cmd.function_call_durable_id,
+                    exception=None,
+                ),
+                InputEventFunctionCallWatcherResult(
+                    function_call_durable_id=cmd.function_call_durable_id,
+                    output=f"result_for_{cmd.function_call_durable_id}",
+                    exception=None,
+                ),
+            ]
+        return []
 
 
 class TestEventLoopBasic(unittest.TestCase):
@@ -391,11 +405,17 @@ class TestEventLoopWaitFutures(unittest.TestCase):
                     durable_id=cmd.durable_id, exception=None
                 )
             elif isinstance(cmd, OutputEventCreateFunctionCallWatcher):
-                return InputEventFunctionCallWatcherResult(
-                    function_call_durable_id=cmd.function_call_durable_id,
-                    output=99,
-                    exception=None,
-                )
+                return [
+                    InputEventFunctionCallWatcherCreated(
+                        durable_id=cmd.function_call_durable_id,
+                        exception=None,
+                    ),
+                    InputEventFunctionCallWatcherResult(
+                        function_call_durable_id=cmd.function_call_durable_id,
+                        output=99,
+                        exception=None,
+                    ),
+                ]
 
         driver.result_callback = result_callback
         output = driver.run([], {})
@@ -433,11 +453,17 @@ class TestEventLoopWaitFutures(unittest.TestCase):
                     durable_id=cmd.durable_id, exception=None
                 )
             elif isinstance(cmd, OutputEventCreateFunctionCallWatcher):
-                return InputEventFunctionCallWatcherResult(
-                    function_call_durable_id=cmd.function_call_durable_id,
-                    output=None,
-                    exception=InternalError("child failed"),
-                )
+                return [
+                    InputEventFunctionCallWatcherCreated(
+                        durable_id=cmd.function_call_durable_id,
+                        exception=None,
+                    ),
+                    InputEventFunctionCallWatcherResult(
+                        function_call_durable_id=cmd.function_call_durable_id,
+                        output=None,
+                        exception=InternalError("child failed"),
+                    ),
+                ]
 
         driver.result_callback = result_callback
         output = driver.run([], {})
@@ -522,11 +548,17 @@ class TestEventLoopMapOperation(unittest.TestCase):
                     durable_id=cmd.durable_id, exception=None
                 )
             elif isinstance(cmd, OutputEventCreateFunctionCallWatcher):
-                return InputEventFunctionCallWatcherResult(
-                    function_call_durable_id=cmd.function_call_durable_id,
-                    output=[100, 200, 300],
-                    exception=None,
-                )
+                return [
+                    InputEventFunctionCallWatcherCreated(
+                        durable_id=cmd.function_call_durable_id,
+                        exception=None,
+                    ),
+                    InputEventFunctionCallWatcherResult(
+                        function_call_durable_id=cmd.function_call_durable_id,
+                        output=[100, 200, 300],
+                        exception=None,
+                    ),
+                ]
 
         driver.result_callback = result_callback
         output = driver.run([], {})
@@ -788,11 +820,17 @@ class TestEventLoopReduceOperation(unittest.TestCase):
                 )
             elif isinstance(cmd, OutputEventCreateFunctionCallWatcher):
                 # The splitter will return the single value 42 as its output.
-                return InputEventFunctionCallWatcherResult(
-                    function_call_durable_id=cmd.function_call_durable_id,
-                    output=42,
-                    exception=None,
-                )
+                return [
+                    InputEventFunctionCallWatcherCreated(
+                        durable_id=cmd.function_call_durable_id,
+                        exception=None,
+                    ),
+                    InputEventFunctionCallWatcherResult(
+                        function_call_durable_id=cmd.function_call_durable_id,
+                        output=42,
+                        exception=None,
+                    ),
+                ]
 
         driver.result_callback = result_callback
         output = driver.run([], {})
@@ -824,11 +862,17 @@ class TestEventLoopReduceOperation(unittest.TestCase):
                     durable_id=cmd.durable_id, exception=None
                 )
             elif isinstance(cmd, OutputEventCreateFunctionCallWatcher):
-                return InputEventFunctionCallWatcherResult(
-                    function_call_durable_id=cmd.function_call_durable_id,
-                    output=30,
-                    exception=None,
-                )
+                return [
+                    InputEventFunctionCallWatcherCreated(
+                        durable_id=cmd.function_call_durable_id,
+                        exception=None,
+                    ),
+                    InputEventFunctionCallWatcherResult(
+                        function_call_durable_id=cmd.function_call_durable_id,
+                        output=30,
+                        exception=None,
+                    ),
+                ]
 
         driver.result_callback = result_callback
         output = driver.run([], {})
@@ -1012,11 +1056,17 @@ class TestEventLoopAsync(unittest.TestCase):
                     durable_id=cmd.durable_id, exception=None
                 )
             elif isinstance(cmd, OutputEventCreateFunctionCallWatcher):
-                return InputEventFunctionCallWatcherResult(
-                    function_call_durable_id=cmd.function_call_durable_id,
-                    output=99,
-                    exception=None,
-                )
+                return [
+                    InputEventFunctionCallWatcherCreated(
+                        durable_id=cmd.function_call_durable_id,
+                        exception=None,
+                    ),
+                    InputEventFunctionCallWatcherResult(
+                        function_call_durable_id=cmd.function_call_durable_id,
+                        output=99,
+                        exception=None,
+                    ),
+                ]
 
         driver.result_callback = result_callback
         output = driver.run([], {})
@@ -1084,6 +1134,12 @@ class TestEventLoopResultDeliveryOrder(unittest.TestCase):
         watcher_cmd = watcher_batch.events[0]
         self.assertIsInstance(watcher_cmd, OutputEventCreateFunctionCallWatcher)
         self.assertEqual(watcher_cmd.function_call_durable_id, splitter_cmd.durable_id)
+        loop.add_input_event(
+            InputEventFunctionCallWatcherCreated(
+                durable_id=watcher_cmd.function_call_durable_id,
+                exception=None,
+            )
+        )
         loop.add_input_event(
             InputEventFunctionCallWatcherResult(
                 function_call_durable_id=watcher_cmd.function_call_durable_id,

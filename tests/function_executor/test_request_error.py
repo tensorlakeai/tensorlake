@@ -103,7 +103,6 @@ class TestRequestError(unittest.TestCase):
                     alloc_result.HasField("uploaded_function_outputs_blob")
                 )
                 self.assertFalse(alloc_result.HasField("value"))
-                self.assertFalse(alloc_result.HasField("updates"))
 
         fe_stdout: str = process.read_stdout()
         self.assertIn("RequestError: The request can't succeed: 10", fe_stdout)

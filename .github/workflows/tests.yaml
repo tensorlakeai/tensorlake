@@ -38,6 +38,49 @@ jobs:
       - name: Run Rust workspace tests
         run: cargo test --workspace
 
+  windows_build_smoke:
+    name: Windows build smoke test
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build Cloud SDK wheel
+        uses: PyO3/maturin-action@v1
+        env:
+          CARGO_TARGET_DIR: target
+        with:
+          target: x86_64-pc-windows-msvc
+          args: --manifest-path crates/rust-cloud-sdk-py/Cargo.toml --release --out dist-cloud-sdk -i python
+          sccache: 'true'
+
+      - name: Bundle Cloud SDK extension into tensorlake wheel
+        run: |
+          python .github/scripts/bundle_cloud_sdk_wheel.py "dist-cloud-sdk/tensorlake_rust_cloud_sdk-*.whl" src/tensorlake --require-abi3
+
+      - name: Build tensorlake wheel
+        uses: PyO3/maturin-action@v1
+        env:
+          CARGO_TARGET_DIR: target
+        with:
+          target: x86_64-pc-windows-msvc
+          args: --release --out dist
+          sccache: 'true'
+
+      - name: Verify wheel imports Rust Cloud SDK extension
+        run: |
+          python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy tensorlake.cli.build_images
+
   run_tests:
     name: Lint and test
     runs-on: ubuntu-latest-xlarge

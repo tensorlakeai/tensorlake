@@ -18,8 +18,8 @@ from tensorlake.applications import (
 )
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     Allocation,
+    AllocationExecutionEventFinishAllocation,
     AllocationOutcomeCode,
-    AllocationResult,
     CreateAllocationRequest,
     InitializationOutcomeCode,
     InitializeResponse,
@@ -81,17 +81,19 @@ class TestPrintProgressUpdates(unittest.TestCase):
                     InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
                 )
 
-                alloc_result: AllocationResult = run_allocation_that_returns_output(
-                    self,
-                    stub,
-                    request=CreateAllocationRequest(
-                        allocation=Allocation(
-                            request_id="123",
-                            function_call_id="test-function-call",
-                            allocation_id="test-allocation-id",
-                            inputs=application_function_inputs(arg, int),
+                alloc_result: AllocationExecutionEventFinishAllocation = (
+                    run_allocation_that_returns_output(
+                        self,
+                        stub,
+                        request=CreateAllocationRequest(
+                            allocation=Allocation(
+                                request_id="123",
+                                function_call_id="test-function-call",
+                                allocation_id="test-allocation-id",
+                                inputs=application_function_inputs(arg, int),
+                            ),
                         ),
-                    ),
+                    )
                 )
 
                 self.assertEqual(
@@ -144,17 +146,19 @@ class TestPrintProgressUpdates(unittest.TestCase):
                     InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_SUCCESS,
                 )
 
-                alloc_result: AllocationResult = run_allocation_that_returns_output(
-                    self,
-                    stub,
-                    request=CreateAllocationRequest(
-                        allocation=Allocation(
-                            request_id="123",
-                            function_call_id="test-function-call",
-                            allocation_id="test-allocation-id",
-                            inputs=application_function_inputs(arg, int),
+                alloc_result: AllocationExecutionEventFinishAllocation = (
+                    run_allocation_that_returns_output(
+                        self,
+                        stub,
+                        request=CreateAllocationRequest(
+                            allocation=Allocation(
+                                request_id="123",
+                                function_call_id="test-function-call",
+                                allocation_id="test-allocation-id",
+                                inputs=application_function_inputs(arg, int),
+                            ),
                         ),
-                    ),
+                    )
                 )
 
                 self.assertEqual(

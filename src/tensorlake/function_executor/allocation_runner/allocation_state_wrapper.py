@@ -2,32 +2,26 @@ import hashlib
 import threading
 from typing import Any, Callable, Iterable
 
-from google.protobuf.timestamp_pb2 import Timestamp
-
 from tensorlake.applications import InternalError
 
 from ..proto.function_executor_pb2 import (
-    BLOB,
-    AllocationFunctionCall,
-    AllocationFunctionCallWatcher,
     AllocationOutputBLOBRequest,
     AllocationProgress,
     AllocationRequestStateOperation,
-    AllocationResult,
     AllocationState,
-    ExecutionPlanUpdates,
 )
 
 
 class AllocationStateWrapper:
+    """Thread-safe wrapper around AllocationState proto used to update it and notify about updates to it."""
+
     def __init__(self) -> None:
         self._allocation_state_update_lock: threading.Condition = threading.Condition()
         self._allocation_state: AllocationState = AllocationState(
-            function_calls=[],
-            function_call_watchers=[],
             output_blob_requests=[],
             request_state_operations=[],
         )
+        self._finished: bool = False
         self._update_hash()
 
     def update_progress(self, current: float, total: float) -> None:
@@ -38,67 +32,15 @@ class AllocationStateWrapper:
             self._update_hash()
             self._allocation_state_update_lock.notify_all()
 
-    def set_result(self, result: AllocationResult) -> None:
-        # This method is expected to be called only once.
+    def set_finished(self) -> None:
+        """Marks the allocation as finished. Unblocks wait_for_update."""
         with self._allocation_state_update_lock:
-            self._allocation_state.result.CopyFrom(result)
-            self._update_hash()
+            self._finished = True
             self._allocation_state_update_lock.notify_all()
 
-    def has_result(self) -> bool:
-        with self._allocation_state_update_lock:
-            return self._allocation_state.HasField("result")
-
-    def add_function_call(
-        self,
-        id: str,
-        execution_plan_updates: ExecutionPlanUpdates,
-        args_blob: BLOB | None,
-    ) -> None:
-        with self._allocation_state_update_lock:
-            self._allocation_state.function_calls.append(
-                AllocationFunctionCall(
-                    id=id,
-                    updates=execution_plan_updates,
-                    args_blob=args_blob,
-                )
-            )
-            self._update_hash()
-            self._allocation_state_update_lock.notify_all()
-
-    def delete_function_call(self, id: str) -> None:
-        with self._allocation_state_update_lock:
-            _remove_repeated_field_item(
-                lambda fc: fc.id == id,
-                self._allocation_state.function_calls,
-            )
-            self._update_hash()
-            self._allocation_state_update_lock.notify_all()
-
-    def add_function_call_watcher(
-        self, id: str, root_function_call_id: str, deadline: Timestamp | None
-    ) -> None:
-        with self._allocation_state_update_lock:
-            watcher = AllocationFunctionCallWatcher(
-                watcher_id=id,
-                id=id,
-                function_call_id=root_function_call_id,
-                root_function_call_id=root_function_call_id,
-            )
-            if deadline is not None:
-                watcher.deadline.CopyFrom(deadline)
-            self._allocation_state.function_call_watchers.append(watcher)
-            self._update_hash()
-            self._allocation_state_update_lock.notify_all()
-
-    def delete_function_call_watcher(self, id: str) -> None:
-        with self._allocation_state_update_lock:
-            _remove_repeated_field_item(
-                lambda fcw: fcw.id == id,
-                self._allocation_state.function_call_watchers,
-            )
-            self._update_hash()
-            self._allocation_state_update_lock.notify_all()
+    @property
+    def finished(self) -> bool:
+        return self._finished
 
     def add_output_blob_request(self, id: str, size: int) -> None:
         with self._allocation_state_update_lock:
@@ -137,16 +79,19 @@ class AllocationStateWrapper:
             self._update_hash()
             self._allocation_state_update_lock.notify_all()
 
-    def wait_for_update(self, last_seen_hash: str | None) -> AllocationState:
-        """Returns copy of the current allocation state when it's updated."""
+    def wait_for_update(self, last_seen_hash: str | None) -> AllocationState | None:
+        """Returns copy of the current allocation state when it's updated.
+
+        Returns None if the allocation is finished and no more updates will happen.
+        """
         with self._allocation_state_update_lock:
             while True:
                 if last_seen_hash != self._allocation_state.sha256_hash:
                     return self._copy_state_locked()
-                if self._allocation_state.HasField("result"):
-                    # No more state updates will happen if the result field is set.
-                    # Return to avoid deadlock in wait() below.
-                    return self._copy_state_locked()
+                if self._finished:
+                    # No more state updates will happen after the allocation is finished.
+                    # Return None to avoid deadlock in wait() below.
+                    return None
                 self._allocation_state_update_lock.wait()
 
     def _copy_state_locked(self) -> AllocationState:

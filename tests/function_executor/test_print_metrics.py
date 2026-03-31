@@ -18,8 +18,8 @@ from tensorlake.applications import (
 )
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     Allocation,
+    AllocationExecutionEventFinishAllocation,
     AllocationOutcomeCode,
-    AllocationResult,
     CreateAllocationRequest,
     InitializationOutcomeCode,
     InitializeResponse,
@@ -63,17 +63,19 @@ class TestPrintMetrics(unittest.TestCase):
                 )
 
                 allocation_id: str = "test-allocation-id"
-                alloc_result: AllocationResult = run_allocation_that_returns_output(
-                    self,
-                    stub,
-                    request=CreateAllocationRequest(
-                        allocation=Allocation(
-                            request_id="123",
-                            function_call_id="test-function-call",
-                            allocation_id=allocation_id,
-                            inputs=application_function_inputs(arg, int),
+                alloc_result: AllocationExecutionEventFinishAllocation = (
+                    run_allocation_that_returns_output(
+                        self,
+                        stub,
+                        request=CreateAllocationRequest(
+                            allocation=Allocation(
+                                request_id="123",
+                                function_call_id="test-function-call",
+                                allocation_id=allocation_id,
+                                inputs=application_function_inputs(arg, int),
+                            ),
                         ),
-                    ),
+                    )
                 )
 
                 self.assertEqual(

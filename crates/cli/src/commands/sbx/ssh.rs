@@ -183,22 +183,23 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
             exit_code
         });
 
-        // Listen for terminal resize events (SIGWINCH) and SIGINT (in case it
-        // arrives from an external kill, since raw mode disables terminal ISIG).
+        // Listen for Ctrl+C on every platform. Window resize notifications are
+        // only available through SIGWINCH on Unix, so Windows builds skip that
+        // branch and keep the session functional without dynamic resize events.
+        let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
+
+        #[cfg(unix)]
         let mut sigwinch = tokio::signal::unix::signal(
             tokio::signal::unix::SignalKind::window_change(),
         )
         .expect("failed to register SIGWINCH handler");
-        let mut sigint = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::interrupt(),
-        )
-        .expect("failed to register SIGINT handler");
 
         // Main loop: stdin -> WebSocket
         let mut stdin = tokio::io::stdin();
         let mut buf = [0u8; 4096];
         let mut server_exit_code: Option<i32> = None;
 
+        #[cfg(unix)]
         loop {
             tokio::select! {
                 result = stdin.read(&mut buf) => {
@@ -227,7 +228,33 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
                         break;
                     }
                 }
-                _ = sigint.recv() => {
+                _ = &mut ctrl_c => {
+                    break;
+                }
+            }
+        }
+
+        #[cfg(not(unix))]
+        loop {
+            tokio::select! {
+                result = stdin.read(&mut buf) => {
+                    match result {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let mut msg = vec![OP_DATA];
+                            msg.extend_from_slice(&buf[..n]);
+                            if ws_write.send(tungstenite::Message::Binary(msg.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                exit_code = &mut reader_handle => {
+                    server_exit_code = exit_code.unwrap_or(None);
+                    break;
+                }
+                _ = &mut ctrl_c => {
                     break;
                 }
             }

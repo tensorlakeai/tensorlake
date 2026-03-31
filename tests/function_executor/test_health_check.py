@@ -17,8 +17,8 @@ from tensorlake.applications import application, function
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     Allocation,
     AllocationOutcomeCode,
-    AllocationResult,
     CreateAllocationRequest,
+    GetAllocationExecutionLogBatchRequest,
     HealthCheckRequest,
     HealthCheckResponse,
     InitializationOutcomeCode,
@@ -73,6 +73,24 @@ def wait_health_check_failure(test_case: unittest.TestCase, stub: FunctionExecut
     test_case.fail(f"Health check didn't fail in {HEALTH_CHECK_FAIL_WAIT_SEC} secs.")
 
 
+def _create_allocation_and_wait_execution_log(
+    stub: FunctionExecutorStub,
+    request: CreateAllocationRequest,
+    timeout_sec: float | None = None,
+):
+    """Creates allocation and blocks on get_allocation_execution_log_batch.
+
+    Raises RpcError on timeout or if server goes away.
+    """
+    stub.create_allocation(request)
+    stub.get_allocation_execution_log_batch(
+        GetAllocationExecutionLogBatchRequest(
+            allocation_id=request.allocation.allocation_id,
+        ),
+        timeout=timeout_sec,
+    )
+
+
 class TestHealthCheck(unittest.TestCase):
     def test_not_initialized_fails(self):
         with FunctionExecutorProcessContextManager() as process:
@@ -107,14 +125,13 @@ class TestHealthCheck(unittest.TestCase):
 
                 def run_task_in_thread():
                     try:
-                        allocation_id: str = "test-allocation-id"
-                        run_allocation_that_fails(
+                        _create_allocation_and_wait_execution_log(
                             stub,
                             request=CreateAllocationRequest(
                                 allocation=Allocation(
                                     request_id="123",
                                     function_call_id="test-function-call",
-                                    allocation_id=allocation_id,
+                                    allocation_id="test-allocation-id",
                                     inputs=application_function_inputs("deadlock", str),
                                 ),
                             ),
@@ -153,7 +170,7 @@ class TestHealthCheck(unittest.TestCase):
                 )
 
                 def run_task_in_thread():
-                    allocation_result: AllocationResult = run_allocation_that_fails(
+                    finish_event = run_allocation_that_fails(
                         stub,
                         request=CreateAllocationRequest(
                             allocation=Allocation(
@@ -168,7 +185,7 @@ class TestHealthCheck(unittest.TestCase):
                     )
 
                     self.assertEqual(
-                        allocation_result.outcome_code,
+                        finish_event.outcome_code,
                         AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,
                     )
 
@@ -201,7 +218,7 @@ class TestHealthCheck(unittest.TestCase):
 
                 def run_task_in_thread():
                     try:
-                        run_allocation_that_fails(
+                        _create_allocation_and_wait_execution_log(
                             stub,
                             request=CreateAllocationRequest(
                                 allocation=Allocation(
@@ -215,7 +232,7 @@ class TestHealthCheck(unittest.TestCase):
                             ),
                         )
                         # Due to "tcp keep-alive" property of the health checks the allocation
-                        # watch state iterator read should unblock with RpcError.
+                        # execution log batch read should unblock with RpcError.
 
                         self.fail("Waiting for task result should have failed.")
                     except RpcError:
@@ -245,7 +262,7 @@ class TestHealthCheck(unittest.TestCase):
 
                 def run_task_in_thread():
                     try:
-                        run_allocation_that_fails(
+                        _create_allocation_and_wait_execution_log(
                             stub,
                             request=CreateAllocationRequest(
                                 allocation=Allocation(
@@ -261,7 +278,7 @@ class TestHealthCheck(unittest.TestCase):
                         )
 
                         # Due to "tcp keep-alive" property of the health checks the allocation
-                        # watch state iterator read should unblock with RpcError.
+                        # execution log batch read should unblock with RpcError.
 
                         self.fail("Waiting for task result should have failed.")
                     except RpcError:
