@@ -263,7 +263,10 @@ enum SbxCommands {
     /// Create a new sandbox
     New {
         /// Optional name for the sandbox. Named sandboxes support suspend/resume.
-        /// Omit to create an ephemeral sandbox (no suspend/resume).
+        /// Omit to create an ephemeral sandbox (no suspend/resume). When provided, must start
+        /// with a lowercase letter, contain only lowercase letters, digits, and hyphens, not end
+        /// with a hyphen, max 63 chars. Names that are exactly 21 lowercase alphanumeric
+        /// characters are rejected (ambiguous with sandbox IDs).
         name: Option<String>,
 
         /// Number of CPUs (default: 1.0 for new sandboxes, inherited for snapshot restores)
@@ -453,7 +456,9 @@ enum SbxCommands {
         /// Sandbox ID or current name
         sandbox_id: String,
 
-        /// New name to assign (must match [a-z][a-z0-9-]*, max 63 chars)
+        /// New name to assign. Rules: start with a lowercase letter, contain only lowercase
+        /// letters, digits, and hyphens, not end with a hyphen, max 63 chars. Names that are
+        /// exactly 21 lowercase alphanumeric characters are rejected (ambiguous with sandbox IDs).
         new_name: String,
     },
 

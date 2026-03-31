@@ -4,6 +4,7 @@ use crate::error::{CliError, Result};
 
 pub async fn run(ctx: &CliContext, snapshot_ids: &[String]) -> Result<()> {
     let client = ctx.client()?;
+    let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
 
     for snapshot_id in snapshot_ids {
         let resp = client
@@ -23,7 +24,11 @@ pub async fn run(ctx: &CliContext, snapshot_ids: &[String]) -> Result<()> {
             )));
         }
 
-        println!("Deleted snapshot {}", snapshot_id);
+        if is_tty {
+            eprintln!("Deleted snapshot {}", snapshot_id);
+        } else {
+            println!("{}", snapshot_id);
+        }
     }
 
     Ok(())

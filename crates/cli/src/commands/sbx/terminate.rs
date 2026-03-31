@@ -4,6 +4,7 @@ use crate::error::{CliError, Result};
 
 pub async fn run(ctx: &CliContext, sandbox_ids: &[String]) -> Result<()> {
     let client = ctx.client()?;
+    let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
 
     for sandbox_id in sandbox_ids {
         let resp = client
@@ -23,7 +24,11 @@ pub async fn run(ctx: &CliContext, sandbox_ids: &[String]) -> Result<()> {
             )));
         }
 
-        println!("Terminated sandbox {}", sandbox_id);
+        if is_tty {
+            eprintln!("Terminated sandbox {}", sandbox_id);
+        } else {
+            println!("{}", sandbox_id);
+        }
     }
 
     Ok(())

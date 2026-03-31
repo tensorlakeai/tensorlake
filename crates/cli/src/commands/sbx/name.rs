@@ -24,6 +24,22 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, new_name: &str) -> Result<(
         )));
     }
 
-    println!("{sandbox_id}");
+    let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    if is_tty {
+        eprintln!("Sandbox {} is now named {}.", sandbox_id, new_name);
+        print_post_name_tip(new_name);
+    } else {
+        println!("{new_name}");
+    }
     Ok(())
+}
+
+fn print_post_name_tip(name: &str) {
+    eprintln!();
+    eprintln!("Since your sandbox has a name, you can access it with commands like:");
+    eprintln!("  tl sbx ssh {name}");
+    eprintln!("  tl sbx exec {name} -- bash -c \"echo Hello, World!\"");
+    eprintln!("  tl sbx cp ./myfile.py {name}:/tmp/myfile.py");
+    eprintln!("  tl sbx suspend {name}");
+    eprintln!();
 }
