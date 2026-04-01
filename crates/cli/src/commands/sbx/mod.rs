@@ -35,6 +35,20 @@ pub fn sandbox_endpoint(ctx: &CliContext, endpoint: &str) -> String {
     }
 }
 
+pub fn apply_proxy_access_settings(
+    body: &mut serde_json::Value,
+    ports: &[u16],
+    allow_unauthenticated_access: bool,
+) {
+    if !ports.is_empty() {
+        body["exposed_ports"] = serde_json::json!(ports);
+    }
+
+    if allow_unauthenticated_access || !ports.is_empty() {
+        body["allow_unauthenticated_access"] = serde_json::Value::Bool(true);
+    }
+}
+
 pub const DEFAULT_SANDBOX_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 const SANDBOX_WAIT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -197,6 +211,47 @@ pub fn parse_env_vars(env: &[String]) -> Result<Option<serde_json::Value>> {
         );
     }
     Ok(Some(serde_json::Value::Object(map)))
+}
+
+#[cfg(test)]
+mod proxy_access_tests {
+    use super::apply_proxy_access_settings;
+
+    #[test]
+    fn exposed_ports_enable_unauthenticated_access() {
+        let mut body = serde_json::json!({});
+
+        apply_proxy_access_settings(&mut body, &[8000], false);
+
+        assert_eq!(body["exposed_ports"], serde_json::json!([8000]));
+        assert_eq!(
+            body["allow_unauthenticated_access"],
+            serde_json::Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn explicit_unauthenticated_access_without_ports_is_preserved() {
+        let mut body = serde_json::json!({});
+
+        apply_proxy_access_settings(&mut body, &[], true);
+
+        assert_eq!(
+            body["allow_unauthenticated_access"],
+            serde_json::Value::Bool(true)
+        );
+        assert!(body.get("exposed_ports").is_none());
+    }
+
+    #[test]
+    fn no_ports_and_no_unauthenticated_access_leave_body_unchanged() {
+        let mut body = serde_json::json!({});
+
+        apply_proxy_access_settings(&mut body, &[], false);
+
+        assert!(body.get("allow_unauthenticated_access").is_none());
+        assert!(body.get("exposed_ports").is_none());
+    }
 }
 
 pub fn format_created_at(value: Option<&serde_json::Value>) -> String {
