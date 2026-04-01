@@ -227,6 +227,7 @@ def _register_image(
     dockerfile: str,
     snapshot_id: str,
     snapshot_uri: str,
+    is_public: bool = False,
 ) -> dict:
     """POST to Platform API through the ingress to register the image."""
     org_id = ctx.organization_id
@@ -252,6 +253,7 @@ def _register_image(
         "dockerfile": dockerfile,
         "snapshotId": snapshot_id,
         "snapshotUri": snapshot_uri,
+        "isPublic": is_public,
     }
     resp = httpx.post(url, json=body, headers=headers, timeout=30.0)
     resp.raise_for_status()
@@ -263,6 +265,7 @@ def create_sandbox_image(
     image_name: str | None,
     cpus: float,
     memory_mb: int,
+    is_public: bool = False,
 ):
     ctx = _build_context_from_env()
 
@@ -349,7 +352,7 @@ def create_sandbox_image(
                 f"Snapshot {snapshot.snapshot_id} completed without a snapshot URI"
             )
         result = _register_image(
-            ctx, image.name, dockerfile, snapshot.snapshot_id, snapshot.snapshot_uri
+            ctx, image.name, dockerfile, snapshot.snapshot_id, snapshot.snapshot_uri, is_public
         )
         _emit(
             {
@@ -406,11 +409,17 @@ def create_sandbox_image_entrypoint():
         default=4096,
         help="Memory in MB for the build sandbox that installs dependencies and builds the image (default: 4096)",
     )
+    parser.add_argument(
+        "--public",
+        action="store_true",
+        default=False,
+        help="Make this sandbox image publicly accessible.",
+    )
     args = parser.parse_args()
 
     try:
         create_sandbox_image(
-            args.image_file_path, args.image_name, args.cpus, args.memory
+            args.image_file_path, args.image_name, args.cpus, args.memory, args.public
         )
     except SystemExit:
         raise
