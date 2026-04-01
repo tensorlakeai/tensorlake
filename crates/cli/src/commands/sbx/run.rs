@@ -1,5 +1,5 @@
 use crate::auth::context::CliContext;
-use crate::commands::sbx::sandbox_endpoint;
+use crate::commands::sbx::{apply_proxy_access_settings, sandbox_endpoint};
 use crate::error::{CliError, Result};
 
 #[allow(clippy::too_many_arguments)]
@@ -37,12 +37,7 @@ pub async fn run(
     if let Some(img) = image {
         create_body["image"] = serde_json::Value::String(img.to_string());
     }
-    if !ports.is_empty() {
-        create_body["exposed_ports"] = serde_json::json!(ports);
-    }
-    if allow_unauthenticated_access {
-        create_body["allow_unauthenticated_access"] = serde_json::Value::Bool(true);
-    }
+    apply_proxy_access_settings(&mut create_body, ports, allow_unauthenticated_access);
     let has_network = no_internet || !network_allow.is_empty() || !network_deny.is_empty();
     if has_network {
         let mut network = serde_json::json!({});

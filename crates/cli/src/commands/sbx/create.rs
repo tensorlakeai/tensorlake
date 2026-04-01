@@ -1,7 +1,8 @@
 use crate::auth::context::CliContext;
 use crate::commands::sbx::image::resolve_image;
 use crate::commands::sbx::{
-    DEFAULT_SANDBOX_WAIT_TIMEOUT, sandbox_endpoint, sandbox_proxy_base, wait_for_sandbox_status,
+    DEFAULT_SANDBOX_WAIT_TIMEOUT, apply_proxy_access_settings, sandbox_endpoint,
+    sandbox_proxy_base, wait_for_sandbox_status,
 };
 use crate::error::{CliError, Result};
 
@@ -103,12 +104,7 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
         body["name"] = serde_json::Value::String(n.to_string());
     }
 
-    if !ports.is_empty() {
-        body["exposed_ports"] = serde_json::json!(ports);
-    }
-    if allow_unauthenticated_access {
-        body["allow_unauthenticated_access"] = serde_json::Value::Bool(true);
-    }
+    apply_proxy_access_settings(&mut body, ports, allow_unauthenticated_access);
 
     let has_network = no_internet || !network_allow.is_empty() || !network_deny.is_empty();
     if has_network {
