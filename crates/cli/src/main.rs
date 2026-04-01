@@ -505,6 +505,10 @@ enum ImageCommands {
         /// Registered image name (defaults to the image name from the file)
         #[arg(short = 'n', long)]
         registered_name: Option<String>,
+
+        /// Make this sandbox image publicly accessible
+        #[arg(long)]
+        public: bool,
     },
 
     /// List all sandbox images
@@ -860,12 +864,14 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         image_file_path,
                         image_name,
                         registered_name,
+                        public,
                     } => {
                         commands::sbx::image::create::run(
                             ctx,
                             &image_file_path,
                             image_name.as_deref(),
                             registered_name.as_deref(),
+                            public,
                         )
                         .await
                     }

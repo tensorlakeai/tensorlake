@@ -14,6 +14,7 @@ pub async fn run(
     image_file_path: &str,
     image_name: Option<&str>,
     registered_name: Option<&str>,
+    is_public: bool,
 ) -> Result<()> {
     // 1. Parse the Python file for Image definitions.
     let abs_path = tokio::fs::canonicalize(image_file_path)
@@ -39,7 +40,8 @@ pub async fn run(
     eprintln!("\u{2699}\u{fe0f}  Sandbox {} is running", sandbox_id);
 
     // 4. Execute build operations (always terminate sandbox on exit).
-    let inner_result = run_build_and_register(ctx, &sandbox_id, image_def, &effective_name).await;
+    let inner_result =
+        run_build_and_register(ctx, &sandbox_id, image_def, &effective_name, is_public).await;
 
     // Always attempt sandbox termination, even on error.
     let _ = terminate_sandbox(ctx, &sandbox_id).await;
@@ -52,6 +54,7 @@ async fn run_build_and_register(
     sandbox_id: &str,
     image_def: &ImageDef,
     image_name: &str,
+    is_public: bool,
 ) -> Result<()> {
     execute_operations(ctx, sandbox_id, image_def).await?;
 
@@ -73,6 +76,7 @@ async fn run_build_and_register(
         &dockerfile,
         &snapshot.snapshot_id,
         &snapshot.snapshot_uri,
+        is_public,
     )
     .await?;
     eprintln!("\u{2705} Image '{}' registered ({})", image_name, image_id);
@@ -251,6 +255,7 @@ async fn register_image(
     dockerfile: &str,
     snapshot_id: &str,
     snapshot_uri: &str,
+    is_public: bool,
 ) -> Result<String> {
     let (base_url, _, _) = super::templates_base_url(ctx)?;
 
@@ -260,6 +265,7 @@ async fn register_image(
         "dockerfile": dockerfile,
         "snapshotId": snapshot_id,
         "snapshotUri": snapshot_uri,
+        "isPublic": is_public,
     });
 
     let resp = client
