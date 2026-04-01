@@ -221,7 +221,13 @@ def _execute_operations(sandbox: Sandbox, image):
             )
 
 
-def _register_image(ctx: Context, name: str, dockerfile: str, snapshot_id: str) -> dict:
+def _register_image(
+    ctx: Context,
+    name: str,
+    dockerfile: str,
+    snapshot_id: str,
+    is_public: bool = False,
+) -> dict:
     """POST to Platform API through the ingress to register the image."""
     org_id = ctx.organization_id
     proj_id = ctx.project_id
@@ -241,7 +247,12 @@ def _register_image(ctx: Context, name: str, dockerfile: str, snapshot_id: str) 
         headers["X-Forwarded-Organization-Id"] = org_id
         headers["X-Forwarded-Project-Id"] = proj_id
 
-    body = {"name": name, "dockerfile": dockerfile, "snapshotId": snapshot_id}
+    body = {
+        "name": name,
+        "dockerfile": dockerfile,
+        "snapshotId": snapshot_id,
+        "isPublic": is_public,
+    }
     resp = httpx.post(url, json=body, headers=headers, timeout=30.0)
     resp.raise_for_status()
     return resp.json()
@@ -252,6 +263,7 @@ def create_sandbox_image(
     image_name: str | None,
     cpus: float,
     memory_mb: int,
+    is_public: bool = False,
 ):
     ctx = _build_context_from_env()
 
@@ -333,7 +345,9 @@ def create_sandbox_image(
 
         # 6. Register image via Platform API.
         _emit({"type": "status", "message": "Registering image..."})
-        result = _register_image(ctx, image.name, dockerfile, snapshot.snapshot_id)
+        result = _register_image(
+            ctx, image.name, dockerfile, snapshot.snapshot_id, is_public
+        )
         _emit(
             {
                 "type": "image_registered",
@@ -388,11 +402,17 @@ def create_sandbox_image_entrypoint():
         default=4096,
         help="Memory in MB for the build sandbox that installs dependencies and builds the image (default: 4096)",
     )
+    parser.add_argument(
+        "--public",
+        action="store_true",
+        default=False,
+        help="Make this sandbox image publicly accessible.",
+    )
     args = parser.parse_args()
 
     try:
         create_sandbox_image(
-            args.image_file_path, args.image_name, args.cpus, args.memory
+            args.image_file_path, args.image_name, args.cpus, args.memory, args.public
         )
     except SystemExit:
         raise
