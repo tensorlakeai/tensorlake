@@ -83,62 +83,8 @@ class TestCreateSandboxImage(unittest.TestCase):
             "data-tools",
             "FROM python:3.11-slim",
             "snap-1",
-            False,
         )
         sandbox.terminate.assert_called_once_with()
-
-    def test_create_sandbox_image_public(self):
-        module = ModuleType("test_module")
-        image = Image(name="data-tools", base_image="python:3.11-slim")
-        module.MY_IMAGE = image
-
-        ctx = MagicMock()
-        sandbox = MagicMock()
-        sandbox.sandbox_id = "sbx-1"
-        snapshot = SimpleNamespace(snapshot_id="snap-1")
-
-        with (
-            patch.object(
-                create_sandbox_image_module,
-                "_build_context_from_env",
-                return_value=ctx,
-            ),
-            patch.object(create_sandbox_image_module, "load_code", return_value=module),
-            patch.object(create_sandbox_image_module, "_execute_operations"),
-            patch.object(
-                create_sandbox_image_module,
-                "dockerfile_content",
-                return_value="FROM python:3.11-slim",
-            ),
-            patch.object(
-                create_sandbox_image_module,
-                "_register_image",
-                return_value={"id": "tpl-1"},
-            ) as register_image,
-            patch.object(create_sandbox_image_module, "_emit"),
-            patch.object(
-                create_sandbox_image_module, "SandboxClient"
-            ) as sandbox_client_cls,
-        ):
-            sandbox_client = sandbox_client_cls.return_value
-            sandbox_client.create_and_connect.return_value = sandbox
-            sandbox_client.snapshot_and_wait.return_value = snapshot
-
-            create_sandbox_image_module.create_sandbox_image(
-                "image.py",
-                image_name=None,
-                cpus=BUILD_CPUS,
-                memory_mb=BUILD_MEMORY_MB,
-                is_public=True,
-            )
-
-        register_image.assert_called_once_with(
-            ctx,
-            "data-tools",
-            "FROM python:3.11-slim",
-            "snap-1",
-            True,
-        )
 
     def test_discover_module_images_rejects_duplicate_names(self):
         module = ModuleType("test_module")
