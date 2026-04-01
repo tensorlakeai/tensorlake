@@ -1,7 +1,22 @@
+use std::time::Duration;
+
 use crate::auth::context::CliContext;
 use crate::commands::sbx::sandbox_proxy_base;
 use crate::error::{CliError, Result};
 use crate::http;
+use tokio::sync::mpsc;
+
+const OP_DATA: u8 = 0x00;
+const OP_RESIZE: u8 = 0x01;
+const OP_READY: u8 = 0x02;
+const OP_EXIT: u8 = 0x03;
+const PTY_CLOSE_WAIT_TIMEOUT: Duration = Duration::from_millis(200);
+
+#[derive(Debug, PartialEq, Eq)]
+enum PtyBinaryFrame {
+    Data(Vec<u8>),
+    Exit(i32),
+}
 
 pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> {
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
@@ -124,11 +139,6 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
         .await
         .map_err(|e| CliError::Other(anyhow::anyhow!("WebSocket connection failed: {}", e)))?;
 
-    // PTY protocol opcodes
-    const OP_DATA: u8 = 0x00;
-    const OP_RESIZE: u8 = 0x01;
-    const OP_READY: u8 = 0x02;
-
     use futures::sink::SinkExt;
     use futures::stream::StreamExt;
     use tokio::io::AsyncReadExt;
@@ -145,7 +155,7 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
         }
     }
     crossterm::terminal::enable_raw_mode()?;
-    let _raw_guard = RawModeGuard;
+    let mut raw_guard = Some(RawModeGuard);
 
     // Send READY to tell the server to flush buffered output.
     ws_write
@@ -153,27 +163,29 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
         .await
         .map_err(|e| CliError::Other(anyhow::anyhow!("failed to send READY: {}", e)))?;
 
-    let result = async {
+    let (result, needs_prompt_newline) = async {
         // Spawn reader task (WebSocket -> stdout)
         let mut reader_handle = tokio::spawn(async move {
             let mut exit_code: Option<i32> = None;
             while let Some(msg) = ws_read.next().await {
                 match msg {
                     Ok(tungstenite::Message::Binary(data)) => {
-                        if !data.is_empty() && data[0] == OP_DATA {
-                            let mut stdout = tokio::io::stdout();
-                            use tokio::io::AsyncWriteExt;
-                            let _ = stdout.write_all(&data[1..]).await;
-                            let _ = stdout.flush().await;
+                        match parse_pty_binary_frame(&data) {
+                            Some(PtyBinaryFrame::Data(payload)) => {
+                                let mut stdout = tokio::io::stdout();
+                                use tokio::io::AsyncWriteExt;
+                                let _ = stdout.write_all(&payload).await;
+                                let _ = stdout.flush().await;
+                            }
+                            Some(PtyBinaryFrame::Exit(code)) => {
+                                exit_code = Some(code);
+                                break;
+                            }
+                            None => {}
                         }
                     }
                     Ok(tungstenite::Message::Close(Some(frame))) => {
-                        let reason = frame.reason.to_string();
-                        if let Some(code_str) = reason.strip_prefix("exit:")
-                            && let Ok(code) = code_str.parse::<i32>()
-                        {
-                            exit_code = Some(code);
-                        }
+                        exit_code = exit_code.or_else(|| parse_legacy_exit_code(frame.reason.as_ref()));
                         break;
                     }
                     Ok(tungstenite::Message::Close(None)) | Err(_) => break,
@@ -181,6 +193,32 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
                 }
             }
             exit_code
+        });
+
+        // Read stdin on a separate task so remote close/exit is not blocked on
+        // a terminal read future that only wakes once the user types again.
+        let (stdin_tx, mut stdin_rx) = mpsc::channel::<std::io::Result<Vec<u8>>>(8);
+        let stdin_reader = tokio::spawn(async move {
+            let mut stdin = tokio::io::stdin();
+            let mut buf = [0u8; 4096];
+
+            loop {
+                match stdin.read(&mut buf).await {
+                    Ok(0) => {
+                        let _ = stdin_tx.send(Ok(Vec::new())).await;
+                        break;
+                    }
+                    Ok(n) => {
+                        if stdin_tx.send(Ok(buf[..n].to_vec())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = stdin_tx.send(Err(error)).await;
+                        break;
+                    }
+                }
+            }
         });
 
         // Listen for Ctrl+C on every platform. Window resize notifications are
@@ -195,28 +233,28 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
         .expect("failed to register SIGWINCH handler");
 
         // Main loop: stdin -> WebSocket
-        let mut stdin = tokio::io::stdin();
-        let mut buf = [0u8; 4096];
         let mut server_exit_code: Option<i32> = None;
+        let mut terminated_by_remote = false;
 
         #[cfg(unix)]
         loop {
             tokio::select! {
-                result = stdin.read(&mut buf) => {
-                    match result {
-                        Ok(0) => break,
-                        Ok(n) => {
+                maybe_stdin = stdin_rx.recv() => {
+                    match maybe_stdin {
+                        Some(Ok(data)) if data.is_empty() => break,
+                        Some(Ok(data)) => {
                             let mut msg = vec![OP_DATA];
-                            msg.extend_from_slice(&buf[..n]);
+                            msg.extend_from_slice(&data);
                             if ws_write.send(tungstenite::Message::Binary(msg.into())).await.is_err() {
                                 break;
                             }
                         }
-                        Err(_) => break,
+                        Some(Err(_)) | None => break,
                     }
                 }
                 exit_code = &mut reader_handle => {
                     server_exit_code = exit_code.unwrap_or(None);
+                    terminated_by_remote = true;
                     break;
                 }
                 _ = sigwinch.recv() => {
@@ -237,21 +275,22 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
         #[cfg(not(unix))]
         loop {
             tokio::select! {
-                result = stdin.read(&mut buf) => {
-                    match result {
-                        Ok(0) => break,
-                        Ok(n) => {
+                maybe_stdin = stdin_rx.recv() => {
+                    match maybe_stdin {
+                        Some(Ok(data)) if data.is_empty() => break,
+                        Some(Ok(data)) => {
                             let mut msg = vec![OP_DATA];
-                            msg.extend_from_slice(&buf[..n]);
+                            msg.extend_from_slice(&data);
                             if ws_write.send(tungstenite::Message::Binary(msg.into())).await.is_err() {
                                 break;
                             }
                         }
-                        Err(_) => break,
+                        Some(Err(_)) | None => break,
                     }
                 }
                 exit_code = &mut reader_handle => {
                     server_exit_code = exit_code.unwrap_or(None);
+                    terminated_by_remote = true;
                     break;
                 }
                 _ = &mut ctrl_c => {
@@ -266,20 +305,30 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
             .send(tungstenite::Message::Close(None))
             .await;
 
-        // If the reader hasn't finished yet, wait for it to get the exit code.
+        // Restore cooked mode before any shutdown wait so typed input is not
+        // swallowed if the process takes a brief moment to finish closing.
+        drop(raw_guard.take());
+
+        // If the reader hasn't finished yet, give it a short grace period to
+        // receive a server-side exit signal or close frame. Abort afterwards so
+        // local disconnects do not hang indefinitely on a broken close handshake.
         if server_exit_code.is_none() {
-            server_exit_code = reader_handle.await.unwrap_or(None);
+            let (exit_code, reader_completed) = wait_for_reader_shutdown(&mut reader_handle).await?;
+            server_exit_code = exit_code;
+            terminated_by_remote = terminated_by_remote || reader_completed;
         }
 
-        server_exit_code
+        stdin_reader.abort();
+
+        Ok::<(Option<i32>, bool), CliError>((server_exit_code, !terminated_by_remote))
     }
-    .await;
+    .await?;
 
-    // Terminal is restored by _raw_guard Drop.
-    drop(_raw_guard);
+    drop(raw_guard.take());
 
-    // Print a newline so the outer shell prompt starts on a clean line.
-    eprintln!();
+    if needs_prompt_newline {
+        eprintln!();
+    }
 
     if let Some(code) = result
         && code != 0
@@ -288,4 +337,91 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
     }
 
     Ok(())
+}
+
+fn parse_pty_binary_frame(data: &[u8]) -> Option<PtyBinaryFrame> {
+    match data.first().copied() {
+        Some(OP_DATA) => Some(PtyBinaryFrame::Data(data[1..].to_vec())),
+        Some(OP_EXIT) if data.len() >= 5 => {
+            let exit_code = i32::from_be_bytes(data[1..5].try_into().ok()?);
+            Some(PtyBinaryFrame::Exit(exit_code))
+        }
+        _ => None,
+    }
+}
+
+fn parse_legacy_exit_code(reason: &str) -> Option<i32> {
+    let code = reason.strip_prefix("exit:")?;
+    code.parse::<i32>().ok()
+}
+
+async fn wait_for_reader_shutdown(
+    reader_handle: &mut tokio::task::JoinHandle<Option<i32>>,
+) -> Result<(Option<i32>, bool)> {
+    match tokio::time::timeout(PTY_CLOSE_WAIT_TIMEOUT, &mut *reader_handle).await {
+        Ok(join_result) => join_result
+            .map(|exit_code| (exit_code, true))
+            .map_err(|error| CliError::Other(anyhow::anyhow!("PTY reader task failed: {}", error))),
+        Err(_) => {
+            reader_handle.abort();
+            let _ = reader_handle.await;
+            Ok((None, false))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        OP_DATA, OP_EXIT, PTY_CLOSE_WAIT_TIMEOUT, PtyBinaryFrame, parse_legacy_exit_code,
+        parse_pty_binary_frame, wait_for_reader_shutdown,
+    };
+    use std::future::pending;
+    use std::time::Duration;
+
+    #[test]
+    fn parse_pty_binary_frame_reads_data_frames() {
+        assert_eq!(
+            parse_pty_binary_frame(&[OP_DATA, b'h', b'i']),
+            Some(PtyBinaryFrame::Data(b"hi".to_vec()))
+        );
+    }
+
+    #[test]
+    fn parse_pty_binary_frame_reads_exit_frames() {
+        assert_eq!(
+            parse_pty_binary_frame(&[OP_EXIT, 0, 0, 0, 7]),
+            Some(PtyBinaryFrame::Exit(7))
+        );
+    }
+
+    #[test]
+    fn parse_pty_binary_frame_ignores_malformed_exit_frames() {
+        assert_eq!(parse_pty_binary_frame(&[OP_EXIT, 0, 0]), None);
+    }
+
+    #[test]
+    fn parse_legacy_exit_code_reads_close_reason() {
+        assert_eq!(parse_legacy_exit_code("exit:23"), Some(23));
+        assert_eq!(parse_legacy_exit_code("bye"), None);
+    }
+
+    #[tokio::test]
+    async fn wait_for_reader_shutdown_aborts_hung_reader() {
+        let mut reader_handle = tokio::spawn(async move {
+            pending::<()>().await;
+            None
+        });
+
+        let result = tokio::time::timeout(
+            PTY_CLOSE_WAIT_TIMEOUT + Duration::from_secs(1),
+            wait_for_reader_shutdown(&mut reader_handle),
+        )
+        .await
+        .expect("reader shutdown should be bounded")
+        .unwrap();
+
+        assert_eq!(result, (None, false));
+        assert!(reader_handle.is_finished());
+    }
 }
