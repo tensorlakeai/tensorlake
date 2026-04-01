@@ -24,6 +24,8 @@ pub struct Client {
     base_client: reqwest::Client,
     /// Client with user provided middlewares. Used to perform regular HTTP requests.
     client: ClientWithMiddleware,
+    /// Default headers configured on the underlying clients.
+    default_headers: HeaderMap,
 }
 
 /// Builder for creating a [`Client`] with a fluent API.
@@ -115,6 +117,7 @@ impl ClientBuilder {
             base_url: self.base_url,
             base_client,
             client,
+            default_headers,
         })
     }
 }
@@ -122,6 +125,14 @@ impl ClientBuilder {
 type EventSourceStream<T> = Pin<Box<dyn Stream<Item = Result<T, SdkError>> + Send>>;
 
 impl Client {
+    pub(crate) fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    pub(crate) fn default_headers(&self) -> HeaderMap {
+        self.default_headers.clone()
+    }
+
     /// Execute an HTTP request.
     pub async fn execute(&self, request: Request) -> Result<Response, SdkError> {
         let response = self.client.execute(request).await?;

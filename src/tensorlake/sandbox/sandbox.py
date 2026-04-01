@@ -38,6 +38,9 @@ try:
         CloudSandboxClientError as RustCloudSandboxClientError,
     )
     from tensorlake._cloud_sdk import (
+        CloudSandboxDesktopClient as RustCloudSandboxDesktopClient,
+    )
+    from tensorlake._cloud_sdk import (
         CloudSandboxProxyClient as RustCloudSandboxProxyClient,
     )
 
@@ -45,10 +48,12 @@ try:
 except Exception:
     try:
         from _cloud_sdk import CloudSandboxClientError as RustCloudSandboxClientError
+        from _cloud_sdk import CloudSandboxDesktopClient as RustCloudSandboxDesktopClient
         from _cloud_sdk import CloudSandboxProxyClient as RustCloudSandboxProxyClient
 
         _RUST_SANDBOX_PROXY_CLIENT_AVAILABLE = True
     except Exception:
+        RustCloudSandboxDesktopClient = None
         RustCloudSandboxProxyClient = None
         RustCloudSandboxClientError = None
         _RUST_SANDBOX_PROXY_CLIENT_AVAILABLE = False
@@ -111,6 +116,10 @@ class Sandbox:
         self._sandbox_id = sandbox_id
         self._owns_sandbox: bool = False
         self._lifecycle_client: SandboxClient | None = None
+        self._proxy_url = proxy_url
+        self._api_key = api_key
+        self._organization_id = organization_id
+        self._project_id = project_id
 
         if not _RUST_SANDBOX_PROXY_CLIENT_AVAILABLE:
             raise SandboxError(
@@ -470,6 +479,38 @@ class Sandbox:
         else:
             ws_base = base
         return f"{ws_base}/api/v1/pty/{session_id}/ws"
+
+    def connect_desktop(
+        self,
+        port: int = 5901,
+        password: str | None = None,
+        shared: bool = True,
+        connect_timeout: float = 10.0,
+    ):
+        """Connect to a sandbox VNC session for programmatic desktop control."""
+        from .desktop import Desktop
+
+        if RustCloudSandboxDesktopClient is None:
+            raise SandboxError(
+                "Rust Cloud SDK desktop client is required but unavailable. "
+                "Build/install it with `make build_rust_py_client`."
+            )
+
+        try:
+            rust_client = RustCloudSandboxDesktopClient(
+                proxy_url=self._proxy_url,
+                sandbox_id=self._sandbox_id,
+                port=port,
+                password=password,
+                shared=shared,
+                connect_timeout_sec=connect_timeout,
+                api_key=self._api_key,
+                organization_id=self._organization_id,
+                project_id=self._project_id,
+            )
+            return Desktop(rust_client)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
     # --- Health and info ---
 

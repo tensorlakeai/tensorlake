@@ -23,7 +23,9 @@ use tensorlake_cloud_sdk::images::models::{
     ApplicationBuildContext, CreateApplicationBuildRequest,
 };
 use tensorlake_cloud_sdk::sandboxes::models::{CreateSandboxRequest, SandboxPoolRequest};
-use tensorlake_cloud_sdk::sandboxes::{SandboxProxyClient, SandboxesClient};
+use tensorlake_cloud_sdk::sandboxes::{
+    SandboxDesktopClient as RustSandboxDesktopClient, SandboxProxyClient, SandboxesClient,
+};
 use tensorlake_cloud_sdk::{Client, ClientBuilder, error::SdkError};
 use tokio::runtime::Runtime;
 
@@ -950,6 +952,164 @@ impl CloudSandboxProxyClient {
 }
 
 #[pyclass]
+pub struct CloudSandboxDesktopClient {
+    client: RustSandboxDesktopClient,
+    runtime: Runtime,
+}
+
+#[pymethods]
+impl CloudSandboxDesktopClient {
+    #[new]
+    #[pyo3(signature = (proxy_url, sandbox_id, port=5901, password=None, shared=true, connect_timeout_sec=10.0, api_key=None, organization_id=None, project_id=None))]
+    fn new(
+        proxy_url: String,
+        sandbox_id: String,
+        port: u16,
+        password: Option<String>,
+        shared: bool,
+        connect_timeout_sec: f64,
+        api_key: Option<String>,
+        organization_id: Option<String>,
+        project_id: Option<String>,
+    ) -> PyResult<Self> {
+        let (base_url, host_override) = resolve_proxy_target(&proxy_url, &sandbox_id)?;
+
+        let mut builder = ClientBuilder::new(&base_url);
+        if let Some(token) = api_key.as_deref() {
+            builder = builder.bearer_token(token);
+        }
+
+        if let (Some(org_id), Some(project_id)) =
+            (organization_id.as_deref(), project_id.as_deref())
+        {
+            builder = builder.scope(org_id, project_id);
+        }
+
+        let client = builder.build().map_err(into_sandbox_py_error)?;
+        let runtime = Runtime::new().map_err(|e| {
+            CloudSandboxClientError::new_err((
+                "internal",
+                Option::<u16>::None,
+                format!("failed to create tokio runtime: {e}"),
+            ))
+        })?;
+        let connect_timeout = duration_from_seconds("connect_timeout_sec", connect_timeout_sec)?;
+        let desktop_client = runtime
+            .block_on(RustSandboxDesktopClient::connect(
+                client,
+                host_override,
+                port,
+                password,
+                shared,
+                connect_timeout,
+            ))
+            .map_err(into_sandbox_py_error)?;
+
+        Ok(Self {
+            client: desktop_client,
+            runtime,
+        })
+    }
+
+    fn close(&self) -> PyResult<()> {
+        self.runtime
+            .block_on(self.client.close())
+            .map_err(into_sandbox_py_error)
+    }
+
+    fn screenshot_png(
+        &self,
+        py: Python<'_>,
+        timeout_sec: f64,
+    ) -> PyResult<Py<pyo3::types::PyBytes>> {
+        let timeout_sec = duration_from_seconds("timeout_sec", timeout_sec)?;
+        let png = self
+            .runtime
+            .block_on(self.client.screenshot(timeout_sec))
+            .map_err(into_sandbox_py_error)?;
+        Ok(pyo3::types::PyBytes::new(py, &png).into())
+    }
+
+    fn move_mouse(&self, x: u16, y: u16) -> PyResult<()> {
+        self.runtime
+            .block_on(self.client.move_mouse(x, y))
+            .map_err(into_sandbox_py_error)
+    }
+
+    #[pyo3(signature = (button="left", x=None, y=None))]
+    fn mouse_press(&self, button: &str, x: Option<u16>, y: Option<u16>) -> PyResult<()> {
+        self.runtime
+            .block_on(self.client.mouse_press(button, x, y))
+            .map_err(into_sandbox_py_error)
+    }
+
+    #[pyo3(signature = (button="left", x=None, y=None))]
+    fn mouse_release(&self, button: &str, x: Option<u16>, y: Option<u16>) -> PyResult<()> {
+        self.runtime
+            .block_on(self.client.mouse_release(button, x, y))
+            .map_err(into_sandbox_py_error)
+    }
+
+    #[pyo3(signature = (button="left", x=None, y=None))]
+    fn click(&self, button: &str, x: Option<u16>, y: Option<u16>) -> PyResult<()> {
+        self.runtime
+            .block_on(self.client.click(button, x, y))
+            .map_err(into_sandbox_py_error)
+    }
+
+    #[pyo3(signature = (button="left", x=None, y=None, delay_ms=50))]
+    fn double_click(
+        &self,
+        button: &str,
+        x: Option<u16>,
+        y: Option<u16>,
+        delay_ms: u64,
+    ) -> PyResult<()> {
+        self.runtime
+            .block_on(self.client.double_click(button, x, y, delay_ms))
+            .map_err(into_sandbox_py_error)
+    }
+
+    fn key_down(&self, key: &str) -> PyResult<()> {
+        self.runtime
+            .block_on(self.client.key_down(key))
+            .map_err(into_sandbox_py_error)
+    }
+
+    fn key_up(&self, key: &str) -> PyResult<()> {
+        self.runtime
+            .block_on(self.client.key_up(key))
+            .map_err(into_sandbox_py_error)
+    }
+
+    fn press(&self, keys: Vec<String>) -> PyResult<()> {
+        self.runtime
+            .block_on(self.client.press(&keys))
+            .map_err(into_sandbox_py_error)
+    }
+
+    fn type_text(&self, text: String) -> PyResult<()> {
+        self.runtime
+            .block_on(self.client.type_text(&text))
+            .map_err(into_sandbox_py_error)
+    }
+
+    #[getter]
+    fn width(&self) -> PyResult<u16> {
+        self.runtime
+            .block_on(async { self.client.dimensions().await.map(|(width, _)| width) })
+            .map_err(into_sandbox_py_error)
+    }
+
+    #[getter]
+    fn height(&self) -> PyResult<u16> {
+        self.runtime
+            .block_on(async { self.client.dimensions().await.map(|(_, height)| height) })
+            .map_err(into_sandbox_py_error)
+    }
+}
+
+#[pyclass]
 pub struct CloudDocumentAIClient {
     client: DocumentAiClient,
     runtime: Runtime,
@@ -1132,6 +1292,17 @@ fn calculate_sleep_time(retries: usize) -> f64 {
     let jitter_multiplier: f64 = 0.75;
     let base_delay = initial_delay_seconds * 2f64.powi(retries as i32);
     base_delay.min(max_delay_seconds) * jitter_multiplier
+}
+
+fn duration_from_seconds(name: &str, seconds: f64) -> PyResult<Duration> {
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return Err(CloudSandboxClientError::new_err((
+            "sdk_usage",
+            Option::<u16>::None,
+            format!("{name} must be a positive finite number"),
+        )));
+    }
+    Ok(Duration::from_secs_f64(seconds))
 }
 
 fn is_retryable(error: &SdkError) -> bool {
@@ -1532,6 +1703,7 @@ fn _cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<CloudApiClient>()?;
     module.add_class::<CloudSandboxClient>()?;
     module.add_class::<CloudSandboxProxyClient>()?;
+    module.add_class::<CloudSandboxDesktopClient>()?;
     module.add_class::<CloudDocumentAIClient>()?;
     module.add_function(wrap_pyfunction!(create_image_context_file, module)?)?;
     Ok(())

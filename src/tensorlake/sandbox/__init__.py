@@ -1,6 +1,7 @@
 """Tensorlake Sandbox SDK - Client for managing and interacting with sandboxes."""
 
 from .client import SandboxClient
+from .desktop import Desktop
 from .exceptions import (
     PoolInUseError,
     PoolNotFoundError,
@@ -42,6 +43,7 @@ __all__ = [
     "SandboxClient",
     # Sandbox interaction
     "Sandbox",
+    "Desktop",
     # Lifecycle models
     "SandboxStatus",
     "SandboxInfo",
