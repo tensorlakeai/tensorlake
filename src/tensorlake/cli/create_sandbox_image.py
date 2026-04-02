@@ -352,7 +352,12 @@ def create_sandbox_image(
                 f"Snapshot {snapshot.snapshot_id} completed without a snapshot URI"
             )
         result = _register_image(
-            ctx, image.name, dockerfile, snapshot.snapshot_id, snapshot.snapshot_uri, is_public
+            ctx,
+            image.name,
+            dockerfile,
+            snapshot.snapshot_id,
+            snapshot.snapshot_uri,
+            is_public,
         )
         _emit(
             {
