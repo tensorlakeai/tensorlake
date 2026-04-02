@@ -16,6 +16,7 @@ import {
   type SnapshotInfo,
   SnapshotStatus,
   type UpdatePoolOptions,
+  type UpdateSandboxOptions,
   fromSnakeKeys,
   toSnakeKeys,
 } from "./models.js";
@@ -97,7 +98,7 @@ export class SandboxClient {
     const body: Record<string, unknown> = {
       resources: {
         cpus: options?.cpus ?? 1.0,
-        memory_mb: options?.memoryMb ?? 512,
+        memory_mb: options?.memoryMb ?? 1024,
         ephemeral_disk_mb: options?.ephemeralDiskMb ?? 1024,
       },
     };
@@ -107,6 +108,7 @@ export class SandboxClient {
     if (options?.timeoutSecs != null) body.timeout_secs = options.timeoutSecs;
     if (options?.entrypoint != null) body.entrypoint = options.entrypoint;
     if (options?.snapshotId != null) body.snapshot_id = options.snapshotId;
+    if (options?.name != null) body.name = options.name;
 
     if (
       options?.allowInternetAccess === false ||
@@ -144,6 +146,17 @@ export class SandboxClient {
     return (raw.sandboxes ?? []).map(
       (s) => fromSnakeKeys(s, "sandboxId") as SandboxInfo,
     );
+  }
+
+  async update(sandboxId: string, options: UpdateSandboxOptions): Promise<SandboxInfo> {
+    const body: Record<string, unknown> = {};
+    if (options.name != null) body.name = options.name;
+    const raw = await this.http.requestJson<Record<string, unknown>>(
+      "PATCH",
+      this.path(`sandboxes/${sandboxId}`),
+      { body },
+    );
+    return fromSnakeKeys(raw, "sandboxId") as SandboxInfo;
   }
 
   async delete(sandboxId: string): Promise<void> {
@@ -229,7 +242,7 @@ export class SandboxClient {
       image: options.image,
       resources: {
         cpus: options.cpus ?? 1.0,
-        memory_mb: options.memoryMb ?? 512,
+        memory_mb: options.memoryMb ?? 1024,
         ephemeral_disk_mb: options.ephemeralDiskMb ?? 1024,
       },
       timeout_secs: options.timeoutSecs ?? 0,
@@ -274,7 +287,7 @@ export class SandboxClient {
       image: options.image,
       resources: {
         cpus: options.cpus ?? 1.0,
-        memory_mb: options.memoryMb ?? 512,
+        memory_mb: options.memoryMb ?? 1024,
         ephemeral_disk_mb: options.ephemeralDiskMb ?? 1024,
       },
       timeout_secs: options.timeoutSecs ?? 0,

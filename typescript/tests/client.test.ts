@@ -41,7 +41,7 @@ describe("SandboxClient", () => {
         const body = JSON.parse(init?.body as string);
         expect(body.resources).toEqual({
           cpus: 1.0,
-          memory_mb: 512,
+          memory_mb: 1024,
           ephemeral_disk_mb: 1024,
         });
         return new Response(
@@ -87,6 +87,37 @@ describe("SandboxClient", () => {
       expect(result.sandboxId).toBe("sbx-2");
       client.close();
     });
+
+    it("sends name in request body when provided", async () => {
+      mockFetch((_url, init) => {
+        const body = JSON.parse(init?.body as string);
+        expect(body.name).toBe("my-sandbox");
+        return new Response(
+          JSON.stringify({ sandbox_id: "sbx-named", status: "pending" }),
+          { status: 200 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost();
+      const result = await client.create({ name: "my-sandbox" });
+      expect(result.sandboxId).toBe("sbx-named");
+      client.close();
+    });
+
+    it("omits name from request body when not provided", async () => {
+      mockFetch((_url, init) => {
+        const body = JSON.parse(init?.body as string);
+        expect(body.name).toBeUndefined();
+        return new Response(
+          JSON.stringify({ sandbox_id: "sbx-1", status: "pending" }),
+          { status: 200 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await client.create();
+      client.close();
+    });
   });
 
   describe("get", () => {
@@ -97,7 +128,7 @@ describe("SandboxClient", () => {
             id: "sbx-1",
             namespace: "default",
             status: "running",
-            resources: { cpus: 1, memory_mb: 512, ephemeral_disk_mb: 1024 },
+            resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
             secret_names: [],
             created_at: 1700000000,
           }),
@@ -112,6 +143,47 @@ describe("SandboxClient", () => {
       expect(info.createdAt).toBeInstanceOf(Date);
       client.close();
     });
+
+    it("maps name field from response", async () => {
+      mockFetch(() =>
+        new Response(
+          JSON.stringify({
+            id: "sbx-named",
+            namespace: "default",
+            status: "running",
+            resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+            secret_names: [],
+            name: "my-sandbox",
+          }),
+          { status: 200 },
+        ),
+      );
+
+      const client = SandboxClient.forLocalhost();
+      const info = await client.get("sbx-named");
+      expect(info.name).toBe("my-sandbox");
+      client.close();
+    });
+
+    it("returns undefined name when absent from response", async () => {
+      mockFetch(() =>
+        new Response(
+          JSON.stringify({
+            id: "sbx-1",
+            namespace: "default",
+            status: "running",
+            resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+            secret_names: [],
+          }),
+          { status: 200 },
+        ),
+      );
+
+      const client = SandboxClient.forLocalhost();
+      const info = await client.get("sbx-1");
+      expect(info.name).toBeUndefined();
+      client.close();
+    });
   });
 
   describe("list", () => {
@@ -124,7 +196,7 @@ describe("SandboxClient", () => {
                 id: "sbx-1",
                 namespace: "default",
                 status: "running",
-                resources: { cpus: 1, memory_mb: 512, ephemeral_disk_mb: 1024 },
+                resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
                 secret_names: [],
               },
             ],
@@ -137,6 +209,34 @@ describe("SandboxClient", () => {
       const list = await client.list();
       expect(list).toHaveLength(1);
       expect(list[0].sandboxId).toBe("sbx-1");
+      client.close();
+    });
+  });
+
+  describe("update", () => {
+    it("updates an unnamed sandbox with a new name", async () => {
+      mockFetch((url, init) => {
+        expect(url).toContain("/sandboxes/sbx-1");
+        expect(init?.method).toBe("PATCH");
+        const body = JSON.parse(init?.body as string);
+        expect(body.name).toBe("my-new-name");
+        return new Response(
+          JSON.stringify({
+            id: "sbx-1",
+            namespace: "default",
+            status: "running",
+            resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+            secret_names: [],
+            name: "my-new-name",
+          }),
+          { status: 200 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost();
+      const info = await client.update("sbx-1", { name: "my-new-name" });
+      expect(info.sandboxId).toBe("sbx-1");
+      expect(info.name).toBe("my-new-name");
       client.close();
     });
   });
@@ -234,7 +334,7 @@ describe("SandboxClient", () => {
             id: "pool-1",
             namespace: "default",
             image: "node:20",
-            resources: { cpus: 1, memory_mb: 512, ephemeral_disk_mb: 1024 },
+            resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
             secret_names: [],
             timeout_secs: 0,
           }),

@@ -62,6 +62,13 @@ export interface CreateSandboxOptions {
   allowOut?: string[];
   denyOut?: string[];
   snapshotId?: string;
+  /** Optional name for the sandbox. Named sandboxes support suspend/resume. When absent the sandbox is ephemeral. */
+  name?: string;
+}
+
+export interface UpdateSandboxOptions {
+  /** New name for the sandbox. Naming an ephemeral sandbox enables suspend/resume. */
+  name?: string;
 }
 
 export interface CreateSandboxResponse {
@@ -83,6 +90,7 @@ export interface SandboxInfo {
   outcome?: string;
   createdAt?: Date;
   terminatedAt?: Date;
+  name?: string;
 }
 
 // --- Snapshots ---
