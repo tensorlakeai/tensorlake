@@ -33,20 +33,21 @@ const SANDBOX_DISK_MB = 1024;
 async function pollSandboxStatus(
   client: SandboxClient,
   sandboxId: string,
-  target: SandboxStatus,
+  target: SandboxStatus | SandboxStatus[],
   timeoutSec = 60,
   intervalMs = 1000,
 ): Promise<SandboxStatus> {
+  const targets = Array.isArray(target) ? target : [target];
   const deadline = Date.now() + timeoutSec * 1000;
   let status: SandboxStatus | undefined;
   while (Date.now() < deadline) {
     const info = await client.get(sandboxId);
     status = info.status;
-    if (status === target) return status;
+    if (targets.includes(status)) return status;
     await sleep(intervalMs);
   }
   throw new Error(
-    `Sandbox ${sandboxId} did not reach ${target} within ${timeoutSec}s (last: ${status})`,
+    `Sandbox ${sandboxId} did not reach ${targets.join(" or ")} within ${timeoutSec}s (last: ${status})`,
   );
 }
 
@@ -597,13 +598,15 @@ describe(
       // Wait beyond the 30s timeout
       await sleep(35_000);
 
+      // On timeout a sandbox may transition to either suspended or terminated
+      // depending on whether it has a name (named sandboxes suspend; ephemeral ones terminate).
       const status = await pollSandboxStatus(
         client,
         sandboxId,
-        SandboxStatus.TERMINATED,
+        [SandboxStatus.TERMINATED, SandboxStatus.SUSPENDED],
         30,
       );
-      expect(status).toBe(SandboxStatus.TERMINATED);
+      expect([SandboxStatus.TERMINATED, SandboxStatus.SUSPENDED]).toContain(status);
 
       const info = await client.get(sandboxId);
       expect(info.outcome).toBe("Success(Timeout)");
@@ -611,6 +614,12 @@ describe(
     });
 
     it("cleanup", async () => {
+      if (sandboxId) {
+        try {
+          await client.delete(sandboxId);
+        } catch {}
+        sandboxId = undefined!;
+      }
       if (poolId) {
         await sleep(2000);
         await client.deletePool(poolId);

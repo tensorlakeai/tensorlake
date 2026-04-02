@@ -4,6 +4,7 @@ export enum SandboxStatus {
   PENDING = "pending",
   RUNNING = "running",
   SNAPSHOTTING = "snapshotting",
+  SUSPENDED = "suspended",
   TERMINATED = "terminated",
 }
 
@@ -373,7 +374,8 @@ export function fromSnakeKeys(
       } else if (Array.isArray(v)) {
         result[key] = v.map((item) => fromSnakeKeys(item));
       } else {
-        result[key] = v;
+        // Normalize null → undefined so optional fields match TypeScript's ? convention.
+        result[key] = v === null ? undefined : v;
       }
     }
     return result;
