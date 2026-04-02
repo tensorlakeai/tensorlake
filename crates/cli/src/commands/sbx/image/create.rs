@@ -2,12 +2,17 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use tensorlake_cloud_sdk::images::models::{Image, ImageBuildOperation, ImageBuildOperationType};
+use tokio::time::{Duration, Instant};
 
 use crate::auth::context::CliContext;
 use crate::commands::sbx::{self, sandbox_proxy_base};
 use crate::error::{CliError, Result};
 use crate::http;
 use crate::python_ast::{self, ImageDef, OpDef};
+
+const DEFAULT_IMAGE_BUILD_SANDBOX_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
+const DEFAULT_SANDBOX_ENTRY_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+const SANDBOX_ENTRY_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 pub async fn run(
     ctx: &CliContext,
@@ -36,12 +41,28 @@ pub async fn run(
         "image": image_def.base_image,
         "resources": { "cpus": 2, "memory_mb": 4096 }
     });
-    let sandbox_id = sbx::create::create_with_request(ctx, sandbox_body, true).await?;
+    let sandbox_id = sbx::create::create_with_request(ctx, sandbox_body, false).await?;
+    sbx::wait_for_sandbox_status(
+        ctx,
+        &sandbox_id,
+        "Waiting for build sandbox to start",
+        "running",
+        DEFAULT_IMAGE_BUILD_SANDBOX_WAIT_TIMEOUT,
+    )
+    .await?;
     eprintln!("\u{2699}\u{fe0f}  Sandbox {} is running", sandbox_id);
 
     // 4. Execute build operations (always terminate sandbox on exit).
-    let inner_result =
-        run_build_and_register(ctx, &sandbox_id, image_def, &effective_name, is_public).await;
+    let sandbox_entry_retry_deadline = Instant::now() + DEFAULT_SANDBOX_ENTRY_WAIT_TIMEOUT;
+    let inner_result = run_build_and_register(
+        ctx,
+        &sandbox_id,
+        image_def,
+        &effective_name,
+        is_public,
+        sandbox_entry_retry_deadline,
+    )
+    .await;
 
     // Always attempt sandbox termination, even on error.
     let _ = terminate_sandbox(ctx, &sandbox_id).await;
@@ -55,12 +76,18 @@ async fn run_build_and_register(
     image_def: &ImageDef,
     image_name: &str,
     is_public: bool,
+    sandbox_entry_retry_deadline: Instant,
 ) -> Result<()> {
-    execute_operations(ctx, sandbox_id, image_def).await?;
+    execute_operations(ctx, sandbox_id, image_def, sandbox_entry_retry_deadline).await?;
 
     // 5. Snapshot (filesystem only — skip memory for faster snapshots).
-    let snapshot =
-        sbx::snapshot::create_snapshot_with_details(ctx, sandbox_id, 300.0, Some("filesystem_only")).await?;
+    let snapshot = sbx::snapshot::create_snapshot_with_details(
+        ctx,
+        sandbox_id,
+        300.0,
+        Some("filesystem_only"),
+    )
+    .await?;
     eprintln!("\u{1f4f8} Snapshot created: {}", snapshot.snapshot_id);
 
     // 6. Build Dockerfile text.
@@ -89,6 +116,7 @@ async fn execute_operations(
     ctx: &CliContext,
     sandbox_id: &str,
     image_def: &ImageDef,
+    sandbox_entry_retry_deadline: Instant,
 ) -> Result<()> {
     // Accumulated env vars — mirrors the Python `process_env` dict.
     let mut env: HashMap<String, String> = HashMap::new();
@@ -96,7 +124,7 @@ async fn execute_operations(
 
     // Set up /app working directory.
     let env_vec = env_to_vec(&env);
-    sbx::exec::run(
+    run_exec_with_entry_retry(
         ctx,
         sandbox_id,
         "mkdir",
@@ -104,11 +132,12 @@ async fn execute_operations(
         None,
         None,
         &env_vec,
+        sandbox_entry_retry_deadline,
     )
     .await?;
 
     for op in &image_def.operations {
-        execute_single_op(ctx, sandbox_id, op, &mut env).await?;
+        execute_single_op(ctx, sandbox_id, op, &mut env, sandbox_entry_retry_deadline).await?;
     }
 
     Ok(())
@@ -119,13 +148,14 @@ async fn execute_single_op(
     sandbox_id: &str,
     op: &OpDef,
     env: &mut HashMap<String, String>,
+    sandbox_entry_retry_deadline: Instant,
 ) -> Result<()> {
     match op.op_type.as_str() {
         "RUN" => {
             for cmd in &op.args {
                 eprintln!("\u{2699}\u{fe0f}  RUN {}", cmd);
                 let env_vec = env_to_vec(env);
-                sbx::exec::run(
+                run_exec_with_entry_retry(
                     ctx,
                     sandbox_id,
                     "sh",
@@ -133,6 +163,7 @@ async fn execute_single_op(
                     None,
                     Some("/app"),
                     &env_vec,
+                    sandbox_entry_retry_deadline,
                 )
                 .await?;
             }
@@ -141,7 +172,7 @@ async fn execute_single_op(
             let src = op.args.first().map(String::as_str).unwrap_or("");
             let dest = op.args.get(1).map(String::as_str).unwrap_or(src);
             eprintln!("\u{2699}\u{fe0f}  {} {} -> {}", op.op_type, src, dest);
-            upload_to_sandbox(ctx, sandbox_id, src, dest).await?;
+            upload_to_sandbox(ctx, sandbox_id, src, dest, sandbox_entry_retry_deadline).await?;
         }
         "ENV" => {
             let key = op.args.first().cloned().unwrap_or_default();
@@ -151,7 +182,7 @@ async fn execute_single_op(
             // Persist for future shell sessions inside the sandbox.
             let persist_cmd = format!("echo 'export {}=\"{}\"' >> /etc/environment", key, val);
             let env_vec = env_to_vec(env);
-            sbx::exec::run(
+            run_exec_with_entry_retry(
                 ctx,
                 sandbox_id,
                 "sh",
@@ -159,6 +190,7 @@ async fn execute_single_op(
                 None,
                 None,
                 &env_vec,
+                sandbox_entry_retry_deadline,
             )
             .await?;
         }
@@ -174,6 +206,7 @@ async fn upload_to_sandbox(
     sandbox_id: &str,
     local_path: &str,
     dest_path: &str,
+    sandbox_entry_retry_deadline: Instant,
 ) -> Result<()> {
     let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
     let client = build_proxy_client(ctx, host_override.as_deref())?;
@@ -181,9 +214,27 @@ async fn upload_to_sandbox(
     let path = Path::new(local_path);
     if path.is_file() {
         let data = tokio::fs::read(path).await.map_err(CliError::Io)?;
-        upload_bytes(&client, &proxy_base, dest_path, data).await?;
+        upload_bytes(
+            ctx,
+            sandbox_id,
+            &client,
+            &proxy_base,
+            dest_path,
+            data,
+            sandbox_entry_retry_deadline,
+        )
+        .await?;
     } else if path.is_dir() {
-        upload_dir(&client, &proxy_base, path, dest_path).await?;
+        upload_dir(
+            ctx,
+            sandbox_id,
+            &client,
+            &proxy_base,
+            path,
+            dest_path,
+            sandbox_entry_retry_deadline,
+        )
+        .await?;
     } else {
         return Err(CliError::usage(format!(
             "Local path not found: {}",
@@ -195,10 +246,13 @@ async fn upload_to_sandbox(
 }
 
 async fn upload_dir(
+    ctx: &CliContext,
+    sandbox_id: &str,
     client: &reqwest::Client,
     proxy_base: &str,
     local_dir: &Path,
     dest_dir: &str,
+    sandbox_entry_retry_deadline: Instant,
 ) -> Result<()> {
     let mut stack = vec![local_dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -211,7 +265,16 @@ async fn upload_dir(
                 let rel = entry_path.strip_prefix(local_dir).unwrap_or(&entry_path);
                 let remote_dest = format!("{}/{}", dest_dir.trim_end_matches('/'), rel.display());
                 let data = tokio::fs::read(&entry_path).await.map_err(CliError::Io)?;
-                upload_bytes(client, proxy_base, &remote_dest, data).await?;
+                upload_bytes(
+                    ctx,
+                    sandbox_id,
+                    client,
+                    proxy_base,
+                    &remote_dest,
+                    data,
+                    sandbox_entry_retry_deadline,
+                )
+                .await?;
             }
         }
     }
@@ -219,33 +282,149 @@ async fn upload_dir(
 }
 
 async fn upload_bytes(
+    ctx: &CliContext,
+    sandbox_id: &str,
     client: &reqwest::Client,
     proxy_base: &str,
     dest_path: &str,
     data: Vec<u8>,
+    sandbox_entry_retry_deadline: Instant,
 ) -> Result<()> {
-    let resp = client
-        .put(format!(
-            "{}/api/v1/files?path={}",
-            proxy_base,
-            urlencoding::encode(dest_path)
-        ))
-        .body(data)
-        .send()
-        .await
-        .map_err(CliError::Http)?;
+    let url = format!(
+        "{}/api/v1/files?path={}",
+        proxy_base,
+        urlencoding::encode(dest_path)
+    );
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(CliError::Other(anyhow::anyhow!(
-            "File upload to sandbox failed (HTTP {}): {}",
-            status,
-            body
-        )));
+    loop {
+        let resp = client.put(&url).body(data.clone()).send().await;
+        match resp {
+            Ok(resp) if resp.status().is_success() => return Ok(()),
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                let error = CliError::Other(anyhow::anyhow!(
+                    "File upload to sandbox failed (HTTP {}): {}",
+                    status,
+                    body
+                ));
+                if !should_retry_sandbox_entry(
+                    ctx,
+                    sandbox_id,
+                    &error,
+                    sandbox_entry_retry_deadline,
+                )
+                .await
+                {
+                    return Err(error);
+                }
+            }
+            Err(error) => {
+                let error = CliError::Http(error);
+                if !should_retry_sandbox_entry(
+                    ctx,
+                    sandbox_id,
+                    &error,
+                    sandbox_entry_retry_deadline,
+                )
+                .await
+                {
+                    return Err(error);
+                }
+            }
+        }
+
+        tokio::time::sleep(SANDBOX_ENTRY_WAIT_POLL_INTERVAL).await;
+    }
+}
+
+async fn run_exec_with_entry_retry(
+    ctx: &CliContext,
+    sandbox_id: &str,
+    command: &str,
+    args: &[String],
+    timeout: Option<f64>,
+    workdir: Option<&str>,
+    env: &[String],
+    sandbox_entry_retry_deadline: Instant,
+) -> Result<()> {
+    loop {
+        let result = sbx::exec::run(ctx, sandbox_id, command, args, timeout, workdir, env).await;
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if should_retry_sandbox_entry(
+                    ctx,
+                    sandbox_id,
+                    &error,
+                    sandbox_entry_retry_deadline,
+                )
+                .await =>
+            {
+                tokio::time::sleep(SANDBOX_ENTRY_WAIT_POLL_INTERVAL).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn should_retry_sandbox_entry(
+    ctx: &CliContext,
+    sandbox_id: &str,
+    error: &CliError,
+    sandbox_entry_retry_deadline: Instant,
+) -> bool {
+    if Instant::now() >= sandbox_entry_retry_deadline {
+        return false;
     }
 
-    Ok(())
+    let is_retryable = match error {
+        CliError::Http(error) => is_retryable_sandbox_entry_transport_error(error),
+        CliError::Other(error) => is_retryable_sandbox_entry_message(&error.to_string()),
+        _ => false,
+    };
+
+    if !is_retryable {
+        return false;
+    }
+
+    sandbox_status(ctx, sandbox_id)
+        .await
+        .is_some_and(|status| status == "running")
+}
+
+async fn sandbox_status(ctx: &CliContext, sandbox_id: &str) -> Option<String> {
+    let client = ctx.client().ok()?;
+    let resp = client
+        .get(sbx::sandbox_endpoint(
+            ctx,
+            &format!("sandboxes/{sandbox_id}"),
+        ))
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let info: serde_json::Value = resp.json().await.ok()?;
+    info.get("status")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+}
+
+fn is_retryable_sandbox_entry_message(message: &str) -> bool {
+    message.contains("CONNECTION_REFUSED")
+        || message.contains("Connection to sandbox refused")
+        || message.contains("CONNECTION_TIMEOUT")
+        || message.contains("READ_TIMEOUT")
+        || message.contains("WRITE_TIMEOUT")
+        || message.contains("PROXY_ERROR")
+}
+
+fn is_retryable_sandbox_entry_transport_error(error: &reqwest::Error) -> bool {
+    error.is_connect() || error.is_timeout()
 }
 
 /// Register the image via the Platform API.
@@ -389,4 +568,23 @@ fn build_proxy_client(ctx: &CliContext, host_override: Option<&str>) -> Result<r
 /// Convert an env HashMap to `["KEY=VALUE", ...]` strings for `exec::run`.
 fn env_to_vec(env: &HashMap<String, String>) -> Vec<String> {
     env.iter().map(|(k, v)| format!("{}={}", k, v)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_retryable_sandbox_entry_message;
+
+    #[test]
+    fn retryable_sandbox_entry_message_matches_connection_refused() {
+        assert!(is_retryable_sandbox_entry_message(
+            r#"{"error":"Connection to sandbox refused.","code":"CONNECTION_REFUSED"}"#
+        ));
+    }
+
+    #[test]
+    fn retryable_sandbox_entry_message_rejects_non_transient_failure() {
+        assert!(!is_retryable_sandbox_entry_message(
+            r#"{"error":"invalid request"}"#
+        ));
+    }
 }
