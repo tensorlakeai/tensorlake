@@ -14,6 +14,7 @@ pub async fn run(
     image_file_path: &str,
     image_name: Option<&str>,
     registered_name: Option<&str>,
+    is_public: bool,
 ) -> Result<()> {
     // 1. Parse the Python file for Image definitions.
     let abs_path = tokio::fs::canonicalize(image_file_path)
@@ -39,7 +40,8 @@ pub async fn run(
     eprintln!("\u{2699}\u{fe0f}  Sandbox {} is running", sandbox_id);
 
     // 4. Execute build operations (always terminate sandbox on exit).
-    let inner_result = run_build_and_register(ctx, &sandbox_id, image_def, &effective_name).await;
+    let inner_result =
+        run_build_and_register(ctx, &sandbox_id, image_def, &effective_name, is_public).await;
 
     // Always attempt sandbox termination, even on error.
     let _ = terminate_sandbox(ctx, &sandbox_id).await;
@@ -52,13 +54,14 @@ async fn run_build_and_register(
     sandbox_id: &str,
     image_def: &ImageDef,
     image_name: &str,
+    is_public: bool,
 ) -> Result<()> {
     execute_operations(ctx, sandbox_id, image_def).await?;
 
     // 5. Snapshot (filesystem only — skip memory for faster snapshots).
-    let snapshot_id =
-        sbx::snapshot::create_snapshot(ctx, sandbox_id, 300.0, Some("filesystem_only")).await?;
-    eprintln!("\u{1f4f8} Snapshot created: {}", snapshot_id);
+    let snapshot =
+        sbx::snapshot::create_snapshot_with_details(ctx, sandbox_id, 300.0, Some("filesystem_only")).await?;
+    eprintln!("\u{1f4f8} Snapshot created: {}", snapshot.snapshot_id);
 
     // 6. Build Dockerfile text.
     let sdk_version = env!("CARGO_PKG_VERSION");
@@ -67,7 +70,15 @@ async fn run_build_and_register(
 
     // 7. Register image via Platform API.
     eprintln!("\u{2699}\u{fe0f}  Registering image...");
-    let image_id = register_image(ctx, image_name, &dockerfile, &snapshot_id).await?;
+    let image_id = register_image(
+        ctx,
+        image_name,
+        &dockerfile,
+        &snapshot.snapshot_id,
+        &snapshot.snapshot_uri,
+        is_public,
+    )
+    .await?;
     eprintln!("\u{2705} Image '{}' registered ({})", image_name, image_id);
 
     Ok(())
@@ -243,6 +254,8 @@ async fn register_image(
     name: &str,
     dockerfile: &str,
     snapshot_id: &str,
+    snapshot_uri: &str,
+    is_public: bool,
 ) -> Result<String> {
     let (base_url, _, _) = super::templates_base_url(ctx)?;
 
@@ -251,6 +264,8 @@ async fn register_image(
         "name": name,
         "dockerfile": dockerfile,
         "snapshotId": snapshot_id,
+        "snapshotUri": snapshot_uri,
+        "isPublic": is_public,
     });
 
     let resp = client
