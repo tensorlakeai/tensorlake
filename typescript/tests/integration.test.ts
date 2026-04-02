@@ -22,8 +22,8 @@ import {
 import { Sandbox } from "../src/sandbox.js";
 
 const SANDBOX_IMAGE = "docker.io/library/alpine:latest";
-const SANDBOX_CPUS = 0.2;
-const SANDBOX_MEMORY_MB = 100;
+const SANDBOX_CPUS = 1.0;
+const SANDBOX_MEMORY_MB = 1024;
 const SANDBOX_DISK_MB = 1024;
 
 // ---------------------------------------------------------------------------
@@ -343,11 +343,11 @@ describe(
       const updated = await client.updatePool(poolId, {
         image: SANDBOX_IMAGE,
         cpus: SANDBOX_CPUS,
-        memoryMb: 200,
+        memoryMb: 2048,
         ephemeralDiskMb: SANDBOX_DISK_MB,
         warmContainers: 1,
       });
-      expect(updated.resources.memoryMb).toBe(200);
+      expect(updated.resources.memoryMb).toBe(2048);
       expect(updated.warmContainers).toBe(1);
     });
 
