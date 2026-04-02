@@ -22,7 +22,9 @@ use tensorlake_cloud_sdk::images::ImagesClient;
 use tensorlake_cloud_sdk::images::models::{
     ApplicationBuildContext, CreateApplicationBuildRequest,
 };
-use tensorlake_cloud_sdk::sandboxes::models::{CreateSandboxRequest, SandboxPoolRequest};
+use tensorlake_cloud_sdk::sandboxes::models::{
+    CreateSandboxRequest, SandboxPoolRequest, UpdateSandboxRequest,
+};
 use tensorlake_cloud_sdk::sandboxes::{
     SandboxDesktopClient as RustSandboxDesktopClient, SandboxProxyClient, SandboxesClient,
 };
@@ -610,6 +612,18 @@ impl CloudSandboxClient {
             let sandboxes = client.list().await?;
             let response = serde_json::json!({ "sandboxes": sandboxes });
             Ok(serde_json::to_string(&response)?)
+        })
+    }
+
+    fn update_sandbox(&self, sandbox_id: String, request_json: String) -> PyResult<String> {
+        let request: UpdateSandboxRequest = parse_json_payload(&request_json)?;
+        self.run_with_retry(5, move |client| {
+            let sandbox_id = sandbox_id.clone();
+            let request = request.clone();
+            async move {
+                let response = client.update(&sandbox_id, &request).await?;
+                Ok(serde_json::to_string(&response)?)
+            }
         })
     }
 

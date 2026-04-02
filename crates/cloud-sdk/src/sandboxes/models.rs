@@ -43,6 +43,12 @@ pub struct CreateSandboxRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UpdateSandboxRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SandboxPoolRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
