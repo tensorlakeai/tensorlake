@@ -117,19 +117,25 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
 
     let sandbox_id = create_with_request(ctx, body, wait).await?;
     let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let display_id = name.unwrap_or(&sandbox_id);
     if is_tty {
-        eprintln!("Sandbox {} is ready.", sandbox_id);
+        eprintln!("Sandbox {} is ready.", display_id);
     }
     if !is_tty {
         println!("{}", sandbox_id);
     }
     if is_tty {
-        print_post_create_tip(ctx, &sandbox_id, name.is_none());
+        print_post_create_tip(ctx, &sandbox_id, display_id, name.is_none());
     }
     Ok(())
 }
 
-fn print_post_create_tip(ctx: &CliContext, sandbox_id: &str, is_ephemeral: bool) {
+fn print_post_create_tip(
+    ctx: &CliContext,
+    sandbox_id: &str,
+    display_id: &str,
+    is_ephemeral: bool,
+) {
     let (proxy_url, host_header) = sandbox_proxy_base(ctx, sandbox_id);
     let host_flag = host_header
         .as_deref()
@@ -138,16 +144,18 @@ fn print_post_create_tip(ctx: &CliContext, sandbox_id: &str, is_ephemeral: bool)
 
     eprintln!();
     eprintln!("Get started:");
-    eprintln!("  tl sbx ssh {sandbox_id}");
-    eprintln!("  tl sbx exec {sandbox_id} -- bash -c \"echo Hello, World!\"");
+    eprintln!("  tl sbx ssh {display_id}");
+    eprintln!("  tl sbx exec {display_id} -- bash -c \"echo Hello, World!\"");
     if is_ephemeral {
-        eprintln!("  tl sbx name {sandbox_id} <name>  # make persistent (enables suspend/resume)");
+        eprintln!(
+            "  tl sbx name {display_id} <name>  # make persistent (enables suspend/resume)"
+        );
     }
 
     let tips: Vec<(&str, String)> = vec![
         (
             "copy files into your sandbox?",
-            format!("  tl sbx cp ./myfile.py {sandbox_id}:/tmp/myfile.py"),
+            format!("  tl sbx cp ./myfile.py {display_id}:/tmp/myfile.py"),
         ),
         (
             "run a process via the HTTP API?",
