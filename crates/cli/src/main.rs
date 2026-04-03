@@ -726,9 +726,11 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
         Commands::Sbx(subcmd) => {
             ensure_auth_and_project(ctx).await?;
             match subcmd {
-                SbxCommands::Ls { all, running, quiet } => {
-                    commands::sbx::ls::run(ctx, running, all, quiet).await
-                }
+                SbxCommands::Ls {
+                    all,
+                    running,
+                    quiet,
+                } => commands::sbx::ls::run(ctx, running, all, quiet).await,
                 SbxCommands::Terminate { sandbox_ids } => {
                     commands::sbx::terminate::run(ctx, &sandbox_ids).await
                 }
