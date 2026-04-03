@@ -250,6 +250,10 @@ enum SbxCommands {
         /// Show only sandboxes with status `running`
         #[arg(short, long)]
         running: bool,
+
+        /// Only print sandbox IDs, one per line (no table formatting)
+        #[arg(short, long)]
+        quiet: bool,
     },
 
     /// Terminate one or more sandboxes
@@ -722,7 +726,9 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
         Commands::Sbx(subcmd) => {
             ensure_auth_and_project(ctx).await?;
             match subcmd {
-                SbxCommands::Ls { all, running } => commands::sbx::ls::run(ctx, running, all).await,
+                SbxCommands::Ls { all, running, quiet } => {
+                    commands::sbx::ls::run(ctx, running, all, quiet).await
+                }
                 SbxCommands::Terminate { sandbox_ids } => {
                     commands::sbx::terminate::run(ctx, &sandbox_ids).await
                 }
