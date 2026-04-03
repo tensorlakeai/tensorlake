@@ -140,9 +140,7 @@ class Desktop:
     def right_click(self, x: int | None = None, y: int | None = None) -> None:
         self.click(x=x, y=y, button="right")
 
-    def scroll(
-        self, steps: int, x: int | None = None, y: int | None = None
-    ) -> None:
+    def scroll(self, steps: int, x: int | None = None, y: int | None = None) -> None:
         try:
             self._rust_client.scroll(steps, x, y)
         except Exception as e:
