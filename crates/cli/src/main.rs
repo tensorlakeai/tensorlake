@@ -84,7 +84,7 @@ enum Commands {
         directory: Option<String>,
 
         /// Skip confirmation of detected project directory
-        #[arg(long)]
+        #[arg(short = 'y', long)]
         no_confirm: bool,
     },
 
@@ -94,7 +94,7 @@ enum Commands {
         name: String,
 
         /// Overwrite existing files
-        #[arg(long)]
+        #[arg(short, long)]
         force: bool,
     },
 
@@ -128,15 +128,15 @@ enum Commands {
         stage: String,
 
         /// Path to a MiniJinja template file; the variable `tensorlake_image` is set to the generated Dockerfile
-        #[arg(long)]
+        #[arg(short = 'T', long)]
         template: Option<String>,
 
         /// Push built images to the registry after building
-        #[arg(long)]
+        #[arg(short, long)]
         push: bool,
 
         /// Environment variable to inject into the generated Dockerfile as an ENV directive (KEY=VALUE, repeatable)
-        #[arg(long = "build-env", value_name = "KEY=VALUE")]
+        #[arg(short = 'e', long = "build-env", value_name = "KEY=VALUE")]
         build_envs: Vec<String>,
     },
 
@@ -146,11 +146,11 @@ enum Commands {
         path_or_url: String,
 
         /// Pages to parse, e.g. '1', '1-5', or '1,2,10'. Default: all pages.
-        #[arg(long)]
+        #[arg(short, long)]
         pages: Option<String>,
 
         /// Ignore local cache and re-parse the document
-        #[arg(long)]
+        #[arg(short = 'I', long)]
         ignore_cache: bool,
     },
 
@@ -201,11 +201,11 @@ enum CronCommands {
         schedule: String,
 
         /// Inline JSON to send as input on every invocation
-        #[arg(long, conflicts_with = "input_file")]
+        #[arg(short = 'j', long, conflicts_with = "input_file")]
         input_json: Option<String>,
 
         /// Path to a file whose bytes are sent as input on every invocation
-        #[arg(long, conflicts_with = "input_json")]
+        #[arg(short = 'f', long, conflicts_with = "input_json")]
         input_file: Option<String>,
     },
 
@@ -244,12 +244,16 @@ enum SbxCommands {
     /// List all sandboxes
     Ls {
         /// Include sandboxes with status `terminated`
-        #[arg(long)]
+        #[arg(short, long)]
         all: bool,
 
         /// Show only sandboxes with status `running`
-        #[arg(long)]
+        #[arg(short, long)]
         running: bool,
+
+        /// Only print sandbox IDs, one per line (no table formatting)
+        #[arg(short, long)]
+        quiet: bool,
     },
 
     /// Terminate one or more sandboxes
@@ -270,35 +274,35 @@ enum SbxCommands {
         name: Option<String>,
 
         /// Number of CPUs (default: 1.0 for new sandboxes, inherited for snapshot restores)
-        #[arg(long)]
+        #[arg(short, long)]
         cpus: Option<f64>,
 
         /// Memory in MB (default: 1024 for new sandboxes, inherited for snapshot restores)
-        #[arg(long)]
+        #[arg(short, long)]
         memory: Option<i64>,
 
         /// Timeout in seconds
-        #[arg(long)]
+        #[arg(short, long)]
         timeout: Option<i64>,
 
         /// Entrypoint command parts
-        #[arg(long)]
+        #[arg(short, long)]
         entrypoint: Vec<String>,
 
         /// Create from a snapshot ID
-        #[arg(long, conflicts_with = "image")]
+        #[arg(short, long, conflicts_with = "image")]
         snapshot: Option<String>,
 
         /// Create from a registered image name
-        #[arg(long, conflicts_with = "snapshot")]
+        #[arg(short, long, conflicts_with = "snapshot")]
         image: Option<String>,
 
         /// Return immediately after creation instead of waiting for the sandbox to be running
-        #[arg(long)]
+        #[arg(short, long)]
         no_wait: bool,
 
         /// Expose a port via the sandbox proxy (can be repeated)
-        #[arg(long = "expose", value_parser = parse_user_port)]
+        #[arg(short = 'x', long = "expose", value_parser = parse_user_port)]
         ports: Vec<u16>,
 
         /// Allow unauthenticated proxy access to this sandbox
@@ -306,15 +310,15 @@ enum SbxCommands {
         allow_unauthenticated_access: bool,
 
         /// Block all outbound internet access
-        #[arg(long)]
+        #[arg(short = 'N', long)]
         no_internet: bool,
 
         /// Allow outbound traffic to this IP or CIDR (can be repeated)
-        #[arg(long = "network-allow")]
+        #[arg(short = 'A', long = "network-allow")]
         network_allow: Vec<String>,
 
         /// Deny outbound traffic to this IP or CIDR (can be repeated)
-        #[arg(long = "network-deny")]
+        #[arg(short = 'D', long = "network-deny")]
         network_deny: Vec<String>,
     },
 
@@ -324,7 +328,7 @@ enum SbxCommands {
         sandbox_id: String,
 
         /// Return immediately after sending the suspend request instead of waiting for the sandbox to be suspended
-        #[arg(long)]
+        #[arg(short, long)]
         no_wait: bool,
     },
 
@@ -334,7 +338,7 @@ enum SbxCommands {
         sandbox_id: String,
 
         /// Return immediately after sending the resume request instead of waiting for the sandbox to be running
-        #[arg(long)]
+        #[arg(short, long)]
         no_wait: bool,
     },
 
@@ -385,7 +389,7 @@ enum SbxCommands {
         timeout: f64,
 
         /// Number of copies to create from the same snapshot
-        #[arg(long, default_value = "1")]
+        #[arg(short = 'n', long, default_value = "1")]
         times: NonZeroUsize,
     },
 
@@ -407,11 +411,11 @@ enum SbxCommands {
         image: Option<String>,
 
         /// Number of CPUs
-        #[arg(long, default_value = "1.0")]
+        #[arg(short, long, default_value = "1.0")]
         cpus: f64,
 
         /// Memory in MB
-        #[arg(long, default_value = "1024")]
+        #[arg(short, long, default_value = "1024")]
         memory: i64,
 
         /// Command timeout in seconds
@@ -427,11 +431,11 @@ enum SbxCommands {
         env: Vec<String>,
 
         /// Keep sandbox after command exits
-        #[arg(long)]
+        #[arg(short, long)]
         keep: bool,
 
         /// Expose a port via the sandbox proxy (can be repeated)
-        #[arg(long = "expose", value_parser = parse_user_port)]
+        #[arg(short = 'x', long = "expose", value_parser = parse_user_port)]
         ports: Vec<u16>,
 
         /// Allow unauthenticated proxy access to this sandbox
@@ -439,15 +443,15 @@ enum SbxCommands {
         allow_unauthenticated_access: bool,
 
         /// Block all outbound internet access
-        #[arg(long)]
+        #[arg(short = 'N', long)]
         no_internet: bool,
 
         /// Allow outbound traffic to this IP or CIDR (can be repeated)
-        #[arg(long = "network-allow")]
+        #[arg(short = 'A', long = "network-allow")]
         network_allow: Vec<String>,
 
         /// Deny outbound traffic to this IP or CIDR (can be repeated)
-        #[arg(long = "network-deny")]
+        #[arg(short = 'D', long = "network-deny")]
         network_deny: Vec<String>,
     },
 
@@ -482,7 +486,7 @@ enum SbxCommands {
         remote_port: u16,
 
         /// Local port to listen on (defaults to the remote port)
-        #[arg(long, value_parser = parse_tcp_port)]
+        #[arg(short, long, value_parser = parse_tcp_port)]
         listen_port: Option<u16>,
     },
 
@@ -507,7 +511,7 @@ enum ImageCommands {
         registered_name: Option<String>,
 
         /// Make this sandbox image publicly accessible
-        #[arg(long)]
+        #[arg(short, long)]
         public: bool,
     },
 
@@ -722,7 +726,11 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
         Commands::Sbx(subcmd) => {
             ensure_auth_and_project(ctx).await?;
             match subcmd {
-                SbxCommands::Ls { all, running } => commands::sbx::ls::run(ctx, running, all).await,
+                SbxCommands::Ls {
+                    all,
+                    running,
+                    quiet,
+                } => commands::sbx::ls::run(ctx, running, all, quiet).await,
                 SbxCommands::Terminate { sandbox_ids } => {
                     commands::sbx::terminate::run(ctx, &sandbox_ids).await
                 }

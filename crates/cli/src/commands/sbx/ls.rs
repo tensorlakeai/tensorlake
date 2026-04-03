@@ -5,7 +5,12 @@ use crate::commands::sbx::{created_at_sort_key, format_created_at, sandbox_endpo
 use crate::error::{CliError, Result};
 use crate::output::table::new_table;
 
-pub async fn run(ctx: &CliContext, running_only: bool, include_terminated: bool) -> Result<()> {
+pub async fn run(
+    ctx: &CliContext,
+    running_only: bool,
+    include_terminated: bool,
+    quiet: bool,
+) -> Result<()> {
     let client = ctx.client()?;
     let url = sandbox_endpoint(ctx, "sandboxes");
 
@@ -52,6 +57,18 @@ pub async fn run(ctx: &CliContext, running_only: bool, include_terminated: bool)
         b_created_at.cmp(&a_created_at)
     });
 
+    if quiet {
+        for s in &sandboxes {
+            let id = s
+                .get("sandbox_id")
+                .or_else(|| s.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("-");
+            println!("{}", id);
+        }
+        return Ok(());
+    }
+
     if sandboxes.is_empty() {
         println!("No sandboxes found.");
         return Ok(());
@@ -59,6 +76,7 @@ pub async fn run(ctx: &CliContext, running_only: bool, include_terminated: bool)
 
     let mut table = new_table(&[
         "ID",
+        "Name",
         "Status",
         "Image",
         "CPUs",
@@ -73,6 +91,7 @@ pub async fn run(ctx: &CliContext, running_only: bool, include_terminated: bool)
             .or_else(|| s.get("id"))
             .and_then(|v| v.as_str())
             .unwrap_or("-");
+        let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let status = s.get("status").and_then(|v| v.as_str()).unwrap_or("-");
         let image = s.get("image").and_then(|v| v.as_str()).unwrap_or("-");
 
@@ -97,6 +116,7 @@ pub async fn run(ctx: &CliContext, running_only: bool, include_terminated: bool)
 
         table.add_row(vec![
             Cell::new(id),
+            Cell::new(name),
             Cell::new(status),
             Cell::new(image),
             Cell::new(&cpus),
