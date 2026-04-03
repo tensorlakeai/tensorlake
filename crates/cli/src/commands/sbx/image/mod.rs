@@ -22,87 +22,6 @@ pub fn templates_base_url(ctx: &CliContext) -> Result<(String, String, String)> 
     Ok((base, org_id, proj_id))
 }
 
-/// Resolve an image name or ID to its snapshot ID.
-/// Tries direct GET first, falls back to paginated list.
-pub async fn resolve_image(ctx: &CliContext, image_name: &str) -> Result<String> {
-    let (base_url, _, _) = templates_base_url(ctx)?;
-    let client = ctx.client()?;
-    let direct_url = format!("{}/{}", base_url, image_name);
-
-    if ctx.debug {
-        eprintln!(
-            "DEBUG resolve_image: trying direct lookup GET {}",
-            direct_url
-        );
-    }
-
-    let direct_resp = client
-        .get(&direct_url)
-        .send()
-        .await
-        .map_err(CliError::Http)?;
-    if direct_resp.status().is_success() {
-        let result: serde_json::Value = direct_resp.json().await.map_err(CliError::Http)?;
-        if let Some(snapshot_id) = snapshot_id_from_item(&result, image_name)? {
-            if ctx.debug {
-                eprintln!("DEBUG resolve_image: direct lookup succeeded");
-            }
-            eprintln!(
-                "Resolved image '{}' -> snapshot {}",
-                image_name, snapshot_id
-            );
-            return Ok(snapshot_id);
-        }
-        return Err(CliError::Other(anyhow::anyhow!(
-            "image '{}' has no snapshotId",
-            image_name
-        )));
-    }
-    if direct_resp.status().as_u16() != 404 {
-        let status = direct_resp.status();
-        let body = direct_resp.text().await.unwrap_or_default();
-        return Err(CliError::Other(anyhow::anyhow!(
-            "failed to fetch image '{}' (HTTP {}): {}",
-            image_name,
-            status,
-            body
-        )));
-    }
-
-    if ctx.debug {
-        eprintln!(
-            "DEBUG resolve_image: direct lookup returned 404, falling back to paginated list"
-        );
-    }
-
-    let snapshot_id = find_image_in_paginated_list(ctx, &client, &base_url, image_name)
-        .await?
-        .ok_or_else(|| CliError::Other(anyhow::anyhow!("image '{}' not found", image_name)))?;
-
-    if ctx.debug {
-        eprintln!("DEBUG resolve_image: paginated list lookup succeeded");
-    }
-    eprintln!(
-        "Resolved image '{}' -> snapshot {}",
-        image_name, snapshot_id
-    );
-    Ok(snapshot_id)
-}
-
-/// Page through the list, returning just the snapshot ID.
-pub async fn find_image_in_paginated_list(
-    ctx: &CliContext,
-    client: &reqwest::Client,
-    base_url: &str,
-    image_ref: &str,
-) -> Result<Option<String>> {
-    let item = find_image_item_in_paginated_list(ctx, client, base_url, image_ref).await?;
-    match item {
-        Some(ref item) => snapshot_id_from_item(item, image_ref),
-        None => Ok(None),
-    }
-}
-
 /// Page through the list, returning the full JSON item if found.
 pub async fn find_image_item_in_paginated_list(
     ctx: &CliContext,
@@ -215,17 +134,6 @@ pub fn item_matches_image_ref(item: &serde_json::Value, image_ref: &str) -> bool
     id == image_ref || name == image_ref
 }
 
-pub fn snapshot_id_from_item(item: &serde_json::Value, image_ref: &str) -> Result<Option<String>> {
-    let snapshot_id = item.get("snapshotId").and_then(|v| v.as_str());
-    match snapshot_id {
-        Some(snapshot_id) => Ok(Some(snapshot_id.to_string())),
-        None => Err(CliError::Other(anyhow::anyhow!(
-            "image '{}' has no snapshotId",
-            image_ref
-        ))),
-    }
-}
-
 pub fn absolute_api_url(api_url: &str, next: &str) -> String {
     if next.starts_with("http://") || next.starts_with("https://") {
         next.to_string()
@@ -236,7 +144,7 @@ pub fn absolute_api_url(api_url: &str, next: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{absolute_api_url, item_matches_image_ref, snapshot_id_from_item};
+    use super::{absolute_api_url, item_matches_image_ref};
     use serde_json::json;
 
     #[test]
@@ -250,19 +158,6 @@ mod tests {
         assert!(item_matches_image_ref(&item, "sandbox_template_123"));
         assert!(item_matches_image_ref(&item, "k3s-base"));
         assert!(!item_matches_image_ref(&item, "other"));
-    }
-
-    #[test]
-    fn snapshot_id_from_item_reads_single_template_response() {
-        let item = json!({
-            "id": "sandbox_template_123",
-            "name": "k3s-base",
-            "snapshotId": "snap-1"
-        });
-
-        let snapshot_id = snapshot_id_from_item(&item, "sandbox_template_123")
-            .expect("single item lookup should succeed");
-        assert_eq!(snapshot_id.as_deref(), Some("snap-1"));
     }
 
     #[test]
