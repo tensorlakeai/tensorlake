@@ -2,8 +2,8 @@ import json
 import unittest
 
 from tensorlake.sandbox import PoolInUseError, SandboxNotFoundError
-from tensorlake.sandbox.exceptions import SandboxError
 from tensorlake.sandbox.client import SandboxClient
+from tensorlake.sandbox.exceptions import SandboxError
 
 
 class _FakeRustClient:
