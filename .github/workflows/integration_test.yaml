@@ -65,6 +65,9 @@ jobs:
 
       - name: Run integration tests in Docker
         run: |
+          PYPI_VERSION="${{ inputs.version }}"
+          PYPI_VERSION="${PYPI_VERSION/-dev/.dev}"
+
           docker run --rm \
             --network host \
             -e TENSORLAKE_API_URL="http://localhost:8900" \
@@ -78,7 +81,7 @@ jobs:
               echo "--- Installing tensorlake from TestPyPI ---"
               pip install --index-url https://test.pypi.org/simple/ \
                           --extra-index-url https://pypi.org/simple/ \
-                          tensorlake==${{ inputs.version }}
+                          tensorlake==${PYPI_VERSION}
 
               echo "--- 1. Build images ---"
               tl build-images /tmp/test_app.py \
