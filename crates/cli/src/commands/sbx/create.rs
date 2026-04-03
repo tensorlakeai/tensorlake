@@ -259,8 +259,7 @@ mod tests {
 
     #[test]
     fn create_body_includes_only_explicit_snapshot_overrides() {
-        let body =
-            build_create_request_body(Some(2.5), None, None, &[], Some("snap-1"), None);
+        let body = build_create_request_body(Some(2.5), None, None, &[], Some("snap-1"), None);
 
         assert_eq!(body["snapshot_id"], "snap-1");
         assert_eq!(body["resources"]["cpus"], 2.5);

@@ -1,3 +1,4 @@
+pub mod desktop;
 pub mod models;
 
 use eventsource_stream::Eventsource;
@@ -8,6 +9,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::{client::Client, error::SdkError};
+pub use desktop::SandboxDesktopClient;
 
 use models::{
     CreateSandboxPoolResponse, CreateSandboxRequest, CreateSandboxResponse, CreateSnapshotResponse,
