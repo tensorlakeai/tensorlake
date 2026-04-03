@@ -89,6 +89,24 @@ class TestDesktopWrapper(unittest.TestCase):
         finally:
             sandbox_module.RustCloudSandboxDesktopClient = previous
 
+    def test_connect_desktop_preserves_sandbox_name(self):
+        import tensorlake.sandbox.sandbox as sandbox_module
+
+        previous = sandbox_module.RustCloudSandboxDesktopClient
+        try:
+            sandbox_module.RustCloudSandboxDesktopClient = _FakeRustDesktopClient
+            sandbox = Sandbox(
+                sandbox_id_or_name="stable-name",
+                proxy_url="https://sandbox.tensorlake.ai",
+                api_key="k",
+            )
+
+            desktop = sandbox.connect_desktop()
+
+            self.assertEqual(desktop._rust_client.kwargs["sandbox_id"], "stable-name")
+        finally:
+            sandbox_module.RustCloudSandboxDesktopClient = previous
+
     def test_desktop_methods_delegate_to_rust_client(self):
         rust_client = _FakeRustDesktopClient()
         desktop = Desktop(rust_client)

@@ -2,6 +2,7 @@ import json
 import unittest
 
 from tensorlake.sandbox import PoolInUseError, SandboxNotFoundError
+from tensorlake.sandbox.exceptions import SandboxError
 from tensorlake.sandbox.client import SandboxClient
 
 
@@ -37,6 +38,21 @@ class _FakeRustClient:
 
 
 class TestSandboxClientRustBackend(unittest.TestCase):
+    def test_connect_accepts_sandbox_name(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+
+        sandbox = client.connect(
+            "stable-name", proxy_url="https://sandbox.tensorlake.ai"
+        )
+
+        self.assertEqual(sandbox.sandbox_id, "stable-name")
+
+    def test_connect_rejects_conflicting_identifier_aliases(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+
+        with self.assertRaisesRegex(SandboxError, "Provide only one of"):
+            client.connect("stable-name", sandbox_id="sbx-123")
+
     def test_create_uses_rust_backend(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
         fake = _FakeRustClient()

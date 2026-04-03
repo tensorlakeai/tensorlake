@@ -122,6 +122,10 @@ pool = client.create_pool(
 # Claim a sandbox instantly from the pool
 resp = client.claim(pool.pool_id)
 sandbox = client.connect(resp.sandbox_id)
+
+# Named sandboxes can be reconnected later by name
+named = client.create(image="python:3.11-slim", name="stable-name")
+sandbox = client.connect("stable-name")
 ```
 
 ---

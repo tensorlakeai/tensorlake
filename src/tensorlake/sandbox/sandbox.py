@@ -109,13 +109,25 @@ class Sandbox:
 
     def __init__(
         self,
-        sandbox_id: str,
+        sandbox_id_or_name: str | None = None,
         proxy_url: str = _defaults.SANDBOX_PROXY_URL,
         api_key: str | None = _defaults.API_KEY,
         organization_id: str | None = None,
         project_id: str | None = None,
+        *,
+        sandbox_id: str | None = None,
     ):
-        self._sandbox_id = sandbox_id
+        if sandbox_id_or_name and sandbox_id and sandbox_id_or_name != sandbox_id:
+            raise SandboxError(
+                "Provide only one of `sandbox_id_or_name` or `sandbox_id`, not both."
+            )
+        sandbox_identifier = sandbox_id_or_name or sandbox_id
+        if not sandbox_identifier:
+            raise SandboxError(
+                "`sandbox_id_or_name` is required. `sandbox_id` is accepted as a deprecated alias."
+            )
+
+        self._sandbox_id = sandbox_identifier
         self._owns_sandbox: bool = False
         self._lifecycle_client: SandboxClient | None = None
         self._proxy_url = proxy_url
@@ -132,7 +144,7 @@ class Sandbox:
         try:
             self._rust_client = RustCloudSandboxProxyClient(
                 proxy_url=proxy_url,
-                sandbox_id=sandbox_id,
+                sandbox_id=sandbox_identifier,
                 api_key=api_key,
                 organization_id=organization_id,
                 project_id=project_id,
