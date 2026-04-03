@@ -87,6 +87,8 @@ pub struct SandboxInfo {
     #[serde(default)]
     pub outcome: Option<String>,
     #[serde(default)]
+    pub termination_reason: Option<String>,
+    #[serde(default)]
     pub created_at: Option<serde_json::Value>,
     #[serde(default)]
     pub terminated_at: Option<serde_json::Value>,

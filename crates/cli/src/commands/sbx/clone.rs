@@ -1,5 +1,8 @@
 use crate::auth::context::CliContext;
-use crate::commands::sbx::{DEFAULT_SANDBOX_WAIT_TIMEOUT, sandbox_endpoint, snapshot};
+use crate::commands::sbx::{
+    DEFAULT_SANDBOX_WAIT_TIMEOUT, format_sandbox_wait_termination_message, sandbox_endpoint,
+    snapshot,
+};
 use crate::error::{CliError, Result};
 use futures::future::try_join_all;
 use tokio::time::{Duration, Instant};
@@ -160,12 +163,9 @@ async fn wait_for_clone_running(
             }
 
             if current_status == "terminated" {
-                return Err(CliError::Other(anyhow::anyhow!(
-                    "Clone {}/{} ({}) terminated while starting",
-                    copy_index + 1,
-                    total_copies,
-                    sandbox_id
-                )));
+                let subject = format!("Clone {}/{} ({})", copy_index + 1, total_copies, sandbox_id);
+                let message = format_sandbox_wait_termination_message(&subject, "running", &info);
+                return Err(CliError::Other(anyhow::anyhow!(message)));
             }
         }
 

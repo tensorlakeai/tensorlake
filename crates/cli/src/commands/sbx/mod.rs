@@ -121,10 +121,9 @@ pub async fn wait_for_sandbox_status(
                 if let Some(ref s) = spinner {
                     s.finish_and_clear();
                 }
-                return Err(CliError::Other(anyhow::anyhow!(
-                    "Sandbox terminated while waiting to reach '{}'",
-                    target_status
-                )));
+                let message =
+                    format_sandbox_wait_termination_message("Sandbox", target_status, &info);
+                return Err(CliError::Other(anyhow::anyhow!(message)));
             }
         }
 
@@ -180,6 +179,34 @@ fn is_localhost(url: &str) -> bool {
         return host == "localhost" || host == "127.0.0.1";
     }
     false
+}
+
+fn sandbox_termination_detail(info: &serde_json::Value) -> Option<String> {
+    let reason = info
+        .get("termination_reason")
+        .and_then(|value| value.as_str())?;
+    match reason {
+        "ImageNotFound" => Some(
+            info.get("image")
+                .and_then(|value| value.as_str())
+                .filter(|image| !image.is_empty())
+                .map(|image| format!("image not found: {image}"))
+                .unwrap_or_else(|| "image not found".to_string()),
+        ),
+        _ => Some(format!("termination reason: {reason}")),
+    }
+}
+
+fn format_sandbox_wait_termination_message(
+    subject: &str,
+    target_status: &str,
+    info: &serde_json::Value,
+) -> String {
+    if let Some(detail) = sandbox_termination_detail(info) {
+        format!("{subject} failed to reach '{target_status}': {detail}")
+    } else {
+        format!("{subject} terminated while waiting to reach '{target_status}'")
+    }
 }
 
 /// Parse `sandbox_id:/remote/path` syntax.
@@ -317,7 +344,9 @@ fn parse_numeric_timestamp(timestamp: f64) -> Option<DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
-    use super::format_created_at;
+    use super::{
+        format_created_at, format_sandbox_wait_termination_message, sandbox_termination_detail,
+    };
     use chrono::{Duration, Utc};
 
     #[test]
@@ -336,5 +365,60 @@ mod tests {
         assert!(!formatted.ends_with("ago"));
         assert!(formatted.contains('-'));
         assert!(formatted.contains(':'));
+    }
+
+    #[test]
+    fn sandbox_termination_detail_formats_image_not_found() {
+        let info = serde_json::json!({
+            "termination_reason": "ImageNotFound",
+            "image": "foo",
+        });
+
+        let detail = sandbox_termination_detail(&info);
+
+        assert_eq!(detail.as_deref(), Some("image not found: foo"));
+    }
+
+    #[test]
+    fn sandbox_wait_termination_message_includes_image_not_found_detail() {
+        let info = serde_json::json!({
+            "termination_reason": "ImageNotFound",
+            "image": "foo",
+        });
+
+        let message = format_sandbox_wait_termination_message("Sandbox", "running", &info);
+
+        assert_eq!(
+            message,
+            "Sandbox failed to reach 'running': image not found: foo"
+        );
+    }
+
+    #[test]
+    fn sandbox_wait_termination_message_falls_back_without_reason() {
+        let info = serde_json::json!({
+            "status": "terminated",
+        });
+
+        let message = format_sandbox_wait_termination_message("Sandbox", "running", &info);
+
+        assert_eq!(
+            message,
+            "Sandbox terminated while waiting to reach 'running'"
+        );
+    }
+
+    #[test]
+    fn sandbox_wait_termination_message_includes_generic_reason() {
+        let info = serde_json::json!({
+            "termination_reason": "StartupFailedInternalError",
+        });
+
+        let message = format_sandbox_wait_termination_message("Sandbox", "running", &info);
+
+        assert_eq!(
+            message,
+            "Sandbox failed to reach 'running': termination reason: StartupFailedInternalError"
+        );
     }
 }
