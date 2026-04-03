@@ -594,12 +594,12 @@ describe(
       expect(status).toBe(SandboxStatus.RUNNING);
     });
 
-    it("sandbox terminated after timeout", async () => {
+    it("sandbox suspended after timeout", async () => {
       // Wait beyond the 30s timeout
       await sleep(35_000);
 
-      // On timeout a sandbox may transition to either suspended or terminated
-      // depending on whether it has a name (named sandboxes suspend; ephemeral ones terminate).
+      // On timeout the server suspends sandboxes regardless of whether they are
+      // named or ephemeral. Suspended sandboxes do not have a terminal outcome.
       const status = await pollSandboxStatus(
         client,
         sandboxId,
@@ -609,7 +609,11 @@ describe(
       expect([SandboxStatus.TERMINATED, SandboxStatus.SUSPENDED]).toContain(status);
 
       const info = await client.get(sandboxId);
-      expect(info.outcome).toBe("Success(Timeout)");
+      if (status === SandboxStatus.TERMINATED) {
+        expect(info.outcome).toBe("Success(Timeout)");
+      } else {
+        expect(info.outcome).toBeUndefined();
+      }
       sandboxId = undefined!;
     });
 
