@@ -73,6 +73,7 @@ jobs:
             -e TENSORLAKE_API_URL="http://localhost:8900" \
             -e TENSORLAKE_API_KEY="${{ secrets.TENSORLAKE_API_KEY }}" \
             -e TENSORLAKE_ONPREM=true \
+            -e PYPI_VERSION="${PYPI_VERSION}" \
             -v /tmp/test_app.py:/tmp/test_app.py \
             -v /var/run/docker.sock:/var/run/docker.sock \
             python:3.11-slim bash -c '
