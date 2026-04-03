@@ -48,7 +48,9 @@ try:
 except Exception:
     try:
         from _cloud_sdk import CloudSandboxClientError as RustCloudSandboxClientError
-        from _cloud_sdk import CloudSandboxDesktopClient as RustCloudSandboxDesktopClient
+        from _cloud_sdk import (
+            CloudSandboxDesktopClient as RustCloudSandboxDesktopClient,
+        )
         from _cloud_sdk import CloudSandboxProxyClient as RustCloudSandboxProxyClient
 
         _RUST_SANDBOX_PROXY_CLIENT_AVAILABLE = True

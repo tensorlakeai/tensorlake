@@ -71,7 +71,10 @@ class TestDesktopWrapper(unittest.TestCase):
             self.assertIsInstance(desktop, Desktop)
             self.assertEqual(desktop.width, 1280)
             self.assertEqual(desktop.height, 720)
-            self.assertEqual(desktop._rust_client.kwargs["proxy_url"], "https://sandbox.tensorlake.ai")
+            self.assertEqual(
+                desktop._rust_client.kwargs["proxy_url"],
+                "https://sandbox.tensorlake.ai",
+            )
             self.assertEqual(desktop._rust_client.kwargs["sandbox_id"], "sbx-1")
             self.assertEqual(desktop._rust_client.kwargs["port"], 5902)
             self.assertEqual(desktop._rust_client.kwargs["password"], "secret")
