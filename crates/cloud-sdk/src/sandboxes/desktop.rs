@@ -23,6 +23,8 @@ const ENCODING_DESKTOP_SIZE: i32 = -223;
 const BUTTON_LEFT_MASK: u8 = 1;
 const BUTTON_MIDDLE_MASK: u8 = 1 << 1;
 const BUTTON_RIGHT_MASK: u8 = 1 << 2;
+const BUTTON_SCROLL_UP_MASK: u8 = 1 << 3;
+const BUTTON_SCROLL_DOWN_MASK: u8 = 1 << 4;
 
 #[derive(Clone)]
 pub struct SandboxDesktopClient {
@@ -111,6 +113,11 @@ impl SandboxDesktopClient {
         session.double_click(button, x, y, delay_ms).await
     }
 
+    pub async fn scroll(&self, steps: i32, x: Option<u16>, y: Option<u16>) -> Result<(), SdkError> {
+        let mut session = self.session.lock().await;
+        session.scroll(steps, x, y).await
+    }
+
     pub async fn key_down(&self, key: &str) -> Result<(), SdkError> {
         let mut session = self.session.lock().await;
         session.key_down(key).await
@@ -151,9 +158,9 @@ impl TunnelConnection {
         let ws_url = build_tunnel_url(client.base_url(), remote_port)?;
         let headers = build_tunnel_headers(client.default_headers(), host_override.as_deref())?;
 
-        let mut request = ws_url
-            .into_client_request()
-            .map_err(|error| SdkError::ClientError(format!("failed to build tunnel request: {error}")))?;
+        let mut request = ws_url.into_client_request().map_err(|error| {
+            SdkError::ClientError(format!("failed to build tunnel request: {error}"))
+        })?;
 
         for (name, value) in &headers {
             request.headers_mut().insert(name, value.clone());
@@ -255,7 +262,8 @@ where
             .write_all(client_version.render().as_bytes())
             .await?;
 
-        let selected_security = negotiate_security(&mut transport, client_version, password).await?;
+        let selected_security =
+            negotiate_security(&mut transport, client_version, password).await?;
 
         transport.write_all(&[u8::from(shared)]).await?;
 
@@ -324,7 +332,10 @@ where
                 })??;
 
             match batch {
-                ServerMessageOutcome::FramebufferUpdate { saw_resize, saw_raw } => {
+                ServerMessageOutcome::FramebufferUpdate {
+                    saw_resize,
+                    saw_raw,
+                } => {
                     if saw_resize && !saw_raw {
                         needs_refresh = true;
                         continue;
@@ -399,6 +410,46 @@ where
         self.click(button, None, None).await
     }
 
+    async fn scroll(&mut self, steps: i32, x: Option<u16>, y: Option<u16>) -> Result<(), SdkError> {
+        self.move_if_requested(x, y).await?;
+
+        if steps == 0 {
+            return Ok(());
+        }
+
+        let (wheel_mask, step_count) = if steps > 0 {
+            (
+                BUTTON_SCROLL_UP_MASK,
+                usize::try_from(steps).expect("positive i32 fits into usize"),
+            )
+        } else {
+            (
+                BUTTON_SCROLL_DOWN_MASK,
+                usize::try_from(steps.unsigned_abs()).expect("u32 fits into usize"),
+            )
+        };
+
+        for _ in 0..step_count {
+            let pressed_mask = self.button_mask | wheel_mask;
+            send_pointer_event(
+                &mut self.transport,
+                pressed_mask,
+                self.pointer_x,
+                self.pointer_y,
+            )
+            .await?;
+            send_pointer_event(
+                &mut self.transport,
+                self.button_mask,
+                self.pointer_x,
+                self.pointer_y,
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
     async fn key_down(&mut self, key: &str) -> Result<(), SdkError> {
         send_key_event(&mut self.transport, true, keysym_from_key_name(key)?).await
     }
@@ -430,9 +481,9 @@ where
             send_key_event(&mut self.transport, true, *keysym).await?;
         }
 
-        let last = *keysyms
-            .last()
-            .ok_or_else(|| SdkError::ClientError("desktop press requires at least one key".to_string()))?;
+        let last = *keysyms.last().ok_or_else(|| {
+            SdkError::ClientError("desktop press requires at least one key".to_string())
+        })?;
         send_key_event(&mut self.transport, true, last).await?;
         send_key_event(&mut self.transport, false, last).await?;
 
@@ -547,13 +598,9 @@ where
         let _padding = read_u8(&mut self.transport).await?;
         let _first_color = read_u16(&mut self.transport).await?;
         let color_count = read_u16(&mut self.transport).await?;
-        let byte_count = usize::from(color_count)
-            .checked_mul(6)
-            .ok_or_else(|| {
-                SdkError::ClientError(
-                    "desktop color map update exceeds supported bounds".to_string(),
-                )
-            })?;
+        let byte_count = usize::from(color_count).checked_mul(6).ok_or_else(|| {
+            SdkError::ClientError("desktop color map update exceeds supported bounds".to_string())
+        })?;
         let _ = self.transport.read_exact(byte_count).await?;
         Err(SdkError::ClientError(
             "desktop sessions do not support color-map VNC pixel formats".to_string(),
@@ -593,7 +640,8 @@ where
         data: &[u8],
     ) -> Result<(), SdkError> {
         if x.checked_add(width).is_none_or(|value| value > self.width)
-            || y.checked_add(height).is_none_or(|value| value > self.height)
+            || y.checked_add(height)
+                .is_none_or(|value| value > self.height)
         {
             return Err(SdkError::ClientError(
                 "desktop raw rectangle exceeds framebuffer bounds".to_string(),
@@ -607,10 +655,8 @@ where
                 let rgba = self
                     .pixel_format
                     .decode_pixel(&data[src_index..src_index + bytes_per_pixel])?;
-                let dst_index = ((usize::from(y) + row) * usize::from(self.width)
-                    + usize::from(x)
-                    + col)
-                    * 4;
+                let dst_index =
+                    ((usize::from(y) + row) * usize::from(self.width) + usize::from(x) + col) * 4;
                 self.framebuffer[dst_index..dst_index + 4].copy_from_slice(&rgba);
             }
         }
@@ -620,15 +666,18 @@ where
     fn encode_png(&self) -> Result<Vec<u8>, SdkError> {
         let mut out = Vec::new();
         {
-            let mut encoder = png::Encoder::new(&mut out, u32::from(self.width), u32::from(self.height));
+            let mut encoder =
+                png::Encoder::new(&mut out, u32::from(self.width), u32::from(self.height));
             encoder.set_color(ColorType::Rgba);
             encoder.set_depth(BitDepth::Eight);
-            let mut writer = encoder
-                .write_header()
-                .map_err(|error| SdkError::ClientError(format!("failed to encode desktop screenshot: {error}")))?;
+            let mut writer = encoder.write_header().map_err(|error| {
+                SdkError::ClientError(format!("failed to encode desktop screenshot: {error}"))
+            })?;
             writer
                 .write_image_data(&self.framebuffer)
-                .map_err(|error| SdkError::ClientError(format!("failed to encode desktop screenshot: {error}")))?;
+                .map_err(|error| {
+                    SdkError::ClientError(format!("failed to encode desktop screenshot: {error}"))
+                })?;
         }
         Ok(out)
     }
@@ -737,11 +786,18 @@ impl PixelFormat {
             }
         }
 
-        let red = scale_channel((value >> self.red_shift) & u32::from(self.red_max), self.red_max)?;
-        let green =
-            scale_channel((value >> self.green_shift) & u32::from(self.green_max), self.green_max)?;
-        let blue =
-            scale_channel((value >> self.blue_shift) & u32::from(self.blue_max), self.blue_max)?;
+        let red = scale_channel(
+            (value >> self.red_shift) & u32::from(self.red_max),
+            self.red_max,
+        )?;
+        let green = scale_channel(
+            (value >> self.green_shift) & u32::from(self.green_max),
+            self.green_max,
+        )?;
+        let blue = scale_channel(
+            (value >> self.blue_shift) & u32::from(self.blue_max),
+            self.blue_max,
+        )?;
         Ok([red, green, blue, 255])
     }
 
@@ -809,7 +865,9 @@ async fn negotiate_security<T: DesktopTransport>(
                 "VNC security negotiation failed: {reason}"
             )));
         }
-        transport.read_exact(usize::from(security_type_count)).await?
+        transport
+            .read_exact(usize::from(security_type_count))
+            .await?
     };
 
     let selected = if password.is_some() && security_types.contains(&SECURITY_TYPE_VNC_AUTH) {
@@ -865,7 +923,9 @@ fn encrypt_vnc_challenge(password: &[u8], challenge: &[u8]) -> Result<[u8; 16], 
         key[index] = reverse_bits(*byte);
     }
     let cipher = Des::new_from_slice(&key).map_err(|error| {
-        SdkError::ClientError(format!("failed to initialize VNC authentication cipher: {error}"))
+        SdkError::ClientError(format!(
+            "failed to initialize VNC authentication cipher: {error}"
+        ))
     })?;
 
     let mut output = [0u8; 16];
@@ -1040,11 +1100,14 @@ fn allocate_framebuffer(width: u16, height: u16) -> Result<Vec<u8>, SdkError> {
 
 fn build_tunnel_url(base_url: &str, remote_port: u16) -> Result<String, SdkError> {
     let mut url = Url::parse(base_url).map_err(|error| {
-        SdkError::ClientError(format!("invalid sandbox proxy base URL `{base_url}`: {error}"))
+        SdkError::ClientError(format!(
+            "invalid sandbox proxy base URL `{base_url}`: {error}"
+        ))
     })?;
     let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
-    url.set_scheme(scheme)
-        .map_err(|_| SdkError::ClientError("failed to convert proxy URL to websocket URL".to_string()))?;
+    url.set_scheme(scheme).map_err(|_| {
+        SdkError::ClientError("failed to convert proxy URL to websocket URL".to_string())
+    })?;
     url.set_path("/api/v1/tunnels/tcp");
     url.set_query(Some(&format!("port={remote_port}")));
     Ok(url.to_string())
@@ -1187,7 +1250,9 @@ mod tests {
     impl DesktopTransport for MockTransport {
         async fn read_exact(&mut self, len: usize) -> Result<Vec<u8>, SdkError> {
             let mut out = vec![0; len];
-            self.read_cursor.read_exact(&mut out).map_err(SdkError::Io)?;
+            self.read_cursor
+                .read_exact(&mut out)
+                .map_err(SdkError::Io)?;
             Ok(out)
         }
 
@@ -1243,7 +1308,10 @@ mod tests {
         bytes
     }
 
-    async fn connect_session(read_bytes: Vec<u8>, password: Option<&str>) -> Result<DesktopSession<MockTransport>, SdkError> {
+    async fn connect_session(
+        read_bytes: Vec<u8>,
+        password: Option<&str>,
+    ) -> Result<DesktopSession<MockTransport>, SdkError> {
         let transport = MockTransport::new(read_bytes);
         DesktopSession::connect(transport, password.map(str::to_string), true).await
     }
@@ -1293,9 +1361,11 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("expected VNC auth failure"),
         };
-        assert!(error
-            .to_string()
-            .contains("requires password authentication"));
+        assert!(
+            error
+                .to_string()
+                .contains("requires password authentication")
+        );
     }
 
     #[tokio::test]
@@ -1372,13 +1442,15 @@ mod tests {
         let _ = session.screenshot(Duration::from_secs(1)).await.unwrap();
         assert_eq!(session.width, 2);
         assert_eq!(session.height, 1);
-        assert!(session
-            .transport
-            .writes
-            .windows(10)
-            .filter(|chunk| chunk[0] == 3)
-            .count()
-            >= 2);
+        assert!(
+            session
+                .transport
+                .writes
+                .windows(10)
+                .filter(|chunk| chunk[0] == 3)
+                .count()
+                >= 2
+        );
     }
 
     #[tokio::test]
@@ -1393,19 +1465,27 @@ mod tests {
         let mut session = connect_session(bytes, None).await.unwrap();
         session.move_mouse(4, 5).await.unwrap();
         session.click("middle", None, None).await.unwrap();
-        session.double_click("left", Some(7), Some(8), 0).await.unwrap();
+        session
+            .double_click("left", Some(7), Some(8), 0)
+            .await
+            .unwrap();
         session.click("right", None, None).await.unwrap();
+        session.scroll(2, None, None).await.unwrap();
+        session.scroll(-1, Some(9), Some(6)).await.unwrap();
 
         let writes = &session.transport.writes;
-        assert!(writes
-            .windows(6)
-            .any(|chunk| chunk == [5, 2, 0, 4, 0, 5]));
-        assert!(writes
-            .windows(6)
-            .any(|chunk| chunk == [5, 1, 0, 7, 0, 8]));
-        assert!(writes
-            .windows(6)
-            .any(|chunk| chunk == [5, 4, 0, 7, 0, 8]));
+        assert!(writes.windows(6).any(|chunk| chunk == [5, 2, 0, 4, 0, 5]));
+        assert!(writes.windows(6).any(|chunk| chunk == [5, 1, 0, 7, 0, 8]));
+        assert!(writes.windows(6).any(|chunk| chunk == [5, 4, 0, 7, 0, 8]));
+        assert_eq!(
+            writes
+                .windows(6)
+                .filter(|chunk| *chunk == [5, 8, 0, 7, 0, 8])
+                .count(),
+            2
+        );
+        assert!(writes.windows(6).any(|chunk| chunk == [5, 16, 0, 9, 0, 6]));
+        assert!(writes.windows(6).any(|chunk| chunk == [5, 0, 0, 9, 0, 6]));
     }
 
     #[tokio::test]
@@ -1420,22 +1500,33 @@ mod tests {
         let mut session = connect_session(bytes, None).await.unwrap();
         session.key_down("a").await.unwrap();
         session.key_up("a").await.unwrap();
-        session.press(&["ctrl".to_string(), "c".to_string()]).await.unwrap();
+        session
+            .press(&["ctrl".to_string(), "c".to_string()])
+            .await
+            .unwrap();
         session.key_down("enter").await.unwrap();
         session.type_text("Aé").await.unwrap();
 
         let writes = &session.transport.writes;
-        assert!(writes
-            .windows(8)
-            .any(|chunk| chunk == [4, 1, 0, 0, 0, 0, 0, b'a']));
-        assert!(writes
-            .windows(8)
-            .any(|chunk| chunk == [4, 1, 0, 0, 0, 0, 0xff, 0xe3]));
-        assert!(writes
-            .windows(8)
-            .any(|chunk| chunk == [4, 1, 0, 0, 0, 0, 0xff, 0x0d]));
-        assert!(writes
-            .windows(8)
-            .any(|chunk| chunk == [4, 1, 0, 0, 0x01, 0x00, 0x00, 0xe9]));
+        assert!(
+            writes
+                .windows(8)
+                .any(|chunk| chunk == [4, 1, 0, 0, 0, 0, 0, b'a'])
+        );
+        assert!(
+            writes
+                .windows(8)
+                .any(|chunk| chunk == [4, 1, 0, 0, 0, 0, 0xff, 0xe3])
+        );
+        assert!(
+            writes
+                .windows(8)
+                .any(|chunk| chunk == [4, 1, 0, 0, 0, 0, 0xff, 0x0d])
+        );
+        assert!(
+            writes
+                .windows(8)
+                .any(|chunk| chunk == [4, 1, 0, 0, 0x01, 0x00, 0x00, 0xe9])
+        );
     }
 }

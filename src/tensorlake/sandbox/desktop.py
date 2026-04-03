@@ -140,6 +140,24 @@ class Desktop:
     def right_click(self, x: int | None = None, y: int | None = None) -> None:
         self.click(x=x, y=y, button="right")
 
+    def scroll(
+        self, steps: int, x: int | None = None, y: int | None = None
+    ) -> None:
+        try:
+            self._rust_client.scroll(steps, x, y)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    def scroll_up(
+        self, steps: int = 1, x: int | None = None, y: int | None = None
+    ) -> None:
+        self.scroll(abs(int(steps)), x=x, y=y)
+
+    def scroll_down(
+        self, steps: int = 1, x: int | None = None, y: int | None = None
+    ) -> None:
+        self.scroll(-abs(int(steps)), x=x, y=y)
+
     def key_down(self, key: str) -> None:
         try:
             self._rust_client.key_down(key)

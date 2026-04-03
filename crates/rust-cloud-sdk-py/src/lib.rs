@@ -1070,6 +1070,13 @@ impl CloudSandboxDesktopClient {
             .map_err(into_sandbox_py_error)
     }
 
+    #[pyo3(signature = (steps, x=None, y=None))]
+    fn scroll(&self, steps: i32, x: Option<u16>, y: Option<u16>) -> PyResult<()> {
+        self.runtime
+            .block_on(self.client.scroll(steps, x, y))
+            .map_err(into_sandbox_py_error)
+    }
+
     fn key_down(&self, key: &str) -> PyResult<()> {
         self.runtime
             .block_on(self.client.key_down(key))

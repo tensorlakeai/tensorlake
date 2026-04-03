@@ -33,6 +33,9 @@ class _FakeRustDesktopClient:
     def double_click(self, button, x, y, delay_ms):
         self.calls.append(("double_click", button, x, y, delay_ms))
 
+    def scroll(self, steps, x, y):
+        self.calls.append(("scroll", steps, x, y))
+
     def key_down(self, key):
         self.calls.append(("key_down", key))
 
@@ -99,6 +102,9 @@ class TestDesktopWrapper(unittest.TestCase):
         desktop.left_click(1, 2)
         desktop.middle_click()
         desktop.right_click()
+        desktop.scroll(2, 20, 30)
+        desktop.scroll_up()
+        desktop.scroll_down(3)
         desktop.key_down("enter")
         desktop.key_up("enter")
         desktop.press("a")
@@ -119,6 +125,9 @@ class TestDesktopWrapper(unittest.TestCase):
                 ("click", "left", 1, 2),
                 ("click", "middle", None, None),
                 ("click", "right", None, None),
+                ("scroll", 2, 20, 30),
+                ("scroll", 1, None, None),
+                ("scroll", -3, None, None),
                 ("key_down", "enter"),
                 ("key_up", "enter"),
                 ("press", ["a"]),
