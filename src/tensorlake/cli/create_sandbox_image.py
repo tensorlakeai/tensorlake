@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import shlex
 import sys
 import traceback
 from types import ModuleType
@@ -188,6 +189,26 @@ def _copy_to_sandbox(sandbox: Sandbox, local_path: str, remote_path: str):
         raise FileNotFoundError(f"Local path not found: {local_path}")
 
 
+def _persist_env_var(sandbox: Sandbox, process_env: dict[str, str], key: str, value: str):
+    """Persist an env var so future interactive shells inherit it."""
+    bash_export = shlex.quote(f'export {key}={value}')
+    env_line = shlex.quote(f"{key}={value}")
+    commands = [
+        "mkdir -p /etc/profile.d",
+        f"printf '%s\\n' {bash_export} >> /etc/profile.d/tensorlake-env.sh",
+        f"printf '%s\\n' {bash_export} >> /root/.bashrc",
+        f"printf '%s\\n' {bash_export} >> /root/.profile",
+        f"printf '%s\\n' {env_line} >> /etc/environment",
+    ]
+    for command in commands:
+        _run_streaming(
+            sandbox,
+            "sh",
+            ["-c", command],
+            env=process_env,
+        )
+
+
 def _execute_operations(sandbox: Sandbox, image):
     """Translate Image build operations into sandbox commands with streaming output."""
     # Mirror the Dockerfile ENV defaults: WORKDIR /app, PIP_BREAK_SYSTEM_PACKAGES=1.
@@ -212,13 +233,7 @@ def _execute_operations(sandbox: Sandbox, image):
             key, value = op.args[0], op.args[1]
             _emit({"type": "status", "message": f"ENV {key}={value}"})
             process_env[key] = value
-            # Also persist for processes started outside this script.
-            _run_streaming(
-                sandbox,
-                "sh",
-                ["-c", f"echo 'export {key}=\"{value}\"' >> /etc/environment"],
-                env=process_env,
-            )
+            _persist_env_var(sandbox, process_env, key, value)
 
 
 def _register_image(

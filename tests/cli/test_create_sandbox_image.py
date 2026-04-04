@@ -215,3 +215,31 @@ class TestCreateSandboxImage(unittest.TestCase):
             cpus=BUILD_CPUS,
             memory_mb=BUILD_MEMORY_MB,
         )
+
+    def test_execute_operations_persists_env_for_future_shells(self):
+        image = Image(name="data-tools", base_image="python:3.11-slim").env(
+            "PATH", "/usr/local/bin:/usr/bin:/bin"
+        )
+        sandbox = MagicMock()
+
+        with patch.object(create_sandbox_image_module, "_run_streaming") as run_streaming:
+            create_sandbox_image_module._execute_operations(sandbox, image)
+
+        commands = [call.args[2][1] for call in run_streaming.call_args_list]
+        self.assertIn("mkdir -p /etc/profile.d", commands)
+        self.assertIn(
+            "printf '%s\\n' 'export PATH=/usr/local/bin:/usr/bin:/bin' >> /etc/profile.d/tensorlake-env.sh",
+            commands,
+        )
+        self.assertIn(
+            "printf '%s\\n' 'export PATH=/usr/local/bin:/usr/bin:/bin' >> /root/.bashrc",
+            commands,
+        )
+        self.assertIn(
+            "printf '%s\\n' 'export PATH=/usr/local/bin:/usr/bin:/bin' >> /root/.profile",
+            commands,
+        )
+        self.assertIn(
+            "printf '%s\\n' PATH=/usr/local/bin:/usr/bin:/bin >> /etc/environment",
+            commands,
+        )
