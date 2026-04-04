@@ -63,6 +63,7 @@ pub struct CreateArgs<'a> {
     pub name: Option<&'a str>,
     pub cpus: Option<f64>,
     pub memory: Option<i64>,
+    pub disk: Option<i64>,
     pub timeout: Option<i64>,
     pub entrypoint: &'a [String],
     pub snapshot_id: Option<&'a str>,
@@ -80,6 +81,7 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
         name,
         cpus,
         memory,
+        disk,
         timeout,
         entrypoint,
         snapshot_id,
@@ -93,7 +95,7 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
     } = args;
 
     let mut body =
-        build_create_request_body(cpus, memory, timeout, entrypoint, snapshot_id, image_name);
+        build_create_request_body(cpus, memory, disk, timeout, entrypoint, snapshot_id, image_name);
     if let Some(n) = name {
         body["name"] = serde_json::Value::String(n.to_string());
     }
@@ -197,6 +199,7 @@ fn print_post_create_tip(ctx: &CliContext, sandbox_id: &str, is_ephemeral: bool)
 fn build_create_request_body(
     cpus: Option<f64>,
     memory: Option<i64>,
+    disk: Option<i64>,
     timeout: Option<i64>,
     entrypoint: &[String],
     snapshot_id: Option<&str>,
@@ -212,15 +215,24 @@ fn build_create_request_body(
         if let Some(memory) = memory {
             resources.insert("memory_mb".to_string(), serde_json::json!(memory));
         }
+        // disk overrides are ignored by the server for snapshot restores,
+        // but we pass them through for forward compatibility.
+        if let Some(disk) = disk {
+            resources.insert("ephemeral_disk_mb".to_string(), serde_json::json!(disk));
+        }
         if !resources.is_empty() {
             body["resources"] = serde_json::Value::Object(resources);
         }
         body["snapshot_id"] = serde_json::Value::String(snapshot_id.to_string());
     } else {
-        body["resources"] = serde_json::json!({
+        let mut resources = serde_json::json!({
             "cpus": cpus.unwrap_or(DEFAULT_SANDBOX_CPUS),
             "memory_mb": memory.unwrap_or(DEFAULT_SANDBOX_MEMORY_MB),
         });
+        if let Some(disk) = disk {
+            resources["ephemeral_disk_mb"] = serde_json::json!(disk);
+        }
+        body["resources"] = resources;
     }
 
     if let Some(t) = timeout {
@@ -242,7 +254,7 @@ mod tests {
 
     #[test]
     fn create_body_uses_defaults_without_snapshot() {
-        let body = build_create_request_body(None, None, None, &[], None, None);
+        let body = build_create_request_body(None, None, None, None, &[], None, None);
 
         assert_eq!(body["resources"]["cpus"], 1.0);
         assert_eq!(body["resources"]["memory_mb"], 1024);
@@ -251,7 +263,7 @@ mod tests {
 
     #[test]
     fn create_body_omits_resources_for_snapshot_without_overrides() {
-        let body = build_create_request_body(None, None, None, &[], Some("snap-1"), None);
+        let body = build_create_request_body(None, None, None, None, &[], Some("snap-1"), None);
 
         assert_eq!(body["snapshot_id"], "snap-1");
         assert!(body.get("resources").is_none());
@@ -260,7 +272,7 @@ mod tests {
     #[test]
     fn create_body_includes_only_explicit_snapshot_overrides() {
         let body =
-            build_create_request_body(Some(2.5), None, None, &[], Some("snap-1"), None);
+            build_create_request_body(Some(2.5), None, None, None, &[], Some("snap-1"), None);
 
         assert_eq!(body["snapshot_id"], "snap-1");
         assert_eq!(body["resources"]["cpus"], 2.5);
@@ -269,9 +281,24 @@ mod tests {
 
     #[test]
     fn create_body_passes_image_name_through_to_server() {
-        let body = build_create_request_body(None, None, None, &[], None, Some("ubuntu-minimal"));
+        let body = build_create_request_body(None, None, None, None, &[], None, Some("ubuntu-minimal"));
 
         assert_eq!(body["image"], "ubuntu-minimal");
         assert!(body.get("snapshot_id").is_none());
+    }
+
+    #[test]
+    fn create_body_includes_disk_for_fresh_boot() {
+        let body = build_create_request_body(None, None, Some(4096), None, &[], None, None);
+
+        assert_eq!(body["resources"]["ephemeral_disk_mb"], 4096);
+    }
+
+    #[test]
+    fn create_body_includes_disk_for_snapshot_restore() {
+        let body = build_create_request_body(None, None, Some(8192), None, &[], Some("snap-1"), None);
+
+        assert_eq!(body["snapshot_id"], "snap-1");
+        assert_eq!(body["resources"]["ephemeral_disk_mb"], 8192);
     }
 }

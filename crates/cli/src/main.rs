@@ -277,6 +277,10 @@ enum SbxCommands {
         #[arg(long)]
         memory: Option<i64>,
 
+        /// Root disk size in MB (default: 2048 for new sandboxes, ignored for snapshot restores)
+        #[arg(long)]
+        disk: Option<i64>,
+
         /// Timeout in seconds
         #[arg(long)]
         timeout: Option<i64>,
@@ -413,6 +417,10 @@ enum SbxCommands {
         /// Memory in MB
         #[arg(long, default_value = "1024")]
         memory: i64,
+
+        /// Root disk size in MB (default: 2048)
+        #[arg(long)]
+        disk: Option<i64>,
 
         /// Command timeout in seconds
         #[arg(short, long)]
@@ -730,6 +738,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     name,
                     cpus,
                     memory,
+                    disk,
                     timeout,
                     entrypoint,
                     snapshot,
@@ -747,6 +756,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             name: name.as_deref(),
                             cpus,
                             memory,
+                            disk,
                             timeout,
                             entrypoint: &entrypoint,
                             snapshot_id: snapshot.as_deref(),
@@ -827,6 +837,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     image,
                     cpus,
                     memory,
+                    disk,
                     timeout,
                     workdir,
                     env,
@@ -844,6 +855,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         image.as_deref(),
                         cpus,
                         memory,
+                        disk,
                         timeout,
                         workdir.as_deref(),
                         &env,

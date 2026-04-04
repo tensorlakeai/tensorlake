@@ -10,6 +10,7 @@ pub async fn run(
     image: Option<&str>,
     cpus: f64,
     memory: i64,
+    disk: Option<i64>,
     timeout: Option<f64>,
     workdir: Option<&str>,
     env: &[String],
@@ -28,11 +29,15 @@ pub async fn run(
         .unwrap_or_else(|| "default image".to_string());
     eprintln!("Creating sandbox with {}...", label);
 
+    let mut resources = serde_json::json!({
+        "cpus": cpus,
+        "memory_mb": memory,
+    });
+    if let Some(d) = disk {
+        resources["ephemeral_disk_mb"] = serde_json::json!(d);
+    }
     let mut create_body = serde_json::json!({
-        "resources": {
-            "cpus": cpus,
-            "memory_mb": memory,
-        },
+        "resources": resources,
     });
     if let Some(img) = image {
         create_body["image"] = serde_json::Value::String(img.to_string());
