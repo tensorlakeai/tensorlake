@@ -7,7 +7,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const packageRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(packageRoot, "..");
-const outputDir = path.join(packageRoot, "dist", "bin");
+const outputDir = path.join(packageRoot, "dist", "bin", `${process.platform}-${process.arch}`);
 const extension = process.platform === "win32" ? ".exe" : "";
 
 const cargo = spawnSync("cargo", ["build", "--release", "-p", "tensorlake-cli"], {

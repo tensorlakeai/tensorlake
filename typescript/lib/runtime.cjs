@@ -8,9 +8,16 @@ function packageRoot() {
   return path.resolve(__dirname, "..");
 }
 
-function binaryPath(binaryName) {
-  const extension = process.platform === "win32" ? ".exe" : "";
-  return path.join(packageRoot(), "dist", "bin", `${binaryName}${extension}`);
+function binaryTargetId(platform = process.platform, arch = process.arch) {
+  return `${platform}-${arch}`;
+}
+
+function binaryPath(binaryName, options = {}) {
+  const platform = options.platform ?? process.platform;
+  const arch = options.arch ?? process.arch;
+  const extension = platform === "win32" ? ".exe" : "";
+  const root = options.packageRoot ?? packageRoot();
+  return path.join(root, "dist", "bin", binaryTargetId(platform, arch), `${binaryName}${extension}`);
 }
 
 function exitWithSpawnResult(result) {
@@ -25,7 +32,7 @@ function runBinary(binaryName) {
   const executable = binaryPath(binaryName);
   if (!fs.existsSync(executable)) {
     console.error(
-      `Missing packaged binary '${binaryName}'. Run 'npm run build' in tensorlake before packaging.`,
+      `Missing packaged binary '${binaryName}' for ${binaryTargetId()}. Run 'npm run build' in tensorlake before packaging or install a package published with support for your platform.`,
     );
     process.exit(1);
   }
@@ -81,6 +88,8 @@ function runPythonModule(moduleName, helpText) {
 }
 
 module.exports = {
+  binaryPath,
+  binaryTargetId,
   runBinary,
   runPythonModule,
 };

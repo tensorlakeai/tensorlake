@@ -14,8 +14,8 @@ defaults:
     working-directory: typescript
 
 jobs:
-  build-and-test:
-    name: Build and test package
+  build-sdk-and-test:
+    name: Build SDK and test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,12 +28,6 @@ jobs:
           cache: "npm"
           cache-dependency-path: typescript/package-lock.json
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-
       - name: Install dependencies
         run: npm ci
 
@@ -43,15 +37,66 @@ jobs:
       - name: Run tests
         run: npm test
 
-      - name: Build
-        run: npm run build
+      - name: Build SDK
+        run: npm run build:sdk
 
-      - name: Verify package contents
-        run: npm pack --dry-run --ignore-scripts
+      - name: Upload SDK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-dist
+          path: typescript/dist
+
+  build-cli-binaries:
+    name: Build CLI binaries (${{ matrix.target_id }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target_id: linux-x64
+          - os: macos-13
+            target_id: darwin-x64
+          - os: macos-14
+            target_id: darwin-arm64
+          - os: windows-latest
+            target_id: win32-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: typescript/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build CLI
+        run: npm run build:cli
+
+      - name: Verify packaged CLI binary
+        run: node ./bin/tl.cjs --help
+
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target_id }}
+          path: typescript/dist/bin/${{ matrix.target_id }}
 
   publish:
     name: Publish to npm
-    needs: build-and-test
+    needs:
+      - build-sdk-and-test
+      - build-cli-binaries
     runs-on: ubuntu-latest
     environment:
       name: npm
@@ -70,16 +115,43 @@ jobs:
           cache: "npm"
           cache-dependency-path: typescript/package-lock.json
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-
       - name: Install dependencies
         run: npm ci
 
+      - name: Download SDK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sdk-dist
+          path: typescript/dist
+
+      - name: Download Linux CLI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-linux-x64
+          path: typescript/dist/bin/linux-x64
+
+      - name: Download macOS x64 CLI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-darwin-x64
+          path: typescript/dist/bin/darwin-x64
+
+      - name: Download macOS arm64 CLI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-darwin-arm64
+          path: typescript/dist/bin/darwin-arm64
+
+      - name: Download Windows x64 CLI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-win32-x64
+          path: typescript/dist/bin/win32-x64
+
+      - name: Verify package contents
+        run: npm pack --dry-run --ignore-scripts
+
       - name: Publish to npm
-        run: npm publish --provenance --access public
+        run: npm publish --provenance --access public --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
