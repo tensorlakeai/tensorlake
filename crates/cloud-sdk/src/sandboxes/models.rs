@@ -159,7 +159,8 @@ pub struct SnapshotInfo {
     pub snapshot_id: String,
     pub namespace: String,
     pub sandbox_id: String,
-    pub base_image: String,
+    #[serde(default)]
+    pub base_image: Option<String>,
     pub status: String,
     #[serde(default)]
     pub error: Option<String>,
