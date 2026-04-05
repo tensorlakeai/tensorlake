@@ -168,9 +168,7 @@ def _parse_from_value(value: str, line_number: int) -> str:
 
     image = tokens[0]
     if len(tokens) > 1 and tokens[1].lower() != "as":
-        raise ValueError(
-            f"line {line_number}: unsupported FROM syntax '{value}'"
-        )
+        raise ValueError(f"line {line_number}: unsupported FROM syntax '{value}'")
     return image
 
 
@@ -187,7 +185,9 @@ def _parse_copy_like_values(
 
     payload = payload.strip()
     if not payload:
-        raise ValueError(f"line {line_number}: {keyword} must include source and destination")
+        raise ValueError(
+            f"line {line_number}: {keyword} must include source and destination"
+        )
 
     if payload.startswith("["):
         try:
@@ -373,7 +373,9 @@ def _copy_to_sandbox(sandbox: Sandbox, local_path: str, remote_path: str):
         raise FileNotFoundError(f"Local path not found: {local_path}")
 
 
-def _persist_env_var(sandbox: Sandbox, process_env: dict[str, str], key: str, value: str):
+def _persist_env_var(
+    sandbox: Sandbox, process_env: dict[str, str], key: str, value: str
+):
     escaped_value = value.replace("\\", "\\\\").replace('"', '\\"')
     export_line = f'export {key}="{escaped_value}"'
     _run_streaming(

@@ -68,7 +68,9 @@ class TestCreateSandboxImage(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(ValueError, "multi-stage Dockerfiles are not supported"):
+            with self.assertRaisesRegex(
+                ValueError, "multi-stage Dockerfiles are not supported"
+            ):
                 create_sandbox_image_module._load_dockerfile_plan(
                     str(dockerfile_path),
                     None,
@@ -85,15 +87,13 @@ class TestCreateSandboxImage(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             dockerfile_path = Path(tmpdir) / "sandbox-image.Dockerfile"
-            dockerfile_text = (
-                "\n".join(
-                    [
-                        "FROM python:3.12-slim",
-                        "WORKDIR /app",
-                        "COPY . /app",
-                        'RUN python -c "print(\'hello\')"',
-                    ]
-                )
+            dockerfile_text = "\n".join(
+                [
+                    "FROM python:3.12-slim",
+                    "WORKDIR /app",
+                    "COPY . /app",
+                    "RUN python -c \"print('hello')\"",
+                ]
             )
             dockerfile_path.write_text(dockerfile_text + "\n", encoding="utf-8")
 
@@ -103,7 +103,9 @@ class TestCreateSandboxImage(unittest.TestCase):
                     "_build_context_from_env",
                     return_value=ctx,
                 ),
-                patch.object(create_sandbox_image_module, "_execute_dockerfile_plan") as execute,
+                patch.object(
+                    create_sandbox_image_module, "_execute_dockerfile_plan"
+                ) as execute,
                 patch.object(
                     create_sandbox_image_module,
                     "_register_image",

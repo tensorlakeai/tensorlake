@@ -13,6 +13,7 @@ import {
   PoolInUseError,
   PoolNotFoundError,
   SandboxClient,
+  SandboxError,
   SandboxNotFoundError,
   SandboxStatus,
   type SandboxInfo,
@@ -49,6 +50,68 @@ async function pollSandboxStatus(
   throw new Error(
     `Sandbox ${sandboxId} did not reach ${targets.join(" or ")} within ${timeoutSec}s (last: ${status})`,
   );
+}
+
+async function createSandboxWithStartupRetry(
+  client: SandboxClient,
+  options: Parameters<SandboxClient["create"]>[0],
+  startupTimeoutSec = 60,
+  attempts = 3,
+): Promise<string> {
+  let lastSandboxId: string | undefined;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const resp = await client.create(options);
+    lastSandboxId = resp.sandboxId;
+
+    const startupStatus =
+      resp.status === SandboxStatus.RUNNING
+        ? SandboxStatus.RUNNING
+        : await pollSandboxStatus(
+            client,
+            resp.sandboxId,
+            [SandboxStatus.RUNNING, SandboxStatus.TERMINATED],
+            startupTimeoutSec,
+          );
+
+    if (startupStatus === SandboxStatus.RUNNING) {
+      return resp.sandboxId;
+    }
+
+    if (attempt < attempts) {
+      await sleep(1000);
+    }
+  }
+
+  throw new Error(
+    `Sandbox ${lastSandboxId} terminated during startup after ${attempts} attempt(s)`,
+  );
+}
+
+async function createAndConnectWithStartupRetry(
+  client: SandboxClient,
+  options: Parameters<SandboxClient["createAndConnect"]>[0],
+  attempts = 3,
+): Promise<Sandbox> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await client.createAndConnect(options);
+    } catch (error) {
+      lastError = error;
+      if (
+        !(error instanceof SandboxError) ||
+        !error.message.includes("terminated during startup") ||
+        attempt === attempts
+      ) {
+        throw error;
+      }
+      await sleep(1000);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 async function pollPoolContainers(
@@ -110,22 +173,20 @@ describe(
     });
 
     it("creates a sandbox", async () => {
-      const resp = await client.create({
+      sandboxId = await createSandboxWithStartupRetry(client, {
         image: SANDBOX_IMAGE,
         cpus: SANDBOX_CPUS,
         memoryMb: SANDBOX_MEMORY_MB,
         ephemeralDiskMb: SANDBOX_DISK_MB,
         entrypoint: ["sleep", "300"],
       });
-      expect(resp.sandboxId).toBeTruthy();
-      expect([SandboxStatus.PENDING, SandboxStatus.RUNNING]).toContain(resp.status);
-      sandboxId = resp.sandboxId;
+      expect(sandboxId).toBeTruthy();
     });
 
     it("gets a sandbox", async () => {
       const info = await client.get(sandboxId);
       expect(info.sandboxId).toBe(sandboxId);
-      expect([SandboxStatus.PENDING, SandboxStatus.RUNNING]).toContain(info.status);
+      expect(info.status).toBe(SandboxStatus.RUNNING);
     });
 
     it("lists sandboxes", async () => {
@@ -174,7 +235,7 @@ describe(
         apiUrl: process.env.TENSORLAKE_API_URL ?? "https://api.tensorlake.ai",
         apiKey: process.env.TENSORLAKE_API_KEY,
       });
-      sandbox = await client.createAndConnect({
+      sandbox = await createAndConnectWithStartupRetry(client, {
         image: SANDBOX_IMAGE,
         cpus: SANDBOX_CPUS,
         memoryMb: SANDBOX_MEMORY_MB,
@@ -611,16 +672,17 @@ describe(
       const info = await client.get(sandboxId);
       if (status === SandboxStatus.TERMINATED) {
         expect(info.outcome).toBe("Success(Timeout)");
+        sandboxId = undefined!;
       } else {
         expect(info.outcome).toBeUndefined();
       }
-      sandboxId = undefined!;
     });
 
     it("cleanup", async () => {
       if (sandboxId) {
         try {
           await client.delete(sandboxId);
+          await pollSandboxStatus(client, sandboxId, SandboxStatus.TERMINATED, 30);
         } catch {}
         sandboxId = undefined!;
       }
