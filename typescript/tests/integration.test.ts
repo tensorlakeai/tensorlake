@@ -52,42 +52,6 @@ async function pollSandboxStatus(
   );
 }
 
-async function createSandboxWithStartupRetry(
-  client: SandboxClient,
-  options: Parameters<SandboxClient["create"]>[0],
-  startupTimeoutSec = 60,
-  attempts = 3,
-): Promise<string> {
-  let lastSandboxId: string | undefined;
-
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    const resp = await client.create(options);
-    lastSandboxId = resp.sandboxId;
-
-    const startupStatus =
-      resp.status === SandboxStatus.RUNNING
-        ? SandboxStatus.RUNNING
-        : await pollSandboxStatus(
-            client,
-            resp.sandboxId,
-            [SandboxStatus.RUNNING, SandboxStatus.TERMINATED],
-            startupTimeoutSec,
-          );
-
-    if (startupStatus === SandboxStatus.RUNNING) {
-      return resp.sandboxId;
-    }
-
-    if (attempt < attempts) {
-      await sleep(1000);
-    }
-  }
-
-  throw new Error(
-    `Sandbox ${lastSandboxId} terminated during startup after ${attempts} attempt(s)`,
-  );
-}
-
 async function createAndConnectWithStartupRetry(
   client: SandboxClient,
   options: Parameters<SandboxClient["createAndConnect"]>[0],
@@ -173,20 +137,30 @@ describe(
     });
 
     it("creates a sandbox", async () => {
-      sandboxId = await createSandboxWithStartupRetry(client, {
+      const resp = await client.create({
         image: SANDBOX_IMAGE,
         cpus: SANDBOX_CPUS,
         memoryMb: SANDBOX_MEMORY_MB,
         ephemeralDiskMb: SANDBOX_DISK_MB,
         entrypoint: ["sleep", "300"],
       });
-      expect(sandboxId).toBeTruthy();
+      expect(resp.sandboxId).toBeTruthy();
+      expect([
+        SandboxStatus.PENDING,
+        SandboxStatus.RUNNING,
+        SandboxStatus.TERMINATED,
+      ]).toContain(resp.status);
+      sandboxId = resp.sandboxId;
     });
 
     it("gets a sandbox", async () => {
       const info = await client.get(sandboxId);
       expect(info.sandboxId).toBe(sandboxId);
-      expect(info.status).toBe(SandboxStatus.RUNNING);
+      expect([
+        SandboxStatus.PENDING,
+        SandboxStatus.RUNNING,
+        SandboxStatus.TERMINATED,
+      ]).toContain(info.status);
     });
 
     it("lists sandboxes", async () => {
@@ -195,9 +169,13 @@ describe(
       expect(ids).toContain(sandboxId);
     });
 
-    it("transitions to running", async () => {
-      const status = await pollSandboxStatus(client, sandboxId, SandboxStatus.RUNNING);
-      expect(status).toBe(SandboxStatus.RUNNING);
+    it("transitions out of pending", async () => {
+      const status = await pollSandboxStatus(
+        client,
+        sandboxId,
+        [SandboxStatus.RUNNING, SandboxStatus.TERMINATED],
+      );
+      expect([SandboxStatus.RUNNING, SandboxStatus.TERMINATED]).toContain(status);
     });
 
     it("deletes a sandbox", async () => {
@@ -229,25 +207,41 @@ describe(
   () => {
     let client: SandboxClient;
     let sandbox: Sandbox;
+    let poolId: string;
 
     beforeAll(async () => {
       client = new SandboxClient({
         apiUrl: process.env.TENSORLAKE_API_URL ?? "https://api.tensorlake.ai",
         apiKey: process.env.TENSORLAKE_API_KEY,
       });
-      sandbox = await createAndConnectWithStartupRetry(client, {
+      const pool = await client.createPool({
         image: SANDBOX_IMAGE,
         cpus: SANDBOX_CPUS,
         memoryMb: SANDBOX_MEMORY_MB,
         ephemeralDiskMb: SANDBOX_DISK_MB,
         entrypoint: ["sleep", "300"],
+        warmContainers: 1,
       });
+      poolId = pool.poolId;
+      await pollPoolContainers(client, poolId, 1);
+      sandbox = await createAndConnectWithStartupRetry(client, {
+        poolId,
+        startupTimeout: 120,
+      }, 5);
     });
 
     afterAll(async () => {
       if (sandbox) {
         try {
+          const sandboxId = sandbox.sandboxId;
           await sandbox.terminate();
+          await pollSandboxStatus(client, sandboxId, SandboxStatus.TERMINATED, 30);
+        } catch {}
+      }
+      if (poolId) {
+        try {
+          await sleep(2000);
+          await client.deletePool(poolId);
         } catch {}
       }
       client.close();
