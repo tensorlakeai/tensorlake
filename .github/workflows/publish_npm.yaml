@@ -55,8 +55,6 @@ jobs:
         include:
           - os: ubuntu-latest
             target_id: linux-x64
-          - os: macos-13
-            target_id: darwin-x64
           - os: macos-14
             target_id: darwin-arm64
           - os: windows-latest
@@ -129,12 +127,6 @@ jobs:
         with:
           name: cli-linux-x64
           path: typescript/dist/bin/linux-x64
-
-      - name: Download macOS x64 CLI artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: cli-darwin-x64
-          path: typescript/dist/bin/darwin-x64
 
       - name: Download macOS arm64 CLI artifact
         uses: actions/download-artifact@v4
