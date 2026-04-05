@@ -1,6 +1,8 @@
 // Public API
 export { SandboxClient } from "./client.js";
 export { Sandbox } from "./sandbox.js";
+export { CloudClient } from "./cloud-client.js";
+export { APIClient } from "./api-client.js";
 
 // Errors
 export {
@@ -11,6 +13,9 @@ export {
   PoolNotFoundError,
   PoolInUseError,
   RemoteAPIError,
+  RequestNotFinishedError,
+  RequestFailedError,
+  RequestExecutionError,
 } from "./errors.js";
 
 // Models & enums
@@ -22,6 +27,31 @@ export {
   OutputMode,
   ContainerState,
 } from "./models.js";
+
+export type {
+  BinaryPayload,
+  CloudClientOptions,
+  RequestInput,
+  ApplicationSummary,
+  ApplicationManifest,
+  RequestErrorInfo,
+  RequestMetadata,
+  RequestOutput,
+  ApiKeyIntrospection,
+  NewSecret,
+  Secret,
+  SecretsPagination,
+  SecretsList,
+  UpsertSecretResponse,
+  BuildInfo,
+  BuildLogEntry,
+  StartImageBuildRequest,
+  CreateApplicationBuildImageRequest,
+  CreateApplicationBuildRequest,
+  ApplicationBuildContext,
+  ApplicationBuildImageResult,
+  ApplicationBuildResponse,
+} from "./cloud-models.js";
 
 export type {
   ContainerResourcesInfo,

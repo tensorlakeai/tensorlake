@@ -1,11 +1,18 @@
 {
-  "name": "@tensorlakeai/tensorlake",
-  "version": "0.1.0",
-  "description": "TypeScript SDK for TensorLake Sandboxes",
+  "name": "tensorlake",
+  "version": "0.4.38",
+  "description": "TensorLake SDK and CLI for applications, sandboxes, and cloud services",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "tl": "./bin/tl.cjs",
+    "tensorlake": "./bin/tensorlake.cjs",
+    "tensorlake-deploy": "./bin/tensorlake-deploy.cjs",
+    "tensorlake-create-sandbox-image": "./bin/tensorlake-create-sandbox-image.cjs",
+    "function-executor": "./bin/function-executor.cjs"
+  },
   "exports": {
     ".": {
       "import": {
@@ -19,15 +26,20 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "bin",
+    "lib"
   ],
   "scripts": {
-    "build": "tsup",
+    "build:sdk": "tsup",
+    "build:cli": "node ./scripts/prepare-package.mjs",
+    "build": "npm run build:sdk && npm run build:cli",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --exclude tests/integration.test.ts",
     "test:integration": "vitest run tests/integration.test.ts",
     "test:watch": "vitest",
-    "lint": "eslint src/ tests/"
+    "lint": "eslint src/ tests/",
+    "prepack": "npm run build"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -36,7 +48,9 @@
     "tensorlake",
     "sandbox",
     "cloud",
-    "sdk"
+    "sdk",
+    "applications",
+    "cli"
   ],
   "license": "Apache-2.0",
   "devDependencies": {

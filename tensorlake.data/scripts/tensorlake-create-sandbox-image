@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+from tensorlake.cli.create_sandbox_image import create_sandbox_image_entrypoint
+
+
+if __name__ == "__main__":
+    create_sandbox_image_entrypoint()

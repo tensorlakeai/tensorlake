@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseSSEStream } from "../src/sse.js";
+import { parseSSEMessages, parseSSEStream } from "../src/sse.js";
 
 function createStream(text: string): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -101,5 +101,20 @@ describe("parseSSEStream", () => {
       events.push(event);
     }
     expect(events).toEqual([]);
+  });
+
+  it("parses raw SSE messages with event metadata", async () => {
+    const stream = createStream(
+      "event: progress\nid: 42\ndata: hello\ndata: world\n\n",
+    );
+
+    const messages: unknown[] = [];
+    for await (const message of parseSSEMessages(stream)) {
+      messages.push(message);
+    }
+
+    expect(messages).toEqual([
+      { event: "progress", id: "42", data: "hello\nworld" },
+    ]);
   });
 });

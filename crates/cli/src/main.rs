@@ -497,16 +497,13 @@ enum SbxCommands {
 
 #[derive(Subcommand)]
 enum ImageCommands {
-    /// Register a sandbox image from a Python file definition
+    /// Register a sandbox image from a Dockerfile
     Create {
-        /// Path to the image Python file
-        image_file_path: String,
+        /// Path to the Dockerfile
+        dockerfile_path: String,
 
-        /// Name of the image to use (required if multiple images exist)
-        #[arg(short = 'i', long)]
-        image_name: Option<String>,
-
-        /// Registered image name (defaults to the image name from the file)
+        /// Registered image name (defaults to the Dockerfile stem, or the parent directory name
+        /// when the file is named Dockerfile)
         #[arg(short = 'n', long)]
         registered_name: Option<String>,
 
@@ -869,15 +866,13 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 }
                 SbxCommands::Image(image_cmd) => match image_cmd {
                     ImageCommands::Create {
-                        image_file_path,
-                        image_name,
+                        dockerfile_path,
                         registered_name,
                         public,
                     } => {
                         commands::sbx::image::create::run(
                             ctx,
-                            &image_file_path,
-                            image_name.as_deref(),
+                            &dockerfile_path,
                             registered_name.as_deref(),
                             public,
                         )

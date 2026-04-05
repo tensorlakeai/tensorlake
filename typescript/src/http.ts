@@ -18,6 +18,16 @@ export interface HttpClientOptions {
   timeoutMs?: number;
 }
 
+type RequestBody = BodyInit | Uint8Array | ArrayBuffer;
+
+export interface HttpRequestOptions {
+  body?: RequestBody | null;
+  headers?: Record<string, string>;
+  json?: unknown;
+  signal?: AbortSignal;
+  allowHttpErrors?: boolean;
+}
+
 /**
  * Internal HTTP client with retry logic, auth headers, and error mapping.
  *
@@ -38,17 +48,15 @@ export class HttpClient {
     this.retryBackoffMs = options.retryBackoffMs ?? defaults.RETRY_BACKOFF_MS;
     this.timeoutMs = options.timeoutMs ?? defaults.DEFAULT_HTTP_TIMEOUT_MS;
 
-    this.headers = {
-      "Content-Type": "application/json",
-    };
+    this.headers = {};
     if (options.apiKey) {
       this.headers["Authorization"] = `Bearer ${options.apiKey}`;
     }
     if (options.organizationId) {
-      this.headers["X-Organization-ID"] = options.organizationId;
+      this.headers["X-Forwarded-Organization-Id"] = options.organizationId;
     }
     if (options.projectId) {
-      this.headers["X-Project-ID"] = options.projectId;
+      this.headers["X-Forwarded-Project-Id"] = options.projectId;
     }
     if (options.hostHeader) {
       this.headers["Host"] = options.hostHeader;
@@ -66,10 +74,15 @@ export class HttpClient {
     path: string,
     options?: {
       body?: unknown;
+      headers?: Record<string, string>;
       signal?: AbortSignal;
     },
   ): Promise<T> {
-    const response = await this.request(method, path, options);
+    const response = await this.requestResponse(method, path, {
+      json: options?.body,
+      headers: options?.headers,
+      signal: options?.signal,
+    });
     const text = await response.text();
     if (!text) return undefined as T;
     return JSON.parse(text) as T;
@@ -80,22 +93,25 @@ export class HttpClient {
     method: string,
     path: string,
     options?: {
-      body?: Uint8Array;
+      body?: RequestBody | null;
       contentType?: string;
+      headers?: Record<string, string>;
       signal?: AbortSignal;
     },
   ): Promise<Uint8Array> {
-    const headers = { ...this.headers };
+    const headers = { ...(options?.headers ?? {}) };
     if (options?.contentType) {
       headers["Content-Type"] = options.contentType;
     }
 
-    const response = await this.doFetch(
+    const response = await this.requestResponse(
       method,
       path,
-      options?.body,
-      headers,
-      options?.signal,
+      {
+        body: options?.body,
+        headers,
+        signal: options?.signal,
+      },
     );
     const buffer = await response.arrayBuffer();
     return new Uint8Array(buffer);
@@ -107,13 +123,13 @@ export class HttpClient {
     path: string,
     options?: { signal?: AbortSignal },
   ): Promise<ReadableStream<Uint8Array>> {
-    const headers = { ...this.headers, Accept: "text/event-stream" };
-    const response = await this.doFetch(
+    const response = await this.requestResponse(
       method,
       path,
-      undefined,
-      headers,
-      options?.signal,
+      {
+        headers: { Accept: "text/event-stream" },
+        signal: options?.signal,
+      },
     );
     if (!response.body) {
       throw new RemoteAPIError(response.status, "No response body for SSE stream");
@@ -121,26 +137,42 @@ export class HttpClient {
     return response.body;
   }
 
-  /** Low-level fetch with retry, timeout, and error mapping. */
-  private async request(
+  /** Make a request and return the raw Response. */
+  async requestResponse(
     method: string,
     path: string,
-    options?: {
-      body?: unknown;
-      signal?: AbortSignal;
-    },
+    options?: HttpRequestOptions,
   ): Promise<Response> {
-    const body =
-      options?.body !== undefined ? JSON.stringify(options.body) : undefined;
-    return this.doFetch(method, path, body, this.headers, options?.signal);
+    const headers = {
+      ...this.headers,
+      ...(options?.headers ?? {}),
+    };
+    const hasJsonBody = options?.json !== undefined;
+    if (hasJsonBody && !hasHeader(headers, "Content-Type")) {
+      headers["Content-Type"] = "application/json";
+    }
+
+    const body = hasJsonBody
+      ? JSON.stringify(options?.json)
+      : normalizeRequestBody(options?.body);
+
+    return this.doFetch(
+      method,
+      path,
+      body,
+      headers,
+      options?.signal,
+      options?.allowHttpErrors ?? false,
+    );
   }
 
   private async doFetch(
     method: string,
     path: string,
-    body: string | Uint8Array | undefined,
+    body: BodyInit | undefined,
     headers: Record<string, string>,
     signal?: AbortSignal,
+    allowHttpErrors = false,
   ): Promise<Response> {
     const url = `${this.baseUrl}${path}`;
     let lastError: Error | undefined;
@@ -186,6 +218,10 @@ export class HttpClient {
           continue;
         }
 
+        if (allowHttpErrors) {
+          return response;
+        }
+
         // Non-retryable error — throw mapped error
         const errorBody = await response.text().catch(() => "");
         throwMappedError(response.status, errorBody, path);
@@ -213,6 +249,21 @@ export class HttpClient {
 
     throw new SandboxConnectionError(lastError?.message ?? "Request failed");
   }
+}
+
+function hasHeader(headers: Record<string, string>, name: string): boolean {
+  const lowered = name.toLowerCase();
+  return Object.keys(headers).some((key) => key.toLowerCase() === lowered);
+}
+
+function normalizeRequestBody(body?: RequestBody | null): BodyInit | undefined {
+  if (body == null) {
+    return undefined;
+  }
+  if (body instanceof Uint8Array) {
+    return Uint8Array.from(body).buffer;
+  }
+  return body;
 }
 
 /** Map HTTP status codes to specific error types. */

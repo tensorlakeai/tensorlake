@@ -329,6 +329,10 @@ export function toSnakeKeys(obj: unknown): unknown {
 export function parseTimestamp(v: unknown): Date | undefined {
   if (v == null) return undefined;
   if (v instanceof Date) return v;
+  if (typeof v === "string") {
+    const parsed = Date.parse(v);
+    return Number.isNaN(parsed) ? undefined : new Date(parsed);
+  }
   const ts = Number(v);
   if (isNaN(ts)) return undefined;
   if (ts > 1e15) return new Date(ts / 1000); // microseconds → ms
@@ -336,16 +340,13 @@ export function parseTimestamp(v: unknown): Date | undefined {
   return new Date(ts * 1000); // seconds → ms
 }
 
-/** ID field mapping: API returns `id`, we expose context-specific names. */
-type IdFieldName = "sandboxId" | "poolId" | "snapshotId";
-
 /**
  * Recursively convert all object keys from snake_case to camelCase,
  * with special handling for `id` → contextual name and timestamp parsing.
  */
 export function fromSnakeKeys(
   obj: unknown,
-  idField?: IdFieldName,
+  idField?: string,
 ): unknown {
   if (Array.isArray(obj)) return obj.map((item) => fromSnakeKeys(item, idField));
   if (obj !== null && typeof obj === "object" && !(obj instanceof Date)) {
@@ -367,10 +368,7 @@ export function fromSnakeKeys(
       ) {
         result[key] = parseTimestamp(v);
       } else if (typeof v === "object" && v !== null && !Array.isArray(v)) {
-        // Determine nested id field context
-        let nestedIdField: IdFieldName | undefined;
-        if (key === "containers") nestedIdField = undefined;
-        result[key] = fromSnakeKeys(v, nestedIdField);
+        result[key] = fromSnakeKeys(v);
       } else if (Array.isArray(v)) {
         result[key] = v.map((item) => fromSnakeKeys(item));
       } else {

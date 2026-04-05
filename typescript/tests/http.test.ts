@@ -39,8 +39,8 @@ describe("HttpClient", () => {
     mockFetch((_url, init) => {
       const headers = init?.headers as Record<string, string>;
       expect(headers["Authorization"]).toBe("Bearer my-key");
-      expect(headers["X-Organization-ID"]).toBe("org-1");
-      expect(headers["X-Project-ID"]).toBe("proj-1");
+      expect(headers["X-Forwarded-Organization-Id"]).toBe("org-1");
+      expect(headers["X-Forwarded-Project-Id"]).toBe("proj-1");
       return new Response("{}", { status: 200 });
     });
 
@@ -51,6 +51,19 @@ describe("HttpClient", () => {
       projectId: "proj-1",
     });
     await client.requestJson("GET", "/test");
+    client.close();
+  });
+
+  it("adds JSON content type only when sending JSON bodies", async () => {
+    mockFetch((_url, init) => {
+      const headers = init?.headers as Record<string, string>;
+      expect(headers["Content-Type"]).toBe("application/json");
+      expect(init?.body).toBe(JSON.stringify({ ok: true }));
+      return new Response("{}", { status: 200 });
+    });
+
+    const client = new HttpClient({ baseUrl: "http://localhost:8900" });
+    await client.requestJson("POST", "/test", { body: { ok: true } });
     client.close();
   });
 
