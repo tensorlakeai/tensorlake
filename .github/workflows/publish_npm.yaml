@@ -148,6 +148,9 @@ jobs:
           name: cli-win32-x64
           path: typescript/dist/bin/win32-x64
 
+      - name: Restore executable bits for Unix CLI binaries
+        run: find dist/bin -type f ! -name "*.exe" -exec chmod 755 {} +
+
       - name: Verify package contents
         run: npm pack --dry-run --ignore-scripts
 
