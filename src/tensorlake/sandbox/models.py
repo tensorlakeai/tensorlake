@@ -232,7 +232,7 @@ class SnapshotInfo(BaseModel):
     snapshot_id: str = Field(alias="id")
     namespace: str
     sandbox_id: str
-    base_image: str
+    base_image: str | None = None
     status: SnapshotStatus
     error: str | None = None
     snapshot_uri: str | None = None
