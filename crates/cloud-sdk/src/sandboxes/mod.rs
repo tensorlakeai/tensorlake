@@ -16,7 +16,7 @@ use models::{
     DaemonInfo, HealthResponse, ListDirectoryResponse, ListProcessesResponse,
     ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse, OutputEvent,
     OutputResponse, ProcessInfo, SandboxInfo, SandboxPoolInfo, SandboxPoolRequest,
-    SendSignalResponse, SnapshotInfo,
+    SendSignalResponse, SnapshotInfo, UpdateSandboxRequest,
 };
 
 /// A client for managing sandbox lifecycle, pool, and snapshot APIs.
@@ -91,6 +91,19 @@ impl SandboxesClient {
         let resp = self.client.execute(req).await?;
         let list: ListSandboxesResponse = Self::parse_json(resp).await?;
         Ok(list.sandboxes)
+    }
+
+    pub async fn update(
+        &self,
+        sandbox_id: &str,
+        request: &UpdateSandboxRequest,
+    ) -> Result<SandboxInfo, SdkError> {
+        let uri = self.endpoint(&format!("sandboxes/{sandbox_id}"));
+        let req = self
+            .client
+            .build_post_json_request(Method::PATCH, &uri, request)?;
+        let resp = self.client.execute(req).await?;
+        Self::parse_json(resp).await
     }
 
     pub async fn delete(&self, sandbox_id: &str) -> Result<(), SdkError> {

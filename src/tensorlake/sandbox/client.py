@@ -31,6 +31,7 @@ from .models import (
     SandboxStatus,
     SnapshotInfo,
     SnapshotStatus,
+    UpdateSandboxRequest,
 )
 
 try:
@@ -381,6 +382,36 @@ class SandboxClient:
             data = ListSandboxesResponse.model_validate(json.loads(response_json))
             return data.sandboxes
         except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    def update_sandbox(self, sandbox_id: str, name: str) -> SandboxInfo:
+        """Update a sandbox's properties.
+
+        Currently supports updating the sandbox name. Naming an ephemeral sandbox
+        makes it non-ephemeral and enables suspend/resume.
+
+        Args:
+            sandbox_id: ID of the sandbox to update
+            name: New name for the sandbox
+
+        Returns:
+            SandboxInfo with updated sandbox details
+
+        Raises:
+            SandboxNotFoundError: If sandbox doesn't exist
+            RemoteAPIError: If the API request fails
+            SandboxConnectionError: If the server is unreachable
+        """
+        request = UpdateSandboxRequest(name=name)
+        try:
+            response_json = self._rust_client.update_sandbox(
+                sandbox_id=sandbox_id,
+                request_json=request.model_dump_json(exclude_none=True),
+            )
+            return SandboxInfo.model_validate_json(response_json)
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
 
     def delete(self, sandbox_id: str) -> None:

@@ -123,6 +123,7 @@ Wrapper scripts live in `tensorlake.data/scripts/` and are installed into the vi
 | Rust command | Spawns wrapper script |
 |---|---|
 | `tl deploy` | `tensorlake-deploy` |
+| `tl sbx image create` | `tensorlake-create-sandbox-image` |
 | `tl parse` | `tensorlake-parse` |
 | `tl generate-dockerfiles` | `tensorlake-generate-dockerfiles` |
 

@@ -108,6 +108,12 @@ class CreateSandboxRequest(BaseModel):
     name: str | None = None
 
 
+class UpdateSandboxRequest(BaseModel):
+    """Request payload for updating a sandbox."""
+
+    name: str | None = None
+
+
 class SandboxPoolRequest(BaseModel):
     """Request payload for creating or updating a sandbox pool."""
 

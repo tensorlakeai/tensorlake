@@ -1,19 +1,53 @@
 import argparse
 import json
 import os
+import posixpath
+import shlex
 import sys
 import traceback
-from types import ModuleType
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 
-from tensorlake.applications.remote.code.loader import load_code
 from tensorlake.cli._common import Context
-from tensorlake.image import Image
-from tensorlake.image.image import _ImageBuildOperationType
-from tensorlake.image.utils import dockerfile_content
 from tensorlake.sandbox import Sandbox, SandboxClient
 from tensorlake.sandbox.models import ProcessStatus
+
+_BUILD_SANDBOX_PIP_ENV = {"PIP_BREAK_SYSTEM_PACKAGES": "1"}
+_IGNORED_DOCKERFILE_INSTRUCTIONS = {
+    "CMD",
+    "ENTRYPOINT",
+    "EXPOSE",
+    "HEALTHCHECK",
+    "LABEL",
+    "STOPSIGNAL",
+    "VOLUME",
+}
+_UNSUPPORTED_DOCKERFILE_INSTRUCTIONS = {
+    "ARG",
+    "ONBUILD",
+    "SHELL",
+    "USER",
+}
+
+
+@dataclass(frozen=True)
+class DockerfileInstruction:
+    keyword: str
+    value: str
+    line_number: int
+
+
+@dataclass(frozen=True)
+class DockerfileBuildPlan:
+    dockerfile_path: str
+    context_dir: str
+    registered_name: str
+    dockerfile_text: str
+    base_image: str
+    instructions: list[DockerfileInstruction]
 
 
 def _emit(obj):
@@ -42,59 +76,221 @@ def _build_context_from_env() -> Context:
     )
 
 
-def _discover_module_images(module: ModuleType | None) -> dict[str, Image]:
-    """Discover top-level Image objects from a loaded Python module."""
-    if module is None:
-        return {}
-
-    images: dict[str, Image] = {}
-    for value in vars(module).values():
-        if isinstance(value, Image):
-            if value.name in images:
-                _emit(
-                    {
-                        "type": "error",
-                        "message": f"Duplicate image name '{value.name}'. Each image must have a unique name.",
-                    }
-                )
-                sys.exit(1)
-            images[value.name] = value
-
-    return images
+def _default_registered_name(dockerfile_path: str) -> str:
+    path = Path(dockerfile_path)
+    stem = path.stem
+    if stem.lower() == "dockerfile":
+        parent_name = path.parent.name.strip()
+        return parent_name or "sandbox-image"
+    return stem or "sandbox-image"
 
 
-def _select_image(images: dict[str, Image], image_name: str | None) -> Image:
-    """Select an Image object from discovered images.
+def _logical_dockerfile_lines(dockerfile_text: str) -> list[tuple[int, str]]:
+    logical_lines: list[tuple[int, str]] = []
+    parts: list[str] = []
+    start_line: int | None = None
 
-    If image_name is given, find by name. Otherwise auto-select if only one exists.
-    """
-    if not images:
-        _emit({"type": "error", "message": "No images found in image file"})
-        sys.exit(1)
+    for line_number, raw_line in enumerate(dockerfile_text.splitlines(), start=1):
+        stripped = raw_line.strip()
+        if not parts and (not stripped or stripped.startswith("#")):
+            continue
 
-    if image_name is None:
-        if len(images) == 1:
-            return next(iter(images.values()))
-        names = list(images.keys())
-        _emit(
-            {
-                "type": "error",
-                "message": f"Multiple images found: {', '.join(names)}. Use --image-name to select one.",
-            }
+        if start_line is None:
+            start_line = line_number
+
+        line = raw_line.rstrip()
+        continued = line.endswith("\\")
+        if continued:
+            line = line[:-1]
+
+        normalized = line.strip()
+        if normalized and not normalized.startswith("#"):
+            parts.append(normalized)
+
+        if continued:
+            continue
+
+        if parts:
+            logical_lines.append((start_line, " ".join(parts)))
+        parts = []
+        start_line = None
+
+    if parts:
+        logical_lines.append((start_line or 1, " ".join(parts)))
+
+    return logical_lines
+
+
+def _split_instruction(line: str, line_number: int) -> tuple[str, str]:
+    parts = line.split(None, 1)
+    if not parts:
+        raise ValueError(f"line {line_number}: empty Dockerfile instruction")
+    keyword = parts[0].upper()
+    value = parts[1].strip() if len(parts) > 1 else ""
+    return keyword, value
+
+
+def _strip_leading_flags(value: str) -> tuple[dict[str, str], str]:
+    flags: dict[str, str] = {}
+    remaining = value.lstrip()
+
+    while remaining.startswith("--"):
+        token, sep, rest = remaining.partition(" ")
+        if not sep:
+            raise ValueError(f"invalid Dockerfile flag syntax: {value}")
+
+        flag_body = token[2:]
+        if "=" in flag_body:
+            key, flag_value = flag_body.split("=", 1)
+            remaining = rest.lstrip()
+        else:
+            rest = rest.lstrip()
+            flag_value, sep, remaining = rest.partition(" ")
+            if not sep:
+                raise ValueError(f"missing value for Dockerfile flag '{token}'")
+            key = flag_body
+            remaining = remaining.lstrip()
+
+        flags[key] = flag_value
+
+    return flags, remaining
+
+
+def _parse_from_value(value: str, line_number: int) -> str:
+    flags, remainder = _strip_leading_flags(value)
+    if flags.get("platform"):
+        # --platform only affects architecture selection; the base image name stays the same.
+        pass
+
+    tokens = shlex.split(remainder)
+    if not tokens:
+        raise ValueError(f"line {line_number}: FROM must include a base image")
+
+    image = tokens[0]
+    if len(tokens) > 1 and tokens[1].lower() != "as":
+        raise ValueError(f"line {line_number}: unsupported FROM syntax '{value}'")
+    return image
+
+
+def _parse_copy_like_values(
+    value: str,
+    line_number: int,
+    keyword: str,
+) -> tuple[dict[str, str], list[str], str]:
+    flags, payload = _strip_leading_flags(value)
+    if "from" in flags:
+        raise ValueError(
+            f"line {line_number}: {keyword} --from is not supported for sandbox image creation"
         )
-        sys.exit(1)
 
-    if image_name in images:
-        return images[image_name]
+    payload = payload.strip()
+    if not payload:
+        raise ValueError(
+            f"line {line_number}: {keyword} must include source and destination"
+        )
 
-    names = list(images.keys())
-    _emit(
-        {
-            "type": "error",
-            "message": f"Image '{image_name}' not found. Available: {', '.join(names)}",
-        }
+    if payload.startswith("["):
+        try:
+            items = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"line {line_number}: invalid JSON array syntax for {keyword}: {exc}"
+            ) from exc
+        if not isinstance(items, list) or len(items) < 2:
+            raise ValueError(
+                f"line {line_number}: {keyword} JSON array form requires at least two string values"
+            )
+        if not all(isinstance(item, str) for item in items):
+            raise ValueError(
+                f"line {line_number}: {keyword} JSON array form only supports string values"
+            )
+        parts = items
+    else:
+        parts = shlex.split(payload)
+        if len(parts) < 2:
+            raise ValueError(
+                f"line {line_number}: {keyword} must include at least one source and one destination"
+            )
+
+    return flags, parts[:-1], parts[-1]
+
+
+def _parse_env_pairs(value: str, line_number: int) -> list[tuple[str, str]]:
+    tokens = shlex.split(value)
+    if not tokens:
+        raise ValueError(f"line {line_number}: ENV must include a key and value")
+
+    if all("=" in token for token in tokens):
+        pairs: list[tuple[str, str]] = []
+        for token in tokens:
+            key, env_value = token.split("=", 1)
+            if not key:
+                raise ValueError(f"line {line_number}: invalid ENV token '{token}'")
+            pairs.append((key, env_value))
+        return pairs
+
+    if len(tokens) < 2:
+        raise ValueError(f"line {line_number}: ENV must include a key and value")
+
+    return [(tokens[0], " ".join(tokens[1:]))]
+
+
+def _resolve_container_path(path: str, working_dir: str) -> str:
+    if not path:
+        return working_dir
+    if path.startswith("/"):
+        normalized = posixpath.normpath(path)
+    else:
+        normalized = posixpath.normpath(posixpath.join(working_dir, path))
+    return normalized if normalized.startswith("/") else f"/{normalized}"
+
+
+def _load_dockerfile_plan(
+    dockerfile_path: str,
+    registered_name: str | None,
+) -> DockerfileBuildPlan:
+    path = Path(dockerfile_path).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Dockerfile not found: {dockerfile_path}")
+
+    dockerfile_text = path.read_text(encoding="utf-8")
+    base_image: str | None = None
+    instructions: list[DockerfileInstruction] = []
+
+    for line_number, line in _logical_dockerfile_lines(dockerfile_text):
+        keyword, value = _split_instruction(line, line_number)
+        if keyword == "FROM":
+            if base_image is not None:
+                raise ValueError(
+                    f"line {line_number}: multi-stage Dockerfiles are not supported for sandbox image creation"
+                )
+            base_image = _parse_from_value(value, line_number)
+            continue
+
+        if keyword in _UNSUPPORTED_DOCKERFILE_INSTRUCTIONS:
+            raise ValueError(
+                f"line {line_number}: Dockerfile instruction '{keyword}' is not supported for sandbox image creation"
+            )
+
+        instructions.append(
+            DockerfileInstruction(
+                keyword=keyword,
+                value=value,
+                line_number=line_number,
+            )
+        )
+
+    if base_image is None:
+        raise ValueError("Dockerfile must contain a FROM instruction")
+
+    return DockerfileBuildPlan(
+        dockerfile_path=str(path),
+        context_dir=str(path.parent),
+        registered_name=(registered_name or _default_registered_name(str(path))),
+        dockerfile_text=dockerfile_text,
+        base_image=base_image,
+        instructions=instructions,
     )
-    sys.exit(1)
 
 
 def _run_streaming(
@@ -104,12 +300,7 @@ def _run_streaming(
     env: dict[str, str] | None = None,
     working_dir: str | None = None,
 ):
-    """Start a process and stream its stdout/stderr in real time via NDJSON.
-
-    Polls get_stdout()/get_stderr() in a loop, emitting new lines as they
-    appear so the user sees pip install progress, build output, etc.
-    line-by-line as it happens.
-    """
+    """Start a process and stream its stdout/stderr in real time via NDJSON."""
     import time
 
     proc = sandbox.start_process(
@@ -123,22 +314,18 @@ def _run_streaming(
     stderr_seen = 0
 
     while True:
-        # Emit any new stdout lines.
         stdout_resp = sandbox.get_stdout(proc.pid)
         for line in stdout_resp.lines[stdout_seen:]:
             _emit({"type": "build_log", "stream": "stdout", "message": line})
         stdout_seen = len(stdout_resp.lines)
 
-        # Emit any new stderr lines.
         stderr_resp = sandbox.get_stderr(proc.pid)
         for line in stderr_resp.lines[stderr_seen:]:
             _emit({"type": "build_log", "stream": "stderr", "message": line})
         stderr_seen = len(stderr_resp.lines)
 
-        # Check if process has exited.
         info = sandbox.get_process(proc.pid)
         if info.status != ProcessStatus.RUNNING:
-            # Drain any remaining output after exit.
             stdout_resp = sandbox.get_stdout(proc.pid)
             for line in stdout_resp.lines[stdout_seen:]:
                 _emit({"type": "build_log", "stream": "stdout", "message": line})
@@ -149,8 +336,6 @@ def _run_streaming(
 
         time.sleep(0.3)
 
-    # The daemon may report a non-RUNNING status before the exit code is
-    # available.  Re-poll briefly until exit_code or signal is populated.
     for _ in range(10):
         if info.exit_code is not None or info.signal is not None:
             break
@@ -162,7 +347,7 @@ def _run_streaming(
     elif info.signal is not None:
         exit_code = -info.signal
     else:
-        exit_code = 0  # Process exited, assume success if no code reported
+        exit_code = 0
 
     if exit_code != 0:
         raise RuntimeError(
@@ -181,44 +366,191 @@ def _copy_to_sandbox(sandbox: Sandbox, local_path: str, remote_path: str):
             for filename in files:
                 full = os.path.join(root, filename)
                 rel = os.path.relpath(full, local_path)
-                dest = os.path.join(remote_path, rel)
+                dest = posixpath.join(remote_path, rel)
                 with open(full, "rb") as f:
                     sandbox.write_file(dest, f.read())
     else:
         raise FileNotFoundError(f"Local path not found: {local_path}")
 
 
-def _execute_operations(sandbox: Sandbox, image):
-    """Translate Image build operations into sandbox commands with streaming output."""
-    # Mirror the Dockerfile ENV defaults: WORKDIR /app, PIP_BREAK_SYSTEM_PACKAGES=1.
-    # Accumulate user ENV operations so later RUN commands inherit them.
-    process_env: dict[str, str] = {"PIP_BREAK_SYSTEM_PACKAGES": "1"}
+def _persist_env_var(
+    sandbox: Sandbox, process_env: dict[str, str], key: str, value: str
+):
+    escaped_value = value.replace("\\", "\\\\").replace('"', '\\"')
+    export_line = f'export {key}="{escaped_value}"'
+    _run_streaming(
+        sandbox,
+        "sh",
+        ["-c", f"printf '%s\\n' {shlex.quote(export_line)} >> /etc/environment"],
+        env=process_env,
+    )
 
-    # Set working directory.
-    _run_streaming(sandbox, "mkdir", ["-p", "/app"], env=process_env)
 
-    for op in image._build_operations:
-        if op.type == _ImageBuildOperationType.RUN:
-            for cmd in op.args:
-                _emit({"type": "status", "message": f"RUN {cmd}"})
-                _run_streaming(
-                    sandbox, "sh", ["-c", cmd], env=process_env, working_dir="/app"
+def _copy_from_context(
+    sandbox: Sandbox,
+    context_dir: str,
+    sources: list[str],
+    destination: str,
+    working_dir: str,
+    keyword: str,
+):
+    destination_path = _resolve_container_path(destination, working_dir)
+    if len(sources) > 1 and not destination_path.endswith("/"):
+        raise ValueError(
+            f"{keyword} with multiple sources requires a directory destination ending in '/'"
+        )
+
+    for source in sources:
+        local_source = os.path.join(context_dir, source)
+        if len(sources) > 1:
+            remote_destination = posixpath.join(
+                destination_path.rstrip("/"),
+                os.path.basename(source.rstrip("/")),
+            )
+        else:
+            remote_destination = destination_path
+            if os.path.isfile(local_source) and destination_path.endswith("/"):
+                remote_destination = posixpath.join(
+                    destination_path.rstrip("/"),
+                    os.path.basename(source),
                 )
-        elif op.type in (_ImageBuildOperationType.COPY, _ImageBuildOperationType.ADD):
-            src, dest = op.args[0], op.args[1]
-            _emit({"type": "status", "message": f"COPY {src} -> {dest}"})
-            _copy_to_sandbox(sandbox, src, dest)
-        elif op.type == _ImageBuildOperationType.ENV:
-            key, value = op.args[0], op.args[1]
-            _emit({"type": "status", "message": f"ENV {key}={value}"})
-            process_env[key] = value
-            # Also persist for processes started outside this script.
+
+        _emit(
+            {
+                "type": "status",
+                "message": f"{keyword} {source} -> {remote_destination}",
+            }
+        )
+        _copy_to_sandbox(sandbox, local_source, remote_destination)
+
+
+def _add_url_to_sandbox(
+    sandbox: Sandbox,
+    url: str,
+    destination: str,
+    working_dir: str,
+    process_env: dict[str, str],
+):
+    destination_path = _resolve_container_path(destination, working_dir)
+    parsed = urlparse(url)
+    file_name = os.path.basename(parsed.path.rstrip("/")) or "downloaded"
+    if destination_path.endswith("/"):
+        destination_path = posixpath.join(destination_path.rstrip("/"), file_name)
+
+    parent_dir = posixpath.dirname(destination_path) or "/"
+    _emit(
+        {
+            "type": "status",
+            "message": f"ADD {url} -> {destination_path}",
+        }
+    )
+    _run_streaming(sandbox, "mkdir", ["-p", parent_dir], env=process_env)
+    _run_streaming(
+        sandbox,
+        "sh",
+        [
+            "-c",
+            f"curl -fsSL --location {shlex.quote(url)} -o {shlex.quote(destination_path)}",
+        ],
+        env=process_env,
+        working_dir=working_dir,
+    )
+
+
+def _execute_dockerfile_plan(sandbox: Sandbox, plan: DockerfileBuildPlan):
+    process_env: dict[str, str] = dict(_BUILD_SANDBOX_PIP_ENV)
+    working_dir = "/"
+
+    for instruction in plan.instructions:
+        keyword = instruction.keyword
+        value = instruction.value
+        line_number = instruction.line_number
+
+        if keyword == "RUN":
+            _emit({"type": "status", "message": f"RUN {value}"})
             _run_streaming(
                 sandbox,
                 "sh",
-                ["-c", f"echo 'export {key}=\"{value}\"' >> /etc/environment"],
+                ["-c", value],
                 env=process_env,
+                working_dir=working_dir,
             )
+            continue
+
+        if keyword == "WORKDIR":
+            tokens = shlex.split(value)
+            if len(tokens) != 1:
+                raise ValueError(
+                    f"line {line_number}: WORKDIR must include exactly one path"
+                )
+            working_dir = _resolve_container_path(tokens[0], working_dir)
+            _emit({"type": "status", "message": f"WORKDIR {working_dir}"})
+            _run_streaming(sandbox, "mkdir", ["-p", working_dir], env=process_env)
+            continue
+
+        if keyword == "ENV":
+            for key, env_value in _parse_env_pairs(value, line_number):
+                _emit({"type": "status", "message": f"ENV {key}={env_value}"})
+                process_env[key] = env_value
+                _persist_env_var(sandbox, process_env, key, env_value)
+            continue
+
+        if keyword == "COPY":
+            _flags, sources, destination = _parse_copy_like_values(
+                value,
+                line_number,
+                keyword,
+            )
+            _copy_from_context(
+                sandbox,
+                plan.context_dir,
+                sources,
+                destination,
+                working_dir,
+                keyword,
+            )
+            continue
+
+        if keyword == "ADD":
+            _flags, sources, destination = _parse_copy_like_values(
+                value,
+                line_number,
+                keyword,
+            )
+            if len(sources) == 1 and urlparse(sources[0]).scheme in {"http", "https"}:
+                _add_url_to_sandbox(
+                    sandbox,
+                    sources[0],
+                    destination,
+                    working_dir,
+                    process_env,
+                )
+            else:
+                _copy_from_context(
+                    sandbox,
+                    plan.context_dir,
+                    sources,
+                    destination,
+                    working_dir,
+                    keyword,
+                )
+            continue
+
+        if keyword in _IGNORED_DOCKERFILE_INSTRUCTIONS:
+            _emit(
+                {
+                    "type": "warning",
+                    "message": (
+                        f"Skipping Dockerfile instruction '{keyword}' during snapshot materialization. "
+                        "It is still preserved in the registered Dockerfile."
+                    ),
+                }
+            )
+            continue
+
+        raise ValueError(
+            f"line {line_number}: Dockerfile instruction '{keyword}' is not supported for sandbox image creation"
+        )
 
 
 def _register_image(
@@ -243,7 +575,6 @@ def _register_image(
         "Authorization": f"Bearer {bearer_token}",
         "Content-Type": "application/json",
     }
-    # Include scope headers for PAT auth (match Rust CLI behavior).
     if ctx.personal_access_token and not ctx.api_key:
         headers["X-Forwarded-Organization-Id"] = org_id
         headers["X-Forwarded-Project-Id"] = proj_id
@@ -261,39 +592,21 @@ def _register_image(
 
 
 def create_sandbox_image(
-    image_file_path: str,
-    image_name: str | None,
+    dockerfile_path: str,
+    registered_name: str | None,
     cpus: float,
     memory_mb: int,
     is_public: bool = False,
 ):
     ctx = _build_context_from_env()
 
-    # 1. Load code & discover images.
-    _emit({"type": "status", "message": f"Loading {image_file_path}..."})
+    _emit({"type": "status", "message": f"Loading {dockerfile_path}..."})
     try:
-        module = load_code(os.path.abspath(image_file_path))
-    except SyntaxError as e:
-        _emit(
-            {
-                "type": "error",
-                "message": f"Syntax error in {e.filename}, line {e.lineno}: {e.msg}",
-            }
-        )
-        sys.exit(1)
-    except ImportError as e:
-        _emit(
-            {
-                "type": "error",
-                "message": "Failed to import image file. Make sure all dependencies are installed.",
-                "details": f"{type(e).__name__}: {e}",
-            }
-        )
-        sys.exit(1)
+        plan = _load_dockerfile_plan(dockerfile_path, registered_name)
     except Exception as e:
         event = {
             "type": "error",
-            "message": f"Failed to load {image_file_path}",
+            "message": f"Failed to load Dockerfile {dockerfile_path}",
             "details": f"{type(e).__name__}: {e}",
         }
         if _debug_enabled():
@@ -301,12 +614,13 @@ def create_sandbox_image(
         _emit(event)
         sys.exit(1)
 
-    images = _discover_module_images(module)
-    image = _select_image(images, image_name)
+    _emit(
+        {
+            "type": "status",
+            "message": f"Selected image name: {plan.registered_name}",
+        }
+    )
 
-    _emit({"type": "status", "message": f"Selected image: {image.name}"})
-
-    # 2. Create sandbox.
     _emit({"type": "status", "message": "Creating sandbox..."})
     sandbox_client = SandboxClient(
         api_url=ctx.api_url,
@@ -318,7 +632,7 @@ def create_sandbox_image(
     sandbox = None
     try:
         sandbox = sandbox_client.create_and_connect(
-            image=image._base_image,
+            image=plan.base_image,
             cpus=cpus,
             memory_mb=memory_mb,
         )
@@ -329,10 +643,8 @@ def create_sandbox_image(
             }
         )
 
-        # 3. Execute image operations with streaming output.
-        _execute_operations(sandbox, image)
+        _execute_dockerfile_plan(sandbox, plan)
 
-        # 4. Snapshot.
         _emit({"type": "status", "message": "Creating snapshot..."})
         snapshot = sandbox_client.snapshot_and_wait(sandbox.sandbox_id)
         _emit(
@@ -342,10 +654,6 @@ def create_sandbox_image(
             }
         )
 
-        # 5. Generate dockerfile text.
-        dockerfile = dockerfile_content(image)
-
-        # 6. Register image via Platform API.
         _emit({"type": "status", "message": "Registering image..."})
         if not snapshot.snapshot_uri:
             raise RuntimeError(
@@ -353,8 +661,8 @@ def create_sandbox_image(
             )
         result = _register_image(
             ctx,
-            image.name,
-            dockerfile,
+            plan.registered_name,
+            plan.dockerfile_text,
             snapshot.snapshot_id,
             snapshot.snapshot_uri,
             is_public,
@@ -363,7 +671,7 @@ def create_sandbox_image(
             {
                 "type": "image_registered",
                 "image_id": result.get("id", ""),
-                "name": image.name,
+                "name": plan.registered_name,
                 "snapshot_id": snapshot.snapshot_id,
                 "snapshot_uri": snapshot.snapshot_uri,
             }
@@ -390,29 +698,32 @@ def create_sandbox_image(
 
 def create_sandbox_image_entrypoint():
     parser = argparse.ArgumentParser(
-        description="Register a sandbox image from a Python file"
+        description="Register a sandbox image from a Dockerfile"
     )
     parser.add_argument(
-        "image_file_path",
-        help="Path to the image Python file",
+        "dockerfile_path",
+        help="Path to the Dockerfile",
     )
     parser.add_argument(
-        "--image-name",
-        "-i",
+        "--name",
+        "-n",
         default=None,
-        help="Name of the image to use (required if multiple images exist in the file)",
+        help=(
+            "Registered sandbox image name. Defaults to the Dockerfile stem, "
+            "or the parent directory name when the file is named Dockerfile."
+        ),
     )
     parser.add_argument(
         "--cpus",
         type=float,
         default=2.0,
-        help="CPUs for the build sandbox that installs dependencies and builds the image (default: 2.0)",
+        help="CPUs for the build sandbox that materializes the Dockerfile (default: 2.0)",
     )
     parser.add_argument(
         "--memory",
         type=int,
         default=4096,
-        help="Memory in MB for the build sandbox that installs dependencies and builds the image (default: 4096)",
+        help="Memory in MB for the build sandbox that materializes the Dockerfile (default: 4096)",
     )
     parser.add_argument(
         "--public",
@@ -424,7 +735,11 @@ def create_sandbox_image_entrypoint():
 
     try:
         create_sandbox_image(
-            args.image_file_path, args.image_name, args.cpus, args.memory, args.public
+            args.dockerfile_path,
+            args.name,
+            args.cpus,
+            args.memory,
+            args.public,
         )
     except SystemExit:
         raise
