@@ -52,6 +52,11 @@
     "applications",
     "cli"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tensorlakeai/tensorlake",
+    "directory": "typescript"
+  },
   "license": "Apache-2.0",
   "devDependencies": {
     "@types/node": "^20.11.0",
