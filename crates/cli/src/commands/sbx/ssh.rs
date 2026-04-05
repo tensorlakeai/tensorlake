@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::time::Duration;
 
 use crate::auth::context::CliContext;
@@ -141,8 +142,6 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
 
     use futures::sink::SinkExt;
     use futures::stream::StreamExt;
-    use tokio::io::AsyncReadExt;
-
     let (mut ws_write, mut ws_read) = ws_stream.split();
 
     // Enter raw mode with a Drop guard so the terminal is restored even on
@@ -195,26 +194,29 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
             exit_code
         });
 
-        // Read stdin on a separate task so remote close/exit is not blocked on
-        // a terminal read future that only wakes once the user types again.
-        let (stdin_tx, mut stdin_rx) = mpsc::channel::<std::io::Result<Vec<u8>>>(8);
-        let stdin_reader = tokio::spawn(async move {
-            let mut stdin = tokio::io::stdin();
+        // Read stdin on a detached OS thread instead of `tokio::io::stdin()`.
+        // Tokio backs TTY stdin with a blocking read that cannot be cancelled,
+        // so aborting that task can leave the CLI hung until the user presses
+        // Enter again. A detached thread may stay blocked, but it does not keep
+        // the process alive once the SSH command finishes.
+        let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<std::io::Result<Vec<u8>>>();
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin().lock();
             let mut buf = [0u8; 4096];
 
             loop {
-                match stdin.read(&mut buf).await {
+                match stdin.read(&mut buf) {
                     Ok(0) => {
-                        let _ = stdin_tx.send(Ok(Vec::new())).await;
+                        let _ = stdin_tx.send(Ok(Vec::new()));
                         break;
                     }
                     Ok(n) => {
-                        if stdin_tx.send(Ok(buf[..n].to_vec())).await.is_err() {
+                        if stdin_tx.send(Ok(buf[..n].to_vec())).is_err() {
                             break;
                         }
                     }
                     Err(error) => {
-                        let _ = stdin_tx.send(Err(error)).await;
+                        let _ = stdin_tx.send(Err(error));
                         break;
                     }
                 }
@@ -317,8 +319,6 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
             server_exit_code = exit_code;
             terminated_by_remote = terminated_by_remote || reader_completed;
         }
-
-        stdin_reader.abort();
 
         Ok::<(Option<i32>, bool), CliError>((server_exit_code, !terminated_by_remote))
     }
