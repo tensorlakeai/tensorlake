@@ -369,10 +369,10 @@ enum SbxCommands {
 
     /// Copy files between local and sandbox
     Cp {
-        /// Source path (sandbox_id_or_name:/path or local path)
+        /// Source path (identifier:/path or local path)
         src: String,
 
-        /// Destination path (sandbox_id_or_name:/path or local path)
+        /// Destination path (identifier:/path or local path)
         dest: String,
     },
 

@@ -734,6 +734,116 @@ class TestSandboxTimeout(BaseSandboxTest):
 
 
 # ---------------------------------------------------------------------------
+# TestNamedSandboxIdentifier
+# ---------------------------------------------------------------------------
+
+
+class TestNamedSandboxIdentifier(BaseSandboxTest):
+    """Verify that sandbox identifier and sandbox_id are distinct and that
+    sandbox_id always carries the server-assigned UUID, never a human-readable
+    name.
+
+    Some tests below are expected to fail until both server and SDK changes are
+    deployed (specifically test_4_connect_by_name_sandbox_id_is_uuid, which
+    requires the SDK to resolve names to UUIDs on connect).
+    """
+
+    sandbox_id: str | None = None
+    sandbox_name: str = "tl-integ-named-sbx"
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.sandbox_id:
+            try:
+                cls.client.delete(cls.sandbox_id)
+            except Exception:
+                pass
+        super().tearDownClass()
+
+    def test_1_create_named_sandbox_returns_uuid(self):
+        """create() with a name must return a sandbox_id that is the UUID,
+        not the human-readable name."""
+        resp = self.client.create(
+            image=_SANDBOX_IMAGE,
+            cpus=_SANDBOX_CPUS,
+            memory_mb=_SANDBOX_MEMORY_MB,
+            ephemeral_disk_mb=_SANDBOX_DISK_MB,
+            entrypoint=["sleep", "300"],
+            name=self.__class__.sandbox_name,
+        )
+        self.assertIsNotNone(resp.sandbox_id)
+        self.assertNotEqual(
+            resp.sandbox_id,
+            self.__class__.sandbox_name,
+            "sandbox_id returned by create() must be the UUID, not the name",
+        )
+        self.__class__.sandbox_id = resp.sandbox_id
+
+    def test_2_get_by_name_returns_uuid(self):
+        """get() with a name must return a SandboxInfo whose sandbox_id is
+        the UUID, not the name, and whose name field matches the given name."""
+        self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_1")
+        info = self.client.get(self.__class__.sandbox_name)
+        self.assertEqual(
+            info.sandbox_id,
+            self.__class__.sandbox_id,
+            "sandbox_id from get(name) must equal the UUID returned by create()",
+        )
+        self.assertNotEqual(
+            info.sandbox_id,
+            self.__class__.sandbox_name,
+            "sandbox_id must never equal the sandbox name",
+        )
+        self.assertEqual(
+            info.name,
+            self.__class__.sandbox_name,
+            "name field must carry the human-readable name",
+        )
+
+    def test_3_connect_by_uuid_sandbox_id_matches(self):
+        """Connecting by the UUID must yield a Sandbox whose sandbox_id equals
+        that UUID."""
+        self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_1")
+        sandbox = self.client.connect(identifier=self.__class__.sandbox_id)
+        try:
+            self.assertEqual(
+                sandbox.sandbox_id,
+                self.__class__.sandbox_id,
+                "sandbox_id must equal the UUID used to connect",
+            )
+        finally:
+            sandbox.close()
+
+    def test_4_connect_by_name_sandbox_id_is_uuid(self):
+        """Connecting by name must yield a Sandbox whose sandbox_id is the
+        server-assigned UUID, not the name.
+
+        NOTE: This test is expected to fail until the SDK resolves sandbox
+        names to UUIDs during connect(). It documents the target behaviour.
+        """
+        self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_1")
+        sandbox = self.client.connect(identifier=self.__class__.sandbox_name)
+        try:
+            self.assertNotEqual(
+                sandbox.sandbox_id,
+                self.__class__.sandbox_name,
+                "sandbox_id must be the UUID, not the name",
+            )
+            self.assertEqual(
+                sandbox.sandbox_id,
+                self.__class__.sandbox_id,
+                "sandbox_id must equal the UUID returned by create()",
+            )
+        finally:
+            sandbox.close()
+
+    def test_5_cleanup(self):
+        if self.__class__.sandbox_id:
+            self.client.delete(self.__class__.sandbox_id)
+            self.__class__.sandbox_id = None
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -751,6 +861,7 @@ if __name__ == "__main__":
         TestMaxContainers,
         TestPoolDeletion,
         TestSandboxTimeout,
+        TestNamedSandboxIdentifier,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
     runner = unittest.TextTestRunner(verbosity=2 if "-v" in sys.argv else 1)

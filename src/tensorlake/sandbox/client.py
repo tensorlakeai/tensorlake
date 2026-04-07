@@ -81,22 +81,22 @@ def _rust_status_code(e: Exception) -> int | None:
 
 
 def _resolve_sandbox_identifier(
-    sandbox_id_or_name: str | None,
+    identifier: str | None,
     sandbox_id: str | None,
     *,
     parameter_name: str,
 ) -> str:
-    if sandbox_id_or_name and sandbox_id and sandbox_id_or_name != sandbox_id:
+    if identifier and sandbox_id and identifier != sandbox_id:
         raise SandboxError(
             f"Provide only one of `{parameter_name}` or `sandbox_id`, not both."
         )
 
-    identifier = sandbox_id_or_name or sandbox_id
-    if not identifier:
+    resolved = identifier or sandbox_id
+    if not resolved:
         raise SandboxError(
             f"`{parameter_name}` is required. `sandbox_id` is accepted as a deprecated alias."
         )
-    return identifier
+    return resolved
 
 
 def _raise_as_sandbox_error(e: Exception) -> None:
@@ -818,7 +818,7 @@ class SandboxClient:
 
     def connect(
         self,
-        sandbox_id_or_name: str | None = None,
+        identifier: str | None = None,
         *,
         proxy_url: str | None = None,
         sandbox_id: str | None = None,
@@ -826,11 +826,11 @@ class SandboxClient:
         """Connect to a running sandbox for process and file operations.
 
         Args:
-            sandbox_id_or_name: Sandbox ID or name to connect to.
+            identifier: Sandbox ID or name to connect to.
             proxy_url: Override the sandbox proxy URL. Auto-detected based on
                 api_url when not provided. Can also be set via the
                 TENSORLAKE_SANDBOX_PROXY_URL environment variable.
-            sandbox_id: Deprecated alias for ``sandbox_id_or_name``.
+            sandbox_id: Deprecated alias for ``identifier``.
 
         Returns:
             Sandbox instance for interacting with the running sandbox
@@ -838,16 +838,16 @@ class SandboxClient:
         from .sandbox import Sandbox
 
         sandbox_identifier = _resolve_sandbox_identifier(
-            sandbox_id_or_name,
+            identifier,
             sandbox_id,
-            parameter_name="sandbox_id_or_name",
+            parameter_name="identifier",
         )
 
         if proxy_url is None:
             proxy_url = self._resolve_proxy_url()
 
         return Sandbox(
-            sandbox_id_or_name=sandbox_identifier,
+            identifier=sandbox_identifier,
             proxy_url=proxy_url,
             api_key=self._api_key,
             organization_id=self._organization_id,

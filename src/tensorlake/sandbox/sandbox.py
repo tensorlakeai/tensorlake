@@ -112,7 +112,7 @@ class Sandbox:
 
     def __init__(
         self,
-        sandbox_id_or_name: str | None = None,
+        identifier: str | None = None,
         proxy_url: str = _defaults.SANDBOX_PROXY_URL,
         api_key: str | None = _defaults.API_KEY,
         organization_id: str | None = None,
@@ -120,14 +120,14 @@ class Sandbox:
         *,
         sandbox_id: str | None = None,
     ):
-        if sandbox_id_or_name and sandbox_id and sandbox_id_or_name != sandbox_id:
+        if identifier and sandbox_id and identifier != sandbox_id:
             raise SandboxError(
-                "Provide only one of `sandbox_id_or_name` or `sandbox_id`, not both."
+                "Provide only one of `identifier` or `sandbox_id`, not both."
             )
-        sandbox_identifier = sandbox_id_or_name or sandbox_id
+        sandbox_identifier = identifier or sandbox_id
         if not sandbox_identifier:
             raise SandboxError(
-                "`sandbox_id_or_name` is required. `sandbox_id` is accepted as a deprecated alias."
+                "`identifier` is required. `sandbox_id` is accepted as a deprecated alias."
             )
 
         self._sandbox_id = sandbox_identifier
