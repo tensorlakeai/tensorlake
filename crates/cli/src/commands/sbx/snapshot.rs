@@ -4,6 +4,7 @@ use crate::error::{CliError, Result};
 
 pub struct SnapshotDetails {
     pub snapshot_id: String,
+    #[allow(dead_code)]
     pub snapshot_uri: String,
 }
 
