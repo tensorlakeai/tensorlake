@@ -250,7 +250,7 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
                             // so we can forward it to the remote (aborting the foreground
                             // process) and then close the session with exit code 130
                             // (128 + SIGINT), matching standard Unix abort semantics.
-                            let ctrl_c_pressed = data.iter().any(|&b| b == 0x03);
+                            let ctrl_c_pressed = data.contains(&0x03);
                             let mut msg = vec![OP_DATA];
                             msg.extend_from_slice(&data);
                             if ws_write.send(tungstenite::Message::Binary(msg.into())).await.is_err() {
@@ -293,7 +293,7 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
                     match maybe_stdin {
                         Some(Ok(data)) if data.is_empty() => break,
                         Some(Ok(data)) => {
-                            let ctrl_c_pressed = data.iter().any(|&b| b == 0x03);
+                            let ctrl_c_pressed = data.contains(&0x03);
                             let mut msg = vec![OP_DATA];
                             msg.extend_from_slice(&data);
                             if ws_write.send(tungstenite::Message::Binary(msg.into())).await.is_err() {

@@ -717,9 +717,7 @@ impl ProtocolVersion {
     }
 
     fn negotiated(self) -> Self {
-        if self.major != 3 {
-            Self { major: 3, minor: 8 }
-        } else if self.minor >= 8 {
+        if self.major != 3 || self.minor >= 8 {
             Self { major: 3, minor: 8 }
         } else if self.minor >= 7 {
             Self { major: 3, minor: 7 }
@@ -1172,12 +1170,11 @@ fn keysym_from_key_name(key: &str) -> Result<u32, SdkError> {
         return Ok(*value);
     }
 
-    if let Some(function_number) = normalized.strip_prefix('f') {
-        if let Ok(number) = function_number.parse::<u8>() {
-            if (1..=12).contains(&number) {
-                return Ok(0xffbd + u32::from(number));
-            }
-        }
+    if let Some(function_number) = normalized.strip_prefix('f')
+        && let Ok(number) = function_number.parse::<u8>()
+        && (1..=12).contains(&number)
+    {
+        return Ok(0xffbd + u32::from(number));
     }
 
     Err(SdkError::ClientError(format!(
