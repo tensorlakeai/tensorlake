@@ -4,6 +4,7 @@ export enum SandboxStatus {
   PENDING = "pending",
   RUNNING = "running",
   SNAPSHOTTING = "snapshotting",
+  SUSPENDING = "suspending",
   SUSPENDED = "suspended",
   TERMINATED = "terminated",
 }
@@ -52,6 +53,7 @@ export interface NetworkConfig {
 // --- Sandbox lifecycle ---
 
 export interface CreateSandboxOptions {
+  /** Optional sandbox image name, such as `ubuntu-minimal` or a registered Sandbox Image. When omitted, Tensorlake uses the default managed environment. */
   image?: string;
   cpus?: number;
   memoryMb?: number;
@@ -70,6 +72,10 @@ export interface CreateSandboxOptions {
 export interface UpdateSandboxOptions {
   /** New name for the sandbox. Naming an ephemeral sandbox enables suspend/resume. */
   name?: string;
+  /** Whether exposed user ports should be reachable without TensorLake auth. */
+  allowUnauthenticatedAccess?: boolean;
+  /** User ports that should be routable through the sandbox proxy. Port 9501 is reserved. */
+  exposedPorts?: number[];
 }
 
 export interface CreateSandboxResponse {
@@ -81,6 +87,7 @@ export interface SandboxInfo {
   sandboxId: string;
   namespace: string;
   status: SandboxStatus;
+  /** Resolved sandbox image name. */
   image?: string;
   resources: ContainerResourcesInfo;
   secretNames: string[];
@@ -92,6 +99,15 @@ export interface SandboxInfo {
   createdAt?: Date;
   terminatedAt?: Date;
   name?: string;
+  allowUnauthenticatedAccess?: boolean;
+  exposedPorts?: number[];
+  sandboxUrl?: string;
+}
+
+export interface SandboxPortAccess {
+  allowUnauthenticatedAccess: boolean;
+  exposedPorts: number[];
+  sandboxUrl?: string;
 }
 
 // --- Snapshots ---
@@ -121,6 +137,7 @@ export interface SnapshotAndWaitOptions {
 // --- Pools ---
 
 export interface CreatePoolOptions {
+  /** Sandbox image name, such as `ubuntu-minimal` or a registered Sandbox Image. */
   image: string;
   cpus?: number;
   memoryMb?: number;
@@ -133,6 +150,7 @@ export interface CreatePoolOptions {
 }
 
 export interface UpdatePoolOptions {
+  /** Sandbox image name, such as `ubuntu-minimal` or a registered Sandbox Image. */
   image: string;
   cpus?: number;
   memoryMb?: number;
@@ -159,6 +177,7 @@ export interface PoolContainerInfo {
 export interface SandboxPoolInfo {
   poolId: string;
   namespace: string;
+  /** Sandbox image name backing the pool. */
   image: string;
   resources: ContainerResourcesInfo;
   secretNames: string[];

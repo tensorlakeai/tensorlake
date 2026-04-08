@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import time
 from typing import TYPE_CHECKING, Iterator
+from urllib.parse import urlparse
+
+import httpx
 
 from . import _defaults
 from .exceptions import (
@@ -134,6 +137,19 @@ class Sandbox:
         self._api_key = api_key
         self._organization_id = organization_id
         self._project_id = project_id
+        parsed_proxy = urlparse(proxy_url)
+        self._host_header = None
+        if parsed_proxy.hostname in ("localhost", "127.0.0.1"):
+            self._host_header = f"{sandbox_identifier}.local"
+        self._proxy_headers: dict[str, str] = {}
+        if api_key:
+            self._proxy_headers["Authorization"] = f"Bearer {api_key}"
+        if organization_id:
+            self._proxy_headers["X-Forwarded-Organization-Id"] = organization_id
+        if project_id:
+            self._proxy_headers["X-Forwarded-Project-Id"] = project_id
+        if self._host_header:
+            self._proxy_headers["Host"] = self._host_header
 
         if not _RUST_SANDBOX_PROXY_CLIENT_AVAILABLE:
             raise SandboxError(
@@ -493,6 +509,80 @@ class Sandbox:
         else:
             ws_base = base
         return f"{ws_base}/api/v1/pty/{session_id}/ws"
+
+    def connect_pty(
+        self,
+        session_id: str,
+        token: str,
+        *,
+        on_data=None,
+        on_exit=None,
+        connect_timeout: float = 10.0,
+    ):
+        """Attach to an existing PTY session and return a high-level handle."""
+        from .pty import build_pty_connection
+
+        pty = build_pty_connection(
+            session_id=session_id,
+            token=token,
+            ws_url=self.pty_ws_url(session_id, token),
+            http_url=f"{self._base_url.rstrip('/')}/api/v1/pty/{session_id}",
+            ws_headers=self._proxy_headers,
+            http_headers=self._proxy_headers,
+            connect_timeout=connect_timeout,
+        )
+        if on_data is not None:
+            pty.on_data(on_data)
+        if on_exit is not None:
+            pty.on_exit(on_exit)
+        return pty.connect()
+
+    def _delete_pty_session(self, session_id: str, *, timeout: float = 10.0) -> None:
+        response = httpx.delete(
+            f"{self._base_url.rstrip('/')}/api/v1/pty/{session_id}",
+            headers=self._proxy_headers,
+            timeout=timeout,
+        )
+        if response.is_success or response.status_code == 404:
+            return
+        raise RemoteAPIError(response.status_code, response.text)
+
+    def create_pty(
+        self,
+        command: str,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        working_dir: str | None = None,
+        rows: int = 24,
+        cols: int = 80,
+        *,
+        on_data=None,
+        on_exit=None,
+        connect_timeout: float = 10.0,
+    ):
+        """Create a PTY session, connect immediately, and return its handle."""
+        session = self.create_pty_session(
+            command=command,
+            args=args,
+            env=env,
+            working_dir=working_dir,
+            rows=rows,
+            cols=cols,
+        )
+        try:
+            return self.connect_pty(
+                session["session_id"],
+                session["token"],
+                on_data=on_data,
+                on_exit=on_exit,
+                connect_timeout=connect_timeout,
+            )
+        except Exception:
+            try:
+                self._delete_pty_session(session["session_id"], timeout=connect_timeout)
+            except Exception:
+                pass
+            raise
 
     def connect_desktop(
         self,

@@ -24,6 +24,248 @@ import {
 } from "./models.js";
 import { parseSSEStream } from "./sse.js";
 import { resolveProxyTarget } from "./url.js";
+import WebSocket, { type RawData } from "ws";
+
+const PTY_OP_DATA = 0x00;
+const PTY_OP_RESIZE = 0x01;
+const PTY_OP_READY = 0x02;
+const PTY_OP_EXIT = 0x03;
+
+export type PtyDataHandler = (data: Uint8Array) => void;
+export type PtyExitHandler = (exitCode: number) => void;
+
+export interface PtyConnectionOptions {
+  onData?: PtyDataHandler;
+  onExit?: PtyExitHandler;
+}
+
+export interface CreatePtyOptions
+  extends CreatePtySessionOptions,
+    PtyConnectionOptions {}
+
+export class Pty {
+  readonly sessionId: string;
+  readonly token: string;
+
+  private readonly wsUrl: string;
+  private readonly wsHeaders: Record<string, string>;
+  private readonly killSession: () => Promise<void>;
+  private socket: WebSocket | null = null;
+  private connectPromise: Promise<this> | null = null;
+  private intentionalDisconnect = false;
+  private exitCode: number | null = null;
+  private waitSettled = false;
+  private readonly dataHandlers = new Set<PtyDataHandler>();
+  private readonly exitHandlers = new Set<PtyExitHandler>();
+  private readonly waitPromise: Promise<number>;
+  private resolveWait!: (exitCode: number) => void;
+  private rejectWait!: (error: unknown) => void;
+
+  constructor(options: {
+    sessionId: string;
+    token: string;
+    wsUrl: string;
+    wsHeaders: Record<string, string>;
+    killSession: () => Promise<void>;
+  }) {
+    this.sessionId = options.sessionId;
+    this.token = options.token;
+    this.wsUrl = options.wsUrl;
+    this.wsHeaders = options.wsHeaders;
+    this.killSession = options.killSession;
+    this.waitPromise = new Promise<number>((resolve, reject) => {
+      this.resolveWait = resolve;
+      this.rejectWait = reject;
+    });
+  }
+
+  onData(handler: PtyDataHandler): () => void {
+    this.dataHandlers.add(handler);
+    return () => this.dataHandlers.delete(handler);
+  }
+
+  onExit(handler: PtyExitHandler): () => void {
+    this.exitHandlers.add(handler);
+    if (this.exitCode != null) {
+      queueMicrotask(() => handler(this.exitCode!));
+    }
+    return () => this.exitHandlers.delete(handler);
+  }
+
+  async connect(): Promise<this> {
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      return this;
+    }
+    if (this.connectPromise) {
+      return this.connectPromise;
+    }
+
+    this.intentionalDisconnect = false;
+
+    this.connectPromise = new Promise<this>((resolve, reject) => {
+      let opened = false;
+      const socket = new WebSocket(this.wsUrl, {
+        headers: this.wsHeaders,
+      });
+      this.socket = socket;
+
+      socket.on("open", async () => {
+        try {
+          await sendPtyFrame(socket, Buffer.from([PTY_OP_READY]));
+          opened = true;
+          resolve(this);
+        } catch (error) {
+          reject(error);
+        }
+      });
+
+      socket.on("message", (message: RawData) => {
+        const bytes = normalizePtyMessage(message);
+        const opcode = bytes[0];
+
+        if (opcode === PTY_OP_DATA) {
+          const payload = bytes.subarray(1);
+          for (const handler of this.dataHandlers) {
+            handler(payload);
+          }
+          return;
+        }
+
+        if (opcode === PTY_OP_EXIT && bytes.length >= 5) {
+          this.finishWait(bytes.readInt32BE(1));
+        }
+      });
+
+      socket.on("close", (code: number, reason: Buffer) => {
+        const closeReason = Buffer.isBuffer(reason)
+          ? reason.toString("utf8")
+          : String(reason);
+
+        if (this.socket === socket) {
+          this.socket = null;
+        }
+        this.connectPromise = null;
+
+        if (this.exitCode != null) {
+          this.finishWait(this.exitCode);
+          return;
+        }
+
+        if (closeReason.startsWith("exit:")) {
+          const parsed = Number.parseInt(closeReason.slice(5), 10);
+          this.finishWait(Number.isNaN(parsed) ? -1 : parsed);
+          return;
+        }
+
+        if (this.intentionalDisconnect) {
+          this.intentionalDisconnect = false;
+          return;
+        }
+
+        if (!opened) {
+          reject(new SandboxError(
+            `PTY websocket closed before READY completed: ${code} ${closeReason || "no reason"}`,
+          ));
+          return;
+        }
+
+        if (closeReason === "session terminated") {
+          this.failWait(new SandboxError("PTY session terminated"));
+          return;
+        }
+
+        this.failWait(
+          new SandboxError(
+            `PTY websocket closed unexpectedly: ${code} ${closeReason || "no reason"}`,
+          ),
+        );
+      });
+
+      socket.on("error", (error: Error) => {
+        if (!opened) {
+          reject(error);
+        }
+      });
+    });
+
+    return this.connectPromise;
+  }
+
+  async sendInput(input: string | Uint8Array): Promise<void> {
+    const socket = this.requireOpenSocket();
+    await sendPtyFrame(socket, encodePtyInput(input));
+  }
+
+  async resize(cols: number, rows: number): Promise<void> {
+    const socket = this.requireOpenSocket();
+    await sendPtyFrame(socket, encodePtyResize(cols, rows));
+  }
+
+  disconnect(code = 1000, reason = "client disconnect"): void {
+    if (!this.socket) return;
+    this.intentionalDisconnect = true;
+    this.socket.close(code, reason);
+  }
+
+  wait(): Promise<number> {
+    return this.waitPromise;
+  }
+
+  async kill(): Promise<void> {
+    await this.killSession();
+  }
+
+  private requireOpenSocket(): WebSocket {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      throw new SandboxError("PTY is not connected");
+    }
+    return this.socket;
+  }
+
+  private finishWait(exitCode: number): void {
+    if (this.waitSettled) return;
+    this.waitSettled = true;
+    this.exitCode = exitCode;
+    for (const handler of this.exitHandlers) {
+      handler(exitCode);
+    }
+    this.resolveWait(exitCode);
+  }
+
+  private failWait(error: unknown): void {
+    if (this.waitSettled) return;
+    this.waitSettled = true;
+    this.rejectWait(error);
+  }
+}
+
+function normalizePtyMessage(message: RawData): Buffer {
+  if (Buffer.isBuffer(message)) return message;
+  if (Array.isArray(message)) {
+    return Buffer.concat(message.map((part) => Buffer.from(part)));
+  }
+  return Buffer.from(message);
+}
+
+function encodePtyInput(input: string | Uint8Array): Buffer {
+  const payload =
+    typeof input === "string" ? Buffer.from(input, "utf8") : Buffer.from(input);
+  return Buffer.concat([Buffer.from([PTY_OP_DATA]), payload]);
+}
+
+function encodePtyResize(cols: number, rows: number): Buffer {
+  const frame = Buffer.alloc(5);
+  frame[0] = PTY_OP_RESIZE;
+  frame.writeUInt16BE(cols, 1);
+  frame.writeUInt16BE(rows, 3);
+  return frame;
+}
+
+function sendPtyFrame(socket: WebSocket, frame: Buffer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    socket.send(frame, (error?: Error) => (error ? reject(error) : resolve()));
+  });
+}
 
 /**
  * Client for interacting with a running sandbox.
@@ -35,6 +277,7 @@ export class Sandbox {
   readonly sandboxId: string;
   private readonly http: HttpClient;
   private readonly baseUrl: string;
+  private readonly wsHeaders: Record<string, string>;
   private ownsSandbox = false;
   private lifecycleClient: SandboxClient | null = null;
 
@@ -44,6 +287,19 @@ export class Sandbox {
     const proxyUrl = options.proxyUrl ?? defaults.SANDBOX_PROXY_URL;
     const { baseUrl, hostHeader } = resolveProxyTarget(proxyUrl, options.sandboxId);
     this.baseUrl = baseUrl;
+    this.wsHeaders = {};
+    if (options.apiKey) {
+      this.wsHeaders.Authorization = `Bearer ${options.apiKey}`;
+    }
+    if (options.organizationId) {
+      this.wsHeaders["X-Forwarded-Organization-Id"] = options.organizationId;
+    }
+    if (options.projectId) {
+      this.wsHeaders["X-Forwarded-Project-Id"] = options.projectId;
+    }
+    if (hostHeader) {
+      this.wsHeaders.Host = hostHeader;
+    }
 
     this.http = new HttpClient({
       baseUrl,
@@ -316,6 +572,51 @@ export class Sandbox {
       { body: payload },
     );
     return fromSnakeKeys(raw) as PtySessionInfo;
+  }
+
+  async createPty(options: CreatePtyOptions): Promise<Pty> {
+    const { onData, onExit, ...createOptions } = options;
+    const session = await this.createPtySession(createOptions);
+    try {
+      return await this.connectPty(session.sessionId, session.token, { onData, onExit });
+    } catch (error) {
+      try {
+        await this.http.requestResponse("DELETE", `/api/v1/pty/${session.sessionId}`);
+      } catch {}
+      throw error;
+    }
+  }
+
+  async connectPty(
+    sessionId: string,
+    token: string,
+    options?: PtyConnectionOptions,
+  ): Promise<Pty> {
+    const wsUrl = new URL(this.ptyWsUrl(sessionId, token));
+    const authToken = wsUrl.searchParams.get("token") ?? token;
+
+    const pty = new Pty({
+      sessionId,
+      token: authToken,
+      wsUrl: wsUrl.toString(),
+      wsHeaders: {
+        ...this.wsHeaders,
+        "X-PTY-Token": authToken,
+      },
+      killSession: async () => {
+        await this.http.requestResponse("DELETE", `/api/v1/pty/${sessionId}`);
+      },
+    });
+
+    if (options?.onData) {
+      pty.onData(options.onData);
+    }
+    if (options?.onExit) {
+      pty.onExit(options.onExit);
+    }
+
+    await pty.connect();
+    return pty;
   }
 
   ptyWsUrl(sessionId: string, token: string): string {

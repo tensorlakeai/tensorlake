@@ -1,8 +1,18 @@
 // Public API
 export { SandboxClient } from "./client.js";
 export { Sandbox } from "./sandbox.js";
+export { Pty } from "./sandbox.js";
 export { CloudClient } from "./cloud-client.js";
 export { APIClient } from "./api-client.js";
+export { createSandboxImage } from "./sandbox-image.js";
+export { Image, dockerfileContent, ImageBuildOperationType } from "./image.js";
+
+export type {
+  PtyDataHandler,
+  PtyExitHandler,
+  PtyConnectionOptions,
+  CreatePtyOptions,
+} from "./sandbox.js";
 
 // Errors
 export {
@@ -59,6 +69,7 @@ export type {
   CreateSandboxOptions,
   CreateSandboxResponse,
   SandboxInfo,
+  SandboxPortAccess,
   CreateSnapshotResponse,
   SnapshotInfo,
   SnapshotAndWaitOptions,
@@ -84,3 +95,16 @@ export type {
   SandboxOptions,
   CreateAndConnectOptions,
 } from "./models.js";
+
+export type {
+  DockerfileInstruction,
+  DockerfileBuildPlan,
+  CreateSandboxImageOptions,
+  SandboxImageSource,
+} from "./sandbox-image.js";
+
+export type {
+  ImageOptions,
+  ImageBuildOperation,
+  ImageBuildOperationType as ImageBuildOperationTypeValue,
+} from "./image.js";

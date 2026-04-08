@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest.mock import patch
 
 from tensorlake.sandbox import PoolInUseError, SandboxNotFoundError
 from tensorlake.sandbox.client import SandboxClient
@@ -9,6 +10,8 @@ from tensorlake.sandbox.exceptions import SandboxError
 class _FakeRustClient:
     def __init__(self):
         self.create_request_json = None
+        self.update_request_json = None
+        self.last_get_sandbox_id = None
 
     def close(self):
         return None
@@ -36,16 +39,61 @@ class _FakeRustClient:
 }
 """
 
+    def get_sandbox_json(self, sandbox_id):
+        self.last_get_sandbox_id = sandbox_id
+        return """
+{
+  "id": "sbx-1",
+  "namespace": "default",
+  "status": "running",
+  "resources": {
+    "cpus": 1.0,
+    "memory_mb": 512,
+    "ephemeral_disk_mb": 1024
+  },
+  "secret_names": [],
+  "allow_unauthenticated_access": false,
+  "exposed_ports": [8080],
+  "sandbox_url": "https://sbx-1.sandbox.tensorlake.ai"
+}
+"""
+
+    def update_sandbox(self, sandbox_id, request_json):
+        self.last_get_sandbox_id = sandbox_id
+        self.update_request_json = request_json
+        payload = json.loads(request_json)
+        response = {
+            "id": sandbox_id,
+            "namespace": "default",
+            "status": "running",
+            "resources": {
+                "cpus": 1.0,
+                "memory_mb": 512,
+                "ephemeral_disk_mb": 1024,
+            },
+            "secret_names": [],
+            "name": payload.get("name"),
+            "allow_unauthenticated_access": payload.get(
+                "allow_unauthenticated_access", False
+            ),
+            "exposed_ports": payload.get("exposed_ports", []),
+            "sandbox_url": f"https://{sandbox_id}.sandbox.tensorlake.ai",
+        }
+        return json.dumps(response)
+
 
 class TestSandboxClientRustBackend(unittest.TestCase):
     def test_connect_accepts_sandbox_name(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
 
-        sandbox = client.connect(
-            "stable-name", proxy_url="https://sandbox.tensorlake.ai"
-        )
+        with patch("tensorlake.sandbox.sandbox.Sandbox") as sandbox_cls:
+            sandbox_cls.return_value.sandbox_id = "stable-name"
 
-        self.assertEqual(sandbox.sandbox_id, "stable-name")
+            sandbox = client.connect(
+                "stable-name", proxy_url="https://sandbox.tensorlake.ai"
+            )
+
+            self.assertEqual(sandbox.sandbox_id, "stable-name")
 
     def test_connect_rejects_conflicting_identifier_aliases(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
@@ -75,6 +123,70 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertEqual(len(sandboxes), 1)
         self.assertEqual(sandboxes[0].sandbox_id, "sbx-1")
         self.assertEqual(sandboxes[0].status, "running")
+
+    def test_update_sandbox_sends_port_access_fields(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FakeRustClient()
+        client._rust_client = fake
+
+        info = client.update_sandbox(
+            "sbx-1",
+            name="renamed",
+            allow_unauthenticated_access=True,
+            exposed_ports=[8081, 8080, 8081],
+        )
+
+        request_json = json.loads(fake.update_request_json)
+        self.assertEqual(request_json["name"], "renamed")
+        self.assertTrue(request_json["allow_unauthenticated_access"])
+        self.assertEqual(request_json["exposed_ports"], [8080, 8081])
+        self.assertTrue(info.allow_unauthenticated_access)
+        self.assertEqual(info.exposed_ports, [8080, 8081])
+
+    def test_get_port_access_reads_current_settings(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = _FakeRustClient()
+
+        access = client.get_port_access("sbx-1")
+
+        self.assertFalse(access.allow_unauthenticated_access)
+        self.assertEqual(access.exposed_ports, [8080])
+        self.assertEqual(access.sandbox_url, "https://sbx-1.sandbox.tensorlake.ai")
+
+    def test_expose_ports_merges_existing_ports(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FakeRustClient()
+        client._rust_client = fake
+
+        info = client.expose_ports(
+            "sbx-1",
+            [8081, 8080],
+            allow_unauthenticated_access=True,
+        )
+
+        request_json = json.loads(fake.update_request_json)
+        self.assertEqual(request_json["exposed_ports"], [8080, 8081])
+        self.assertTrue(request_json["allow_unauthenticated_access"])
+        self.assertEqual(info.exposed_ports, [8080, 8081])
+
+    def test_unexpose_ports_removes_ports_and_disables_public_access_when_empty(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FakeRustClient()
+        client._rust_client = fake
+
+        info = client.unexpose_ports("sbx-1", [8080])
+
+        request_json = json.loads(fake.update_request_json)
+        self.assertEqual(request_json["exposed_ports"], [])
+        self.assertFalse(request_json["allow_unauthenticated_access"])
+        self.assertEqual(info.exposed_ports, [])
+
+    def test_port_management_rejects_reserved_management_port(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = _FakeRustClient()
+
+        with self.assertRaisesRegex(SandboxError, "reserved for sandbox management"):
+            client.expose_ports("sbx-1", [9501])
 
     def test_get_maps_404_to_sandbox_not_found(self):
         class FakeRustError(Exception):

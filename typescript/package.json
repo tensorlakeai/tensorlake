@@ -1,6 +1,6 @@
 {
   "name": "tensorlake",
-  "version": "0.4.40",
+  "version": "0.4.41",
   "description": "TensorLake SDK and CLI for applications, sandboxes, and cloud services",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -60,9 +60,13 @@
   "license": "Apache-2.0",
   "devDependencies": {
     "@types/node": "^20.11.0",
+    "@types/ws": "^8.18.1",
     "eslint": "^9.0.0",
     "tsup": "^8.0.0",
     "typescript": "^5.4.0",
     "vitest": "^2.0.0"
+  },
+  "dependencies": {
+    "ws": "^8.20.0"
   }
 }

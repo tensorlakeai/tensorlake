@@ -54,10 +54,10 @@ Create a sandbox, run a command, and clean up:
 
 ```bash
 # Create a sandbox
-tensorlake sbx create --image python:3.11-slim
+tensorlake sbx create --image ubuntu-minimal
 
 # Run a command inside it
-tensorlake sbx exec <sandbox-id> -- python -c "print('Hello from the sandbox!')"
+tensorlake sbx exec <sandbox-id> -- sh -lc "printf 'Hello from the sandbox!\n'"
 
 # Copy a file into the sandbox
 tensorlake sbx cp ./my_script.py <sandbox-id>:/tmp/my_script.py
@@ -69,6 +69,8 @@ tensorlake sbx ssh <sandbox-id>
 tensorlake sbx terminate <sandbox-id>
 ```
 
+`--image` expects a sandbox image name such as `ubuntu-minimal` or a registered Sandbox Image name, not an arbitrary Docker image reference.
+
 ### Create a Sandbox Programmatically
 
 ```python
@@ -77,9 +79,9 @@ from tensorlake.sandbox import SandboxClient
 client = SandboxClient.for_cloud(api_key="your-api-key")
 
 # Create a sandbox and connect to it
-with client.create_and_connect(image="python:3.11-slim") as sandbox:
+with client.create_and_connect(image="ubuntu-minimal") as sandbox:
     # Run a command
-    result = sandbox.run("python", ["-c", "print('Hello from the sandbox!')"])
+    result = sandbox.run("sh", ["-lc", "printf 'Hello from the sandbox!\\n'"])
     print(result.stdout)  # "Hello from the sandbox!"
 
     # Write and read files
@@ -87,7 +89,7 @@ with client.create_and_connect(image="python:3.11-slim") as sandbox:
     content = sandbox.read_file("/tmp/data.txt")
 
     # Start a long-running process
-    proc = sandbox.start_process("python", ["-m", "http.server", "8080"])
+    proc = sandbox.start_process("sleep", ["300"])
     print(proc.pid)
 
 # Sandbox is automatically terminated when the context manager exits
@@ -115,7 +117,7 @@ Pre-warm containers for fast startup:
 ```python
 # Create a pool with warm containers
 pool = client.create_pool(
-    image="python:3.11-slim",
+    image="ubuntu-minimal",
     warm_containers=3,
 )
 
@@ -124,7 +126,7 @@ resp = client.claim(pool.pool_id)
 sandbox = client.connect(resp.sandbox_id)
 
 # Named sandboxes can be reconnected later by name
-named = client.create(image="python:3.11-slim", name="stable-name")
+named = client.create(image="ubuntu-minimal", name="stable-name")
 sandbox = client.connect("stable-name")
 ```
 

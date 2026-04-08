@@ -30,12 +30,14 @@ from .models import (
     ProcessStatus,
     SandboxInfo,
     SandboxPoolInfo,
+    SandboxPortAccess,
     SandboxStatus,
     SendSignalResponse,
     SnapshotInfo,
     SnapshotStatus,
     StdinMode,
 )
+from .pty import Pty
 from .sandbox import Sandbox
 
 __all__ = [
@@ -43,10 +45,12 @@ __all__ = [
     "SandboxClient",
     # Sandbox interaction
     "Sandbox",
+    "Pty",
     "Desktop",
     # Lifecycle models
     "SandboxStatus",
     "SandboxInfo",
+    "SandboxPortAccess",
     "CreateSandboxResponse",
     "SandboxPoolInfo",
     "PoolContainerInfo",

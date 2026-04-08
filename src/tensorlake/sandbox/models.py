@@ -112,6 +112,8 @@ class UpdateSandboxRequest(BaseModel):
     """Request payload for updating a sandbox."""
 
     name: str | None = None
+    allow_unauthenticated_access: bool | None = None
+    exposed_ports: list[int] | None = None
 
 
 class SandboxPoolRequest(BaseModel):
@@ -153,8 +155,19 @@ class SandboxInfo(BaseModel):
     created_at: OptionalTimestamp = None
     terminated_at: OptionalTimestamp = None
     name: str | None = None
+    allow_unauthenticated_access: bool = False
+    exposed_ports: list[int] | None = None
+    sandbox_url: str | None = None
 
     model_config = {"populate_by_name": True}
+
+
+class SandboxPortAccess(BaseModel):
+    """Current proxy access configuration for a sandbox."""
+
+    allow_unauthenticated_access: bool = False
+    exposed_ports: list[int] = Field(default_factory=list)
+    sandbox_url: str | None = None
 
 
 class ListSandboxesResponse(BaseModel):
