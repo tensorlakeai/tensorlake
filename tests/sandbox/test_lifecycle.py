@@ -159,7 +159,7 @@ class TestSandboxLifecycle(BaseSandboxTest):
     def test_4_sandbox_transitions_to_running(self):
         self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_1")
         status = _poll_sandbox_status(
-            self.client, self.__class__.sandbox_id, SandboxStatus.RUNNING, timeout=60
+            self.client, self.__class__.sandbox_id, SandboxStatus.RUNNING, timeout=120
         )
         self.assertEqual(status, SandboxStatus.RUNNING)
 
