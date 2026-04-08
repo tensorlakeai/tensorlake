@@ -38,7 +38,7 @@ export interface DockerfileBuildPlan {
   contextDir: string;
   registeredName: string;
   dockerfileText: string;
-  baseImage: string;
+  baseImage?: string;
   instructions: DockerfileInstruction[];
 }
 
@@ -90,7 +90,7 @@ interface BuildSandbox {
 
 interface BuildClient {
   createAndConnect(options: {
-    image: string;
+    image?: string;
     cpus?: number;
     memoryMb?: number;
   }): Promise<BuildSandbox>;
@@ -487,12 +487,25 @@ export function loadImagePlan(
   options: Pick<CreateSandboxImageOptions, "registeredName" | "contextDir"> = {},
 ): DockerfileBuildPlan {
   const contextDir = path.resolve(options.contextDir ?? process.cwd());
-  return buildPlanFromDockerfileText(
-    dockerfileContent(image),
-    path.join(contextDir, "Dockerfile"),
+  const dockerfileText = dockerfileContent(image);
+  const logicalLines = logicalDockerfileLines(dockerfileText);
+  const instructions = image.baseImage == null ? logicalLines : logicalLines.slice(1);
+
+  return {
+    dockerfilePath: path.join(contextDir, "Dockerfile"),
     contextDir,
-    options.registeredName ?? image.name,
-  );
+    registeredName: options.registeredName ?? image.name,
+    dockerfileText,
+    baseImage: image.baseImage ?? undefined,
+    instructions: instructions.map(({ line, lineNumber }) => {
+      const parsed = splitInstruction(line, lineNumber);
+      return {
+        keyword: parsed.keyword,
+        value: parsed.value,
+        lineNumber,
+      };
+    }),
+  };
 }
 
 function defaultEmit(event: Record<string, unknown>) {
@@ -617,6 +630,20 @@ function emitOutputLines(
   }
 }
 
+function isPathWithinContext(contextDir: string, localPath: string): boolean {
+  const relative = path.relative(contextDir, localPath);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function resolveContextSourcePath(contextDir: string, source: string): string {
+  const resolvedContextDir = path.resolve(contextDir);
+  const resolvedSource = path.resolve(resolvedContextDir, source);
+  if (!isPathWithinContext(resolvedContextDir, resolvedSource)) {
+    throw new Error(`Local path escapes the build context: ${source}`);
+  }
+  return resolvedSource;
+}
+
 async function copyLocalPathToSandbox(
   sandbox: BuildSandbox,
   localPath: string,
@@ -687,7 +714,7 @@ async function copyFromContext(
   }
 
   for (const source of sources) {
-    const localSource = path.join(contextDir, source);
+    const localSource = resolveContextSourcePath(contextDir, source);
     const localStats = await stat(localSource).catch(() => null);
     if (!localStats) {
       throw new Error(`Local path not found: ${localSource}`);
@@ -939,7 +966,10 @@ export async function createSandboxImage(
       : loadImagePlan(source, options);
   emit({
     type: "status",
-    message: `Starting build sandbox from ${plan.baseImage}...`,
+    message:
+      plan.baseImage == null
+        ? "Starting build sandbox with the default server image..."
+        : `Starting build sandbox from ${plan.baseImage}...`,
   });
 
   const client = clientFactory(context);
@@ -947,7 +977,7 @@ export async function createSandboxImage(
 
   try {
     sandbox = await client.createAndConnect({
-      image: plan.baseImage,
+      ...(plan.baseImage == null ? {} : { image: plan.baseImage }),
       cpus: options.cpus ?? 2.0,
       memoryMb: options.memoryMb ?? 4096,
     });

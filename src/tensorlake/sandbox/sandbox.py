@@ -7,6 +7,8 @@ import time
 from typing import TYPE_CHECKING, Iterator
 from urllib.parse import urlparse
 
+import httpx
+
 from . import _defaults
 from .exceptions import (
     RemoteAPIError,
@@ -535,6 +537,18 @@ class Sandbox:
             pty.on_exit(on_exit)
         return pty.connect()
 
+    def _delete_pty_session(
+        self, session_id: str, *, timeout: float = 10.0
+    ) -> None:
+        response = httpx.delete(
+            f"{self._base_url.rstrip('/')}/api/v1/pty/{session_id}",
+            headers=self._proxy_headers,
+            timeout=timeout,
+        )
+        if response.is_success or response.status_code == 404:
+            return
+        raise RemoteAPIError(response.status_code, response.text)
+
     def create_pty(
         self,
         command: str,
@@ -557,13 +571,22 @@ class Sandbox:
             rows=rows,
             cols=cols,
         )
-        return self.connect_pty(
-            session["session_id"],
-            session["token"],
-            on_data=on_data,
-            on_exit=on_exit,
-            connect_timeout=connect_timeout,
-        )
+        try:
+            return self.connect_pty(
+                session["session_id"],
+                session["token"],
+                on_data=on_data,
+                on_exit=on_exit,
+                connect_timeout=connect_timeout,
+            )
+        except Exception:
+            try:
+                self._delete_pty_session(
+                    session["session_id"], timeout=connect_timeout
+                )
+            except Exception:
+                pass
+            raise
 
     def connect_desktop(
         self,

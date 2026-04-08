@@ -29,6 +29,7 @@ from .models import (
     ProcessInfo,
     ProcessStatus,
     SandboxInfo,
+    SandboxPortAccess,
     SandboxPoolInfo,
     SandboxStatus,
     SendSignalResponse,
@@ -49,6 +50,7 @@ __all__ = [
     # Lifecycle models
     "SandboxStatus",
     "SandboxInfo",
+    "SandboxPortAccess",
     "CreateSandboxResponse",
     "SandboxPoolInfo",
     "PoolContainerInfo",

@@ -46,6 +46,10 @@ pub struct CreateSandboxRequest {
 pub struct UpdateSandboxRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_unauthenticated_access: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exposed_ports: Option<Vec<u16>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -101,6 +105,12 @@ pub struct SandboxInfo {
     /// User-provided name. Present only on named (non-ephemeral) sandboxes.
     #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
+    pub allow_unauthenticated_access: bool,
+    #[serde(default)]
+    pub exposed_ports: Option<Vec<u16>>,
+    #[serde(default)]
+    pub sandbox_url: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

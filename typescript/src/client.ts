@@ -10,6 +10,7 @@ import {
   type CreateSnapshotResponse,
   type SandboxClientOptions,
   type SandboxInfo,
+  type SandboxPortAccess,
   type SandboxPoolInfo,
   SandboxStatus,
   type SnapshotAndWaitOptions,
@@ -151,12 +152,65 @@ export class SandboxClient {
   async update(sandboxId: string, options: UpdateSandboxOptions): Promise<SandboxInfo> {
     const body: Record<string, unknown> = {};
     if (options.name != null) body.name = options.name;
+    if (options.allowUnauthenticatedAccess != null) {
+      body.allow_unauthenticated_access = options.allowUnauthenticatedAccess;
+    }
+    if (options.exposedPorts != null) {
+      body.exposed_ports = normalizeUserPorts(options.exposedPorts);
+    }
+    if (Object.keys(body).length === 0) {
+      throw new SandboxError("At least one sandbox update field must be provided.");
+    }
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "PATCH",
       this.path(`sandboxes/${sandboxId}`),
       { body },
     );
     return fromSnakeKeys(raw, "sandboxId") as SandboxInfo;
+  }
+
+  async getPortAccess(sandboxId: string): Promise<SandboxPortAccess> {
+    const info = await this.get(sandboxId);
+    return {
+      allowUnauthenticatedAccess: info.allowUnauthenticatedAccess ?? false,
+      exposedPorts: dedupeAndSortPorts(info.exposedPorts ?? []),
+      sandboxUrl: info.sandboxUrl,
+    };
+  }
+
+  async exposePorts(
+    sandboxId: string,
+    ports: number[],
+    options?: { allowUnauthenticatedAccess?: boolean },
+  ): Promise<SandboxInfo> {
+    const requestedPorts = normalizeUserPorts(ports);
+    const current = await this.getPortAccess(sandboxId);
+    const desiredPorts = dedupeAndSortPorts([
+      ...current.exposedPorts,
+      ...requestedPorts,
+    ]);
+    return this.update(sandboxId, {
+      allowUnauthenticatedAccess:
+        options?.allowUnauthenticatedAccess ??
+        current.allowUnauthenticatedAccess,
+      exposedPorts: desiredPorts,
+    });
+  }
+
+  async unexposePorts(
+    sandboxId: string,
+    ports: number[],
+  ): Promise<SandboxInfo> {
+    const requestedPorts = normalizeUserPorts(ports);
+    const current = await this.getPortAccess(sandboxId);
+    const toRemove = new Set(requestedPorts);
+    const desiredPorts = current.exposedPorts.filter((port) => !toRemove.has(port));
+    return this.update(sandboxId, {
+      allowUnauthenticatedAccess: desiredPorts.length
+        ? current.allowUnauthenticatedAccess
+        : false,
+      exposedPorts: desiredPorts,
+    });
   }
 
   async delete(sandboxId: string): Promise<void> {
@@ -383,4 +437,24 @@ export class SandboxClient {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const RESERVED_SANDBOX_MANAGEMENT_PORT = 9501;
+
+function normalizeUserPorts(ports: number[]): number[] {
+  return dedupeAndSortPorts(ports.map(validateUserPort));
+}
+
+function validateUserPort(port: number): number {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new SandboxError(`invalid port '${port}'`);
+  }
+  if (port === RESERVED_SANDBOX_MANAGEMENT_PORT) {
+    throw new SandboxError("port 9501 is reserved for sandbox management");
+  }
+  return port;
+}
+
+function dedupeAndSortPorts(ports: number[]): number[] {
+  return [...new Set(ports)].sort((a, b) => a - b);
 }

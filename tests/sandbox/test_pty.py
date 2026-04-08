@@ -153,6 +153,24 @@ class TestPty(unittest.TestCase):
                 delete_mock.assert_called_once()
                 self.assertIn("/api/v1/pty/sess-1", delete_mock.call_args.args[0])
 
+    def test_create_pty_cleans_up_session_when_attach_fails(self):
+        import tensorlake.sandbox.pty as pty_module
+
+        sandbox, _ = self.make_sandbox()
+        fake_websocket_module = types.SimpleNamespace(
+            create_connection=lambda *args, **kwargs: (_ for _ in ()).throw(
+                OSError("mock websocket connect failure")
+            )
+        )
+
+        with patch.object(pty_module, "websocket", fake_websocket_module), patch.object(
+            sandbox, "_delete_pty_session"
+        ) as delete_mock:
+            with self.assertRaisesRegex(Exception, "mock websocket connect failure"):
+                sandbox.create_pty(command="/bin/bash")
+
+            delete_mock.assert_called_once_with("sess-1", timeout=10.0)
+
 
 if __name__ == "__main__":
     unittest.main()

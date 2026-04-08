@@ -26,6 +26,7 @@ from .models import (
     ListSnapshotsResponse,
     NetworkConfig,
     SandboxInfo,
+    SandboxPortAccess,
     SandboxPoolInfo,
     SandboxPoolRequest,
     SandboxStatus,
@@ -115,6 +116,22 @@ def _raise_as_sandbox_error(e: Exception) -> None:
         raise SandboxError(message) from None
 
     raise SandboxError(str(e)) from e
+
+
+_RESERVED_SANDBOX_MANAGEMENT_PORT = 9501
+
+
+def _normalize_user_ports(ports: list[int]) -> list[int]:
+    normalized: set[int] = set()
+    for port in ports:
+        if isinstance(port, bool) or not isinstance(port, int):
+            raise SandboxError(f"invalid port '{port}'")
+        if port < 1 or port > 65535:
+            raise SandboxError(f"invalid port '{port}'")
+        if port == _RESERVED_SANDBOX_MANAGEMENT_PORT:
+            raise SandboxError("port 9501 is reserved for sandbox management")
+        normalized.add(port)
+    return sorted(normalized)
 
 
 class SandboxClient:
@@ -386,15 +403,27 @@ class SandboxClient:
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def update_sandbox(self, sandbox_id: str, name: str) -> SandboxInfo:
+    def update_sandbox(
+        self,
+        sandbox_id: str,
+        name: str | None = None,
+        *,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
+    ) -> SandboxInfo:
         """Update a sandbox's properties.
 
-        Currently supports updating the sandbox name. Naming an ephemeral sandbox
-        makes it non-ephemeral and enables suspend/resume.
+        Supports updating the sandbox name and sandbox proxy access settings.
 
         Args:
-            sandbox_id: ID of the sandbox to update
-            name: New name for the sandbox
+            sandbox_id: ID or name of the sandbox to update
+            name: New name for the sandbox. Naming an ephemeral sandbox makes it
+                non-ephemeral and enables suspend/resume.
+            allow_unauthenticated_access: Whether exposed user ports should be
+                reachable without TensorLake auth.
+            exposed_ports: User ports that should be routable through the sandbox
+                proxy. Port ``9501`` is reserved for sandbox management and cannot
+                be configured here.
 
         Returns:
             SandboxInfo with updated sandbox details
@@ -404,7 +433,21 @@ class SandboxClient:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
-        request = UpdateSandboxRequest(name=name)
+        normalized_ports = (
+            _normalize_user_ports(exposed_ports) if exposed_ports is not None else None
+        )
+        if (
+            name is None
+            and allow_unauthenticated_access is None
+            and normalized_ports is None
+        ):
+            raise SandboxError("At least one sandbox update field must be provided.")
+
+        request = UpdateSandboxRequest(
+            name=name,
+            allow_unauthenticated_access=allow_unauthenticated_access,
+            exposed_ports=normalized_ports,
+        )
         try:
             response_json = self._rust_client.update_sandbox(
                 sandbox_id=sandbox_id,
@@ -415,6 +458,52 @@ class SandboxClient:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
+
+    def get_port_access(self, sandbox_id: str) -> SandboxPortAccess:
+        """Return the current sandbox proxy settings for user ports."""
+        info = self.get(sandbox_id)
+        return SandboxPortAccess(
+            allow_unauthenticated_access=info.allow_unauthenticated_access,
+            exposed_ports=sorted(set(info.exposed_ports or [])),
+            sandbox_url=info.sandbox_url,
+        )
+
+    def expose_ports(
+        self,
+        sandbox_id: str,
+        ports: list[int],
+        *,
+        allow_unauthenticated_access: bool | None = None,
+    ) -> SandboxInfo:
+        """Expose additional user ports through the sandbox proxy.
+
+        By default this preserves the sandbox's current auth mode for user ports.
+        Set ``allow_unauthenticated_access=True`` to make them publicly reachable.
+        """
+        current = self.get_port_access(sandbox_id)
+        desired_ports = sorted(set(current.exposed_ports + _normalize_user_ports(ports)))
+        return self.update_sandbox(
+            sandbox_id,
+            allow_unauthenticated_access=(
+                current.allow_unauthenticated_access
+                if allow_unauthenticated_access is None
+                else allow_unauthenticated_access
+            ),
+            exposed_ports=desired_ports,
+        )
+
+    def unexpose_ports(self, sandbox_id: str, ports: list[int]) -> SandboxInfo:
+        """Remove one or more user ports from the sandbox proxy allowlist."""
+        current = self.get_port_access(sandbox_id)
+        ports_to_remove = set(_normalize_user_ports(ports))
+        desired_ports = [port for port in current.exposed_ports if port not in ports_to_remove]
+        return self.update_sandbox(
+            sandbox_id,
+            allow_unauthenticated_access=(
+                current.allow_unauthenticated_access if desired_ports else False
+            ),
+            exposed_ports=desired_ports,
+        )
 
     def delete(self, sandbox_id: str) -> None:
         """Terminate a sandbox.

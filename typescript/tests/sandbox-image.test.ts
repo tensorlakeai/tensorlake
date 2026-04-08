@@ -85,6 +85,17 @@ describe("sandbox image helpers", () => {
     ].join("\n"));
   });
 
+  it("omits FROM when the Image DSL defers base-image selection", () => {
+    const image = new Image({ name: "default-build" })
+      .workdir("/workspace")
+      .run("echo ready");
+
+    expect(dockerfileContent(image)).toBe([
+      "WORKDIR /workspace",
+      "RUN echo ready",
+    ].join("\n"));
+  });
+
   it("loadImagePlan derives build plan from the Image DSL", () => {
     const image = new Image({
       name: "data-tools",
@@ -109,6 +120,22 @@ describe("sandbox image helpers", () => {
         lineNumber: 3,
       },
       { keyword: "RUN", value: "echo ready", lineNumber: 4 },
+    ]);
+  });
+
+  it("loadImagePlan supports Image DSL definitions without an explicit base image", () => {
+    const image = new Image({ name: "default-build" })
+      .workdir("/workspace")
+      .run("echo ready");
+
+    const plan = loadImagePlan(image, {
+      contextDir: "/tmp/project",
+    });
+
+    expect(plan.baseImage).toBeUndefined();
+    expect(plan.instructions).toEqual([
+      { keyword: "WORKDIR", value: "/workspace", lineNumber: 1 },
+      { keyword: "RUN", value: "echo ready", lineNumber: 2 },
     ]);
   });
 
@@ -282,6 +309,144 @@ describe("sandbox image helpers", () => {
       "s3://snapshots/snap-1.tar.zst",
       false,
     );
+    expect(sandbox.terminate).toHaveBeenCalled();
+  });
+
+  it("createSandboxImage lets the server choose the base image when the Image DSL omits one", async () => {
+    vi.stubEnv("TENSORLAKE_API_URL", "https://api.tensorlake.ai");
+    vi.stubEnv("TENSORLAKE_API_KEY", "tl_key_test");
+    vi.stubEnv("INDEXIFY_NAMESPACE", "default");
+    vi.stubEnv("TENSORLAKE_ORGANIZATION_ID", "org_123");
+    vi.stubEnv("TENSORLAKE_PROJECT_ID", "proj_123");
+
+    const tempDir = await mkdir(path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-default`), {
+      recursive: true,
+    });
+
+    const image = new Image({ name: "default-build" })
+      .workdir("/workspace")
+      .run("echo ready");
+
+    const sandbox = {
+      sandboxId: "sbx-1",
+      run: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" })),
+      startProcess: vi.fn(async () => ({ pid: 1 })),
+      getStdout: vi.fn(async () => ({ pid: 1, lines: [], lineCount: 0 })),
+      getStderr: vi.fn(async () => ({ pid: 1, lines: [], lineCount: 0 })),
+      getProcess: vi.fn(async () => ({
+        pid: 1,
+        status: "exited",
+        stdinWritable: false,
+        command: "sh",
+        args: [],
+        startedAt: new Date(),
+        exitCode: 0,
+      })),
+      writeFile: vi.fn(async () => {}),
+      terminate: vi.fn(async () => {}),
+    };
+
+    const client = {
+      createAndConnect: vi.fn(async () => sandbox),
+      snapshotAndWait: vi.fn(async () => ({
+        snapshotId: "snap-1",
+        snapshotUri: "s3://snapshots/snap-1.tar.zst",
+      })),
+      close: vi.fn(() => {}),
+    };
+
+    const registerImage = vi.fn(async () => ({ id: "tpl-1" }));
+
+    await createSandboxImage(
+      image,
+      { contextDir: tempDir },
+      {
+        emit: () => {},
+        createClient: () => client as never,
+        registerImage,
+        sleep: async () => {},
+      },
+    );
+
+    expect(client.createAndConnect).toHaveBeenCalledWith({
+      cpus: 2.0,
+      memoryMb: 4096,
+    });
+    expect(registerImage).toHaveBeenCalledWith(
+      expect.anything(),
+      "default-build",
+      [
+        "WORKDIR /workspace",
+        "RUN echo ready",
+      ].join("\n"),
+      "snap-1",
+      "s3://snapshots/snap-1.tar.zst",
+      false,
+    );
+  });
+
+  it("rejects COPY paths that escape the declared build context", async () => {
+    vi.stubEnv("TENSORLAKE_API_URL", "https://api.tensorlake.ai");
+    vi.stubEnv("TENSORLAKE_API_KEY", "tl_key_test");
+    vi.stubEnv("INDEXIFY_NAMESPACE", "default");
+    vi.stubEnv("TENSORLAKE_ORGANIZATION_ID", "org_123");
+    vi.stubEnv("TENSORLAKE_PROJECT_ID", "proj_123");
+
+    const rootDir = await mkdir(path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-escape`), {
+      recursive: true,
+    });
+    const contextDir = path.join(rootDir, "context");
+    await mkdir(contextDir, { recursive: true });
+    await writeFile(path.join(rootDir, "secret.txt"), "top-secret", "utf8");
+
+    const image = new Image({ name: "escape-build", baseImage: "ubuntu-systemd" })
+      .copy("../secret.txt", "/workspace/secret.txt");
+
+    const sandbox = {
+      sandboxId: "sbx-1",
+      run: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" })),
+      startProcess: vi.fn(async () => ({ pid: 1 })),
+      getStdout: vi.fn(async () => ({ pid: 1, lines: [], lineCount: 0 })),
+      getStderr: vi.fn(async () => ({ pid: 1, lines: [], lineCount: 0 })),
+      getProcess: vi.fn(async () => ({
+        pid: 1,
+        status: "exited",
+        stdinWritable: false,
+        command: "sh",
+        args: [],
+        startedAt: new Date(),
+        exitCode: 0,
+      })),
+      writeFile: vi.fn(async () => {}),
+      terminate: vi.fn(async () => {}),
+    };
+
+    const client = {
+      createAndConnect: vi.fn(async () => sandbox),
+      snapshotAndWait: vi.fn(async () => ({
+        snapshotId: "snap-1",
+        snapshotUri: "s3://snapshots/snap-1.tar.zst",
+      })),
+      close: vi.fn(() => {}),
+    };
+
+    const registerImage = vi.fn(async () => ({ id: "tpl-1" }));
+
+    await expect(
+      createSandboxImage(
+        image,
+        { contextDir },
+        {
+          emit: () => {},
+          createClient: () => client as never,
+          registerImage,
+          sleep: async () => {},
+        },
+      ),
+    ).rejects.toThrow(/escapes the build context/);
+
+    expect(sandbox.writeFile).not.toHaveBeenCalled();
+    expect(registerImage).not.toHaveBeenCalled();
     expect(sandbox.terminate).toHaveBeenCalled();
   });
 });

@@ -5,6 +5,7 @@ class MockWebSocket {
   static readonly OPEN = 1;
   static readonly CLOSED = 3;
   static instances: MockWebSocket[] = [];
+  static failOnOpen = false;
 
   readonly url: string;
   readonly options: { headers?: Record<string, string> } | undefined;
@@ -18,6 +19,11 @@ class MockWebSocket {
     this.options = options;
     MockWebSocket.instances.push(this);
     queueMicrotask(() => {
+      if (MockWebSocket.failOnOpen) {
+        this.emit("error", new Error("mock websocket connect failure"));
+        this.emitClose(1011, "mock websocket connect failure");
+        return;
+      }
       this.readyState = MockWebSocket.OPEN;
       this.emit("open");
     });
@@ -66,6 +72,7 @@ describe("Sandbox PTY", () => {
   beforeEach(async () => {
     originalFetch = globalThis.fetch;
     MockWebSocket.instances = [];
+    MockWebSocket.failOnOpen = false;
     vi.resetModules();
     ({ Sandbox } = await import("../src/sandbox.js"));
   });
@@ -207,6 +214,38 @@ describe("Sandbox PTY", () => {
     await expect(pty.kill()).resolves.toBeUndefined();
     expect(globalThis.fetch).toHaveBeenCalledWith(
       "https://sbx-1.sandbox.tensorlake.ai/api/v1/pty/sess-4",
+      expect.objectContaining({
+        method: "DELETE",
+      }),
+    );
+  });
+
+  it("cleans up the created PTY session when the initial websocket attach fails", async () => {
+    MockWebSocket.failOnOpen = true;
+
+    mockFetch((url, init) => {
+      if (url.endsWith("/api/v1/pty") && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            session_id: "sess-fail",
+            token: "tok-fail",
+          }),
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/api/v1/pty/sess-fail") && init?.method === "DELETE") {
+        return new Response("", { status: 200 });
+      }
+      return new Response("", { status: 404 });
+    });
+
+    const sandbox = makeSandbox();
+    await expect(
+      sandbox.createPty({ command: "/bin/bash" }),
+    ).rejects.toThrow(/mock websocket connect failure|READY completed/);
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "https://sbx-1.sandbox.tensorlake.ai/api/v1/pty/sess-fail",
       expect.objectContaining({
         method: "DELETE",
       }),

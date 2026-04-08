@@ -1,7 +1,5 @@
 import { randomUUID } from "node:crypto";
 
-const DEFAULT_BASE_IMAGE_NAME = "ubuntu-minimal";
-
 export const ImageBuildOperationType = {
   ADD: "ADD",
   COPY: "COPY",
@@ -22,7 +20,7 @@ export interface ImageBuildOperation {
 export interface ImageOptions {
   name?: string;
   tag?: string;
-  baseImage?: string;
+  baseImage?: string | null;
 }
 
 function cloneOperation(op: ImageBuildOperation): ImageBuildOperation {
@@ -37,16 +35,16 @@ export class Image {
   readonly _id: string;
   readonly _name: string;
   readonly _tag: string;
-  readonly _baseImage: string;
+  readonly _baseImage: string | null;
   readonly _buildOperations: ImageBuildOperation[];
 
   constructor();
-  constructor(name: string, tag?: string, baseImage?: string);
+  constructor(name: string, tag?: string, baseImage?: string | null);
   constructor(options: ImageOptions);
   constructor(
     nameOrOptions: string | ImageOptions = {},
     tag = "latest",
-    baseImage = DEFAULT_BASE_IMAGE_NAME,
+    baseImage: string | null = null,
   ) {
     this._id = randomUUID();
     this._buildOperations = [];
@@ -60,7 +58,7 @@ export class Image {
 
     this._name = nameOrOptions.name ?? "default";
     this._tag = nameOrOptions.tag ?? "latest";
-    this._baseImage = nameOrOptions.baseImage ?? DEFAULT_BASE_IMAGE_NAME;
+    this._baseImage = nameOrOptions.baseImage ?? null;
   }
 
   get name(): string {
@@ -71,7 +69,7 @@ export class Image {
     return this._tag;
   }
 
-  get baseImage(): string {
+  get baseImage(): string | null {
     return this._baseImage;
   }
 
@@ -153,8 +151,7 @@ function renderBuildOp(op: ImageBuildOperation): string {
 }
 
 export function dockerfileContent(image: Image): string {
-  return [
-    `FROM ${image.baseImage}`,
-    ...image.buildOperations.map((op) => renderBuildOp(op)),
-  ].join("\n");
+  const lines = image.baseImage == null ? [] : [`FROM ${image.baseImage}`];
+  lines.push(...image.buildOperations.map((op) => renderBuildOp(op)));
+  return lines.join("\n");
 }

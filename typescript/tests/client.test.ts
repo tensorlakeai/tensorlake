@@ -165,6 +165,31 @@ describe("SandboxClient", () => {
       client.close();
     });
 
+    it("maps port access fields from response", async () => {
+      mockFetch(() =>
+        new Response(
+          JSON.stringify({
+            id: "sbx-ports",
+            namespace: "default",
+            status: "running",
+            resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+            secret_names: [],
+            allow_unauthenticated_access: true,
+            exposed_ports: [8080, 3000],
+            sandbox_url: "https://sbx-ports.sandbox.tensorlake.ai",
+          }),
+          { status: 200 },
+        ),
+      );
+
+      const client = SandboxClient.forLocalhost();
+      const info = await client.get("sbx-ports");
+      expect(info.allowUnauthenticatedAccess).toBe(true);
+      expect(info.exposedPorts).toEqual([8080, 3000]);
+      expect(info.sandboxUrl).toBe("https://sbx-ports.sandbox.tensorlake.ai");
+      client.close();
+    });
+
     it("returns undefined name when absent from response", async () => {
       mockFetch(() =>
         new Response(
@@ -237,6 +262,171 @@ describe("SandboxClient", () => {
       const info = await client.update("sbx-1", { name: "my-new-name" });
       expect(info.sandboxId).toBe("sbx-1");
       expect(info.name).toBe("my-new-name");
+      client.close();
+    });
+
+    it("updates sandbox port access settings", async () => {
+      mockFetch((url, init) => {
+        expect(url).toContain("/sandboxes/sbx-1");
+        expect(init?.method).toBe("PATCH");
+        const body = JSON.parse(init?.body as string);
+        expect(body.allow_unauthenticated_access).toBe(true);
+        expect(body.exposed_ports).toEqual([8080, 8081]);
+        return new Response(
+          JSON.stringify({
+            id: "sbx-1",
+            namespace: "default",
+            status: "running",
+            resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+            secret_names: [],
+            allow_unauthenticated_access: true,
+            exposed_ports: [8080, 8081],
+          }),
+          { status: 200 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost();
+      const info = await client.update("sbx-1", {
+        allowUnauthenticatedAccess: true,
+        exposedPorts: [8081, 8080],
+      });
+      expect(info.allowUnauthenticatedAccess).toBe(true);
+      expect(info.exposedPorts).toEqual([8080, 8081]);
+      client.close();
+    });
+
+    it("rejects empty sandbox updates", async () => {
+      const client = SandboxClient.forLocalhost();
+      await expect(client.update("sbx-1", {})).rejects.toThrow(
+        "At least one sandbox update field must be provided.",
+      );
+      client.close();
+    });
+  });
+
+  describe("port management", () => {
+    it("reads current port access", async () => {
+      mockFetch(() =>
+        new Response(
+          JSON.stringify({
+            id: "sbx-1",
+            namespace: "default",
+            status: "running",
+            resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+            secret_names: [],
+            allow_unauthenticated_access: false,
+            exposed_ports: [8080],
+            sandbox_url: "https://sbx-1.sandbox.tensorlake.ai",
+          }),
+          { status: 200 },
+        ),
+      );
+
+      const client = SandboxClient.forLocalhost();
+      const access = await client.getPortAccess("sbx-1");
+      expect(access.allowUnauthenticatedAccess).toBe(false);
+      expect(access.exposedPorts).toEqual([8080]);
+      expect(access.sandboxUrl).toBe("https://sbx-1.sandbox.tensorlake.ai");
+      client.close();
+    });
+
+    it("exposes ports by merging with existing ports", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              id: "sbx-1",
+              namespace: "default",
+              status: "running",
+              resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+              secret_names: [],
+              allow_unauthenticated_access: false,
+              exposed_ports: [8080],
+            }),
+            { status: 200 },
+          ),
+        )
+        .mockImplementationOnce((_url, init) => {
+          const body = JSON.parse(init?.body as string);
+          expect(body.allow_unauthenticated_access).toBe(true);
+          expect(body.exposed_ports).toEqual([8080, 8081]);
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                id: "sbx-1",
+                namespace: "default",
+                status: "running",
+                resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+                secret_names: [],
+                allow_unauthenticated_access: true,
+                exposed_ports: [8080, 8081],
+              }),
+              { status: 200 },
+            ),
+          );
+        });
+      globalThis.fetch = fetchMock as typeof fetch;
+
+      const client = SandboxClient.forLocalhost();
+      const info = await client.exposePorts("sbx-1", [8081, 8080], {
+        allowUnauthenticatedAccess: true,
+      });
+      expect(info.exposedPorts).toEqual([8080, 8081]);
+      client.close();
+    });
+
+    it("unexposes ports and disables unauthenticated access when none remain", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              id: "sbx-1",
+              namespace: "default",
+              status: "running",
+              resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+              secret_names: [],
+              allow_unauthenticated_access: true,
+              exposed_ports: [8080],
+            }),
+            { status: 200 },
+          ),
+        )
+        .mockImplementationOnce((_url, init) => {
+          const body = JSON.parse(init?.body as string);
+          expect(body.allow_unauthenticated_access).toBe(false);
+          expect(body.exposed_ports).toEqual([]);
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                id: "sbx-1",
+                namespace: "default",
+                status: "running",
+                resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+                secret_names: [],
+                allow_unauthenticated_access: false,
+                exposed_ports: [],
+              }),
+              { status: 200 },
+            ),
+          );
+        });
+      globalThis.fetch = fetchMock as typeof fetch;
+
+      const client = SandboxClient.forLocalhost();
+      const info = await client.unexposePorts("sbx-1", [8080]);
+      expect(info.exposedPorts).toEqual([]);
+      expect(info.allowUnauthenticatedAccess).toBe(false);
+      client.close();
+    });
+
+    it("rejects reserved management port 9501", async () => {
+      const client = SandboxClient.forLocalhost();
+      await expect(client.exposePorts("sbx-1", [9501])).rejects.toThrow(
+        "port 9501 is reserved for sandbox management",
+      );
       client.close();
     });
   });

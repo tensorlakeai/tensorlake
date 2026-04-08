@@ -72,6 +72,10 @@ export interface CreateSandboxOptions {
 export interface UpdateSandboxOptions {
   /** New name for the sandbox. Naming an ephemeral sandbox enables suspend/resume. */
   name?: string;
+  /** Whether exposed user ports should be reachable without TensorLake auth. */
+  allowUnauthenticatedAccess?: boolean;
+  /** User ports that should be routable through the sandbox proxy. Port 9501 is reserved. */
+  exposedPorts?: number[];
 }
 
 export interface CreateSandboxResponse {
@@ -95,6 +99,15 @@ export interface SandboxInfo {
   createdAt?: Date;
   terminatedAt?: Date;
   name?: string;
+  allowUnauthenticatedAccess?: boolean;
+  exposedPorts?: number[];
+  sandboxUrl?: string;
+}
+
+export interface SandboxPortAccess {
+  allowUnauthenticatedAccess: boolean;
+  exposedPorts: number[];
+  sandboxUrl?: string;
 }
 
 // --- Snapshots ---

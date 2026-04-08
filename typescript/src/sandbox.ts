@@ -577,7 +577,14 @@ export class Sandbox {
   async createPty(options: CreatePtyOptions): Promise<Pty> {
     const { onData, onExit, ...createOptions } = options;
     const session = await this.createPtySession(createOptions);
-    return this.connectPty(session.sessionId, session.token, { onData, onExit });
+    try {
+      return await this.connectPty(session.sessionId, session.token, { onData, onExit });
+    } catch (error) {
+      try {
+        await this.http.requestResponse("DELETE", `/api/v1/pty/${session.sessionId}`);
+      } catch {}
+      throw error;
+    }
   }
 
   async connectPty(

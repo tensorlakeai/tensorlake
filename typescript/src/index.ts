@@ -69,6 +69,7 @@ export type {
   CreateSandboxOptions,
   CreateSandboxResponse,
   SandboxInfo,
+  SandboxPortAccess,
   CreateSnapshotResponse,
   SnapshotInfo,
   SnapshotAndWaitOptions,
