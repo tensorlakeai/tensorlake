@@ -15,6 +15,7 @@ import {
   SandboxStatus,
   type SnapshotAndWaitOptions,
   type SnapshotInfo,
+  type SnapshotOptions,
   SnapshotStatus,
   type UpdatePoolOptions,
   type UpdateSandboxOptions,
@@ -244,10 +245,19 @@ export class SandboxClient {
 
   // --- Snapshots ---
 
-  async snapshot(sandboxId: string): Promise<CreateSnapshotResponse> {
+  async snapshot(
+    sandboxId: string,
+    options?: SnapshotOptions,
+  ): Promise<CreateSnapshotResponse> {
+    // Preserve today's wire shape (no body) when contentMode is not set.
+    const requestOptions =
+      options?.contentMode != null
+        ? { body: { snapshot_content_mode: options.contentMode } }
+        : undefined;
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "POST",
       this.path(`sandboxes/${sandboxId}/snapshot`),
+      requestOptions,
     );
     return fromSnakeKeys(raw, "snapshotId") as CreateSnapshotResponse;
   }
@@ -284,7 +294,9 @@ export class SandboxClient {
     const timeout = options?.timeout ?? 300;
     const pollInterval = options?.pollInterval ?? 1;
 
-    const result = await this.snapshot(sandboxId);
+    const result = await this.snapshot(sandboxId, {
+      contentMode: options?.contentMode,
+    });
     const deadline = Date.now() + timeout * 1000;
 
     while (Date.now() < deadline) {

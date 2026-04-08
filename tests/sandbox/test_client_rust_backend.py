@@ -2,7 +2,11 @@ import json
 import unittest
 from unittest.mock import patch
 
-from tensorlake.sandbox import PoolInUseError, SandboxNotFoundError
+from tensorlake.sandbox import (
+    PoolInUseError,
+    SandboxNotFoundError,
+    SnapshotContentMode,
+)
 from tensorlake.sandbox.client import SandboxClient
 from tensorlake.sandbox.exceptions import SandboxError
 
@@ -12,9 +16,21 @@ class _FakeRustClient:
         self.create_request_json = None
         self.update_request_json = None
         self.last_get_sandbox_id = None
+        self.create_snapshot_calls: list[tuple[str, str | None]] = []
 
     def close(self):
         return None
+
+    def create_snapshot(self, sandbox_id, content_mode=None):
+        self.create_snapshot_calls.append((sandbox_id, content_mode))
+        return '{"snapshot_id":"snap-1","status":"in_progress"}'
+
+    def get_snapshot_json(self, snapshot_id):
+        return (
+            '{"id":"snap-1","namespace":"default","sandbox_id":"sbx-1",'
+            '"base_image":"python:3.12","status":"completed",'
+            '"snapshot_uri":"s3://snap-1.tar.zst"}'
+        )
 
     def create_sandbox(self, request_json):
         self.create_request_json = request_json
@@ -237,6 +253,33 @@ class TestSandboxClientRustBackend(unittest.TestCase):
                 client.delete_pool("pool-1")
         finally:
             sandbox_client_module.RustCloudSandboxClientError = previous
+
+    def test_snapshot_threads_content_mode_to_rust_backend(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FakeRustClient()
+        client._rust_client = fake
+
+        info = client.snapshot_and_wait(
+            "sbx-1",
+            content_mode=SnapshotContentMode.FILESYSTEM_ONLY,
+        )
+
+        self.assertEqual(len(fake.create_snapshot_calls), 1)
+        sandbox_id, content_mode = fake.create_snapshot_calls[0]
+        self.assertEqual(sandbox_id, "sbx-1")
+        self.assertEqual(content_mode, "filesystem_only")
+        self.assertEqual(info.snapshot_id, "snap-1")
+
+    def test_snapshot_omits_content_mode_when_none(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FakeRustClient()
+        client._rust_client = fake
+
+        client.snapshot_and_wait("sbx-1")
+
+        self.assertEqual(len(fake.create_snapshot_calls), 1)
+        _, content_mode = fake.create_snapshot_calls[0]
+        self.assertIsNone(content_mode)
 
 
 if __name__ == "__main__":

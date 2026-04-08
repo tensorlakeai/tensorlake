@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import {
   type CommandResult,
   type ProcessInfo,
+  type SnapshotContentMode,
   type SnapshotInfo,
 } from "./models.js";
 import { type OutputResponse, ProcessStatus } from "./models.js";
@@ -96,7 +97,11 @@ interface BuildClient {
   }): Promise<BuildSandbox>;
   snapshotAndWait(
     sandboxId: string,
-    options?: { timeout?: number; pollInterval?: number },
+    options?: {
+      timeout?: number;
+      pollInterval?: number;
+      contentMode?: SnapshotContentMode;
+    },
   ): Promise<SnapshotInfo>;
   close(): void;
 }
@@ -989,7 +994,9 @@ export async function createSandboxImage(
     await executeDockerfilePlan(sandbox, plan, emit, sleep);
 
     emit({ type: "status", message: "Creating snapshot..." });
-    const snapshot = await client.snapshotAndWait(sandbox.sandboxId);
+    const snapshot = await client.snapshotAndWait(sandbox.sandboxId, {
+      contentMode: "filesystem_only",
+    });
     emit({
       type: "snapshot_created",
       snapshot_id: snapshot.snapshotId,

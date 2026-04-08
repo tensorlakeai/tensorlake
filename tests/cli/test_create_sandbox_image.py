@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from tensorlake.cli import create_sandbox_image as create_sandbox_image_module
+from tensorlake.sandbox.models import SnapshotContentMode
 
 BUILD_CPUS = 2.0
 BUILD_MEMORY_MB = 4096
@@ -143,6 +144,14 @@ class TestCreateSandboxImage(unittest.TestCase):
             False,
         )
         sandbox.terminate.assert_called_once_with()
+        # Regression: sandbox image builds MUST request a filesystem-only
+        # snapshot so the resulting image cold-boots on restore (see PR
+        # #583 for the original regression that produced Full snapshots
+        # and broke `tl sbx new --image`).
+        sandbox_client.snapshot_and_wait.assert_called_once_with(
+            "sbx-1",
+            content_mode=SnapshotContentMode.FILESYSTEM_ONLY,
+        )
 
     def test_create_sandbox_image_public(self):
         ctx = MagicMock()
@@ -198,6 +207,10 @@ class TestCreateSandboxImage(unittest.TestCase):
             "snap-1",
             "s3://snapshots/snap-1.tar.zst",
             True,
+        )
+        sandbox_client.snapshot_and_wait.assert_called_once_with(
+            "sbx-1",
+            content_mode=SnapshotContentMode.FILESYSTEM_ONLY,
         )
 
 

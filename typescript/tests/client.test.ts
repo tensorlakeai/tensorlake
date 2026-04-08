@@ -500,6 +500,45 @@ describe("SandboxClient", () => {
       client.close();
     });
 
+    it("omits request body when no snapshot options are provided", async () => {
+      // Pins down backwards compatibility: when contentMode is unset we
+      // must not change the wire shape for existing callers.
+      mockFetch((_url, init) => {
+        expect(init?.method).toBe("POST");
+        expect(init?.body).toBeUndefined();
+        return new Response(
+          JSON.stringify({ snapshot_id: "snap-1", status: "in_progress" }),
+          { status: 200 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await client.snapshot("sbx-1");
+      client.close();
+    });
+
+    it("sends snapshot_content_mode in body when contentMode is provided", async () => {
+      // Regression: sandbox image builds MUST pass `filesystem_only` so
+      // that restored sandboxes cold-boot (see PR #583 for the original
+      // regression that broke `tl sbx new --image`).
+      mockFetch((_url, init) => {
+        expect(init?.method).toBe("POST");
+        const body = JSON.parse(String(init?.body ?? "{}"));
+        expect(body.snapshot_content_mode).toBe("filesystem_only");
+        return new Response(
+          JSON.stringify({ snapshot_id: "snap-1", status: "in_progress" }),
+          { status: 200 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost();
+      const result = await client.snapshot("sbx-1", {
+        contentMode: "filesystem_only",
+      });
+      expect(result.snapshotId).toBe("snap-1");
+      client.close();
+    });
+
     it("gets snapshot info", async () => {
       mockFetch(() =>
         new Response(

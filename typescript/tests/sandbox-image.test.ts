@@ -206,7 +206,12 @@ describe("sandbox image helpers", () => {
       cpus: 2.0,
       memoryMb: 4096,
     });
-    expect(client.snapshotAndWait).toHaveBeenCalledWith("sbx-1");
+    // Regression: sandbox image builds MUST request a filesystem-only
+    // snapshot so restored sandboxes cold-boot (see PR #583).
+    expect(client.snapshotAndWait).toHaveBeenCalledWith(
+      "sbx-1",
+      expect.objectContaining({ contentMode: "filesystem_only" }),
+    );
     expect(registerImage).toHaveBeenCalledWith(
       expect.objectContaining({
         organizationId: "org_123",
@@ -289,6 +294,10 @@ describe("sandbox image helpers", () => {
       cpus: 2.0,
       memoryMb: 4096,
     });
+    expect(client.snapshotAndWait).toHaveBeenCalledWith(
+      "sbx-1",
+      expect.objectContaining({ contentMode: "filesystem_only" }),
+    );
     expect(writeFileMock).toHaveBeenCalledWith(
       "/workspace/hello.txt",
       expect.any(Uint8Array),
@@ -372,6 +381,10 @@ describe("sandbox image helpers", () => {
       cpus: 2.0,
       memoryMb: 4096,
     });
+    expect(client.snapshotAndWait).toHaveBeenCalledWith(
+      "sbx-1",
+      expect.objectContaining({ contentMode: "filesystem_only" }),
+    );
     expect(registerImage).toHaveBeenCalledWith(
       expect.anything(),
       "default-build",
