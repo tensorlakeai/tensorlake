@@ -223,8 +223,6 @@ jobs:
 
       - name: Set up Docker
         uses: docker/setup-docker-action@v4
-        with:
-          set-host: true
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4

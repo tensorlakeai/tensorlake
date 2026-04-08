@@ -21,7 +21,7 @@ from tensorlake.sandbox import (
     SandboxStatus,
 )
 
-_SANDBOX_IMAGE = "ubuntu-minimal"
+_SANDBOX_IMAGE = "docker.io/library/alpine:latest"
 _SANDBOX_CPUS = 0.2
 _SANDBOX_MEMORY_MB = 512
 _SANDBOX_DISK_MB = 1024
@@ -159,7 +159,7 @@ class TestSandboxLifecycle(BaseSandboxTest):
     def test_4_sandbox_transitions_to_running(self):
         self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_1")
         status = _poll_sandbox_status(
-            self.client, self.__class__.sandbox_id, SandboxStatus.RUNNING, timeout=120
+            self.client, self.__class__.sandbox_id, SandboxStatus.RUNNING, timeout=60
         )
         self.assertEqual(status, SandboxStatus.RUNNING)
 
