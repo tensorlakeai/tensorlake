@@ -282,7 +282,7 @@ class SandboxClient:
 
         Args:
             image: Sandbox image name to boot from, such as
-                ``ubuntu-minimal`` or a registered Sandbox Image name.
+                ``tensorlake/ubuntu-minimal`` or a registered Sandbox Image name.
                 When omitted, Tensorlake uses the default managed environment.
             cpus: Number of CPUs to allocate
             memory_mb: Memory in megabytes
@@ -673,7 +673,7 @@ class SandboxClient:
 
         Args:
             image: Sandbox image name to boot from, such as
-                ``ubuntu-minimal`` or a registered Sandbox Image name.
+                ``tensorlake/ubuntu-minimal`` or a registered Sandbox Image name.
             cpus: Number of CPUs to allocate
             memory_mb: Memory in megabytes
             ephemeral_disk_mb: Ephemeral disk space in megabytes
@@ -767,7 +767,7 @@ class SandboxClient:
         Args:
             pool_id: ID of the pool to update
             image: Sandbox image name to boot from, such as
-                ``ubuntu-minimal`` or a registered Sandbox Image name.
+                ``tensorlake/ubuntu-minimal`` or a registered Sandbox Image name.
             cpus: Number of CPUs to allocate
             memory_mb: Memory in megabytes
             ephemeral_disk_mb: Ephemeral disk space in megabytes
@@ -898,7 +898,7 @@ class SandboxClient:
 
         Args:
             image: Sandbox image name to boot from, such as
-                ``ubuntu-minimal`` or a registered Sandbox Image name
+                ``tensorlake/ubuntu-minimal`` or a registered Sandbox Image name
                 (optional if using pool).
             cpus: Number of CPUs to allocate
             memory_mb: Memory in megabytes

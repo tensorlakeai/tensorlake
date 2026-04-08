@@ -54,7 +54,7 @@ Create a sandbox, run a command, and clean up:
 
 ```bash
 # Create a sandbox
-tensorlake sbx create --image ubuntu-minimal
+tensorlake sbx create --image tensorlake/tensorlake/ubuntu-minimal
 
 # Run a command inside it
 tensorlake sbx exec <sandbox-id> -- sh -lc "printf 'Hello from the sandbox!\n'"
@@ -69,7 +69,7 @@ tensorlake sbx ssh <sandbox-id>
 tensorlake sbx terminate <sandbox-id>
 ```
 
-`--image` expects a sandbox image name such as `ubuntu-minimal` or a registered Sandbox Image name, not an arbitrary Docker image reference.
+`--image` expects a sandbox image name such as `tensorlake/ubuntu-minimal` or a registered Sandbox Image name, not an arbitrary Docker image reference.
 
 ### Create a Sandbox Programmatically
 
@@ -79,7 +79,7 @@ from tensorlake.sandbox import SandboxClient
 client = SandboxClient.for_cloud(api_key="your-api-key")
 
 # Create a sandbox and connect to it
-with client.create_and_connect(image="ubuntu-minimal") as sandbox:
+with client.create_and_connect(image="tensorlake/ubuntu-minimal") as sandbox:
     # Run a command
     result = sandbox.run("sh", ["-lc", "printf 'Hello from the sandbox!\\n'"])
     print(result.stdout)  # "Hello from the sandbox!"
@@ -117,7 +117,7 @@ Pre-warm containers for fast startup:
 ```python
 # Create a pool with warm containers
 pool = client.create_pool(
-    image="ubuntu-minimal",
+    image="tensorlake/ubuntu-minimal",
     warm_containers=3,
 )
 
@@ -126,7 +126,7 @@ resp = client.claim(pool.pool_id)
 sandbox = client.connect(resp.sandbox_id)
 
 # Named sandboxes can be reconnected later by name
-named = client.create(image="ubuntu-minimal", name="stable-name")
+named = client.create(image="tensorlake/ubuntu-minimal", name="stable-name")
 sandbox = client.connect("stable-name")
 ```
 
