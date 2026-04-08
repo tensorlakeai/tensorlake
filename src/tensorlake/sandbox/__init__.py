@@ -33,6 +33,7 @@ from .models import (
     SandboxPortAccess,
     SandboxStatus,
     SendSignalResponse,
+    SnapshotContentMode,
     SnapshotInfo,
     SnapshotStatus,
     StdinMode,
@@ -59,6 +60,7 @@ __all__ = [
     "NetworkConfig",
     # Snapshot models
     "SnapshotStatus",
+    "SnapshotContentMode",
     "SnapshotInfo",
     "CreateSnapshotResponse",
     # Command result

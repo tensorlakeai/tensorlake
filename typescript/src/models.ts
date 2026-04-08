@@ -15,6 +15,18 @@ export enum SnapshotStatus {
   FAILED = "failed",
 }
 
+/**
+ * Content mode for snapshot creation.
+ *
+ * - `"full"`: Full VM snapshot (memory + filesystem state). Sandboxes
+ *   restored from this snapshot warm-restore VM memory.
+ * - `"filesystem_only"`: Filesystem-only snapshot. Sandboxes restored from
+ *   this snapshot cold-boot from the snapshot tarball instead of warm-
+ *   restoring VM state. Use this for sandbox image builds so that the
+ *   restored sandbox bypasses Firecracker's overlay-path constraints.
+ */
+export type SnapshotContentMode = "full" | "filesystem_only";
+
 export enum ProcessStatus {
   RUNNING = "running",
   EXITED = "exited",
@@ -129,7 +141,16 @@ export interface SnapshotInfo {
   createdAt?: Date;
 }
 
-export interface SnapshotAndWaitOptions {
+export interface SnapshotOptions {
+  /**
+   * Optional content mode for the snapshot. When omitted the server picks
+   * its default. Use `"filesystem_only"` for snapshots intended for sandbox
+   * image builds so that restored sandboxes cold-boot.
+   */
+  contentMode?: SnapshotContentMode;
+}
+
+export interface SnapshotAndWaitOptions extends SnapshotOptions {
   timeout?: number;
   pollInterval?: number;
 }

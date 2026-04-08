@@ -38,6 +38,8 @@ export {
   ContainerState,
 } from "./models.js";
 
+export type { SnapshotContentMode, SnapshotOptions } from "./models.js";
+
 export type {
   BinaryPayload,
   CloudClientOptions,

@@ -23,7 +23,7 @@ use tensorlake_cloud_sdk::images::models::{
     ApplicationBuildContext, CreateApplicationBuildRequest,
 };
 use tensorlake_cloud_sdk::sandboxes::models::{
-    CreateSandboxRequest, SandboxPoolRequest, UpdateSandboxRequest,
+    CreateSandboxRequest, SandboxPoolRequest, SnapshotContentMode, UpdateSandboxRequest,
 };
 use tensorlake_cloud_sdk::sandboxes::{
     SandboxDesktopClient as RustSandboxDesktopClient, SandboxProxyClient, SandboxesClient,
@@ -634,11 +634,26 @@ impl CloudSandboxClient {
         })
     }
 
-    fn create_snapshot(&self, sandbox_id: String) -> PyResult<String> {
+    #[pyo3(signature = (sandbox_id, content_mode=None))]
+    fn create_snapshot(
+        &self,
+        sandbox_id: String,
+        content_mode: Option<String>,
+    ) -> PyResult<String> {
+        let parsed_mode = match content_mode.as_deref() {
+            None => None,
+            Some("full") => Some(SnapshotContentMode::Full),
+            Some("filesystem_only") => Some(SnapshotContentMode::FilesystemOnly),
+            Some(other) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "invalid snapshot content_mode '{other}': expected 'full' or 'filesystem_only'"
+                )));
+            }
+        };
         self.run_with_retry(5, move |client| {
             let sandbox_id = sandbox_id.clone();
             async move {
-                let response = client.snapshot(&sandbox_id).await?;
+                let response = client.snapshot(&sandbox_id, parsed_mode).await?;
                 Ok(serde_json::to_string(&response)?)
             }
         })

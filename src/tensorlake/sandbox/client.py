@@ -30,6 +30,7 @@ from .models import (
     SandboxPoolRequest,
     SandboxPortAccess,
     SandboxStatus,
+    SnapshotContentMode,
     SnapshotInfo,
     SnapshotStatus,
     UpdateSandboxRequest,
@@ -529,14 +530,23 @@ class SandboxClient:
 
     # --- Snapshot operations ---
 
-    def snapshot(self, sandbox_id: str) -> CreateSnapshotResponse:
+    def snapshot(
+        self,
+        sandbox_id: str,
+        content_mode: SnapshotContentMode | None = None,
+    ) -> CreateSnapshotResponse:
         """Create a snapshot of a running sandbox's filesystem.
 
         This is an asynchronous operation. Poll with :meth:`get_snapshot`
         until the status is ``completed`` or ``failed``.
 
         Args:
-            sandbox_id: ID of the running sandbox to snapshot
+            sandbox_id: ID of the running sandbox to snapshot.
+            content_mode: Optional content mode for the snapshot. When
+                ``None`` (default) the server picks its default. Use
+                :attr:`SnapshotContentMode.FILESYSTEM_ONLY` for snapshots
+                that should be cold-booted by sandboxes restoring from
+                them (e.g. sandbox image builds).
 
         Returns:
             CreateSnapshotResponse with snapshot_id and status
@@ -547,7 +557,10 @@ class SandboxClient:
             SandboxConnectionError: If the server is unreachable
         """
         try:
-            response_json = self._rust_client.create_snapshot(sandbox_id=sandbox_id)
+            response_json = self._rust_client.create_snapshot(
+                sandbox_id=sandbox_id,
+                content_mode=content_mode.value if content_mode is not None else None,
+            )
             return CreateSnapshotResponse.model_validate_json(response_json)
         except Exception as e:
             if _rust_status_code(e) == 404:
@@ -610,6 +623,7 @@ class SandboxClient:
         sandbox_id: str,
         timeout: float = 300,
         poll_interval: float = 1.0,
+        content_mode: SnapshotContentMode | None = None,
     ) -> SnapshotInfo:
         """Create a snapshot and wait for it to complete.
 
@@ -617,6 +631,8 @@ class SandboxClient:
             sandbox_id: ID of the running sandbox to snapshot
             timeout: Max seconds to wait for completion (default 300)
             poll_interval: Seconds between status polls (default 1)
+            content_mode: Optional content mode for the snapshot. See
+                :meth:`snapshot` for details.
 
         Returns:
             SnapshotInfo with completed snapshot details
@@ -624,7 +640,7 @@ class SandboxClient:
         Raises:
             SandboxError: If snapshot fails or times out
         """
-        result = self.snapshot(sandbox_id)
+        result = self.snapshot(sandbox_id, content_mode=content_mode)
         deadline = time.time() + timeout
         while time.time() < deadline:
             info = self.get_snapshot(result.snapshot_id)

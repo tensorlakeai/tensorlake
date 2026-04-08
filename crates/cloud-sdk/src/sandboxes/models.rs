@@ -163,6 +163,19 @@ pub struct ListSandboxPoolsResponse {
     pub pools: Vec<SandboxPoolInfo>,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotContentMode {
+    Full,
+    FilesystemOnly,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CreateSnapshotRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_content_mode: Option<SnapshotContentMode>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CreateSnapshotResponse {
     pub snapshot_id: String,
@@ -263,4 +276,40 @@ pub struct DirectoryEntry {
 pub struct ListDirectoryResponse {
     pub path: String,
     pub entries: Vec<DirectoryEntry>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_content_mode_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&SnapshotContentMode::Full).unwrap(),
+            "\"full\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SnapshotContentMode::FilesystemOnly).unwrap(),
+            "\"filesystem_only\""
+        );
+    }
+
+    #[test]
+    fn create_snapshot_request_skips_none_content_mode() {
+        let body = CreateSnapshotRequest {
+            snapshot_content_mode: None,
+        };
+        assert_eq!(serde_json::to_string(&body).unwrap(), "{}");
+    }
+
+    #[test]
+    fn create_snapshot_request_serializes_filesystem_only() {
+        let body = CreateSnapshotRequest {
+            snapshot_content_mode: Some(SnapshotContentMode::FilesystemOnly),
+        };
+        assert_eq!(
+            serde_json::to_string(&body).unwrap(),
+            r#"{"snapshot_content_mode":"filesystem_only"}"#
+        );
+    }
 }

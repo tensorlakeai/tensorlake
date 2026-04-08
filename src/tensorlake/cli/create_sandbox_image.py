@@ -13,7 +13,7 @@ import httpx
 
 from tensorlake.cli._common import Context
 from tensorlake.sandbox import Sandbox, SandboxClient
-from tensorlake.sandbox.models import ProcessStatus
+from tensorlake.sandbox.models import ProcessStatus, SnapshotContentMode
 
 _BUILD_SANDBOX_PIP_ENV = {"PIP_BREAK_SYSTEM_PACKAGES": "1"}
 _IGNORED_DOCKERFILE_INSTRUCTIONS = {
@@ -646,7 +646,10 @@ def create_sandbox_image(
         _execute_dockerfile_plan(sandbox, plan)
 
         _emit({"type": "status", "message": "Creating snapshot..."})
-        snapshot = sandbox_client.snapshot_and_wait(sandbox.sandbox_id)
+        snapshot = sandbox_client.snapshot_and_wait(
+            sandbox.sandbox_id,
+            content_mode=SnapshotContentMode.FILESYSTEM_ONLY,
+        )
         _emit(
             {
                 "type": "snapshot_created",

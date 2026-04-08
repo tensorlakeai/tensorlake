@@ -48,6 +48,21 @@ class SnapshotStatus(str, Enum):
     FAILED = "failed"
 
 
+class SnapshotContentMode(str, Enum):
+    """Content mode for snapshot creation.
+
+    - ``FULL``: Full VM snapshot (memory + filesystem state). Sandboxes
+      restored from this snapshot warm-restore VM memory.
+    - ``FILESYSTEM_ONLY``: Filesystem-only snapshot. Sandboxes restored
+      from this snapshot cold-boot from the snapshot tarball instead of
+      warm-restoring VM state. Use this for sandbox image builds so that
+      the restored sandbox bypasses Firecracker's overlay-path constraints.
+    """
+
+    FULL = "full"
+    FILESYSTEM_ONLY = "filesystem_only"
+
+
 class ContainerResourcesInfo(BaseModel):
     """Container resource configuration."""
 
