@@ -36,6 +36,7 @@ from .models import (
     SnapshotStatus,
     StdinMode,
 )
+from .pty import Pty
 from .sandbox import Sandbox
 
 __all__ = [
@@ -43,6 +44,7 @@ __all__ = [
     "SandboxClient",
     # Sandbox interaction
     "Sandbox",
+    "Pty",
     "Desktop",
     # Lifecycle models
     "SandboxStatus",

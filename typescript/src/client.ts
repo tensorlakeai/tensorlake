@@ -166,6 +166,20 @@ export class SandboxClient {
     );
   }
 
+  async suspend(sandboxId: string): Promise<void> {
+    await this.http.requestResponse(
+      "POST",
+      this.path(`sandboxes/${sandboxId}/suspend`),
+    );
+  }
+
+  async resume(sandboxId: string): Promise<void> {
+    await this.http.requestResponse(
+      "POST",
+      this.path(`sandboxes/${sandboxId}/resume`),
+    );
+  }
+
   async claim(poolId: string): Promise<CreateSandboxResponse> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "POST",

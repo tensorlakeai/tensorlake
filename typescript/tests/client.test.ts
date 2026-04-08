@@ -250,6 +250,34 @@ describe("SandboxClient", () => {
     });
   });
 
+  describe("suspend", () => {
+    it("suspends a sandbox", async () => {
+      mockFetch((url, init) => {
+        expect(url).toContain("/sandboxes/sbx-1/suspend");
+        expect(init?.method).toBe("POST");
+        return new Response("", { status: 202 });
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await expect(client.suspend("sbx-1")).resolves.toBeUndefined();
+      client.close();
+    });
+  });
+
+  describe("resume", () => {
+    it("resumes a sandbox", async () => {
+      mockFetch((url, init) => {
+        expect(url).toContain("/sandboxes/sbx-1/resume");
+        expect(init?.method).toBe("POST");
+        return new Response("", { status: 202 });
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await expect(client.resume("sbx-1")).resolves.toBeUndefined();
+      client.close();
+    });
+  });
+
   describe("claim", () => {
     it("claims from pool", async () => {
       mockFetch(() =>

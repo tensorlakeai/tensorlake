@@ -3,7 +3,7 @@ members = ["crates/cloud-sdk", "crates/cli", "crates/rust-cloud-sdk-py"]
 resolver = "3"
 
 [workspace.package]
-version = "0.4.40"
+version = "0.4.41"
 authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
 edition = "2024"
 license = "Apache-2.0"

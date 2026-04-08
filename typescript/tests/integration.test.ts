@@ -22,7 +22,7 @@ import {
 } from "../src/index.js";
 import { Sandbox } from "../src/sandbox.js";
 
-const SANDBOX_IMAGE = "docker.io/library/alpine:latest";
+const SANDBOX_IMAGE = "ubuntu-minimal";
 const SANDBOX_CPUS = 1.0;
 const SANDBOX_MEMORY_MB = 1024;
 const SANDBOX_DISK_MB = 1024;
