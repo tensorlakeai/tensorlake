@@ -63,12 +63,12 @@ class _FakeRustProxyClient:
 class TestSandboxRustBackend(unittest.TestCase):
     def test_sandbox_accepts_sandbox_name(self):
         sandbox = Sandbox(
-            sandbox_id_or_name="stable-name",
+            identifier="stable-name",
             proxy_url="http://localhost:9443",
             api_key="k",
         )
 
-        self.assertEqual(sandbox.sandbox_id, "stable-name")
+        self.assertEqual(sandbox._identifier, "stable-name")
 
     def test_start_process_uses_rust_backend(self):
         sandbox = Sandbox(

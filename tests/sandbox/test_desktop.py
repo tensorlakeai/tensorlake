@@ -96,7 +96,7 @@ class TestDesktopWrapper(unittest.TestCase):
         try:
             sandbox_module.RustCloudSandboxDesktopClient = _FakeRustDesktopClient
             sandbox = Sandbox(
-                sandbox_id_or_name="stable-name",
+                identifier="stable-name",
                 proxy_url="https://sandbox.tensorlake.ai",
                 api_key="k",
             )

@@ -126,11 +126,11 @@ jobs:
 
       - name: Extract Indexify Dataplane from container image to host
         run: |
-          docker pull ${{ steps.login-ecr.outputs.registry }}/indexify-dataplane:latest
-          container_id=$(docker create ${{ steps.login-ecr.outputs.registry }}/indexify-dataplane:latest)
-          docker cp $container_id:/indexify/indexify-dataplane /usr/local/bin/indexify-dataplane
+          docker pull ${{ steps.login-ecr.outputs.registry }}/platform-dataplane:latest
+          container_id=$(docker create ${{ steps.login-ecr.outputs.registry }}/platform-dataplane:latest)
+          docker cp $container_id:/indexify/platform-dataplane /usr/local/bin/platform-dataplane
           docker rm $container_id
-          chmod +x /usr/local/bin/indexify-dataplane
+          chmod +x /usr/local/bin/platform-dataplane
 
       - name: Start Background Indexify Server in Docker container
         uses: JarvusInnovations/background-action@v1
@@ -159,7 +159,7 @@ jobs:
         with:
           run: |
             export PATH=$(poetry env info --path)/bin:$PATH
-            /usr/local/bin/indexify-dataplane &
+            /usr/local/bin/platform-dataplane &
           wait-on: |
             tcp:localhost:8100
           tail: true
@@ -237,11 +237,11 @@ jobs:
 
       - name: Install Indexify Dataplane
         run: |
-          docker pull ${{ steps.login-ecr.outputs.registry }}/indexify-dataplane:latest
-          container_id=$(docker create ${{ steps.login-ecr.outputs.registry }}/indexify-dataplane:latest)
-          docker cp $container_id:/indexify/indexify-dataplane /usr/local/bin/indexify-dataplane
+          docker pull ${{ steps.login-ecr.outputs.registry }}/platform-dataplane:latest
+          container_id=$(docker create ${{ steps.login-ecr.outputs.registry }}/platform-dataplane:latest)
+          docker cp $container_id:/indexify/platform-dataplane /usr/local/bin/platform-dataplane
           docker rm $container_id
-          chmod +x /usr/local/bin/indexify-dataplane
+          chmod +x /usr/local/bin/platform-dataplane
 
       - name: Start Background Indexify Server in Docker container
         uses: JarvusInnovations/background-action@v1
@@ -285,7 +285,7 @@ jobs:
         uses: JarvusInnovations/background-action@v1
         with:
           run: |
-            /usr/local/bin/indexify-dataplane --config /tmp/dataplane/config.yaml &
+            /usr/local/bin/platform-dataplane --config /tmp/dataplane/config.yaml &
           wait-on: |
             tcp:localhost:8902
           tail: true

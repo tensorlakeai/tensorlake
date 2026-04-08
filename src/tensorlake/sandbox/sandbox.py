@@ -26,6 +26,7 @@ from .models import (
     OutputResponse,
     ProcessInfo,
     ProcessStatus,
+    SandboxInfo,
     SendSignalResponse,
     StdinMode,
 )
@@ -112,7 +113,7 @@ class Sandbox:
 
     def __init__(
         self,
-        sandbox_id_or_name: str | None = None,
+        identifier: str | None = None,
         proxy_url: str = _defaults.SANDBOX_PROXY_URL,
         api_key: str | None = _defaults.API_KEY,
         organization_id: str | None = None,
@@ -120,17 +121,18 @@ class Sandbox:
         *,
         sandbox_id: str | None = None,
     ):
-        if sandbox_id_or_name and sandbox_id and sandbox_id_or_name != sandbox_id:
+        if identifier and sandbox_id and identifier != sandbox_id:
             raise SandboxError(
-                "Provide only one of `sandbox_id_or_name` or `sandbox_id`, not both."
+                "Provide only one of `identifier` or `sandbox_id`, not both."
             )
-        sandbox_identifier = sandbox_id_or_name or sandbox_id
+        sandbox_identifier = identifier or sandbox_id
         if not sandbox_identifier:
             raise SandboxError(
-                "`sandbox_id_or_name` is required. `sandbox_id` is accepted as a deprecated alias."
+                "`identifier` is required. `sandbox_id` is accepted as a deprecated alias."
             )
 
-        self._sandbox_id = sandbox_identifier
+        self._identifier = sandbox_identifier
+        self._cached_info: SandboxInfo | None = None
         self._owns_sandbox: bool = False
         self._lifecycle_client: SandboxClient | None = None
         self._proxy_url = proxy_url
@@ -169,9 +171,26 @@ class Sandbox:
         except Exception as e:
             _raise_as_sandbox_error(e)
 
+    def _fetch_info(self) -> SandboxInfo:
+        """Fetch and cache sandbox info from the server (lazy, once per instance)."""
+        if self._cached_info is None:
+            if self._lifecycle_client is None:
+                raise SandboxError(
+                    "Cannot resolve sandbox info: no lifecycle client available. "
+                    "Connect via SandboxClient.connect() to enable sandbox_id and name lookup."
+                )
+            self._cached_info = self._lifecycle_client.get(self._identifier)
+        return self._cached_info
+
     @property
     def sandbox_id(self) -> str:
-        return self._sandbox_id
+        """The server-assigned UUID for this sandbox."""
+        return self._fetch_info().sandbox_id
+
+    @property
+    def name(self) -> str | None:
+        """The human-readable name for this sandbox, or None if unnamed."""
+        return self._fetch_info().name
 
     def __enter__(self) -> Sandbox:
         return self
@@ -199,7 +218,7 @@ class Sandbox:
         self._lifecycle_client = None
         self.close()
         if lifecycle_client is not None:
-            lifecycle_client.delete(self._sandbox_id)
+            lifecycle_client.delete(self._identifier)
 
     # --- High-level convenience ---
 
@@ -603,7 +622,7 @@ class Sandbox:
         try:
             rust_client = RustCloudSandboxDesktopClient(
                 proxy_url=self._proxy_url,
-                sandbox_id=self._sandbox_id,
+                sandbox_id=self._identifier,
                 port=port,
                 password=password,
                 shared=shared,

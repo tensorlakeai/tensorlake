@@ -1,5 +1,10 @@
 import * as defaults from "./defaults.js";
 
+/** Remove a trailing slash from a URL string if present. */
+function trimTrailingSlashes(url: string): string {
+  return url.endsWith("/") ? url.slice(0, -1) : url;
+}
+
 /** Check whether a URL points to localhost. */
 export function isLocalhost(apiUrl: string): boolean {
   try {
@@ -57,7 +62,7 @@ export function resolveProxyTarget(
 
     if (host === "localhost" || host === "127.0.0.1") {
       return {
-        baseUrl: proxyUrl.replace(/\/+$/, ""),
+        baseUrl: trimTrailingSlashes(proxyUrl),
         hostHeader: `${sandboxId}.local`,
       };
     }
@@ -69,7 +74,7 @@ export function resolveProxyTarget(
     };
   } catch {
     return {
-      baseUrl: `${proxyUrl.replace(/\/+$/, "")}/${sandboxId}`,
+      baseUrl: `${trimTrailingSlashes(proxyUrl)}/${sandboxId}`,
       hostHeader: undefined,
     };
   }

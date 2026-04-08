@@ -425,7 +425,7 @@ function createApplicationBuildForm(
 }
 
 function trimTrailingSlashes(value: string): string {
-  return value.replace(/\/+$/, "");
+  return value.endsWith("/") ? value.slice(0, -1) : value;
 }
 
 function toBlobPart(data: BinaryPayload): string | Blob | ArrayBuffer {

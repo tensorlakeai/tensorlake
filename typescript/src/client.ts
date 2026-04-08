@@ -383,10 +383,10 @@ export class SandboxClient {
 
   // --- Connect ---
 
-  connect(sandboxId: string, proxyUrl?: string): Sandbox {
+  connect(identifier: string, proxyUrl?: string): Sandbox {
     const resolvedProxy = proxyUrl ?? resolveProxyUrl(this.apiUrl);
     return new Sandbox({
-      sandboxId,
+      sandboxId: identifier,
       proxyUrl: resolvedProxy,
       apiKey: this.apiKey,
       organizationId: this.organizationId,
