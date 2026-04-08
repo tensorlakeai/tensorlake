@@ -43,7 +43,8 @@ export class HttpClient {
   private abortController: AbortController | null = null;
 
   constructor(options: HttpClientOptions) {
-    this.baseUrl = options.baseUrl.replace(/\/+$/, "");
+    const url = options.baseUrl;
+    this.baseUrl = url.endsWith("/") ? url.slice(0, -1) : url;
     this.maxRetries = options.maxRetries ?? defaults.MAX_RETRIES;
     this.retryBackoffMs = options.retryBackoffMs ?? defaults.RETRY_BACKOFF_MS;
     this.timeoutMs = options.timeoutMs ?? defaults.DEFAULT_HTTP_TIMEOUT_MS;
