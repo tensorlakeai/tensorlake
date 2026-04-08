@@ -112,7 +112,7 @@ class DataplaneProcessContextManager:
         state_dir = os.path.join(self._tmpdir.name, "state")
         self._generate_config(config_path, state_dir)
 
-        binary = os.environ.get("DATAPLANE_BIN", "indexify-dataplane")
+        binary = os.environ.get("DATAPLANE_BIN", "platform-dataplane")
         print(f"Starting dataplane: {binary} --config {config_path}", flush=True)
 
         self._process = subprocess.Popen(
