@@ -26,9 +26,9 @@ from .models import (
     ListSnapshotsResponse,
     NetworkConfig,
     SandboxInfo,
-    SandboxPortAccess,
     SandboxPoolInfo,
     SandboxPoolRequest,
+    SandboxPortAccess,
     SandboxStatus,
     SnapshotInfo,
     SnapshotStatus,
@@ -481,7 +481,9 @@ class SandboxClient:
         Set ``allow_unauthenticated_access=True`` to make them publicly reachable.
         """
         current = self.get_port_access(sandbox_id)
-        desired_ports = sorted(set(current.exposed_ports + _normalize_user_ports(ports)))
+        desired_ports = sorted(
+            set(current.exposed_ports + _normalize_user_ports(ports))
+        )
         return self.update_sandbox(
             sandbox_id,
             allow_unauthenticated_access=(
@@ -496,7 +498,9 @@ class SandboxClient:
         """Remove one or more user ports from the sandbox proxy allowlist."""
         current = self.get_port_access(sandbox_id)
         ports_to_remove = set(_normalize_user_ports(ports))
-        desired_ports = [port for port in current.exposed_ports if port not in ports_to_remove]
+        desired_ports = [
+            port for port in current.exposed_ports if port not in ports_to_remove
+        ]
         return self.update_sandbox(
             sandbox_id,
             allow_unauthenticated_access=(

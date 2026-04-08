@@ -537,9 +537,7 @@ class Sandbox:
             pty.on_exit(on_exit)
         return pty.connect()
 
-    def _delete_pty_session(
-        self, session_id: str, *, timeout: float = 10.0
-    ) -> None:
+    def _delete_pty_session(self, session_id: str, *, timeout: float = 10.0) -> None:
         response = httpx.delete(
             f"{self._base_url.rstrip('/')}/api/v1/pty/{session_id}",
             headers=self._proxy_headers,
@@ -581,9 +579,7 @@ class Sandbox:
             )
         except Exception:
             try:
-                self._delete_pty_session(
-                    session["session_id"], timeout=connect_timeout
-                )
+                self._delete_pty_session(session["session_id"], timeout=connect_timeout)
             except Exception:
                 pass
             raise

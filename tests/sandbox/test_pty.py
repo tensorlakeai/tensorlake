@@ -49,12 +49,13 @@ class TestPty(unittest.TestCase):
         import tensorlake.sandbox.sandbox as sandbox_module
 
         fake = _FakeRustProxyClient()
-        with patch.object(
-            sandbox_module, "_RUST_SANDBOX_PROXY_CLIENT_AVAILABLE", True
-        ), patch.object(
-            sandbox_module,
-            "RustCloudSandboxProxyClient",
-            side_effect=lambda **kwargs: fake,
+        with (
+            patch.object(sandbox_module, "_RUST_SANDBOX_PROXY_CLIENT_AVAILABLE", True),
+            patch.object(
+                sandbox_module,
+                "RustCloudSandboxProxyClient",
+                side_effect=lambda **kwargs: fake,
+            ),
         ):
             sandbox = Sandbox(
                 sandbox_id="sbx-1",
@@ -163,9 +164,10 @@ class TestPty(unittest.TestCase):
             )
         )
 
-        with patch.object(pty_module, "websocket", fake_websocket_module), patch.object(
-            sandbox, "_delete_pty_session"
-        ) as delete_mock:
+        with (
+            patch.object(pty_module, "websocket", fake_websocket_module),
+            patch.object(sandbox, "_delete_pty_session") as delete_mock,
+        ):
             with self.assertRaisesRegex(Exception, "mock websocket connect failure"):
                 sandbox.create_pty(command="/bin/bash")
 

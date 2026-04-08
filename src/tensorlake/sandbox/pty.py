@@ -105,12 +105,16 @@ class Pty:
             try:
                 ws = websocket.create_connection(
                     self._ws_url,
-                    header=[f"{key}: {value}" for key, value in self._ws_headers.items()],
+                    header=[
+                        f"{key}: {value}" for key, value in self._ws_headers.items()
+                    ],
                     timeout=self._connect_timeout,
                     enable_multithread=True,
                 )
             except Exception as e:
-                raise SandboxConnectionError(f"PTY websocket connection failed: {e}") from e
+                raise SandboxConnectionError(
+                    f"PTY websocket connection failed: {e}"
+                ) from e
 
             self._ws = ws
 
