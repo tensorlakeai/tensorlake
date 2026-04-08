@@ -846,17 +846,15 @@ class SandboxClient:
         if proxy_url is None:
             proxy_url = self._resolve_proxy_url()
 
-        # Resolve names to their server-assigned UUID so that Sandbox.sandbox_id
-        # always returns the UUID, never a human-readable name.
-        resolved_id = self.get(sandbox_identifier).sandbox_id
-
-        return Sandbox(
-            identifier=resolved_id,
+        sandbox = Sandbox(
+            identifier=sandbox_identifier,
             proxy_url=proxy_url,
             api_key=self._api_key,
             organization_id=self._organization_id,
             project_id=self._project_id,
         )
+        sandbox._lifecycle_client = self
+        return sandbox
 
     def create_and_connect(
         self,

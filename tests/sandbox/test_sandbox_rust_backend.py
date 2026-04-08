@@ -68,7 +68,7 @@ class TestSandboxRustBackend(unittest.TestCase):
             api_key="k",
         )
 
-        self.assertEqual(sandbox.sandbox_id, "stable-name")
+        self.assertEqual(sandbox._identifier, "stable-name")
 
     def test_start_process_uses_rust_backend(self):
         sandbox = Sandbox(
