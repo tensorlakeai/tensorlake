@@ -2,6 +2,8 @@
 export { SandboxClient } from "./client.js";
 export { Sandbox } from "./sandbox.js";
 export { Pty } from "./sandbox.js";
+export { Desktop } from "./desktop.js";
+export { TcpTunnel } from "./tunnel.js";
 export { CloudClient } from "./cloud-client.js";
 export { APIClient } from "./api-client.js";
 export { createSandboxImage } from "./sandbox-image.js";
@@ -13,6 +15,16 @@ export type {
   PtyConnectionOptions,
   CreatePtyOptions,
 } from "./sandbox.js";
+export type {
+  ConnectDesktopOptions,
+  DesktopDoubleClickOptions,
+  DesktopPointerOptions,
+  MouseButton,
+} from "./desktop.js";
+export type {
+  CreateTunnelOptions,
+  TunnelAddress,
+} from "./tunnel.js";
 
 // Errors
 export {

@@ -1,4 +1,8 @@
 import type { SandboxClient } from "./client.js";
+import {
+  type ConnectDesktopOptions,
+  Desktop,
+} from "./desktop.js";
 import * as defaults from "./defaults.js";
 import { SandboxError } from "./errors.js";
 import { HttpClient } from "./http.js";
@@ -22,6 +26,10 @@ import {
   StdinMode,
   fromSnakeKeys,
 } from "./models.js";
+import {
+  type CreateTunnelOptions,
+  TcpTunnel,
+} from "./tunnel.js";
 import { parseSSEStream } from "./sse.js";
 import { resolveProxyTarget } from "./url.js";
 import WebSocket, { type RawData } from "ws";
@@ -617,6 +625,31 @@ export class Sandbox {
 
     await pty.connect();
     return pty;
+  }
+
+  async createTunnel(
+    remotePort: number,
+    options?: CreateTunnelOptions,
+  ): Promise<TcpTunnel> {
+    return TcpTunnel.listen({
+      baseUrl: this.baseUrl,
+      wsHeaders: this.wsHeaders,
+      remotePort,
+      localHost: options?.localHost,
+      localPort: options?.localPort,
+      connectTimeout: options?.connectTimeout,
+    });
+  }
+
+  async connectDesktop(options?: ConnectDesktopOptions): Promise<Desktop> {
+    return Desktop.connect({
+      baseUrl: this.baseUrl,
+      wsHeaders: this.wsHeaders,
+      port: options?.port,
+      password: options?.password,
+      shared: options?.shared,
+      connectTimeout: options?.connectTimeout,
+    });
   }
 
   ptyWsUrl(sessionId: string, token: string): string {
