@@ -69,7 +69,7 @@ describe("sandbox image helpers", () => {
   it("renders a Dockerfile from the Image DSL", () => {
     const image = new Image({
       name: "data-tools",
-      baseImage: "ubuntu-systemd",
+      baseImage: "tensorlake/ubuntu-systemd",
     })
       .workdir("/workspace")
       .env("APP_ENV", "prod")
@@ -77,7 +77,7 @@ describe("sandbox image helpers", () => {
       .run("python3 -m pip install --break-system-packages -r /tmp/requirements.txt");
 
     expect(dockerfileContent(image)).toBe([
-      "FROM ubuntu-systemd",
+      "FROM tensorlake/ubuntu-systemd",
       "WORKDIR /workspace",
       'ENV APP_ENV="prod"',
       "COPY requirements.txt /tmp/requirements.txt",
@@ -99,7 +99,7 @@ describe("sandbox image helpers", () => {
   it("loadImagePlan derives build plan from the Image DSL", () => {
     const image = new Image({
       name: "data-tools",
-      baseImage: "ubuntu-systemd",
+      baseImage: "tensorlake/ubuntu-systemd",
     })
       .workdir("/workspace")
       .copy("requirements.txt", "/tmp/requirements.txt")
@@ -109,7 +109,7 @@ describe("sandbox image helpers", () => {
       contextDir: "/tmp/project",
     });
 
-    expect(plan.baseImage).toBe("ubuntu-systemd");
+    expect(plan.baseImage).toBe("tensorlake/ubuntu-systemd");
     expect(plan.registeredName).toBe("data-tools");
     expect(plan.contextDir).toBe("/tmp/project");
     expect(plan.instructions).toEqual([
@@ -241,7 +241,7 @@ describe("sandbox image helpers", () => {
 
     const image = new Image({
       name: "dsl-image",
-      baseImage: "ubuntu-systemd",
+      baseImage: "tensorlake/ubuntu-systemd",
     })
       .workdir("/workspace")
       .copy("hello.txt", "/workspace/hello.txt")
@@ -290,7 +290,7 @@ describe("sandbox image helpers", () => {
     );
 
     expect(client.createAndConnect).toHaveBeenCalledWith({
-      image: "ubuntu-systemd",
+      image: "tensorlake/ubuntu-systemd",
       cpus: 2.0,
       memoryMb: 4096,
     });
@@ -309,7 +309,7 @@ describe("sandbox image helpers", () => {
       }),
       "dsl-image",
       [
-        "FROM ubuntu-systemd",
+        "FROM tensorlake/ubuntu-systemd",
         "WORKDIR /workspace",
         "COPY hello.txt /workspace/hello.txt",
         "RUN cat /workspace/hello.txt",
@@ -412,7 +412,7 @@ describe("sandbox image helpers", () => {
     await mkdir(contextDir, { recursive: true });
     await writeFile(path.join(rootDir, "secret.txt"), "top-secret", "utf8");
 
-    const image = new Image({ name: "escape-build", baseImage: "ubuntu-systemd" })
+    const image = new Image({ name: "escape-build", baseImage: "tensorlake/ubuntu-systemd" })
       .copy("../secret.txt", "/workspace/secret.txt");
 
     const sandbox = {

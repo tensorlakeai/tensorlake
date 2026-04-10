@@ -65,7 +65,7 @@ export interface NetworkConfig {
 // --- Sandbox lifecycle ---
 
 export interface CreateSandboxOptions {
-  /** Optional sandbox image name, such as `ubuntu-minimal` or a registered Sandbox Image. When omitted, Tensorlake uses the default managed environment. */
+  /** Optional sandbox image name, such as `tensorlake/ubuntu-minimal` or a registered Sandbox Image. When omitted, Tensorlake uses the default managed environment. */
   image?: string;
   cpus?: number;
   memoryMb?: number;
@@ -158,7 +158,7 @@ export interface SnapshotAndWaitOptions extends SnapshotOptions {
 // --- Pools ---
 
 export interface CreatePoolOptions {
-  /** Sandbox image name, such as `ubuntu-minimal` or a registered Sandbox Image. */
+  /** Sandbox image name, such as `tensorlake/ubuntu-minimal` or a registered Sandbox Image. */
   image: string;
   cpus?: number;
   memoryMb?: number;
@@ -171,7 +171,7 @@ export interface CreatePoolOptions {
 }
 
 export interface UpdatePoolOptions {
-  /** Sandbox image name, such as `ubuntu-minimal` or a registered Sandbox Image. */
+  /** Sandbox image name, such as `tensorlake/ubuntu-minimal` or a registered Sandbox Image. */
   image: string;
   cpus?: number;
   memoryMb?: number;
