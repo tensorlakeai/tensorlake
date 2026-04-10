@@ -113,6 +113,20 @@ impl SandboxesClient {
         Ok(())
     }
 
+    pub async fn suspend(&self, sandbox_id: &str) -> Result<(), SdkError> {
+        let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/suspend"));
+        let req = self.client.request(Method::POST, &uri).build()?;
+        let _resp = self.client.execute(req).await?;
+        Ok(())
+    }
+
+    pub async fn resume(&self, sandbox_id: &str) -> Result<(), SdkError> {
+        let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/resume"));
+        let req = self.client.request(Method::POST, &uri).build()?;
+        let _resp = self.client.execute(req).await?;
+        Ok(())
+    }
+
     pub async fn snapshot(
         &self,
         sandbox_id: &str,

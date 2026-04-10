@@ -634,6 +634,20 @@ impl CloudSandboxClient {
         })
     }
 
+    fn suspend_sandbox(&self, sandbox_id: String) -> PyResult<()> {
+        self.run_with_retry(5, move |client| {
+            let sandbox_id = sandbox_id.clone();
+            async move { client.suspend(&sandbox_id).await }
+        })
+    }
+
+    fn resume_sandbox(&self, sandbox_id: String) -> PyResult<()> {
+        self.run_with_retry(5, move |client| {
+            let sandbox_id = sandbox_id.clone();
+            async move { client.resume(&sandbox_id).await }
+        })
+    }
+
     #[pyo3(signature = (sandbox_id, content_mode=None))]
     fn create_snapshot(
         &self,

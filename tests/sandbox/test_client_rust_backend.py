@@ -17,9 +17,17 @@ class _FakeRustClient:
         self.update_request_json = None
         self.last_get_sandbox_id = None
         self.create_snapshot_calls: list[tuple[str, str | None]] = []
+        self.suspend_calls: list[str] = []
+        self.resume_calls: list[str] = []
 
     def close(self):
         return None
+
+    def suspend_sandbox(self, sandbox_id):
+        self.suspend_calls.append(sandbox_id)
+
+    def resume_sandbox(self, sandbox_id):
+        self.resume_calls.append(sandbox_id)
 
     def create_snapshot(self, sandbox_id, content_mode=None):
         self.create_snapshot_calls.append((sandbox_id, content_mode))
@@ -203,6 +211,78 @@ class TestSandboxClientRustBackend(unittest.TestCase):
 
         with self.assertRaisesRegex(SandboxError, "reserved for sandbox management"):
             client.expose_ports("sbx-1", [9501])
+
+    def test_suspend_calls_rust_backend(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FakeRustClient()
+        client._rust_client = fake
+
+        client.suspend("my-env")
+
+        self.assertEqual(fake.suspend_calls, ["my-env"])
+        self.assertEqual(fake.resume_calls, [])
+
+    def test_resume_calls_rust_backend(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FakeRustClient()
+        client._rust_client = fake
+
+        client.resume("my-env")
+
+        self.assertEqual(fake.resume_calls, ["my-env"])
+        self.assertEqual(fake.suspend_calls, [])
+
+    def test_suspend_maps_404_to_sandbox_not_found(self):
+        class FakeRustError(Exception):
+            pass
+
+        class _NotFoundRustClient:
+            def close(self):
+                return None
+
+            def suspend_sandbox(self, sandbox_id):
+                raise FakeRustError(
+                    ("remote_api", 404, f"sandbox {sandbox_id} not found")
+                )
+
+        import tensorlake.sandbox.client as sandbox_client_module
+
+        previous = sandbox_client_module.RustCloudSandboxClientError
+        try:
+            sandbox_client_module.RustCloudSandboxClientError = FakeRustError
+            client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+            client._rust_client = _NotFoundRustClient()
+
+            with self.assertRaises(SandboxNotFoundError):
+                client.suspend("missing")
+        finally:
+            sandbox_client_module.RustCloudSandboxClientError = previous
+
+    def test_resume_maps_404_to_sandbox_not_found(self):
+        class FakeRustError(Exception):
+            pass
+
+        class _NotFoundRustClient:
+            def close(self):
+                return None
+
+            def resume_sandbox(self, sandbox_id):
+                raise FakeRustError(
+                    ("remote_api", 404, f"sandbox {sandbox_id} not found")
+                )
+
+        import tensorlake.sandbox.client as sandbox_client_module
+
+        previous = sandbox_client_module.RustCloudSandboxClientError
+        try:
+            sandbox_client_module.RustCloudSandboxClientError = FakeRustError
+            client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+            client._rust_client = _NotFoundRustClient()
+
+            with self.assertRaises(SandboxNotFoundError):
+                client.resume("missing")
+        finally:
+            sandbox_client_module.RustCloudSandboxClientError = previous
 
     def test_get_maps_404_to_sandbox_not_found(self):
         class FakeRustError(Exception):
