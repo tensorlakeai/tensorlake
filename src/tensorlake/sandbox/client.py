@@ -528,6 +528,52 @@ class SandboxClient:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
 
+    def suspend(self, sandbox_id: str) -> None:
+        """Suspend a named sandbox.
+
+        Only sandboxes created with a ``name`` can be suspended; ephemeral
+        sandboxes cannot. The call returns as soon as the server accepts
+        the request; poll :meth:`get` until
+        :attr:`SandboxStatus.SUSPENDED` if you need to wait for the
+        transition to complete.
+
+        Args:
+            sandbox_id: ID or name of the sandbox to suspend
+
+        Raises:
+            SandboxNotFoundError: If sandbox doesn't exist
+            RemoteAPIError: If the API request fails
+            SandboxConnectionError: If the server is unreachable
+        """
+        try:
+            self._rust_client.suspend_sandbox(sandbox_id=sandbox_id)
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
+            _raise_as_sandbox_error(e)
+
+    def resume(self, sandbox_id: str) -> None:
+        """Resume a suspended sandbox.
+
+        The call returns as soon as the server accepts the request; poll
+        :meth:`get` until :attr:`SandboxStatus.RUNNING` if you need to
+        wait for the transition to complete.
+
+        Args:
+            sandbox_id: ID or name of the sandbox to resume
+
+        Raises:
+            SandboxNotFoundError: If sandbox doesn't exist
+            RemoteAPIError: If the API request fails
+            SandboxConnectionError: If the server is unreachable
+        """
+        try:
+            self._rust_client.resume_sandbox(sandbox_id=sandbox_id)
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
+            _raise_as_sandbox_error(e)
+
     # --- Snapshot operations ---
 
     def snapshot(
