@@ -266,13 +266,15 @@ class Sandbox:
             CommandResult with exit_code, stdout, and stderr
         """
         payload = self._build_command_payload(
-            command, args, env, working_dir, timeout=timeout,
+            command,
+            args,
+            env,
+            working_dir,
+            timeout=timeout,
         )
 
         try:
-            events_json = self._rust_client.run_process_json(
-                json.dumps(payload)
-            )
+            events_json = self._rust_client.run_process_json(json.dumps(payload))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
@@ -326,7 +328,10 @@ class Sandbox:
             ProcessInfo with pid and status
         """
         payload = self._build_command_payload(
-            command, args, env, working_dir,
+            command,
+            args,
+            env,
+            working_dir,
             stdin_mode=stdin_mode if stdin_mode != StdinMode.CLOSED else None,
             stdout_mode=stdout_mode if stdout_mode != OutputMode.CAPTURE else None,
             stderr_mode=stderr_mode if stderr_mode != OutputMode.CAPTURE else None,
