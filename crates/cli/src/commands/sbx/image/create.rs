@@ -104,10 +104,7 @@ pub async fn run(
             }
             "image_registered" => {
                 let name = event.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let image_id = event
-                    .get("image_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let image_id = event.get("image_id").and_then(|v| v.as_str()).unwrap_or("");
                 eprintln!("✅ Image '{}' registered ({})", name, image_id);
             }
             "done" => {}

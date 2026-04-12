@@ -474,6 +474,18 @@ enum SbxCommands {
         /// Shell to use
         #[arg(short, long, default_value = "/bin/bash")]
         shell: String,
+
+        /// Shell argument (repeatable)
+        #[arg(long = "shell-arg", allow_hyphen_values = true)]
+        shell_args: Vec<String>,
+
+        /// Working directory
+        #[arg(short, long)]
+        workdir: Option<String>,
+
+        /// Environment variable (KEY=VALUE)
+        #[arg(short, long)]
+        env: Vec<String>,
     },
 
     /// Tunnel a local TCP port into a sandbox over WebSocket
@@ -861,8 +873,22 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     )
                     .await
                 }
-                SbxCommands::Ssh { sandbox_id, shell } => {
-                    commands::sbx::ssh::run(ctx, &sandbox_id, &shell).await
+                SbxCommands::Ssh {
+                    sandbox_id,
+                    shell,
+                    shell_args,
+                    workdir,
+                    env,
+                } => {
+                    commands::sbx::ssh::run(
+                        ctx,
+                        &sandbox_id,
+                        &shell,
+                        &shell_args,
+                        workdir.as_deref(),
+                        &env,
+                    )
+                    .await
                 }
                 SbxCommands::Image(image_cmd) => match image_cmd {
                     ImageCommands::Create {
@@ -982,6 +1008,46 @@ mod tests {
                 assert_eq!(listen_port, Some(15900));
             }
             _ => panic!("expected sbx tunnel command"),
+        }
+    }
+
+    #[test]
+    fn sbx_ssh_parses_shell_args_workdir_and_env() {
+        let cli = Cli::try_parse_from([
+            "tl",
+            "sbx",
+            "ssh",
+            "sbx-123",
+            "--shell",
+            "/bin/zsh",
+            "--shell-arg",
+            "-l",
+            "--shell-arg",
+            "-c",
+            "--workdir",
+            "/tmp/work",
+            "--env",
+            "FOO=bar",
+            "--env",
+            "TERM=screen-256color",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Ssh {
+                sandbox_id,
+                shell,
+                shell_args,
+                workdir,
+                env,
+            }) => {
+                assert_eq!(sandbox_id, "sbx-123");
+                assert_eq!(shell, "/bin/zsh");
+                assert_eq!(shell_args, vec!["-l", "-c"]);
+                assert_eq!(workdir, Some("/tmp/work".to_string()));
+                assert_eq!(env, vec!["FOO=bar", "TERM=screen-256color"]);
+            }
+            _ => panic!("expected sbx ssh command"),
         }
     }
 

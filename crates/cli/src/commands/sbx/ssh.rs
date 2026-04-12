@@ -2,7 +2,7 @@ use std::io::Read;
 use std::time::Duration;
 
 use crate::auth::context::CliContext;
-use crate::commands::sbx::sandbox_proxy_base;
+use crate::commands::sbx::{parse_env_vars, sandbox_proxy_base};
 use crate::error::{CliError, Result};
 use crate::http;
 use tokio::sync::mpsc;
@@ -19,11 +19,19 @@ enum PtyBinaryFrame {
     Exit(i32),
 }
 
-pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> {
+pub async fn run(
+    ctx: &CliContext,
+    sandbox_id: &str,
+    shell: &str,
+    shell_args: &[String],
+    workdir: Option<&str>,
+    env: &[String],
+) -> Result<()> {
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return Err(CliError::usage("ssh requires an interactive terminal"));
     }
 
+    let env_dict = parse_env_vars(env)?;
     let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
 
     // Build a client with auth headers and optional Host override
@@ -74,17 +82,12 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
     // Let the first PTY request trigger the existing server-side wake-up path
     // for suspended sandboxes instead of resuming from the CLI first.
     // Create PTY session via proxy API
+    let pty_payload =
+        build_pty_create_payload(shell, shell_args, workdir, &term_val, rows, cols, env_dict)?;
+
     let pty_resp = client
         .post(format!("{}/api/v1/pty", proxy_base))
-        .json(&serde_json::json!({
-            "command": shell,
-            "rows": rows,
-            "cols": cols,
-            "env": {
-                "TERM": term_val,
-                "COLORTERM": "truecolor",
-            },
-        }))
+        .json(&pty_payload)
         .send()
         .await
         .map_err(CliError::Http)?;
@@ -357,6 +360,53 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, shell: &str) -> Result<()> 
     Ok(())
 }
 
+fn build_pty_create_payload(
+    shell: &str,
+    shell_args: &[String],
+    workdir: Option<&str>,
+    term: &str,
+    rows: u16,
+    cols: u16,
+    user_env: Option<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let mut env_map = serde_json::Map::new();
+    env_map.insert(
+        "TERM".to_string(),
+        serde_json::Value::String(term.to_string()),
+    );
+    env_map.insert(
+        "COLORTERM".to_string(),
+        serde_json::Value::String("truecolor".to_string()),
+    );
+
+    if let Some(user_env_value) = user_env {
+        let serde_json::Value::Object(user_env_map) = user_env_value else {
+            return Err(CliError::Other(anyhow::anyhow!(
+                "invalid env payload for PTY session"
+            )));
+        };
+        for (key, value) in user_env_map {
+            env_map.insert(key, value);
+        }
+    }
+
+    let mut payload = serde_json::json!({
+        "command": shell,
+        "rows": rows,
+        "cols": cols,
+        "env": serde_json::Value::Object(env_map),
+    });
+
+    if !shell_args.is_empty() {
+        payload["args"] = serde_json::json!(shell_args);
+    }
+    if let Some(path) = workdir {
+        payload["working_dir"] = serde_json::Value::String(path.to_string());
+    }
+
+    Ok(payload)
+}
+
 fn parse_pty_binary_frame(data: &[u8]) -> Option<PtyBinaryFrame> {
     match data.first().copied() {
         Some(OP_DATA) => Some(PtyBinaryFrame::Data(data[1..].to_vec())),
@@ -391,8 +441,8 @@ async fn wait_for_reader_shutdown(
 #[cfg(test)]
 mod tests {
     use super::{
-        OP_DATA, OP_EXIT, PTY_CLOSE_WAIT_TIMEOUT, PtyBinaryFrame, parse_legacy_exit_code,
-        parse_pty_binary_frame, wait_for_reader_shutdown,
+        OP_DATA, OP_EXIT, PTY_CLOSE_WAIT_TIMEOUT, PtyBinaryFrame, build_pty_create_payload,
+        parse_legacy_exit_code, parse_pty_binary_frame, wait_for_reader_shutdown,
     };
     use std::future::pending;
     use std::time::Duration;
@@ -422,6 +472,48 @@ mod tests {
     fn parse_legacy_exit_code_reads_close_reason() {
         assert_eq!(parse_legacy_exit_code("exit:23"), Some(23));
         assert_eq!(parse_legacy_exit_code("bye"), None);
+    }
+
+    #[test]
+    fn build_pty_create_payload_includes_shell_args_and_workdir() {
+        let payload = build_pty_create_payload(
+            "/bin/zsh",
+            &[String::from("-l"), String::from("-c")],
+            Some("/tmp/work"),
+            "xterm-256color",
+            40,
+            120,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(payload["command"], "/bin/zsh");
+        assert_eq!(payload["args"], serde_json::json!(["-l", "-c"]));
+        assert_eq!(payload["working_dir"], "/tmp/work");
+        assert_eq!(payload["rows"], 40);
+        assert_eq!(payload["cols"], 120);
+    }
+
+    #[test]
+    fn build_pty_create_payload_merges_env_and_allows_overrides() {
+        let payload = build_pty_create_payload(
+            "/bin/bash",
+            &[],
+            None,
+            "xterm-256color",
+            24,
+            80,
+            Some(serde_json::json!({
+                "FOO": "bar",
+                "TERM": "screen-256color",
+                "COLORTERM": "24bit",
+            })),
+        )
+        .unwrap();
+
+        assert_eq!(payload["env"]["FOO"], "bar");
+        assert_eq!(payload["env"]["TERM"], "screen-256color");
+        assert_eq!(payload["env"]["COLORTERM"], "24bit");
     }
 
     #[tokio::test]
