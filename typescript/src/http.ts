@@ -118,16 +118,17 @@ export class HttpClient {
     return new Uint8Array(buffer);
   }
 
-  /** Make a request and return the raw Response (for SSE streaming). */
+  /** Make a request and return the response body as an SSE stream. */
   async requestStream(
     method: string,
     path: string,
-    options?: { signal?: AbortSignal },
+    options?: { signal?: AbortSignal; json?: unknown },
   ): Promise<ReadableStream<Uint8Array>> {
     const response = await this.requestResponse(
       method,
       path,
       {
+        json: options?.json,
         headers: { Accept: "text/event-stream" },
         signal: options?.signal,
       },

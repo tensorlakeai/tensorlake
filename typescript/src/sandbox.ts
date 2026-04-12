@@ -17,7 +17,6 @@ import {
   type OutputEvent,
   type OutputResponse,
   type ProcessInfo,
-  ProcessStatus,
   type PtySessionInfo,
   type RunOptions,
   type SandboxOptions,
@@ -340,44 +339,49 @@ export class Sandbox {
 
   // --- High-level convenience ---
 
+  /**
+   * Run a command to completion and return its output.
+   *
+   * Uses a single streaming `POST /api/v1/processes/run` request that starts
+   * the process, streams output, and delivers the exit code over one connection.
+   */
   async run(command: string, options?: RunOptions): Promise<CommandResult> {
-    const proc = await this.startProcess(command, {
-      args: options?.args,
-      env: options?.env,
-      workingDir: options?.workingDir,
-    });
+    const body: Record<string, unknown> = { command };
+    if (options?.args) body.args = options.args;
+    if (options?.env) body.env = options.env;
+    if (options?.workingDir) body.working_dir = options.workingDir;
+    if (options?.timeout != null) body.timeout = options.timeout;
 
-    const deadline = options?.timeout
-      ? Date.now() + options.timeout * 1000
-      : null;
+    const sseStream = await this.http.requestStream(
+      "POST",
+      "/api/v1/processes/run",
+      { json: body },
+    );
 
-    let info: ProcessInfo;
-    while (true) {
-      info = await this.getProcess(proc.pid);
-      if (info.status !== ProcessStatus.RUNNING) break;
-      if (deadline && Date.now() > deadline) {
-        await this.killProcess(proc.pid);
-        throw new SandboxError(`Command timed out after ${options!.timeout}s`);
+    const stdoutLines: string[] = [];
+    const stderrLines: string[] = [];
+    let exitCode = -1;
+
+    for await (const raw of parseSSEStream<Record<string, unknown>>(sseStream)) {
+      if (typeof raw.line === "string") {
+        if (raw.stream === "stderr") {
+          stderrLines.push(raw.line);
+        } else {
+          stdoutLines.push(raw.line);
+        }
+      } else if ("exit_code" in raw || "signal" in raw) {
+        if (typeof raw.exit_code === "number") {
+          exitCode = raw.exit_code;
+        } else if (typeof raw.signal === "number") {
+          exitCode = -raw.signal;
+        }
       }
-      await sleep(100);
-    }
-
-    const stdoutResp = await this.getStdout(proc.pid);
-    const stderrResp = await this.getStderr(proc.pid);
-
-    let exitCode: number;
-    if (info.exitCode != null) {
-      exitCode = info.exitCode;
-    } else if (info.signal != null) {
-      exitCode = -info.signal;
-    } else {
-      exitCode = -1;
     }
 
     return {
       exitCode,
-      stdout: stdoutResp.lines.join("\n"),
-      stderr: stderrResp.lines.join("\n"),
+      stdout: stdoutLines.join("\n"),
+      stderr: stderrLines.join("\n"),
     };
   }
 
@@ -681,8 +685,4 @@ export class Sandbox {
     );
     return fromSnakeKeys(raw) as DaemonInfo;
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -15,8 +15,9 @@ use models::{
     CreateSandboxPoolResponse, CreateSandboxRequest, CreateSandboxResponse, CreateSnapshotRequest,
     CreateSnapshotResponse, DaemonInfo, HealthResponse, ListDirectoryResponse,
     ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse,
-    OutputEvent, OutputResponse, ProcessInfo, SandboxInfo, SandboxPoolInfo, SandboxPoolRequest,
-    SendSignalResponse, SnapshotContentMode, SnapshotInfo, UpdateSandboxRequest,
+    OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo, SandboxPoolInfo,
+    SandboxPoolRequest, SendSignalResponse, SnapshotContentMode, SnapshotInfo,
+    UpdateSandboxRequest,
 };
 
 /// A client for managing sandbox lifecycle, pool, and snapshot APIs.
@@ -345,6 +346,44 @@ impl SandboxProxyClient {
     pub async fn follow_output(&self, pid: i64) -> Result<Vec<OutputEvent>, SdkError> {
         self.follow_stream(&format!("/api/v1/processes/{pid}/output/follow"))
             .await
+    }
+
+    pub async fn run_process(&self, payload: &Value) -> Result<Vec<RunProcessEvent>, SdkError> {
+        let req = self
+            .request(Method::POST, "/api/v1/processes/run")
+            .header(ACCEPT, "text/event-stream")
+            .json(payload)
+            .build()?;
+        let response = self.client.execute_raw(req).await?;
+        let stream = response
+            .bytes_stream()
+            .eventsource()
+            .filter_map(move |event| async move {
+                match event {
+                    Ok(msg) => {
+                        // Single parse: try typed deserialization directly.
+                        // The Exited variant has all-optional fields so it acts
+                        // as a catch-all for unrecognised JSON (heartbeats, etc.).
+                        // Discard Exited{None, None} — a real exit always has at
+                        // least one of exit_code or signal.
+                        match serde_json::from_str::<RunProcessEvent>(&msg.data) {
+                            Ok(RunProcessEvent::Exited {
+                                exit_code: None,
+                                signal: None,
+                            }) => None,
+                            Ok(evt) => Some(Ok(evt)),
+                            Err(_) => None,
+                        }
+                    }
+                    Err(error) => Some(Err(SdkError::EventSourceError(error.to_string()))),
+                }
+            });
+        futures::pin_mut!(stream);
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event?);
+        }
+        Ok(events)
     }
 
     async fn follow_stream(&self, path: &str) -> Result<Vec<OutputEvent>, SdkError> {
