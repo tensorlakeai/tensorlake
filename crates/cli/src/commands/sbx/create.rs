@@ -269,7 +269,14 @@ mod tests {
 
     #[test]
     fn create_body_passes_image_name_through_to_server() {
-        let body = build_create_request_body(None, None, None, &[], None, Some("tensorlake/ubuntu-minimal"));
+        let body = build_create_request_body(
+            None,
+            None,
+            None,
+            &[],
+            None,
+            Some("tensorlake/ubuntu-minimal"),
+        );
 
         assert_eq!(body["image"], "tensorlake/ubuntu-minimal");
         assert!(body.get("snapshot_id").is_none());
