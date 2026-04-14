@@ -120,8 +120,13 @@ async fn stream_run_events(resp: reqwest::Response) -> Result<i32> {
 }
 
 enum RunEvent {
-    Output { line: String, stream: Option<String> },
-    Exited { code: i32 },
+    Output {
+        line: String,
+        stream: Option<String>,
+    },
+    Exited {
+        code: i32,
+    },
     Other,
 }
 
@@ -184,7 +189,11 @@ mod tests {
 
     #[test]
     fn parse_run_event_skips_heartbeat_payloads() {
-        assert!(parse_run_event(r#"{"type":"heartbeat"}"#).unwrap().is_none());
+        assert!(
+            parse_run_event(r#"{"type":"heartbeat"}"#)
+                .unwrap()
+                .is_none()
+        );
         assert!(
             parse_run_event(r#"{"event":"keepalive"}"#)
                 .unwrap()

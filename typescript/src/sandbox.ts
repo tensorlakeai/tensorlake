@@ -4,7 +4,7 @@ import {
   Desktop,
 } from "./desktop.js";
 import * as defaults from "./defaults.js";
-import { RemoteAPIError, SandboxError } from "./errors.js";
+import { SandboxError } from "./errors.js";
 import { HttpClient } from "./http.js";
 import {
   type CommandResult,
@@ -352,24 +352,12 @@ export class Sandbox {
     if (options?.workingDir) body.working_dir = options.workingDir;
     if (options?.timeout != null) body.timeout = options.timeout;
 
-    try {
-      const sseStream = await this.http.requestStream(
-        "POST",
-        "/api/v1/processes/run",
-        { json: body },
-      );
-      return await this._collectRunStream(sseStream);
-    } catch (e) {
-      if (e instanceof RemoteAPIError && e.statusCode === 405) {
-        return this._runLegacy(command, options);
-      }
-      throw e;
-    }
-  }
+    const sseStream = await this.http.requestStream(
+      "POST",
+      "/api/v1/processes/run",
+      { json: body },
+    );
 
-  private async _collectRunStream(
-    sseStream: ReadableStream<Uint8Array>,
-  ): Promise<CommandResult> {
     const stdoutLines: string[] = [];
     const stderrLines: string[] = [];
     let exitCode = -1;
@@ -389,65 +377,6 @@ export class Sandbox {
         }
       }
     }
-
-    return {
-      exitCode,
-      stdout: stdoutLines.join("\n"),
-      stderr: stderrLines.join("\n"),
-    };
-  }
-
-  private async _runLegacy(
-    command: string,
-    options?: RunOptions,
-  ): Promise<CommandResult> {
-    const proc = await this.startProcess(command, {
-      args: options?.args,
-      env: options?.env,
-      workingDir: options?.workingDir,
-    });
-
-    const stdoutLines: string[] = [];
-    const stderrLines: string[] = [];
-
-    // Use AbortController so we can cancel the SSE stream on timeout.
-    const ac = new AbortController();
-    let timedOut = false;
-    const timeoutId =
-      options?.timeout != null
-        ? setTimeout(() => {
-            timedOut = true;
-            ac.abort();
-          }, options.timeout * 1000)
-        : null;
-
-    try {
-      for await (const event of this.followOutput(proc.pid, {
-        signal: ac.signal,
-      })) {
-        if (typeof event.line === "string") {
-          if (event.stream === "stderr") {
-            stderrLines.push(event.line);
-          } else {
-            stdoutLines.push(event.line);
-          }
-        }
-      }
-    } finally {
-      if (timeoutId != null) clearTimeout(timeoutId);
-    }
-
-    if (timedOut) {
-      await this.killProcess(proc.pid).catch(() => {});
-    }
-
-    const info = await this.getProcess(proc.pid);
-    const exitCode =
-      info.exitCode != null
-        ? info.exitCode
-        : info.signal != null
-          ? -info.signal
-          : -1;
 
     return {
       exitCode,
