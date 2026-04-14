@@ -335,7 +335,7 @@ pub async fn run(
         // If the reader hasn't finished yet, give it a short grace period to
         // receive a server-side exit signal or close frame. Abort afterwards so
         // local disconnects do not hang indefinitely on a broken close handshake.
-        if server_exit_code.is_none() {
+        if server_exit_code.is_none() && !terminated_by_remote {
             let (exit_code, reader_completed) = wait_for_reader_shutdown(&mut reader_handle).await?;
             server_exit_code = exit_code;
             terminated_by_remote = terminated_by_remote || reader_completed;
