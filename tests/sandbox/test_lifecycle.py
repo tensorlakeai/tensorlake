@@ -22,7 +22,9 @@ from tensorlake.sandbox import (
     SandboxStatus,
 )
 
-_SANDBOX_IMAGE = "tensorlake/ubuntu-minimal"
+_SANDBOX_IMAGE = os.environ.get(
+    "TENSORLAKE_SANDBOX_IMAGE", "docker.io/library/alpine:latest"
+)
 _SANDBOX_CPUS = 1.0
 _SANDBOX_MEMORY_MB = 1024
 _SANDBOX_DISK_MB = 1024
@@ -105,7 +107,7 @@ class BaseSandboxTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        api_url = os.environ.get("TENSORLAKE_API_URL", "https://api.tensorlake.ai")
+        api_url = os.environ.get("TENSORLAKE_API_URL", "http://localhost:8900")
         cls.client = SandboxClient(api_url=api_url)
 
     @classmethod

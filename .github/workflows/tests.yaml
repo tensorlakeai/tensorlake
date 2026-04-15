@@ -235,3 +235,4 @@ jobs:
         env:
           TENSORLAKE_API_URL: ${{ secrets.TENSORLAKE_API_URL }}
           TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
+          TENSORLAKE_SANDBOX_IMAGE: tensorlake/ubuntu-minimal
