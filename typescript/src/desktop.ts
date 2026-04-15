@@ -82,6 +82,11 @@ export class DesktopSession<T extends DesktopTransport> {
   private pointerX = 0;
   private pointerY = 0;
   private buttonMask = 0;
+  private framebufferVersion = 0;
+  private closed = false;
+  private updateLoopError: Error | null = null;
+  private readonly updateSignal = createDeferredSignal();
+  private updateLoopPromise: Promise<void> | null = null;
 
   constructor(options: {
     transport: T;
@@ -120,56 +125,49 @@ export class DesktopSession<T extends DesktopTransport> {
     await sendSetPixelFormat(transport, pixelFormat);
     await sendSetEncodings(transport, [ENCODING_RAW, ENCODING_DESKTOP_SIZE]);
 
-    return new DesktopSession({
+    const session = new DesktopSession({
       transport,
       width: init.width,
       height: init.height,
       pixelFormat,
       framebuffer: allocateFramebuffer(init.width, init.height),
     });
+    session.startFramebufferUpdates();
+    return session;
   }
 
   async close(): Promise<void> {
+    this.closed = true;
+    this.updateSignal.resolve();
     await this.transport.close();
+    await this.updateLoopPromise;
   }
 
   async screenshot(timeoutSeconds = 5): Promise<Uint8Array> {
-    const timeoutMs = secondsToMillis(timeoutSeconds);
-    const deadline = Date.now() + timeoutMs;
-    let needsRefresh = true;
+    await this.waitForFramebufferVersion(
+      1,
+      timeoutSeconds,
+      `timed out waiting for initial desktop framebuffer after ${timeoutSeconds.toFixed(2)}s`,
+    );
+    return encodePng(this.width, this.height, this.framebuffer);
+  }
 
-    while (Date.now() < deadline) {
-      if (needsRefresh) {
-        await sendFramebufferUpdateRequest(
-          this.transport,
-          false,
-          0,
-          0,
-          this.width,
-          this.height,
-        );
-        needsRefresh = false;
-      }
+  getFrameVersion(): number {
+    return this.framebufferVersion;
+  }
 
-      const remainingMs = Math.max(0, deadline - Date.now());
-      const outcome = await withTimeout(
-        remainingMs,
-        () => this.readServerMessage(),
-        `timed out waiting for desktop screenshot after ${timeoutSeconds.toFixed(2)}s`,
+  async screenshotAfter(frameVersion: number, timeoutSeconds = 1): Promise<Uint8Array> {
+    const minimumVersion = validateNonNegativeInteger(frameVersion, "frame version") + 1;
+
+    if (this.framebufferVersion < minimumVersion) {
+      await this.waitForFramebufferVersion(
+        minimumVersion,
+        timeoutSeconds,
+        `timed out waiting for a fresher desktop framebuffer after ${timeoutSeconds.toFixed(2)}s`,
       );
-
-      if (outcome.kind === "framebufferUpdate") {
-        if (outcome.sawResize && !outcome.sawRaw) {
-          needsRefresh = true;
-          continue;
-        }
-        return encodePng(this.width, this.height, this.framebuffer);
-      }
     }
 
-    throw new SandboxError(
-      `timed out waiting for desktop screenshot after ${timeoutSeconds.toFixed(2)}s`,
-    );
+    return encodePng(this.width, this.height, this.framebuffer);
   }
 
   async moveMouse(x: number, y: number): Promise<void> {
@@ -316,6 +314,92 @@ export class DesktopSession<T extends DesktopTransport> {
     }
   }
 
+  private startFramebufferUpdates(): void {
+    if (this.updateLoopPromise) {
+      return;
+    }
+
+    this.updateLoopPromise = this.runFramebufferUpdateLoop().catch((error: unknown) => {
+      if (this.closed) {
+        return;
+      }
+      this.updateLoopError = normalizeError(error);
+      this.updateSignal.resolve();
+    });
+  }
+
+  private async runFramebufferUpdateLoop(): Promise<void> {
+    let incremental = false;
+
+    while (!this.closed) {
+      await sendFramebufferUpdateRequest(
+        this.transport,
+        incremental,
+        0,
+        0,
+        this.width,
+        this.height,
+      );
+
+      const outcome = await this.readUntilFramebufferUpdate();
+      if (outcome.sawResize && !outcome.sawRaw) {
+        incremental = false;
+        continue;
+      }
+
+      if (outcome.sawRaw) {
+        this.framebufferVersion += 1;
+        this.updateSignal.resolve();
+      }
+
+      incremental = true;
+    }
+  }
+
+  private async readUntilFramebufferUpdate(): Promise<FramebufferUpdateOutcome> {
+    while (true) {
+      const outcome = await this.readServerMessage();
+      if (outcome.kind === "framebufferUpdate") {
+        return outcome;
+      }
+    }
+  }
+
+  private async waitForFramebufferVersion(
+    minimumVersion: number,
+    timeoutSeconds: number,
+    timeoutMessage: string,
+  ): Promise<void> {
+    const timeoutMs = secondsToMillis(timeoutSeconds);
+    const deadline = Date.now() + timeoutMs;
+
+    while (this.framebufferVersion < minimumVersion) {
+      if (this.updateLoopError) {
+        throw this.updateLoopError;
+      }
+      if (this.closed) {
+        throw new SandboxError("desktop session is closed");
+      }
+
+      const observedVersion = this.framebufferVersion;
+      const waitForUpdate = this.updateSignal.wait();
+      if (this.framebufferVersion !== observedVersion) {
+        continue;
+      }
+
+      const remainingMs = Math.max(0, deadline - Date.now());
+      if (remainingMs === 0) {
+        break;
+      }
+
+      await withTimeout(remainingMs, () => waitForUpdate, timeoutMessage);
+    }
+
+    if (this.framebufferVersion < minimumVersion) {
+      throw new SandboxError(timeoutMessage);
+    }
+  }
+
   private async readServerMessage(): Promise<ServerMessageOutcome> {
     const messageType = await readU8(this.transport);
     if (messageType === 0) {
@@ -419,40 +503,32 @@ export class DesktopSession<T extends DesktopTransport> {
 }
 
 export class Desktop {
-  private readonly session: DesktopSession<TunnelByteStream>;
+  private session: DesktopSession<TunnelByteStream>;
+  private readonly connectRequest: DesktopConnectRequest & {
+    port: number;
+    shared: boolean;
+    connectTimeout: number;
+  };
   private operationChain: Promise<void> = Promise.resolve();
+  private reconnectPromise: Promise<void> | null = null;
+  private closed = false;
 
-  private constructor(session: DesktopSession<TunnelByteStream>) {
+  private constructor(
+    session: DesktopSession<TunnelByteStream>,
+    connectRequest: DesktopConnectRequest & {
+      port: number;
+      shared: boolean;
+      connectTimeout: number;
+    },
+  ) {
     this.session = session;
+    this.connectRequest = connectRequest;
   }
 
   static async connect(options: DesktopConnectRequest): Promise<Desktop> {
-    const port = validatePort(options.port ?? 5901, "desktop port");
-    const shared = options.shared ?? true;
-    const connectTimeout = options.connectTimeout ?? 10;
-    const connectTimeoutMs = secondsToMillis(connectTimeout);
-    const state: { transport?: TunnelByteStream } = {};
-    try {
-      const session = await withTimeout(
-        connectTimeoutMs,
-        async () => {
-          state.transport = await TunnelByteStream.connect({
-            baseUrl: options.baseUrl,
-            wsHeaders: options.wsHeaders,
-            remotePort: port,
-            connectTimeoutMs,
-          });
-          return DesktopSession.connect(state.transport, options.password, shared);
-        },
-        `timed out while connecting desktop session after ${connectTimeout.toFixed(2)}s`,
-      );
-      return new Desktop(session);
-    } catch (error) {
-      if (state.transport) {
-        await state.transport.close().catch(() => {});
-      }
-      throw error;
-    }
+    const connectRequest = normalizeDesktopConnectRequest(options);
+    const session = await openDesktopSession(connectRequest);
+    return new Desktop(session, connectRequest);
   }
 
   get width(): number {
@@ -464,11 +540,20 @@ export class Desktop {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
     await this.enqueue(() => this.session.close());
   }
 
   async screenshot(timeout = 5): Promise<Uint8Array> {
-    return this.enqueue(() => this.session.screenshot(timeout));
+    return this.enqueue(() => this.captureScreenshot(timeout));
+  }
+
+  getFrameVersion(): number {
+    return this.session.getFrameVersion();
+  }
+
+  async screenshotAfter(frameVersion: number, timeout = 1): Promise<Uint8Array> {
+    return this.enqueue(() => this.captureScreenshotAfter(frameVersion, timeout));
   }
 
   async moveMouse(x: number, y: number): Promise<void> {
@@ -538,6 +623,52 @@ export class Desktop {
       () => undefined,
     );
     return run;
+  }
+
+  private async captureScreenshot(timeout: number): Promise<Uint8Array> {
+    try {
+      return await this.session.screenshot(timeout);
+    } catch (error) {
+      if (!isReconnectableDesktopScreenshotError(error) || this.closed) {
+        throw error;
+      }
+
+      await this.reconnect();
+      return this.session.screenshot(timeout);
+    }
+  }
+
+  private async captureScreenshotAfter(
+    frameVersion: number,
+    timeout: number,
+  ): Promise<Uint8Array> {
+    try {
+      return await this.session.screenshotAfter(frameVersion, timeout);
+    } catch (error) {
+      if (!isReconnectableDesktopScreenshotError(error) || this.closed) {
+        throw error;
+      }
+
+      await this.reconnect();
+      return this.session.screenshot(timeout);
+    }
+  }
+
+  private async reconnect(): Promise<void> {
+    if (this.reconnectPromise) {
+      return this.reconnectPromise;
+    }
+
+    this.reconnectPromise = this.performReconnect().finally(() => {
+      this.reconnectPromise = null;
+    });
+    return this.reconnectPromise;
+  }
+
+  private async performReconnect(): Promise<void> {
+    const previousSession = this.session;
+    await previousSession.close().catch(() => {});
+    this.session = await openDesktopSession(this.connectRequest);
   }
 }
 
@@ -916,6 +1047,101 @@ function allocateFramebuffer(width: number, height: number): Uint8Array {
   return new Uint8Array(width * height * 4);
 }
 
+function normalizeDesktopConnectRequest(
+  options: DesktopConnectRequest,
+): DesktopConnectRequest & {
+  port: number;
+  shared: boolean;
+  connectTimeout: number;
+} {
+  return {
+    ...options,
+    port: validatePort(options.port ?? 5901, "desktop port"),
+    shared: options.shared ?? true,
+    connectTimeout: options.connectTimeout ?? 10,
+  };
+}
+
+async function openDesktopSession(
+  options: DesktopConnectRequest & {
+    port: number;
+    shared: boolean;
+    connectTimeout: number;
+  },
+): Promise<DesktopSession<TunnelByteStream>> {
+  const connectTimeoutMs = secondsToMillis(options.connectTimeout);
+  const state: { transport?: TunnelByteStream } = {};
+
+  try {
+    return await withTimeout(
+      connectTimeoutMs,
+      async () => {
+        state.transport = await TunnelByteStream.connect({
+          baseUrl: options.baseUrl,
+          wsHeaders: options.wsHeaders,
+          remotePort: options.port,
+          connectTimeoutMs,
+        });
+        return DesktopSession.connect(
+          state.transport,
+          options.password,
+          options.shared,
+        );
+      },
+      `timed out while connecting desktop session after ${options.connectTimeout.toFixed(2)}s`,
+    );
+  } catch (error) {
+    if (state.transport) {
+      await state.transport.close().catch(() => {});
+    }
+    throw error;
+  }
+}
+
+function isReconnectableDesktopScreenshotError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("desktop tunnel closed unexpectedly") ||
+    message.includes("desktop tunnel is not connected") ||
+    message.includes("connection closed") ||
+    message.includes("econnreset") ||
+    message.includes("timed out waiting for initial desktop framebuffer") ||
+    message.includes("timed out while connecting tunnel websocket") ||
+    message.includes("tunnel websocket closed before opening") ||
+    message.includes("tunnel websocket handshake failed")
+  );
+}
+
+function createDeferredSignal(): {
+  resolve(): void;
+  wait(): Promise<void>;
+} {
+  let resolveCurrent!: () => void;
+  let promise = new Promise<void>((resolve) => {
+    resolveCurrent = resolve;
+  });
+
+  return {
+    resolve() {
+      resolveCurrent();
+      promise = new Promise<void>((resolve) => {
+        resolveCurrent = resolve;
+      });
+    },
+    wait() {
+      return promise;
+    },
+  };
+}
+
+function normalizeError(error: unknown): Error {
+  return error instanceof Error ? error : new SandboxError(String(error));
+}
+
 function buttonMask(button: MouseButton | string): number {
   const normalized = button.trim().toLowerCase();
   if (normalized === "left") return BUTTON_LEFT_MASK;
@@ -1078,6 +1304,8 @@ const SPECIAL_KEYSYMS = new Map<string, number>([
   ["right", 0xff53],
   ["home", 0xff50],
   ["end", 0xff57],
+  ["pageup", 0xff55],
+  ["pagedown", 0xff56],
   ["page_up", 0xff55],
   ["page_down", 0xff56],
   ["shift", 0xffe1],

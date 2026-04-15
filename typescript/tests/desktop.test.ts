@@ -9,6 +9,7 @@ class MockWebSocket {
 
   static instances: MockWebSocket[] = [];
   static nextIncomingFrames: Buffer[] = [];
+  static nextConnectionBehaviors: Array<(socket: MockWebSocket) => void> = [];
 
   readonly url: string;
   readonly options: { headers?: Record<string, string> } | undefined;
@@ -24,10 +25,15 @@ class MockWebSocket {
 
     queueMicrotask(() => {
       this.readyState = MockWebSocket.OPEN;
-      this.emit("open");
+      this.dispatch("open");
+      const behavior = MockWebSocket.nextConnectionBehaviors.shift();
+      if (behavior) {
+        behavior(this);
+        return;
+      }
       setTimeout(() => {
         for (const frame of MockWebSocket.nextIncomingFrames) {
-          this.emit("message", frame, true);
+          this.dispatch("message", frame, true);
         }
         MockWebSocket.nextIncomingFrames = [];
       }, 0);
@@ -54,14 +60,14 @@ class MockWebSocket {
 
   close(): void {
     this.readyState = MockWebSocket.CLOSED;
-    this.emit("close", 1000, Buffer.alloc(0));
+    this.dispatch("close", 1000, Buffer.alloc(0));
   }
 
   pong(_data?: Buffer, _mask?: boolean, cb?: () => void): void {
     cb?.();
   }
 
-  private emit(event: string, ...args: any[]): void {
+  dispatch(event: string, ...args: any[]): void {
     for (const handler of this.handlers[event] ?? []) {
       handler(...args);
     }
@@ -233,6 +239,7 @@ describe("DesktopSession", () => {
   beforeEach(async () => {
     MockWebSocket.instances = [];
     MockWebSocket.nextIncomingFrames = [];
+    MockWebSocket.nextConnectionBehaviors = [];
     vi.resetModules();
     ({ DesktopSession } = await import("../src/desktop.js"));
     ({ Sandbox } = await import("../src/sandbox.js"));
@@ -410,5 +417,48 @@ describe("DesktopSession", () => {
     expect(socket.options?.headers?.Authorization).toBe("Bearer test-api-key");
     expect(socket.sent[0].toString("ascii")).toBe("RFB 003.008\n");
     expect(parsePng(png).width).toBe(2);
+  });
+
+  it("reconnects screenshot operations after the desktop tunnel drops", async () => {
+    MockWebSocket.nextConnectionBehaviors = [
+      (socket) => {
+        setTimeout(() => {
+          socket.dispatch("message", Buffer.concat([
+            Buffer.from("RFB 003.008\n", "ascii"),
+            Buffer.from([1, 1]),
+            u32(0),
+            serverInitBytes(1, 1, true),
+          ]), true);
+        }, 0);
+      },
+      (socket) => {
+        setTimeout(() => {
+          socket.dispatch("message", Buffer.concat([
+            Buffer.from("RFB 003.008\n", "ascii"),
+            Buffer.from([1, 1]),
+            u32(0),
+            serverInitBytes(1, 1, true),
+            rawFramebufferUpdate(1, 1, [[7, 8, 9, 255]]),
+          ]), true);
+        }, 0);
+      },
+    ];
+
+    const sandbox = new Sandbox({
+      sandboxId: "sbx-reconnect",
+      proxyUrl: "https://sandbox.tensorlake.ai",
+      apiKey: "test-api-key",
+    });
+
+    const desktop = await sandbox.connectDesktop();
+    MockWebSocket.instances[0]?.dispatch(
+      "close",
+      1011,
+      Buffer.from("desktop tunnel closed unexpectedly"),
+    );
+    const png = await desktop.screenshot(1);
+
+    expect(MockWebSocket.instances).toHaveLength(2);
+    expect(parsePng(png).rgba).toEqual(Buffer.from([7, 8, 9, 255]));
   });
 });

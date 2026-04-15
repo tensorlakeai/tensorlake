@@ -3,6 +3,7 @@ import { SandboxConnectionError, SandboxError } from "./errors.js";
 import WebSocket, { type RawData } from "ws";
 
 const DEFAULT_TUNNEL_CONNECT_TIMEOUT_MS = 10_000;
+const WEBSOCKET_KEEPALIVE_INTERVAL_MS = 15_000;
 
 export interface CreateTunnelOptions {
   /** Local host/interface to bind. Defaults to `127.0.0.1`. */
@@ -121,9 +122,16 @@ export class TunnelByteStream {
   private readonly pendingReads: PendingRead[] = [];
   private closeError: Error | null = null;
   private closePromise: Promise<void> | null = null;
+  private readonly keepAliveInterval: ReturnType<typeof setInterval>;
 
   constructor(socket: WebSocket) {
     this.socket = socket;
+    this.keepAliveInterval = setInterval(() => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.ping();
+      }
+    }, WEBSOCKET_KEEPALIVE_INTERVAL_MS);
+    this.keepAliveInterval.unref?.();
 
     socket.on("message", (message: RawData, isBinary: boolean) => {
       if (!isBinary) {
@@ -142,12 +150,14 @@ export class TunnelByteStream {
     });
 
     socket.on("close", (_code: number, reason: Buffer) => {
+      clearInterval(this.keepAliveInterval);
       const closeReason =
         reason.length > 0 ? reason.toString("utf8") : "desktop tunnel closed unexpectedly";
       this.fail(new SandboxError(closeReason));
     });
 
     socket.on("error", (error: Error) => {
+      clearInterval(this.keepAliveInterval);
       this.fail(new SandboxConnectionError(error.message));
     });
   }
@@ -394,10 +404,17 @@ function normalizeWebSocketData(message: RawData): Buffer {
 async function relaySocket(localSocket: net.Socket, websocket: WebSocket): Promise<void> {
   return new Promise<void>((resolve) => {
     let settled = false;
+    const keepAliveInterval = setInterval(() => {
+      if (websocket.readyState === WebSocket.OPEN) {
+        websocket.ping();
+      }
+    }, WEBSOCKET_KEEPALIVE_INTERVAL_MS);
+    keepAliveInterval.unref?.();
 
     const finish = () => {
       if (settled) return;
       settled = true;
+      clearInterval(keepAliveInterval);
       cleanup();
       resolve();
     };
