@@ -36,59 +36,24 @@ describe("Sandbox", () => {
   });
 
   describe("run", () => {
+    /** Build an SSE-formatted response body from an array of JSON events. */
+    function sseResponse(events: unknown[]): Response {
+      const body = events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
+      return new Response(body, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    }
+
     it("runs a command and returns result", async () => {
-      let callIndex = 0;
       mockFetch((url, init) => {
-        callIndex++;
-
-        // 1: start_process
-        if (url.endsWith("/api/v1/processes") && init?.method === "POST") {
-          return new Response(
-            JSON.stringify({
-              pid: 42,
-              status: "running",
-              command: "echo",
-              args: ["hello"],
-              stdin_writable: false,
-              started_at: 1700000000,
-            }),
-            { status: 200 },
-          );
+        if (url.includes("/api/v1/processes/run") && init?.method === "POST") {
+          return sseResponse([
+            { pid: 42, started_at: 1700000000 },
+            { line: "hello", timestamp: 1700000000.1, stream: "stdout" },
+            { exit_code: 0 },
+          ]);
         }
-
-        // 2: get_process (poll returns exited)
-        if (url.includes("/api/v1/processes/42") && init?.method === "GET" && !url.includes("stdout") && !url.includes("stderr")) {
-          return new Response(
-            JSON.stringify({
-              pid: 42,
-              status: "exited",
-              exit_code: 0,
-              command: "echo",
-              args: ["hello"],
-              stdin_writable: false,
-              started_at: 1700000000,
-              ended_at: 1700000001,
-            }),
-            { status: 200 },
-          );
-        }
-
-        // 3: get_stdout
-        if (url.includes("/stdout")) {
-          return new Response(
-            JSON.stringify({ pid: 42, lines: ["hello"], line_count: 1 }),
-            { status: 200 },
-          );
-        }
-
-        // 4: get_stderr
-        if (url.includes("/stderr")) {
-          return new Response(
-            JSON.stringify({ pid: 42, lines: [], line_count: 0 }),
-            { status: 200 },
-          );
-        }
-
         return new Response("", { status: 404 });
       });
 

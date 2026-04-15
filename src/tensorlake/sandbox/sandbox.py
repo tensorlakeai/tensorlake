@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 from typing import TYPE_CHECKING, Iterator
 from urllib.parse import urlparse
 
@@ -25,7 +24,6 @@ from .models import (
     OutputMode,
     OutputResponse,
     ProcessInfo,
-    ProcessStatus,
     SandboxInfo,
     SendSignalResponse,
     StdinMode,
@@ -220,6 +218,27 @@ class Sandbox:
         if lifecycle_client is not None:
             lifecycle_client.delete(self._identifier)
 
+    @staticmethod
+    def _build_command_payload(
+        command: str,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        working_dir: str | None = None,
+        **extra: object,
+    ) -> dict:
+        """Build a process command payload dict with common fields."""
+        payload: dict = {"command": command}
+        if args is not None:
+            payload["args"] = args
+        if env is not None:
+            payload["env"] = env
+        if working_dir is not None:
+            payload["working_dir"] = working_dir
+        for key, value in extra.items():
+            if value is not None:
+                payload[key] = value
+        return payload
+
     # --- High-level convenience ---
 
     def run(
@@ -232,49 +251,54 @@ class Sandbox:
     ) -> CommandResult:
         """Run a command to completion and return its output.
 
+        Uses a single streaming ``POST /api/v1/processes/run`` request that
+        starts the process, streams output, and delivers the exit code — all
+        over one HTTP connection.
+
         Args:
             command: Command to execute
             args: Command arguments
             env: Environment variables
             working_dir: Working directory
-            timeout: Maximum seconds to wait (None = no limit)
+            timeout: Maximum seconds to wait (enforced server-side; None = no limit)
 
         Returns:
             CommandResult with exit_code, stdout, and stderr
         """
-        proc = self.start_process(
-            command=command,
-            args=args,
-            env=env,
-            working_dir=working_dir,
+        payload = self._build_command_payload(
+            command,
+            args,
+            env,
+            working_dir,
+            timeout=timeout,
         )
 
-        deadline = time.time() + timeout if timeout else None
-        while True:
-            info = self.get_process(proc.pid)
-            if info.status != ProcessStatus.RUNNING:
-                break
-            if deadline and time.time() > deadline:
-                self.kill_process(proc.pid)
-                raise SandboxError(f"Command timed out after {timeout}s")
-            # Poll at 100ms — fast enough for interactive commands while
-            # keeping overhead low for longer-running processes.
-            time.sleep(0.1)
+        try:
+            events_json = self._rust_client.run_process_json(json.dumps(payload))
+        except Exception as e:
+            _raise_as_sandbox_error(e)
 
-        stdout_resp = self.get_stdout(proc.pid)
-        stderr_resp = self.get_stderr(proc.pid)
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+        exit_code = -1
 
-        if info.exit_code is not None:
-            exit_code = info.exit_code
-        elif info.signal is not None:
-            exit_code = -info.signal
-        else:
-            exit_code = -1
+        for event_json in events_json:
+            event = json.loads(event_json)
+            if "line" in event:
+                if event.get("stream") == "stderr":
+                    stderr_lines.append(event["line"])
+                else:
+                    stdout_lines.append(event["line"])
+            elif "exit_code" in event or "signal" in event:
+                if event.get("exit_code") is not None:
+                    exit_code = event["exit_code"]
+                elif event.get("signal") is not None:
+                    exit_code = -event["signal"]
 
         return CommandResult(
             exit_code=exit_code,
-            stdout="\n".join(stdout_resp.lines),
-            stderr="\n".join(stderr_resp.lines),
+            stdout="\n".join(stdout_lines),
+            stderr="\n".join(stderr_lines),
         )
 
     # --- Process management ---
@@ -303,19 +327,15 @@ class Sandbox:
         Returns:
             ProcessInfo with pid and status
         """
-        payload: dict = {"command": command}
-        if args is not None:
-            payload["args"] = args
-        if env is not None:
-            payload["env"] = env
-        if working_dir is not None:
-            payload["working_dir"] = working_dir
-        if stdin_mode != StdinMode.CLOSED:
-            payload["stdin_mode"] = stdin_mode
-        if stdout_mode != OutputMode.CAPTURE:
-            payload["stdout_mode"] = stdout_mode
-        if stderr_mode != OutputMode.CAPTURE:
-            payload["stderr_mode"] = stderr_mode
+        payload = self._build_command_payload(
+            command,
+            args,
+            env,
+            working_dir,
+            stdin_mode=stdin_mode if stdin_mode != StdinMode.CLOSED else None,
+            stdout_mode=stdout_mode if stdout_mode != OutputMode.CAPTURE else None,
+            stderr_mode=stderr_mode if stderr_mode != OutputMode.CAPTURE else None,
+        )
 
         try:
             response_json = self._rust_client.start_process_json(json.dumps(payload))

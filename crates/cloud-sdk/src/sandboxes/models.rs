@@ -249,6 +249,26 @@ pub struct OutputEvent {
     pub stream: Option<String>,
 }
 
+/// Events returned by the streaming `POST /api/v1/processes/run` endpoint.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RunProcessEvent {
+    /// First event: process was created.
+    Started {
+        pid: i64,
+        started_at: serde_json::Value,
+    },
+    /// Intermediate events: output lines (stdout/stderr).
+    Output(OutputEvent),
+    /// Final event: process exited.
+    Exited {
+        #[serde(default)]
+        exit_code: Option<i64>,
+        #[serde(default)]
+        signal: Option<i64>,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DaemonInfo {
     pub version: String,
@@ -300,6 +320,52 @@ mod tests {
             snapshot_content_mode: None,
         };
         assert_eq!(serde_json::to_string(&body).unwrap(), "{}");
+    }
+
+    #[test]
+    fn run_process_event_deserializes_started() {
+        let json = r#"{"pid": 42, "started_at": 1234567890.123}"#;
+        let event: RunProcessEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(event, RunProcessEvent::Started { pid: 42, .. }));
+    }
+
+    #[test]
+    fn run_process_event_deserializes_output() {
+        let json = r#"{"line": "hello", "timestamp": 1234567890.456, "stream": "stdout"}"#;
+        let event: RunProcessEvent = serde_json::from_str(json).unwrap();
+        match event {
+            RunProcessEvent::Output(evt) => {
+                assert_eq!(evt.line, "hello");
+                assert_eq!(evt.stream.as_deref(), Some("stdout"));
+            }
+            _ => panic!("expected Output variant"),
+        }
+    }
+
+    #[test]
+    fn run_process_event_deserializes_exited() {
+        let json = r#"{"exit_code": 0}"#;
+        let event: RunProcessEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            event,
+            RunProcessEvent::Exited {
+                exit_code: Some(0),
+                signal: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn run_process_event_deserializes_signaled() {
+        let json = r#"{"signal": 9}"#;
+        let event: RunProcessEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            event,
+            RunProcessEvent::Exited {
+                exit_code: None,
+                signal: Some(9),
+            }
+        ));
     }
 
     #[test]

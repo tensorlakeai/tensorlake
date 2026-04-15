@@ -167,3 +167,4 @@ cython_debug/
 .envrc.secrets
 .vscode
 .tensorlake/
+.worktrees/

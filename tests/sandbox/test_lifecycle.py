@@ -1,11 +1,11 @@
 """Integration tests for sandbox lifecycle management APIs.
 
-Requires a running Indexify server (localhost:8900/8901) and a running
-indexify-dataplane process.
+Runs against the Tensorlake cloud API (or the URL in TENSORLAKE_API_URL).
+Requires TENSORLAKE_API_KEY to be set.
 
 Usage:
-    export TENSORLAKE_API_URL=http://localhost:8900
-    poetry run python tests/sandbox/test_lifecycle.py
+    TENSORLAKE_API_KEY=... poetry run python tests/sandbox/test_lifecycle.py
+    TENSORLAKE_API_URL=https://api.tensorlake.ai TENSORLAKE_API_KEY=... poetry run python tests/sandbox/test_lifecycle.py
 """
 
 import os
@@ -16,14 +16,15 @@ from tensorlake.sandbox import (
     PoolContainerInfo,
     PoolInUseError,
     PoolNotFoundError,
+    Sandbox,
     SandboxClient,
     SandboxNotFoundError,
     SandboxStatus,
 )
 
-_SANDBOX_IMAGE = "docker.io/library/alpine:latest"
-_SANDBOX_CPUS = 0.2
-_SANDBOX_MEMORY_MB = 512
+_SANDBOX_IMAGE = "tensorlake/ubuntu-minimal"
+_SANDBOX_CPUS = 1.0
+_SANDBOX_MEMORY_MB = 1024
 _SANDBOX_DISK_MB = 1024
 
 
@@ -104,7 +105,7 @@ class BaseSandboxTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        api_url = os.environ.get("TENSORLAKE_API_URL", "http://localhost:8900")
+        api_url = os.environ.get("TENSORLAKE_API_URL", "https://api.tensorlake.ai")
         cls.client = SandboxClient(api_url=api_url)
 
     @classmethod
@@ -229,11 +230,11 @@ class TestPoolLifecycle(BaseSandboxTest):
             pool_id=self.__class__.pool_id,
             image=_SANDBOX_IMAGE,
             cpus=_SANDBOX_CPUS,
-            memory_mb=768,
+            memory_mb=2048,
             ephemeral_disk_mb=_SANDBOX_DISK_MB,
             warm_containers=1,
         )
-        self.assertEqual(updated.resources.memory_mb, 768)
+        self.assertEqual(updated.resources.memory_mb, 2048)
         self.assertEqual(updated.warm_containers, 1)
 
     def test_5_delete_pool(self):
@@ -844,6 +845,112 @@ class TestNamedSandboxIdentifier(BaseSandboxTest):
 
 
 # ---------------------------------------------------------------------------
+# TestSandboxRun
+# ---------------------------------------------------------------------------
+
+
+class TestSandboxRun(BaseSandboxTest):
+    """Integration tests for Sandbox.run() — the streaming process execution endpoint.
+
+    A single Alpine sandbox is created for the whole class and shared across
+    all test methods.  Each test is independent (no ordering dependencies).
+    """
+
+    sandbox_id: str | None = None
+    sandbox: Sandbox | None = None
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        resp = cls.client.create(
+            image=_SANDBOX_IMAGE,
+            cpus=_SANDBOX_CPUS,
+            memory_mb=_SANDBOX_MEMORY_MB,
+            ephemeral_disk_mb=_SANDBOX_DISK_MB,
+            entrypoint=["sleep", "300"],
+        )
+        cls.sandbox_id = resp.sandbox_id
+        _poll_sandbox_status(
+            cls.client, cls.sandbox_id, SandboxStatus.RUNNING, timeout=60
+        )
+        cls.sandbox = cls.client.connect(identifier=cls.sandbox_id)
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.sandbox is not None:
+            cls.sandbox.close()
+            cls.sandbox = None
+        if cls.sandbox_id:
+            try:
+                cls.client.delete(cls.sandbox_id)
+            except Exception:
+                pass
+        super().tearDownClass()
+
+    def test_captures_stdout(self):
+        result = self.sandbox.run("echo", args=["hello world"])
+        self.assertEqual(result.exit_code, 0, f"sandbox {self.sandbox_id}: exit_code")
+        self.assertIn(
+            "hello world", result.stdout, f"sandbox {self.sandbox_id}: stdout"
+        )
+
+    def test_captures_stderr(self):
+        result = self.sandbox.run("sh", args=["-c", "echo error-output >&2"])
+        self.assertEqual(result.exit_code, 0, f"sandbox {self.sandbox_id}: exit_code")
+        self.assertIn(
+            "error-output", result.stderr, f"sandbox {self.sandbox_id}: stderr"
+        )
+        self.assertEqual(
+            result.stdout, "", f"sandbox {self.sandbox_id}: stdout should be empty"
+        )
+
+    def test_nonzero_exit_code(self):
+        result = self.sandbox.run("sh", args=["-c", "exit 42"])
+        self.assertEqual(result.exit_code, 42, f"sandbox {self.sandbox_id}: exit_code")
+
+    def test_env_vars(self):
+        result = self.sandbox.run(
+            "sh",
+            args=["-c", "echo $MY_VAR"],
+            env={"MY_VAR": "streaming-test-value"},
+        )
+        self.assertEqual(result.exit_code, 0, f"sandbox {self.sandbox_id}: exit_code")
+        self.assertIn(
+            "streaming-test-value",
+            result.stdout,
+            f"sandbox {self.sandbox_id}: stdout",
+        )
+
+    def test_working_directory(self):
+        result = self.sandbox.run("pwd", working_dir="/tmp")
+        self.assertEqual(result.exit_code, 0, f"sandbox {self.sandbox_id}: exit_code")
+        self.assertIn("/tmp", result.stdout, f"sandbox {self.sandbox_id}: stdout")
+
+    def test_multiline_output(self):
+        result = self.sandbox.run("sh", args=["-c", "printf 'a\\nb\\nc\\n'"])
+        self.assertEqual(result.exit_code, 0, f"sandbox {self.sandbox_id}: exit_code")
+        lines = result.stdout.splitlines()
+        self.assertEqual(
+            lines, ["a", "b", "c"], f"sandbox {self.sandbox_id}: stdout lines"
+        )
+
+    def test_stdout_and_stderr_independent(self):
+        """Lines written to stdout and stderr must be routed to the correct field."""
+        result = self.sandbox.run(
+            "sh", args=["-c", "echo out-line; echo err-line >&2; echo out-line2"]
+        )
+        self.assertEqual(result.exit_code, 0, f"sandbox {self.sandbox_id}: exit_code")
+        self.assertIn("out-line", result.stdout, f"sandbox {self.sandbox_id}: stdout")
+        self.assertIn("out-line2", result.stdout, f"sandbox {self.sandbox_id}: stdout")
+        self.assertIn("err-line", result.stderr, f"sandbox {self.sandbox_id}: stderr")
+        self.assertNotIn(
+            "err-line",
+            result.stdout,
+            f"sandbox {self.sandbox_id}: stdout should not contain stderr",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -862,6 +969,7 @@ if __name__ == "__main__":
         TestPoolDeletion,
         TestSandboxTimeout,
         TestNamedSandboxIdentifier,
+        TestSandboxRun,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
     runner = unittest.TextTestRunner(verbosity=2 if "-v" in sys.argv else 1)
