@@ -979,6 +979,20 @@ impl CloudSandboxProxyClient {
         })
     }
 
+    fn run_process_json(&self, payload_json: String) -> PyResult<Vec<String>> {
+        let payload: Value = parse_json_payload(&payload_json)?;
+        self.run_with_retry(5, move |client| {
+            let payload = payload.clone();
+            async move {
+                let events = client.run_process(&payload).await?;
+                events
+                    .into_iter()
+                    .map(|event| serde_json::to_string(&event).map_err(SdkError::from))
+                    .collect()
+            }
+        })
+    }
+
     fn health_json(&self) -> PyResult<String> {
         self.run_with_retry(5, move |client| async move {
             let response = client.health().await?;

@@ -145,28 +145,26 @@ describe(
         entrypoint: ["sleep", "300"],
       });
       expect(resp.sandboxId).toBeTruthy();
-      expect([
-        SandboxStatus.PENDING,
-        SandboxStatus.RUNNING,
-        SandboxStatus.TERMINATED,
-      ]).toContain(resp.status);
+      expect(
+        [SandboxStatus.PENDING, SandboxStatus.RUNNING, SandboxStatus.TERMINATED],
+        `sandbox ${resp.sandboxId}`,
+      ).toContain(resp.status);
       sandboxId = resp.sandboxId;
     });
 
     it("gets a sandbox", async () => {
       const info = await client.get(sandboxId);
-      expect(info.sandboxId).toBe(sandboxId);
-      expect([
-        SandboxStatus.PENDING,
-        SandboxStatus.RUNNING,
-        SandboxStatus.TERMINATED,
-      ]).toContain(info.status);
+      expect(info.sandboxId, `sandbox ${sandboxId}`).toBe(sandboxId);
+      expect(
+        [SandboxStatus.PENDING, SandboxStatus.RUNNING, SandboxStatus.TERMINATED],
+        `sandbox ${sandboxId}`,
+      ).toContain(info.status);
     });
 
     it("lists sandboxes", async () => {
       const list = await client.list();
       const ids = list.map((s) => s.sandboxId);
-      expect(ids).toContain(sandboxId);
+      expect(ids, `sandbox ${sandboxId} not found in list`).toContain(sandboxId);
     });
 
     it("transitions out of pending", async () => {
@@ -175,7 +173,10 @@ describe(
         sandboxId,
         [SandboxStatus.RUNNING, SandboxStatus.TERMINATED],
       );
-      expect([SandboxStatus.RUNNING, SandboxStatus.TERMINATED]).toContain(status);
+      expect(
+        [SandboxStatus.RUNNING, SandboxStatus.TERMINATED],
+        `sandbox ${sandboxId}`,
+      ).toContain(status);
     });
 
     it("deletes a sandbox", async () => {
@@ -189,7 +190,7 @@ describe(
         SandboxStatus.TERMINATED,
         30,
       );
-      expect(status).toBe(SandboxStatus.TERMINATED);
+      expect(status, `sandbox ${sandboxId}`).toBe(SandboxStatus.TERMINATED);
       sandboxId = undefined!;
     });
 
@@ -249,21 +250,21 @@ describe(
 
     it("runs a command and captures stdout", async () => {
       const result = await sandbox.run("echo", { args: ["hello world"] });
-      expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain("hello world");
+      expect(result.exitCode, `sandbox ${sandbox.sandboxId}: exitCode`).toBe(0);
+      expect(result.stdout, `sandbox ${sandbox.sandboxId}: stdout`).toContain("hello world");
     });
 
     it("captures stderr", async () => {
       const result = await sandbox.run("sh", {
         args: ["-c", "echo error >&2"],
       });
-      expect(result.exitCode).toBe(0);
-      expect(result.stderr).toContain("error");
+      expect(result.exitCode, `sandbox ${sandbox.sandboxId}: exitCode`).toBe(0);
+      expect(result.stderr, `sandbox ${sandbox.sandboxId}: stderr`).toContain("error");
     });
 
     it("returns non-zero exit code", async () => {
       const result = await sandbox.run("sh", { args: ["-c", "exit 42"] });
-      expect(result.exitCode).toBe(42);
+      expect(result.exitCode, `sandbox ${sandbox.sandboxId}`).toBe(42);
     });
 
     it("runs command with env vars", async () => {
@@ -271,14 +272,14 @@ describe(
         args: ["-c", "echo $MY_VAR"],
         env: { MY_VAR: "test-value" },
       });
-      expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain("test-value");
+      expect(result.exitCode, `sandbox ${sandbox.sandboxId}: exitCode`).toBe(0);
+      expect(result.stdout, `sandbox ${sandbox.sandboxId}: stdout`).toContain("test-value");
     });
 
     it("runs command with working directory", async () => {
       const result = await sandbox.run("pwd", { workingDir: "/tmp" });
-      expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain("/tmp");
+      expect(result.exitCode, `sandbox ${sandbox.sandboxId}: exitCode`).toBe(0);
+      expect(result.stdout, `sandbox ${sandbox.sandboxId}: stdout`).toContain("/tmp");
     });
 
     it("writes and reads a file", async () => {
@@ -287,7 +288,7 @@ describe(
 
       const data = await sandbox.readFile("/tmp/test-ts-sdk.txt");
       const text = new TextDecoder().decode(data);
-      expect(text).toBe("hello from typescript sdk");
+      expect(text, `sandbox ${sandbox.sandboxId}`).toBe("hello from typescript sdk");
     });
 
     it("lists a directory", async () => {
@@ -298,10 +299,10 @@ describe(
       );
 
       const listing = await sandbox.listDirectory("/tmp");
-      expect(listing.path).toBe("/tmp");
-      expect(listing.entries.length).toBeGreaterThan(0);
+      expect(listing.path, `sandbox ${sandbox.sandboxId}: path`).toBe("/tmp");
+      expect(listing.entries.length, `sandbox ${sandbox.sandboxId}: entries`).toBeGreaterThan(0);
       const names = listing.entries.map((e) => e.name);
-      expect(names).toContain("list-test.txt");
+      expect(names, `sandbox ${sandbox.sandboxId}: list-test.txt not found`).toContain("list-test.txt");
     });
 
     it("deletes a file", async () => {
@@ -314,35 +315,35 @@ describe(
       // Verify the file is gone by listing the directory
       const listing = await sandbox.listDirectory("/tmp");
       const names = listing.entries.map((e) => e.name);
-      expect(names).not.toContain("to-delete.txt");
+      expect(names, `sandbox ${sandbox.sandboxId}: to-delete.txt still present`).not.toContain("to-delete.txt");
     });
 
     it("starts and manages processes", async () => {
       const proc = await sandbox.startProcess("sleep", { args: ["10"] });
-      expect(proc.pid).toBeGreaterThan(0);
-      expect(proc.status).toBe("running");
+      expect(proc.pid, `sandbox ${sandbox.sandboxId}: pid`).toBeGreaterThan(0);
+      expect(proc.status, `sandbox ${sandbox.sandboxId}: status`).toBe("running");
 
       const processes = await sandbox.listProcesses();
       const pids = processes.map((p) => p.pid);
-      expect(pids).toContain(proc.pid);
+      expect(pids, `sandbox ${sandbox.sandboxId}: pid ${proc.pid} not in list`).toContain(proc.pid);
 
       await sandbox.killProcess(proc.pid);
 
       // Wait for process to exit
       await sleep(500);
       const info = await sandbox.getProcess(proc.pid);
-      expect(info.status).not.toBe("running");
+      expect(info.status, `sandbox ${sandbox.sandboxId}: process ${proc.pid} still running`).not.toBe("running");
     });
 
     it("checks health", async () => {
       const health = await sandbox.health();
-      expect(health.healthy).toBe(true);
+      expect(health.healthy, `sandbox ${sandbox.sandboxId}`).toBe(true);
     });
 
     it("gets daemon info", async () => {
       const info = await sandbox.info();
-      expect(info.version).toBeTruthy();
-      expect(info.uptimeSecs).toBeGreaterThanOrEqual(0);
+      expect(info.version, `sandbox ${sandbox.sandboxId}: version`).toBeTruthy();
+      expect(info.uptimeSecs, `sandbox ${sandbox.sandboxId}: uptimeSecs`).toBeGreaterThanOrEqual(0);
     });
   },
   { timeout: 180_000 },
@@ -465,13 +466,16 @@ describe(
     it("claims a sandbox from pool", async () => {
       const resp = await client.claim(poolId);
       expect(resp.sandboxId).toBeTruthy();
-      expect([SandboxStatus.PENDING, SandboxStatus.RUNNING]).toContain(resp.status);
+      expect(
+        [SandboxStatus.PENDING, SandboxStatus.RUNNING],
+        `sandbox ${resp.sandboxId}`,
+      ).toContain(resp.status);
       sandboxId = resp.sandboxId;
     });
 
     it("sandbox from pool reaches running", async () => {
       const status = await pollSandboxStatus(client, sandboxId, SandboxStatus.RUNNING);
-      expect(status).toBe(SandboxStatus.RUNNING);
+      expect(status, `sandbox ${sandboxId}`).toBe(SandboxStatus.RUNNING);
     });
 
     it("cannot delete pool with active sandbox", async () => {
@@ -549,15 +553,15 @@ describe(
       const claimed = (detail.containers ?? []).filter(
         (c) => c.id === warmContainerId,
       );
-      expect(claimed).toHaveLength(1);
-      expect(claimed[0].sandboxId).toBe(sandboxId);
+      expect(claimed, `sandbox ${sandboxId}: warm container not claimed`).toHaveLength(1);
+      expect(claimed[0].sandboxId, `sandbox ${sandboxId}`).toBe(sandboxId);
     });
 
     it("replacement warm container is created", async () => {
       const containers = await pollPoolContainers(client, poolId, 2);
       const warm = warmContainers(containers);
-      expect(warm.length).toBeGreaterThanOrEqual(1);
-      expect(warm[0].id).not.toBe(warmContainerId);
+      expect(warm.length, `sandbox ${sandboxId}: no replacement warm container`).toBeGreaterThanOrEqual(1);
+      expect(warm[0].id, `sandbox ${sandboxId}: replacement has same id`).not.toBe(warmContainerId);
     });
 
     it("deleting sandbox removes claimed container", async () => {
@@ -646,7 +650,7 @@ describe(
 
     it("sandbox reaches running", async () => {
       const status = await pollSandboxStatus(client, sandboxId, SandboxStatus.RUNNING);
-      expect(status).toBe(SandboxStatus.RUNNING);
+      expect(status, `sandbox ${sandboxId}`).toBe(SandboxStatus.RUNNING);
     });
 
     it("sandbox suspended after timeout", async () => {
@@ -661,14 +665,17 @@ describe(
         [SandboxStatus.TERMINATED, SandboxStatus.SUSPENDED],
         30,
       );
-      expect([SandboxStatus.TERMINATED, SandboxStatus.SUSPENDED]).toContain(status);
+      expect(
+        [SandboxStatus.TERMINATED, SandboxStatus.SUSPENDED],
+        `sandbox ${sandboxId}`,
+      ).toContain(status);
 
       const info = await client.get(sandboxId);
       if (status === SandboxStatus.TERMINATED) {
-        expect(info.outcome).toBe("Success(Timeout)");
+        expect(info.outcome, `sandbox ${sandboxId}`).toBe("Success(Timeout)");
         sandboxId = undefined!;
       } else {
-        expect(info.outcome).toBeUndefined();
+        expect(info.outcome, `sandbox ${sandboxId}`).toBeUndefined();
       }
     });
 
