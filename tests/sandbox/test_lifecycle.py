@@ -22,7 +22,7 @@ from tensorlake.sandbox import (
     SandboxStatus,
 )
 
-_SANDBOX_IMAGE = "tensorlake/ubuntu-minimal"
+_SANDBOX_IMAGE = os.environ.get("TENSORLAKE_SANDBOX_IMAGE", "docker.io/library/alpine:latest")
 _SANDBOX_CPUS = 1.0
 _SANDBOX_MEMORY_MB = 1024
 _SANDBOX_DISK_MB = 1024
