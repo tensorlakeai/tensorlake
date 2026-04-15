@@ -8,6 +8,7 @@ from tensorlake.sandbox.models import StdinMode
 class _FakeRustProxyClient:
     def __init__(self):
         self.start_payload_json = None
+        self.run_payload_json = None
 
     def close(self):
         return None
@@ -54,6 +55,15 @@ class _FakeRustProxyClient:
                     "stream": "stdout",
                 }
             )
+        ]
+
+    def run_process_json(self, payload_json):
+        self.run_payload_json = payload_json
+        return [
+            json.dumps({"line": "out1", "stream": "stdout", "timestamp": 1_700_000_001}),
+            json.dumps({"line": "err1", "stream": "stderr", "timestamp": 1_700_000_002}),
+            json.dumps({"line": "out2", "stream": "stdout", "timestamp": 1_700_000_003}),
+            json.dumps({"exit_code": 0}),
         ]
 
     def health_json(self):
@@ -113,6 +123,40 @@ class TestSandboxRustBackend(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].line, "hello")
         self.assertEqual(events[0].stream, "stdout")
+
+    def test_run_uses_streaming_endpoint(self):
+        sandbox = Sandbox(
+            sandbox_id="sbx-1", proxy_url="http://localhost:9443", api_key="k"
+        )
+        fake = _FakeRustProxyClient()
+        sandbox._rust_client = fake
+
+        result = sandbox.run("echo", args=["hello"])
+
+        # Verify the payload sent to the Rust client.
+        payload = json.loads(fake.run_payload_json)
+        self.assertEqual(payload["command"], "echo")
+        self.assertEqual(payload["args"], ["hello"])
+
+        # Verify stdout/stderr lines are collected from streaming events.
+        self.assertEqual(result.stdout, "out1\nout2")
+        self.assertEqual(result.stderr, "err1")
+        self.assertEqual(result.exit_code, 0)
+
+    def test_run_signal_maps_to_negative_exit_code(self):
+        sandbox = Sandbox(
+            sandbox_id="sbx-1", proxy_url="http://localhost:9443", api_key="k"
+        )
+
+        class _SignaledFakeClient(_FakeRustProxyClient):
+            def run_process_json(self, payload_json):
+                return [json.dumps({"signal": 9})]
+
+        sandbox._rust_client = _SignaledFakeClient()
+
+        result = sandbox.run("sleep", args=["100"])
+
+        self.assertEqual(result.exit_code, -9)
 
     def test_health_maps_connection_error(self):
         class FakeRustError(Exception):
