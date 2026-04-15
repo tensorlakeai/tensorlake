@@ -1,11 +1,11 @@
 """Integration tests for sandbox lifecycle management APIs.
 
-Requires a running Indexify server (localhost:8900/8901) and a running
-indexify-dataplane process.
+Runs against the Tensorlake cloud API (or the URL in TENSORLAKE_API_URL).
+Requires TENSORLAKE_API_KEY to be set.
 
 Usage:
-    export TENSORLAKE_API_URL=http://localhost:8900
-    poetry run python tests/sandbox/test_lifecycle.py
+    TENSORLAKE_API_KEY=... poetry run python tests/sandbox/test_lifecycle.py
+    TENSORLAKE_API_URL=https://api.tensorlake.ai TENSORLAKE_API_KEY=... poetry run python tests/sandbox/test_lifecycle.py
 """
 
 import os
@@ -22,9 +22,9 @@ from tensorlake.sandbox import (
     SandboxStatus,
 )
 
-_SANDBOX_IMAGE = "docker.io/library/alpine:latest"
-_SANDBOX_CPUS = 0.2
-_SANDBOX_MEMORY_MB = 512
+_SANDBOX_IMAGE = "tensorlake/ubuntu-minimal"
+_SANDBOX_CPUS = 1.0
+_SANDBOX_MEMORY_MB = 1024
 _SANDBOX_DISK_MB = 1024
 
 
@@ -105,7 +105,7 @@ class BaseSandboxTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        api_url = os.environ.get("TENSORLAKE_API_URL", "http://localhost:8900")
+        api_url = os.environ.get("TENSORLAKE_API_URL", "https://api.tensorlake.ai")
         cls.client = SandboxClient(api_url=api_url)
 
     @classmethod
@@ -870,7 +870,9 @@ class TestSandboxRun(BaseSandboxTest):
             entrypoint=["sleep", "300"],
         )
         cls.sandbox_id = resp.sandbox_id
-        _poll_sandbox_status(cls.client, cls.sandbox_id, SandboxStatus.RUNNING, timeout=60)
+        _poll_sandbox_status(
+            cls.client, cls.sandbox_id, SandboxStatus.RUNNING, timeout=60
+        )
         cls.sandbox = cls.client.connect(identifier=cls.sandbox_id)
 
     @classmethod
@@ -888,13 +890,19 @@ class TestSandboxRun(BaseSandboxTest):
     def test_captures_stdout(self):
         result = self.sandbox.run("echo", args=["hello world"])
         self.assertEqual(result.exit_code, 0, f"sandbox {self.sandbox_id}: exit_code")
-        self.assertIn("hello world", result.stdout, f"sandbox {self.sandbox_id}: stdout")
+        self.assertIn(
+            "hello world", result.stdout, f"sandbox {self.sandbox_id}: stdout"
+        )
 
     def test_captures_stderr(self):
         result = self.sandbox.run("sh", args=["-c", "echo error-output >&2"])
         self.assertEqual(result.exit_code, 0, f"sandbox {self.sandbox_id}: exit_code")
-        self.assertIn("error-output", result.stderr, f"sandbox {self.sandbox_id}: stderr")
-        self.assertEqual(result.stdout, "", f"sandbox {self.sandbox_id}: stdout should be empty")
+        self.assertIn(
+            "error-output", result.stderr, f"sandbox {self.sandbox_id}: stderr"
+        )
+        self.assertEqual(
+            result.stdout, "", f"sandbox {self.sandbox_id}: stdout should be empty"
+        )
 
     def test_nonzero_exit_code(self):
         result = self.sandbox.run("sh", args=["-c", "exit 42"])
@@ -922,7 +930,9 @@ class TestSandboxRun(BaseSandboxTest):
         result = self.sandbox.run("sh", args=["-c", "printf 'a\\nb\\nc\\n'"])
         self.assertEqual(result.exit_code, 0, f"sandbox {self.sandbox_id}: exit_code")
         lines = result.stdout.splitlines()
-        self.assertEqual(lines, ["a", "b", "c"], f"sandbox {self.sandbox_id}: stdout lines")
+        self.assertEqual(
+            lines, ["a", "b", "c"], f"sandbox {self.sandbox_id}: stdout lines"
+        )
 
     def test_stdout_and_stderr_independent(self):
         """Lines written to stdout and stderr must be routed to the correct field."""
@@ -933,7 +943,11 @@ class TestSandboxRun(BaseSandboxTest):
         self.assertIn("out-line", result.stdout, f"sandbox {self.sandbox_id}: stdout")
         self.assertIn("out-line2", result.stdout, f"sandbox {self.sandbox_id}: stdout")
         self.assertIn("err-line", result.stderr, f"sandbox {self.sandbox_id}: stderr")
-        self.assertNotIn("err-line", result.stdout, f"sandbox {self.sandbox_id}: stdout should not contain stderr")
+        self.assertNotIn(
+            "err-line",
+            result.stdout,
+            f"sandbox {self.sandbox_id}: stdout should not contain stderr",
+        )
 
 
 # ---------------------------------------------------------------------------

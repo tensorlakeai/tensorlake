@@ -60,9 +60,15 @@ class _FakeRustProxyClient:
     def run_process_json(self, payload_json):
         self.run_payload_json = payload_json
         return [
-            json.dumps({"line": "out1", "stream": "stdout", "timestamp": 1_700_000_001}),
-            json.dumps({"line": "err1", "stream": "stderr", "timestamp": 1_700_000_002}),
-            json.dumps({"line": "out2", "stream": "stdout", "timestamp": 1_700_000_003}),
+            json.dumps(
+                {"line": "out1", "stream": "stdout", "timestamp": 1_700_000_001}
+            ),
+            json.dumps(
+                {"line": "err1", "stream": "stderr", "timestamp": 1_700_000_002}
+            ),
+            json.dumps(
+                {"line": "out2", "stream": "stdout", "timestamp": 1_700_000_003}
+            ),
             json.dumps({"exit_code": 0}),
         ]
 
