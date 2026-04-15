@@ -230,11 +230,11 @@ class TestPoolLifecycle(BaseSandboxTest):
             pool_id=self.__class__.pool_id,
             image=_SANDBOX_IMAGE,
             cpus=_SANDBOX_CPUS,
-            memory_mb=768,
+            memory_mb=2048,
             ephemeral_disk_mb=_SANDBOX_DISK_MB,
             warm_containers=1,
         )
-        self.assertEqual(updated.resources.memory_mb, 768)
+        self.assertEqual(updated.resources.memory_mb, 2048)
         self.assertEqual(updated.warm_containers, 1)
 
     def test_5_delete_pool(self):
