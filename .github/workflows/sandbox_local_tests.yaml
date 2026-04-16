@@ -141,7 +141,7 @@ jobs:
           chmod +x /tmp/sandbox-proxy-build/sandbox-proxy
 
           cat > /tmp/sandbox-proxy-build/Dockerfile <<'EOF'
-          FROM docker.io/library/alpine:latest
+          FROM docker.io/library/debian:bookworm-slim
           COPY sandbox-proxy /usr/local/bin/sandbox-proxy
           ENTRYPOINT ["/usr/local/bin/sandbox-proxy"]
           EOF
