@@ -156,7 +156,7 @@ jobs:
 
           cat > /tmp/dataplane-config.yaml << EOF
           env: local
-          server_addr: "http://localhost:8900"
+          server_addr: "http://localhost:8901"
           sandbox_driver:
             type: docker
             default_sandbox_image: "sandbox-proxy-alpine:latest"
