@@ -47,6 +47,11 @@ jobs:
       - name: Set up Docker
         uses: docker/setup-docker-action@v4
 
+      - name: Start local Docker registry
+        run: |
+          docker run -d -p 5000:5000 --name registry registry:2
+          echo "Local registry running at localhost:5000"
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -141,9 +146,9 @@ jobs:
           ENTRYPOINT ["/usr/local/bin/sandbox-proxy"]
           EOF
 
-          docker build -t sandbox-proxy:local /tmp/sandbox-proxy-build/
-          echo "Built sandbox-proxy:local"
-          docker image ls sandbox-proxy:local
+          docker build -t localhost:5000/sandbox-proxy:local /tmp/sandbox-proxy-build/
+          docker push localhost:5000/sandbox-proxy:local
+          echo "Pushed localhost:5000/sandbox-proxy:local"
 
       - name: Generate Indexify Dataplane config
         run: |
@@ -158,7 +163,7 @@ jobs:
           cat > /tmp/dataplane-config.yaml << EOF
           env: local
           server_addr: "http://localhost:8901"
-          default_sandbox_image: "sandbox-proxy:local"
+          default_sandbox_image: "localhost:5000/sandbox-proxy:local"
           sandbox_driver:
             type: docker
             snapshot_local_dir: "/tmp/dataplane-snapshots"
@@ -187,5 +192,5 @@ jobs:
       - name: Run Sandbox integration tests
         env:
           TENSORLAKE_API_URL: http://127.0.0.1:8900
-          TENSORLAKE_SANDBOX_IMAGE: sandbox-proxy:local
+          TENSORLAKE_SANDBOX_IMAGE: localhost:5000/sandbox-proxy:local
         run: make test_sandbox
