@@ -147,7 +147,14 @@ jobs:
       - name: Generate Indexify Dataplane config
         run: |
           mkdir -p /tmp/dataplane-snapshots /tmp/dataplane-state
-          cat > /tmp/dataplane-config.yaml << 'EOF'
+
+          # Determine the Docker bridge gateway so containers can reach the host proxy.
+          # On Linux, this is the IP containers use to connect back to the host.
+          DOCKER_HOST_IP=$(docker network inspect bridge \
+            --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}')
+          echo "Docker bridge gateway: $DOCKER_HOST_IP"
+
+          cat > /tmp/dataplane-config.yaml << EOF
           env: local
           server_addr: "http://localhost:8900"
           sandbox_driver:
@@ -157,7 +164,7 @@ jobs:
           http_proxy:
             port: 9443
             listen_addr: "0.0.0.0"
-            advertise_address: "127.0.0.1:9443"
+            advertise_address: "$DOCKER_HOST_IP:9443"
           monitoring:
             port: 8100
           state_dir: "/tmp/dataplane-state"
