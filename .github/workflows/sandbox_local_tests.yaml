@@ -139,7 +139,7 @@ jobs:
           chmod +x /tmp/container-daemon-build/indexify-container-daemon
 
           cat > /tmp/container-daemon-build/Dockerfile <<'EOF'
-          FROM docker.io/library/debian:bookworm-slim
+          FROM docker.io/library/debian:trixie-slim
           COPY indexify-container-daemon /usr/local/bin/indexify-container-daemon
           ENTRYPOINT ["/usr/local/bin/indexify-container-daemon"]
           EOF
