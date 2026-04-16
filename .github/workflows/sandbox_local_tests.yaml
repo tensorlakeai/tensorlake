@@ -92,59 +92,45 @@ jobs:
           log-output: true
           log-output-if: true
 
-      - name: Start Background Indexify Dataplane
-        uses: JarvusInnovations/background-action@v1
-        with:
-          run: |
-            export PATH=$(poetry env info --path)/bin:$PATH
-            /usr/local/bin/platform-dataplane &
-          wait-on: |
-            tcp:localhost:8100
-          tail: true
-          wait-for: 30s
-          log-output: true
-          log-output-if: true
-
-      - name: Build minimal sandbox proxy image
+      - name: Extract sandbox proxy binary from Indexify Dataplane
         run: |
-          PROXY_BIN=""
+          # Start the dataplane briefly so it self-extracts its embedded proxy binary.
+          /usr/local/bin/platform-dataplane &
+          DP_PID=$!
 
-          # 1. Check if the proxy binary was shipped alongside platform-dataplane
-          #    in the container image (other executables in /indexify/).
-          for f in /tmp/indexify-contents/*; do
-            if [ -f "$f" ] && [ -x "$f" ] && [ "$(basename $f)" != "platform-dataplane" ]; then
-              PROXY_BIN="$f"
+          # Wait up to 30s for the well-known extraction path (/tmp/indexify-container-daemon).
+          PROXY_BIN=""
+          for i in $(seq 1 30); do
+            if [ -f /tmp/indexify-container-daemon ] && [ -x /tmp/indexify-container-daemon ]; then
+              PROXY_BIN=/tmp/indexify-container-daemon
               break
             fi
+            # Fallback: any new executable created after the dataplane binary was copied.
+            BIN=$(find /tmp -maxdepth 4 -type f -executable \
+              -newer /usr/local/bin/platform-dataplane 2>/dev/null | head -1)
+            if [ -n "$BIN" ]; then
+              PROXY_BIN=$BIN
+              break
+            fi
+            sleep 1
           done
 
-          # 2. Search common locations where the dataplane may extract the binary
-          #    at startup. Look for new executables created after the dataplane
-          #    binary itself was written to disk.
-          if [ -z "$PROXY_BIN" ]; then
-            PROXY_BIN=$(find /tmp /var/lib /usr/local/bin /root /home \
-              -maxdepth 6 -type f -executable \
-              -newer /usr/local/bin/platform-dataplane \
-              ! -name "platform-dataplane" \
-              2>/dev/null | head -1)
-          fi
+          # Stop the initial dataplane instance.
+          kill $DP_PID 2>/dev/null || true
+          sleep 2
 
-          # 3. Try to find the extraction path from string literals in the binary.
           if [ -z "$PROXY_BIN" ]; then
-            echo "=== Extraction path hints from platform-dataplane strings ==="
-            strings /usr/local/bin/platform-dataplane \
-              | grep -E "(proxy|sandbox.agent|extract|/tmp|/var/lib)" \
-              | head -40 || true
-            echo "=== /tmp contents after dataplane startup ==="
+            echo "=== /tmp contents ==="
             find /tmp -maxdepth 4 -type f 2>/dev/null | sort
-            echo "=== /usr/local/bin contents ==="
-            ls -la /usr/local/bin/
             echo "ERROR: could not find the sandbox proxy binary"
             exit 1
           fi
 
-          echo "Found sandbox proxy binary: $PROXY_BIN"
+          echo "Extracted proxy binary: $PROXY_BIN"
+          echo "PROXY_BIN=$PROXY_BIN" >> "$GITHUB_ENV"
 
+      - name: Build minimal sandbox proxy image
+        run: |
           mkdir -p /tmp/sandbox-proxy-build
           cp "$PROXY_BIN" /tmp/sandbox-proxy-build/sandbox-proxy
           chmod +x /tmp/sandbox-proxy-build/sandbox-proxy
@@ -157,10 +143,41 @@ jobs:
 
           docker build -t sandbox-proxy-alpine:latest /tmp/sandbox-proxy-build/
           echo "Built sandbox-proxy-alpine:latest"
-          echo "TENSORLAKE_SANDBOX_IMAGE=sandbox-proxy-alpine:latest" >> "$GITHUB_ENV"
+
+      - name: Generate Indexify Dataplane config
+        run: |
+          mkdir -p /tmp/dataplane-snapshots /tmp/dataplane-state
+          cat > /tmp/dataplane-config.yaml << 'EOF'
+          env: local
+          server_addr: "http://localhost:8900"
+          sandbox_driver:
+            type: docker
+            default_sandbox_image: "sandbox-proxy-alpine:latest"
+            snapshot_local_dir: "/tmp/dataplane-snapshots"
+          http_proxy:
+            port: 9443
+            listen_addr: "0.0.0.0"
+            advertise_address: "127.0.0.1:9443"
+          monitoring:
+            port: 8100
+          state_dir: "/tmp/dataplane-state"
+          EOF
+          echo "=== Generated dataplane config ==="
+          cat /tmp/dataplane-config.yaml
+
+      - name: Start Background Indexify Dataplane
+        uses: JarvusInnovations/background-action@v1
+        with:
+          run: /usr/local/bin/platform-dataplane --config /tmp/dataplane-config.yaml &
+          wait-on: |
+            tcp:localhost:9443
+          tail: true
+          wait-for: 30s
+          log-output: true
+          log-output-if: true
 
       - name: Run Sandbox integration tests
         env:
           TENSORLAKE_API_URL: http://127.0.0.1:8900
-          TENSORLAKE_SANDBOX_IMAGE: ${{ env.TENSORLAKE_SANDBOX_IMAGE }}
+          TENSORLAKE_SANDBOX_IMAGE: sandbox-proxy-alpine:latest
         run: make test_sandbox
