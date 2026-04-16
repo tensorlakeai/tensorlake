@@ -62,13 +62,20 @@ jobs:
         run: |
           docker pull ${{ steps.login-ecr.outputs.registry }}/platform-dataplane:latest
           container_id=$(docker create ${{ steps.login-ecr.outputs.registry }}/platform-dataplane:latest)
-          docker cp $container_id:/indexify/platform-dataplane /usr/local/bin/platform-dataplane
-          docker rm $container_id
+          mkdir -p /tmp/indexify-contents
+          docker cp $container_id:/indexify/. /tmp/indexify-contents/
+          echo "=== /indexify/ contents in platform-dataplane image ==="
+          ls -la /tmp/indexify-contents/
+          cp /tmp/indexify-contents/platform-dataplane /usr/local/bin/platform-dataplane
           chmod +x /usr/local/bin/platform-dataplane
+          docker rm $container_id
 
       - name: Start Background Indexify Server in Docker container
         uses: JarvusInnovations/background-action@v1
         with:
+          # Storage path must be the same in container and host
+          # so the Dataplane can access the local FS blob store.
+          # Use the same gid, uid to avoid blob access permission issues.
           run: |
             mkdir -p /tmp/indexify-server-storage/indexify_storage/blobs
             docker run -i -a stdout -a stderr --rm \
@@ -98,8 +105,62 @@ jobs:
           log-output: true
           log-output-if: true
 
+      - name: Build minimal sandbox proxy image
+        run: |
+          PROXY_BIN=""
+
+          # 1. Check if the proxy binary was shipped alongside platform-dataplane
+          #    in the container image (other executables in /indexify/).
+          for f in /tmp/indexify-contents/*; do
+            if [ -f "$f" ] && [ -x "$f" ] && [ "$(basename $f)" != "platform-dataplane" ]; then
+              PROXY_BIN="$f"
+              break
+            fi
+          done
+
+          # 2. Search common locations where the dataplane may extract the binary
+          #    at startup. Look for new executables created after the dataplane
+          #    binary itself was written to disk.
+          if [ -z "$PROXY_BIN" ]; then
+            PROXY_BIN=$(find /tmp /var/lib /usr/local/bin /root /home \
+              -maxdepth 6 -type f -executable \
+              -newer /usr/local/bin/platform-dataplane \
+              ! -name "platform-dataplane" \
+              2>/dev/null | head -1)
+          fi
+
+          # 3. Try to find the extraction path from string literals in the binary.
+          if [ -z "$PROXY_BIN" ]; then
+            echo "=== Extraction path hints from platform-dataplane strings ==="
+            strings /usr/local/bin/platform-dataplane \
+              | grep -E "(proxy|sandbox.agent|extract|/tmp|/var/lib)" \
+              | head -40 || true
+            echo "=== /tmp contents after dataplane startup ==="
+            find /tmp -maxdepth 4 -type f 2>/dev/null | sort
+            echo "=== /usr/local/bin contents ==="
+            ls -la /usr/local/bin/
+            echo "ERROR: could not find the sandbox proxy binary"
+            exit 1
+          fi
+
+          echo "Found sandbox proxy binary: $PROXY_BIN"
+
+          mkdir -p /tmp/sandbox-proxy-build
+          cp "$PROXY_BIN" /tmp/sandbox-proxy-build/sandbox-proxy
+          chmod +x /tmp/sandbox-proxy-build/sandbox-proxy
+
+          cat > /tmp/sandbox-proxy-build/Dockerfile <<'EOF'
+          FROM docker.io/library/alpine:latest
+          COPY sandbox-proxy /usr/local/bin/sandbox-proxy
+          ENTRYPOINT ["/usr/local/bin/sandbox-proxy"]
+          EOF
+
+          docker build -t sandbox-proxy-alpine:latest /tmp/sandbox-proxy-build/
+          echo "Built sandbox-proxy-alpine:latest"
+          echo "TENSORLAKE_SANDBOX_IMAGE=sandbox-proxy-alpine:latest" >> "$GITHUB_ENV"
+
       - name: Run Sandbox integration tests
         env:
           TENSORLAKE_API_URL: http://127.0.0.1:8900
-          TENSORLAKE_SANDBOX_IMAGE: tensorlake/ubuntu-minimal
+          TENSORLAKE_SANDBOX_IMAGE: ${{ env.TENSORLAKE_SANDBOX_IMAGE }}
         run: make test_sandbox
