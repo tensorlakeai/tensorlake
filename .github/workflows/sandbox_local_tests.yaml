@@ -46,11 +46,13 @@ jobs:
 
       - name: Set up Docker
         uses: docker/setup-docker-action@v4
+        with:
+          daemon-config: '{"insecure-registries": ["127.0.0.1:5000"]}'
 
       - name: Start local Docker registry
         run: |
-          docker run -d -p 5000:5000 --name registry registry:2
-          echo "Local registry running at localhost:5000"
+          docker run -d -p 127.0.0.1:5000:5000 --name registry registry:2
+          echo "Local registry running at 127.0.0.1:5000"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -103,16 +105,12 @@ jobs:
           /usr/local/bin/platform-dataplane &
           DP_PID=$!
 
-          # Wait up to 30s for the well-known extraction path (/tmp/indexify-container-daemon).
+          # Wait up to 30s for indexify-container-daemon to appear in its extraction dir.
+          # The dataplane extracts it to /tmp/indexify-runtime/uid-<uid>/<hash>/indexify-container-daemon.
           PROXY_BIN=""
           for i in $(seq 1 30); do
-            if [ -f /tmp/indexify-container-daemon ] && [ -x /tmp/indexify-container-daemon ]; then
-              PROXY_BIN=/tmp/indexify-container-daemon
-              break
-            fi
-            # Fallback: any new executable created after the dataplane binary was copied.
-            BIN=$(find /tmp -maxdepth 4 -type f -executable \
-              -newer /usr/local/bin/platform-dataplane 2>/dev/null | head -1)
+            BIN=$(find /tmp/indexify-runtime -name "indexify-container-daemon" \
+              -type f -executable 2>/dev/null | head -1)
             if [ -n "$BIN" ]; then
               PROXY_BIN=$BIN
               break
@@ -126,7 +124,7 @@ jobs:
 
           if [ -z "$PROXY_BIN" ]; then
             echo "=== /tmp contents ==="
-            find /tmp -maxdepth 4 -type f 2>/dev/null | sort
+            find /tmp -maxdepth 6 -type f 2>/dev/null | sort
             echo "ERROR: could not find the sandbox proxy binary"
             exit 1
           fi
@@ -146,9 +144,9 @@ jobs:
           ENTRYPOINT ["/usr/local/bin/sandbox-proxy"]
           EOF
 
-          docker build -t localhost:5000/sandbox-proxy:local /tmp/sandbox-proxy-build/
-          docker push localhost:5000/sandbox-proxy:local
-          echo "Pushed localhost:5000/sandbox-proxy:local"
+          docker build -t 127.0.0.1:5000/sandbox-proxy:local /tmp/sandbox-proxy-build/
+          docker push 127.0.0.1:5000/sandbox-proxy:local
+          echo "Pushed 127.0.0.1:5000/sandbox-proxy:local"
 
       - name: Generate Indexify Dataplane config
         run: |
@@ -163,7 +161,7 @@ jobs:
           cat > /tmp/dataplane-config.yaml << EOF
           env: local
           server_addr: "http://localhost:8901"
-          default_sandbox_image: "localhost:5000/sandbox-proxy:local"
+          default_sandbox_image: "127.0.0.1:5000/sandbox-proxy:local"
           sandbox_driver:
             type: docker
             snapshot_local_dir: "/tmp/dataplane-snapshots"
