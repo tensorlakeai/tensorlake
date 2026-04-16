@@ -1,0 +1,105 @@
+name: Sandbox Local Integration Tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'main'
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    branches:
+      - 'main'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  test_sandbox_local:
+    name: Sandbox integration tests (local)
+    runs-on: ubuntu-latest-xlarge
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: "pip"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 2.0.0
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Build tensorlake
+        run: make build
+
+      - name: Set up Docker
+        uses: docker/setup-docker-action@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: github-actions-sandbox-local
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Extract Indexify Dataplane from container image to host
+        run: |
+          docker pull ${{ steps.login-ecr.outputs.registry }}/platform-dataplane:latest
+          container_id=$(docker create ${{ steps.login-ecr.outputs.registry }}/platform-dataplane:latest)
+          docker cp $container_id:/indexify/platform-dataplane /usr/local/bin/platform-dataplane
+          docker rm $container_id
+          chmod +x /usr/local/bin/platform-dataplane
+
+      - name: Start Background Indexify Server in Docker container
+        uses: JarvusInnovations/background-action@v1
+        with:
+          run: |
+            mkdir -p /tmp/indexify-server-storage/indexify_storage/blobs
+            docker run -i -a stdout -a stderr --rm \
+              --network host \
+              --user "$(id -u):$(id -g)" \
+              --name indexify-server \
+              -v /tmp/indexify-server-storage:/tmp/indexify-server-storage \
+              -w /tmp/indexify-server-storage \
+              ${{ steps.login-ecr.outputs.registry }}/indexify-server:latest &
+          wait-on: |
+            tcp:localhost:8900
+          tail: true
+          wait-for: 30s
+          log-output: true
+          log-output-if: true
+
+      - name: Start Background Indexify Dataplane
+        uses: JarvusInnovations/background-action@v1
+        with:
+          run: |
+            export PATH=$(poetry env info --path)/bin:$PATH
+            /usr/local/bin/platform-dataplane &
+          wait-on: |
+            tcp:localhost:8100
+          tail: true
+          wait-for: 30s
+          log-output: true
+          log-output-if: true
+
+      - name: Run Sandbox integration tests
+        env:
+          TENSORLAKE_API_URL: http://127.0.0.1:8900
+          TENSORLAKE_SANDBOX_IMAGE: docker.io/library/alpine:latest
+        run: make test_sandbox
