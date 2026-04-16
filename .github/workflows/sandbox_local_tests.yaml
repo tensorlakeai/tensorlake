@@ -193,4 +193,17 @@ jobs:
         env:
           TENSORLAKE_API_URL: http://127.0.0.1:8900
           TENSORLAKE_SANDBOX_IMAGE: localhost:5000/sandbox-proxy:local
-        run: make test_sandbox
+        run: |
+          make build_cloud_sdk
+          # TestSandboxRun (sandbox.run / POST /api/v1/processes/run SSE) is
+          # excluded here: the ECR platform-dataplane:latest proxy binary does
+          # not yet support the streaming endpoint added in commit 157ad75.
+          cd tests/sandbox && poetry run python -m unittest -v \
+            test_lifecycle.TestSandboxLifecycle \
+            test_lifecycle.TestPoolLifecycle \
+            test_lifecycle.TestPoolWithSandboxes \
+            test_lifecycle.TestWarmContainers \
+            test_lifecycle.TestMaxContainers \
+            test_lifecycle.TestPoolDeletion \
+            test_lifecycle.TestSandboxTimeout \
+            test_lifecycle.TestNamedSandboxIdentifier
