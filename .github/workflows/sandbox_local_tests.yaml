@@ -141,8 +141,9 @@ jobs:
           ENTRYPOINT ["/usr/local/bin/sandbox-proxy"]
           EOF
 
-          docker build -t sandbox-proxy-alpine:latest /tmp/sandbox-proxy-build/
-          echo "Built sandbox-proxy-alpine:latest"
+          docker build -t sandbox-proxy:local /tmp/sandbox-proxy-build/
+          echo "Built sandbox-proxy:local"
+          docker image ls sandbox-proxy:local
 
       - name: Generate Indexify Dataplane config
         run: |
@@ -157,9 +158,9 @@ jobs:
           cat > /tmp/dataplane-config.yaml << EOF
           env: local
           server_addr: "http://localhost:8901"
+          default_sandbox_image: "sandbox-proxy:local"
           sandbox_driver:
             type: docker
-            default_sandbox_image: "sandbox-proxy-alpine:latest"
             snapshot_local_dir: "/tmp/dataplane-snapshots"
           http_proxy:
             port: 9443
@@ -186,5 +187,5 @@ jobs:
       - name: Run Sandbox integration tests
         env:
           TENSORLAKE_API_URL: http://127.0.0.1:8900
-          TENSORLAKE_SANDBOX_IMAGE: sandbox-proxy-alpine:latest
+          TENSORLAKE_SANDBOX_IMAGE: sandbox-proxy:local
         run: make test_sandbox
