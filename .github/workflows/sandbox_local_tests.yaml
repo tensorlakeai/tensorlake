@@ -101,5 +101,5 @@ jobs:
       - name: Run Sandbox integration tests
         env:
           TENSORLAKE_API_URL: http://127.0.0.1:8900
-          TENSORLAKE_SANDBOX_IMAGE: docker.io/library/alpine:latest
+          TENSORLAKE_SANDBOX_IMAGE: tensorlake/ubuntu-minimal
         run: make test_sandbox
