@@ -52,7 +52,7 @@ jobs:
       - name: Start local Docker registry
         run: |
           docker run -d -p 127.0.0.1:5000:5000 --name registry registry:2
-          echo "Local registry running at 127.0.0.1:5000"
+          echo "Local Docker registry running at 127.0.0.1:5000"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -99,20 +99,20 @@ jobs:
           log-output: true
           log-output-if: true
 
-      - name: Extract sandbox proxy binary from Indexify Dataplane
+      - name: Extract container daemon binary from Indexify Dataplane
         run: |
-          # Start the dataplane briefly so it self-extracts its embedded proxy binary.
+          # Start the dataplane briefly so it self-extracts its embedded container daemon binary.
           /usr/local/bin/platform-dataplane &
           DP_PID=$!
 
           # Wait up to 30s for indexify-container-daemon to appear in its extraction dir.
           # The dataplane extracts it to /tmp/indexify-runtime/uid-<uid>/<hash>/indexify-container-daemon.
-          PROXY_BIN=""
+          DAEMON_BIN=""
           for i in $(seq 1 30); do
             BIN=$(find /tmp/indexify-runtime -name "indexify-container-daemon" \
               -type f -executable 2>/dev/null | head -1)
             if [ -n "$BIN" ]; then
-              PROXY_BIN=$BIN
+              DAEMON_BIN=$BIN
               break
             fi
             sleep 1
@@ -122,31 +122,31 @@ jobs:
           kill $DP_PID 2>/dev/null || true
           sleep 2
 
-          if [ -z "$PROXY_BIN" ]; then
+          if [ -z "$DAEMON_BIN" ]; then
             echo "=== /tmp contents ==="
             find /tmp -maxdepth 6 -type f 2>/dev/null | sort
-            echo "ERROR: could not find the sandbox proxy binary"
+            echo "ERROR: could not find the container daemon binary"
             exit 1
           fi
 
-          echo "Extracted proxy binary: $PROXY_BIN"
-          echo "PROXY_BIN=$PROXY_BIN" >> "$GITHUB_ENV"
+          echo "Extracted container daemon binary: $DAEMON_BIN"
+          echo "DAEMON_BIN=$DAEMON_BIN" >> "$GITHUB_ENV"
 
-      - name: Build minimal sandbox proxy image
+      - name: Build minimal container daemon image
         run: |
-          mkdir -p /tmp/sandbox-proxy-build
-          cp "$PROXY_BIN" /tmp/sandbox-proxy-build/sandbox-proxy
-          chmod +x /tmp/sandbox-proxy-build/sandbox-proxy
+          mkdir -p /tmp/container-daemon-build
+          cp "$DAEMON_BIN" /tmp/container-daemon-build/indexify-container-daemon
+          chmod +x /tmp/container-daemon-build/indexify-container-daemon
 
-          cat > /tmp/sandbox-proxy-build/Dockerfile <<'EOF'
+          cat > /tmp/container-daemon-build/Dockerfile <<'EOF'
           FROM docker.io/library/debian:bookworm-slim
-          COPY sandbox-proxy /usr/local/bin/sandbox-proxy
-          ENTRYPOINT ["/usr/local/bin/sandbox-proxy"]
+          COPY indexify-container-daemon /usr/local/bin/indexify-container-daemon
+          ENTRYPOINT ["/usr/local/bin/indexify-container-daemon"]
           EOF
 
-          docker build -t 127.0.0.1:5000/sandbox-proxy:local /tmp/sandbox-proxy-build/
-          docker push 127.0.0.1:5000/sandbox-proxy:local
-          echo "Pushed 127.0.0.1:5000/sandbox-proxy:local"
+          docker build -t 127.0.0.1:5000/container-daemon:local /tmp/container-daemon-build/
+          docker push 127.0.0.1:5000/container-daemon:local
+          echo "Pushed 127.0.0.1:5000/container-daemon:local"
 
       - name: Generate Indexify Dataplane config
         run: |
@@ -161,7 +161,7 @@ jobs:
           cat > /tmp/dataplane-config.yaml << EOF
           env: local
           server_addr: "http://localhost:8901"
-          default_sandbox_image: "127.0.0.1:5000/sandbox-proxy:local"
+          default_sandbox_image: "127.0.0.1:5000/container-daemon:local"
           sandbox_driver:
             type: docker
             snapshot_local_dir: "/tmp/dataplane-snapshots"
