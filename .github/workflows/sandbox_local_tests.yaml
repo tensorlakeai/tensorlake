@@ -2,13 +2,6 @@ name: Sandbox Local Integration Tests
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - 'main'
-  pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
-    branches:
-      - 'main'
 
 permissions:
   id-token: write
