@@ -13,6 +13,7 @@ export interface HttpClientOptions {
   organizationId?: string;
   projectId?: string;
   hostHeader?: string;
+  routingHint?: string;
   maxRetries?: number;
   retryBackoffMs?: number;
   timeoutMs?: number;
@@ -61,6 +62,9 @@ export class HttpClient {
     }
     if (options.hostHeader) {
       this.headers["Host"] = options.hostHeader;
+    }
+    if (options.routingHint) {
+      this.headers["X-Tensorlake-Route-Hint"] = options.routingHint;
     }
   }
 

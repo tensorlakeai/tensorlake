@@ -314,6 +314,7 @@ export class Sandbox {
       organizationId: options.organizationId,
       projectId: options.projectId,
       hostHeader,
+      routingHint: options.routingHint,
     });
   }
 
