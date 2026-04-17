@@ -118,6 +118,7 @@ class Sandbox:
         project_id: str | None = None,
         *,
         sandbox_id: str | None = None,
+        routing_hint: str | None = None,
     ):
         if identifier and sandbox_id and identifier != sandbox_id:
             raise SandboxError(
@@ -164,6 +165,7 @@ class Sandbox:
                 api_key=api_key,
                 organization_id=organization_id,
                 project_id=project_id,
+                routing_hint=routing_hint,
             )
             self._base_url = self._rust_client.base_url()
         except Exception as e:

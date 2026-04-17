@@ -884,6 +884,7 @@ class SandboxClient:
         *,
         proxy_url: str | None = None,
         sandbox_id: str | None = None,
+        routing_hint: str | None = None,
     ) -> "Sandbox":
         """Connect to a running sandbox for process and file operations.
 
@@ -914,6 +915,7 @@ class SandboxClient:
             api_key=self._api_key,
             organization_id=self._organization_id,
             project_id=self._project_id,
+            routing_hint=routing_hint,
         )
         sandbox._lifecycle_client = self
         return sandbox
@@ -991,6 +993,19 @@ class SandboxClient:
                 snapshot_id=snapshot_id,
                 name=name,
             )
+
+        # Fast path: the blocking create/claim response already carries Running status
+        # and a short-lived routing hint. Use it immediately to skip an extra poll RTT
+        # and let the proxy route the first request without a placement lookup.
+        if result.status == SandboxStatus.RUNNING:
+            sandbox = self.connect(
+                result.sandbox_id,
+                proxy_url=proxy_url,
+                routing_hint=result.routing_hint,
+            )
+            sandbox._owns_sandbox = True
+            sandbox._lifecycle_client = self
+            return sandbox
 
         deadline = time.time() + startup_timeout
         while time.time() < deadline:

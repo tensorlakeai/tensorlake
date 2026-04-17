@@ -73,6 +73,8 @@ pub struct SandboxPoolRequest {
 pub struct CreateSandboxResponse {
     pub sandbox_id: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_hint: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

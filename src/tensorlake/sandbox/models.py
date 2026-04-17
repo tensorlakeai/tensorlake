@@ -151,6 +151,7 @@ class CreateSandboxResponse(BaseModel):
 
     sandbox_id: str
     status: SandboxStatus
+    routing_hint: str | None = None
 
 
 class SandboxInfo(BaseModel):

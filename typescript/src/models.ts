@@ -93,6 +93,7 @@ export interface UpdateSandboxOptions {
 export interface CreateSandboxResponse {
   sandboxId: string;
   status: SandboxStatus;
+  routingHint?: string;
 }
 
 export interface SandboxInfo {
@@ -326,6 +327,7 @@ export interface SandboxOptions {
   apiKey?: string;
   organizationId?: string;
   projectId?: string;
+  routingHint?: string;
 }
 
 export interface CreateAndConnectOptions extends CreateSandboxOptions {

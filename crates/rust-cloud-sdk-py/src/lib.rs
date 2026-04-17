@@ -784,13 +784,14 @@ pub struct CloudSandboxProxyClient {
 #[pymethods]
 impl CloudSandboxProxyClient {
     #[new]
-    #[pyo3(signature = (proxy_url, sandbox_id, api_key=None, organization_id=None, project_id=None))]
+    #[pyo3(signature = (proxy_url, sandbox_id, api_key=None, organization_id=None, project_id=None, routing_hint=None))]
     fn new(
         proxy_url: String,
         sandbox_id: String,
         api_key: Option<String>,
         organization_id: Option<String>,
         project_id: Option<String>,
+        routing_hint: Option<String>,
     ) -> PyResult<Self> {
         let (base_url, host_override) = resolve_proxy_target(&proxy_url, &sandbox_id)?;
 
@@ -813,7 +814,8 @@ impl CloudSandboxProxyClient {
                 format!("failed to create tokio runtime: {e}"),
             ))
         })?;
-        let sandbox_proxy_client = SandboxProxyClient::new(client, host_override);
+        let sandbox_proxy_client =
+            SandboxProxyClient::new(client, host_override).with_routing_hint(routing_hint);
 
         Ok(Self {
             client: sandbox_proxy_client,

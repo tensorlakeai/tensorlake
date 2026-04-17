@@ -395,7 +395,7 @@ export class SandboxClient {
 
   // --- Connect ---
 
-  connect(identifier: string, proxyUrl?: string): Sandbox {
+  connect(identifier: string, proxyUrl?: string, routingHint?: string): Sandbox {
     const resolvedProxy = proxyUrl ?? resolveProxyUrl(this.apiUrl);
     return new Sandbox({
       sandboxId: identifier,
@@ -403,6 +403,7 @@ export class SandboxClient {
       apiKey: this.apiKey,
       organizationId: this.organizationId,
       projectId: this.projectId,
+      routingHint,
     });
   }
 
@@ -416,6 +417,15 @@ export class SandboxClient {
       result = await this.claim(options.poolId);
     } else {
       result = await this.create(options);
+    }
+
+    // Fast path: the blocking create/claim response already carries Running status
+    // and a short-lived routing hint. Use it immediately to skip an extra poll RTT
+    // and let the proxy route the first request without a placement lookup.
+    if (result.status === SandboxStatus.RUNNING) {
+      const sandbox = this.connect(result.sandboxId, options?.proxyUrl, result.routingHint);
+      sandbox._setOwner(this);
+      return sandbox;
     }
 
     const deadline = Date.now() + startupTimeout * 1000;
