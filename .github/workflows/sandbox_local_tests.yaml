@@ -141,6 +141,7 @@ jobs:
           cat > /tmp/container-daemon-build/Dockerfile <<'EOF'
           FROM docker.io/library/debian:trixie-slim
           COPY indexify-container-daemon /usr/local/bin/indexify-container-daemon
+          EXPOSE 9500 9501
           ENTRYPOINT ["/usr/local/bin/indexify-container-daemon"]
           EOF
 
