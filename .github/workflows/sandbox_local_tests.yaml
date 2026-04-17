@@ -1,0 +1,187 @@
+name: Sandbox Local Integration Tests
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  test_sandbox_local:
+    name: Sandbox integration tests (local)
+    runs-on: ubuntu-latest-xlarge
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: "pip"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 2.0.0
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Build tensorlake
+        run: make build
+
+      - name: Set up Docker
+        uses: docker/setup-docker-action@v4
+        with:
+          daemon-config: '{"insecure-registries": ["127.0.0.1:5000"]}'
+
+      - name: Start local Docker registry
+        run: |
+          docker run -d -p 127.0.0.1:5000:5000 --name registry registry:2
+          echo "Local Docker registry running at 127.0.0.1:5000"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: github-actions-sandbox-local
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Extract Indexify Dataplane from container image to host
+        run: |
+          docker pull ${{ steps.login-ecr.outputs.registry }}/platform-dataplane:latest
+          container_id=$(docker create ${{ steps.login-ecr.outputs.registry }}/platform-dataplane:latest)
+          mkdir -p /tmp/indexify-contents
+          docker cp $container_id:/indexify/. /tmp/indexify-contents/
+          echo "=== /indexify/ contents in platform-dataplane image ==="
+          ls -la /tmp/indexify-contents/
+          cp /tmp/indexify-contents/platform-dataplane /usr/local/bin/platform-dataplane
+          chmod +x /usr/local/bin/platform-dataplane
+          docker rm $container_id
+
+      - name: Start Background Indexify Server in Docker container
+        uses: JarvusInnovations/background-action@v1
+        with:
+          # Storage path must be the same in container and host
+          # so the Dataplane can access the local FS blob store.
+          # Use the same gid, uid to avoid blob access permission issues.
+          run: |
+            mkdir -p /tmp/indexify-server-storage/indexify_storage/blobs
+            docker run -i -a stdout -a stderr --rm \
+              --network host \
+              --user "$(id -u):$(id -g)" \
+              --name indexify-server \
+              -v /tmp/indexify-server-storage:/tmp/indexify-server-storage \
+              -w /tmp/indexify-server-storage \
+              ${{ steps.login-ecr.outputs.registry }}/indexify-server:latest &
+          wait-on: |
+            tcp:localhost:8900
+          tail: true
+          wait-for: 30s
+          log-output: true
+          log-output-if: true
+
+      - name: Extract container daemon binary from Indexify Dataplane
+        run: |
+          # Start the dataplane briefly so it self-extracts its embedded container daemon binary.
+          /usr/local/bin/platform-dataplane &
+          DP_PID=$!
+
+          # Wait up to 30s for indexify-container-daemon to appear in its extraction dir.
+          # The dataplane extracts it to /tmp/indexify-runtime/uid-<uid>/<hash>/indexify-container-daemon.
+          DAEMON_BIN=""
+          for i in $(seq 1 30); do
+            BIN=$(find /tmp/indexify-runtime -name "indexify-container-daemon" \
+              -type f -executable 2>/dev/null | head -1)
+            if [ -n "$BIN" ]; then
+              DAEMON_BIN=$BIN
+              break
+            fi
+            sleep 1
+          done
+
+          # Stop the initial dataplane instance.
+          kill $DP_PID 2>/dev/null || true
+          sleep 2
+
+          if [ -z "$DAEMON_BIN" ]; then
+            echo "=== /tmp contents ==="
+            find /tmp -maxdepth 6 -type f 2>/dev/null | sort
+            echo "ERROR: could not find the container daemon binary"
+            exit 1
+          fi
+
+          echo "Extracted container daemon binary: $DAEMON_BIN"
+          echo "DAEMON_BIN=$DAEMON_BIN" >> "$GITHUB_ENV"
+
+      - name: Build minimal container daemon image
+        run: |
+          mkdir -p /tmp/container-daemon-build
+          cp "$DAEMON_BIN" /tmp/container-daemon-build/indexify-container-daemon
+          chmod +x /tmp/container-daemon-build/indexify-container-daemon
+
+          cat > /tmp/container-daemon-build/Dockerfile <<'EOF'
+          FROM docker.io/library/debian:trixie-slim
+          COPY indexify-container-daemon /usr/local/bin/indexify-container-daemon
+          EXPOSE 9500 9501
+          ENTRYPOINT ["/usr/local/bin/indexify-container-daemon"]
+          EOF
+
+          docker build -t 127.0.0.1:5000/container-daemon:local /tmp/container-daemon-build/
+          docker push 127.0.0.1:5000/container-daemon:local
+          echo "Pushed 127.0.0.1:5000/container-daemon:local"
+
+      - name: Generate Indexify Dataplane config
+        run: |
+          mkdir -p /tmp/dataplane-snapshots /tmp/dataplane-state
+
+          # Determine the Docker bridge gateway so containers can reach the host proxy.
+          # On Linux, this is the IP containers use to connect back to the host.
+          DOCKER_HOST_IP=$(docker network inspect bridge \
+            --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}')
+          echo "Docker bridge gateway: $DOCKER_HOST_IP"
+
+          cat > /tmp/dataplane-config.yaml << EOF
+          env: local
+          server_addr: "http://localhost:8901"
+          default_sandbox_image: "127.0.0.1:5000/container-daemon:local"
+          sandbox_driver:
+            type: docker
+            snapshot_local_dir: "/tmp/dataplane-snapshots"
+          http_proxy:
+            port: 9443
+            listen_addr: "0.0.0.0"
+            advertise_address: "$DOCKER_HOST_IP:9443"
+          monitoring:
+            port: 8100
+          state_dir: "/tmp/dataplane-state"
+          EOF
+          echo "=== Generated dataplane config ==="
+          cat /tmp/dataplane-config.yaml
+
+      - name: Start Background Indexify Dataplane
+        uses: JarvusInnovations/background-action@v1
+        with:
+          run: /usr/local/bin/platform-dataplane --config /tmp/dataplane-config.yaml &
+          wait-on: |
+            tcp:localhost:9443
+          tail: true
+          wait-for: 30s
+          log-output: true
+          log-output-if: true
+
+      - name: Run Sandbox integration tests
+        env:
+          TENSORLAKE_API_URL: http://127.0.0.1:8900
+        run: make test_sandbox

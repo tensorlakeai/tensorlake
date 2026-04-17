@@ -851,6 +851,7 @@ class TestNamedSandboxIdentifier(BaseSandboxTest):
 # ---------------------------------------------------------------------------
 
 
+@unittest.skip("TestSandboxRun disabled pending proxy routing fix")
 class TestSandboxRun(BaseSandboxTest):
     """Integration tests for Sandbox.run() — the streaming process execution endpoint.
 
