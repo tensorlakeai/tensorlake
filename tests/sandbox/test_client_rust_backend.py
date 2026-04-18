@@ -5,6 +5,7 @@ from unittest.mock import patch
 from tensorlake.sandbox import (
     PoolInUseError,
     SandboxNotFoundError,
+    SandboxStatus,
     SnapshotContentMode,
 )
 from tensorlake.sandbox.client import SandboxClient
@@ -19,6 +20,23 @@ class _FakeRustClient:
         self.create_snapshot_calls: list[tuple[str, str | None]] = []
         self.suspend_calls: list[str] = []
         self.resume_calls: list[str] = []
+        self.create_response_json = '{"sandbox_id":"sbx-1","status":"pending"}'
+        self.get_sandbox_response_json = """
+{
+  "id": "sbx-1",
+  "namespace": "default",
+  "status": "running",
+  "resources": {
+    "cpus": 1.0,
+    "memory_mb": 512,
+    "ephemeral_disk_mb": 1024
+  },
+  "secret_names": [],
+  "allow_unauthenticated_access": false,
+  "exposed_ports": [8080],
+  "sandbox_url": "https://sbx-1.sandbox.tensorlake.ai"
+}
+"""
 
     def close(self):
         return None
@@ -42,7 +60,7 @@ class _FakeRustClient:
 
     def create_sandbox(self, request_json):
         self.create_request_json = request_json
-        return '{"sandbox_id":"sbx-1","status":"pending"}'
+        return self.create_response_json
 
     def list_sandboxes_json(self):
         return """
@@ -65,22 +83,7 @@ class _FakeRustClient:
 
     def get_sandbox_json(self, sandbox_id):
         self.last_get_sandbox_id = sandbox_id
-        return """
-{
-  "id": "sbx-1",
-  "namespace": "default",
-  "status": "running",
-  "resources": {
-    "cpus": 1.0,
-    "memory_mb": 512,
-    "ephemeral_disk_mb": 1024
-  },
-  "secret_names": [],
-  "allow_unauthenticated_access": false,
-  "exposed_ports": [8080],
-  "sandbox_url": "https://sbx-1.sandbox.tensorlake.ai"
-}
-"""
+        return self.get_sandbox_response_json
 
     def update_sandbox(self, sandbox_id, request_json):
         self.last_get_sandbox_id = sandbox_id
@@ -360,6 +363,51 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertEqual(len(fake.create_snapshot_calls), 1)
         _, content_mode = fake.create_snapshot_calls[0]
         self.assertIsNone(content_mode)
+
+    def test_get_parses_suspending_status(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FakeRustClient()
+        fake.get_sandbox_response_json = """
+{
+  "id": "sbx-1",
+  "namespace": "default",
+  "status": "suspending",
+  "resources": {
+    "cpus": 1.0,
+    "memory_mb": 512,
+    "ephemeral_disk_mb": 1024
+  },
+  "secret_names": []
+}
+"""
+        client._rust_client = fake
+
+        info = client.get("sbx-1")
+
+        self.assertEqual(info.status, SandboxStatus.SUSPENDING)
+
+    def test_create_and_connect_raises_when_sandbox_suspends_during_startup(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FakeRustClient()
+        fake.get_sandbox_response_json = """
+{
+  "id": "sbx-1",
+  "namespace": "default",
+  "status": "suspended",
+  "resources": {
+    "cpus": 1.0,
+    "memory_mb": 512,
+    "ephemeral_disk_mb": 1024
+  },
+  "secret_names": []
+}
+"""
+        client._rust_client = fake
+
+        with self.assertRaisesRegex(
+            SandboxError, "Sandbox sbx-1 became suspended during startup"
+        ):
+            client.create_and_connect(startup_timeout=1)
 
 
 if __name__ == "__main__":

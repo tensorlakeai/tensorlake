@@ -95,6 +95,14 @@ with client.create_and_connect(image="tensorlake/ubuntu-minimal") as sandbox:
 # Sandbox is automatically terminated when the context manager exits
 ```
 
+`create_and_connect()` and TypeScript `createAndConnect()` wait for the sandbox
+to reach `running`. On newer servers, a sandbox can also become `suspended`
+during startup when a timeout fires. The SDKs surface `suspended` as a startup
+failure when they observe it via `get()`, but some server versions still fold
+that path into a generic startup timeout on the blocking create-and-wait
+endpoint. If you need to distinguish `suspended` from a true startup timeout,
+use `create()` and poll `get()` yourself.
+
 ### Snapshots
 
 Save the state of a sandbox and restore it later:

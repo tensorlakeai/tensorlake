@@ -969,6 +969,14 @@ class SandboxClient:
             name: Optional name for the sandbox. Named sandboxes support
                 suspend/resume. When absent the sandbox is ephemeral.
 
+        Note:
+            Some server versions can suspend a sandbox during startup but still
+            report the blocking create-and-wait flow as a generic startup
+            timeout. If you need to distinguish that case reliably, use
+            :meth:`create` and then poll :meth:`get` for
+            :attr:`SandboxStatus.RUNNING`, :attr:`SandboxStatus.SUSPENDED`, or
+            :attr:`SandboxStatus.TERMINATED`.
+
         Returns:
             Connected Sandbox instance (auto-terminates in context manager)
 

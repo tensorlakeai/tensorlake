@@ -238,6 +238,70 @@ describe("SandboxClient", () => {
     });
   });
 
+  describe("createAndConnect", () => {
+    it("fails fast when sandbox suspends during startup", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({ sandbox_id: "sbx-1", status: "pending" }),
+            { status: 200 },
+          ),
+        )
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              id: "sbx-1",
+              namespace: "default",
+              status: "suspended",
+              resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+              secret_names: [],
+            }),
+            { status: 200 },
+          ),
+        );
+      globalThis.fetch = fetchMock as typeof fetch;
+
+      const client = SandboxClient.forLocalhost();
+      await expect(client.createAndConnect({ startupTimeout: 1 })).rejects.toThrow(
+        "Sandbox sbx-1 became suspended during startup",
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      client.close();
+    });
+
+    it("still fails when sandbox terminates during startup", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({ sandbox_id: "sbx-1", status: "pending" }),
+            { status: 200 },
+          ),
+        )
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              id: "sbx-1",
+              namespace: "default",
+              status: "terminated",
+              resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+              secret_names: [],
+            }),
+            { status: 200 },
+          ),
+        );
+      globalThis.fetch = fetchMock as typeof fetch;
+
+      const client = SandboxClient.forLocalhost();
+      await expect(client.createAndConnect({ startupTimeout: 1 })).rejects.toThrow(
+        "Sandbox sbx-1 became terminated during startup",
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      client.close();
+    });
+  });
+
   describe("update", () => {
     it("updates an unnamed sandbox with a new name", async () => {
       mockFetch((url, init) => {

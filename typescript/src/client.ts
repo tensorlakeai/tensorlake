@@ -437,9 +437,12 @@ export class SandboxClient {
         sandbox._setOwner(this);
         return sandbox;
       }
-      if (info.status === SandboxStatus.TERMINATED) {
+      if (
+        info.status === SandboxStatus.SUSPENDED ||
+        info.status === SandboxStatus.TERMINATED
+      ) {
         throw new SandboxError(
-          `Sandbox ${result.sandboxId} terminated during startup`,
+          `Sandbox ${result.sandboxId} became ${info.status} during startup`,
         );
       }
       await sleep(500);
