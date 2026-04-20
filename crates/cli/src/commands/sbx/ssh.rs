@@ -96,7 +96,11 @@ pub async fn run(
                 | "ansi"
                 | "linux"
         );
-        if portable { raw } else { "xterm-256color".to_string() }
+        if portable {
+            raw
+        } else {
+            "xterm-256color".to_string()
+        }
     };
 
     // Let the first PTY request trigger the existing server-side wake-up path
