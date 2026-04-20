@@ -26,12 +26,14 @@ install-dev-release:
 	@cp tensorlake.data/scripts/* $$(poetry env info --path)/bin/
 	@echo "Done. Activate the venv with 'poetry shell' or prefix commands with 'poetry run'."
 
-# Global install: builds the Rust CLI (release) and installs the Python package
-# into the user's Python environment (~/.local/) so that `tl`, `tensorlake`, and
-# all wrapper scripts work from any directory without activating a virtualenv.
-# Requires: pip and maturin available outside any virtualenv.
+# Global install: builds the Rust extension and the Python package and installs
+# both into the user's Python environment (~/.local/) so that `tl`, `tensorlake`,
+# and all wrapper scripts work from any directory without activating a virtualenv.
 # After running, ensure ~/.local/bin is on your PATH.
 install-global:
+	@rm -rf dist
+	@poetry run maturin build --release --manifest-path crates/rust-cloud-sdk-py/Cargo.toml --out dist
+	@pip3 install --user --break-system-packages --force-reinstall dist/*.whl
 	@pip3 install --user --break-system-packages -e .
 	@echo "Done. Make sure ~/.local/bin is on your PATH."
 	@echo "  fish: fish_add_path ~/.local/bin"
@@ -84,11 +86,11 @@ test_sandbox:
 # extension, bundles its native module into the main wheel, then installs into a
 # temporary venv and verifies imports — all without touching PyPI.
 build_release:
-	@rm -rf dist dist-cloud-sdk
+	@rm -rf dist
 	@echo "--- Building Cloud SDK extension ---"
-	@poetry run maturin build --manifest-path crates/rust-cloud-sdk-py/Cargo.toml --release --out dist-cloud-sdk
+	@poetry run maturin build --manifest-path crates/rust-cloud-sdk-py/Cargo.toml --release --out dist
 	@echo "--- Bundling native Cloud SDK extension into src/tensorlake/ ---"
-	@poetry run python .github/scripts/bundle_cloud_sdk_wheel.py "dist-cloud-sdk/tensorlake_rust_cloud_sdk-*.whl" src/tensorlake --require-abi3
+	@poetry run python .github/scripts/bundle_cloud_sdk_wheel.py "dist/tensorlake_rust_cloud_sdk-*.whl" src/tensorlake --require-abi3
 	@echo "--- Building main wheel ---"
 	@poetry run maturin build --release --out dist
 	@echo "--- Removing bundled native module from source tree ---"

@@ -1,24 +1,25 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as undici from "undici";
 import { SandboxClient } from "../src/client.js";
 import { SandboxStatus, SnapshotStatus } from "../src/models.js";
 import { SandboxError, SandboxNotFoundError } from "../src/errors.js";
 
-describe("SandboxClient", () => {
-  let originalFetch: typeof globalThis.fetch;
+vi.mock("undici", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("undici")>();
+  return { ...actual, fetch: vi.fn() };
+});
 
-  beforeEach(() => {
-    originalFetch = globalThis.fetch;
-  });
+describe("SandboxClient", () => {
 
   afterEach(() => {
-    globalThis.fetch = originalFetch;
+    vi.mocked(undici.fetch).mockReset();
     vi.restoreAllMocks();
   });
 
   function mockFetch(
     handler: (url: string, init?: RequestInit) => Response | Promise<Response>,
   ) {
-    globalThis.fetch = vi.fn(handler as typeof fetch);
+    vi.mocked(undici.fetch).mockImplementation(handler as typeof undici.fetch);
   }
 
   describe("construction", () => {
@@ -332,8 +333,7 @@ describe("SandboxClient", () => {
     });
 
     it("exposes ports by merging with existing ports", async () => {
-      const fetchMock = vi
-        .fn()
+      vi.mocked(undici.fetch)
         .mockResolvedValueOnce(
           new Response(
             JSON.stringify({
@@ -367,7 +367,7 @@ describe("SandboxClient", () => {
             ),
           );
         });
-      globalThis.fetch = fetchMock as typeof fetch;
+      
 
       const client = SandboxClient.forLocalhost();
       const info = await client.exposePorts("sbx-1", [8081, 8080], {
@@ -378,8 +378,7 @@ describe("SandboxClient", () => {
     });
 
     it("unexposes ports and disables unauthenticated access when none remain", async () => {
-      const fetchMock = vi
-        .fn()
+      vi.mocked(undici.fetch)
         .mockResolvedValueOnce(
           new Response(
             JSON.stringify({
@@ -413,7 +412,7 @@ describe("SandboxClient", () => {
             ),
           );
         });
-      globalThis.fetch = fetchMock as typeof fetch;
+      
 
       const client = SandboxClient.forLocalhost();
       const info = await client.unexposePorts("sbx-1", [8080]);

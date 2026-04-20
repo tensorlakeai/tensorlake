@@ -152,6 +152,7 @@ class CreateSandboxResponse(BaseModel):
     sandbox_id: str
     status: SandboxStatus
     routing_hint: str | None = None
+    name: str | None = None
 
 
 class SandboxInfo(BaseModel):
@@ -174,6 +175,7 @@ class SandboxInfo(BaseModel):
     allow_unauthenticated_access: bool = False
     exposed_ports: list[int] | None = None
     sandbox_url: str | None = None
+    routing_hint: str | None = None
 
     model_config = {"populate_by_name": True}
 

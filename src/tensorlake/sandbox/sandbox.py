@@ -6,6 +6,7 @@ import json
 from typing import TYPE_CHECKING, Iterator
 from urllib.parse import urlparse
 
+
 import httpx
 
 from . import _defaults
@@ -119,6 +120,7 @@ class Sandbox:
         *,
         sandbox_id: str | None = None,
         routing_hint: str | None = None,
+        _proxy_rust_client: object | None = None,
     ):
         if identifier and sandbox_id and identifier != sandbox_id:
             raise SandboxError(
@@ -131,6 +133,9 @@ class Sandbox:
             )
 
         self._identifier = sandbox_identifier
+        self._sandbox_id: str | None = None
+        self._name: str | None = None
+        self._name_loaded: bool = False
         self._cached_info: SandboxInfo | None = None
         self._owns_sandbox: bool = False
         self._lifecycle_client: SandboxClient | None = None
@@ -158,18 +163,22 @@ class Sandbox:
                 "Build/install it with `make build_rust_py_client`."
             )
 
-        try:
-            self._rust_client = RustCloudSandboxProxyClient(
-                proxy_url=proxy_url,
-                sandbox_id=sandbox_identifier,
-                api_key=api_key,
-                organization_id=organization_id,
-                project_id=project_id,
-                routing_hint=routing_hint,
-            )
+        if _proxy_rust_client is not None:
+            self._rust_client = _proxy_rust_client
             self._base_url = self._rust_client.base_url()
-        except Exception as e:
-            _raise_as_sandbox_error(e)
+        else:
+            try:
+                self._rust_client = RustCloudSandboxProxyClient(
+                    proxy_url=proxy_url,
+                    sandbox_id=sandbox_identifier,
+                    api_key=api_key,
+                    organization_id=organization_id,
+                    project_id=project_id,
+                    routing_hint=routing_hint,
+                )
+                self._base_url = self._rust_client.base_url()
+            except Exception as e:
+                _raise_as_sandbox_error(e)
 
     def _fetch_info(self) -> SandboxInfo:
         """Fetch and cache sandbox info from the server (lazy, once per instance)."""
@@ -185,12 +194,19 @@ class Sandbox:
     @property
     def sandbox_id(self) -> str:
         """The server-assigned UUID for this sandbox."""
-        return self._fetch_info().sandbox_id
+        if self._sandbox_id is not None:
+            return self._sandbox_id
+        self._sandbox_id = self._fetch_info().sandbox_id
+        return self._sandbox_id
 
     @property
     def name(self) -> str | None:
         """The human-readable name for this sandbox, or None if unnamed."""
-        return self._fetch_info().name
+        if self._name_loaded:
+            return self._name
+        self._name = self._fetch_info().name
+        self._name_loaded = True
+        return self._name
 
     def __enter__(self) -> Sandbox:
         return self

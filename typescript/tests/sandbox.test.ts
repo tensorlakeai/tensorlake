@@ -1,23 +1,24 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as undici from "undici";
 import { Sandbox } from "../src/sandbox.js";
 import { ProcessStatus } from "../src/models.js";
 
-describe("Sandbox", () => {
-  let originalFetch: typeof globalThis.fetch;
+vi.mock("undici", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("undici")>();
+  return { ...actual, fetch: vi.fn() };
+});
 
-  beforeEach(() => {
-    originalFetch = globalThis.fetch;
-  });
+describe("Sandbox", () => {
 
   afterEach(() => {
-    globalThis.fetch = originalFetch;
+    vi.mocked(undici.fetch).mockReset();
     vi.restoreAllMocks();
   });
 
   function mockFetch(
     handler: (url: string, init?: RequestInit) => Response | Promise<Response>,
   ) {
-    globalThis.fetch = vi.fn(handler as typeof fetch);
+    vi.mocked(undici.fetch).mockImplementation(handler as typeof undici.fetch);
   }
 
   function makeSandbox(id = "sbx-test"): Sandbox {

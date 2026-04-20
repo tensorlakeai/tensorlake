@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as undici from "undici";
 import { HttpClient } from "../src/http.js";
 import {
   PoolInUseError,
@@ -8,22 +9,22 @@ import {
   SandboxNotFoundError,
 } from "../src/errors.js";
 
-describe("HttpClient", () => {
-  let originalFetch: typeof globalThis.fetch;
+vi.mock("undici", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("undici")>();
+  return { ...actual, fetch: vi.fn() };
+});
 
-  beforeEach(() => {
-    originalFetch = globalThis.fetch;
-  });
+describe("HttpClient", () => {
 
   afterEach(() => {
-    globalThis.fetch = originalFetch;
+    vi.mocked(undici.fetch).mockReset();
     vi.restoreAllMocks();
   });
 
   function mockFetch(
     handler: (url: string, init?: RequestInit) => Response | Promise<Response>,
   ) {
-    globalThis.fetch = vi.fn(handler as typeof fetch);
+    vi.mocked(undici.fetch).mockImplementation(handler as typeof undici.fetch);
   }
 
   it("makes successful JSON requests", async () => {

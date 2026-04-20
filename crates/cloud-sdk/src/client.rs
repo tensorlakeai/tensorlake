@@ -133,6 +133,20 @@ impl Client {
         self.default_headers.clone()
     }
 
+    /// Create a new client that shares the same underlying HTTP connection pool but uses a
+    /// different base URL. Cloning `reqwest::Client` shares its Arc-backed connection pool, so
+    /// HTTP/2 connections established for one base URL can be reused (via connection coalescing)
+    /// when talking to another host that resolves to the same IP with the same TLS certificate.
+    pub fn with_base_url(&self, new_url: &str) -> Self {
+        let client = ReqwestClientBuilder::new(self.base_client.clone()).build();
+        Self {
+            base_url: new_url.to_string(),
+            base_client: self.base_client.clone(),
+            client,
+            default_headers: self.default_headers.clone(),
+        }
+    }
+
     /// Execute an HTTP request.
     pub async fn execute(&self, request: Request) -> Result<Response, SdkError> {
         let response = self.client.execute(request).await?;

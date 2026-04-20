@@ -1,3 +1,4 @@
+import { Agent, fetch as undiciFetch, setGlobalDispatcher } from "undici";
 import * as defaults from "./defaults.js";
 import {
   PoolInUseError,
@@ -18,6 +19,13 @@ export interface HttpClientOptions {
   retryBackoffMs?: number;
   timeoutMs?: number;
 }
+
+setGlobalDispatcher(
+  new Agent({
+    keepAliveTimeout: 60_000,
+    allowH2: true,
+  }),
+);
 
 type RequestBody = BodyInit | Uint8Array | ArrayBuffer;
 
@@ -109,15 +117,11 @@ export class HttpClient {
       headers["Content-Type"] = options.contentType;
     }
 
-    const response = await this.requestResponse(
-      method,
-      path,
-      {
-        body: options?.body,
-        headers,
-        signal: options?.signal,
-      },
-    );
+    const response = await this.requestResponse(method, path, {
+      body: options?.body,
+      headers,
+      signal: options?.signal,
+    });
     const buffer = await response.arrayBuffer();
     return new Uint8Array(buffer);
   }
@@ -128,17 +132,16 @@ export class HttpClient {
     path: string,
     options?: { signal?: AbortSignal; json?: unknown },
   ): Promise<ReadableStream<Uint8Array>> {
-    const response = await this.requestResponse(
-      method,
-      path,
-      {
-        json: options?.json,
-        headers: { Accept: "text/event-stream" },
-        signal: options?.signal,
-      },
-    );
+    const response = await this.requestResponse(method, path, {
+      json: options?.json,
+      headers: { Accept: "text/event-stream" },
+      signal: options?.signal,
+    });
     if (!response.body) {
-      throw new RemoteAPIError(response.status, "No response body for SSE stream");
+      throw new RemoteAPIError(
+        response.status,
+        "No response body for SSE stream",
+      );
     }
     return response.body;
   }
@@ -201,12 +204,12 @@ export class HttpClient {
         : this.abortController.signal;
 
       try {
-        const response = await fetch(url, {
+        const response = (await undiciFetch(url, {
           method,
           headers,
-          body,
+          body: body ?? null,
           signal: combinedSignal,
-        });
+        })) as Response;
 
         clearTimeout(timeoutId);
 
@@ -234,8 +237,12 @@ export class HttpClient {
       } catch (err) {
         clearTimeout(timeoutId);
 
-        if (err instanceof RemoteAPIError || err instanceof SandboxNotFoundError ||
-            err instanceof PoolNotFoundError || err instanceof PoolInUseError) {
+        if (
+          err instanceof RemoteAPIError ||
+          err instanceof SandboxNotFoundError ||
+          err instanceof PoolNotFoundError ||
+          err instanceof PoolInUseError
+        ) {
           throw err;
         }
 
@@ -244,8 +251,7 @@ export class HttpClient {
         }
 
         // Network / timeout error
-        lastError =
-          err instanceof Error ? err : new Error(String(err));
+        lastError = err instanceof Error ? err : new Error(String(err));
 
         if (attempt >= this.maxRetries) {
           throw new SandboxConnectionError(lastError.message);
@@ -273,11 +279,7 @@ function normalizeRequestBody(body?: RequestBody | null): BodyInit | undefined {
 }
 
 /** Map HTTP status codes to specific error types. */
-function throwMappedError(
-  status: number,
-  body: string,
-  path: string,
-): never {
+function throwMappedError(status: number, body: string, path: string): never {
   let message = body;
   try {
     const parsed = JSON.parse(body);

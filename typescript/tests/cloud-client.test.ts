@@ -1,22 +1,23 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as undici from "undici";
 import { CloudClient } from "../src/cloud-client.js";
 
-describe("CloudClient", () => {
-  let originalFetch: typeof globalThis.fetch;
+vi.mock("undici", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("undici")>();
+  return { ...actual, fetch: vi.fn() };
+});
 
-  beforeEach(() => {
-    originalFetch = globalThis.fetch;
-  });
+describe("CloudClient", () => {
 
   afterEach(() => {
-    globalThis.fetch = originalFetch;
+    vi.mocked(undici.fetch).mockReset();
     vi.restoreAllMocks();
   });
 
   function mockFetch(
     handler: (url: string, init?: RequestInit) => Response | Promise<Response>,
   ) {
-    globalThis.fetch = vi.fn(handler as typeof fetch);
+    vi.mocked(undici.fetch).mockImplementation(handler as typeof undici.fetch);
   }
 
   it("runs single-part requests as raw bodies when the part name is 0", async () => {
