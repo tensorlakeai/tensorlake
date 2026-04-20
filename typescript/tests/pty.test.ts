@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as undici from "undici";
 
 class MockWebSocket {
   static readonly CONNECTING = 0;
@@ -65,12 +66,15 @@ vi.mock("ws", () => ({
   default: MockWebSocket,
 }));
 
+vi.mock("undici", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("undici")>();
+  return { ...actual, fetch: vi.fn() };
+});
+
 describe("Sandbox PTY", () => {
-  let originalFetch: typeof globalThis.fetch;
   let Sandbox: typeof import("../src/sandbox.js").Sandbox;
 
   beforeEach(async () => {
-    originalFetch = globalThis.fetch;
     MockWebSocket.instances = [];
     MockWebSocket.failOnOpen = false;
     vi.resetModules();
@@ -78,14 +82,14 @@ describe("Sandbox PTY", () => {
   });
 
   afterEach(() => {
-    globalThis.fetch = originalFetch;
+    vi.mocked(undici.fetch).mockReset();
     vi.restoreAllMocks();
   });
 
   function mockFetch(
     handler: (url: string, init?: RequestInit) => Response | Promise<Response>,
   ) {
-    globalThis.fetch = vi.fn(handler as typeof fetch);
+    vi.mocked(undici.fetch).mockImplementation(handler as typeof undici.fetch);
   }
 
   function makeSandbox() {
@@ -212,7 +216,7 @@ describe("Sandbox PTY", () => {
     const pty = await sandbox.createPty({ command: "/bin/bash" });
 
     await expect(pty.kill()).resolves.toBeUndefined();
-    expect(globalThis.fetch).toHaveBeenCalledWith(
+    expect(vi.mocked(undici.fetch)).toHaveBeenCalledWith(
       "https://sbx-1.sandbox.tensorlake.ai/api/v1/pty/sess-4",
       expect.objectContaining({
         method: "DELETE",
@@ -244,7 +248,7 @@ describe("Sandbox PTY", () => {
       sandbox.createPty({ command: "/bin/bash" }),
     ).rejects.toThrow(/mock websocket connect failure|READY completed/);
 
-    expect(globalThis.fetch).toHaveBeenCalledWith(
+    expect(vi.mocked(undici.fetch)).toHaveBeenCalledWith(
       "https://sbx-1.sandbox.tensorlake.ai/api/v1/pty/sess-fail",
       expect.objectContaining({
         method: "DELETE",

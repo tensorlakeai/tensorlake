@@ -115,6 +115,7 @@ export interface SandboxInfo {
   allowUnauthenticatedAccess?: boolean;
   exposedPorts?: number[];
   sandboxUrl?: string;
+  routingHint?: string;
 }
 
 export interface SandboxPortAccess {

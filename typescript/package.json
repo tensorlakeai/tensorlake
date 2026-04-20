@@ -1,6 +1,6 @@
 {
   "name": "tensorlake",
-  "version": "0.4.47",
+  "version": "0.4.48",
   "description": "TensorLake SDK and CLI for applications, sandboxes, and cloud services",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -42,7 +42,7 @@
     "prepack": "npm run build"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   },
   "keywords": [
     "tensorlake",
@@ -67,6 +67,7 @@
     "vitest": "^2.0.0"
   },
   "dependencies": {
+    "undici": "^8.1.0",
     "ws": "^8.20.0"
   }
 }

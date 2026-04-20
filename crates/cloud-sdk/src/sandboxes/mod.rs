@@ -45,6 +45,10 @@ impl SandboxesClient {
         }
     }
 
+    pub fn http_client(&self) -> &Client {
+        &self.client
+    }
+
     fn endpoint(&self, endpoint: &str) -> String {
         if self.use_namespaced_endpoints {
             format!("/v1/namespaces/{}/{}", self.namespace, endpoint)

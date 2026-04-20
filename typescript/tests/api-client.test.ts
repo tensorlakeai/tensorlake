@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as undici from "undici";
 import { APIClient } from "../src/api-client.js";
 import {
   RequestExecutionError,
@@ -6,22 +7,22 @@ import {
   RequestNotFinishedError,
 } from "../src/errors.js";
 
-describe("APIClient", () => {
-  let originalFetch: typeof globalThis.fetch;
+vi.mock("undici", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("undici")>();
+  return { ...actual, fetch: vi.fn() };
+});
 
-  beforeEach(() => {
-    originalFetch = globalThis.fetch;
-  });
+describe("APIClient", () => {
 
   afterEach(() => {
-    globalThis.fetch = originalFetch;
+    vi.mocked(undici.fetch).mockReset();
     vi.restoreAllMocks();
   });
 
   function mockFetch(
     handler: (url: string, init?: RequestInit) => Response | Promise<Response>,
   ) {
-    globalThis.fetch = vi.fn(handler as typeof fetch);
+    vi.mocked(undici.fetch).mockImplementation(handler as typeof undici.fetch);
   }
 
   it("throws RequestNotFinishedError when output is requested too early", async () => {

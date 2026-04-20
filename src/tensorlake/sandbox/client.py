@@ -909,6 +909,12 @@ class SandboxClient:
         if proxy_url is None:
             proxy_url = self._resolve_proxy_url()
 
+        proxy_rust_client = self._rust_client.connect_proxy(
+            proxy_url=proxy_url,
+            sandbox_id=sandbox_identifier,
+            routing_hint=routing_hint,
+        )
+
         sandbox = Sandbox(
             identifier=sandbox_identifier,
             proxy_url=proxy_url,
@@ -916,6 +922,7 @@ class SandboxClient:
             organization_id=self._organization_id,
             project_id=self._project_id,
             routing_hint=routing_hint,
+            _proxy_rust_client=proxy_rust_client,
         )
         sandbox._lifecycle_client = self
         return sandbox
@@ -1003,6 +1010,9 @@ class SandboxClient:
                 proxy_url=proxy_url,
                 routing_hint=result.routing_hint,
             )
+            sandbox._sandbox_id = result.sandbox_id
+            sandbox._name = result.name
+            sandbox._name_loaded = True
             sandbox._owns_sandbox = True
             sandbox._lifecycle_client = self
             return sandbox
@@ -1011,7 +1021,15 @@ class SandboxClient:
         while time.time() < deadline:
             info = self.get(result.sandbox_id)
             if info.status == SandboxStatus.RUNNING:
-                sandbox = self.connect(result.sandbox_id, proxy_url=proxy_url)
+                sandbox = self.connect(
+                    result.sandbox_id,
+                    proxy_url=proxy_url,
+                    routing_hint=info.routing_hint,
+                )
+                sandbox._sandbox_id = info.sandbox_id
+                sandbox._name = info.name
+                sandbox._name_loaded = True
+                sandbox._cached_info = info
                 sandbox._owns_sandbox = True
                 sandbox._lifecycle_client = self
                 return sandbox

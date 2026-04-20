@@ -745,6 +745,35 @@ impl CloudSandboxClient {
             async move { client.delete_pool(&pool_id).await }
         })
     }
+
+    /// Create a proxy client for the given sandbox that shares this client's HTTP connection
+    /// pool. All proxy clients created this way reuse the same underlying reqwest::Client,
+    /// so HTTP/2 connections can be coalesced: only the first sandbox in a session pays the
+    /// TCP+TLS handshake cost.
+    #[pyo3(signature = (proxy_url, sandbox_id, routing_hint=None))]
+    fn connect_proxy(
+        &self,
+        proxy_url: String,
+        sandbox_id: String,
+        routing_hint: Option<String>,
+    ) -> PyResult<CloudSandboxProxyClient> {
+        let (base_url, host_override) = resolve_proxy_target(&proxy_url, &sandbox_id)?;
+        let shared_client = self.client.http_client().with_base_url(&base_url);
+        let proxy = SandboxProxyClient::new(shared_client, host_override)
+            .with_routing_hint(routing_hint);
+        let runtime = Runtime::new().map_err(|e| {
+            CloudSandboxClientError::new_err((
+                "internal",
+                Option::<u16>::None,
+                format!("failed to create tokio runtime: {e}"),
+            ))
+        })?;
+        Ok(CloudSandboxProxyClient {
+            client: proxy,
+            runtime,
+            base_url,
+        })
+    }
 }
 
 impl CloudSandboxProxyClient {

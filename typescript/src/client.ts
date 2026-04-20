@@ -433,7 +433,7 @@ export class SandboxClient {
     while (Date.now() < deadline) {
       const info = await this.get(result.sandboxId);
       if (info.status === SandboxStatus.RUNNING) {
-        const sandbox = this.connect(result.sandboxId, options?.proxyUrl);
+        const sandbox = this.connect(result.sandboxId, options?.proxyUrl, info.routingHint);
         sandbox._setOwner(this);
         return sandbox;
       }
