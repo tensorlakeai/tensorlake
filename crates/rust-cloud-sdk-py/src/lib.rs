@@ -759,8 +759,8 @@ impl CloudSandboxClient {
     ) -> PyResult<CloudSandboxProxyClient> {
         let (base_url, host_override) = resolve_proxy_target(&proxy_url, &sandbox_id)?;
         let shared_client = self.client.http_client().with_base_url(&base_url);
-        let proxy = SandboxProxyClient::new(shared_client, host_override)
-            .with_routing_hint(routing_hint);
+        let proxy =
+            SandboxProxyClient::new(shared_client, host_override).with_routing_hint(routing_hint);
         let runtime = Runtime::new().map_err(|e| {
             CloudSandboxClientError::new_err((
                 "internal",
