@@ -6,7 +6,6 @@ import json
 from typing import TYPE_CHECKING, Iterator
 from urllib.parse import urlparse
 
-
 import httpx
 
 from . import _defaults

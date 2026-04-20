@@ -1,4 +1,9 @@
-import { Agent, fetch as undiciFetch, setGlobalDispatcher } from "undici";
+import {
+  Agent,
+  fetch as undiciFetch,
+  setGlobalDispatcher,
+  type BodyInit as UndiciBodyInit,
+} from "undici";
 import * as defaults from "./defaults.js";
 import {
   PoolInUseError,
@@ -178,7 +183,7 @@ export class HttpClient {
   private async doFetch(
     method: string,
     path: string,
-    body: BodyInit | undefined,
+    body: UndiciBodyInit | undefined,
     headers: Record<string, string>,
     signal?: AbortSignal,
     allowHttpErrors = false,
@@ -207,7 +212,7 @@ export class HttpClient {
         const response = (await undiciFetch(url, {
           method,
           headers,
-          body: body ?? null,
+          body,
           signal: combinedSignal,
         })) as Response;
 
@@ -268,14 +273,16 @@ function hasHeader(headers: Record<string, string>, name: string): boolean {
   return Object.keys(headers).some((key) => key.toLowerCase() === lowered);
 }
 
-function normalizeRequestBody(body?: RequestBody | null): BodyInit | undefined {
+function normalizeRequestBody(
+  body?: RequestBody | null,
+): UndiciBodyInit | undefined {
   if (body == null) {
     return undefined;
   }
   if (body instanceof Uint8Array) {
-    return Uint8Array.from(body).buffer;
+    return Uint8Array.from(body).buffer as ArrayBuffer;
   }
-  return body;
+  return body as UndiciBodyInit;
 }
 
 /** Map HTTP status codes to specific error types. */
