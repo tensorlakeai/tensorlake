@@ -297,7 +297,7 @@ class Sandbox:
 
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
-        exit_code = -1
+        exit_code: int | None = None
 
         for event_json in events_json:
             event = json.loads(event_json)
@@ -311,6 +311,11 @@ class Sandbox:
                     exit_code = event["exit_code"]
                 elif event.get("signal") is not None:
                     exit_code = -event["signal"]
+
+        if exit_code is None:
+            raise SandboxConnectionError(
+                "sandbox process stream ended without an exit event"
+            )
 
         return CommandResult(
             exit_code=exit_code,

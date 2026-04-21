@@ -348,76 +348,108 @@ impl SandboxProxyClient {
     }
 
     pub async fn follow_stdout(&self, pid: i64) -> Result<Vec<OutputEvent>, SdkError> {
-        self.follow_stream(&format!("/api/v1/processes/{pid}/stdout/follow"))
-            .await
+        self.follow_stream(
+            Method::GET,
+            &format!("/api/v1/processes/{pid}/stdout/follow"),
+            None,
+            |data| -> Option<Result<OutputEvent, SdkError>> {
+                serde_json::from_str(data).ok().map(Ok)
+            },
+        )
+        .await
     }
 
     pub async fn follow_stderr(&self, pid: i64) -> Result<Vec<OutputEvent>, SdkError> {
-        self.follow_stream(&format!("/api/v1/processes/{pid}/stderr/follow"))
-            .await
+        self.follow_stream(
+            Method::GET,
+            &format!("/api/v1/processes/{pid}/stderr/follow"),
+            None,
+            |data| -> Option<Result<OutputEvent, SdkError>> {
+                serde_json::from_str(data).ok().map(Ok)
+            },
+        )
+        .await
     }
 
     pub async fn follow_output(&self, pid: i64) -> Result<Vec<OutputEvent>, SdkError> {
-        self.follow_stream(&format!("/api/v1/processes/{pid}/output/follow"))
-            .await
+        self.follow_stream(
+            Method::GET,
+            &format!("/api/v1/processes/{pid}/output/follow"),
+            None,
+            |data| -> Option<Result<OutputEvent, SdkError>> {
+                serde_json::from_str(data).ok().map(Ok)
+            },
+        )
+        .await
     }
 
     pub async fn run_process(&self, payload: &Value) -> Result<Vec<RunProcessEvent>, SdkError> {
-        let req = self
-            .request(Method::POST, "/api/v1/processes/run")
-            .header(ACCEPT, "text/event-stream")
-            .json(payload)
-            .build()?;
-        let response = self.client.execute_raw(req).await?;
-        let stream = response
-            .bytes_stream()
-            .eventsource()
-            .filter_map(move |event| async move {
-                match event {
-                    Ok(msg) => {
-                        // Single parse: try typed deserialization directly.
-                        // The Exited variant has all-optional fields so it acts
-                        // as a catch-all for unrecognised JSON (heartbeats, etc.).
-                        // Discard Exited{None, None} — a real exit always has at
-                        // least one of exit_code or signal.
-                        match serde_json::from_str::<RunProcessEvent>(&msg.data) {
-                            Ok(RunProcessEvent::Exited {
-                                exit_code: None,
-                                signal: None,
-                            }) => None,
-                            Ok(evt) => Some(Ok(evt)),
-                            Err(_) => None,
-                        }
-                    }
-                    Err(error) => Some(Err(SdkError::EventSourceError(error.to_string()))),
+        self.follow_stream(
+            Method::POST,
+            "/api/v1/processes/run",
+            Some(payload),
+            |data| -> Option<Result<RunProcessEvent, SdkError>> {
+                match serde_json::from_str(data) {
+                    Ok(RunProcessEvent::Exited {
+                        exit_code: None,
+                        signal: None,
+                    }) => None,
+                    Ok(evt) => Some(Ok(evt)),
+                    Err(_) => None,
                 }
-            });
-        futures::pin_mut!(stream);
-        let mut events = Vec::new();
-        while let Some(event) = stream.next().await {
-            events.push(event?);
-        }
-        Ok(events)
+            },
+        )
+        .await
     }
 
-    async fn follow_stream(&self, path: &str) -> Result<Vec<OutputEvent>, SdkError> {
-        let req = self
-            .request(Method::GET, path)
-            .header(ACCEPT, "text/event-stream")
-            .build()?;
-        let response = self.client.execute(req).await?;
-        let stream = response
-            .bytes_stream()
-            .eventsource()
-            .filter_map(move |event| async move {
-                match event {
-                    Ok(msg) => match serde_json::from_str::<OutputEvent>(&msg.data) {
-                        Ok(evt) => Some(Ok(evt)),
-                        Err(_) => None, // Skip non-output events (e.g. heartbeats)
-                    },
-                    Err(error) => Some(Err(SdkError::EventSourceError(error.to_string()))),
-                }
-            });
+    async fn follow_stream<T, E, F>(
+        &self,
+        method: Method,
+        path: &str,
+        payload: Option<&Value>,
+        filter_map: F,
+    ) -> Result<Vec<T>, SdkError>
+    where
+        E: Into<SdkError>,
+        F: Fn(&str) -> Option<Result<T, E>>,
+    {
+        let mut req = self
+            .request(method, path)
+            .header(ACCEPT, "text/event-stream");
+        if let Some(payload) = payload {
+            req = req.json(payload);
+        }
+
+        let response = self.client.execute(req.build()?).await?;
+
+        if !response.status().is_success() {
+            return Err(SdkError::ClientError(format!(
+                "expected success response from {path}, got status: {}",
+                response.status()
+            )));
+        }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+
+        if !content_type
+            .to_ascii_lowercase()
+            .contains("text/event-stream")
+        {
+            return Err(SdkError::ClientError(format!(
+                "expected text/event-stream response from {path}, got content-type: {content_type}"
+            )));
+        }
+        let stream = response.bytes_stream().eventsource().filter_map(|event| {
+            let result = match event {
+                Ok(msg) => filter_map(&msg.data).map(|r| r.map_err(Into::into)),
+                Err(error) => Some(Err(SdkError::EventSourceError(error.to_string()))),
+            };
+            async move { result }
+        });
         futures::pin_mut!(stream);
         let mut events = Vec::new();
         while let Some(event) = stream.next().await {

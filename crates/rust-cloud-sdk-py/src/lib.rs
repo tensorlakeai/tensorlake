@@ -793,9 +793,6 @@ impl CloudSandboxProxyClient {
 
                     retries += 1;
                     let sleep_time = calculate_sleep_time(retries);
-                    eprintln!(
-                        "Retrying rust sandbox proxy request after {sleep_time:.2} seconds. Retry count: {retries}. Retryable exception: {err}"
-                    );
                     std::thread::sleep(Duration::from_secs_f64(sleep_time));
                 }
             }
@@ -1019,7 +1016,7 @@ impl CloudSandboxProxyClient {
                 events
                     .into_iter()
                     .map(|event| serde_json::to_string(&event).map_err(SdkError::from))
-                    .collect()
+                    .collect::<Result<Vec<_>, _>>()
             }
         })
     }
