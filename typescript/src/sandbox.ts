@@ -8,7 +8,9 @@ import { SandboxError } from "./errors.js";
 import { HttpClient } from "./http.js";
 import {
   type CommandResult,
+  type CreateAndConnectOptions,
   type CreatePtySessionOptions,
+  type CreateSnapshotResponse,
   type DaemonInfo,
   type DirectoryEntry,
   type HealthResponse,
@@ -19,8 +21,13 @@ import {
   type ProcessInfo,
   type PtySessionInfo,
   type RunOptions,
+  type SandboxClientOptions,
   type SandboxOptions,
+  SandboxStatus,
   type SendSignalResponse,
+  type SnapshotAndWaitOptions,
+  type SnapshotContentMode,
+  type SnapshotInfo,
   type StartProcessOptions,
   StdinMode,
   fromSnakeKeys,
@@ -287,6 +294,8 @@ export class Sandbox {
   private readonly wsHeaders: Record<string, string>;
   private ownsSandbox = false;
   private lifecycleClient: SandboxClient | null = null;
+  private ownsLifecycleClient = false;
+  private resolvedSandboxId: string | null = null;
 
   constructor(options: SandboxOptions) {
     this.sandboxId = options.sandboxId;
@@ -324,18 +333,247 @@ export class Sandbox {
     this.lifecycleClient = client;
   }
 
+  /** @internal Used by SandboxClient.connect to wire the lifecycle client without taking ownership. */
+  _setLifecycleClient(client: SandboxClient): void {
+    this.lifecycleClient = client;
+  }
+
+  /**
+   * Close the proxy connection. The sandbox keeps running.
+   *
+   * The lifecycle client (if any) is preserved so that subsequent
+   * `terminate()` calls on this handle still work.
+   */
   close(): void {
     this.http.close();
   }
 
   async terminate(): Promise<void> {
-    const client = this.lifecycleClient;
     this.ownsSandbox = false;
-    this.lifecycleClient = null;
-    this.close();
-    if (client) {
-      await client.delete(this.sandboxId);
+    try {
+      if (this.lifecycleClient) {
+        await this.lifecycleClient.delete(this.sandboxId);
+      }
+    } finally {
+      this.close();
+      this.releaseOwnedLifecycleClient();
     }
+  }
+
+  private releaseOwnedLifecycleClient(): void {
+    if (this.ownsLifecycleClient && this.lifecycleClient) {
+      this.lifecycleClient.close();
+    }
+    this.ownsLifecycleClient = false;
+    this.lifecycleClient = null;
+  }
+
+  /** @internal Used by factory paths to mark that this Sandbox owns (and must close) its lifecycle client. */
+  _markLifecycleClientOwned(): void {
+    this.ownsLifecycleClient = true;
+  }
+
+  // --- Class-level factories ---
+
+  /** Create a new sandbox (or restore from `snapshotId`) and return a ready handle, blocking until Running. */
+  static async create(
+    options?: CreateAndConnectOptions &
+      SandboxClientOptions & { _client?: SandboxClient },
+  ): Promise<Sandbox> {
+    const ownsClient = options?._client == null;
+    const client = options?._client ?? (await resolveLifecycleClient(options));
+    const sandbox = await client.createAndConnect(options);
+    if (ownsClient) sandbox._markLifecycleClientOwned();
+    return sandbox;
+  }
+
+  /** Attach to an existing sandbox by ID or name without changing its state. */
+  static async connect(
+    options: {
+      identifier?: string;
+      sandboxId?: string;
+      proxyUrl?: string;
+      routingHint?: string;
+      _client?: SandboxClient;
+    } & SandboxClientOptions,
+  ): Promise<Sandbox> {
+    if (
+      options.identifier != null &&
+      options.sandboxId != null &&
+      options.identifier !== options.sandboxId
+    ) {
+      throw new SandboxError(
+        "Provide only one of `identifier` or `sandboxId`, not both.",
+      );
+    }
+    const identifier = options.identifier ?? options.sandboxId;
+    if (!identifier) {
+      throw new SandboxError(
+        "Sandbox.connect requires `identifier` (sandbox ID or name).",
+      );
+    }
+    const ownsClient = options._client == null;
+    const client = options._client ?? (await resolveLifecycleClient(options));
+    const sandbox = client.connect(identifier, options.proxyUrl, options.routingHint);
+    if (ownsClient) sandbox._markLifecycleClientOwned();
+    return sandbox;
+  }
+
+  /** Get a snapshot by ID. */
+  static async getSnapshot(
+    snapshotId: string,
+    options?: SandboxClientOptions & { _client?: SandboxClient },
+  ): Promise<SnapshotInfo> {
+    const owned = options?._client == null;
+    const client = options?._client ?? (await resolveLifecycleClient(options));
+    try {
+      return await client.getSnapshot(snapshotId);
+    } finally {
+      if (owned) client.close();
+    }
+  }
+
+  /** Delete a snapshot by ID. */
+  static async deleteSnapshot(
+    snapshotId: string,
+    options?: SandboxClientOptions & { _client?: SandboxClient },
+  ): Promise<void> {
+    const owned = options?._client == null;
+    const client = options?._client ?? (await resolveLifecycleClient(options));
+    try {
+      await client.deleteSnapshot(snapshotId);
+    } finally {
+      if (owned) client.close();
+    }
+  }
+
+  // --- Lifecycle: suspend / resume / checkpoint ---
+
+  private requireLifecycleClient(operation: string): SandboxClient {
+    if (this.lifecycleClient == null) {
+      throw new SandboxError(
+        `Cannot ${operation}: this Sandbox was constructed without a lifecycle client. ` +
+          "Use Sandbox.create() / Sandbox.connect() (or SandboxClient.createAndConnect() / SandboxClient.connect()).",
+      );
+    }
+    return this.lifecycleClient;
+  }
+
+  private async waitForStatus(
+    client: SandboxClient,
+    target: SandboxStatus,
+    operation: string,
+    timeout: number,
+    pollInterval: number,
+    initialInfo: { status: SandboxStatus } | null,
+  ): Promise<void> {
+    const deadline = Date.now() + timeout * 1000;
+    let info = initialInfo;
+    while (true) {
+      if (info === null) {
+        info = await client.get(this.sandboxId);
+      }
+      if (info.status === target) return;
+      if (info.status === SandboxStatus.TERMINATED) {
+        throw new SandboxError(
+          `Sandbox ${this.sandboxId} became terminated while awaiting ${operation}`,
+        );
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        const label = target.charAt(0).toUpperCase() + target.slice(1);
+        throw new SandboxError(
+          `Sandbox ${this.sandboxId} did not reach ${label} within ${timeout}s`,
+        );
+      }
+      await sleep(Math.min(pollInterval * 1000, remaining));
+      info = null;
+    }
+  }
+
+  /** Suspend this sandbox, blocking until Suspended when `wait` is true. */
+  async suspend(options?: {
+    timeout?: number;
+    pollInterval?: number;
+    wait?: boolean;
+  }): Promise<void> {
+    const client = this.requireLifecycleClient("suspend");
+    await client.suspend(this.sandboxId);
+    if (options?.wait === false) return;
+    await this.waitForStatus(
+      client,
+      SandboxStatus.SUSPENDED,
+      "suspend",
+      options?.timeout ?? 300,
+      options?.pollInterval ?? 1,
+      null,
+    );
+  }
+
+  /** Resume this sandbox, blocking until Running when `wait` is true. No-op if already Running. */
+  async resume(options?: {
+    timeout?: number;
+    pollInterval?: number;
+    wait?: boolean;
+  }): Promise<void> {
+    const client = this.requireLifecycleClient("resume");
+    const wait = options?.wait ?? true;
+
+    let initialInfo: { status: SandboxStatus } | null = null;
+    if (wait) {
+      try {
+        initialInfo = await client.get(this.sandboxId);
+      } catch {
+        initialInfo = null;
+      }
+      if (initialInfo && initialInfo.status === SandboxStatus.RUNNING) return;
+    }
+
+    await client.resume(this.sandboxId);
+    if (!wait) return;
+    await this.waitForStatus(
+      client,
+      SandboxStatus.RUNNING,
+      "resume",
+      options?.timeout ?? 300,
+      options?.pollInterval ?? 1,
+      null,
+    );
+  }
+
+  /**
+   * Take a snapshot of this sandbox. Returns `SnapshotInfo` when `wait` is
+   * true, else the immediate `CreateSnapshotResponse`.
+   */
+  async checkpoint(
+    options?: SnapshotAndWaitOptions & { wait?: boolean },
+  ): Promise<SnapshotInfo | CreateSnapshotResponse> {
+    const client = this.requireLifecycleClient("checkpoint");
+    if (options?.wait === false) {
+      return client.snapshot(this.sandboxId, { contentMode: options?.contentMode });
+    }
+    return client.snapshotAndWait(this.sandboxId, {
+      timeout: options?.timeout,
+      pollInterval: options?.pollInterval,
+      contentMode: options?.contentMode,
+    });
+  }
+
+  /** List snapshots taken from this sandbox. */
+  async listSnapshots(): Promise<SnapshotInfo[]> {
+    const client = this.requireLifecycleClient("listSnapshots");
+    const [resolvedId, all] = await Promise.all([
+      this.resolveSandboxId(client),
+      client.listSnapshots(),
+    ]);
+    return all.filter((s) => s.sandboxId === resolvedId);
+  }
+
+  private async resolveSandboxId(client: SandboxClient): Promise<string> {
+    if (this.resolvedSandboxId !== null) return this.resolvedSandboxId;
+    const info = await client.get(this.sandboxId);
+    this.resolvedSandboxId = info.sandboxId;
+    return this.resolvedSandboxId;
   }
 
   // --- High-level convenience ---
@@ -686,4 +924,24 @@ export class Sandbox {
     );
     return fromSnakeKeys(raw) as DaemonInfo;
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function resolveLifecycleClient(
+  options: SandboxClientOptions | undefined,
+): Promise<SandboxClient> {
+  const { SandboxClient: ClientCtor } = await import("./client.js");
+  return new ClientCtor({
+    apiUrl: options?.apiUrl,
+    apiKey: options?.apiKey,
+    organizationId: options?.organizationId,
+    projectId: options?.projectId,
+    namespace: options?.namespace,
+    maxRetries: options?.maxRetries,
+    retryBackoffMs: options?.retryBackoffMs,
+    _internal: true,
+  } as SandboxClientOptions & { _internal: true });
 }

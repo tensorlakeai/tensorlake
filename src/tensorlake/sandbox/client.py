@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+import warnings
 from urllib.parse import urlparse
 
 from . import _defaults
@@ -122,6 +123,23 @@ def _raise_as_sandbox_error(e: Exception) -> None:
 _RESERVED_SANDBOX_MANAGEMENT_PORT = 9501
 
 
+_sandbox_client_deprecation_warned = False
+
+
+def _warn_sandbox_client_deprecated_once() -> None:
+    global _sandbox_client_deprecation_warned
+    if _sandbox_client_deprecation_warned:
+        return
+    _sandbox_client_deprecation_warned = True
+    warnings.warn(
+        "SandboxClient is deprecated; use Sandbox.create() / Sandbox.connect() "
+        "and the instance methods sandbox.suspend() / .resume() / .checkpoint() "
+        "instead. SandboxClient will be removed in a future release.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
 def _normalize_user_ports(ports: list[int]) -> list[int]:
     normalized: set[int] = set()
     for port in ports:
@@ -151,7 +169,11 @@ class SandboxClient:
         namespace: str | None = _defaults.NAMESPACE,
         max_retries: int = _defaults.MAX_RETRIES,
         retry_backoff_sec: float = _defaults.RETRY_BACKOFF_SEC,
+        *,
+        _internal: bool = False,
     ):
+        if not _internal:
+            _warn_sandbox_client_deprecated_once()
         self._api_url: str = api_url
         self._api_key: str | None = api_key
         self._organization_id: str | None = organization_id

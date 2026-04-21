@@ -40,7 +40,10 @@ export class SandboxClient {
   private readonly namespace: string;
   private readonly local: boolean;
 
-  constructor(options?: SandboxClientOptions) {
+  constructor(options?: SandboxClientOptions & { _internal?: boolean }) {
+    if (!options?._internal) {
+      warnSandboxClientDeprecatedOnce();
+    }
     this.apiUrl = options?.apiUrl ?? defaults.API_URL;
     this.apiKey = options?.apiKey ?? defaults.API_KEY;
     this.organizationId = options?.organizationId;
@@ -397,7 +400,7 @@ export class SandboxClient {
 
   connect(identifier: string, proxyUrl?: string, routingHint?: string): Sandbox {
     const resolvedProxy = proxyUrl ?? resolveProxyUrl(this.apiUrl);
-    return new Sandbox({
+    const sandbox = new Sandbox({
       sandboxId: identifier,
       proxyUrl: resolvedProxy,
       apiKey: this.apiKey,
@@ -405,6 +408,8 @@ export class SandboxClient {
       projectId: this.projectId,
       routingHint,
     });
+    sandbox._setLifecycleClient(this);
+    return sandbox;
   }
 
   async createAndConnect(
@@ -459,6 +464,18 @@ export class SandboxClient {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+let sandboxClientDeprecationWarned = false;
+function warnSandboxClientDeprecatedOnce(): void {
+  if (sandboxClientDeprecationWarned) return;
+  sandboxClientDeprecationWarned = true;
+  // eslint-disable-next-line no-console
+  console.warn(
+    "[tensorlake] SandboxClient is deprecated; use Sandbox.create() / Sandbox.connect() " +
+      "and the instance methods sandbox.suspend() / .resume() / .checkpoint() instead. " +
+      "SandboxClient will be removed in a future release.",
+  );
 }
 
 const RESERVED_SANDBOX_MANAGEMENT_PORT = 9501;

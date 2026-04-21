@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import TYPE_CHECKING, Iterator
 from urllib.parse import urlparse
 
@@ -16,6 +17,7 @@ from .exceptions import (
 )
 from .models import (
     CommandResult,
+    CreateSnapshotResponse,
     DaemonInfo,
     HealthResponse,
     ListDirectoryResponse,
@@ -25,13 +27,13 @@ from .models import (
     OutputResponse,
     ProcessInfo,
     SandboxInfo,
+    SandboxStatus,
     SendSignalResponse,
+    SnapshotContentMode,
+    SnapshotInfo,
     StdinMode,
 )
 
-# Avoid circular import: sandbox.py ↔ client.py.  With ``from __future__
-# import annotations`` the type string is never evaluated at runtime, but
-# the import itself would still execute and trigger a cycle.
 if TYPE_CHECKING:
     from .client import SandboxClient
 
@@ -138,6 +140,7 @@ class Sandbox:
         self._cached_info: SandboxInfo | None = None
         self._owns_sandbox: bool = False
         self._lifecycle_client: SandboxClient | None = None
+        self._owns_lifecycle_client: bool = False
         self._proxy_url = proxy_url
         self._api_key = api_key
         self._organization_id = organization_id
@@ -156,31 +159,205 @@ class Sandbox:
         if self._host_header:
             self._proxy_headers["Host"] = self._host_header
 
+        if _proxy_rust_client is not None:
+            self._rust_client = _proxy_rust_client
+            self._base_url = self._rust_client.base_url()
+            return
+
         if not _RUST_SANDBOX_PROXY_CLIENT_AVAILABLE:
             raise SandboxError(
                 "Rust Cloud SDK sandbox proxy client is required but unavailable. "
                 "Build/install it with `make build_rust_py_client`."
             )
 
-        if _proxy_rust_client is not None:
-            self._rust_client = _proxy_rust_client
+        try:
+            self._rust_client = RustCloudSandboxProxyClient(
+                proxy_url=proxy_url,
+                sandbox_id=sandbox_identifier,
+                api_key=api_key,
+                organization_id=organization_id,
+                project_id=project_id,
+                routing_hint=routing_hint,
+            )
             self._base_url = self._rust_client.base_url()
-        else:
-            try:
-                self._rust_client = RustCloudSandboxProxyClient(
-                    proxy_url=proxy_url,
-                    sandbox_id=sandbox_identifier,
-                    api_key=api_key,
-                    organization_id=organization_id,
-                    project_id=project_id,
-                    routing_hint=routing_hint,
-                )
-                self._base_url = self._rust_client.base_url()
-            except Exception as e:
-                _raise_as_sandbox_error(e)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    # --- Class-level factories ---
+
+    @staticmethod
+    def _resolve_lifecycle_client(
+        _client: "SandboxClient | None",
+        *,
+        api_url: str,
+        api_key: str | None,
+        organization_id: str | None,
+        project_id: str | None,
+        namespace: str | None,
+    ) -> "SandboxClient":
+        if _client is not None:
+            return _client
+        from .client import SandboxClient
+
+        return SandboxClient(
+            api_url=api_url,
+            api_key=api_key,
+            organization_id=organization_id,
+            project_id=project_id,
+            namespace=namespace,
+            _internal=True,
+        )
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        image: str | None = None,
+        cpus: float = 1.0,
+        memory_mb: int = 1024,
+        ephemeral_disk_mb: int = 1024,
+        secret_names: list[str] | None = None,
+        timeout_secs: int | None = None,
+        entrypoint: list[str] | None = None,
+        allow_internet_access: bool = True,
+        allow_out: list[str] | None = None,
+        deny_out: list[str] | None = None,
+        pool_id: str | None = None,
+        snapshot_id: str | None = None,
+        name: str | None = None,
+        proxy_url: str | None = None,
+        startup_timeout: float = 60,
+        api_url: str = _defaults.API_URL,
+        api_key: str | None = _defaults.API_KEY,
+        organization_id: str | None = None,
+        project_id: str | None = None,
+        namespace: str | None = _defaults.NAMESPACE,
+        _client: "SandboxClient | None" = None,
+    ) -> Sandbox:
+        """Create a new sandbox (or restore from ``snapshot_id``) and return a ready handle.
+
+        Blocks until the sandbox reaches Running status.
+        """
+        owns_client = _client is None
+        client = cls._resolve_lifecycle_client(
+            _client,
+            api_url=api_url,
+            api_key=api_key,
+            organization_id=organization_id,
+            project_id=project_id,
+            namespace=namespace,
+        )
+        sandbox = client.create_and_connect(
+            image=image,
+            cpus=cpus,
+            memory_mb=memory_mb,
+            ephemeral_disk_mb=ephemeral_disk_mb,
+            secret_names=secret_names,
+            timeout_secs=timeout_secs,
+            entrypoint=entrypoint,
+            allow_internet_access=allow_internet_access,
+            allow_out=allow_out,
+            deny_out=deny_out,
+            pool_id=pool_id,
+            snapshot_id=snapshot_id,
+            proxy_url=proxy_url,
+            startup_timeout=startup_timeout,
+            name=name,
+        )
+        if owns_client:
+            sandbox._owns_lifecycle_client = True
+        return sandbox
+
+    @classmethod
+    def connect(
+        cls,
+        *,
+        sandbox_id: str | None = None,
+        identifier: str | None = None,
+        proxy_url: str | None = None,
+        routing_hint: str | None = None,
+        api_url: str = _defaults.API_URL,
+        api_key: str | None = _defaults.API_KEY,
+        organization_id: str | None = None,
+        project_id: str | None = None,
+        namespace: str | None = _defaults.NAMESPACE,
+        _client: "SandboxClient | None" = None,
+    ) -> Sandbox:
+        """Attach to an existing sandbox by ID or name without changing its state."""
+        owns_client = _client is None
+        client = cls._resolve_lifecycle_client(
+            _client,
+            api_url=api_url,
+            api_key=api_key,
+            organization_id=organization_id,
+            project_id=project_id,
+            namespace=namespace,
+        )
+        sandbox = client.connect(
+            identifier=identifier,
+            proxy_url=proxy_url,
+            sandbox_id=sandbox_id,
+            routing_hint=routing_hint,
+        )
+        if owns_client:
+            sandbox._owns_lifecycle_client = True
+        return sandbox
+
+    @classmethod
+    def get_snapshot(
+        cls,
+        snapshot_id: str,
+        *,
+        api_url: str = _defaults.API_URL,
+        api_key: str | None = _defaults.API_KEY,
+        organization_id: str | None = None,
+        project_id: str | None = None,
+        namespace: str | None = _defaults.NAMESPACE,
+        _client: "SandboxClient | None" = None,
+    ) -> SnapshotInfo:
+        """Get a snapshot by ID."""
+        client = cls._resolve_lifecycle_client(
+            _client,
+            api_url=api_url,
+            api_key=api_key,
+            organization_id=organization_id,
+            project_id=project_id,
+            namespace=namespace,
+        )
+        try:
+            return client.get_snapshot(snapshot_id)
+        finally:
+            if _client is None:
+                client.close()
+
+    @classmethod
+    def delete_snapshot(
+        cls,
+        snapshot_id: str,
+        *,
+        api_url: str = _defaults.API_URL,
+        api_key: str | None = _defaults.API_KEY,
+        organization_id: str | None = None,
+        project_id: str | None = None,
+        namespace: str | None = _defaults.NAMESPACE,
+        _client: "SandboxClient | None" = None,
+    ) -> None:
+        """Delete a snapshot by ID."""
+        client = cls._resolve_lifecycle_client(
+            _client,
+            api_url=api_url,
+            api_key=api_key,
+            organization_id=organization_id,
+            project_id=project_id,
+            namespace=namespace,
+        )
+        try:
+            client.delete_snapshot(snapshot_id)
+        finally:
+            if _client is None:
+                client.close()
 
     def _fetch_info(self) -> SandboxInfo:
-        """Fetch and cache sandbox info from the server (lazy, once per instance)."""
         if self._cached_info is None:
             if self._lifecycle_client is None:
                 raise SandboxError(
@@ -221,19 +398,155 @@ class Sandbox:
             self.terminate()
         else:
             self.close()
+            self._release_owned_lifecycle_client()
 
     def close(self):
-        """Close the client connection. The sandbox keeps running."""
+        """Close the proxy connection. The sandbox keeps running.
+
+        The lifecycle client (if any) is preserved so that subsequent
+        ``terminate()`` calls on this handle still work.
+        """
         self._rust_client.close()
 
     def terminate(self):
-        """Terminate the sandbox and close the connection."""
-        lifecycle_client = self._lifecycle_client
+        """Terminate the sandbox and release all owned resources."""
         self._owns_sandbox = False
+        try:
+            if self._lifecycle_client is not None:
+                self._lifecycle_client.delete(self._identifier)
+        finally:
+            self.close()
+            self._release_owned_lifecycle_client()
+
+    def _release_owned_lifecycle_client(self):
+        if self._owns_lifecycle_client and self._lifecycle_client is not None:
+            self._lifecycle_client.close()
+        self._owns_lifecycle_client = False
         self._lifecycle_client = None
-        self.close()
-        if lifecycle_client is not None:
-            lifecycle_client.delete(self._identifier)
+
+    # --- Lifecycle: suspend / resume / checkpoint ---
+
+    def _require_lifecycle_client(self, operation: str) -> "SandboxClient":
+        if self._lifecycle_client is None:
+            raise SandboxError(
+                f"Cannot {operation}: this Sandbox was constructed without a "
+                "lifecycle client. Use Sandbox.create() / Sandbox.connect() "
+                "(or SandboxClient.create_and_connect() / SandboxClient.connect())."
+            )
+        return self._lifecycle_client
+
+    def _wait_for_status(
+        self,
+        client: "SandboxClient",
+        target: SandboxStatus,
+        *,
+        operation: str,
+        timeout: float,
+        poll_interval: float,
+        initial_info: SandboxInfo | None = None,
+    ) -> None:
+        deadline = time.time() + timeout
+        info = initial_info
+        while True:
+            if info is None:
+                info = client.get(self._identifier)
+            if info.status == target:
+                self._cached_info = info
+                return
+            if info.status == SandboxStatus.TERMINATED:
+                raise SandboxError(
+                    f"Sandbox {self._identifier} became terminated while awaiting {operation}"
+                )
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise SandboxError(
+                    f"Sandbox {self._identifier} did not reach {target.value.capitalize()} within {timeout}s"
+                )
+            time.sleep(min(poll_interval, remaining))
+            info = None
+
+    def suspend(
+        self,
+        *,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
+        wait: bool = True,
+    ) -> None:
+        """Suspend this sandbox, blocking until Suspended when ``wait`` is true."""
+        client = self._require_lifecycle_client("suspend")
+        client.suspend(self._identifier)
+        if not wait:
+            return
+        self._wait_for_status(
+            client,
+            SandboxStatus.SUSPENDED,
+            operation="suspend",
+            timeout=timeout,
+            poll_interval=poll_interval,
+        )
+
+    def resume(
+        self,
+        *,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
+        wait: bool = True,
+    ) -> None:
+        """Resume this sandbox, blocking until Running when ``wait`` is true. No-op if already Running."""
+        client = self._require_lifecycle_client("resume")
+
+        initial_info: SandboxInfo | None = None
+        if wait:
+            try:
+                initial_info = client.get(self._identifier)
+            except (SandboxError, RemoteAPIError, SandboxConnectionError):
+                initial_info = None
+            if (
+                initial_info is not None
+                and initial_info.status == SandboxStatus.RUNNING
+            ):
+                self._cached_info = initial_info
+                return
+
+        client.resume(self._identifier)
+        if not wait:
+            return
+        self._wait_for_status(
+            client,
+            SandboxStatus.RUNNING,
+            operation="resume",
+            timeout=timeout,
+            poll_interval=poll_interval,
+        )
+
+    def checkpoint(
+        self,
+        *,
+        content_mode: SnapshotContentMode | None = None,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
+        wait: bool = True,
+    ) -> SnapshotInfo | CreateSnapshotResponse:
+        """Take a snapshot of this sandbox.
+
+        Returns :class:`SnapshotInfo` when ``wait`` is true, else the immediate
+        :class:`CreateSnapshotResponse`.
+        """
+        client = self._require_lifecycle_client("checkpoint")
+        if wait:
+            return client.snapshot_and_wait(
+                self._identifier,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                content_mode=content_mode,
+            )
+        return client.snapshot(self._identifier, content_mode=content_mode)
+
+    def list_snapshots(self) -> list[SnapshotInfo]:
+        """List snapshots taken from this sandbox."""
+        client = self._require_lifecycle_client("list_snapshots")
+        sid = self.sandbox_id
+        return [s for s in client.list_snapshots() if s.sandbox_id == sid]
 
     @staticmethod
     def _build_command_payload(
