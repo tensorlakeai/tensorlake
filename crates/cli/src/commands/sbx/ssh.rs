@@ -304,18 +304,9 @@ pub async fn run(
                     match maybe_stdin {
                         Some(Ok(data)) if data.is_empty() => break,
                         Some(Ok(data)) => {
-                            // In raw mode the terminal driver does not generate SIGINT for
-                            // Ctrl+C; it sends 0x03 as a plain byte instead. Forward it to
-                            // the remote (aborting the foreground process there) and close
-                            // the session with exit code 130 (128 + SIGINT).
-                            let ctrl_c_pressed = data.contains(&0x03);
                             let mut msg = vec![OP_DATA];
                             msg.extend_from_slice(&data);
                             if ws_write.send(tungstenite::Message::Binary(msg.into())).await.is_err() {
-                                break;
-                            }
-                            if ctrl_c_pressed {
-                                server_exit_code = Some(130);
                                 break;
                             }
                         }
