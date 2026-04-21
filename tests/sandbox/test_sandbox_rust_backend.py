@@ -164,6 +164,22 @@ class TestSandboxRustBackend(unittest.TestCase):
 
         self.assertEqual(result.exit_code, -9)
 
+    def test_run_raises_when_stream_has_no_exit_event(self):
+        sandbox = Sandbox(
+            sandbox_id="sbx-1", proxy_url="http://localhost:9443", api_key="k"
+        )
+
+        class _MissingExitFakeClient(_FakeRustProxyClient):
+            def run_process_json(self, payload_json):
+                return []
+
+        sandbox._rust_client = _MissingExitFakeClient()
+
+        with self.assertRaisesRegex(
+            SandboxConnectionError, "stream ended without an exit event"
+        ):
+            sandbox.run("echo", args=["hello"])
+
     def test_health_maps_connection_error(self):
         class FakeRustError(Exception):
             pass

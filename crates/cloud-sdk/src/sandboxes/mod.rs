@@ -368,7 +368,20 @@ impl SandboxProxyClient {
             .header(ACCEPT, "text/event-stream")
             .json(payload)
             .build()?;
-        let response = self.client.execute_raw(req).await?;
+        let response = self.client.execute(req).await?;
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        if !content_type
+            .to_ascii_lowercase()
+            .contains("text/event-stream")
+        {
+            return Err(SdkError::ClientError(format!(
+                "expected text/event-stream response from /api/v1/processes/run, got content-type: {content_type}"
+            )));
+        }
         let stream = response
             .bytes_stream()
             .eventsource()
