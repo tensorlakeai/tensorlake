@@ -60,6 +60,9 @@ export type Traced<T> = T & { readonly traceId: string };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function withTraceId<T>(value: T, traceId: string): Traced<T> {
+  if (value == null) {
+    return { traceId } as unknown as Traced<T>;
+  }
   return Object.assign(value as any, { traceId }) as Traced<T>;
 }
 

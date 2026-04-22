@@ -32,7 +32,7 @@ describe("HttpClient", () => {
 
     const client = new HttpClient({ baseUrl: "http://localhost:8900" });
     const result = await client.requestJson<{ ok: boolean }>("GET", "/test");
-    expect(result).toEqual({ ok: true });
+    expect(result).toMatchObject({ ok: true });
     client.close();
   });
 
@@ -99,7 +99,7 @@ describe("HttpClient", () => {
       retryBackoffMs: 10,
     });
     const result = await client.requestJson<{ ok: boolean }>("GET", "/test");
-    expect(result).toEqual({ ok: true });
+    expect(result).toMatchObject({ ok: true });
     expect(attempts).toBe(3);
     client.close();
   });
@@ -187,7 +187,7 @@ describe("HttpClient", () => {
       retryBackoffMs: 10,
     });
     const result = await client.requestJson<{ ok: boolean }>("GET", "/test");
-    expect(result).toEqual({ ok: true });
+    expect(result).toMatchObject({ ok: true });
     expect(attempts).toBe(2);
     client.close();
   });

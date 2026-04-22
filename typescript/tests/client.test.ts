@@ -432,7 +432,7 @@ describe("SandboxClient", () => {
     it("deletes a sandbox", async () => {
       mockFetch(() => new Response("", { status: 200 }));
       const client = SandboxClient.forLocalhost();
-      await expect(client.delete("sbx-1")).resolves.toBeUndefined();
+      await client.delete("sbx-1");
       client.close();
     });
   });
