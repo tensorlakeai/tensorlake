@@ -7,7 +7,7 @@ No OTLP export is performed — the header is the only telemetry artifact.
 
 from __future__ import annotations
 
-import secrets
+import os
 from typing import Generic, Iterator, TypeVar
 
 T = TypeVar("T")
@@ -18,8 +18,8 @@ def generate_traceparent() -> str:
 
     Format: ``00-<32 hex>-<16 hex>-01`` (sampled).
     """
-    trace_id = secrets.token_hex(16)
-    span_id = secrets.token_hex(8)
+    trace_id = os.urandom(16).hex()
+    span_id = os.urandom(8).hex()
     return f"00-{trace_id}-{span_id}-01"
 
 
