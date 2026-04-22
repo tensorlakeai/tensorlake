@@ -81,7 +81,7 @@ use sandboxes::*;
 use secrets::*;
 
 mod client;
-pub use client::{Client, ClientBuilder};
+pub use client::{Client, ClientBuilder, Traced};
 
 /// The main entry point for the Tensorlake Cloud SDK.
 ///

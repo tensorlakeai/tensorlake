@@ -381,7 +381,7 @@ impl CloudApiClient {
                 let response = images_client
                     .create_application_build(&build_service_path, &request, &image_contexts)
                     .await?;
-                Ok(serde_json::to_string(&response)?)
+                Ok(serde_json::to_string(&*response).map_err(SdkError::from)?)
             }
         })
     }
@@ -399,7 +399,7 @@ impl CloudApiClient {
                 let response = images_client
                     .application_build_info(&build_service_path, &application_build_id)
                     .await?;
-                Ok(serde_json::to_string(&response)?)
+                Ok(serde_json::to_string(&*response).map_err(SdkError::from)?)
             }
         })
     }
@@ -417,7 +417,7 @@ impl CloudApiClient {
                 let response = images_client
                     .cancel_application_build(&build_service_path, &application_build_id)
                     .await?;
-                Ok(serde_json::to_string(&response)?)
+                Ok(serde_json::to_string(&*response).map_err(SdkError::from)?)
             }
         })
     }
@@ -462,7 +462,7 @@ impl CloudApiClient {
                 async move {
                     let mut events: Vec<String> = Vec::new();
                     stream_build_log_events(client, &path, |event| {
-                        events.push(serde_json::to_string(&event)?);
+                        events.push(serde_json::to_string(&event).map_err(SdkError::from)?);
                         Ok(())
                     })
                     .await?;
@@ -581,8 +581,8 @@ impl CloudSandboxClient {
         self.run_with_retry(5, move |client| {
             let request = request.clone();
             async move {
-                let response = client.create(&request).await?;
-                Ok(serde_json::to_string(&response)?)
+                let traced = client.create(&request).await?;
+                Ok(serde_json::to_string(&*traced).map_err(SdkError::from)?)
             }
         })
     }
@@ -591,8 +591,8 @@ impl CloudSandboxClient {
         self.run_with_retry(5, move |client| {
             let pool_id = pool_id.clone();
             async move {
-                let response = client.claim(&pool_id).await?;
-                Ok(serde_json::to_string(&response)?)
+                let traced = client.claim(&pool_id).await?;
+                Ok(serde_json::to_string(&*traced).map_err(SdkError::from)?)
             }
         })
     }
@@ -601,17 +601,17 @@ impl CloudSandboxClient {
         self.run_with_retry(5, move |client| {
             let sandbox_id = sandbox_id.clone();
             async move {
-                let response = client.get(&sandbox_id).await?;
-                Ok(serde_json::to_string(&response)?)
+                let traced = client.get(&sandbox_id).await?;
+                Ok(serde_json::to_string(&*traced).map_err(SdkError::from)?)
             }
         })
     }
 
     fn list_sandboxes_json(&self) -> PyResult<String> {
         self.run_with_retry(5, move |client| async move {
-            let sandboxes = client.list().await?;
+            let sandboxes = client.list().await?.into_inner();
             let response = serde_json::json!({ "sandboxes": sandboxes });
-            Ok(serde_json::to_string(&response)?)
+            Ok(serde_json::to_string(&response).map_err(SdkError::from)?)
         })
     }
 
@@ -621,8 +621,8 @@ impl CloudSandboxClient {
             let sandbox_id = sandbox_id.clone();
             let request = request.clone();
             async move {
-                let response = client.update(&sandbox_id, &request).await?;
-                Ok(serde_json::to_string(&response)?)
+                let traced = client.update(&sandbox_id, &request).await?;
+                Ok(serde_json::to_string(&*traced).map_err(SdkError::from)?)
             }
         })
     }
@@ -630,21 +630,21 @@ impl CloudSandboxClient {
     fn delete_sandbox(&self, sandbox_id: String) -> PyResult<()> {
         self.run_with_retry(5, move |client| {
             let sandbox_id = sandbox_id.clone();
-            async move { client.delete(&sandbox_id).await }
+            async move { client.delete(&sandbox_id).await.map(|_| ()) }
         })
     }
 
     fn suspend_sandbox(&self, sandbox_id: String) -> PyResult<()> {
         self.run_with_retry(5, move |client| {
             let sandbox_id = sandbox_id.clone();
-            async move { client.suspend(&sandbox_id).await }
+            async move { client.suspend(&sandbox_id).await.map(|_| ()) }
         })
     }
 
     fn resume_sandbox(&self, sandbox_id: String) -> PyResult<()> {
         self.run_with_retry(5, move |client| {
             let sandbox_id = sandbox_id.clone();
-            async move { client.resume(&sandbox_id).await }
+            async move { client.resume(&sandbox_id).await.map(|_| ()) }
         })
     }
 
@@ -667,8 +667,8 @@ impl CloudSandboxClient {
         self.run_with_retry(5, move |client| {
             let sandbox_id = sandbox_id.clone();
             async move {
-                let response = client.snapshot(&sandbox_id, parsed_mode).await?;
-                Ok(serde_json::to_string(&response)?)
+                let traced = client.snapshot(&sandbox_id, parsed_mode).await?;
+                Ok(serde_json::to_string(&*traced).map_err(SdkError::from)?)
             }
         })
     }
@@ -677,24 +677,24 @@ impl CloudSandboxClient {
         self.run_with_retry(5, move |client| {
             let snapshot_id = snapshot_id.clone();
             async move {
-                let response = client.get_snapshot(&snapshot_id).await?;
-                Ok(serde_json::to_string(&response)?)
+                let traced = client.get_snapshot(&snapshot_id).await?;
+                Ok(serde_json::to_string(&*traced).map_err(SdkError::from)?)
             }
         })
     }
 
     fn list_snapshots_json(&self) -> PyResult<String> {
         self.run_with_retry(5, move |client| async move {
-            let snapshots = client.list_snapshots().await?;
+            let snapshots = client.list_snapshots().await?.into_inner();
             let response = serde_json::json!({ "snapshots": snapshots });
-            Ok(serde_json::to_string(&response)?)
+            Ok(serde_json::to_string(&response).map_err(SdkError::from)?)
         })
     }
 
     fn delete_snapshot(&self, snapshot_id: String) -> PyResult<()> {
         self.run_with_retry(5, move |client| {
             let snapshot_id = snapshot_id.clone();
-            async move { client.delete_snapshot(&snapshot_id).await }
+            async move { client.delete_snapshot(&snapshot_id).await.map(|_| ()) }
         })
     }
 
@@ -703,8 +703,8 @@ impl CloudSandboxClient {
         self.run_with_retry(5, move |client| {
             let request = request.clone();
             async move {
-                let response = client.create_pool(&request).await?;
-                Ok(serde_json::to_string(&response)?)
+                let traced = client.create_pool(&request).await?;
+                Ok(serde_json::to_string(&*traced).map_err(SdkError::from)?)
             }
         })
     }
@@ -713,17 +713,17 @@ impl CloudSandboxClient {
         self.run_with_retry(5, move |client| {
             let pool_id = pool_id.clone();
             async move {
-                let response = client.get_pool(&pool_id).await?;
-                Ok(serde_json::to_string(&response)?)
+                let traced = client.get_pool(&pool_id).await?;
+                Ok(serde_json::to_string(&*traced).map_err(SdkError::from)?)
             }
         })
     }
 
     fn list_pools_json(&self) -> PyResult<String> {
         self.run_with_retry(5, move |client| async move {
-            let pools = client.list_pools().await?;
+            let pools = client.list_pools().await?.into_inner();
             let response = serde_json::json!({ "pools": pools });
-            Ok(serde_json::to_string(&response)?)
+            Ok(serde_json::to_string(&response).map_err(SdkError::from)?)
         })
     }
 
@@ -733,8 +733,8 @@ impl CloudSandboxClient {
             let pool_id = pool_id.clone();
             let request = request.clone();
             async move {
-                let response = client.update_pool(&pool_id, &request).await?;
-                Ok(serde_json::to_string(&response)?)
+                let traced = client.update_pool(&pool_id, &request).await?;
+                Ok(serde_json::to_string(&*traced).map_err(SdkError::from)?)
             }
         })
     }
@@ -742,7 +742,7 @@ impl CloudSandboxClient {
     fn delete_pool(&self, pool_id: String) -> PyResult<()> {
         self.run_with_retry(5, move |client| {
             let pool_id = pool_id.clone();
-            async move { client.delete_pool(&pool_id).await }
+            async move { client.delete_pool(&pool_id).await.map(|_| ()) }
         })
     }
 
@@ -858,180 +858,233 @@ impl CloudSandboxProxyClient {
         self.base_url.clone()
     }
 
-    fn start_process_json(&self, payload_json: String) -> PyResult<String> {
+    fn start_process_json(&self, payload_json: String) -> PyResult<(String, String)> {
         let payload: Value = parse_json_payload(&payload_json)?;
         self.run_with_retry(5, move |client| {
             let payload = payload.clone();
             async move {
-                let response = client.start_process(&payload).await?;
-                Ok(serde_json::to_string(&response)?)
+                let traced = client.start_process(&payload).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
             }
         })
     }
 
-    fn list_processes_json(&self) -> PyResult<String> {
+    fn list_processes_json(&self) -> PyResult<(String, String)> {
         self.run_with_retry(5, move |client| async move {
-            let processes = client.list_processes().await?;
+            let traced = client.list_processes().await?;
+            let trace_id = traced.trace_id.clone();
+            let processes = traced.into_inner();
             let response = serde_json::json!({ "processes": processes });
-            Ok(serde_json::to_string(&response)?)
+            Ok((
+                trace_id,
+                serde_json::to_string(&response).map_err(SdkError::from)?,
+            ))
         })
     }
 
-    fn get_process_json(&self, pid: i64) -> PyResult<String> {
+    fn get_process_json(&self, pid: i64) -> PyResult<(String, String)> {
         self.run_with_retry(5, move |client| async move {
-            let response = client.get_process(pid).await?;
-            Ok(serde_json::to_string(&response)?)
+            let traced = client.get_process(pid).await?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+            Ok((trace_id, json))
         })
     }
 
-    fn kill_process(&self, pid: i64) -> PyResult<()> {
-        self.run_with_retry(
-            5,
-            move |client| async move { client.kill_process(pid).await },
-        )
-    }
-
-    fn send_signal_json(&self, pid: i64, signal: i64) -> PyResult<String> {
+    fn kill_process(&self, pid: i64) -> PyResult<String> {
         self.run_with_retry(5, move |client| async move {
-            let response = client.send_signal(pid, signal).await?;
-            Ok(serde_json::to_string(&response)?)
+            let traced = client.kill_process(pid).await?;
+            Ok(traced.trace_id)
         })
     }
 
-    fn write_stdin(&self, pid: i64, data: Vec<u8>) -> PyResult<()> {
+    fn send_signal_json(&self, pid: i64, signal: i64) -> PyResult<(String, String)> {
+        self.run_with_retry(5, move |client| async move {
+            let traced = client.send_signal(pid, signal).await?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn write_stdin(&self, pid: i64, data: Vec<u8>) -> PyResult<String> {
         self.run_with_retry(5, move |client| {
             let data = data.clone();
-            async move { client.write_stdin(pid, data).await }
+            async move {
+                let traced = client.write_stdin(pid, data).await?;
+                Ok(traced.trace_id)
+            }
         })
     }
 
-    fn close_stdin(&self, pid: i64) -> PyResult<()> {
-        self.run_with_retry(
-            5,
-            move |client| async move { client.close_stdin(pid).await },
-        )
-    }
-
-    fn get_stdout_json(&self, pid: i64) -> PyResult<String> {
+    fn close_stdin(&self, pid: i64) -> PyResult<String> {
         self.run_with_retry(5, move |client| async move {
-            let response = client.get_stdout(pid).await?;
-            Ok(serde_json::to_string(&response)?)
+            let traced = client.close_stdin(pid).await?;
+            Ok(traced.trace_id)
         })
     }
 
-    fn get_stderr_json(&self, pid: i64) -> PyResult<String> {
+    fn get_stdout_json(&self, pid: i64) -> PyResult<(String, String)> {
         self.run_with_retry(5, move |client| async move {
-            let response = client.get_stderr(pid).await?;
-            Ok(serde_json::to_string(&response)?)
+            let traced = client.get_stdout(pid).await?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+            Ok((trace_id, json))
         })
     }
 
-    fn get_output_json(&self, pid: i64) -> PyResult<String> {
+    fn get_stderr_json(&self, pid: i64) -> PyResult<(String, String)> {
         self.run_with_retry(5, move |client| async move {
-            let response = client.get_output(pid).await?;
-            Ok(serde_json::to_string(&response)?)
+            let traced = client.get_stderr(pid).await?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+            Ok((trace_id, json))
         })
     }
 
-    fn follow_stdout_json(&self, pid: i64) -> PyResult<Vec<String>> {
+    fn get_output_json(&self, pid: i64) -> PyResult<(String, String)> {
+        self.run_with_retry(5, move |client| async move {
+            let traced = client.get_output(pid).await?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn follow_stdout_json(&self, pid: i64) -> PyResult<(String, Vec<String>)> {
         self.run_with_retry(10, move |client| async move {
-            let events = client.follow_stdout(pid).await?;
-            events
+            let traced = client.follow_stdout(pid).await?;
+            let trace_id = traced.trace_id.clone();
+            let events = traced
+                .into_inner()
                 .into_iter()
                 .map(|event| serde_json::to_string(&event).map_err(SdkError::from))
-                .collect()
+                .collect::<Result<Vec<String>, SdkError>>()?;
+            Ok((trace_id, events))
         })
     }
 
-    fn follow_stderr_json(&self, pid: i64) -> PyResult<Vec<String>> {
+    fn follow_stderr_json(&self, pid: i64) -> PyResult<(String, Vec<String>)> {
         self.run_with_retry(10, move |client| async move {
-            let events = client.follow_stderr(pid).await?;
-            events
+            let traced = client.follow_stderr(pid).await?;
+            let trace_id = traced.trace_id.clone();
+            let events = traced
+                .into_inner()
                 .into_iter()
                 .map(|event| serde_json::to_string(&event).map_err(SdkError::from))
-                .collect()
+                .collect::<Result<Vec<String>, SdkError>>()?;
+            Ok((trace_id, events))
         })
     }
 
-    fn follow_output_json(&self, pid: i64) -> PyResult<Vec<String>> {
+    fn follow_output_json(&self, pid: i64) -> PyResult<(String, Vec<String>)> {
         self.run_with_retry(10, move |client| async move {
-            let events = client.follow_output(pid).await?;
-            events
+            let traced = client.follow_output(pid).await?;
+            let trace_id = traced.trace_id.clone();
+            let events = traced
+                .into_inner()
                 .into_iter()
                 .map(|event| serde_json::to_string(&event).map_err(SdkError::from))
-                .collect()
+                .collect::<Result<Vec<String>, SdkError>>()?;
+            Ok((trace_id, events))
         })
     }
 
-    fn read_file_bytes(&self, py: Python<'_>, path: String) -> PyResult<Py<pyo3::types::PyBytes>> {
-        let data: Vec<u8> = self.run_with_retry(5, move |client| {
+    fn read_file_bytes(
+        &self,
+        py: Python<'_>,
+        path: String,
+    ) -> PyResult<(String, Py<pyo3::types::PyBytes>)> {
+        let (trace_id, data): (String, Vec<u8>) = self.run_with_retry(5, move |client| {
             let path = path.clone();
-            async move { client.read_file(&path).await }
+            async move {
+                let traced = client.read_file(&path).await?;
+                Ok((traced.trace_id.clone(), traced.into_inner()))
+            }
         })?;
-        Ok(pyo3::types::PyBytes::new(py, &data).into())
+        Ok((trace_id, pyo3::types::PyBytes::new(py, &data).into()))
     }
 
-    fn write_file(&self, path: String, content: Vec<u8>) -> PyResult<()> {
+    fn write_file(&self, path: String, content: Vec<u8>) -> PyResult<String> {
         self.run_with_retry(5, move |client| {
             let path = path.clone();
             let content = content.clone();
-            async move { client.write_file(&path, content).await }
-        })
-    }
-
-    fn delete_file(&self, path: String) -> PyResult<()> {
-        self.run_with_retry(5, move |client| {
-            let path = path.clone();
-            async move { client.delete_file(&path).await }
-        })
-    }
-
-    fn list_directory_json(&self, path: String) -> PyResult<String> {
-        self.run_with_retry(5, move |client| {
-            let path = path.clone();
             async move {
-                let response = client.list_directory(&path).await?;
-                Ok(serde_json::to_string(&response)?)
+                let traced = client.write_file(&path, content).await?;
+                Ok(traced.trace_id)
             }
         })
     }
 
-    fn create_pty_session_json(&self, payload_json: String) -> PyResult<String> {
-        let payload: Value = parse_json_payload(&payload_json)?;
+    fn delete_file(&self, path: String) -> PyResult<String> {
         self.run_with_retry(5, move |client| {
-            let payload = payload.clone();
+            let path = path.clone();
             async move {
-                let response = client.create_pty_session(&payload).await?;
-                Ok(serde_json::to_string(&response)?)
+                let traced = client.delete_file(&path).await?;
+                Ok(traced.trace_id)
             }
         })
     }
 
-    fn run_process_json(&self, payload_json: String) -> PyResult<Vec<String>> {
+    fn list_directory_json(&self, path: String) -> PyResult<(String, String)> {
+        self.run_with_retry(5, move |client| {
+            let path = path.clone();
+            async move {
+                let traced = client.list_directory(&path).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
+            }
+        })
+    }
+
+    fn create_pty_session_json(&self, payload_json: String) -> PyResult<(String, String)> {
         let payload: Value = parse_json_payload(&payload_json)?;
         self.run_with_retry(5, move |client| {
             let payload = payload.clone();
             async move {
-                let events = client.run_process(&payload).await?;
-                events
+                let traced = client.create_pty_session(&payload).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
+            }
+        })
+    }
+
+    fn run_process_json(&self, payload_json: String) -> PyResult<(String, Vec<String>)> {
+        let payload: Value = parse_json_payload(&payload_json)?;
+        self.run_with_retry(5, move |client| {
+            let payload = payload.clone();
+            async move {
+                let traced = client.run_process(&payload).await?;
+                let trace_id = traced.trace_id.clone();
+                let events = traced
+                    .into_inner()
                     .into_iter()
                     .map(|event| serde_json::to_string(&event).map_err(SdkError::from))
-                    .collect::<Result<Vec<_>, _>>()
+                    .collect::<Result<Vec<String>, SdkError>>()?;
+                Ok((trace_id, events))
             }
         })
     }
 
-    fn health_json(&self) -> PyResult<String> {
+    fn health_json(&self) -> PyResult<(String, String)> {
         self.run_with_retry(5, move |client| async move {
-            let response = client.health().await?;
-            Ok(serde_json::to_string(&response)?)
+            let traced = client.health().await?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+            Ok((trace_id, json))
         })
     }
 
-    fn info_json(&self) -> PyResult<String> {
+    fn info_json(&self) -> PyResult<(String, String)> {
         self.run_with_retry(5, move |client| async move {
-            let response = client.info().await?;
-            Ok(serde_json::to_string(&response)?)
+            let traced = client.info().await?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+            Ok((trace_id, json))
         })
     }
 }
@@ -1267,7 +1320,7 @@ impl CloudDocumentAIClient {
             let body_json = body_json.clone();
             async move {
                 let response = client.request(method, &path, body_json.as_ref()).await?;
-                Ok(serde_json::to_string(&response)?)
+                Ok(serde_json::to_string(&response).map_err(SdkError::from)?)
             }
         })
     }
@@ -1278,7 +1331,7 @@ impl CloudDocumentAIClient {
             let content = content.clone();
             async move {
                 let response = client.upload_file(&file_name, content).await?;
-                Ok(serde_json::to_string(&response)?)
+                Ok(serde_json::to_string(&response).map_err(SdkError::from)?)
             }
         })
     }

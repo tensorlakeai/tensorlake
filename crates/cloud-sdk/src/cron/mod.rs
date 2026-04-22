@@ -1,6 +1,9 @@
 pub mod models;
 
-use crate::{client::Client, error::SdkError};
+use crate::{
+    client::{Client, Traced},
+    error::SdkError,
+};
 use models::*;
 use reqwest::Method;
 
@@ -22,7 +25,7 @@ impl CronClient {
         application: &str,
         cron_expression: &str,
         input_base64: Option<String>,
-    ) -> Result<CreateCronScheduleResponse, SdkError> {
+    ) -> Result<Traced<CreateCronScheduleResponse>, SdkError> {
         let path = format!(
             "/v1/namespaces/{}/applications/{}/cron-schedules",
             namespace, application
@@ -34,10 +37,7 @@ impl CronClient {
         let req = self
             .client
             .build_post_json_request(Method::POST, &path, &body)?;
-        let resp = self.client.execute(req).await?;
-        let bytes = resp.bytes().await?;
-        let jd = &mut serde_json::Deserializer::from_reader(bytes.as_ref());
-        Ok(serde_path_to_error::deserialize(jd)?)
+        self.client.execute_json(req).await
     }
 
     /// List all cron schedules for an application.
@@ -45,16 +45,13 @@ impl CronClient {
         &self,
         namespace: &str,
         application: &str,
-    ) -> Result<ListCronSchedulesResponse, SdkError> {
+    ) -> Result<Traced<ListCronSchedulesResponse>, SdkError> {
         let path = format!(
             "/v1/namespaces/{}/applications/{}/cron-schedules",
             namespace, application
         );
         let req = self.client.build_get_json_request(&path, None)?;
-        let resp = self.client.execute(req).await?;
-        let bytes = resp.bytes().await?;
-        let jd = &mut serde_json::Deserializer::from_reader(bytes.as_ref());
-        Ok(serde_path_to_error::deserialize(jd)?)
+        self.client.execute_json(req).await
     }
 
     /// Delete a cron schedule by ID.
@@ -63,7 +60,7 @@ impl CronClient {
         namespace: &str,
         application: &str,
         schedule_id: &str,
-    ) -> Result<(), SdkError> {
+    ) -> Result<Traced<()>, SdkError> {
         let path = format!(
             "/v1/namespaces/{}/applications/{}/cron-schedules/{}",
             namespace, application, schedule_id
@@ -73,7 +70,6 @@ impl CronClient {
             .request(Method::DELETE, &path)
             .build()
             .map_err(SdkError::from)?;
-        self.client.execute(req).await?;
-        Ok(())
+        Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 }

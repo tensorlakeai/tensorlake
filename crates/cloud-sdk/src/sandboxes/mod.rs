@@ -5,10 +5,12 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use reqwest::Method;
 use reqwest::header::ACCEPT;
-use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::{client::Client, error::SdkError};
+use crate::{
+    client::{Client, Traced},
+    error::SdkError,
+};
 pub use desktop::SandboxDesktopClient;
 
 use models::{
@@ -57,86 +59,74 @@ impl SandboxesClient {
         }
     }
 
-    async fn parse_json<T: DeserializeOwned>(response: reqwest::Response) -> Result<T, SdkError> {
-        let bytes = response.bytes().await?;
-        let jd = &mut serde_json::Deserializer::from_slice(bytes.as_ref());
-        let parsed = serde_path_to_error::deserialize(jd)?;
-        Ok(parsed)
-    }
-
     pub async fn create(
         &self,
         request: &CreateSandboxRequest,
-    ) -> Result<CreateSandboxResponse, SdkError> {
+    ) -> Result<Traced<CreateSandboxResponse>, SdkError> {
         let uri = self.endpoint("sandboxes");
         let req = self
             .client
             .build_post_json_request(Method::POST, &uri, request)?;
-        let resp = self.client.execute(req).await?;
-        Self::parse_json(resp).await
+        self.client.execute_json(req).await
     }
 
-    pub async fn claim(&self, pool_id: &str) -> Result<CreateSandboxResponse, SdkError> {
+    pub async fn claim(&self, pool_id: &str) -> Result<Traced<CreateSandboxResponse>, SdkError> {
         let uri = self.endpoint(&format!("sandbox-pools/{pool_id}/sandboxes"));
         let req = self.client.request(Method::POST, &uri).build()?;
-        let resp = self.client.execute(req).await?;
-        Self::parse_json(resp).await
+        self.client.execute_json(req).await
     }
 
-    pub async fn get(&self, sandbox_id: &str) -> Result<SandboxInfo, SdkError> {
+    pub async fn get(&self, sandbox_id: &str) -> Result<Traced<SandboxInfo>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}"));
         let req = self.client.request(Method::GET, &uri).build()?;
-        let resp = self.client.execute(req).await?;
-        Self::parse_json(resp).await
+        self.client.execute_json(req).await
     }
 
-    pub async fn list(&self) -> Result<Vec<SandboxInfo>, SdkError> {
+    pub async fn list(&self) -> Result<Traced<Vec<SandboxInfo>>, SdkError> {
         let uri = self.endpoint("sandboxes");
         let req = self.client.request(Method::GET, &uri).build()?;
-        let resp = self.client.execute(req).await?;
-        let list: ListSandboxesResponse = Self::parse_json(resp).await?;
-        Ok(list.sandboxes)
+        Ok(self
+            .client
+            .execute_json::<ListSandboxesResponse>(req)
+            .await?
+            .map(|r| r.sandboxes))
     }
 
     pub async fn update(
         &self,
         sandbox_id: &str,
         request: &UpdateSandboxRequest,
-    ) -> Result<SandboxInfo, SdkError> {
+    ) -> Result<Traced<SandboxInfo>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}"));
         let req = self
             .client
             .build_post_json_request(Method::PATCH, &uri, request)?;
-        let resp = self.client.execute(req).await?;
-        Self::parse_json(resp).await
+        self.client.execute_json(req).await
     }
 
-    pub async fn delete(&self, sandbox_id: &str) -> Result<(), SdkError> {
+    pub async fn delete(&self, sandbox_id: &str) -> Result<Traced<()>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}"));
         let req = self.client.request(Method::DELETE, &uri).build()?;
-        let _resp = self.client.execute(req).await?;
-        Ok(())
+        Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
-    pub async fn suspend(&self, sandbox_id: &str) -> Result<(), SdkError> {
+    pub async fn suspend(&self, sandbox_id: &str) -> Result<Traced<()>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/suspend"));
         let req = self.client.request(Method::POST, &uri).build()?;
-        let _resp = self.client.execute(req).await?;
-        Ok(())
+        Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
-    pub async fn resume(&self, sandbox_id: &str) -> Result<(), SdkError> {
+    pub async fn resume(&self, sandbox_id: &str) -> Result<Traced<()>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/resume"));
         let req = self.client.request(Method::POST, &uri).build()?;
-        let _resp = self.client.execute(req).await?;
-        Ok(())
+        Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
     pub async fn snapshot(
         &self,
         sandbox_id: &str,
         content_mode: Option<SnapshotContentMode>,
-    ) -> Result<CreateSnapshotResponse, SdkError> {
+    ) -> Result<Traced<CreateSnapshotResponse>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/snapshot"));
         let req = if content_mode.is_some() {
             let body = CreateSnapshotRequest {
@@ -148,77 +138,74 @@ impl SandboxesClient {
             // Preserve today's wire shape (no body) for callers that don't set a content mode.
             self.client.request(Method::POST, &uri).build()?
         };
-        let resp = self.client.execute(req).await?;
-        Self::parse_json(resp).await
+        self.client.execute_json(req).await
     }
 
-    pub async fn get_snapshot(&self, snapshot_id: &str) -> Result<SnapshotInfo, SdkError> {
+    pub async fn get_snapshot(&self, snapshot_id: &str) -> Result<Traced<SnapshotInfo>, SdkError> {
         let uri = self.endpoint(&format!("snapshots/{snapshot_id}"));
         let req = self.client.request(Method::GET, &uri).build()?;
-        let resp = self.client.execute(req).await?;
-        Self::parse_json(resp).await
+        self.client.execute_json(req).await
     }
 
-    pub async fn list_snapshots(&self) -> Result<Vec<SnapshotInfo>, SdkError> {
+    pub async fn list_snapshots(&self) -> Result<Traced<Vec<SnapshotInfo>>, SdkError> {
         let uri = self.endpoint("snapshots");
         let req = self.client.request(Method::GET, &uri).build()?;
-        let resp = self.client.execute(req).await?;
-        let list: ListSnapshotsResponse = Self::parse_json(resp).await?;
-        Ok(list.snapshots)
+        Ok(self
+            .client
+            .execute_json::<ListSnapshotsResponse>(req)
+            .await?
+            .map(|r| r.snapshots))
     }
 
-    pub async fn delete_snapshot(&self, snapshot_id: &str) -> Result<(), SdkError> {
+    pub async fn delete_snapshot(&self, snapshot_id: &str) -> Result<Traced<()>, SdkError> {
         let uri = self.endpoint(&format!("snapshots/{snapshot_id}"));
         let req = self.client.request(Method::DELETE, &uri).build()?;
-        let _resp = self.client.execute(req).await?;
-        Ok(())
+        Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
     pub async fn create_pool(
         &self,
         request: &SandboxPoolRequest,
-    ) -> Result<CreateSandboxPoolResponse, SdkError> {
+    ) -> Result<Traced<CreateSandboxPoolResponse>, SdkError> {
         let uri = self.endpoint("sandbox-pools");
         let req = self
             .client
             .build_post_json_request(Method::POST, &uri, request)?;
-        let resp = self.client.execute(req).await?;
-        Self::parse_json(resp).await
+        self.client.execute_json(req).await
     }
 
-    pub async fn get_pool(&self, pool_id: &str) -> Result<SandboxPoolInfo, SdkError> {
+    pub async fn get_pool(&self, pool_id: &str) -> Result<Traced<SandboxPoolInfo>, SdkError> {
         let uri = self.endpoint(&format!("sandbox-pools/{pool_id}"));
         let req = self.client.request(Method::GET, &uri).build()?;
-        let resp = self.client.execute(req).await?;
-        Self::parse_json(resp).await
+        self.client.execute_json(req).await
     }
 
-    pub async fn list_pools(&self) -> Result<Vec<SandboxPoolInfo>, SdkError> {
+    pub async fn list_pools(&self) -> Result<Traced<Vec<SandboxPoolInfo>>, SdkError> {
         let uri = self.endpoint("sandbox-pools");
         let req = self.client.request(Method::GET, &uri).build()?;
-        let resp = self.client.execute(req).await?;
-        let list: ListSandboxPoolsResponse = Self::parse_json(resp).await?;
-        Ok(list.pools)
+        Ok(self
+            .client
+            .execute_json::<ListSandboxPoolsResponse>(req)
+            .await?
+            .map(|r| r.pools))
     }
 
     pub async fn update_pool(
         &self,
         pool_id: &str,
         request: &SandboxPoolRequest,
-    ) -> Result<SandboxPoolInfo, SdkError> {
+    ) -> Result<Traced<SandboxPoolInfo>, SdkError> {
         let uri = self.endpoint(&format!("sandbox-pools/{pool_id}"));
         let req = self
             .client
             .build_post_json_request(Method::PUT, &uri, request)?;
-        let resp = self.client.execute(req).await?;
-        Self::parse_json(resp).await
+        self.client.execute_json(req).await
     }
 
-    pub async fn delete_pool(&self, pool_id: &str) -> Result<(), SdkError> {
+    pub async fn delete_pool(&self, pool_id: &str) -> Result<Traced<()>, SdkError> {
         let uri = self.endpoint(&format!("sandbox-pools/{pool_id}"));
         let req = self.client.request(Method::DELETE, &uri).build()?;
-        let _resp = self.client.execute(req).await?;
-        Ok(())
+        Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 }
 
@@ -255,265 +242,249 @@ impl SandboxProxyClient {
         request_builder
     }
 
-    async fn parse_json<T: DeserializeOwned>(response: reqwest::Response) -> Result<T, SdkError> {
-        let bytes = response.bytes().await?;
-        let jd = &mut serde_json::Deserializer::from_slice(bytes.as_ref());
-        let parsed = serde_path_to_error::deserialize(jd)?;
-        Ok(parsed)
-    }
-
-    pub async fn start_process(&self, payload: &Value) -> Result<ProcessInfo, SdkError> {
+    pub async fn start_process(&self, payload: &Value) -> Result<Traced<ProcessInfo>, SdkError> {
         let req = self
             .request(Method::POST, "/api/v1/processes")
             .json(payload)
             .build()?;
-        let resp = self.client.execute(req).await?;
-        Self::parse_json(resp).await
+        self.client.execute_json(req).await
     }
 
-    pub async fn list_processes(&self) -> Result<Vec<ProcessInfo>, SdkError> {
+    pub async fn list_processes(&self) -> Result<Traced<Vec<ProcessInfo>>, SdkError> {
         let req = self.request(Method::GET, "/api/v1/processes").build()?;
-        let resp = self.client.execute(req).await?;
-        let list: ListProcessesResponse = Self::parse_json(resp).await?;
-        Ok(list.processes)
+        Ok(self
+            .client
+            .execute_json::<ListProcessesResponse>(req)
+            .await?
+            .map(|r| r.processes))
     }
 
-    pub async fn get_process(&self, pid: i64) -> Result<ProcessInfo, SdkError> {
+    pub async fn get_process(&self, pid: i64) -> Result<Traced<ProcessInfo>, SdkError> {
         let req = self
             .request(Method::GET, &format!("/api/v1/processes/{pid}"))
             .build()?;
-        let resp = self.client.execute(req).await?;
-        Self::parse_json(resp).await
+        self.client.execute_json(req).await
     }
 
-    pub async fn kill_process(&self, pid: i64) -> Result<(), SdkError> {
+    pub async fn kill_process(&self, pid: i64) -> Result<Traced<()>, SdkError> {
         let req = self
             .request(Method::DELETE, &format!("/api/v1/processes/{pid}"))
             .build()?;
-        let _resp = self.client.execute(req).await?;
-        Ok(())
+        Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
-    pub async fn send_signal(&self, pid: i64, signal: i64) -> Result<SendSignalResponse, SdkError> {
+    pub async fn send_signal(
+        &self,
+        pid: i64,
+        signal: i64,
+    ) -> Result<Traced<SendSignalResponse>, SdkError> {
         let req = self
             .request(Method::POST, &format!("/api/v1/processes/{pid}/signal"))
             .json(&serde_json::json!({ "signal": signal }))
             .build()?;
-        let resp = self.client.execute(req).await?;
-        Self::parse_json(resp).await
+        self.client.execute_json(req).await
     }
 
-    pub async fn write_stdin(&self, pid: i64, data: Vec<u8>) -> Result<(), SdkError> {
+    pub async fn write_stdin(&self, pid: i64, data: Vec<u8>) -> Result<Traced<()>, SdkError> {
         let req = self
             .request(Method::POST, &format!("/api/v1/processes/{pid}/stdin"))
             .body(data)
             .build()?;
-        let _resp = self.client.execute(req).await?;
-        Ok(())
+        Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
-    pub async fn close_stdin(&self, pid: i64) -> Result<(), SdkError> {
+    pub async fn close_stdin(&self, pid: i64) -> Result<Traced<()>, SdkError> {
         let req = self
             .request(
                 Method::POST,
                 &format!("/api/v1/processes/{pid}/stdin/close"),
             )
             .build()?;
-        let _resp = self.client.execute(req).await?;
-        Ok(())
+        Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
-    pub async fn get_stdout(&self, pid: i64) -> Result<OutputResponse, SdkError> {
+    pub async fn get_stdout(&self, pid: i64) -> Result<Traced<OutputResponse>, SdkError> {
         let req = self
             .request(Method::GET, &format!("/api/v1/processes/{pid}/stdout"))
             .build()?;
-        let resp = self.client.execute(req).await?;
-        Self::parse_json(resp).await
+        self.client.execute_json(req).await
     }
 
-    pub async fn get_stderr(&self, pid: i64) -> Result<OutputResponse, SdkError> {
+    pub async fn get_stderr(&self, pid: i64) -> Result<Traced<OutputResponse>, SdkError> {
         let req = self
             .request(Method::GET, &format!("/api/v1/processes/{pid}/stderr"))
             .build()?;
-        let resp = self.client.execute(req).await?;
-        Self::parse_json(resp).await
+        self.client.execute_json(req).await
     }
 
-    pub async fn get_output(&self, pid: i64) -> Result<OutputResponse, SdkError> {
+    pub async fn get_output(&self, pid: i64) -> Result<Traced<OutputResponse>, SdkError> {
         let req = self
             .request(Method::GET, &format!("/api/v1/processes/{pid}/output"))
             .build()?;
-        let resp = self.client.execute(req).await?;
-        Self::parse_json(resp).await
+        self.client.execute_json(req).await
     }
 
-    pub async fn follow_stdout(&self, pid: i64) -> Result<Vec<OutputEvent>, SdkError> {
-        self.follow_stream(
-            Method::GET,
-            &format!("/api/v1/processes/{pid}/stdout/follow"),
-            None,
-            |data| -> Option<Result<OutputEvent, SdkError>> {
-                serde_json::from_str(data).ok().map(Ok)
-            },
-        )
-        .await
+    pub async fn follow_stdout(&self, pid: i64) -> Result<Traced<Vec<OutputEvent>>, SdkError> {
+        self.follow_stream(&format!("/api/v1/processes/{pid}/stdout/follow"))
+            .await
     }
 
-    pub async fn follow_stderr(&self, pid: i64) -> Result<Vec<OutputEvent>, SdkError> {
-        self.follow_stream(
-            Method::GET,
-            &format!("/api/v1/processes/{pid}/stderr/follow"),
-            None,
-            |data| -> Option<Result<OutputEvent, SdkError>> {
-                serde_json::from_str(data).ok().map(Ok)
-            },
-        )
-        .await
+    pub async fn follow_stderr(&self, pid: i64) -> Result<Traced<Vec<OutputEvent>>, SdkError> {
+        self.follow_stream(&format!("/api/v1/processes/{pid}/stderr/follow"))
+            .await
     }
 
-    pub async fn follow_output(&self, pid: i64) -> Result<Vec<OutputEvent>, SdkError> {
-        self.follow_stream(
-            Method::GET,
-            &format!("/api/v1/processes/{pid}/output/follow"),
-            None,
-            |data| -> Option<Result<OutputEvent, SdkError>> {
-                serde_json::from_str(data).ok().map(Ok)
-            },
-        )
-        .await
+    pub async fn follow_output(&self, pid: i64) -> Result<Traced<Vec<OutputEvent>>, SdkError> {
+        self.follow_stream(&format!("/api/v1/processes/{pid}/output/follow"))
+            .await
     }
 
-    pub async fn run_process(&self, payload: &Value) -> Result<Vec<RunProcessEvent>, SdkError> {
-        self.follow_stream(
-            Method::POST,
-            "/api/v1/processes/run",
-            Some(payload),
-            |data| -> Option<Result<RunProcessEvent, SdkError>> {
-                match serde_json::from_str(data) {
-                    Ok(RunProcessEvent::Exited {
-                        exit_code: None,
-                        signal: None,
-                    }) => None,
-                    Ok(evt) => Some(Ok(evt)),
-                    Err(_) => None,
-                }
-            },
-        )
-        .await
-    }
-
-    async fn follow_stream<T, E, F>(
+    pub async fn run_process(
         &self,
-        method: Method,
-        path: &str,
-        payload: Option<&Value>,
-        filter_map: F,
-    ) -> Result<Vec<T>, SdkError>
-    where
-        E: Into<SdkError>,
-        F: Fn(&str) -> Option<Result<T, E>>,
-    {
-        let mut req = self
-            .request(method, path)
-            .header(ACCEPT, "text/event-stream");
-        if let Some(payload) = payload {
-            req = req.json(payload);
-        }
-
-        let response = self.client.execute(req.build()?).await?;
-
-        if !response.status().is_success() {
-            return Err(SdkError::ClientError(format!(
-                "expected success response from {path}, got status: {}",
-                response.status()
-            )));
-        }
-
+        payload: &Value,
+    ) -> Result<Traced<Vec<RunProcessEvent>>, SdkError> {
+        let path = "/api/v1/processes/run";
+        let req = self
+            .request(Method::POST, path)
+            .header(ACCEPT, "text/event-stream")
+            .json(payload)
+            .build()?;
+        let response = self.client.execute_traced(req).await?;
+        let trace_id = response.trace_id.clone();
         let content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("");
-
-        if !content_type
-            .to_ascii_lowercase()
-            .contains("text/event-stream")
-        {
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !content_type.contains("text/event-stream") {
             return Err(SdkError::ClientError(format!(
                 "expected text/event-stream response from {path}, got content-type: {content_type}"
             )));
         }
-        let stream = response.bytes_stream().eventsource().filter_map(|event| {
-            let result = match event {
-                Ok(msg) => filter_map(&msg.data).map(|r| r.map_err(Into::into)),
-                Err(error) => Some(Err(SdkError::EventSourceError(error.to_string()))),
-            };
-            async move { result }
-        });
+        let stream = response
+            .into_inner()
+            .bytes_stream()
+            .eventsource()
+            .filter_map(move |event| async move {
+                match event {
+                    Ok(msg) => {
+                        // The Exited variant has all-optional fields so it acts as a
+                        // catch-all for unrecognised JSON. Discard Exited{None, None}
+                        // — a real exit always has at least one of exit_code or signal.
+                        match serde_json::from_str::<RunProcessEvent>(&msg.data) {
+                            Ok(RunProcessEvent::Exited {
+                                exit_code: None,
+                                signal: None,
+                            }) => None,
+                            Ok(evt) => Some(Ok(evt)),
+                            Err(_) => None,
+                        }
+                    }
+                    Err(error) => Some(Err(SdkError::EventSourceError(error.to_string()))),
+                }
+            });
         futures::pin_mut!(stream);
         let mut events = Vec::new();
         while let Some(event) = stream.next().await {
             events.push(event?);
         }
-        Ok(events)
+        Ok(Traced::new(trace_id, events))
     }
 
-    pub async fn read_file(&self, path: &str) -> Result<Vec<u8>, SdkError> {
+    async fn follow_stream(&self, path: &str) -> Result<Traced<Vec<OutputEvent>>, SdkError> {
+        let req = self
+            .request(Method::GET, path)
+            .header(ACCEPT, "text/event-stream")
+            .build()?;
+        let response = self.client.execute_traced(req).await?;
+        let trace_id = response.trace_id.clone();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !content_type.contains("text/event-stream") {
+            return Err(SdkError::ClientError(format!(
+                "expected text/event-stream response from {path}, got content-type: {content_type}"
+            )));
+        }
+        let stream = response
+            .into_inner()
+            .bytes_stream()
+            .eventsource()
+            .filter_map(move |event| async move {
+                match event {
+                    Ok(msg) => match serde_json::from_str::<OutputEvent>(&msg.data) {
+                        Ok(evt) => Some(Ok(evt)),
+                        Err(_) => None, // skip heartbeats / non-output events
+                    },
+                    Err(error) => Some(Err(SdkError::EventSourceError(error.to_string()))),
+                }
+            });
+        futures::pin_mut!(stream);
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event?);
+        }
+        Ok(Traced::new(trace_id, events))
+    }
+
+    pub async fn read_file(&self, path: &str) -> Result<Traced<Vec<u8>>, SdkError> {
         let req = self
             .request(Method::GET, "/api/v1/files")
             .query(&[("path", path)])
             .build()?;
-        let resp = self.client.execute(req).await?;
-        let bytes = resp.bytes().await?;
-        Ok(bytes.to_vec())
+        let resp = self.client.execute_traced(req).await?;
+        let trace_id = resp.trace_id.clone();
+        let bytes = resp.into_inner().bytes().await?;
+        Ok(Traced::new(trace_id, bytes.to_vec()))
     }
 
-    pub async fn write_file(&self, path: &str, content: Vec<u8>) -> Result<(), SdkError> {
+    pub async fn write_file(&self, path: &str, content: Vec<u8>) -> Result<Traced<()>, SdkError> {
         let req = self
             .request(Method::PUT, "/api/v1/files")
             .query(&[("path", path)])
             .body(content)
             .build()?;
-        let _resp = self.client.execute(req).await?;
-        Ok(())
+        Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
-    pub async fn delete_file(&self, path: &str) -> Result<(), SdkError> {
+    pub async fn delete_file(&self, path: &str) -> Result<Traced<()>, SdkError> {
         let req = self
             .request(Method::DELETE, "/api/v1/files")
             .query(&[("path", path)])
             .build()?;
-        let _resp = self.client.execute(req).await?;
-        Ok(())
+        Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
-    pub async fn list_directory(&self, path: &str) -> Result<ListDirectoryResponse, SdkError> {
+    pub async fn list_directory(
+        &self,
+        path: &str,
+    ) -> Result<Traced<ListDirectoryResponse>, SdkError> {
         let req = self
             .request(Method::GET, "/api/v1/files/list")
             .query(&[("path", path)])
             .build()?;
-        let resp = self.client.execute(req).await?;
-        Self::parse_json(resp).await
+        self.client.execute_json(req).await
     }
 
-    pub async fn create_pty_session(&self, payload: &Value) -> Result<Value, SdkError> {
+    pub async fn create_pty_session(&self, payload: &Value) -> Result<Traced<Value>, SdkError> {
         let req = self
             .request(Method::POST, "/api/v1/pty")
             .json(payload)
             .build()?;
-        let resp = self.client.execute(req).await?;
-        Self::parse_json(resp).await
+        self.client.execute_json(req).await
     }
 
-    pub async fn health(&self) -> Result<HealthResponse, SdkError> {
+    pub async fn health(&self) -> Result<Traced<HealthResponse>, SdkError> {
         let req = self.request(Method::GET, "/api/v1/health").build()?;
-        let resp = self.client.execute(req).await?;
-        Self::parse_json(resp).await
+        self.client.execute_json(req).await
     }
 
-    pub async fn info(&self) -> Result<DaemonInfo, SdkError> {
+    pub async fn info(&self) -> Result<Traced<DaemonInfo>, SdkError> {
         let req = self.request(Method::GET, "/api/v1/info").build()?;
-        let resp = self.client.execute(req).await?;
-        Self::parse_json(resp).await
+        self.client.execute_json(req).await
     }
 }

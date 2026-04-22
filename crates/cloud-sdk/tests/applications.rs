@@ -307,7 +307,7 @@ async fn test_applications_operations() {
             .await
             .map_err(|e| format!("invoke failed: {e}"))?;
 
-        let request_id = match invoke_response {
+        let request_id = match invoke_response.into_inner() {
             InvokeResponse::RequestId(id) if !id.is_empty() => id,
             _ => return Err("invoke response did not contain a non-empty request id".to_string()),
         };
@@ -353,7 +353,7 @@ async fn test_applications_operations() {
                 ));
             }
 
-            match request.outcome {
+            match &request.outcome {
                 Some(RequestOutcome::Success) => {
                     request_succeeded = true;
                     break;

@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from tensorlake._tracing import inject_traceparent
 from tensorlake.cli._common import Context
 from tensorlake.sandbox import Sandbox, SandboxClient
 from tensorlake.sandbox.models import ProcessStatus, SnapshotContentMode
@@ -714,7 +715,7 @@ def _register_image(
         "snapshotUri": snapshot_uri,
         "isPublic": is_public,
     }
-    resp = httpx.post(url, json=body, headers=headers, timeout=30.0)
+    resp = httpx.post(url, json=body, headers=inject_traceparent(headers), timeout=30.0)
     resp.raise_for_status()
     return resp.json()
 

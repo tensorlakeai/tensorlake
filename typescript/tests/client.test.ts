@@ -367,7 +367,6 @@ describe("SandboxClient", () => {
             ),
           );
         });
-      
 
       const client = SandboxClient.forLocalhost();
       const info = await client.exposePorts("sbx-1", [8081, 8080], {
@@ -412,7 +411,6 @@ describe("SandboxClient", () => {
             ),
           );
         });
-      
 
       const client = SandboxClient.forLocalhost();
       const info = await client.unexposePorts("sbx-1", [8080]);

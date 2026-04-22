@@ -9,6 +9,8 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import httpx
 
+from tensorlake._tracing import inject_traceparent
+
 from .exceptions import RemoteAPIError, SandboxConnectionError, SandboxError
 
 try:
@@ -161,7 +163,7 @@ class Pty:
         try:
             response = httpx.delete(
                 self._http_url,
-                headers=self._http_headers,
+                headers=inject_traceparent(self._http_headers),
                 timeout=self._connect_timeout,
             )
         except httpx.HTTPError as e:

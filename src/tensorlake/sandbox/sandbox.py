@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import httpx
+
+from tensorlake._tracing import Traced, TracedIterator, inject_traceparent
 
 from . import _defaults
 from .exceptions import (
@@ -265,7 +267,7 @@ class Sandbox:
         env: dict[str, str] | None = None,
         working_dir: str | None = None,
         timeout: float | None = None,
-    ) -> CommandResult:
+    ) -> Traced[CommandResult]:
         """Run a command to completion and return its output.
 
         Uses a single streaming ``POST /api/v1/processes/run`` request that
@@ -280,7 +282,9 @@ class Sandbox:
             timeout: Maximum seconds to wait (enforced server-side; None = no limit)
 
         Returns:
-            CommandResult with exit_code, stdout, and stderr
+            Traced[CommandResult] — access ``.trace_id`` for the W3C trace ID
+            and ``.exit_code`` / ``.stdout`` / ``.stderr`` directly (or via
+            ``.value``).
         """
         payload = self._build_command_payload(
             command,
@@ -291,7 +295,9 @@ class Sandbox:
         )
 
         try:
-            events_json = self._rust_client.run_process_json(json.dumps(payload))
+            trace_id, events_json = self._rust_client.run_process_json(
+                json.dumps(payload)
+            )
         except Exception as e:
             _raise_as_sandbox_error(e)
 
@@ -317,10 +323,13 @@ class Sandbox:
                 "sandbox process stream ended without an exit event"
             )
 
-        return CommandResult(
-            exit_code=exit_code,
-            stdout="\n".join(stdout_lines),
-            stderr="\n".join(stderr_lines),
+        return Traced(
+            trace_id,
+            CommandResult(
+                exit_code=exit_code,
+                stdout="\n".join(stdout_lines),
+                stderr="\n".join(stderr_lines),
+            ),
         )
 
     # --- Process management ---
@@ -334,7 +343,7 @@ class Sandbox:
         stdin_mode: StdinMode = StdinMode.CLOSED,
         stdout_mode: OutputMode = OutputMode.CAPTURE,
         stderr_mode: OutputMode = OutputMode.CAPTURE,
-    ) -> ProcessInfo:
+    ) -> Traced[ProcessInfo]:
         """Start a new process in the sandbox.
 
         Args:
@@ -347,7 +356,8 @@ class Sandbox:
             stderr_mode: OutputMode.CAPTURE or OutputMode.DISCARD
 
         Returns:
-            ProcessInfo with pid and status
+            Traced[ProcessInfo] — access ``.trace_id`` for the W3C trace ID
+            and ``.pid`` / ``.status`` directly (or via ``.value``).
         """
         payload = self._build_command_payload(
             command,
@@ -360,36 +370,39 @@ class Sandbox:
         )
 
         try:
-            response_json = self._rust_client.start_process_json(json.dumps(payload))
-            return ProcessInfo.model_validate_json(response_json)
+            trace_id, response_json = self._rust_client.start_process_json(
+                json.dumps(payload)
+            )
+            return Traced(trace_id, ProcessInfo.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def list_processes(self) -> list[ProcessInfo]:
+    def list_processes(self) -> Traced[list[ProcessInfo]]:
         """List all processes in the sandbox."""
         try:
-            response_json = self._rust_client.list_processes_json()
+            trace_id, response_json = self._rust_client.list_processes_json()
             data = ListProcessesResponse.model_validate_json(response_json)
-            return data.processes
+            return Traced(trace_id, data.processes)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def get_process(self, pid: int) -> ProcessInfo:
+    def get_process(self, pid: int) -> Traced[ProcessInfo]:
         """Get information about a specific process."""
         try:
-            response_json = self._rust_client.get_process_json(pid=pid)
-            return ProcessInfo.model_validate_json(response_json)
+            trace_id, response_json = self._rust_client.get_process_json(pid=pid)
+            return Traced(trace_id, ProcessInfo.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def kill_process(self, pid: int) -> None:
+    def kill_process(self, pid: int) -> Traced[None]:
         """Kill a process."""
         try:
-            self._rust_client.kill_process(pid=pid)
+            trace_id = self._rust_client.kill_process(pid=pid)
+            return Traced(trace_id, None)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def send_signal(self, pid: int, signal: int) -> SendSignalResponse:
+    def send_signal(self, pid: int, signal: int) -> Traced[SendSignalResponse]:
         """Send a signal to a process.
 
         Args:
@@ -397,95 +410,115 @@ class Sandbox:
             signal: Signal number (e.g. 15 for SIGTERM, 9 for SIGKILL)
         """
         try:
-            response_json = self._rust_client.send_signal_json(pid=pid, signal=signal)
-            return SendSignalResponse.model_validate_json(response_json)
+            trace_id, response_json = self._rust_client.send_signal_json(
+                pid=pid, signal=signal
+            )
+            return Traced(
+                trace_id, SendSignalResponse.model_validate_json(response_json)
+            )
         except Exception as e:
             _raise_as_sandbox_error(e)
 
     # --- Process I/O ---
 
-    def write_stdin(self, pid: int, data: bytes) -> None:
+    def write_stdin(self, pid: int, data: bytes) -> Traced[None]:
         """Write data to a process's stdin."""
         try:
-            self._rust_client.write_stdin(pid=pid, data=data)
+            trace_id = self._rust_client.write_stdin(pid=pid, data=data)
+            return Traced(trace_id, None)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def close_stdin(self, pid: int) -> None:
+    def close_stdin(self, pid: int) -> Traced[None]:
         """Close a process's stdin."""
         try:
-            self._rust_client.close_stdin(pid=pid)
+            trace_id = self._rust_client.close_stdin(pid=pid)
+            return Traced(trace_id, None)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def get_stdout(self, pid: int) -> OutputResponse:
+    def get_stdout(self, pid: int) -> Traced[OutputResponse]:
         """Get all stdout output from a process."""
         try:
-            response_json = self._rust_client.get_stdout_json(pid=pid)
-            return OutputResponse.model_validate_json(response_json)
+            trace_id, response_json = self._rust_client.get_stdout_json(pid=pid)
+            return Traced(trace_id, OutputResponse.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def get_stderr(self, pid: int) -> OutputResponse:
+    def get_stderr(self, pid: int) -> Traced[OutputResponse]:
         """Get all stderr output from a process."""
         try:
-            response_json = self._rust_client.get_stderr_json(pid=pid)
-            return OutputResponse.model_validate_json(response_json)
+            trace_id, response_json = self._rust_client.get_stderr_json(pid=pid)
+            return Traced(trace_id, OutputResponse.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def get_output(self, pid: int) -> OutputResponse:
+    def get_output(self, pid: int) -> Traced[OutputResponse]:
         """Get all combined output from a process."""
         try:
-            response_json = self._rust_client.get_output_json(pid=pid)
-            return OutputResponse.model_validate_json(response_json)
+            trace_id, response_json = self._rust_client.get_output_json(pid=pid)
+            return Traced(trace_id, OutputResponse.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def follow_stdout(self, pid: int) -> Iterator[OutputEvent]:
-        """Stream stdout from a process via SSE. Replays existing output then streams live."""
+    def follow_stdout(self, pid: int) -> TracedIterator[OutputEvent]:
+        """Collect all stdout output events from a process and return them as an iterable.
+
+        Blocks until the process exits and all output has been received."""
         try:
-            events_json = self._rust_client.follow_stdout_json(pid=pid)
-            for event_json in events_json:
-                yield OutputEvent.model_validate_json(event_json)
+            trace_id, events_json = self._rust_client.follow_stdout_json(pid=pid)
+            return TracedIterator(
+                trace_id,
+                [OutputEvent.model_validate_json(ej) for ej in events_json],
+            )
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def follow_stderr(self, pid: int) -> Iterator[OutputEvent]:
-        """Stream stderr from a process via SSE. Replays existing output then streams live."""
+    def follow_stderr(self, pid: int) -> TracedIterator[OutputEvent]:
+        """Collect all stderr output events from a process and return them as an iterable.
+
+        Blocks until the process exits and all output has been received."""
         try:
-            events_json = self._rust_client.follow_stderr_json(pid=pid)
-            for event_json in events_json:
-                yield OutputEvent.model_validate_json(event_json)
+            trace_id, events_json = self._rust_client.follow_stderr_json(pid=pid)
+            return TracedIterator(
+                trace_id,
+                [OutputEvent.model_validate_json(ej) for ej in events_json],
+            )
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def follow_output(self, pid: int) -> Iterator[OutputEvent]:
-        """Stream combined output from a process via SSE. Replays existing output then streams live."""
+    def follow_output(self, pid: int) -> TracedIterator[OutputEvent]:
+        """Collect all combined output events from a process and return them as an iterable.
+
+        Blocks until the process exits and all output has been received."""
         try:
-            events_json = self._rust_client.follow_output_json(pid=pid)
-            for event_json in events_json:
-                yield OutputEvent.model_validate_json(event_json)
+            trace_id, events_json = self._rust_client.follow_output_json(pid=pid)
+            return TracedIterator(
+                trace_id,
+                [OutputEvent.model_validate_json(ej) for ej in events_json],
+            )
         except Exception as e:
             _raise_as_sandbox_error(e)
 
     # --- File operations ---
 
-    def read_file(self, path: str) -> bytes:
+    def read_file(self, path: str) -> Traced[bytes]:
         """Read a file from the sandbox.
 
         Args:
             path: Absolute path inside the sandbox
 
         Returns:
-            File contents as bytes
+            Traced[bytes] — access ``.trace_id`` for the W3C trace ID and
+            ``.value`` for the raw file bytes.
         """
         try:
-            return self._rust_client.read_file_bytes(path=path)
+            trace_id, data = self._rust_client.read_file_bytes(path=path)
+            return Traced(trace_id, data)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def write_file(self, path: str, content: bytes) -> None:
+    def write_file(self, path: str, content: bytes) -> Traced[None]:
         """Write a file to the sandbox.
 
         Args:
@@ -493,33 +526,38 @@ class Sandbox:
             content: File contents as bytes
         """
         try:
-            self._rust_client.write_file(path=path, content=content)
+            trace_id = self._rust_client.write_file(path=path, content=content)
+            return Traced(trace_id, None)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def delete_file(self, path: str) -> None:
+    def delete_file(self, path: str) -> Traced[None]:
         """Delete a file from the sandbox.
 
         Args:
             path: Absolute path inside the sandbox
         """
         try:
-            self._rust_client.delete_file(path=path)
+            trace_id = self._rust_client.delete_file(path=path)
+            return Traced(trace_id, None)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def list_directory(self, path: str) -> ListDirectoryResponse:
+    def list_directory(self, path: str) -> Traced[ListDirectoryResponse]:
         """List contents of a directory in the sandbox.
 
         Args:
             path: Absolute path inside the sandbox
 
         Returns:
-            ListDirectoryResponse with path and entries
+            Traced[ListDirectoryResponse] — access ``.trace_id`` for the W3C
+            trace ID and ``.path`` / ``.entries`` directly (or via ``.value``).
         """
         try:
-            response_json = self._rust_client.list_directory_json(path=path)
-            return ListDirectoryResponse.model_validate_json(response_json)
+            trace_id, response_json = self._rust_client.list_directory_json(path=path)
+            return Traced(
+                trace_id, ListDirectoryResponse.model_validate_json(response_json)
+            )
         except Exception as e:
             _raise_as_sandbox_error(e)
 
@@ -533,10 +571,10 @@ class Sandbox:
         working_dir: str | None = None,
         rows: int = 24,
         cols: int = 80,
-    ) -> dict:
+    ) -> Traced[dict]:
         """Create an interactive PTY session.
 
-        Returns a dict with ``session_id`` and ``token`` for WebSocket
+        Returns a Traced dict with ``session_id`` and ``token`` for WebSocket
         connection via :meth:`pty_ws_url`.
         """
         payload: dict = {"command": command, "rows": rows, "cols": cols}
@@ -548,10 +586,10 @@ class Sandbox:
             payload["working_dir"] = working_dir
 
         try:
-            response_json = self._rust_client.create_pty_session_json(
+            trace_id, response_json = self._rust_client.create_pty_session_json(
                 json.dumps(payload)
             )
-            return json.loads(response_json)
+            return Traced(trace_id, json.loads(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
@@ -601,7 +639,7 @@ class Sandbox:
     def _delete_pty_session(self, session_id: str, *, timeout: float = 10.0) -> None:
         response = httpx.delete(
             f"{self._base_url.rstrip('/')}/api/v1/pty/{session_id}",
-            headers=self._proxy_headers,
+            headers=inject_traceparent(self._proxy_headers),
             timeout=timeout,
         )
         if response.is_success or response.status_code == 404:
@@ -622,7 +660,7 @@ class Sandbox:
         connect_timeout: float = 10.0,
     ):
         """Create a PTY session, connect immediately, and return its handle."""
-        session = self.create_pty_session(
+        traced_session = self.create_pty_session(
             command=command,
             args=args,
             env=env,
@@ -630,6 +668,7 @@ class Sandbox:
             rows=rows,
             cols=cols,
         )
+        session = traced_session.value
         try:
             return self.connect_pty(
                 session["session_id"],
@@ -679,18 +718,18 @@ class Sandbox:
 
     # --- Health and info ---
 
-    def health(self) -> HealthResponse:
+    def health(self) -> Traced[HealthResponse]:
         """Check the container daemon health."""
         try:
-            response_json = self._rust_client.health_json()
-            return HealthResponse.model_validate_json(response_json)
+            trace_id, response_json = self._rust_client.health_json()
+            return Traced(trace_id, HealthResponse.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def info(self) -> DaemonInfo:
+    def info(self) -> Traced[DaemonInfo]:
         """Get container daemon info (version, uptime, process counts)."""
         try:
-            response_json = self._rust_client.info_json()
-            return DaemonInfo.model_validate_json(response_json)
+            trace_id, response_json = self._rust_client.info_json()
+            return Traced(trace_id, DaemonInfo.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
