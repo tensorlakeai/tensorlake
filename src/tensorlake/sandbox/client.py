@@ -6,7 +6,7 @@ import json
 import time
 from urllib.parse import urlparse
 
-from tensorlake._tracing import USER_AGENT
+from tensorlake._tracing import USER_AGENT, Traced
 
 from . import _defaults
 from .exceptions import (
@@ -280,7 +280,7 @@ class SandboxClient:
         deny_out: list[str] | None = None,
         snapshot_id: str | None = None,
         name: str | None = None,
-    ) -> CreateSandboxResponse:
+    ) -> Traced[CreateSandboxResponse]:
         """Create a new standalone sandbox.
 
         Args:
@@ -309,7 +309,7 @@ class SandboxClient:
                 suspend/resume. When absent the sandbox is ephemeral.
 
         Returns:
-            CreateSandboxResponse with sandbox_id and status
+            Traced[CreateSandboxResponse] with sandbox_id, status, and trace_id
 
         Raises:
             RemoteAPIError: If the API request fails
@@ -339,14 +339,14 @@ class SandboxClient:
         )
 
         try:
-            response_json = self._rust_client.create_sandbox(
+            trace_id, response_json = self._rust_client.create_sandbox(
                 request_json=request_model.model_dump_json(exclude_none=True)
             )
-            return CreateSandboxResponse.model_validate_json(response_json)
+            return Traced(trace_id, CreateSandboxResponse.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def claim(self, pool_id: str) -> CreateSandboxResponse:
+    def claim(self, pool_id: str) -> Traced[CreateSandboxResponse]:
         """Claim a sandbox from a pool.
 
         Claims a warm container from the pool, or creates a new one
@@ -356,26 +356,26 @@ class SandboxClient:
             pool_id: ID of the pool to claim from
 
         Returns:
-            CreateSandboxResponse with sandbox_id and status
+            Traced[CreateSandboxResponse] with sandbox_id, status, and trace_id
 
         Raises:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
         try:
-            response_json = self._rust_client.claim_sandbox(pool_id=pool_id)
-            return CreateSandboxResponse.model_validate_json(response_json)
+            trace_id, response_json = self._rust_client.claim_sandbox(pool_id=pool_id)
+            return Traced(trace_id, CreateSandboxResponse.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def get(self, sandbox_id: str) -> SandboxInfo:
+    def get(self, sandbox_id: str) -> Traced[SandboxInfo]:
         """Get information about a sandbox.
 
         Args:
             sandbox_id: ID of the sandbox
 
         Returns:
-            SandboxInfo with full sandbox details
+            Traced[SandboxInfo] with full sandbox details and trace_id
 
         Raises:
             SandboxNotFoundError: If sandbox doesn't exist
@@ -383,27 +383,27 @@ class SandboxClient:
             SandboxConnectionError: If the server is unreachable
         """
         try:
-            response_json = self._rust_client.get_sandbox_json(sandbox_id=sandbox_id)
-            return SandboxInfo.model_validate_json(response_json)
+            trace_id, response_json = self._rust_client.get_sandbox_json(sandbox_id=sandbox_id)
+            return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
         except Exception as e:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
 
-    def list(self) -> list[SandboxInfo]:
+    def list(self) -> Traced[list[SandboxInfo]]:
         """List all sandboxes in the namespace.
 
         Returns:
-            List of SandboxInfo objects
+            Traced[list[SandboxInfo]] with sandbox list and trace_id
 
         Raises:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
         try:
-            response_json = self._rust_client.list_sandboxes_json()
+            trace_id, response_json = self._rust_client.list_sandboxes_json()
             data = ListSandboxesResponse.model_validate(json.loads(response_json))
-            return data.sandboxes
+            return Traced(trace_id, data.sandboxes)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
@@ -414,7 +414,7 @@ class SandboxClient:
         *,
         allow_unauthenticated_access: bool | None = None,
         exposed_ports: list[int] | None = None,
-    ) -> SandboxInfo:
+    ) -> Traced[SandboxInfo]:
         """Update a sandbox's properties.
 
         Supports updating the sandbox name and sandbox proxy access settings.
@@ -453,24 +453,25 @@ class SandboxClient:
             exposed_ports=normalized_ports,
         )
         try:
-            response_json = self._rust_client.update_sandbox(
+            trace_id, response_json = self._rust_client.update_sandbox(
                 sandbox_id=sandbox_id,
                 request_json=request.model_dump_json(exclude_none=True),
             )
-            return SandboxInfo.model_validate_json(response_json)
+            return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
         except Exception as e:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
 
-    def get_port_access(self, sandbox_id: str) -> SandboxPortAccess:
+    def get_port_access(self, sandbox_id: str) -> Traced[SandboxPortAccess]:
         """Return the current sandbox proxy settings for user ports."""
-        info = self.get(sandbox_id)
-        return SandboxPortAccess(
-            allow_unauthenticated_access=info.allow_unauthenticated_access,
-            exposed_ports=sorted(set(info.exposed_ports or [])),
-            sandbox_url=info.sandbox_url,
+        traced = self.get(sandbox_id)
+        port_access = SandboxPortAccess(
+            allow_unauthenticated_access=traced.allow_unauthenticated_access,
+            exposed_ports=sorted(set(traced.exposed_ports or [])),
+            sandbox_url=traced.sandbox_url,
         )
+        return Traced(traced.trace_id, port_access)
 
     def expose_ports(
         self,
@@ -478,7 +479,7 @@ class SandboxClient:
         ports: list[int],
         *,
         allow_unauthenticated_access: bool | None = None,
-    ) -> SandboxInfo:
+    ) -> Traced[SandboxInfo]:
         """Expose additional user ports through the sandbox proxy.
 
         By default this preserves the sandbox's current auth mode for user ports.
@@ -498,7 +499,7 @@ class SandboxClient:
             exposed_ports=desired_ports,
         )
 
-    def unexpose_ports(self, sandbox_id: str, ports: list[int]) -> SandboxInfo:
+    def unexpose_ports(self, sandbox_id: str, ports: list[int]) -> Traced[SandboxInfo]:
         """Remove one or more user ports from the sandbox proxy allowlist."""
         current = self.get_port_access(sandbox_id)
         ports_to_remove = set(_normalize_user_ports(ports))
@@ -513,7 +514,7 @@ class SandboxClient:
             exposed_ports=desired_ports,
         )
 
-    def delete(self, sandbox_id: str) -> None:
+    def delete(self, sandbox_id: str) -> Traced[None]:
         """Terminate a sandbox.
 
         Args:
@@ -525,13 +526,14 @@ class SandboxClient:
             SandboxConnectionError: If the server is unreachable
         """
         try:
-            self._rust_client.delete_sandbox(sandbox_id=sandbox_id)
+            trace_id = self._rust_client.delete_sandbox(sandbox_id=sandbox_id)
+            return Traced(trace_id, None)
         except Exception as e:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
 
-    def suspend(self, sandbox_id: str) -> None:
+    def suspend(self, sandbox_id: str) -> Traced[None]:
         """Suspend a named sandbox.
 
         Only sandboxes created with a ``name`` can be suspended; ephemeral
@@ -549,13 +551,14 @@ class SandboxClient:
             SandboxConnectionError: If the server is unreachable
         """
         try:
-            self._rust_client.suspend_sandbox(sandbox_id=sandbox_id)
+            trace_id = self._rust_client.suspend_sandbox(sandbox_id=sandbox_id)
+            return Traced(trace_id, None)
         except Exception as e:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
 
-    def resume(self, sandbox_id: str) -> None:
+    def resume(self, sandbox_id: str) -> Traced[None]:
         """Resume a suspended sandbox.
 
         The call returns as soon as the server accepts the request; poll
@@ -571,7 +574,8 @@ class SandboxClient:
             SandboxConnectionError: If the server is unreachable
         """
         try:
-            self._rust_client.resume_sandbox(sandbox_id=sandbox_id)
+            trace_id = self._rust_client.resume_sandbox(sandbox_id=sandbox_id)
+            return Traced(trace_id, None)
         except Exception as e:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
@@ -583,7 +587,7 @@ class SandboxClient:
         self,
         sandbox_id: str,
         content_mode: SnapshotContentMode | None = None,
-    ) -> CreateSnapshotResponse:
+    ) -> Traced[CreateSnapshotResponse]:
         """Create a snapshot of a running sandbox's filesystem.
 
         This is an asynchronous operation. Poll with :meth:`get_snapshot`
@@ -598,7 +602,7 @@ class SandboxClient:
                 them (e.g. sandbox image builds).
 
         Returns:
-            CreateSnapshotResponse with snapshot_id and status
+            Traced[CreateSnapshotResponse] with snapshot_id, status, and trace_id
 
         Raises:
             SandboxNotFoundError: If sandbox doesn't exist
@@ -606,53 +610,53 @@ class SandboxClient:
             SandboxConnectionError: If the server is unreachable
         """
         try:
-            response_json = self._rust_client.create_snapshot(
+            trace_id, response_json = self._rust_client.create_snapshot(
                 sandbox_id=sandbox_id,
                 content_mode=content_mode.value if content_mode is not None else None,
             )
-            return CreateSnapshotResponse.model_validate_json(response_json)
+            return Traced(trace_id, CreateSnapshotResponse.model_validate_json(response_json))
         except Exception as e:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
 
-    def get_snapshot(self, snapshot_id: str) -> SnapshotInfo:
+    def get_snapshot(self, snapshot_id: str) -> Traced[SnapshotInfo]:
         """Get information about a snapshot.
 
         Args:
             snapshot_id: ID of the snapshot
 
         Returns:
-            SnapshotInfo with full snapshot details
+            Traced[SnapshotInfo] with full snapshot details and trace_id
 
         Raises:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
         try:
-            response_json = self._rust_client.get_snapshot_json(snapshot_id=snapshot_id)
-            return SnapshotInfo.model_validate_json(response_json)
+            trace_id, response_json = self._rust_client.get_snapshot_json(snapshot_id=snapshot_id)
+            return Traced(trace_id, SnapshotInfo.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def list_snapshots(self) -> list[SnapshotInfo]:
+    def list_snapshots(self) -> Traced[list[SnapshotInfo]]:
         """List all snapshots in the namespace.
 
         Returns:
-            List of SnapshotInfo objects
+            Traced[list[SnapshotInfo]] with snapshot list and trace_id
 
         Raises:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
         try:
-            response_json = self._rust_client.list_snapshots_json()
+            trace_id, response_json = self._rust_client.list_snapshots_json()
             data = ListSnapshotsResponse.model_validate(json.loads(response_json))
-            return data.snapshots
+            return Traced(trace_id, data.snapshots)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def delete_snapshot(self, snapshot_id: str) -> None:
+    def delete_snapshot(self, snapshot_id: str) -> Traced[None]:
         """Delete a snapshot.
 
         Args:
@@ -663,7 +667,8 @@ class SandboxClient:
             SandboxConnectionError: If the server is unreachable
         """
         try:
-            self._rust_client.delete_snapshot(snapshot_id=snapshot_id)
+            trace_id = self._rust_client.delete_snapshot(snapshot_id=snapshot_id)
+            return Traced(trace_id, None)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
@@ -673,7 +678,7 @@ class SandboxClient:
         timeout: float = 300,
         poll_interval: float = 1.0,
         content_mode: SnapshotContentMode | None = None,
-    ) -> SnapshotInfo:
+    ) -> Traced[SnapshotInfo]:
         """Create a snapshot and wait for it to complete.
 
         Args:
@@ -684,24 +689,24 @@ class SandboxClient:
                 :meth:`snapshot` for details.
 
         Returns:
-            SnapshotInfo with completed snapshot details
+            Traced[SnapshotInfo] with completed snapshot details and trace_id
 
         Raises:
             SandboxError: If snapshot fails or times out
         """
-        result = self.snapshot(sandbox_id, content_mode=content_mode)
+        traced_create = self.snapshot(sandbox_id, content_mode=content_mode)
         deadline = time.time() + timeout
         while time.time() < deadline:
-            info = self.get_snapshot(result.snapshot_id)
-            if info.status == SnapshotStatus.COMPLETED:
-                return info
-            if info.status == SnapshotStatus.FAILED:
+            traced_info = self.get_snapshot(traced_create.snapshot_id)
+            if traced_info.status == SnapshotStatus.COMPLETED:
+                return traced_info
+            if traced_info.status == SnapshotStatus.FAILED:
                 raise SandboxError(
-                    f"Snapshot {result.snapshot_id} failed: {info.error}"
+                    f"Snapshot {traced_create.snapshot_id} failed: {traced_info.error}"
                 )
             time.sleep(poll_interval)
         raise SandboxError(
-            f"Snapshot {result.snapshot_id} did not complete within {timeout}s"
+            f"Snapshot {traced_create.snapshot_id} did not complete within {timeout}s"
         )
 
     # --- Pool operations ---
@@ -717,7 +722,7 @@ class SandboxClient:
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
         warm_containers: int | None = None,
-    ) -> CreateSandboxPoolResponse:
+    ) -> Traced[CreateSandboxPoolResponse]:
         """Create a new sandbox pool.
 
         Args:
@@ -752,21 +757,21 @@ class SandboxClient:
         )
 
         try:
-            response_json = self._rust_client.create_pool(
+            trace_id, response_json = self._rust_client.create_pool(
                 request_json=request_model.model_dump_json(exclude_none=True)
             )
-            return CreateSandboxPoolResponse.model_validate_json(response_json)
+            return Traced(trace_id, CreateSandboxPoolResponse.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def get_pool(self, pool_id: str) -> SandboxPoolInfo:
+    def get_pool(self, pool_id: str) -> Traced[SandboxPoolInfo]:
         """Get information about a sandbox pool.
 
         Args:
             pool_id: ID of the pool
 
         Returns:
-            SandboxPoolInfo with full pool details
+            Traced[SandboxPoolInfo] with full pool details and trace_id
 
         Raises:
             PoolNotFoundError: If pool doesn't exist
@@ -774,27 +779,27 @@ class SandboxClient:
             SandboxConnectionError: If the server is unreachable
         """
         try:
-            response_json = self._rust_client.get_pool_json(pool_id=pool_id)
-            return SandboxPoolInfo.model_validate_json(response_json)
+            trace_id, response_json = self._rust_client.get_pool_json(pool_id=pool_id)
+            return Traced(trace_id, SandboxPoolInfo.model_validate_json(response_json))
         except Exception as e:
             if _rust_status_code(e) == 404:
                 raise PoolNotFoundError(pool_id) from None
             _raise_as_sandbox_error(e)
 
-    def list_pools(self) -> list[SandboxPoolInfo]:
+    def list_pools(self) -> Traced[list[SandboxPoolInfo]]:
         """List all sandbox pools in the namespace.
 
         Returns:
-            List of SandboxPoolInfo objects
+            Traced[list[SandboxPoolInfo]] with pool list and trace_id
 
         Raises:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
         try:
-            response_json = self._rust_client.list_pools_json()
+            trace_id, response_json = self._rust_client.list_pools_json()
             data = ListSandboxPoolsResponse.model_validate(json.loads(response_json))
-            return data.pools
+            return Traced(trace_id, data.pools)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
@@ -810,7 +815,7 @@ class SandboxClient:
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
         warm_containers: int | None = None,
-    ) -> SandboxPoolInfo:
+    ) -> Traced[SandboxPoolInfo]:
         """Update a sandbox pool configuration.
 
         Args:
@@ -847,17 +852,17 @@ class SandboxClient:
         )
 
         try:
-            response_json = self._rust_client.update_pool(
+            trace_id, response_json = self._rust_client.update_pool(
                 pool_id=pool_id,
                 request_json=request_model.model_dump_json(exclude_none=True),
             )
-            return SandboxPoolInfo.model_validate_json(response_json)
+            return Traced(trace_id, SandboxPoolInfo.model_validate_json(response_json))
         except Exception as e:
             if _rust_status_code(e) == 404:
                 raise PoolNotFoundError(pool_id) from None
             _raise_as_sandbox_error(e)
 
-    def delete_pool(self, pool_id: str) -> None:
+    def delete_pool(self, pool_id: str) -> Traced[None]:
         """Delete a sandbox pool.
 
         Args:
@@ -870,7 +875,8 @@ class SandboxClient:
             SandboxConnectionError: If the server is unreachable
         """
         try:
-            self._rust_client.delete_pool(pool_id=pool_id)
+            trace_id = self._rust_client.delete_pool(pool_id=pool_id)
+            return Traced(trace_id, None)
         except Exception as e:
             kind, status_code, message = _parse_rust_client_error_fields(e)
             if status_code == 404:

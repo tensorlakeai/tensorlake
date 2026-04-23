@@ -190,7 +190,7 @@ class Sandbox:
                     "Cannot resolve sandbox info: no lifecycle client available. "
                     "Connect via SandboxClient.connect() to enable sandbox_id and name lookup."
                 )
-            self._cached_info = self._lifecycle_client.get(self._identifier)
+            self._cached_info = self._lifecycle_client.get(self._identifier).value
         return self._cached_info
 
     @property

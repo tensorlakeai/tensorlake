@@ -586,75 +586,85 @@ impl CloudSandboxClient {
         // reqwest clients are closed when dropped; this is a no-op for API parity.
     }
 
-    fn create_sandbox(&self, request_json: String) -> PyResult<String> {
+    fn create_sandbox(&self, request_json: String) -> PyResult<(String, String)> {
         let request: CreateSandboxRequest = parse_json_payload(&request_json)?;
         self.run_with_retry(5, move |client| {
             let request = request.clone();
             async move {
                 let traced = client.create(&request).await?;
-                Ok(serde_json::to_string(&*traced).map_err(SdkError::from)?)
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
             }
         })
     }
 
-    fn claim_sandbox(&self, pool_id: String) -> PyResult<String> {
+    fn claim_sandbox(&self, pool_id: String) -> PyResult<(String, String)> {
         self.run_with_retry(5, move |client| {
             let pool_id = pool_id.clone();
             async move {
                 let traced = client.claim(&pool_id).await?;
-                Ok(serde_json::to_string(&*traced).map_err(SdkError::from)?)
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
             }
         })
     }
 
-    fn get_sandbox_json(&self, sandbox_id: String) -> PyResult<String> {
+    fn get_sandbox_json(&self, sandbox_id: String) -> PyResult<(String, String)> {
         self.run_with_retry(5, move |client| {
             let sandbox_id = sandbox_id.clone();
             async move {
                 let traced = client.get(&sandbox_id).await?;
-                Ok(serde_json::to_string(&*traced).map_err(SdkError::from)?)
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
             }
         })
     }
 
-    fn list_sandboxes_json(&self) -> PyResult<String> {
+    fn list_sandboxes_json(&self) -> PyResult<(String, String)> {
         self.run_with_retry(5, move |client| async move {
-            let sandboxes = client.list().await?.into_inner();
-            let response = serde_json::json!({ "sandboxes": sandboxes });
-            Ok(serde_json::to_string(&response).map_err(SdkError::from)?)
+            let traced = client.list().await?;
+            let trace_id = traced.trace_id.clone();
+            let response = serde_json::json!({ "sandboxes": *traced });
+            let json = serde_json::to_string(&response).map_err(SdkError::from)?;
+            Ok((trace_id, json))
         })
     }
 
-    fn update_sandbox(&self, sandbox_id: String, request_json: String) -> PyResult<String> {
+    fn update_sandbox(&self, sandbox_id: String, request_json: String) -> PyResult<(String, String)> {
         let request: UpdateSandboxRequest = parse_json_payload(&request_json)?;
         self.run_with_retry(5, move |client| {
             let sandbox_id = sandbox_id.clone();
             let request = request.clone();
             async move {
                 let traced = client.update(&sandbox_id, &request).await?;
-                Ok(serde_json::to_string(&*traced).map_err(SdkError::from)?)
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
             }
         })
     }
 
-    fn delete_sandbox(&self, sandbox_id: String) -> PyResult<()> {
+    fn delete_sandbox(&self, sandbox_id: String) -> PyResult<String> {
         self.run_with_retry(5, move |client| {
             let sandbox_id = sandbox_id.clone();
-            async move { client.delete(&sandbox_id).await.map(|_| ()) }
+            async move { client.delete(&sandbox_id).await.map(|t| t.trace_id) }
         })
     }
 
-    fn suspend_sandbox(&self, sandbox_id: String) -> PyResult<()> {
+    fn suspend_sandbox(&self, sandbox_id: String) -> PyResult<String> {
         self.run_with_retry(5, move |client| {
             let sandbox_id = sandbox_id.clone();
-            async move { client.suspend(&sandbox_id).await.map(|_| ()) }
+            async move { client.suspend(&sandbox_id).await.map(|t| t.trace_id) }
         })
     }
 
-    fn resume_sandbox(&self, sandbox_id: String) -> PyResult<()> {
+    fn resume_sandbox(&self, sandbox_id: String) -> PyResult<String> {
         self.run_with_retry(5, move |client| {
             let sandbox_id = sandbox_id.clone();
-            async move { client.resume(&sandbox_id).await.map(|_| ()) }
+            async move { client.resume(&sandbox_id).await.map(|t| t.trace_id) }
         })
     }
 
@@ -663,7 +673,7 @@ impl CloudSandboxClient {
         &self,
         sandbox_id: String,
         content_mode: Option<String>,
-    ) -> PyResult<String> {
+    ) -> PyResult<(String, String)> {
         let parsed_mode = match content_mode.as_deref() {
             None => None,
             Some("full") => Some(SnapshotContentMode::Full),
@@ -678,81 +688,95 @@ impl CloudSandboxClient {
             let sandbox_id = sandbox_id.clone();
             async move {
                 let traced = client.snapshot(&sandbox_id, parsed_mode).await?;
-                Ok(serde_json::to_string(&*traced).map_err(SdkError::from)?)
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
             }
         })
     }
 
-    fn get_snapshot_json(&self, snapshot_id: String) -> PyResult<String> {
+    fn get_snapshot_json(&self, snapshot_id: String) -> PyResult<(String, String)> {
         self.run_with_retry(5, move |client| {
             let snapshot_id = snapshot_id.clone();
             async move {
                 let traced = client.get_snapshot(&snapshot_id).await?;
-                Ok(serde_json::to_string(&*traced).map_err(SdkError::from)?)
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
             }
         })
     }
 
-    fn list_snapshots_json(&self) -> PyResult<String> {
+    fn list_snapshots_json(&self) -> PyResult<(String, String)> {
         self.run_with_retry(5, move |client| async move {
-            let snapshots = client.list_snapshots().await?.into_inner();
-            let response = serde_json::json!({ "snapshots": snapshots });
-            Ok(serde_json::to_string(&response).map_err(SdkError::from)?)
+            let traced = client.list_snapshots().await?;
+            let trace_id = traced.trace_id.clone();
+            let response = serde_json::json!({ "snapshots": *traced });
+            let json = serde_json::to_string(&response).map_err(SdkError::from)?;
+            Ok((trace_id, json))
         })
     }
 
-    fn delete_snapshot(&self, snapshot_id: String) -> PyResult<()> {
+    fn delete_snapshot(&self, snapshot_id: String) -> PyResult<String> {
         self.run_with_retry(5, move |client| {
             let snapshot_id = snapshot_id.clone();
-            async move { client.delete_snapshot(&snapshot_id).await.map(|_| ()) }
+            async move { client.delete_snapshot(&snapshot_id).await.map(|t| t.trace_id) }
         })
     }
 
-    fn create_pool(&self, request_json: String) -> PyResult<String> {
+    fn create_pool(&self, request_json: String) -> PyResult<(String, String)> {
         let request: SandboxPoolRequest = parse_json_payload(&request_json)?;
         self.run_with_retry(5, move |client| {
             let request = request.clone();
             async move {
                 let traced = client.create_pool(&request).await?;
-                Ok(serde_json::to_string(&*traced).map_err(SdkError::from)?)
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
             }
         })
     }
 
-    fn get_pool_json(&self, pool_id: String) -> PyResult<String> {
+    fn get_pool_json(&self, pool_id: String) -> PyResult<(String, String)> {
         self.run_with_retry(5, move |client| {
             let pool_id = pool_id.clone();
             async move {
                 let traced = client.get_pool(&pool_id).await?;
-                Ok(serde_json::to_string(&*traced).map_err(SdkError::from)?)
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
             }
         })
     }
 
-    fn list_pools_json(&self) -> PyResult<String> {
+    fn list_pools_json(&self) -> PyResult<(String, String)> {
         self.run_with_retry(5, move |client| async move {
-            let pools = client.list_pools().await?.into_inner();
-            let response = serde_json::json!({ "pools": pools });
-            Ok(serde_json::to_string(&response).map_err(SdkError::from)?)
+            let traced = client.list_pools().await?;
+            let trace_id = traced.trace_id.clone();
+            let response = serde_json::json!({ "pools": *traced });
+            let json = serde_json::to_string(&response).map_err(SdkError::from)?;
+            Ok((trace_id, json))
         })
     }
 
-    fn update_pool(&self, pool_id: String, request_json: String) -> PyResult<String> {
+    fn update_pool(&self, pool_id: String, request_json: String) -> PyResult<(String, String)> {
         let request: SandboxPoolRequest = parse_json_payload(&request_json)?;
         self.run_with_retry(5, move |client| {
             let pool_id = pool_id.clone();
             let request = request.clone();
             async move {
                 let traced = client.update_pool(&pool_id, &request).await?;
-                Ok(serde_json::to_string(&*traced).map_err(SdkError::from)?)
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
             }
         })
     }
 
-    fn delete_pool(&self, pool_id: String) -> PyResult<()> {
+    fn delete_pool(&self, pool_id: String) -> PyResult<String> {
         self.run_with_retry(5, move |client| {
             let pool_id = pool_id.clone();
-            async move { client.delete_pool(&pool_id).await.map(|_| ()) }
+            async move { client.delete_pool(&pool_id).await.map(|t| t.trace_id) }
         })
     }
 
