@@ -87,7 +87,9 @@ export class HttpClient {
     this.retryBackoffMs = options.retryBackoffMs ?? defaults.RETRY_BACKOFF_MS;
     this.timeoutMs = options.timeoutMs ?? defaults.DEFAULT_HTTP_TIMEOUT_MS;
 
-    this.headers = {};
+    this.headers = {
+      "User-Agent": `tensorlake-typescript-sdk/${defaults.SDK_VERSION}`,
+    };
     if (options.apiKey) {
       this.headers["Authorization"] = `Bearer ${options.apiKey}`;
     }

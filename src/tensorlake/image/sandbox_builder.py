@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from tensorlake._tracing import inject_traceparent
+from tensorlake._tracing import USER_AGENT, inject_traceparent
 from tensorlake.cli._common import Context
 from tensorlake.sandbox import Sandbox, SandboxClient
 from tensorlake.sandbox.models import ProcessStatus, SnapshotContentMode
@@ -703,6 +703,7 @@ def _register_image(
     headers = {
         "Authorization": f"Bearer {bearer_token}",
         "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
     }
     if ctx.personal_access_token and not ctx.api_key:
         headers["X-Forwarded-Organization-Id"] = org_id

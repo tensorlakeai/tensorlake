@@ -2,7 +2,7 @@ from typing import Any
 
 import httpx
 
-from tensorlake._tracing import generate_traceparent
+from tensorlake._tracing import USER_AGENT, generate_traceparent
 from tensorlake.applications.blob_store import BLOBStore
 from tensorlake.applications.internal_logger import InternalLogger
 
@@ -71,14 +71,15 @@ class RequestContextHTTPClient(RequestContext):
     def create_http_client(cls, server_base_url: str) -> RequestContextHTTPTransport:
         """Creates an HTTP client for use in RequestContextHTTPClient."""
 
-        def _inject_traceparent(request: httpx.Request) -> None:
+        def _inject_headers(request: httpx.Request) -> None:
             request.headers["traceparent"] = generate_traceparent()
+            request.headers["User-Agent"] = USER_AGENT
 
         # httpx.Client is thread-safe.
         return httpx.Client(
             timeout=_DEFAULT_HTTP_REQUEST_TIMEOUT_SEC,
             base_url=server_base_url,
-            event_hooks={"request": [_inject_traceparent]},
+            event_hooks={"request": [_inject_headers]},
         )
 
     def __getstate__(self):

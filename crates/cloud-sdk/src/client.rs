@@ -90,6 +90,7 @@ pub struct ClientBuilder {
     middlewares: Vec<Arc<dyn Middleware + 'static>>,
     organization_id: Option<String>,
     project_id: Option<String>,
+    user_agent: Option<String>,
 }
 
 impl ClientBuilder {
@@ -105,7 +106,19 @@ impl ClientBuilder {
             middlewares: Vec::new(),
             organization_id: None,
             project_id: None,
+            user_agent: None,
         }
+    }
+
+    /// Override the User-Agent header sent with every request.
+    ///
+    /// Defaults to `tensorlake-rust-sdk/{CARGO_PKG_VERSION}`. Callers that
+    /// wrap this client (e.g. the Python SDK via PyO3) should set a value like
+    /// `tensorlake-python-sdk/{version}` so server logs can distinguish traffic
+    /// by SDK language.
+    pub fn user_agent(mut self, ua: &str) -> Self {
+        self.user_agent = Some(ua.to_string());
+        self
     }
 
     /// Set the bearer token for authentication.
@@ -157,7 +170,11 @@ impl ClientBuilder {
             default_headers.insert("X-Forwarded-Project-Id", str_to_header_value(project_id)?);
         }
 
-        let base_client = new_base_client(&default_headers)?;
+        let ua = self.user_agent.as_deref().unwrap_or(concat!(
+            "tensorlake-rust-sdk/",
+            env!("CARGO_PKG_VERSION")
+        ));
+        let base_client = new_base_client(&default_headers, ua)?;
         let mut builder = ReqwestClientBuilder::new(base_client.clone());
 
         for middleware in &self.middlewares {
@@ -397,14 +414,11 @@ fn ensure_rustls_provider() {
     });
 }
 
-fn new_base_client(headers: &HeaderMap) -> Result<reqwest::Client, SdkError> {
+fn new_base_client(headers: &HeaderMap, user_agent: &str) -> Result<reqwest::Client, SdkError> {
     ensure_rustls_provider();
 
     let client = reqwest::Client::builder()
-        .user_agent(format!(
-            "Tensorlake Cloud SDK/{}",
-            env!("CARGO_PKG_VERSION")
-        ))
+        .user_agent(user_agent)
         .default_headers(headers.clone())
         .build()?;
     Ok(client)

@@ -6,6 +6,8 @@ should use CloudClient. The Rust SDK handles HTTP, auth, and serialization.
 
 import importlib
 
+from tensorlake._tracing import USER_AGENT
+
 _IMPORT_ERROR: Exception | None = None
 _RustClient = None
 _RustClientError = None
@@ -109,6 +111,7 @@ class CloudClient:
                 organization_id=organization_id,
                 project_id=project_id,
                 namespace=namespace,
+                user_agent=USER_AGENT,
             )
         except Exception as e:
             _raise_as_tensorlake_error(e)

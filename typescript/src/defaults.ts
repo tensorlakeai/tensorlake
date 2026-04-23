@@ -1,3 +1,5 @@
+export const SDK_VERSION = "0.4.49";
+
 export const API_URL =
   process.env.TENSORLAKE_API_URL ?? "https://api.tensorlake.ai";
 export const API_KEY = process.env.TENSORLAKE_API_KEY ?? undefined;

@@ -6,6 +6,8 @@ import json
 import time
 from urllib.parse import urlparse
 
+from tensorlake._tracing import USER_AGENT
+
 from . import _defaults
 from .exceptions import (
     PoolInUseError,
@@ -172,6 +174,7 @@ class SandboxClient:
                 organization_id=self._organization_id,
                 project_id=self._project_id,
                 namespace=self._namespace,
+                user_agent=USER_AGENT,
             )
         except Exception as e:
             _raise_as_sandbox_error(e)

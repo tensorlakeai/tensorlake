@@ -7,8 +7,16 @@ No OTLP export is performed — the header is the only telemetry artifact.
 
 from __future__ import annotations
 
+import importlib.metadata
 import os
 from typing import Generic, Iterator, TypeVar
+
+try:
+    _SDK_VERSION = importlib.metadata.version("tensorlake")
+except importlib.metadata.PackageNotFoundError:
+    _SDK_VERSION = "unknown"
+
+USER_AGENT = f"tensorlake-python-sdk/{_SDK_VERSION}"
 
 T = TypeVar("T")
 

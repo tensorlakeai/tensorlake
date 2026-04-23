@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from tensorlake._tracing import Traced, TracedIterator, inject_traceparent
+from tensorlake._tracing import USER_AGENT, Traced, TracedIterator, inject_traceparent
 
 from . import _defaults
 from .exceptions import (
@@ -176,6 +176,7 @@ class Sandbox:
                     organization_id=organization_id,
                     project_id=project_id,
                     routing_hint=routing_hint,
+                    user_agent=USER_AGENT,
                 )
                 self._base_url = self._rust_client.base_url()
             except Exception as e:
@@ -711,6 +712,7 @@ class Sandbox:
                 api_key=self._api_key,
                 organization_id=self._organization_id,
                 project_id=self._project_id,
+                user_agent=USER_AGENT,
             )
             return Desktop(rust_client)
         except Exception as e:

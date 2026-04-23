@@ -48,13 +48,14 @@ pub struct CloudApiClient {
 #[pymethods]
 impl CloudApiClient {
     #[new]
-    #[pyo3(signature = (api_url, api_key=None, organization_id=None, project_id=None, namespace=None))]
+    #[pyo3(signature = (api_url, api_key=None, organization_id=None, project_id=None, namespace=None, user_agent=None))]
     fn new(
         api_url: String,
         api_key: Option<String>,
         organization_id: Option<String>,
         project_id: Option<String>,
         namespace: Option<String>,
+        user_agent: Option<String>,
     ) -> PyResult<Self> {
         let mut builder = ClientBuilder::new(&api_url);
         if let Some(token) = api_key.as_deref() {
@@ -65,6 +66,10 @@ impl CloudApiClient {
             (organization_id.as_deref(), project_id.as_deref())
         {
             builder = builder.scope(org_id, project_id);
+        }
+
+        if let Some(ua) = user_agent.as_deref() {
+            builder = builder.user_agent(ua);
         }
 
         let client = builder.build().map_err(into_py_error)?;
@@ -532,13 +537,14 @@ pub struct CloudSandboxClient {
 #[pymethods]
 impl CloudSandboxClient {
     #[new]
-    #[pyo3(signature = (api_url, api_key=None, organization_id=None, project_id=None, namespace=None))]
+    #[pyo3(signature = (api_url, api_key=None, organization_id=None, project_id=None, namespace=None, user_agent=None))]
     fn new(
         api_url: String,
         api_key: Option<String>,
         organization_id: Option<String>,
         project_id: Option<String>,
         namespace: Option<String>,
+        user_agent: Option<String>,
     ) -> PyResult<Self> {
         let mut builder = ClientBuilder::new(&api_url);
         if let Some(token) = api_key.as_deref() {
@@ -549,6 +555,10 @@ impl CloudSandboxClient {
             (organization_id.as_deref(), project_id.as_deref())
         {
             builder = builder.scope(org_id, project_id);
+        }
+
+        if let Some(ua) = user_agent.as_deref() {
+            builder = builder.user_agent(ua);
         }
 
         let client = builder.build().map_err(into_sandbox_py_error)?;
@@ -810,7 +820,7 @@ pub struct CloudSandboxProxyClient {
 #[pymethods]
 impl CloudSandboxProxyClient {
     #[new]
-    #[pyo3(signature = (proxy_url, sandbox_id, api_key=None, organization_id=None, project_id=None, routing_hint=None))]
+    #[pyo3(signature = (proxy_url, sandbox_id, api_key=None, organization_id=None, project_id=None, routing_hint=None, user_agent=None))]
     fn new(
         proxy_url: String,
         sandbox_id: String,
@@ -818,6 +828,7 @@ impl CloudSandboxProxyClient {
         organization_id: Option<String>,
         project_id: Option<String>,
         routing_hint: Option<String>,
+        user_agent: Option<String>,
     ) -> PyResult<Self> {
         let (base_url, host_override) = resolve_proxy_target(&proxy_url, &sandbox_id)?;
 
@@ -830,6 +841,10 @@ impl CloudSandboxProxyClient {
             (organization_id.as_deref(), project_id.as_deref())
         {
             builder = builder.scope(org_id, project_id);
+        }
+
+        if let Some(ua) = user_agent.as_deref() {
+            builder = builder.user_agent(ua);
         }
 
         let client = builder.build().map_err(into_sandbox_py_error)?;
@@ -1098,7 +1113,7 @@ pub struct CloudSandboxDesktopClient {
 #[pymethods]
 impl CloudSandboxDesktopClient {
     #[new]
-    #[pyo3(signature = (proxy_url, sandbox_id, port=5901, password=None, shared=true, connect_timeout_sec=10.0, api_key=None, organization_id=None, project_id=None))]
+    #[pyo3(signature = (proxy_url, sandbox_id, port=5901, password=None, shared=true, connect_timeout_sec=10.0, api_key=None, organization_id=None, project_id=None, user_agent=None))]
     fn new(
         proxy_url: String,
         sandbox_id: String,
@@ -1109,6 +1124,7 @@ impl CloudSandboxDesktopClient {
         api_key: Option<String>,
         organization_id: Option<String>,
         project_id: Option<String>,
+        user_agent: Option<String>,
     ) -> PyResult<Self> {
         let (base_url, host_override) = resolve_proxy_target(&proxy_url, &sandbox_id)?;
 
@@ -1121,6 +1137,10 @@ impl CloudSandboxDesktopClient {
             (organization_id.as_deref(), project_id.as_deref())
         {
             builder = builder.scope(org_id, project_id);
+        }
+
+        if let Some(ua) = user_agent.as_deref() {
+            builder = builder.user_agent(ua);
         }
 
         let client = builder.build().map_err(into_sandbox_py_error)?;
