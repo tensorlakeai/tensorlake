@@ -69,16 +69,23 @@ struct Cli {
     command: Commands,
 }
 
+#[derive(clap::ValueEnum, Clone)]
+enum OutputFormat {
+    Text,
+    Json,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Login to TensorLake
     Login,
 
     /// Print authentication status
+    #[command(alias = "info")]
     Whoami {
         /// Output format
-        #[arg(short, long, default_value = "text")]
-        output: String,
+        #[arg(short, long, default_value = "text", value_enum)]
+        output: OutputFormat,
     },
 
     /// Initialize TensorLake configuration for this project
@@ -660,7 +667,9 @@ async fn main() {
 async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<()> {
     match command {
         Commands::Login => commands::login::run(ctx).await,
-        Commands::Whoami { output } => commands::whoami::run(ctx, output == "json").await,
+        Commands::Whoami { output } => {
+            commands::whoami::run(ctx, matches!(output, OutputFormat::Json)).await
+        }
         Commands::Init {
             directory,
             no_confirm,
