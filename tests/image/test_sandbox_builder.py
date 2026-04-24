@@ -5,15 +5,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from tensorlake.cli import create_sandbox_image as create_sandbox_image_module
 from tensorlake.image import Image
+from tensorlake.image import sandbox_builder as sbm
 from tensorlake.sandbox.models import SnapshotContentMode
 
 BUILD_CPUS = 2.0
 BUILD_MEMORY_MB = 4096
 
 
-class TestCreateSandboxImage(unittest.TestCase):
+class TestDockerfileParsing(unittest.TestCase):
     def test_logical_dockerfile_lines_merges_continuations(self):
         dockerfile = """
         # comment
@@ -24,7 +24,7 @@ class TestCreateSandboxImage(unittest.TestCase):
         ENV A=1 B=two
         """.strip()
 
-        lines = create_sandbox_image_module._logical_dockerfile_lines(dockerfile)
+        lines = sbm._logical_dockerfile_lines(dockerfile)
 
         self.assertEqual(
             lines,
@@ -45,17 +45,14 @@ class TestCreateSandboxImage(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            plan = create_sandbox_image_module._load_dockerfile_plan(
-                str(dockerfile_path),
-                None,
-            )
+            plan = sbm._load_dockerfile_plan(str(dockerfile_path), None)
 
         self.assertEqual(plan.base_image, "python:3.12-slim")
         self.assertEqual(plan.registered_name, "weather-app")
         self.assertEqual(
             plan.instructions,
             [
-                create_sandbox_image_module.DockerfileInstruction(
+                sbm.DockerfileInstruction(
                     keyword="RUN",
                     value="echo hi",
                     line_number=2,
@@ -74,12 +71,21 @@ class TestCreateSandboxImage(unittest.TestCase):
             with self.assertRaisesRegex(
                 ValueError, "multi-stage Dockerfiles are not supported"
             ):
-                create_sandbox_image_module._load_dockerfile_plan(
-                    str(dockerfile_path),
-                    None,
-                )
+                sbm._load_dockerfile_plan(str(dockerfile_path), None)
 
-    def test_create_sandbox_image_registers_snapshot_from_dockerfile(self):
+
+def _make_build_patches(ctx, sandbox, snapshot):
+    """Common mock bundle for exercising build_sandbox_image without networking."""
+    return (
+        patch.object(sbm, "_build_context_from_env", return_value=ctx),
+        patch.object(sbm, "_execute_dockerfile_plan"),
+        patch.object(sbm, "_register_image", return_value={"id": "tpl-1"}),
+        patch.object(sbm, "SandboxClient"),
+    )
+
+
+class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
+    def test_registers_snapshot_from_dockerfile(self):
         ctx = MagicMock()
         sandbox = MagicMock()
         sandbox.sandbox_id = "sbx-1"
@@ -100,33 +106,21 @@ class TestCreateSandboxImage(unittest.TestCase):
             )
             dockerfile_path.write_text(dockerfile_text + "\n", encoding="utf-8")
 
+            build_ctx, execute, register_image, sandbox_client_cls = (
+                _make_build_patches(ctx, sandbox, snapshot)
+            )
             with (
-                patch.object(
-                    create_sandbox_image_module,
-                    "_build_context_from_env",
-                    return_value=ctx,
-                ),
-                patch.object(
-                    create_sandbox_image_module, "_execute_dockerfile_plan"
-                ) as execute,
-                patch.object(
-                    create_sandbox_image_module,
-                    "_register_image",
-                    return_value={"id": "tpl-1"},
-                ) as register_image,
-                patch.object(create_sandbox_image_module, "_emit"),
-                patch.object(
-                    create_sandbox_image_module,
-                    "SandboxClient",
-                ) as sandbox_client_cls,
+                build_ctx,
+                execute as execute_mock,
+                register_image as register_mock,
+                sandbox_client_cls as sandbox_client_cls_mock,
             ):
-                sandbox_client = sandbox_client_cls.return_value
+                sandbox_client = sandbox_client_cls_mock.return_value
                 sandbox_client.create_and_connect.return_value = sandbox
                 sandbox_client.snapshot_and_wait.return_value = snapshot
 
-                create_sandbox_image_module.create_sandbox_image(
+                sbm.build_sandbox_image(
                     str(dockerfile_path),
-                    registered_name=None,
                     cpus=BUILD_CPUS,
                     memory_mb=BUILD_MEMORY_MB,
                 )
@@ -136,8 +130,8 @@ class TestCreateSandboxImage(unittest.TestCase):
             cpus=BUILD_CPUS,
             memory_mb=BUILD_MEMORY_MB,
         )
-        execute.assert_called_once()
-        register_image.assert_called_once_with(
+        execute_mock.assert_called_once()
+        register_mock.assert_called_once_with(
             ctx,
             "sandbox-image",
             dockerfile_text + "\n",
@@ -155,7 +149,7 @@ class TestCreateSandboxImage(unittest.TestCase):
             content_mode=SnapshotContentMode.FILESYSTEM_ONLY,
         )
 
-    def test_create_sandbox_image_public(self):
+    def test_public_flag_and_registered_name(self):
         ctx = MagicMock()
         sandbox = MagicMock()
         sandbox.sandbox_id = "sbx-1"
@@ -172,29 +166,20 @@ class TestCreateSandboxImage(unittest.TestCase):
             )
             dockerfile_text = dockerfile_path.read_text(encoding="utf-8")
 
+            build_ctx, execute, register_image, sandbox_client_cls = (
+                _make_build_patches(ctx, sandbox, snapshot)
+            )
             with (
-                patch.object(
-                    create_sandbox_image_module,
-                    "_build_context_from_env",
-                    return_value=ctx,
-                ),
-                patch.object(create_sandbox_image_module, "_execute_dockerfile_plan"),
-                patch.object(
-                    create_sandbox_image_module,
-                    "_register_image",
-                    return_value={"id": "tpl-1"},
-                ) as register_image,
-                patch.object(create_sandbox_image_module, "_emit"),
-                patch.object(
-                    create_sandbox_image_module,
-                    "SandboxClient",
-                ) as sandbox_client_cls,
+                build_ctx,
+                execute,
+                register_image as register_mock,
+                sandbox_client_cls as sandbox_client_cls_mock,
             ):
-                sandbox_client = sandbox_client_cls.return_value
+                sandbox_client = sandbox_client_cls_mock.return_value
                 sandbox_client.create_and_connect.return_value = sandbox
                 sandbox_client.snapshot_and_wait.return_value = snapshot
 
-                create_sandbox_image_module.create_sandbox_image(
+                sbm.build_sandbox_image(
                     str(dockerfile_path),
                     registered_name="custom-name",
                     cpus=BUILD_CPUS,
@@ -202,7 +187,7 @@ class TestCreateSandboxImage(unittest.TestCase):
                     is_public=True,
                 )
 
-        register_image.assert_called_once_with(
+        register_mock.assert_called_once_with(
             ctx,
             "custom-name",
             dockerfile_text,
@@ -210,10 +195,10 @@ class TestCreateSandboxImage(unittest.TestCase):
             "s3://snapshots/snap-1.tar.zst",
             True,
         )
-        sandbox_client.snapshot_and_wait.assert_called_once_with(
-            "sbx-1",
-            content_mode=SnapshotContentMode.FILESYSTEM_ONLY,
-        )
+
+    def test_load_errors_raise_SandboxImageLoadError(self):
+        with self.assertRaises(sbm.SandboxImageLoadError):
+            sbm.build_sandbox_image("/nonexistent/Dockerfile")
 
 
 class TestBuildSandboxImageFromImage(unittest.TestCase):
@@ -226,32 +211,24 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
             snapshot_uri="s3://snapshots/snap-1.tar.zst",
         )
 
+        build_ctx, execute, register_image, sandbox_client_cls = _make_build_patches(
+            ctx, sandbox, snapshot
+        )
         with (
-            patch.object(
-                create_sandbox_image_module,
-                "_build_context_from_env",
-                return_value=ctx,
-            ),
-            patch.object(create_sandbox_image_module, "_execute_dockerfile_plan"),
-            patch.object(
-                create_sandbox_image_module,
-                "_register_image",
-                return_value={"id": "tpl-1"},
-            ) as register_image,
-            patch.object(
-                create_sandbox_image_module,
-                "SandboxClient",
-            ) as sandbox_client_cls,
+            build_ctx,
+            execute,
+            register_image as register_mock,
+            sandbox_client_cls as sandbox_client_cls_mock,
         ):
-            sandbox_client = sandbox_client_cls.return_value
+            sandbox_client = sandbox_client_cls_mock.return_value
             sandbox_client.create_and_connect.return_value = sandbox
             sandbox_client.snapshot_and_wait.return_value = snapshot
 
-            result = create_sandbox_image_module.build_sandbox_image(image, **kwargs)
+            result = sbm.build_sandbox_image(image, **kwargs)
 
-        return result, ctx, register_image, sandbox_client, sandbox
+        return result, ctx, register_mock, sandbox_client, sandbox
 
-    def test_build_sandbox_image_from_image_renders_expected_dockerfile(self):
+    def test_renders_expected_dockerfile(self):
         image = (
             Image(name="weather-image", base_image="python:3.12-slim")
             .run("apt-get update")
@@ -262,8 +239,6 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
 
         _, _, register_image, sandbox_client, _ = self._run_build(image)
 
-        # create_and_connect should boot from the image's base image with the
-        # requested resources (defaults here).
         sandbox_client.create_and_connect.assert_called_once_with(
             image="python:3.12-slim",
             cpus=2.0,
@@ -283,20 +258,20 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
         )
         register_image.assert_called_once()
         register_args = register_image.call_args.args
-        self.assertEqual(register_args[1], "weather-image")  # registered name
-        self.assertEqual(register_args[2], expected_dockerfile)  # dockerfile text
+        self.assertEqual(register_args[1], "weather-image")
+        self.assertEqual(register_args[2], expected_dockerfile)
 
         sandbox_client.snapshot_and_wait.assert_called_once_with(
             "sbx-1",
             content_mode=SnapshotContentMode.FILESYSTEM_ONLY,
         )
 
-    def test_build_sandbox_image_registered_name_overrides_image_name(self):
+    def test_registered_name_overrides_image_name(self):
         image = Image(name="default-name", base_image="python:3.12-slim")
         _, _, register_image, _, _ = self._run_build(image, registered_name="override")
         self.assertEqual(register_image.call_args.args[1], "override")
 
-    def test_build_sandbox_image_warns_on_default_name(self):
+    def test_warns_on_default_name(self):
         image = Image(base_image="python:3.12-slim")
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -309,9 +284,9 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
             "Expected a warning about building with the default image name",
         )
 
-    def test_build_sandbox_image_rejects_unknown_source_type(self):
+    def test_rejects_unknown_source_type(self):
         with self.assertRaises(TypeError):
-            create_sandbox_image_module.build_sandbox_image(12345)  # type: ignore[arg-type]
+            sbm.build_sandbox_image(12345)  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":

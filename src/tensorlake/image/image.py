@@ -124,7 +124,7 @@ class Image:
         Returns:
             The registered sandbox template response as a dict.
         """
-        from tensorlake.cli.create_sandbox_image import build_sandbox_image
+        from .sandbox_builder import build_sandbox_image
 
         return build_sandbox_image(
             self,
