@@ -140,6 +140,7 @@ class Sandbox:
         self._sandbox_id: str | None = None
         self._name: str | None = None
         self._name_loaded: bool = False
+        self._trace_id: str | None = None
         self._cached_info: SandboxInfo | None = None
         self._owns_sandbox: bool = False
         self._lifecycle_client: SandboxClient | None = None
@@ -523,6 +524,11 @@ class Sandbox:
             return self._sandbox_id
         self._sandbox_id = self._fetch_info().sandbox_id
         return self._sandbox_id
+
+    @property
+    def trace_id(self) -> str | None:
+        """W3C traceparent trace ID from the create/claim request, or None if not available."""
+        return self._trace_id
 
     @property
     def name(self) -> str | None:

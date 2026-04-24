@@ -1087,6 +1087,7 @@ class SandboxClient:
             sandbox._name_loaded = True
             sandbox._owns_sandbox = True
             sandbox._lifecycle_client = self
+            sandbox._trace_id = result.trace_id
             return sandbox
 
         deadline = time.time() + startup_timeout
@@ -1104,6 +1105,7 @@ class SandboxClient:
                 sandbox._cached_info = info
                 sandbox._owns_sandbox = True
                 sandbox._lifecycle_client = self
+                sandbox._trace_id = result.trace_id
                 return sandbox
             if info.status in (SandboxStatus.SUSPENDED, SandboxStatus.TERMINATED):
                 raise SandboxError(
