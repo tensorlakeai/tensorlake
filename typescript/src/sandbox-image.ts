@@ -49,6 +49,12 @@ export interface CreateSandboxImageOptions {
   memoryMb?: number;
   isPublic?: boolean;
   contextDir?: string;
+  /**
+   * Print build progress to stderr. Ignored when an explicit `emit` is passed
+   * via `deps`. Defaults to false — `createSandboxImage` is silent by default
+   * when invoked programmatically (e.g. `Image.build()`).
+   */
+  verbose?: boolean;
 }
 
 export type SandboxImageSource = string | Image;
@@ -513,8 +519,21 @@ export function loadImagePlan(
   };
 }
 
-function defaultEmit(event: Record<string, unknown>) {
+function ndjsonStdoutEmit(event: Record<string, unknown>) {
   process.stdout.write(`${JSON.stringify(event)}\n`);
+}
+
+function noopEmit(_event: Record<string, unknown>) {}
+
+function stderrEmit(event: Record<string, unknown>) {
+  const type = typeof event.type === "string" ? event.type : "";
+  const message = typeof event.message === "string" ? event.message : "";
+  if (type === "build_log") {
+    const stream = typeof event.stream === "string" ? event.stream : "stdout";
+    process.stderr.write(`[${stream}] ${message}\n`);
+  } else if (message) {
+    process.stderr.write(`[${type}] ${message}\n`);
+  }
 }
 
 function debugEnabled(): boolean {
@@ -954,7 +973,7 @@ export async function createSandboxImage(
   options: CreateSandboxImageOptions = {},
   deps: CreateSandboxImageDeps = {},
 ) {
-  const emit = deps.emit ?? defaultEmit;
+  const emit = deps.emit ?? (options.verbose ? stderrEmit : noopEmit);
   const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   const context = buildContextFromEnv();
   const clientFactory = deps.createClient ?? createDefaultClient;
@@ -1070,10 +1089,14 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
     throw new Error(`Invalid --memory value: ${parsed.values.memory}`);
   }
 
-  await createSandboxImage(dockerfilePath, {
-    registeredName: parsed.values.name,
-    cpus,
-    memoryMb,
-    isPublic: parsed.values.public,
-  });
+  await createSandboxImage(
+    dockerfilePath,
+    {
+      registeredName: parsed.values.name,
+      cpus,
+      memoryMb,
+      isPublic: parsed.values.public,
+    },
+    { emit: ndjsonStdoutEmit },
+  );
 }
