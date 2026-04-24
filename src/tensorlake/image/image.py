@@ -14,6 +14,7 @@ class _ImageBuildOperationType(Enum):
     COPY = 2
     ENV = 3
     RUN = 4
+    WORKDIR = 5
 
 
 @dataclass
@@ -85,6 +86,54 @@ class Image:
                 args=args,
                 options={} if options is None else options,
             )
+        )
+
+    def workdir(self, directory: str) -> "Image":
+        return self._add_operation(
+            _ImageBuildOperation(
+                type=_ImageBuildOperationType.WORKDIR,
+                args=[directory],
+                options={},
+            )
+        )
+
+    def build(
+        self,
+        *,
+        registered_name: str | None = None,
+        cpus: float = 2.0,
+        memory_mb: int = 4096,
+        is_public: bool = False,
+        context_dir: str | None = None,
+        verbose: bool = False,
+    ) -> dict:
+        """Build this image as a sandbox template and register it.
+
+        Materializes the image in a build sandbox, snapshots the filesystem,
+        and registers the snapshot as a named sandbox template.
+
+        Args:
+            registered_name: Name to register the image under. Defaults to ``self.name``.
+            cpus: CPUs for the build sandbox (default 2.0).
+            memory_mb: Memory for the build sandbox in MB (default 4096).
+            is_public: Make the registered image publicly accessible.
+            context_dir: Directory used to resolve relative COPY/ADD paths.
+                Defaults to the current working directory.
+            verbose: If True, print build progress to stderr.
+
+        Returns:
+            The registered sandbox template response as a dict.
+        """
+        from .sandbox_builder import build_sandbox_image
+
+        return build_sandbox_image(
+            self,
+            registered_name=registered_name,
+            cpus=cpus,
+            memory_mb=memory_mb,
+            is_public=is_public,
+            context_dir=context_dir,
+            verbose=verbose,
         )
 
     def _add_operation(self, op: _ImageBuildOperation) -> "Image":

@@ -29,10 +29,6 @@ jobs:
             target: aarch64-apple-darwin
             target_id: darwin-aarch64
             archive: tar.gz
-          - os: macos-13
-            target: x86_64-apple-darwin
-            target_id: darwin-x86_64
-            archive: tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             target_id: windows-x86_64

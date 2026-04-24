@@ -13,6 +13,34 @@ pub struct LoginResult {
     pub project_id: Option<String>,
 }
 
+/// Build the optional device-fingerprint body we send on /cli/login/start.
+///
+/// The server tolerates any subset of these fields (see platform-api
+/// /cli/login/start — pickString trims + truncates at 512 chars). We send
+/// what we can resolve locally so the browser approve screen can show the
+/// user what terminal is asking for access: hostname, OS + arch, and CLI
+/// version.
+fn device_fingerprint() -> serde_json::Value {
+    let hostname = gethostname::gethostname()
+        .into_string()
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let os = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let client_version = format!("tensorlake-cli/{}", env!("CARGO_PKG_VERSION"));
+
+    let mut body = serde_json::Map::new();
+    if let Some(h) = hostname {
+        body.insert("device_name".into(), serde_json::Value::String(h));
+    }
+    body.insert("os".into(), serde_json::Value::String(os));
+    body.insert(
+        "client_version".into(),
+        serde_json::Value::String(client_version),
+    );
+    serde_json::Value::Object(body)
+}
+
 /// Run the interactive device code login flow.
 pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginResult> {
     let login_start_url = format!("{}/platform/cli/login/start", ctx.api_url);
@@ -22,6 +50,7 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
         .map_err(|e| CliError::auth(format!("failed to initialize HTTP client: {}", e)))?;
     let resp = http
         .post(&login_start_url)
+        .json(&device_fingerprint())
         .send()
         .await
         .map_err(|e| CliError::auth(format!("cannot reach {}: {}", ctx.api_url, e)))?;
@@ -53,7 +82,14 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
     eprintln!("we're going to open a web browser for you to enter a one-time code.");
     eprintln!("Your code is: {}", user_code);
 
-    let verification_uri = format!("{}/cli/login", ctx.cloud_url);
+    // Embed the code in the URL so the browser can pre-fill the field.
+    // The user still verifies the code matches what's in their terminal —
+    // pre-fill is a UX improvement, not a security downgrade.
+    let verification_uri = format!(
+        "{}/cli/login?user_code={}",
+        ctx.cloud_url,
+        urlencoding::encode(&user_code),
+    );
     eprintln!("URL: {}", verification_uri);
     eprintln!("opening web browser...");
 
