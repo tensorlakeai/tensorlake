@@ -82,7 +82,14 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
     eprintln!("we're going to open a web browser for you to enter a one-time code.");
     eprintln!("Your code is: {}", user_code);
 
-    let verification_uri = format!("{}/cli/login", ctx.cloud_url);
+    // Embed the code in the URL so the browser can pre-fill the field.
+    // The user still verifies the code matches what's in their terminal —
+    // pre-fill is a UX improvement, not a security downgrade.
+    let verification_uri = format!(
+        "{}/cli/login?user_code={}",
+        ctx.cloud_url,
+        urlencoding::encode(&user_code),
+    );
     eprintln!("URL: {}", verification_uri);
     eprintln!("opening web browser...");
 
