@@ -105,6 +105,7 @@ export class SandboxClient {
 
   // --- Sandbox CRUD ---
 
+  /** Create a new sandbox. Returns immediately; the sandbox may still be starting. Use `createAndConnect()` for a blocking, ready-to-use handle. */
   async create(options?: CreateSandboxOptions): Promise<CreateSandboxResponse> {
     const body: Record<string, unknown> = {
       resources: {
@@ -141,6 +142,7 @@ export class SandboxClient {
     return fromSnakeKeys(raw, "sandboxId") as CreateSandboxResponse;
   }
 
+  /** Get current state and metadata for a sandbox by ID. */
   async get(sandboxId: string): Promise<SandboxInfo> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",
@@ -149,6 +151,7 @@ export class SandboxClient {
     return fromSnakeKeys(raw, "sandboxId") as SandboxInfo;
   }
 
+  /** List all sandboxes in the namespace. */
   async list(): Promise<SandboxInfo[]> {
     const raw = await this.http.requestJson<{ sandboxes: Record<string, unknown>[] }>(
       "GET",
@@ -159,6 +162,7 @@ export class SandboxClient {
     );
   }
 
+  /** Update sandbox properties such as name, exposed ports, and proxy auth settings. */
   async update(sandboxId: string, options: UpdateSandboxOptions): Promise<SandboxInfo> {
     const body: Record<string, unknown> = {};
     if (options.name != null) body.name = options.name;
@@ -179,6 +183,7 @@ export class SandboxClient {
     return fromSnakeKeys(raw, "sandboxId") as SandboxInfo;
   }
 
+  /** Get the current proxy port settings for a sandbox. */
   async getPortAccess(sandboxId: string): Promise<SandboxPortAccess> {
     const info = await this.get(sandboxId);
     return {
@@ -188,6 +193,7 @@ export class SandboxClient {
     };
   }
 
+  /** Add one or more user ports to the sandbox proxy allowlist. */
   async exposePorts(
     sandboxId: string,
     ports: number[],
@@ -207,6 +213,7 @@ export class SandboxClient {
     });
   }
 
+  /** Remove one or more user ports from the sandbox proxy allowlist. */
   async unexposePorts(
     sandboxId: string,
     ports: number[],
@@ -223,6 +230,7 @@ export class SandboxClient {
     });
   }
 
+  /** Terminate and delete a sandbox. */
   async delete(sandboxId: string): Promise<void> {
     await this.http.requestJson(
       "DELETE",
@@ -230,6 +238,20 @@ export class SandboxClient {
     );
   }
 
+  /**
+   * Suspend a named sandbox, preserving its state for later resume.
+   *
+   * Only sandboxes created with a `name` can be suspended; ephemeral sandboxes
+   * cannot. By default blocks until the sandbox is fully `Suspended`. Pass
+   * `{ wait: false }` to return immediately after the request is sent
+   * (fire-and-return); the server processes the suspend asynchronously.
+   *
+   * @param sandboxId - ID or name of the sandbox.
+   * @param options.wait - If `true` (default), poll until `Suspended`. Pass `false` to fire-and-return.
+   * @param options.timeout - Max seconds to wait when `wait=true` (default 300).
+   * @param options.pollInterval - Seconds between status polls when `wait=true` (default 1).
+   * @throws {SandboxError} If `wait=true` and the sandbox does not reach `Suspended` within `timeout`.
+   */
   async suspend(sandboxId: string, options?: SuspendResumeOptions): Promise<void> {
     await this.http.requestResponse(
       "POST",
@@ -250,6 +272,19 @@ export class SandboxClient {
     throw new SandboxError(`Sandbox ${sandboxId} did not suspend within ${timeout}s`);
   }
 
+  /**
+   * Resume a suspended sandbox and bring it back to `Running`.
+   *
+   * By default blocks until the sandbox is `Running` and routable. Pass
+   * `{ wait: false }` to return immediately after the request is sent
+   * (fire-and-return); the server processes the resume asynchronously.
+   *
+   * @param sandboxId - ID or name of the sandbox.
+   * @param options.wait - If `true` (default), poll until `Running`. Pass `false` to fire-and-return.
+   * @param options.timeout - Max seconds to wait when `wait=true` (default 300).
+   * @param options.pollInterval - Seconds between status polls when `wait=true` (default 1).
+   * @throws {SandboxError} If `wait=true` and the sandbox does not reach `Running` within `timeout`.
+   */
   async resume(sandboxId: string, options?: SuspendResumeOptions): Promise<void> {
     await this.http.requestResponse(
       "POST",
@@ -270,6 +305,7 @@ export class SandboxClient {
     throw new SandboxError(`Sandbox ${sandboxId} did not resume within ${timeout}s`);
   }
 
+  /** Claim a warm sandbox from a pool, creating one if no warm containers are available. */
   async claim(poolId: string): Promise<CreateSandboxResponse> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "POST",
@@ -280,6 +316,16 @@ export class SandboxClient {
 
   // --- Snapshots ---
 
+  /**
+   * Request a snapshot of a running sandbox's filesystem.
+   *
+   * This call **returns immediately** with a `snapshotId` and `in_progress`
+   * status — the snapshot is created asynchronously. Poll `getSnapshot()` until
+   * `completed` or `failed`, or use `snapshotAndWait()` to block automatically.
+   *
+   * @param options.contentMode - `"filesystem_only"` for cold-boot snapshots (e.g. image builds).
+   *   Omit to use the server default (full VM snapshot).
+   */
   async snapshot(
     sandboxId: string,
     options?: SnapshotOptions,
@@ -297,6 +343,7 @@ export class SandboxClient {
     return fromSnakeKeys(raw, "snapshotId") as CreateSnapshotResponse;
   }
 
+  /** Get current status and metadata for a snapshot by ID. */
   async getSnapshot(snapshotId: string): Promise<SnapshotInfo> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",
@@ -305,6 +352,7 @@ export class SandboxClient {
     return fromSnakeKeys(raw, "snapshotId") as SnapshotInfo;
   }
 
+  /** List all snapshots in the namespace. */
   async listSnapshots(): Promise<SnapshotInfo[]> {
     const raw = await this.http.requestJson<{ snapshots: Record<string, unknown>[] }>(
       "GET",
@@ -315,6 +363,7 @@ export class SandboxClient {
     );
   }
 
+  /** Delete a snapshot by ID. */
   async deleteSnapshot(snapshotId: string): Promise<void> {
     await this.http.requestJson(
       "DELETE",
@@ -322,6 +371,19 @@ export class SandboxClient {
     );
   }
 
+  /**
+   * Create a snapshot and block until it is committed.
+   *
+   * Combines `snapshot()` with polling `getSnapshot()` until `completed`.
+   * Prefer `sandbox.checkpoint()` on a `Sandbox` handle for the same behavior
+   * without managing the client separately.
+   *
+   * @param sandboxId - ID of the running sandbox to snapshot.
+   * @param options.timeout - Max seconds to wait (default 300).
+   * @param options.pollInterval - Seconds between status polls (default 1).
+   * @param options.contentMode - Content mode passed through to `snapshot()`.
+   * @throws {SandboxError} If the snapshot fails or `timeout` elapses.
+   */
   async snapshotAndWait(
     sandboxId: string,
     options?: SnapshotAndWaitOptions,
@@ -352,6 +414,7 @@ export class SandboxClient {
 
   // --- Pools ---
 
+  /** Create a new sandbox pool with warm pre-booted containers. */
   async createPool(options: CreatePoolOptions): Promise<CreateSandboxPoolResponse> {
     const body: Record<string, unknown> = {
       image: options.image,
@@ -376,6 +439,7 @@ export class SandboxClient {
     return fromSnakeKeys(raw, "poolId") as CreateSandboxPoolResponse;
   }
 
+  /** Get current state and metadata for a sandbox pool by ID. */
   async getPool(poolId: string): Promise<SandboxPoolInfo> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",
@@ -384,6 +448,7 @@ export class SandboxClient {
     return fromSnakeKeys(raw, "poolId") as SandboxPoolInfo;
   }
 
+  /** List all sandbox pools in the namespace. */
   async listPools(): Promise<SandboxPoolInfo[]> {
     const raw = await this.http.requestJson<{ pools: Record<string, unknown>[] }>(
       "GET",
@@ -394,6 +459,7 @@ export class SandboxClient {
     );
   }
 
+  /** Replace the configuration of an existing sandbox pool. */
   async updatePool(
     poolId: string,
     options: UpdatePoolOptions,
@@ -421,6 +487,7 @@ export class SandboxClient {
     return fromSnakeKeys(raw, "poolId") as SandboxPoolInfo;
   }
 
+  /** Delete a sandbox pool. Fails if the pool has active containers. */
   async deletePool(poolId: string): Promise<void> {
     await this.http.requestJson(
       "DELETE",
@@ -430,6 +497,7 @@ export class SandboxClient {
 
   // --- Connect ---
 
+  /** Return a `Sandbox` handle for an existing running sandbox without verifying it exists. */
   connect(identifier: string, proxyUrl?: string, routingHint?: string): Sandbox {
     const resolvedProxy = proxyUrl ?? resolveProxyUrl(this.apiUrl);
     return new Sandbox({
@@ -442,6 +510,15 @@ export class SandboxClient {
     });
   }
 
+  /**
+   * Create a sandbox, wait for it to reach `Running`, and return a connected handle.
+   *
+   * Blocks until the sandbox is ready or `startupTimeout` elapses. The returned
+   * `Sandbox` auto-terminates when `terminate()` is called.
+   *
+   * @param options.startupTimeout - Max seconds to wait for `Running` status (default 60).
+   * @throws {SandboxError} If the sandbox terminates during startup or the timeout elapses.
+   */
   async createAndConnect(
     options?: CreateAndConnectOptions,
   ): Promise<Sandbox> {

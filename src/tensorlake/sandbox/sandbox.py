@@ -341,6 +341,11 @@ class Sandbox:
 
         Args:
             snapshot_id: ID of the snapshot.
+            api_key: Tensorlake API key (defaults to TENSORLAKE_API_KEY env var).
+            api_url: API server URL (defaults to TENSORLAKE_API_URL env var).
+            organization_id: Organization ID for multi-tenant access.
+            project_id: Project ID for scoping resources.
+            namespace: Namespace for local-server deployments.
 
         Returns:
             SnapshotInfo with full snapshot details.
@@ -373,6 +378,11 @@ class Sandbox:
 
         Args:
             snapshot_id: ID of the snapshot to delete.
+            api_key: Tensorlake API key (defaults to TENSORLAKE_API_KEY env var).
+            api_url: API server URL (defaults to TENSORLAKE_API_URL env var).
+            organization_id: Organization ID for multi-tenant access.
+            project_id: Project ID for scoping resources.
+            namespace: Namespace for local-server deployments.
         """
         from .client import SandboxClient
 
