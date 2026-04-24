@@ -138,6 +138,28 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertEqual(request_json["resources"]["cpus"], 2.0)
         self.assertEqual(request_json["resources"]["memory_mb"], 1024)
 
+    def test_create_sends_disk_override_when_provided(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FakeRustClient()
+        client._rust_client = fake
+
+        client.create(disk_mb=25 * 1024)
+
+        request_json = json.loads(fake.create_request_json)
+        self.assertEqual(request_json["resources"]["disk_mb"], 25 * 1024)
+        self.assertNotIn("ephemeral_disk_mb", request_json["resources"])
+
+    def test_create_ignores_deprecated_ephemeral_disk_mb(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FakeRustClient()
+        client._rust_client = fake
+
+        client.create(ephemeral_disk_mb=2048)
+
+        request_json = json.loads(fake.create_request_json)
+        self.assertNotIn("ephemeral_disk_mb", request_json["resources"])
+        self.assertNotIn("disk_mb", request_json["resources"])
+
     def test_list_uses_rust_backend(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
         client._rust_client = _FakeRustClient()

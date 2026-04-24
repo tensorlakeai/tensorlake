@@ -286,6 +286,10 @@ enum SbxCommands {
         #[arg(short, long)]
         memory: Option<i64>,
 
+        /// Root disk size in GB
+        #[arg(long)]
+        disk: Option<u64>,
+
         /// Timeout in seconds
         #[arg(short, long)]
         timeout: Option<i64>,
@@ -525,6 +529,10 @@ enum ImageCommands {
         #[arg(short = 'n', long)]
         registered_name: Option<String>,
 
+        /// Root disk size in GB for the temporary build sandbox
+        #[arg(long)]
+        disk: Option<u64>,
+
         /// Make this sandbox image publicly accessible
         #[arg(short, long)]
         public: bool,
@@ -758,6 +766,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     name,
                     cpus,
                     memory,
+                    disk,
                     timeout,
                     entrypoint,
                     snapshot,
@@ -769,12 +778,20 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     network_allow,
                     network_deny,
                 } => {
+                    let disk_mb = disk
+                        .map(|value| {
+                            value.checked_mul(1024).ok_or_else(|| {
+                                CliError::usage("--disk is too large to convert to MiB")
+                            })
+                        })
+                        .transpose()?;
                     commands::sbx::create::run(
                         ctx,
                         commands::sbx::create::CreateArgs {
                             name: name.as_deref(),
                             cpus,
                             memory,
+                            disk_mb,
                             timeout,
                             entrypoint: &entrypoint,
                             snapshot_id: snapshot.as_deref(),
@@ -905,12 +922,14 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     ImageCommands::Create {
                         dockerfile_path,
                         registered_name,
+                        disk,
                         public,
                     } => {
                         commands::sbx::image::create::run(
                             ctx,
                             &dockerfile_path,
                             registered_name.as_deref(),
+                            disk,
                             public,
                         )
                         .await

@@ -103,6 +103,7 @@ class Image:
         registered_name: str | None = None,
         cpus: float = 2.0,
         memory_mb: int = 4096,
+        disk_mb: int | None = None,
         is_public: bool = False,
         context_dir: str | None = None,
         verbose: bool = False,
@@ -116,6 +117,7 @@ class Image:
             registered_name: Name to register the image under. Defaults to ``self.name``.
             cpus: CPUs for the build sandbox (default 2.0).
             memory_mb: Memory for the build sandbox in MB (default 4096).
+            disk_mb: Root disk size for the build sandbox in MB.
             is_public: Make the registered image publicly accessible.
             context_dir: Directory used to resolve relative COPY/ADD paths.
                 Defaults to the current working directory.
@@ -131,6 +133,7 @@ class Image:
             registered_name=registered_name,
             cpus=cpus,
             memory_mb=memory_mb,
+            disk_mb=disk_mb,
             is_public=is_public,
             context_dir=context_dir,
             verbose=verbose,

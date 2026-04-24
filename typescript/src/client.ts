@@ -107,11 +107,12 @@ export class SandboxClient {
 
   /** Create a new sandbox. Returns immediately; the sandbox may still be starting. Use `createAndConnect()` for a blocking, ready-to-use handle. */
   async create(options?: CreateSandboxOptions): Promise<Traced<CreateSandboxResponse>> {
+    const diskMb = options?.diskMb ?? options?.disk_mb;
     const body: Record<string, unknown> = {
       resources: {
         cpus: options?.cpus ?? 1.0,
         memory_mb: options?.memoryMb ?? 1024,
-        ephemeral_disk_mb: options?.ephemeralDiskMb ?? 1024,
+        ...(diskMb != null ? { disk_mb: diskMb } : {}),
       },
     };
 

@@ -9,6 +9,7 @@ pub async fn run(
     ctx: &CliContext,
     dockerfile_path: &str,
     registered_name: Option<&str>,
+    disk_gb: Option<u64>,
     is_public: bool,
 ) -> Result<()> {
     let mut cmd = tokio::process::Command::new("tensorlake-create-sandbox-image");
@@ -16,6 +17,9 @@ pub async fn run(
 
     if let Some(name) = registered_name {
         cmd.arg("--name").arg(name);
+    }
+    if let Some(disk_gb) = disk_gb {
+        cmd.arg("--disk").arg(disk_gb.to_string());
     }
     if is_public {
         cmd.arg("--public");
