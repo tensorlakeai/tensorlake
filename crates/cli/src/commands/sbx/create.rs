@@ -131,7 +131,9 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
 }
 
 fn print_post_create_tip(ctx: &CliContext, sandbox_id: &str, display_id: &str, is_ephemeral: bool) {
-    let (proxy_url, host_header) = sandbox_proxy_base(ctx, sandbox_id);
+    // Use the name as the proxy subdomain when available; it's a stable human-readable identifier.
+    let proxy_key = if is_ephemeral { sandbox_id } else { display_id };
+    let (proxy_url, host_header) = sandbox_proxy_base(ctx, proxy_key);
     let host_flag = host_header
         .as_deref()
         .map(|h| format!(" \\\n     -H \"Host: {}\"", h))

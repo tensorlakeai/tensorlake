@@ -337,6 +337,25 @@ export interface CreateAndConnectOptions extends CreateSandboxOptions {
   startupTimeout?: number;
 }
 
+export interface SuspendResumeOptions {
+  /** If false, fire-and-return without waiting for completion. Default: true. */
+  wait?: boolean;
+  /** Max seconds to wait when wait=true. Default: 300. */
+  timeout?: number;
+  /** Seconds between status polls when wait=true. Default: 1. */
+  pollInterval?: number;
+}
+
+export interface CheckpointOptions extends SuspendResumeOptions {
+  contentMode?: SnapshotContentMode;
+}
+
+export interface ConnectOptions {
+  sandboxId: string;
+  proxyUrl?: string;
+  routingHint?: string;
+}
+
 // --- JSON key conversion helpers ---
 
 const CAMEL_TO_SNAKE_RE = /[A-Z]/g;

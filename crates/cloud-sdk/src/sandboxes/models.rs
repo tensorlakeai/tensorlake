@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub struct ContainerResourcesInfo {
     pub cpus: f64,
     pub memory_mb: i64,
+    #[serde(default)]
     pub ephemeral_disk_mb: i64,
 }
 

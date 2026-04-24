@@ -32,7 +32,11 @@
 
 use std::{collections::HashMap, pin::Pin, time::Duration};
 
-use crate::{client::Client, error::SdkError, images::error::ImagesError};
+use crate::{
+    client::{Client, Traced},
+    error::SdkError,
+    images::error::ImagesError,
+};
 use futures::stream::Stream;
 use reqwest::{
     Method,
@@ -50,76 +54,11 @@ pub struct ImagesClient {
 }
 
 impl ImagesClient {
-    /// Create a new images client.
-    ///
-    /// # Arguments
-    ///
-    /// * `client` - The base HTTP client configured with authentication
-    /// * `build_service_url` - The URL of the image build service
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use tensorlake_cloud_sdk::{ClientBuilder, images::ImagesClient};
-    ///
-    /// fn example() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let client = ClientBuilder::new("https://api.tensorlake.ai")
-    ///         .bearer_token("your-api-key")
-    ///         .build()?;
-    ///     let images_client = ImagesClient::new(client);
-    ///     Ok(())
-    /// }
-    /// ```
     pub fn new(client: Client) -> Self {
         Self { client }
     }
 
-    /// Build a container image.
-    ///
-    /// This method submits an image build request to the Tensorlake Cloud build service
-    /// and polls for completion.
-    ///
-    /// # Arguments
-    ///
-    /// * `request` - The image build request containing all necessary parameters
-    ///
-    /// # Returns
-    ///
-    /// Returns the build result containing the build ID and final status.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the build request fails or the build process encounters an error.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use tensorlake_cloud_sdk::{ClientBuilder, images::{ImagesClient, models::{ImageBuildRequest, Image}}};
-    ///
-    /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let client = ClientBuilder::new("https://api.tensorlake.ai")
-    ///         .bearer_token("your-api-key")
-    ///         .build()?;
-    ///     let images_client = ImagesClient::new(client);
-    ///
-    ///     // Define an image
-    ///     let image = Image::builder()
-    ///         .name("my-app")
-    ///         .base_image("python:3.9")
-    ///         .build()?;
-    ///     let request = ImageBuildRequest::builder()
-    ///         .image(image)
-    ///         .image_tag("v1.0")
-    ///         .application_name("my-app")
-    ///         .application_version("1.0.0")
-    ///         .function_name("main")
-    ///         .sdk_version("0.2")
-    ///         .build()?;
-    ///
-    ///     images_client.build_image(request).await?;
-    ///     Ok(())
-    /// }
-    /// ```
+    /// Build a container image, poll for completion, and return the result.
     pub async fn build_image(
         &self,
         request: ImageBuildRequest,
@@ -133,46 +72,42 @@ impl ImagesClient {
         build_service_path: &str,
         request: &CreateApplicationBuildRequest,
         image_contexts: &[ApplicationBuildContext],
-    ) -> Result<ApplicationBuildResponse, SdkError> {
+    ) -> Result<Traced<ApplicationBuildResponse>, SdkError> {
         let form = create_application_build_form(request, image_contexts)?;
-        let request =
-            self.client
-                .build_multipart_request(Method::POST, build_service_path, form)?;
-        let response = self.client.execute(request).await?;
-        Ok(response.json::<ApplicationBuildResponse>().await?)
+        let req = self
+            .client
+            .build_multipart_request(Method::POST, build_service_path, form)?;
+        self.client.execute_json(req).await
     }
 
     pub async fn application_build_info(
         &self,
         build_service_path: &str,
         application_build_id: &str,
-    ) -> Result<ApplicationBuildResponse, SdkError> {
+    ) -> Result<Traced<ApplicationBuildResponse>, SdkError> {
         let path = format!(
             "{}/{}",
             build_service_path.trim_end_matches('/'),
             application_build_id
         );
-        let request = self.client.request(Method::GET, &path).build()?;
-        let response = self.client.execute(request).await?;
-        Ok(response.json::<ApplicationBuildResponse>().await?)
+        let req = self.client.request(Method::GET, &path).build()?;
+        self.client.execute_json(req).await
     }
 
     pub async fn cancel_application_build(
         &self,
         build_service_path: &str,
         application_build_id: &str,
-    ) -> Result<ApplicationBuildResponse, SdkError> {
+    ) -> Result<Traced<ApplicationBuildResponse>, SdkError> {
         let path = format!(
             "{}/{}/cancel",
             build_service_path.trim_end_matches('/'),
             application_build_id
         );
-        let request = self.client.request(Method::POST, &path).build()?;
-        let response = self.client.execute(request).await?;
-        Ok(response.json::<ApplicationBuildResponse>().await?)
+        let req = self.client.request(Method::POST, &path).build()?;
+        self.client.execute_json(req).await
     }
 
-    /// Submit a build request to the build service.
     async fn submit_build_request(
         &self,
         request: &ImageBuildRequest,
@@ -193,27 +128,27 @@ impl ImagesClient {
                 Part::bytes(context_data).file_name("context.tar.gz"),
             );
 
-        let request =
-            self.client
-                .build_multipart_request(Method::PUT, "/images/v2/builds", form)?;
-
-        let response = self.client.execute(request).await?;
-        let json = response.json::<BuildInfo>().await?;
-
-        Ok(json)
+        let req = self
+            .client
+            .build_multipart_request(Method::PUT, "/images/v2/builds", form)?;
+        Ok(self
+            .client
+            .execute_json::<BuildInfo>(req)
+            .await?
+            .into_inner())
     }
 
-    /// Poll the build status until completion.
     async fn poll_build_status(&self, build_id: &str) -> Result<ImageBuildResult, SdkError> {
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             let uri_str = format!("/images/v2/builds/{build_id}");
-            let request = self.client.request(Method::GET, &uri_str).build()?;
-
-            let response = self.client.execute(request).await?;
-
-            let build_info: BuildInfo = response.json().await?;
+            let req = self.client.request(Method::GET, &uri_str).build()?;
+            let build_info = self
+                .client
+                .execute_json::<BuildInfo>(req)
+                .await?
+                .into_inner();
 
             match build_info.status.as_str() {
                 "completed" | "succeeded" => {
@@ -234,50 +169,15 @@ impl ImagesClient {
                         error_message: build_info.error_message,
                     });
                 }
-                _ => {
-                    // Continue polling for other statuses (pending, in_progress, building, etc.)
-                    continue;
-                }
+                _ => continue,
             }
         }
     }
 
-    /// List builds for the current project.
-    ///
-    /// # Arguments
-    ///
-    /// * `request` - The list builds request
-    ///
-    /// # Returns
-    ///
-    /// Returns a paginated list of builds.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the request fails or the response cannot be parsed.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use tensorlake_cloud_sdk::{ClientBuilder, images::{ImagesClient, models::ListBuildsRequest}};
-    ///
-    /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let client = ClientBuilder::new("https://api.tensorlake.ai")
-    ///         .bearer_token("your-api-key")
-    ///         .build()?;
-    ///     let images_client = ImagesClient::new(client);
-    ///     let request = ListBuildsRequest::builder()
-    ///         .page(1)
-    ///         .page_size(25)
-    ///         .build()?;
-    ///     images_client.list_builds(&request).await?;
-    ///     Ok(())
-    /// }
-    /// ```
     pub async fn list_builds(
         &self,
         request: &models::ListBuildsRequest,
-    ) -> Result<Page<BuildListResponse>, SdkError> {
+    ) -> Result<Traced<Page<BuildListResponse>>, SdkError> {
         let mut query_params = Vec::new();
         if let Some(p) = request.page {
             query_params.push(("page", p.to_string()));
@@ -286,7 +186,6 @@ impl ImagesClient {
             query_params.push(("page_size", ps.to_string()));
         }
         if let Some(s) = &request.status {
-            // Assuming BuildStatus can be converted to string
             let status_str = match s {
                 BuildStatus::Pending => "pending",
                 BuildStatus::Enqueued => "enqueued",
@@ -313,140 +212,32 @@ impl ImagesClient {
             .request(Method::GET, "/images/v2/builds")
             .query(&query_params)
             .build()?;
-
-        let response = self.client.execute(req).await?;
-
-        Ok(response.json::<Page<BuildListResponse>>().await?)
+        self.client.execute_json(req).await
     }
 
-    /// Cancel a build.
-    ///
-    /// # Arguments
-    ///
-    /// * `request` - The cancel build request
-    ///
-    /// # Returns
-    ///
-    /// Returns a success message if the cancel request was accepted.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the request fails.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use tensorlake_cloud_sdk::{ClientBuilder, images::{ImagesClient, models::CancelBuildRequest}};
-    ///
-    /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let client = ClientBuilder::new("https://api.tensorlake.ai")
-    ///         .bearer_token("your-api-key")
-    ///         .build()?;
-    ///     let images_client = ImagesClient::new(client);
-    ///     let request = CancelBuildRequest::builder()
-    ///         .build_id("build-123".to_string())
-    ///         .build()?;
-    ///     images_client.cancel_build(&request).await?;
-    ///     Ok(())
-    /// }
-    /// ```
-    pub async fn cancel_build(&self, request: &models::CancelBuildRequest) -> Result<(), SdkError> {
+    pub async fn cancel_build(
+        &self,
+        request: &models::CancelBuildRequest,
+    ) -> Result<Traced<()>, SdkError> {
         let uri_str = format!("/images/v2/builds/{}/cancel", request.build_id);
         let req = self.client.request(Method::POST, &uri_str).build()?;
-
-        let _response = self.client.execute(req).await?;
-
-        // 202 Accepted, no body
-        Ok(())
+        Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
-    /// Get build info.
-    ///
-    /// # Arguments
-    ///
-    /// * `request` - The get build info request
-    ///
-    /// # Returns
-    ///
-    /// Returns the build info response containing details about the build.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the request fails or the response cannot be parsed.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use tensorlake_cloud_sdk::{ClientBuilder, images::{ImagesClient, models::GetBuildInfoRequest}};
-    ///
-    /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let client = ClientBuilder::new("https://api.tensorlake.ai")
-    ///         .bearer_token("your-api-key")
-    ///         .build()?;
-    ///     let images_client = ImagesClient::new(client);
-    ///     let request = GetBuildInfoRequest::builder()
-    ///         .build_id("build-123".to_string())
-    ///         .build()?;
-    ///     images_client.get_build_info(&request).await?;
-    ///     Ok(())
-    /// }
-    /// ```
     pub async fn get_build_info(
         &self,
         request: &models::GetBuildInfoRequest,
-    ) -> Result<BuildInfoResponse, SdkError> {
+    ) -> Result<Traced<BuildInfoResponse>, SdkError> {
         let uri_str = format!("/images/v2/builds/{}", request.build_id);
         let req = self.client.request(Method::GET, &uri_str).build()?;
-
-        let response = self.client.execute(req).await?;
-
-        Ok(response.json::<BuildInfoResponse>().await?)
+        self.client.execute_json(req).await
     }
 
-    /// Stream build logs.
-    ///
-    /// # Arguments
-    ///
-    /// * `request` - The stream logs request
-    ///
-    /// # Returns
-    ///
-    /// Returns a stream that yields log entries as they are received from the server.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the request fails.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use tensorlake_cloud_sdk::{ClientBuilder, images::{ImagesClient, models::StreamLogsRequest}};
-    /// use futures::StreamExt;
-    ///
-    /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let client = ClientBuilder::new("https://api.tensorlake.ai")
-    ///         .bearer_token("your-api-key")
-    ///         .build()?;
-    ///     let images_client = ImagesClient::new(client);
-    ///     let request = StreamLogsRequest::builder()
-    ///         .build_id("build-123".to_string())
-    ///         .build()?;
-    ///     let mut stream = images_client.stream_logs(&request).await?;
-    ///     while let Some(log_entry) = stream.next().await {
-    ///         match log_entry {
-    ///             Ok(entry) => println!("Log: {:?}", entry),
-    ///             Err(e) => eprintln!("Error: {:?}", e),
-    ///         }
-    ///     }
-    ///     Ok(())
-    /// }
-    /// ```
     pub async fn stream_logs(
         &self,
         request: &models::StreamLogsRequest,
-    ) -> Result<ImageBuildLogStream, SdkError> {
+    ) -> Result<Traced<ImageBuildLogStream>, SdkError> {
         let uri_str = format!("/images/v2/builds/{}/logs", request.build_id);
-
         let stream = self
             .client
             .build_event_source_request::<LogEntry>(&uri_str)

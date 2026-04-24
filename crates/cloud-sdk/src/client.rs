@@ -8,12 +8,65 @@ use reqwest::{
 use reqwest_middleware::{ClientBuilder as ReqwestClientBuilder, ClientWithMiddleware, Middleware};
 use serde::de::DeserializeOwned;
 use std::{
+    ops::{Deref, DerefMut},
     pin::Pin,
     result::Result,
     sync::{Arc, Once},
 };
 
 use crate::error::SdkError;
+
+/// Wraps any SDK operation result with the W3C `trace_id` so callers can
+/// correlate the request with its server-side spans in Datadog APM or any
+/// other OTEL-compatible backend.
+///
+/// All fields and methods of `T` are accessible via `Deref`/`DerefMut`, so
+/// most existing code compiles unchanged. Use `into_inner()` when you need an
+/// owned `T`.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let result = sdk.sandboxes("ns", false).create(&request).await?;
+/// println!("{}", result.sandbox_id); // existing field — accessible via Deref
+/// println!("{}", result.trace_id);   // new: look this up in Datadog APM
+/// ```
+#[derive(Debug, Clone)]
+pub struct Traced<T> {
+    /// W3C trace ID for this request (32 lowercase hex chars).
+    pub trace_id: String,
+    value: T,
+}
+
+impl<T> Traced<T> {
+    pub fn new(trace_id: String, value: T) -> Self {
+        Self { trace_id, value }
+    }
+
+    pub fn into_inner(self) -> T {
+        self.value
+    }
+
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Traced<U> {
+        Traced {
+            trace_id: self.trace_id,
+            value: f(self.value),
+        }
+    }
+}
+
+impl<T> Deref for Traced<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T> DerefMut for Traced<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.value
+    }
+}
 
 /// HTTP client that interacts with the Tensorlake Cloud API.
 #[derive(Clone)]
@@ -37,6 +90,7 @@ pub struct ClientBuilder {
     middlewares: Vec<Arc<dyn Middleware + 'static>>,
     organization_id: Option<String>,
     project_id: Option<String>,
+    user_agent: Option<String>,
 }
 
 impl ClientBuilder {
@@ -52,7 +106,19 @@ impl ClientBuilder {
             middlewares: Vec::new(),
             organization_id: None,
             project_id: None,
+            user_agent: None,
         }
+    }
+
+    /// Override the User-Agent header sent with every request.
+    ///
+    /// Defaults to `tensorlake-rust-sdk/{CARGO_PKG_VERSION}`. Callers that
+    /// wrap this client (e.g. the Python SDK via PyO3) should set a value like
+    /// `tensorlake-python-sdk/{version}` so server logs can distinguish traffic
+    /// by SDK language.
+    pub fn user_agent(mut self, ua: &str) -> Self {
+        self.user_agent = Some(ua.to_string());
+        self
     }
 
     /// Set the bearer token for authentication.
@@ -104,7 +170,11 @@ impl ClientBuilder {
             default_headers.insert("X-Forwarded-Project-Id", str_to_header_value(project_id)?);
         }
 
-        let base_client = new_base_client(&default_headers)?;
+        let ua = self
+            .user_agent
+            .as_deref()
+            .unwrap_or(concat!("tensorlake-rust-sdk/", env!("CARGO_PKG_VERSION")));
+        let base_client = new_base_client(&default_headers, ua)?;
         let mut builder = ReqwestClientBuilder::new(base_client.clone());
 
         for middleware in &self.middlewares {
@@ -147,16 +217,58 @@ impl Client {
         }
     }
 
-    /// Execute an HTTP request.
-    pub async fn execute(&self, request: Request) -> Result<Response, SdkError> {
+    /// Execute an HTTP request. Injects a W3C `traceparent` header for server-side
+    /// correlation. Use [`execute_traced`] or [`execute_json`] when you need the
+    /// `trace_id` returned to the caller.
+    pub async fn execute(&self, mut request: Request) -> Result<Response, SdkError> {
+        let (traceparent, _) = generate_traceparent();
+        if let Ok(value) = traceparent.parse::<HeaderValue>() {
+            request.headers_mut().insert("traceparent", value);
+        }
         let response = self.client.execute(request).await?;
         self.handle_response(response).await
     }
 
     /// Execute an HTTP request without mapping non-success statuses to [`SdkError`].
-    pub async fn execute_raw(&self, request: Request) -> Result<Response, SdkError> {
+    /// Injects a W3C `traceparent` header for server-side correlation.
+    pub async fn execute_raw(&self, mut request: Request) -> Result<Response, SdkError> {
+        let (traceparent, _) = generate_traceparent();
+        if let Ok(value) = traceparent.parse::<HeaderValue>() {
+            request.headers_mut().insert("traceparent", value);
+        }
         let response = self.client.execute(request).await?;
         Ok(response)
+    }
+
+    /// Execute an HTTP request, inject a W3C `traceparent` header, and return
+    /// the raw response alongside the `trace_id`. Use this when you need the
+    /// `trace_id` but want to handle the response body yourself.
+    pub async fn execute_traced(&self, mut request: Request) -> Result<Traced<Response>, SdkError> {
+        let (traceparent, trace_id) = generate_traceparent();
+        if let Ok(value) = traceparent.parse::<HeaderValue>() {
+            request.headers_mut().insert("traceparent", value);
+        }
+        let response = self.client.execute(request).await?;
+        let response = self.handle_response(response).await?;
+        Ok(Traced::new(trace_id, response))
+    }
+
+    /// Execute an HTTP request, inject a W3C `traceparent` header, deserialize
+    /// the JSON response body, and return both alongside the `trace_id`.
+    ///
+    /// This is the primary building block for service-level methods that return
+    /// structured responses. The `trace_id` lets callers look up the full
+    /// server-side cascade in Datadog APM.
+    pub async fn execute_json<T: DeserializeOwned>(
+        &self,
+        request: Request,
+    ) -> Result<Traced<T>, SdkError> {
+        let traced = self.execute_traced(request).await?;
+        let trace_id = traced.trace_id.clone();
+        let bytes = traced.into_inner().bytes().await?;
+        let jd = &mut serde_json::Deserializer::from_slice(bytes.as_ref());
+        let value: T = serde_path_to_error::deserialize(jd)?;
+        Ok(Traced::new(trace_id, value))
     }
 
     pub fn request(
@@ -170,14 +282,16 @@ impl Client {
     pub async fn build_event_source_request<T>(
         &self,
         path: &str,
-    ) -> Result<EventSourceStream<T>, SdkError>
+    ) -> Result<Traced<EventSourceStream<T>>, SdkError>
     where
         T: DeserializeOwned,
     {
+        let (traceparent, trace_id) = generate_traceparent();
         let response = self
             .base_client
             .get(self.base_url.clone() + path)
             .header(ACCEPT, "text/event-stream")
+            .header("traceparent", traceparent)
             .send()
             .await?;
 
@@ -193,7 +307,7 @@ impl Client {
                     Err(error) => Some(Err(SdkError::EventSourceError(error.to_string()))),
                 }
             });
-        Ok(Box::pin(stream))
+        Ok(Traced::new(trace_id, Box::pin(stream)))
     }
 
     pub fn build_multipart_request(
@@ -260,6 +374,12 @@ impl Client {
     }
 }
 
+fn generate_traceparent() -> (String, String) {
+    let trace_id = hex::encode(rand::random::<[u8; 16]>());
+    let span_id = hex::encode(rand::random::<[u8; 8]>());
+    (format!("00-{trace_id}-{span_id}-01"), trace_id)
+}
+
 async fn body_message_or_default(response: Response, default: &str) -> String {
     let message = response
         .text()
@@ -294,14 +414,11 @@ fn ensure_rustls_provider() {
     });
 }
 
-fn new_base_client(headers: &HeaderMap) -> Result<reqwest::Client, SdkError> {
+fn new_base_client(headers: &HeaderMap, user_agent: &str) -> Result<reqwest::Client, SdkError> {
     ensure_rustls_provider();
 
     let client = reqwest::Client::builder()
-        .user_agent(format!(
-            "Tensorlake Cloud SDK/{}",
-            env!("CARGO_PKG_VERSION")
-        ))
+        .user_agent(user_agent)
         .default_headers(headers.clone())
         .build()?;
     Ok(client)

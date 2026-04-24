@@ -61,6 +61,10 @@ struct Cli {
     #[arg(long, env = "TENSORLAKE_PROJECT_ID")]
     project: Option<String>,
 
+    /// Print the trace ID for this command to stderr (for APM correlation)
+    #[arg(long, env = "TENSORLAKE_SHOW_TRACE_ID", global = true)]
+    show_trace_id: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -265,7 +269,8 @@ enum SbxCommands {
     },
 
     /// Create a new sandbox
-    New {
+    #[command(alias = "new")]
+    Create {
         /// Optional name for the sandbox. Named sandboxes support suspend/resume.
         /// Omit to create an ephemeral sandbox (no suspend/resume). When provided, must start
         /// with a lowercase letter, contain only lowercase letters, digits, and hyphens, not end
@@ -376,8 +381,9 @@ enum SbxCommands {
         dest: String,
     },
 
-    /// Create a snapshot or list snapshots
-    Snapshot(SnapshotArgs),
+    /// Create a checkpoint (snapshot) or list checkpoints
+    #[command(alias = "snapshot")]
+    Checkpoint(SnapshotArgs),
 
     /// Clone a running sandbox via snapshot
     Clone {
@@ -624,11 +630,16 @@ async fn main() {
         cli.organization.as_deref(),
         cli.project.as_deref(),
         cli.debug,
+        cli.show_trace_id,
     );
 
     let mut ctx = CliContext::from_resolved(resolved);
 
     let result = run_command(&mut ctx, cli.command).await;
+
+    if ctx.show_trace_id {
+        eprintln!("Trace-ID: {}", ctx.trace_id);
+    }
 
     if let Err(e) = result {
         match &e {
@@ -743,7 +754,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 SbxCommands::Terminate { sandbox_ids } => {
                     commands::sbx::terminate::run(ctx, &sandbox_ids).await
                 }
-                SbxCommands::New {
+                SbxCommands::Create {
                     name,
                     cpus,
                     memory,
@@ -810,14 +821,14 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     .await
                 }
                 SbxCommands::Cp { src, dest } => commands::sbx::cp::run(ctx, &src, &dest).await,
-                SbxCommands::Snapshot(snapshot_args) => match snapshot_args.command {
+                SbxCommands::Checkpoint(snapshot_args) => match snapshot_args.command {
                     Some(SnapshotCommands::Ls) => commands::sbx::snapshot_ls::run(ctx).await,
                     Some(SnapshotCommands::Rm { snapshot_ids }) => {
                         commands::sbx::snapshot_rm::run(ctx, &snapshot_ids).await
                     }
                     None => {
                         let sandbox_id = snapshot_args.sandbox_id.ok_or_else(|| {
-                            CliError::usage("snapshot requires a sandbox ID or the 'ls' subcommand")
+                            CliError::usage("checkpoint requires a sandbox ID or the 'ls' subcommand")
                         })?;
                         commands::sbx::snapshot::run(ctx, &sandbox_id, snapshot_args.timeout).await
                     }

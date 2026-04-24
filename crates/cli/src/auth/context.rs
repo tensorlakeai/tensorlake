@@ -15,6 +15,10 @@ pub struct CliContext {
     pub organization_id: Option<String>,
     pub project_id: Option<String>,
     pub debug: bool,
+    /// W3C trace ID for this CLI invocation (32 lowercase hex chars).
+    pub trace_id: String,
+    /// When true, print the trace ID to stderr after each command.
+    pub show_trace_id: bool,
     introspect_cache: Option<IntrospectResult>,
 }
 
@@ -36,6 +40,8 @@ impl CliContext {
             organization_id: config.organization_id,
             project_id: config.project_id,
             debug: config.debug,
+            trace_id: hex::encode(rand::random::<[u8; 16]>()),
+            show_trace_id: config.show_trace_id,
             introspect_cache: None,
         }
     }
@@ -51,6 +57,14 @@ impl CliContext {
                 env!("CARGO_PKG_VERSION")
             ))
             .unwrap_or_else(|_| HeaderValue::from_static("Tensorlake CLI")),
+        );
+
+        // Inject W3C traceparent; share trace_id across all requests in this invocation.
+        let span_id = hex::encode(rand::random::<[u8; 8]>());
+        headers.insert(
+            "traceparent",
+            HeaderValue::from_str(&format!("00-{}-{}-01", self.trace_id, span_id))
+                .unwrap_or_else(|_| HeaderValue::from_static("00-0-0-01")),
         );
 
         if let Some(key) = &self.api_key {

@@ -7,22 +7,30 @@ import * as defaults from "./defaults.js";
 import { SandboxError } from "./errors.js";
 import { HttpClient } from "./http.js";
 import {
+  type CheckpointOptions,
   type CommandResult,
+  type ConnectOptions,
+  type CreateAndConnectOptions,
   type CreatePtySessionOptions,
   type DaemonInfo,
   type DirectoryEntry,
   type HealthResponse,
   type ListDirectoryResponse,
-  OutputMode,
   type OutputEvent,
   type OutputResponse,
+  OutputMode,
   type ProcessInfo,
   type PtySessionInfo,
   type RunOptions,
+  type SandboxClientOptions,
   type SandboxOptions,
   type SendSignalResponse,
+  type SnapshotInfo,
   type StartProcessOptions,
+  SandboxStatus,
+  SnapshotStatus,
   StdinMode,
+  type SuspendResumeOptions,
   fromSnakeKeys,
 } from "./models.js";
 import {
@@ -282,6 +290,7 @@ function sendPtyFrame(socket: WebSocket, frame: Buffer): Promise<void> {
  */
 export class Sandbox {
   readonly sandboxId: string;
+  traceId: string | null = null;
   private readonly http: HttpClient;
   private readonly baseUrl: string;
   private readonly wsHeaders: Record<string, string>;
@@ -324,10 +333,135 @@ export class Sandbox {
     this.lifecycleClient = client;
   }
 
+  // --- Static factory methods ---
+
+  /**
+   * Create a new sandbox and return a connected, running handle.
+   *
+   * Covers both fresh sandbox creation and restore-from-snapshot (set
+   * `snapshotId`). Blocks until the sandbox is `Running`.
+   */
+  static async create(
+    options?: CreateAndConnectOptions & Partial<SandboxClientOptions>,
+  ): Promise<Sandbox> {
+    // Dynamic import to break the circular dependency (client.ts imports Sandbox).
+    const { SandboxClient } = await import("./client.js");
+    const client = new SandboxClient(options, /* _internal */ true);
+    const sandbox = await client.createAndConnect(options);
+    sandbox.lifecycleClient = client;
+    return sandbox;
+  }
+
+  /**
+   * Attach to an existing sandbox and return a connected handle.
+   *
+   * Verifies the sandbox exists via a server GET call, then returns a handle
+   * in whatever state the sandbox is in. Does **not** auto-resume a suspended
+   * sandbox — call `sandbox.resume()` explicitly.
+   */
+  static async connect(
+    options: ConnectOptions & Partial<SandboxClientOptions>,
+  ): Promise<Sandbox> {
+    const { SandboxClient } = await import("./client.js");
+    const client = new SandboxClient(options, /* _internal */ true);
+    await client.get(options.sandboxId); // throws SandboxNotFoundError if not found
+    const sandbox = client.connect(options.sandboxId, options.proxyUrl, options.routingHint);
+    sandbox.lifecycleClient = client;
+    return sandbox;
+  }
+
+  // --- Static snapshot management ---
+
+  /** Get information about a snapshot by ID. No sandbox handle needed. */
+  static async getSnapshot(
+    snapshotId: string,
+    options?: Partial<SandboxClientOptions>,
+  ): Promise<SnapshotInfo> {
+    const { SandboxClient } = await import("./client.js");
+    const client = new SandboxClient(options, /* _internal */ true);
+    return client.getSnapshot(snapshotId);
+  }
+
+  /** Delete a snapshot by ID. No sandbox handle needed. */
+  static async deleteSnapshot(
+    snapshotId: string,
+    options?: Partial<SandboxClientOptions>,
+  ): Promise<void> {
+    const { SandboxClient } = await import("./client.js");
+    const client = new SandboxClient(options, /* _internal */ true);
+    await client.deleteSnapshot(snapshotId);
+  }
+
+  // --- Instance lifecycle methods ---
+
+  private requireLifecycleClient(operation: string): SandboxClient {
+    if (!this.lifecycleClient) {
+      throw new SandboxError(
+        `Cannot ${operation}: no lifecycle client available. ` +
+          "Use Sandbox.create() or Sandbox.connect() to get a lifecycle-aware handle.",
+      );
+    }
+    return this.lifecycleClient;
+  }
+
+  /**
+   * Suspend this sandbox.
+   *
+   * By default blocks until the sandbox is fully `Suspended`. Pass
+   * `{ wait: false }` for fire-and-return.
+   */
+  async suspend(options?: SuspendResumeOptions): Promise<void> {
+    const client = this.requireLifecycleClient("suspend");
+    await client.suspend(this.sandboxId, options);
+  }
+
+  /**
+   * Resume this sandbox.
+   *
+   * By default blocks until the sandbox is `Running` and routable. Pass
+   * `{ wait: false }` for fire-and-return.
+   */
+  async resume(options?: SuspendResumeOptions): Promise<void> {
+    const client = this.requireLifecycleClient("resume");
+    await client.resume(this.sandboxId, options);
+  }
+
+  /**
+   * Create a snapshot of this sandbox's filesystem and wait for it to
+   * be committed.
+   *
+   * By default blocks until the snapshot artifact is ready and returns
+   * the completed `SnapshotInfo`. Pass `{ wait: false }` to fire-and-return
+   * (returns `undefined`).
+   */
+  async checkpoint(options?: CheckpointOptions): Promise<SnapshotInfo | undefined> {
+    const client = this.requireLifecycleClient("checkpoint");
+    if (options?.wait === false) {
+      await client.snapshot(this.sandboxId, { contentMode: options.contentMode });
+      return undefined;
+    }
+    return client.snapshotAndWait(this.sandboxId, {
+      timeout: options?.timeout,
+      pollInterval: options?.pollInterval,
+      contentMode: options?.contentMode,
+    });
+  }
+
+  /**
+   * List snapshots taken from this sandbox.
+   */
+  async listSnapshots(): Promise<SnapshotInfo[]> {
+    const client = this.requireLifecycleClient("listSnapshots");
+    const all = await client.listSnapshots();
+    return all.filter((s) => s.sandboxId === this.sandboxId);
+  }
+
+  /** Close the HTTP client. The sandbox keeps running. */
   close(): void {
     this.http.close();
   }
 
+  /** Terminate the sandbox and release all resources. */
   async terminate(): Promise<void> {
     const client = this.lifecycleClient;
     this.ownsSandbox = false;
@@ -388,6 +522,14 @@ export class Sandbox {
 
   // --- Process management ---
 
+  /**
+   * Start a process in the sandbox without waiting for it to exit.
+   *
+   * Returns a `ProcessInfo` with the assigned `pid`. Use `getProcess()` to
+   * poll status, or `followStdout()` / `followOutput()` to stream output
+   * until the process exits. Use `run()` instead to block until completion
+   * and get combined output in one call.
+   */
   async startProcess(
     command: string,
     options?: StartProcessOptions,
@@ -414,6 +556,7 @@ export class Sandbox {
     return fromSnakeKeys(raw) as ProcessInfo;
   }
 
+  /** List all processes (running and exited) tracked by the sandbox daemon. */
   async listProcesses(): Promise<ProcessInfo[]> {
     const raw = await this.http.requestJson<{ processes: Record<string, unknown>[] }>(
       "GET",
@@ -422,6 +565,7 @@ export class Sandbox {
     return (raw.processes ?? []).map((p) => fromSnakeKeys(p) as ProcessInfo);
   }
 
+  /** Get current status and metadata for a process by PID. */
   async getProcess(pid: number): Promise<ProcessInfo> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",
@@ -430,10 +574,12 @@ export class Sandbox {
     return fromSnakeKeys(raw) as ProcessInfo;
   }
 
+  /** Send SIGKILL to a process. */
   async killProcess(pid: number): Promise<void> {
     await this.http.requestJson("DELETE", `/api/v1/processes/${pid}`);
   }
 
+  /** Send an arbitrary signal to a process (e.g. `15` for SIGTERM, `9` for SIGKILL). */
   async sendSignal(pid: number, signal: number): Promise<SendSignalResponse> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "POST",
@@ -445,6 +591,7 @@ export class Sandbox {
 
   // --- Process I/O ---
 
+  /** Write bytes to a process's stdin. The process must have been started with `stdinMode: StdinMode.PIPE`. */
   async writeStdin(pid: number, data: Uint8Array): Promise<void> {
     await this.http.requestBytes("POST", `/api/v1/processes/${pid}/stdin`, {
       body: data,
@@ -452,10 +599,12 @@ export class Sandbox {
     });
   }
 
+  /** Close a process's stdin pipe, signalling EOF to the process. */
   async closeStdin(pid: number): Promise<void> {
     await this.http.requestJson("POST", `/api/v1/processes/${pid}/stdin/close`);
   }
 
+  /** Return all captured stdout lines produced so far by a process. */
   async getStdout(pid: number): Promise<OutputResponse> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",
@@ -464,6 +613,7 @@ export class Sandbox {
     return fromSnakeKeys(raw) as OutputResponse;
   }
 
+  /** Return all captured stderr lines produced so far by a process. */
   async getStderr(pid: number): Promise<OutputResponse> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",
@@ -472,6 +622,7 @@ export class Sandbox {
     return fromSnakeKeys(raw) as OutputResponse;
   }
 
+  /** Return all captured stdout+stderr lines produced so far by a process. */
   async getOutput(pid: number): Promise<OutputResponse> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",
@@ -482,6 +633,7 @@ export class Sandbox {
 
   // --- Streaming (SSE) ---
 
+  /** Stream stdout events from a process until it exits. Yields one `OutputEvent` per line. */
   async *followStdout(
     pid: number,
     options?: { signal?: AbortSignal },
@@ -499,6 +651,7 @@ export class Sandbox {
     }
   }
 
+  /** Stream stderr events from a process until it exits. Yields one `OutputEvent` per line. */
   async *followStderr(
     pid: number,
     options?: { signal?: AbortSignal },
@@ -516,6 +669,7 @@ export class Sandbox {
     }
   }
 
+  /** Stream combined stdout+stderr events from a process until it exits. Yields one `OutputEvent` per line. */
   async *followOutput(
     pid: number,
     options?: { signal?: AbortSignal },
@@ -535,6 +689,7 @@ export class Sandbox {
 
   // --- File operations ---
 
+  /** Read a file from the sandbox and return its raw bytes. */
   async readFile(path: string): Promise<Uint8Array> {
     return this.http.requestBytes(
       "GET",
@@ -542,6 +697,7 @@ export class Sandbox {
     );
   }
 
+  /** Write raw bytes to a file in the sandbox, creating it if it does not exist. */
   async writeFile(path: string, content: Uint8Array): Promise<void> {
     await this.http.requestBytes(
       "PUT",
@@ -550,6 +706,7 @@ export class Sandbox {
     );
   }
 
+  /** Delete a file from the sandbox. */
   async deleteFile(path: string): Promise<void> {
     await this.http.requestJson(
       "DELETE",
@@ -557,6 +714,7 @@ export class Sandbox {
     );
   }
 
+  /** List the contents of a directory in the sandbox. */
   async listDirectory(path: string): Promise<ListDirectoryResponse> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",
@@ -567,6 +725,7 @@ export class Sandbox {
 
   // --- PTY ---
 
+  /** Create an interactive PTY session. Returns a `sessionId` and `token` for WebSocket connection via `connectPty()`. */
   async createPtySession(
     options: CreatePtySessionOptions,
   ): Promise<PtySessionInfo> {
@@ -587,6 +746,7 @@ export class Sandbox {
     return fromSnakeKeys(raw) as PtySessionInfo;
   }
 
+  /** Create a PTY session and connect to it immediately. Cleans up the session if the WebSocket connection fails. */
   async createPty(options: CreatePtyOptions): Promise<Pty> {
     const { onData, onExit, ...createOptions } = options;
     const session = await this.createPtySession(createOptions);
@@ -600,6 +760,7 @@ export class Sandbox {
     }
   }
 
+  /** Attach to an existing PTY session by ID and token and return a connected `Pty` handle. */
   async connectPty(
     sessionId: string,
     token: string,
@@ -632,6 +793,7 @@ export class Sandbox {
     return pty;
   }
 
+  /** Open a TCP tunnel to a port inside the sandbox and return the local listener. */
   async createTunnel(
     remotePort: number,
     options?: CreateTunnelOptions,
@@ -646,6 +808,7 @@ export class Sandbox {
     });
   }
 
+  /** Connect to a sandbox VNC session for programmatic desktop control. */
   async connectDesktop(options?: ConnectDesktopOptions): Promise<Desktop> {
     return Desktop.connect({
       baseUrl: this.baseUrl,
@@ -671,6 +834,7 @@ export class Sandbox {
 
   // --- Health ---
 
+  /** Check the sandbox daemon health. */
   async health(): Promise<HealthResponse> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",
@@ -679,6 +843,7 @@ export class Sandbox {
     return fromSnakeKeys(raw) as HealthResponse;
   }
 
+  /** Get sandbox daemon info (version, uptime, process counts). */
   async info(): Promise<DaemonInfo> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",

@@ -43,6 +43,30 @@ export interface HttpRequestOptions {
 }
 
 /**
+ * The return value of every SDK operation. Carries the W3C `trace_id` so callers
+ * can correlate a specific request with its server-side spans in Datadog APM or
+ * any other OTEL-compatible backend.
+ *
+ * Because this is an intersection type, all properties of `T` are accessible
+ * directly — existing code that ignores `traceId` continues to compile and run
+ * unchanged.
+ *
+ * @example
+ * const sandbox = await client.createSandbox(req);
+ * console.log(sandbox.id);      // existing field — unchanged
+ * console.log(sandbox.traceId); // new: look this up in Datadog APM
+ */
+export type Traced<T> = T & { readonly traceId: string };
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function withTraceId<T>(value: T, traceId: string): Traced<T> {
+  if (value == null) {
+    return { traceId } as unknown as Traced<T>;
+  }
+  return Object.assign(value as any, { traceId }) as Traced<T>;
+}
+
+/**
  * Internal HTTP client with retry logic, auth headers, and error mapping.
  *
  * Uses native `fetch`. Retries on transient status codes (429, 502, 503, 504)
@@ -63,7 +87,9 @@ export class HttpClient {
     this.retryBackoffMs = options.retryBackoffMs ?? defaults.RETRY_BACKOFF_MS;
     this.timeoutMs = options.timeoutMs ?? defaults.DEFAULT_HTTP_TIMEOUT_MS;
 
-    this.headers = {};
+    this.headers = {
+      "User-Agent": `tensorlake-typescript-sdk/${defaults.SDK_VERSION}`,
+    };
     if (options.apiKey) {
       this.headers["Authorization"] = `Bearer ${options.apiKey}`;
     }
@@ -95,15 +121,15 @@ export class HttpClient {
       headers?: Record<string, string>;
       signal?: AbortSignal;
     },
-  ): Promise<T> {
+  ): Promise<Traced<T>> {
     const response = await this.requestResponse(method, path, {
       json: options?.body,
       headers: options?.headers,
       signal: options?.signal,
     });
     const text = await response.text();
-    if (!text) return undefined as T;
-    return JSON.parse(text) as T;
+    const data = (text ? JSON.parse(text) : undefined) as T;
+    return withTraceId(data, response.traceId);
   }
 
   /** Make a request returning raw bytes. */
@@ -116,7 +142,7 @@ export class HttpClient {
       headers?: Record<string, string>;
       signal?: AbortSignal;
     },
-  ): Promise<Uint8Array> {
+  ): Promise<Traced<Uint8Array>> {
     const headers = { ...(options?.headers ?? {}) };
     if (options?.contentType) {
       headers["Content-Type"] = options.contentType;
@@ -128,7 +154,7 @@ export class HttpClient {
       signal: options?.signal,
     });
     const buffer = await response.arrayBuffer();
-    return new Uint8Array(buffer);
+    return withTraceId(new Uint8Array(buffer), response.traceId);
   }
 
   /** Make a request and return the response body as an SSE stream. */
@@ -136,7 +162,7 @@ export class HttpClient {
     method: string,
     path: string,
     options?: { signal?: AbortSignal; json?: unknown },
-  ): Promise<ReadableStream<Uint8Array>> {
+  ): Promise<Traced<ReadableStream<Uint8Array>>> {
     const response = await this.requestResponse(method, path, {
       json: options?.json,
       headers: { Accept: "text/event-stream" },
@@ -148,7 +174,7 @@ export class HttpClient {
         "No response body for SSE stream",
       );
     }
-    return response.body;
+    return withTraceId(response.body, response.traceId);
   }
 
   /** Make a request and return the raw Response. */
@@ -156,7 +182,7 @@ export class HttpClient {
     method: string,
     path: string,
     options?: HttpRequestOptions,
-  ): Promise<Response> {
+  ): Promise<Traced<Response>> {
     const headers = {
       ...this.headers,
       ...(options?.headers ?? {}),
@@ -170,7 +196,7 @@ export class HttpClient {
       ? JSON.stringify(options?.json)
       : normalizeRequestBody(options?.body);
 
-    return this.doFetch(
+    const { response, traceId } = await this.doFetch(
       method,
       path,
       body,
@@ -178,6 +204,17 @@ export class HttpClient {
       options?.signal,
       options?.allowHttpErrors ?? false,
     );
+    return withTraceId(response, traceId);
+  }
+
+  private static makeTraceparent(): { traceparent: string; traceId: string } {
+    const randomHex = (bytes: number) =>
+      Array.from(crypto.getRandomValues(new Uint8Array(bytes)))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+    const traceId = randomHex(16);
+    const spanId = randomHex(8);
+    return { traceparent: `00-${traceId}-${spanId}-01`, traceId };
   }
 
   private async doFetch(
@@ -187,8 +224,10 @@ export class HttpClient {
     headers: Record<string, string>,
     signal?: AbortSignal,
     allowHttpErrors = false,
-  ): Promise<Response> {
+  ): Promise<{ response: Response; traceId: string }> {
     const url = `${this.baseUrl}${path}`;
+    const { traceparent, traceId } = HttpClient.makeTraceparent();
+    headers["traceparent"] = traceparent;
     let lastError: Error | undefined;
 
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
@@ -218,7 +257,7 @@ export class HttpClient {
 
         clearTimeout(timeoutId);
 
-        if (response.ok) return response;
+        if (response.ok) return { response, traceId };
 
         // Check if retryable
         if (
@@ -233,7 +272,7 @@ export class HttpClient {
         }
 
         if (allowHttpErrors) {
-          return response;
+          return { response, traceId };
         }
 
         // Non-retryable error — throw mapped error

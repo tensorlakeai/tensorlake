@@ -46,7 +46,7 @@ async fn test_secrets_operations() {
             .await
             .map_err(|e| format!("upsert failed: {e}"))?;
 
-        match upsert_response {
+        match upsert_response.into_inner() {
             UpsertSecretResponse::Single(secret) => cleanup_secret_ids.push(secret.id),
             UpsertSecretResponse::Multiple(secrets) => {
                 cleanup_secret_ids.extend(secrets.into_iter().map(|s| s.id))
