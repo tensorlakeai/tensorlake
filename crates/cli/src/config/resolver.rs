@@ -14,6 +14,7 @@ pub struct ResolvedConfig {
     pub organization_id: Option<String>,
     pub project_id: Option<String>,
     pub debug: bool,
+    pub show_trace_id: bool,
 }
 
 /// Resolve all configuration from CLI args > env vars > local config > global config > defaults.
@@ -28,6 +29,7 @@ pub fn resolve(
     organization_id: Option<&str>,
     project_id: Option<&str>,
     debug: bool,
+    show_trace_id: bool,
 ) -> ResolvedConfig {
     let local_config = load_local_config();
     let global_config = load_global_config();
@@ -49,6 +51,7 @@ pub fn resolve(
         organization_id: org_id,
         project_id: proj_id,
         debug,
+        show_trace_id,
     }
 }
 

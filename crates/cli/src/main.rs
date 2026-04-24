@@ -61,6 +61,10 @@ struct Cli {
     #[arg(long, env = "TENSORLAKE_PROJECT_ID")]
     project: Option<String>,
 
+    /// Print the trace ID for this command to stderr (for APM correlation)
+    #[arg(long, env = "TENSORLAKE_SHOW_TRACE_ID")]
+    show_trace_id: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -624,11 +628,16 @@ async fn main() {
         cli.organization.as_deref(),
         cli.project.as_deref(),
         cli.debug,
+        cli.show_trace_id,
     );
 
     let mut ctx = CliContext::from_resolved(resolved);
 
     let result = run_command(&mut ctx, cli.command).await;
+
+    if ctx.show_trace_id {
+        eprintln!("Trace-ID: {}", ctx.trace_id);
+    }
 
     if let Err(e) = result {
         match &e {

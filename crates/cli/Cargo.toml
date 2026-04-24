@@ -46,6 +46,7 @@ minijinja = { workspace = true }
 base64 = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+uuid = { workspace = true }
 rustpython-parser = "0.3"
 
 [dev-dependencies]

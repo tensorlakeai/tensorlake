@@ -30,6 +30,7 @@ pub async fn ensure_auth_and_project(ctx: &mut CliContext) -> Result<()> {
             login_result.organization_id.as_deref(),
             login_result.project_id.as_deref(),
             ctx.debug,
+            ctx.show_trace_id,
         );
         *ctx = CliContext::from_resolved(resolved);
 
@@ -79,6 +80,7 @@ pub async fn ensure_auth_and_project(ctx: &mut CliContext) -> Result<()> {
         Some(&org_id),
         Some(&proj_id),
         ctx.debug,
+        ctx.show_trace_id,
     );
     *ctx = CliContext::from_resolved(resolved);
 

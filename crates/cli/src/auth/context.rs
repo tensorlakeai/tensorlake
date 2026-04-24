@@ -1,4 +1,5 @@
 use reqwest::header::{HeaderMap, HeaderValue};
+use uuid::Uuid;
 
 use crate::config::resolver::ResolvedConfig;
 use crate::error::{CliError, Result};
@@ -15,6 +16,10 @@ pub struct CliContext {
     pub organization_id: Option<String>,
     pub project_id: Option<String>,
     pub debug: bool,
+    /// W3C trace ID for this CLI invocation (32 lowercase hex chars).
+    pub trace_id: String,
+    /// When true, print the trace ID to stderr after each command.
+    pub show_trace_id: bool,
     introspect_cache: Option<IntrospectResult>,
 }
 
@@ -36,6 +41,8 @@ impl CliContext {
             organization_id: config.organization_id,
             project_id: config.project_id,
             debug: config.debug,
+            trace_id: Uuid::new_v4().as_simple().to_string(),
+            show_trace_id: config.show_trace_id,
             introspect_cache: None,
         }
     }
@@ -51,6 +58,14 @@ impl CliContext {
                 env!("CARGO_PKG_VERSION")
             ))
             .unwrap_or_else(|_| HeaderValue::from_static("Tensorlake CLI")),
+        );
+
+        // Inject W3C traceparent; share trace_id across all requests in this invocation.
+        let span_id = &Uuid::new_v4().as_simple().to_string()[..16];
+        headers.insert(
+            "traceparent",
+            HeaderValue::from_str(&format!("00-{}-{}-01", self.trace_id, span_id))
+                .unwrap_or_else(|_| HeaderValue::from_static("00-0-0-01")),
         );
 
         if let Some(key) = &self.api_key {

@@ -2797,6 +2797,7 @@ dependencies = [
  "toml",
  "url",
  "urlencoding",
+ "uuid",
 ]
 
 [[package]]
