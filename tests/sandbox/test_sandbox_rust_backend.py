@@ -82,12 +82,15 @@ class _FakeRustProxyClient:
 def _make_sandbox(fake=None):
     """Return a Sandbox wired to *fake* (or a fresh _FakeRustProxyClient)."""
     client = fake or _FakeRustProxyClient()
-    return Sandbox(
-        sandbox_id="sbx-1",
-        proxy_url="http://localhost:9443",
-        api_key="k",
-        _proxy_rust_client=client,
-    ), client
+    return (
+        Sandbox(
+            sandbox_id="sbx-1",
+            proxy_url="http://localhost:9443",
+            api_key="k",
+            _proxy_rust_client=client,
+        ),
+        client,
+    )
 
 
 class TestSandboxRustBackend(unittest.TestCase):
