@@ -194,4 +194,16 @@ impl CliContext {
     pub fn api_key_id(&self) -> Option<String> {
         self.introspect_cache.as_ref().and_then(|r| r.id.clone())
     }
+
+    pub fn introspect_org_id(&self) -> Option<String> {
+        self.introspect_cache
+            .as_ref()
+            .and_then(|r| r.organization_id.clone())
+    }
+
+    pub fn introspect_project_id(&self) -> Option<String> {
+        self.introspect_cache
+            .as_ref()
+            .and_then(|r| r.project_id.clone())
+    }
 }
