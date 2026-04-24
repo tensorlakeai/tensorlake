@@ -1,5 +1,4 @@
 use reqwest::header::{HeaderMap, HeaderValue};
-use uuid::Uuid;
 
 use crate::config::resolver::ResolvedConfig;
 use crate::error::{CliError, Result};
@@ -41,7 +40,7 @@ impl CliContext {
             organization_id: config.organization_id,
             project_id: config.project_id,
             debug: config.debug,
-            trace_id: Uuid::new_v4().as_simple().to_string(),
+            trace_id: hex::encode(rand::random::<[u8; 16]>()),
             show_trace_id: config.show_trace_id,
             introspect_cache: None,
         }
@@ -61,7 +60,7 @@ impl CliContext {
         );
 
         // Inject W3C traceparent; share trace_id across all requests in this invocation.
-        let span_id = &Uuid::new_v4().as_simple().to_string()[..16];
+        let span_id = hex::encode(rand::random::<[u8; 8]>());
         headers.insert(
             "traceparent",
             HeaderValue::from_str(&format!("00-{}-{}-01", self.trace_id, span_id))

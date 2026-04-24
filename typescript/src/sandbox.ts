@@ -290,6 +290,7 @@ function sendPtyFrame(socket: WebSocket, frame: Buffer): Promise<void> {
  */
 export class Sandbox {
   readonly sandboxId: string;
+  traceId: string | null = null;
   private readonly http: HttpClient;
   private readonly baseUrl: string;
   private readonly wsHeaders: Record<string, string>;

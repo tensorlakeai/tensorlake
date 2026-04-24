@@ -1,6 +1,6 @@
 import * as defaults from "./defaults.js";
 import { SandboxError } from "./errors.js";
-import { HttpClient } from "./http.js";
+import { type Traced, HttpClient } from "./http.js";
 import {
   type CheckpointOptions,
   type ConnectOptions,
@@ -106,7 +106,7 @@ export class SandboxClient {
   // --- Sandbox CRUD ---
 
   /** Create a new sandbox. Returns immediately; the sandbox may still be starting. Use `createAndConnect()` for a blocking, ready-to-use handle. */
-  async create(options?: CreateSandboxOptions): Promise<CreateSandboxResponse> {
+  async create(options?: CreateSandboxOptions): Promise<Traced<CreateSandboxResponse>> {
     const body: Record<string, unknown> = {
       resources: {
         cpus: options?.cpus ?? 1.0,
@@ -139,7 +139,8 @@ export class SandboxClient {
       this.path("sandboxes"),
       { body },
     );
-    return fromSnakeKeys(raw, "sandboxId") as CreateSandboxResponse;
+    const result = fromSnakeKeys(raw, "sandboxId") as CreateSandboxResponse;
+    return Object.assign(result, { traceId: raw.traceId }) as Traced<CreateSandboxResponse>;
   }
 
   /** Get current state and metadata for a sandbox by ID. */
@@ -306,12 +307,13 @@ export class SandboxClient {
   }
 
   /** Claim a warm sandbox from a pool, creating one if no warm containers are available. */
-  async claim(poolId: string): Promise<CreateSandboxResponse> {
+  async claim(poolId: string): Promise<Traced<CreateSandboxResponse>> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "POST",
       this.path(`sandbox-pools/${poolId}/sandboxes`),
     );
-    return fromSnakeKeys(raw, "sandboxId") as CreateSandboxResponse;
+    const result = fromSnakeKeys(raw, "sandboxId") as CreateSandboxResponse;
+    return Object.assign(result, { traceId: raw.traceId }) as Traced<CreateSandboxResponse>;
   }
 
   // --- Snapshots ---
@@ -524,7 +526,7 @@ export class SandboxClient {
   ): Promise<Sandbox> {
     const startupTimeout = options?.startupTimeout ?? 60;
 
-    let result: CreateSandboxResponse;
+    let result: Traced<CreateSandboxResponse>;
     if (options?.poolId != null) {
       result = await this.claim(options.poolId);
     } else {
@@ -537,6 +539,7 @@ export class SandboxClient {
     if (result.status === SandboxStatus.RUNNING) {
       const sandbox = this.connect(result.sandboxId, options?.proxyUrl, result.routingHint);
       sandbox._setOwner(this);
+      sandbox.traceId = result.traceId;
       return sandbox;
     }
 
@@ -547,6 +550,7 @@ export class SandboxClient {
       if (info.status === SandboxStatus.RUNNING) {
         const sandbox = this.connect(result.sandboxId, options?.proxyUrl, info.routingHint);
         sandbox._setOwner(this);
+        sandbox.traceId = result.traceId;
         return sandbox;
       }
       if (info.status === SandboxStatus.TERMINATED) {

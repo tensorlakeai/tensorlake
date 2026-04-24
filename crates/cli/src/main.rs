@@ -62,7 +62,7 @@ struct Cli {
     project: Option<String>,
 
     /// Print the trace ID for this command to stderr (for APM correlation)
-    #[arg(long, env = "TENSORLAKE_SHOW_TRACE_ID")]
+    #[arg(long, env = "TENSORLAKE_SHOW_TRACE_ID", global = true)]
     show_trace_id: bool,
 
     #[command(subcommand)]

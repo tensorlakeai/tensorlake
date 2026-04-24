@@ -54,6 +54,7 @@ minijinja = "2"
 # Data types
 bytes = "1.11.1"
 chrono = { version = "0.4.44", features = ["serde"] }
+rand = "0.9.2"
 uuid = { version = "1.22.0", features = ["serde", "v4"] }
 
 # Utilities
