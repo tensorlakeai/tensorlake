@@ -224,18 +224,76 @@ export class SandboxClient {
     );
   }
 
-  async suspend(sandboxId: string): Promise<void> {
+  async suspend(
+    sandboxId: string,
+    options?: { timeout?: number; pollInterval?: number; wait?: boolean },
+  ): Promise<void> {
     await this.http.requestResponse(
       "POST",
       this.path(`sandboxes/${sandboxId}/suspend`),
     );
+    if (options?.wait === false) return;
+    await this.waitForStatus(
+      sandboxId,
+      SandboxStatus.SUSPENDED,
+      "suspend",
+      options?.timeout ?? 300,
+      options?.pollInterval ?? 1,
+    );
   }
 
-  async resume(sandboxId: string): Promise<void> {
+  async resume(
+    sandboxId: string,
+    options?: { timeout?: number; pollInterval?: number; wait?: boolean },
+  ): Promise<void> {
+    const wait = options?.wait ?? true;
+    if (wait) {
+      try {
+        const info = await this.get(sandboxId);
+        if (info.status === SandboxStatus.RUNNING) return;
+      } catch {
+        // ignore: POST /resume below will surface the real error
+      }
+    }
     await this.http.requestResponse(
       "POST",
       this.path(`sandboxes/${sandboxId}/resume`),
     );
+    if (!wait) return;
+    await this.waitForStatus(
+      sandboxId,
+      SandboxStatus.RUNNING,
+      "resume",
+      options?.timeout ?? 300,
+      options?.pollInterval ?? 1,
+    );
+  }
+
+  private async waitForStatus(
+    sandboxId: string,
+    target: SandboxStatus,
+    operation: string,
+    timeout: number,
+    pollInterval: number,
+  ): Promise<void> {
+    const deadline = Date.now() + timeout * 1000;
+    while (true) {
+      const info = await this.get(sandboxId);
+      if (info.status === target) return;
+      if (info.status === SandboxStatus.TERMINATED) {
+        throw new SandboxError(
+          `Sandbox ${sandboxId} became terminated while awaiting ${operation}`,
+        );
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        const label = target.charAt(0).toUpperCase() + target.slice(1);
+        throw new SandboxError(
+          `Sandbox ${sandboxId} did not reach ${label} within ${timeout}s`,
+        );
+      }
+      await sleep(Math.min(pollInterval * 1000, remaining));
+    }
   }
 
   async claim(poolId: string): Promise<CreateSandboxResponse> {

@@ -14,6 +14,8 @@ import json
 import os
 import posixpath
 import shlex
+import sys
+import time
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,8 +96,6 @@ def _noop_emit(_obj: dict) -> None:
 
 
 def _stderr_emit(obj: dict) -> None:
-    import sys
-
     msg = obj.get("message") or ""
     event_type = obj.get("type", "")
     if event_type == "build_log":
@@ -408,8 +408,6 @@ def _run_streaming(
     emit: EmitFn = _noop_emit,
 ):
     """Start a process and stream its stdout/stderr in real time via ``emit``."""
-    import time
-
     proc = sandbox.start_process(
         command=command,
         args=args or [],
@@ -420,7 +418,8 @@ def _run_streaming(
     stdout_seen = 0
     stderr_seen = 0
 
-    while True:
+    def drain() -> None:
+        nonlocal stdout_seen, stderr_seen
         stdout_resp = sandbox.get_stdout(proc.pid)
         for line in stdout_resp.lines[stdout_seen:]:
             emit({"type": "build_log", "stream": "stdout", "message": line})
@@ -431,16 +430,12 @@ def _run_streaming(
             emit({"type": "build_log", "stream": "stderr", "message": line})
         stderr_seen = len(stderr_resp.lines)
 
+    while True:
+        drain()
         info = sandbox.get_process(proc.pid)
         if info.status != ProcessStatus.RUNNING:
-            stdout_resp = sandbox.get_stdout(proc.pid)
-            for line in stdout_resp.lines[stdout_seen:]:
-                emit({"type": "build_log", "stream": "stdout", "message": line})
-            stderr_resp = sandbox.get_stderr(proc.pid)
-            for line in stderr_resp.lines[stderr_seen:]:
-                emit({"type": "build_log", "stream": "stderr", "message": line})
+            drain()
             break
-
         time.sleep(0.3)
 
     for _ in range(10):
@@ -847,19 +842,17 @@ def build_sandbox_image(
     if emit is None:
         emit = _stderr_emit if verbose else _noop_emit
 
+    if not isinstance(source, (Image, str, os.PathLike)):
+        raise TypeError(
+            "source must be an Image or a Dockerfile path, got "
+            f"{type(source).__name__}"
+        )
+
     try:
         if isinstance(source, Image):
             plan = _load_image_plan(source, registered_name, context_dir)
-        elif isinstance(source, (str, os.PathLike)):
-            plan = _load_dockerfile_plan(os.fspath(source), registered_name)
         else:
-            # Programmer error — propagate directly rather than wrapping.
-            raise TypeError(
-                "source must be an Image or a Dockerfile path, got "
-                f"{type(source).__name__}"
-            )
-    except TypeError:
-        raise
+            plan = _load_dockerfile_plan(os.fspath(source), registered_name)
     except (FileNotFoundError, ValueError, OSError) as e:
         raise SandboxImageLoadError(str(e)) from e
 

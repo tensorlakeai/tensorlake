@@ -440,7 +440,30 @@ describe("SandboxClient", () => {
   });
 
   describe("suspend", () => {
-    it("suspends a sandbox", async () => {
+    it("suspends a sandbox and blocks until Suspended", async () => {
+      const calls: string[] = [];
+      mockFetch((url, init) => {
+        calls.push(`${init?.method} ${url}`);
+        if (url.includes("/suspend")) {
+          expect(init?.method).toBe("POST");
+          return new Response("", { status: 202 });
+        }
+        return new Response(
+          JSON.stringify({ sandbox_id: "sbx-1", status: "suspended" }),
+          { status: 200 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await expect(client.suspend("sbx-1")).resolves.toBeUndefined();
+      expect(calls.some((c) => c.includes("/suspend"))).toBe(true);
+      expect(calls.some((c) => c.includes("GET") && c.includes("sbx-1"))).toBe(
+        true,
+      );
+      client.close();
+    });
+
+    it("returns immediately with wait: false", async () => {
       mockFetch((url, init) => {
         expect(url).toContain("/sandboxes/sbx-1/suspend");
         expect(init?.method).toBe("POST");
@@ -448,13 +471,38 @@ describe("SandboxClient", () => {
       });
 
       const client = SandboxClient.forLocalhost();
-      await expect(client.suspend("sbx-1")).resolves.toBeUndefined();
+      await expect(
+        client.suspend("sbx-1", { wait: false }),
+      ).resolves.toBeUndefined();
       client.close();
     });
   });
 
   describe("resume", () => {
-    it("resumes a sandbox", async () => {
+    it("resumes a sandbox and blocks until Running", async () => {
+      let resumeCalled = false;
+      mockFetch((url, init) => {
+        if (url.includes("/resume")) {
+          resumeCalled = true;
+          expect(init?.method).toBe("POST");
+          return new Response("", { status: 202 });
+        }
+        return new Response(
+          JSON.stringify({
+            sandbox_id: "sbx-1",
+            status: resumeCalled ? "running" : "suspended",
+          }),
+          { status: 200 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await expect(client.resume("sbx-1")).resolves.toBeUndefined();
+      expect(resumeCalled).toBe(true);
+      client.close();
+    });
+
+    it("returns immediately with wait: false", async () => {
       mockFetch((url, init) => {
         expect(url).toContain("/sandboxes/sbx-1/resume");
         expect(init?.method).toBe("POST");
@@ -462,7 +510,9 @@ describe("SandboxClient", () => {
       });
 
       const client = SandboxClient.forLocalhost();
-      await expect(client.resume("sbx-1")).resolves.toBeUndefined();
+      await expect(
+        client.resume("sbx-1", { wait: false }),
+      ).resolves.toBeUndefined();
       client.close();
     });
   });

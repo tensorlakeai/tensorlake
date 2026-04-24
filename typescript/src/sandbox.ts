@@ -23,7 +23,6 @@ import {
   type RunOptions,
   type SandboxClientOptions,
   type SandboxOptions,
-  SandboxStatus,
   type SendSignalResponse,
   type SnapshotAndWaitOptions,
   type SnapshotContentMode,
@@ -459,38 +458,6 @@ export class Sandbox {
     return this.lifecycleClient;
   }
 
-  private async waitForStatus(
-    client: SandboxClient,
-    target: SandboxStatus,
-    operation: string,
-    timeout: number,
-    pollInterval: number,
-    initialInfo: { status: SandboxStatus } | null,
-  ): Promise<void> {
-    const deadline = Date.now() + timeout * 1000;
-    let info = initialInfo;
-    while (true) {
-      if (info === null) {
-        info = await client.get(this.sandboxId);
-      }
-      if (info.status === target) return;
-      if (info.status === SandboxStatus.TERMINATED) {
-        throw new SandboxError(
-          `Sandbox ${this.sandboxId} became terminated while awaiting ${operation}`,
-        );
-      }
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) {
-        const label = target.charAt(0).toUpperCase() + target.slice(1);
-        throw new SandboxError(
-          `Sandbox ${this.sandboxId} did not reach ${label} within ${timeout}s`,
-        );
-      }
-      await sleep(Math.min(pollInterval * 1000, remaining));
-      info = null;
-    }
-  }
-
   /** Suspend this sandbox, blocking until Suspended when `wait` is true. */
   async suspend(options?: {
     timeout?: number;
@@ -498,16 +465,7 @@ export class Sandbox {
     wait?: boolean;
   }): Promise<void> {
     const client = this.requireLifecycleClient("suspend");
-    await client.suspend(this.sandboxId);
-    if (options?.wait === false) return;
-    await this.waitForStatus(
-      client,
-      SandboxStatus.SUSPENDED,
-      "suspend",
-      options?.timeout ?? 300,
-      options?.pollInterval ?? 1,
-      null,
-    );
+    await client.suspend(this.sandboxId, options);
   }
 
   /** Resume this sandbox, blocking until Running when `wait` is true. No-op if already Running. */
@@ -517,28 +475,7 @@ export class Sandbox {
     wait?: boolean;
   }): Promise<void> {
     const client = this.requireLifecycleClient("resume");
-    const wait = options?.wait ?? true;
-
-    let initialInfo: { status: SandboxStatus } | null = null;
-    if (wait) {
-      try {
-        initialInfo = await client.get(this.sandboxId);
-      } catch {
-        initialInfo = null;
-      }
-      if (initialInfo && initialInfo.status === SandboxStatus.RUNNING) return;
-    }
-
-    await client.resume(this.sandboxId);
-    if (!wait) return;
-    await this.waitForStatus(
-      client,
-      SandboxStatus.RUNNING,
-      "resume",
-      options?.timeout ?? 300,
-      options?.pollInterval ?? 1,
-      null,
-    );
+    await client.resume(this.sandboxId, options);
   }
 
   /**
@@ -924,10 +861,6 @@ export class Sandbox {
     );
     return fromSnakeKeys(raw) as DaemonInfo;
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function resolveLifecycleClient(

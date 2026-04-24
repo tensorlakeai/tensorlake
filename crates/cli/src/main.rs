@@ -376,8 +376,9 @@ enum SbxCommands {
         dest: String,
     },
 
-    /// Create a snapshot or list snapshots
-    Snapshot(SnapshotArgs),
+    /// Create a checkpoint (snapshot) of a sandbox or manage existing checkpoints
+    #[command(alias = "snapshot")]
+    Checkpoint(CheckpointArgs),
 
     /// Clone a running sandbox via snapshot
     Clone {
@@ -535,9 +536,9 @@ enum ImageCommands {
 }
 
 #[derive(Parser)]
-struct SnapshotArgs {
+struct CheckpointArgs {
     #[command(subcommand)]
-    command: Option<SnapshotCommands>,
+    command: Option<CheckpointCommands>,
 
     /// Sandbox ID or name
     sandbox_id: Option<String>,
@@ -548,13 +549,13 @@ struct SnapshotArgs {
 }
 
 #[derive(Subcommand)]
-enum SnapshotCommands {
-    /// List all snapshots
+enum CheckpointCommands {
+    /// List all checkpoints
     Ls,
 
-    /// Delete one or more snapshots
+    /// Delete one or more checkpoints
     Rm {
-        /// Snapshot IDs
+        /// Checkpoint IDs
         #[arg(required = true)]
         snapshot_ids: Vec<String>,
     },
@@ -644,6 +645,19 @@ async fn main() {
             }
         }
     }
+}
+
+/// Detect whether the user invoked the deprecated `tl sbx snapshot` alias.
+/// clap's derive API doesn't expose which alias matched, so we look at argv
+/// directly: the token immediately following `sbx` is always the subcommand.
+fn subcommand_after_sbx_was_snapshot() -> bool {
+    let mut args = std::env::args();
+    while let Some(arg) = args.next() {
+        if arg == "sbx" {
+            return args.next().as_deref() == Some("snapshot");
+        }
+    }
+    false
 }
 
 async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<()> {
@@ -810,18 +824,32 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     .await
                 }
                 SbxCommands::Cp { src, dest } => commands::sbx::cp::run(ctx, &src, &dest).await,
-                SbxCommands::Snapshot(snapshot_args) => match snapshot_args.command {
-                    Some(SnapshotCommands::Ls) => commands::sbx::snapshot_ls::run(ctx).await,
-                    Some(SnapshotCommands::Rm { snapshot_ids }) => {
-                        commands::sbx::snapshot_rm::run(ctx, &snapshot_ids).await
+                SbxCommands::Checkpoint(checkpoint_args) => {
+                    if subcommand_after_sbx_was_snapshot() {
+                        eprintln!(
+                            "warning: `tl sbx snapshot` is deprecated; use `tl sbx checkpoint` instead."
+                        );
                     }
-                    None => {
-                        let sandbox_id = snapshot_args.sandbox_id.ok_or_else(|| {
-                            CliError::usage("snapshot requires a sandbox ID or the 'ls' subcommand")
-                        })?;
-                        commands::sbx::snapshot::run(ctx, &sandbox_id, snapshot_args.timeout).await
+                    match checkpoint_args.command {
+                        Some(CheckpointCommands::Ls) => commands::sbx::snapshot_ls::run(ctx).await,
+                        Some(CheckpointCommands::Rm { snapshot_ids }) => {
+                            commands::sbx::snapshot_rm::run(ctx, &snapshot_ids).await
+                        }
+                        None => {
+                            let sandbox_id = checkpoint_args.sandbox_id.ok_or_else(|| {
+                                CliError::usage(
+                                    "checkpoint requires a sandbox ID or the 'ls' subcommand",
+                                )
+                            })?;
+                            commands::sbx::snapshot::run(
+                                ctx,
+                                &sandbox_id,
+                                checkpoint_args.timeout,
+                            )
+                            .await
+                        }
                     }
-                },
+                }
                 SbxCommands::Clone {
                     sandbox_id,
                     timeout,

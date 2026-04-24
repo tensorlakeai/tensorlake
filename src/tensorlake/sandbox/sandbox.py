@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 from typing import TYPE_CHECKING, Iterator
 from urllib.parse import urlparse
 
@@ -27,7 +26,6 @@ from .models import (
     OutputResponse,
     ProcessInfo,
     SandboxInfo,
-    SandboxStatus,
     SendSignalResponse,
     SnapshotContentMode,
     SnapshotInfo,
@@ -435,36 +433,6 @@ class Sandbox:
             )
         return self._lifecycle_client
 
-    def _wait_for_status(
-        self,
-        client: "SandboxClient",
-        target: SandboxStatus,
-        *,
-        operation: str,
-        timeout: float,
-        poll_interval: float,
-        initial_info: SandboxInfo | None = None,
-    ) -> None:
-        deadline = time.time() + timeout
-        info = initial_info
-        while True:
-            if info is None:
-                info = client.get(self._identifier)
-            if info.status == target:
-                self._cached_info = info
-                return
-            if info.status == SandboxStatus.TERMINATED:
-                raise SandboxError(
-                    f"Sandbox {self._identifier} became terminated while awaiting {operation}"
-                )
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                raise SandboxError(
-                    f"Sandbox {self._identifier} did not reach {target.value.capitalize()} within {timeout}s"
-                )
-            time.sleep(min(poll_interval, remaining))
-            info = None
-
     def suspend(
         self,
         *,
@@ -474,15 +442,11 @@ class Sandbox:
     ) -> None:
         """Suspend this sandbox, blocking until Suspended when ``wait`` is true."""
         client = self._require_lifecycle_client("suspend")
-        client.suspend(self._identifier)
-        if not wait:
-            return
-        self._wait_for_status(
-            client,
-            SandboxStatus.SUSPENDED,
-            operation="suspend",
+        client.suspend(
+            self._identifier,
             timeout=timeout,
             poll_interval=poll_interval,
+            wait=wait,
         )
 
     def resume(
@@ -494,29 +458,11 @@ class Sandbox:
     ) -> None:
         """Resume this sandbox, blocking until Running when ``wait`` is true. No-op if already Running."""
         client = self._require_lifecycle_client("resume")
-
-        initial_info: SandboxInfo | None = None
-        if wait:
-            try:
-                initial_info = client.get(self._identifier)
-            except (SandboxError, RemoteAPIError, SandboxConnectionError):
-                initial_info = None
-            if (
-                initial_info is not None
-                and initial_info.status == SandboxStatus.RUNNING
-            ):
-                self._cached_info = initial_info
-                return
-
-        client.resume(self._identifier)
-        if not wait:
-            return
-        self._wait_for_status(
-            client,
-            SandboxStatus.RUNNING,
-            operation="resume",
+        client.resume(
+            self._identifier,
             timeout=timeout,
             poll_interval=poll_interval,
+            wait=wait,
         )
 
     def checkpoint(

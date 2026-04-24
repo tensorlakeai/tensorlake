@@ -550,20 +550,52 @@ class SandboxClient:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
 
-    def suspend(self, sandbox_id: str) -> None:
-        """Suspend a named sandbox.
+    def _wait_for_status(
+        self,
+        sandbox_id: str,
+        target: SandboxStatus,
+        operation: str,
+        timeout: float,
+        poll_interval: float,
+    ) -> None:
+        deadline = time.time() + timeout
+        while True:
+            info = self.get(sandbox_id)
+            if info.status == target:
+                return
+            if info.status == SandboxStatus.TERMINATED:
+                raise SandboxError(
+                    f"Sandbox {sandbox_id} became terminated while awaiting {operation}"
+                )
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise SandboxError(
+                    f"Sandbox {sandbox_id} did not reach {target.value.capitalize()} within {timeout}s"
+                )
+            time.sleep(min(poll_interval, remaining))
+
+    def suspend(
+        self,
+        sandbox_id: str,
+        *,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
+        wait: bool = True,
+    ) -> None:
+        """Suspend a named sandbox, blocking until Suspended when ``wait`` is true.
 
         Only sandboxes created with a ``name`` can be suspended; ephemeral
-        sandboxes cannot. The call returns as soon as the server accepts
-        the request; poll :meth:`get` until
-        :attr:`SandboxStatus.SUSPENDED` if you need to wait for the
-        transition to complete.
+        sandboxes cannot. Pass ``wait=False`` for fire-and-return behavior.
 
         Args:
             sandbox_id: ID or name of the sandbox to suspend
+            timeout: Max seconds to wait for Suspended status (default 300)
+            poll_interval: Seconds between status polls (default 1)
+            wait: When true (default), block until the sandbox is Suspended.
 
         Raises:
             SandboxNotFoundError: If sandbox doesn't exist
+            SandboxError: If the sandbox does not reach Suspended within ``timeout``
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
@@ -573,28 +605,64 @@ class SandboxClient:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
+        if not wait:
+            return
+        self._wait_for_status(
+            sandbox_id,
+            SandboxStatus.SUSPENDED,
+            operation="suspend",
+            timeout=timeout,
+            poll_interval=poll_interval,
+        )
 
-    def resume(self, sandbox_id: str) -> None:
-        """Resume a suspended sandbox.
+    def resume(
+        self,
+        sandbox_id: str,
+        *,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
+        wait: bool = True,
+    ) -> None:
+        """Resume a suspended sandbox, blocking until Running when ``wait`` is true.
 
-        The call returns as soon as the server accepts the request; poll
-        :meth:`get` until :attr:`SandboxStatus.RUNNING` if you need to
-        wait for the transition to complete.
+        No-op if the sandbox is already Running. Pass ``wait=False`` for
+        fire-and-return behavior.
 
         Args:
             sandbox_id: ID or name of the sandbox to resume
+            timeout: Max seconds to wait for Running status (default 300)
+            poll_interval: Seconds between status polls (default 1)
+            wait: When true (default), block until the sandbox is Running.
 
         Raises:
             SandboxNotFoundError: If sandbox doesn't exist
+            SandboxError: If the sandbox does not reach Running within ``timeout``
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
+        if wait:
+            try:
+                info = self.get(sandbox_id)
+            except (SandboxError, RemoteAPIError, SandboxConnectionError):
+                info = None
+            if info is not None and info.status == SandboxStatus.RUNNING:
+                return
+
         try:
             self._rust_client.resume_sandbox(sandbox_id=sandbox_id)
         except Exception as e:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
+        if not wait:
+            return
+        self._wait_for_status(
+            sandbox_id,
+            SandboxStatus.RUNNING,
+            operation="resume",
+            timeout=timeout,
+            poll_interval=poll_interval,
+        )
 
     # --- Snapshot operations ---
 

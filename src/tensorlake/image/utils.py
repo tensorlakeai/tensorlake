@@ -18,11 +18,8 @@ def dockerfile_content(img: Image, extra_env_vars: List[tuple] | None = None) ->
     """
     dockerfile_lines: List[str] = [f"FROM {img._base_image}"]
     if not image_has_workdir(img):
-        # Default workdir for Applications. Skip it when the user declared
-        # one so we don't emit two WORKDIR layers.
         dockerfile_lines.append("WORKDIR /app")
-    # Handle externally-managed environments (PEP 668) on modern Linux distros
-    # like Ubuntu 24.04.
+    # PEP 668: allow pip into the system environment on distros like Ubuntu 24.04.
     dockerfile_lines.append("ENV PIP_BREAK_SYSTEM_PACKAGES=1")
 
     if extra_env_vars:
