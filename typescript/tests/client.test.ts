@@ -438,7 +438,7 @@ describe("SandboxClient", () => {
   });
 
   describe("suspend", () => {
-    it("suspends a sandbox", async () => {
+    it("sends POST to suspend endpoint with wait=false", async () => {
       mockFetch((url, init) => {
         expect(url).toContain("/sandboxes/sbx-1/suspend");
         expect(init?.method).toBe("POST");
@@ -446,13 +446,38 @@ describe("SandboxClient", () => {
       });
 
       const client = SandboxClient.forLocalhost();
+      await expect(client.suspend("sbx-1", { wait: false })).resolves.toBeUndefined();
+      client.close();
+    });
+
+    it("polls until Suspended when wait=true (default)", async () => {
+      let callCount = 0;
+      vi.mocked(undici.fetch).mockImplementation(((url: string, init?: RequestInit) => {
+        callCount++;
+        if (callCount === 1) {
+          // First call: POST suspend
+          expect(url).toContain("/sandboxes/sbx-1/suspend");
+          return Promise.resolve(new Response("", { status: 202 }));
+        }
+        // Subsequent calls: GET sandbox status
+        expect(url).toContain("/sandboxes/sbx-1");
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ sandbox_id: "sbx-1", status: "suspended", namespace: "default", resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 }, secret_names: [] }),
+            { status: 200 },
+          ),
+        );
+      }) as typeof undici.fetch);
+
+      const client = SandboxClient.forLocalhost();
       await expect(client.suspend("sbx-1")).resolves.toBeUndefined();
+      expect(callCount).toBeGreaterThanOrEqual(2);
       client.close();
     });
   });
 
   describe("resume", () => {
-    it("resumes a sandbox", async () => {
+    it("sends POST to resume endpoint with wait=false", async () => {
       mockFetch((url, init) => {
         expect(url).toContain("/sandboxes/sbx-1/resume");
         expect(init?.method).toBe("POST");
@@ -460,7 +485,32 @@ describe("SandboxClient", () => {
       });
 
       const client = SandboxClient.forLocalhost();
+      await expect(client.resume("sbx-1", { wait: false })).resolves.toBeUndefined();
+      client.close();
+    });
+
+    it("polls until Running when wait=true (default)", async () => {
+      let callCount = 0;
+      vi.mocked(undici.fetch).mockImplementation(((url: string, init?: RequestInit) => {
+        callCount++;
+        if (callCount === 1) {
+          // First call: POST resume
+          expect(url).toContain("/sandboxes/sbx-1/resume");
+          return Promise.resolve(new Response("", { status: 202 }));
+        }
+        // Subsequent calls: GET sandbox status
+        expect(url).toContain("/sandboxes/sbx-1");
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ sandbox_id: "sbx-1", status: "running", namespace: "default", resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 }, secret_names: [] }),
+            { status: 200 },
+          ),
+        );
+      }) as typeof undici.fetch);
+
+      const client = SandboxClient.forLocalhost();
       await expect(client.resume("sbx-1")).resolves.toBeUndefined();
+      expect(callCount).toBeGreaterThanOrEqual(2);
       client.close();
     });
   });
