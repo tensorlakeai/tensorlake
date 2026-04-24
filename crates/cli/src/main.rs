@@ -380,8 +380,9 @@ enum SbxCommands {
         dest: String,
     },
 
-    /// Create a snapshot or list snapshots
-    Snapshot(SnapshotArgs),
+    /// Create a checkpoint (snapshot) or list checkpoints
+    #[command(alias = "snapshot")]
+    Checkpoint(SnapshotArgs),
 
     /// Clone a running sandbox via snapshot
     Clone {
@@ -819,14 +820,14 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     .await
                 }
                 SbxCommands::Cp { src, dest } => commands::sbx::cp::run(ctx, &src, &dest).await,
-                SbxCommands::Snapshot(snapshot_args) => match snapshot_args.command {
+                SbxCommands::Checkpoint(snapshot_args) => match snapshot_args.command {
                     Some(SnapshotCommands::Ls) => commands::sbx::snapshot_ls::run(ctx).await,
                     Some(SnapshotCommands::Rm { snapshot_ids }) => {
                         commands::sbx::snapshot_rm::run(ctx, &snapshot_ids).await
                     }
                     None => {
                         let sandbox_id = snapshot_args.sandbox_id.ok_or_else(|| {
-                            CliError::usage("snapshot requires a sandbox ID or the 'ls' subcommand")
+                            CliError::usage("checkpoint requires a sandbox ID or the 'ls' subcommand")
                         })?;
                         commands::sbx::snapshot::run(ctx, &sandbox_id, snapshot_args.timeout).await
                     }

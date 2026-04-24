@@ -108,6 +108,9 @@ export type {
   SandboxClientOptions,
   SandboxOptions,
   CreateAndConnectOptions,
+  SuspendResumeOptions,
+  CheckpointOptions,
+  ConnectOptions,
 } from "./models.js";
 
 export type {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+import warnings
 from urllib.parse import urlparse
 
 from tensorlake._tracing import USER_AGENT, Traced, TracedIterator
@@ -153,7 +154,14 @@ class SandboxClient:
         namespace: str | None = _defaults.NAMESPACE,
         max_retries: int = _defaults.MAX_RETRIES,
         retry_backoff_sec: float = _defaults.RETRY_BACKOFF_SEC,
+        _internal: bool = False,
     ):
+        if not _internal:
+            warnings.warn(
+                "SandboxClient is deprecated; use Sandbox.create() / Sandbox.connect() instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self._api_url: str = api_url
         self._api_key: str | None = api_key
         self._organization_id: str | None = organization_id
@@ -539,53 +547,96 @@ class SandboxClient:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
 
-    def suspend(self, sandbox_id: str) -> Traced[None]:
+    def suspend(
+        self,
+        sandbox_id: str,
+        wait: bool = True,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
+    ) -> Traced[None]:
         """Suspend a named sandbox.
 
         Only sandboxes created with a ``name`` can be suspended; ephemeral
-        sandboxes cannot. The call returns as soon as the server accepts
-        the request; poll :meth:`get` until
-        :attr:`SandboxStatus.SUSPENDED` if you need to wait for the
-        transition to complete.
+        sandboxes cannot. By default blocks until the sandbox is fully
+        ``Suspended``; pass ``wait=False`` for fire-and-return.
 
         Args:
             sandbox_id: ID or name of the sandbox to suspend
+            wait: If True (default), poll until Suspended; False returns immediately.
+            timeout: Max seconds to wait when wait=True (default 300)
+            poll_interval: Seconds between polls when wait=True (default 1.0)
 
         Raises:
             SandboxNotFoundError: If sandbox doesn't exist
+            SandboxError: If wait=True and sandbox doesn't suspend within timeout
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
         try:
             trace_id = self._rust_client.suspend_sandbox(sandbox_id=sandbox_id)
-            return Traced(trace_id, None)
         except Exception as e:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
+            raise  # unreachable — satisfies type checker
+        if not wait:
+            return Traced(trace_id, None)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            info = self.get(sandbox_id).value
+            if info.status == SandboxStatus.SUSPENDED:
+                return Traced(trace_id, None)
+            if info.status == SandboxStatus.TERMINATED:
+                raise SandboxError(
+                    f"Sandbox {sandbox_id!r} terminated while waiting for suspend"
+                )
+            time.sleep(poll_interval)
+        raise SandboxError(f"Sandbox {sandbox_id!r} did not suspend within {timeout}s")
 
-    def resume(self, sandbox_id: str) -> Traced[None]:
+    def resume(
+        self,
+        sandbox_id: str,
+        wait: bool = True,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
+    ) -> Traced[None]:
         """Resume a suspended sandbox.
 
-        The call returns as soon as the server accepts the request; poll
-        :meth:`get` until :attr:`SandboxStatus.RUNNING` if you need to
-        wait for the transition to complete.
+        By default blocks until the sandbox is ``Running``; pass
+        ``wait=False`` for fire-and-return.
 
         Args:
             sandbox_id: ID or name of the sandbox to resume
+            wait: If True (default), poll until Running; False returns immediately.
+            timeout: Max seconds to wait when wait=True (default 300)
+            poll_interval: Seconds between polls when wait=True (default 1.0)
 
         Raises:
             SandboxNotFoundError: If sandbox doesn't exist
+            SandboxError: If wait=True and sandbox doesn't resume within timeout
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
         try:
             trace_id = self._rust_client.resume_sandbox(sandbox_id=sandbox_id)
-            return Traced(trace_id, None)
         except Exception as e:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
+            raise  # unreachable — satisfies type checker
+        if not wait:
+            return Traced(trace_id, None)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            info = self.get(sandbox_id).value
+            if info.status == SandboxStatus.RUNNING:
+                return Traced(trace_id, None)
+            if info.status == SandboxStatus.TERMINATED:
+                raise SandboxError(
+                    f"Sandbox {sandbox_id!r} terminated while waiting for resume"
+                )
+            time.sleep(poll_interval)
+        raise SandboxError(f"Sandbox {sandbox_id!r} did not resume within {timeout}s")
 
     # --- Snapshot operations ---
 

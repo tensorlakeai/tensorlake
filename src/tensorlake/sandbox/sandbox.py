@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -28,6 +29,8 @@ from .models import (
     ProcessInfo,
     SandboxInfo,
     SendSignalResponse,
+    SnapshotContentMode,
+    SnapshotInfo,
     StdinMode,
 )
 
@@ -181,6 +184,316 @@ class Sandbox:
                 self._base_url = self._rust_client.base_url()
             except Exception as e:
                 _raise_as_sandbox_error(e)
+
+    # --- Class-level factory methods ---
+
+    @classmethod
+    def create(
+        cls,
+        image: str | None = None,
+        cpus: float = 1.0,
+        memory_mb: int = 1024,
+        ephemeral_disk_mb: int = 1024,
+        secret_names: list[str] | None = None,
+        timeout_secs: int | None = None,
+        entrypoint: list[str] | None = None,
+        allow_internet_access: bool = True,
+        allow_out: list[str] | None = None,
+        deny_out: list[str] | None = None,
+        pool_id: str | None = None,
+        snapshot_id: str | None = None,
+        proxy_url: str | None = None,
+        startup_timeout: float = 60,
+        name: str | None = None,
+        api_key: str | None = _defaults.API_KEY,
+        api_url: str = _defaults.API_URL,
+        organization_id: str | None = None,
+        project_id: str | None = None,
+        namespace: str | None = _defaults.NAMESPACE,
+    ) -> "Sandbox":
+        """Create a new sandbox and return a connected, running handle.
+
+        Covers both fresh sandbox creation and restore-from-snapshot (set
+        ``snapshot_id``). Blocks until the sandbox is ``Running``.
+
+        Args:
+            image: Sandbox image name. When omitted, Tensorlake uses the
+                default managed environment.
+            cpus: Number of CPUs to allocate.
+            memory_mb: Memory in megabytes.
+            ephemeral_disk_mb: Ephemeral disk space in megabytes.
+            secret_names: List of secret names to inject.
+            timeout_secs: Sandbox timeout in seconds.
+            entrypoint: Custom entrypoint command.
+            allow_internet_access: If True (default), outbound traffic is allowed.
+            allow_out: Destination IPs/CIDRs to allow.
+            deny_out: Destination IPs/CIDRs to deny.
+            pool_id: Pool ID to claim a warm container from.
+            snapshot_id: Restore from this snapshot ID.
+            proxy_url: Override the sandbox proxy URL.
+            startup_timeout: Max seconds to wait for Running status (default 60).
+            name: Optional name; named sandboxes support suspend/resume.
+            api_key: Tensorlake API key (defaults to TENSORLAKE_API_KEY env var).
+            api_url: API server URL (defaults to TENSORLAKE_API_URL env var).
+            organization_id: Organization ID for multi-tenant access.
+            project_id: Project ID for scoping resources.
+            namespace: Namespace for local-server deployments.
+
+        Returns:
+            Connected Sandbox handle (auto-terminates in context manager).
+
+        Raises:
+            SandboxError: If sandbox fails to start or times out.
+        """
+        from .client import SandboxClient
+
+        client = SandboxClient(
+            api_url=api_url,
+            api_key=api_key,
+            organization_id=organization_id,
+            project_id=project_id,
+            namespace=namespace,
+            _internal=True,
+        )
+        return client.create_and_connect(
+            image=image,
+            cpus=cpus,
+            memory_mb=memory_mb,
+            ephemeral_disk_mb=ephemeral_disk_mb,
+            secret_names=secret_names,
+            timeout_secs=timeout_secs,
+            entrypoint=entrypoint,
+            allow_internet_access=allow_internet_access,
+            allow_out=allow_out,
+            deny_out=deny_out,
+            pool_id=pool_id,
+            snapshot_id=snapshot_id,
+            proxy_url=proxy_url,
+            startup_timeout=startup_timeout,
+            name=name,
+        )
+
+    @classmethod
+    def connect(
+        cls,
+        sandbox_id: str,
+        *,
+        proxy_url: str | None = None,
+        routing_hint: str | None = None,
+        api_key: str | None = _defaults.API_KEY,
+        api_url: str = _defaults.API_URL,
+        organization_id: str | None = None,
+        project_id: str | None = None,
+        namespace: str | None = _defaults.NAMESPACE,
+    ) -> "Sandbox":
+        """Attach to an existing sandbox and return a connected handle.
+
+        Verifies the sandbox exists via a server GET call, then returns a
+        handle in whatever state the sandbox is in. Does **not** auto-resume
+        a suspended sandbox — call ``sandbox.resume()`` explicitly.
+
+        Args:
+            sandbox_id: ID or name of the sandbox to attach to.
+            proxy_url: Override the sandbox proxy URL.
+            routing_hint: Optional routing hint for the proxy.
+            api_key: Tensorlake API key (defaults to TENSORLAKE_API_KEY env var).
+            api_url: API server URL (defaults to TENSORLAKE_API_URL env var).
+            organization_id: Organization ID for multi-tenant access.
+            project_id: Project ID for scoping resources.
+            namespace: Namespace for local-server deployments.
+
+        Returns:
+            Connected Sandbox handle (does not auto-terminate on context exit).
+
+        Raises:
+            SandboxNotFoundError: If the sandbox does not exist.
+        """
+        from .client import SandboxClient
+
+        client = SandboxClient(
+            api_url=api_url,
+            api_key=api_key,
+            organization_id=organization_id,
+            project_id=project_id,
+            namespace=namespace,
+            _internal=True,
+        )
+        client.get(sandbox_id)  # raises SandboxNotFoundError if not found
+        return client.connect(
+            sandbox_id, proxy_url=proxy_url, routing_hint=routing_hint
+        )
+
+    # --- Class-level snapshot management ---
+
+    @classmethod
+    def get_snapshot(
+        cls,
+        snapshot_id: str,
+        api_key: str | None = _defaults.API_KEY,
+        api_url: str = _defaults.API_URL,
+        organization_id: str | None = None,
+        project_id: str | None = None,
+        namespace: str | None = _defaults.NAMESPACE,
+    ) -> SnapshotInfo:
+        """Get information about a snapshot by ID.
+
+        No sandbox handle is needed — snapshots are looked up directly.
+
+        Args:
+            snapshot_id: ID of the snapshot.
+
+        Returns:
+            SnapshotInfo with full snapshot details.
+        """
+        from .client import SandboxClient
+
+        client = SandboxClient(
+            api_url=api_url,
+            api_key=api_key,
+            organization_id=organization_id,
+            project_id=project_id,
+            namespace=namespace,
+            _internal=True,
+        )
+        return client.get_snapshot(snapshot_id).value
+
+    @classmethod
+    def delete_snapshot(
+        cls,
+        snapshot_id: str,
+        api_key: str | None = _defaults.API_KEY,
+        api_url: str = _defaults.API_URL,
+        organization_id: str | None = None,
+        project_id: str | None = None,
+        namespace: str | None = _defaults.NAMESPACE,
+    ) -> None:
+        """Delete a snapshot by ID.
+
+        No sandbox handle is needed — snapshots are deleted directly.
+
+        Args:
+            snapshot_id: ID of the snapshot to delete.
+        """
+        from .client import SandboxClient
+
+        client = SandboxClient(
+            api_url=api_url,
+            api_key=api_key,
+            organization_id=organization_id,
+            project_id=project_id,
+            namespace=namespace,
+            _internal=True,
+        )
+        client.delete_snapshot(snapshot_id)
+
+    # --- Instance lifecycle methods ---
+
+    def _require_lifecycle_client(self, operation: str) -> None:
+        if self._lifecycle_client is None:
+            raise SandboxError(
+                f"Cannot {operation}: no lifecycle client available. "
+                "Use Sandbox.create() or Sandbox.connect() to get a lifecycle-aware handle."
+            )
+
+    def suspend(
+        self,
+        wait: bool = True,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
+    ) -> None:
+        """Suspend this sandbox.
+
+        By default blocks until the sandbox is fully ``Suspended``.
+        Pass ``wait=False`` for fire-and-return (the server queues the
+        suspend but this method returns immediately).
+
+        Args:
+            wait: If True (default), poll until Suspended.
+            timeout: Max seconds to wait when wait=True (default 300).
+            poll_interval: Seconds between polls when wait=True (default 1.0).
+
+        Raises:
+            SandboxError: If the sandbox does not suspend within timeout,
+                or terminates unexpectedly.
+        """
+        self._require_lifecycle_client("suspend")
+        self._lifecycle_client.suspend(
+            self.sandbox_id, wait=wait, timeout=timeout, poll_interval=poll_interval
+        )
+
+    def resume(
+        self,
+        wait: bool = True,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
+    ) -> None:
+        """Resume this sandbox.
+
+        By default blocks until the sandbox is ``Running`` and routable.
+        Pass ``wait=False`` for fire-and-return. No-op (no error) if the
+        sandbox is already Running.
+
+        Args:
+            wait: If True (default), poll until Running.
+            timeout: Max seconds to wait when wait=True (default 300).
+            poll_interval: Seconds between polls when wait=True (default 1.0).
+
+        Raises:
+            SandboxError: If the sandbox does not resume within timeout,
+                or terminates unexpectedly.
+        """
+        self._require_lifecycle_client("resume")
+        self._lifecycle_client.resume(
+            self.sandbox_id, wait=wait, timeout=timeout, poll_interval=poll_interval
+        )
+
+    def checkpoint(
+        self,
+        wait: bool = True,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
+        content_mode: SnapshotContentMode | None = None,
+    ) -> SnapshotInfo | None:
+        """Create a snapshot of this sandbox's filesystem.
+
+        By default blocks until the snapshot artifact is committed and
+        returns the completed ``SnapshotInfo``. Pass ``wait=False`` to
+        fire-and-return (returns ``None``).
+
+        Args:
+            wait: If True (default), poll until the snapshot is committed.
+            timeout: Max seconds to wait when wait=True (default 300).
+            poll_interval: Seconds between polls when wait=True (default 1.0).
+            content_mode: Optional content mode for the snapshot.
+
+        Returns:
+            Completed SnapshotInfo when wait=True; None when wait=False.
+
+        Raises:
+            SandboxError: If the snapshot fails or times out.
+        """
+        self._require_lifecycle_client("checkpoint")
+        if not wait:
+            self._lifecycle_client.snapshot(self.sandbox_id, content_mode=content_mode)
+            return None
+        return self._lifecycle_client.snapshot_and_wait(
+            self.sandbox_id,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            content_mode=content_mode,
+        ).value
+
+    def list_snapshots(self) -> TracedIterator[SnapshotInfo]:
+        """List snapshots taken from this sandbox.
+
+        Returns:
+            TracedIterator[SnapshotInfo] — iterable over this sandbox's snapshots.
+        """
+        self._require_lifecycle_client("list_snapshots")
+        all_snaps = self._lifecycle_client.list_snapshots()
+        my_id = self.sandbox_id
+        filtered = [s for s in all_snaps if s.sandbox_id == my_id]
+        return TracedIterator(all_snaps.trace_id, filtered)
 
     def _fetch_info(self) -> SandboxInfo:
         """Fetch and cache sandbox info from the server (lazy, once per instance)."""

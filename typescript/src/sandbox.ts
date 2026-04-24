@@ -7,22 +7,30 @@ import * as defaults from "./defaults.js";
 import { SandboxError } from "./errors.js";
 import { HttpClient } from "./http.js";
 import {
+  type CheckpointOptions,
   type CommandResult,
+  type ConnectOptions,
+  type CreateAndConnectOptions,
   type CreatePtySessionOptions,
   type DaemonInfo,
   type DirectoryEntry,
   type HealthResponse,
   type ListDirectoryResponse,
-  OutputMode,
   type OutputEvent,
   type OutputResponse,
+  OutputMode,
   type ProcessInfo,
   type PtySessionInfo,
   type RunOptions,
+  type SandboxClientOptions,
   type SandboxOptions,
   type SendSignalResponse,
+  type SnapshotInfo,
   type StartProcessOptions,
+  SandboxStatus,
+  SnapshotStatus,
   StdinMode,
+  type SuspendResumeOptions,
   fromSnakeKeys,
 } from "./models.js";
 import {
@@ -322,6 +330,129 @@ export class Sandbox {
   _setOwner(client: SandboxClient): void {
     this.ownsSandbox = true;
     this.lifecycleClient = client;
+  }
+
+  // --- Static factory methods ---
+
+  /**
+   * Create a new sandbox and return a connected, running handle.
+   *
+   * Covers both fresh sandbox creation and restore-from-snapshot (set
+   * `snapshotId`). Blocks until the sandbox is `Running`.
+   */
+  static async create(
+    options?: CreateAndConnectOptions & Partial<SandboxClientOptions>,
+  ): Promise<Sandbox> {
+    // Dynamic import to break the circular dependency (client.ts imports Sandbox).
+    const { SandboxClient } = await import("./client.js");
+    const client = new SandboxClient(options, /* _internal */ true);
+    const sandbox = await client.createAndConnect(options);
+    sandbox.lifecycleClient = client;
+    return sandbox;
+  }
+
+  /**
+   * Attach to an existing sandbox and return a connected handle.
+   *
+   * Verifies the sandbox exists via a server GET call, then returns a handle
+   * in whatever state the sandbox is in. Does **not** auto-resume a suspended
+   * sandbox — call `sandbox.resume()` explicitly.
+   */
+  static async connect(
+    options: ConnectOptions & Partial<SandboxClientOptions>,
+  ): Promise<Sandbox> {
+    const { SandboxClient } = await import("./client.js");
+    const client = new SandboxClient(options, /* _internal */ true);
+    await client.get(options.sandboxId); // throws SandboxNotFoundError if not found
+    const sandbox = client.connect(options.sandboxId, options.proxyUrl, options.routingHint);
+    sandbox.lifecycleClient = client;
+    return sandbox;
+  }
+
+  // --- Static snapshot management ---
+
+  /** Get information about a snapshot by ID. No sandbox handle needed. */
+  static async getSnapshot(
+    snapshotId: string,
+    options?: Partial<SandboxClientOptions>,
+  ): Promise<SnapshotInfo> {
+    const { SandboxClient } = await import("./client.js");
+    const client = new SandboxClient(options, /* _internal */ true);
+    return client.getSnapshot(snapshotId);
+  }
+
+  /** Delete a snapshot by ID. No sandbox handle needed. */
+  static async deleteSnapshot(
+    snapshotId: string,
+    options?: Partial<SandboxClientOptions>,
+  ): Promise<void> {
+    const { SandboxClient } = await import("./client.js");
+    const client = new SandboxClient(options, /* _internal */ true);
+    await client.deleteSnapshot(snapshotId);
+  }
+
+  // --- Instance lifecycle methods ---
+
+  private requireLifecycleClient(operation: string): SandboxClient {
+    if (!this.lifecycleClient) {
+      throw new SandboxError(
+        `Cannot ${operation}: no lifecycle client available. ` +
+          "Use Sandbox.create() or Sandbox.connect() to get a lifecycle-aware handle.",
+      );
+    }
+    return this.lifecycleClient;
+  }
+
+  /**
+   * Suspend this sandbox.
+   *
+   * By default blocks until the sandbox is fully `Suspended`. Pass
+   * `{ wait: false }` for fire-and-return.
+   */
+  async suspend(options?: SuspendResumeOptions): Promise<void> {
+    const client = this.requireLifecycleClient("suspend");
+    await client.suspend(this.sandboxId, options);
+  }
+
+  /**
+   * Resume this sandbox.
+   *
+   * By default blocks until the sandbox is `Running` and routable. Pass
+   * `{ wait: false }` for fire-and-return.
+   */
+  async resume(options?: SuspendResumeOptions): Promise<void> {
+    const client = this.requireLifecycleClient("resume");
+    await client.resume(this.sandboxId, options);
+  }
+
+  /**
+   * Create a snapshot of this sandbox's filesystem and wait for it to
+   * be committed.
+   *
+   * By default blocks until the snapshot artifact is ready and returns
+   * the completed `SnapshotInfo`. Pass `{ wait: false }` to fire-and-return
+   * (returns `undefined`).
+   */
+  async checkpoint(options?: CheckpointOptions): Promise<SnapshotInfo | undefined> {
+    const client = this.requireLifecycleClient("checkpoint");
+    if (options?.wait === false) {
+      await client.snapshot(this.sandboxId, { contentMode: options.contentMode });
+      return undefined;
+    }
+    return client.snapshotAndWait(this.sandboxId, {
+      timeout: options?.timeout,
+      pollInterval: options?.pollInterval,
+      contentMode: options?.contentMode,
+    });
+  }
+
+  /**
+   * List snapshots taken from this sandbox.
+   */
+  async listSnapshots(): Promise<SnapshotInfo[]> {
+    const client = this.requireLifecycleClient("listSnapshots");
+    const all = await client.listSnapshots();
+    return all.filter((s) => s.sandboxId === this.sandboxId);
   }
 
   close(): void {

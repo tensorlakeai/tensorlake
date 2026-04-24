@@ -2,6 +2,8 @@ import * as defaults from "./defaults.js";
 import { SandboxError } from "./errors.js";
 import { HttpClient } from "./http.js";
 import {
+  type CheckpointOptions,
+  type ConnectOptions,
   type CreateAndConnectOptions,
   type CreatePoolOptions,
   type CreateSandboxOptions,
@@ -17,6 +19,7 @@ import {
   type SnapshotInfo,
   type SnapshotOptions,
   SnapshotStatus,
+  type SuspendResumeOptions,
   type UpdatePoolOptions,
   type UpdateSandboxOptions,
   fromSnakeKeys,
@@ -40,7 +43,13 @@ export class SandboxClient {
   private readonly namespace: string;
   private readonly local: boolean;
 
-  constructor(options?: SandboxClientOptions) {
+  /** @internal Pass `true` to suppress the deprecation warning when used by `Sandbox.create()` / `Sandbox.connect()`. */
+  constructor(options?: SandboxClientOptions, _internal = false) {
+    if (!_internal) {
+      console.warn(
+        "[tensorlake] SandboxClient is deprecated; use Sandbox.create() / Sandbox.connect() instead.",
+      );
+    }
     this.apiUrl = options?.apiUrl ?? defaults.API_URL;
     this.apiKey = options?.apiKey ?? defaults.API_KEY;
     this.organizationId = options?.organizationId;
@@ -221,18 +230,44 @@ export class SandboxClient {
     );
   }
 
-  async suspend(sandboxId: string): Promise<void> {
+  async suspend(sandboxId: string, options?: SuspendResumeOptions): Promise<void> {
     await this.http.requestResponse(
       "POST",
       this.path(`sandboxes/${sandboxId}/suspend`),
     );
+    if (options?.wait === false) return;
+    const timeout = options?.timeout ?? 300;
+    const pollInterval = options?.pollInterval ?? 1;
+    const deadline = Date.now() + timeout * 1000;
+    while (Date.now() < deadline) {
+      const info = await this.get(sandboxId);
+      if (info.status === SandboxStatus.SUSPENDED) return;
+      if (info.status === SandboxStatus.TERMINATED) {
+        throw new SandboxError(`Sandbox ${sandboxId} terminated while waiting for suspend`);
+      }
+      await sleep(pollInterval * 1000);
+    }
+    throw new SandboxError(`Sandbox ${sandboxId} did not suspend within ${timeout}s`);
   }
 
-  async resume(sandboxId: string): Promise<void> {
+  async resume(sandboxId: string, options?: SuspendResumeOptions): Promise<void> {
     await this.http.requestResponse(
       "POST",
       this.path(`sandboxes/${sandboxId}/resume`),
     );
+    if (options?.wait === false) return;
+    const timeout = options?.timeout ?? 300;
+    const pollInterval = options?.pollInterval ?? 1;
+    const deadline = Date.now() + timeout * 1000;
+    while (Date.now() < deadline) {
+      const info = await this.get(sandboxId);
+      if (info.status === SandboxStatus.RUNNING) return;
+      if (info.status === SandboxStatus.TERMINATED) {
+        throw new SandboxError(`Sandbox ${sandboxId} terminated while waiting for resume`);
+      }
+      await sleep(pollInterval * 1000);
+    }
+    throw new SandboxError(`Sandbox ${sandboxId} did not resume within ${timeout}s`);
   }
 
   async claim(poolId: string): Promise<CreateSandboxResponse> {
