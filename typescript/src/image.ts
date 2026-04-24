@@ -128,6 +128,19 @@ export class Image {
     });
   }
 
+  /**
+   * Build this image as a sandbox template and register it.
+   *
+   * Materializes the image in a build sandbox, snapshots the filesystem,
+   * and registers the snapshot as a named sandbox template.
+   */
+  async build(
+    options: import("./sandbox-image.js").CreateSandboxImageOptions = {},
+  ): Promise<Record<string, unknown>> {
+    const { createSandboxImage } = await import("./sandbox-image.js");
+    return createSandboxImage(this, options);
+  }
+
   private _addOperation(op: ImageBuildOperation): this {
     this._buildOperations.push(op);
     return this;

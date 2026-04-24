@@ -7,13 +7,18 @@ import sys
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urlparse
 
 import httpx
 
 from tensorlake.cli._common import Context
+from tensorlake.image import Image
+from tensorlake.image.image import _ImageBuildOperation, _ImageBuildOperationType
 from tensorlake.sandbox import Sandbox, SandboxClient
 from tensorlake.sandbox.models import ProcessStatus, SnapshotContentMode
+
+EmitFn = Callable[[dict], None]
 
 _BUILD_SANDBOX_PIP_ENV = {"PIP_BREAK_SYSTEM_PACKAGES": "1"}
 _IGNORED_DOCKERFILE_INSTRUCTIONS = {
@@ -52,6 +57,20 @@ class DockerfileBuildPlan:
 
 def _emit(obj):
     print(json.dumps(obj), flush=True)
+
+
+def _noop_emit(_obj: dict) -> None:
+    pass
+
+
+def _stderr_emit(obj: dict) -> None:
+    msg = obj.get("message") or ""
+    event_type = obj.get("type", "")
+    if event_type == "build_log":
+        stream = obj.get("stream", "stdout")
+        print(f"[{stream}] {msg}", file=sys.stderr)
+    elif msg:
+        print(f"[{event_type}] {msg}", file=sys.stderr)
 
 
 def _debug_enabled() -> bool:
@@ -299,8 +318,9 @@ def _run_streaming(
     args: list[str] | None = None,
     env: dict[str, str] | None = None,
     working_dir: str | None = None,
+    emit: EmitFn = _emit,
 ):
-    """Start a process and stream its stdout/stderr in real time via NDJSON."""
+    """Start a process and stream its stdout/stderr in real time via ``emit``."""
     import time
 
     proc = sandbox.start_process(
@@ -316,22 +336,22 @@ def _run_streaming(
     while True:
         stdout_resp = sandbox.get_stdout(proc.pid)
         for line in stdout_resp.lines[stdout_seen:]:
-            _emit({"type": "build_log", "stream": "stdout", "message": line})
+            emit({"type": "build_log", "stream": "stdout", "message": line})
         stdout_seen = len(stdout_resp.lines)
 
         stderr_resp = sandbox.get_stderr(proc.pid)
         for line in stderr_resp.lines[stderr_seen:]:
-            _emit({"type": "build_log", "stream": "stderr", "message": line})
+            emit({"type": "build_log", "stream": "stderr", "message": line})
         stderr_seen = len(stderr_resp.lines)
 
         info = sandbox.get_process(proc.pid)
         if info.status != ProcessStatus.RUNNING:
             stdout_resp = sandbox.get_stdout(proc.pid)
             for line in stdout_resp.lines[stdout_seen:]:
-                _emit({"type": "build_log", "stream": "stdout", "message": line})
+                emit({"type": "build_log", "stream": "stdout", "message": line})
             stderr_resp = sandbox.get_stderr(proc.pid)
             for line in stderr_resp.lines[stderr_seen:]:
-                _emit({"type": "build_log", "stream": "stderr", "message": line})
+                emit({"type": "build_log", "stream": "stderr", "message": line})
             break
 
         time.sleep(0.3)
@@ -374,7 +394,11 @@ def _copy_to_sandbox(sandbox: Sandbox, local_path: str, remote_path: str):
 
 
 def _persist_env_var(
-    sandbox: Sandbox, process_env: dict[str, str], key: str, value: str
+    sandbox: Sandbox,
+    process_env: dict[str, str],
+    key: str,
+    value: str,
+    emit: EmitFn = _emit,
 ):
     escaped_value = value.replace("\\", "\\\\").replace('"', '\\"')
     export_line = f'export {key}="{escaped_value}"'
@@ -383,6 +407,7 @@ def _persist_env_var(
         "sh",
         ["-c", f"printf '%s\\n' {shlex.quote(export_line)} >> /etc/environment"],
         env=process_env,
+        emit=emit,
     )
 
 
@@ -393,6 +418,7 @@ def _copy_from_context(
     destination: str,
     working_dir: str,
     keyword: str,
+    emit: EmitFn = _emit,
 ):
     destination_path = _resolve_container_path(destination, working_dir)
     if len(sources) > 1 and not destination_path.endswith("/"):
@@ -415,7 +441,7 @@ def _copy_from_context(
                     os.path.basename(source),
                 )
 
-        _emit(
+        emit(
             {
                 "type": "status",
                 "message": f"{keyword} {source} -> {remote_destination}",
@@ -430,6 +456,7 @@ def _add_url_to_sandbox(
     destination: str,
     working_dir: str,
     process_env: dict[str, str],
+    emit: EmitFn = _emit,
 ):
     destination_path = _resolve_container_path(destination, working_dir)
     parsed = urlparse(url)
@@ -438,13 +465,13 @@ def _add_url_to_sandbox(
         destination_path = posixpath.join(destination_path.rstrip("/"), file_name)
 
     parent_dir = posixpath.dirname(destination_path) or "/"
-    _emit(
+    emit(
         {
             "type": "status",
             "message": f"ADD {url} -> {destination_path}",
         }
     )
-    _run_streaming(sandbox, "mkdir", ["-p", parent_dir], env=process_env)
+    _run_streaming(sandbox, "mkdir", ["-p", parent_dir], env=process_env, emit=emit)
     _run_streaming(
         sandbox,
         "sh",
@@ -454,10 +481,15 @@ def _add_url_to_sandbox(
         ],
         env=process_env,
         working_dir=working_dir,
+        emit=emit,
     )
 
 
-def _execute_dockerfile_plan(sandbox: Sandbox, plan: DockerfileBuildPlan):
+def _execute_dockerfile_plan(
+    sandbox: Sandbox,
+    plan: DockerfileBuildPlan,
+    emit: EmitFn = _emit,
+):
     process_env: dict[str, str] = dict(_BUILD_SANDBOX_PIP_ENV)
     working_dir = "/"
 
@@ -467,13 +499,14 @@ def _execute_dockerfile_plan(sandbox: Sandbox, plan: DockerfileBuildPlan):
         line_number = instruction.line_number
 
         if keyword == "RUN":
-            _emit({"type": "status", "message": f"RUN {value}"})
+            emit({"type": "status", "message": f"RUN {value}"})
             _run_streaming(
                 sandbox,
                 "sh",
                 ["-c", value],
                 env=process_env,
                 working_dir=working_dir,
+                emit=emit,
             )
             continue
 
@@ -484,15 +517,17 @@ def _execute_dockerfile_plan(sandbox: Sandbox, plan: DockerfileBuildPlan):
                     f"line {line_number}: WORKDIR must include exactly one path"
                 )
             working_dir = _resolve_container_path(tokens[0], working_dir)
-            _emit({"type": "status", "message": f"WORKDIR {working_dir}"})
-            _run_streaming(sandbox, "mkdir", ["-p", working_dir], env=process_env)
+            emit({"type": "status", "message": f"WORKDIR {working_dir}"})
+            _run_streaming(
+                sandbox, "mkdir", ["-p", working_dir], env=process_env, emit=emit
+            )
             continue
 
         if keyword == "ENV":
             for key, env_value in _parse_env_pairs(value, line_number):
-                _emit({"type": "status", "message": f"ENV {key}={env_value}"})
+                emit({"type": "status", "message": f"ENV {key}={env_value}"})
                 process_env[key] = env_value
-                _persist_env_var(sandbox, process_env, key, env_value)
+                _persist_env_var(sandbox, process_env, key, env_value, emit=emit)
             continue
 
         if keyword == "COPY":
@@ -508,6 +543,7 @@ def _execute_dockerfile_plan(sandbox: Sandbox, plan: DockerfileBuildPlan):
                 destination,
                 working_dir,
                 keyword,
+                emit=emit,
             )
             continue
 
@@ -524,6 +560,7 @@ def _execute_dockerfile_plan(sandbox: Sandbox, plan: DockerfileBuildPlan):
                     destination,
                     working_dir,
                     process_env,
+                    emit=emit,
                 )
             else:
                 _copy_from_context(
@@ -533,11 +570,12 @@ def _execute_dockerfile_plan(sandbox: Sandbox, plan: DockerfileBuildPlan):
                     destination,
                     working_dir,
                     keyword,
+                    emit=emit,
                 )
             continue
 
         if keyword in _IGNORED_DOCKERFILE_INSTRUCTIONS:
-            _emit(
+            emit(
                 {
                     "type": "warning",
                     "message": (
@@ -551,6 +589,77 @@ def _execute_dockerfile_plan(sandbox: Sandbox, plan: DockerfileBuildPlan):
         raise ValueError(
             f"line {line_number}: Dockerfile instruction '{keyword}' is not supported for sandbox image creation"
         )
+
+
+def _render_build_op_for_dockerfile(op: _ImageBuildOperation) -> str:
+    """Render a single build op as a Dockerfile line (mirrors TS renderBuildOp)."""
+    options = op.options or {}
+    options_str = (
+        " " + " ".join(f"--{k}={v}" for k, v in options.items()) if options else ""
+    )
+    if op.type == _ImageBuildOperationType.ENV:
+        return f"ENV{options_str} {op.args[0]}={json.dumps(op.args[1])}"
+    return f"{op.type.name}{options_str} {' '.join(op.args)}"
+
+
+def _image_to_dockerfile(image: Image) -> str:
+    """Render a Dockerfile string from an Image (mirrors TS dockerfileContent).
+
+    Unlike the Applications Dockerfile generator in ``tensorlake.image.utils``,
+    this produces a plain Dockerfile with no implicit ``WORKDIR`` or
+    ``tensorlake`` install — matching the TypeScript ``dockerfileContent``.
+    """
+    lines: list[str] = []
+    if image._base_image:
+        lines.append(f"FROM {image._base_image}")
+    for op in image._build_operations:
+        lines.append(_render_build_op_for_dockerfile(op))
+    return "\n".join(lines)
+
+
+def _build_op_to_instruction(
+    op: _ImageBuildOperation, line_number: int
+) -> DockerfileInstruction:
+    """Convert an in-memory build op into a DockerfileInstruction the executor understands."""
+    options = op.options or {}
+    options_str = (
+        " " + " ".join(f"--{k}={v}" for k, v in options.items()) if options else ""
+    )
+    keyword = op.type.name
+    if op.type == _ImageBuildOperationType.ENV:
+        value = f"{options_str} {op.args[0]}={json.dumps(op.args[1])}".lstrip()
+    else:
+        value = f"{options_str} {' '.join(op.args)}".lstrip()
+    return DockerfileInstruction(keyword=keyword, value=value, line_number=line_number)
+
+
+def _load_image_plan(
+    image: Image,
+    registered_name: str | None,
+    context_dir: str | None,
+) -> DockerfileBuildPlan:
+    """Build a DockerfileBuildPlan from an in-memory Image.
+
+    ``context_dir`` is used to resolve relative COPY/ADD sources; defaults to
+    the current working directory.
+    """
+    if not image._base_image:
+        raise ValueError("Image must have a base_image to build")
+
+    resolved_context = str(Path(context_dir or os.getcwd()).resolve())
+    instructions = [
+        _build_op_to_instruction(op, line_number=idx + 1)
+        for idx, op in enumerate(image._build_operations)
+    ]
+
+    return DockerfileBuildPlan(
+        dockerfile_path=str(Path(resolved_context) / "Dockerfile"),
+        context_dir=resolved_context,
+        registered_name=registered_name or image.name,
+        dockerfile_text=_image_to_dockerfile(image),
+        base_image=image._base_image,
+        instructions=instructions,
+    )
 
 
 def _register_image(
@@ -591,37 +700,22 @@ def _register_image(
     return resp.json()
 
 
-def create_sandbox_image(
-    dockerfile_path: str,
-    registered_name: str | None,
+def _run_plan(
+    plan: DockerfileBuildPlan,
+    ctx: Context,
     cpus: float,
     memory_mb: int,
-    is_public: bool = False,
-):
-    ctx = _build_context_from_env()
-
-    _emit({"type": "status", "message": f"Loading {dockerfile_path}..."})
-    try:
-        plan = _load_dockerfile_plan(dockerfile_path, registered_name)
-    except Exception as e:
-        event = {
-            "type": "error",
-            "message": f"Failed to load Dockerfile {dockerfile_path}",
-            "details": f"{type(e).__name__}: {e}",
-        }
-        if _debug_enabled():
-            event["traceback"] = traceback.format_exc()
-        _emit(event)
-        sys.exit(1)
-
-    _emit(
+    is_public: bool,
+    emit: EmitFn,
+) -> dict:
+    """Materialize a plan in a sandbox, snapshot, and register it."""
+    emit(
         {
             "type": "status",
             "message": f"Selected image name: {plan.registered_name}",
         }
     )
-
-    _emit({"type": "status", "message": "Creating sandbox..."})
+    emit({"type": "status", "message": "Creating sandbox..."})
     sandbox_client = SandboxClient(
         api_url=ctx.api_url,
         api_key=ctx.api_key or ctx.personal_access_token,
@@ -636,28 +730,28 @@ def create_sandbox_image(
             cpus=cpus,
             memory_mb=memory_mb,
         )
-        _emit(
+        emit(
             {
                 "type": "status",
                 "message": f"Sandbox {sandbox.sandbox_id} is running",
             }
         )
 
-        _execute_dockerfile_plan(sandbox, plan)
+        _execute_dockerfile_plan(sandbox, plan, emit=emit)
 
-        _emit({"type": "status", "message": "Creating snapshot..."})
+        emit({"type": "status", "message": "Creating snapshot..."})
         snapshot = sandbox_client.snapshot_and_wait(
             sandbox.sandbox_id,
             content_mode=SnapshotContentMode.FILESYSTEM_ONLY,
         )
-        _emit(
+        emit(
             {
                 "type": "snapshot_created",
                 "snapshot_id": snapshot.snapshot_id,
             }
         )
 
-        _emit({"type": "status", "message": "Registering image..."})
+        emit({"type": "status", "message": "Registering image..."})
         if not snapshot.snapshot_uri:
             raise RuntimeError(
                 f"Snapshot {snapshot.snapshot_id} completed without a snapshot URI"
@@ -670,7 +764,7 @@ def create_sandbox_image(
             snapshot.snapshot_uri,
             is_public,
         )
-        _emit(
+        emit(
             {
                 "type": "image_registered",
                 "image_id": result.get("id", ""),
@@ -679,9 +773,86 @@ def create_sandbox_image(
                 "snapshot_uri": snapshot.snapshot_uri,
             }
         )
+        return result
+    finally:
+        if sandbox is not None:
+            try:
+                sandbox.terminate()
+            except Exception:
+                pass
 
+
+def build_sandbox_image(
+    source: Image | str,
+    *,
+    registered_name: str | None = None,
+    cpus: float = 2.0,
+    memory_mb: int = 4096,
+    is_public: bool = False,
+    context_dir: str | None = None,
+    verbose: bool = False,
+    emit: EmitFn | None = None,
+) -> dict:
+    """Build a sandbox image from an :class:`Image` or a Dockerfile path.
+
+    Materializes the image inside a build sandbox, snapshots the filesystem,
+    and registers the snapshot as a named sandbox template.
+
+    Args:
+        source: An :class:`Image` instance or a path to a Dockerfile.
+        registered_name: Name to register the image under. Defaults to the
+            image's ``name`` or the Dockerfile stem.
+        cpus: CPUs for the build sandbox.
+        memory_mb: Memory for the build sandbox in MB.
+        is_public: Make the registered image publicly accessible.
+        context_dir: Directory used to resolve relative COPY/ADD sources.
+            Ignored when ``source`` is a Dockerfile path (the Dockerfile's
+            parent directory is used instead).
+        verbose: Print progress to stderr. Ignored if ``emit`` is provided.
+        emit: Callback invoked for each build event. Takes precedence over
+            ``verbose``. Use this to integrate the builder into custom UIs.
+
+    Returns:
+        The registered sandbox template JSON response.
+    """
+    if emit is None:
+        emit = _stderr_emit if verbose else _noop_emit
+
+    if isinstance(source, Image):
+        plan = _load_image_plan(source, registered_name, context_dir)
+    elif isinstance(source, (str, os.PathLike)):
+        plan = _load_dockerfile_plan(os.fspath(source), registered_name)
+    else:
+        raise TypeError(
+            "source must be an Image or a Dockerfile path, got "
+            f"{type(source).__name__}"
+        )
+
+    ctx = _build_context_from_env()
+    return _run_plan(plan, ctx, cpus, memory_mb, is_public, emit=emit)
+
+
+def create_sandbox_image(
+    dockerfile_path: str,
+    registered_name: str | None,
+    cpus: float,
+    memory_mb: int,
+    is_public: bool = False,
+):
+    """CLI entrypoint: build from a Dockerfile path, emitting NDJSON to stdout."""
+    try:
+        _emit({"type": "status", "message": f"Loading {dockerfile_path}..."})
+        build_sandbox_image(
+            dockerfile_path,
+            registered_name=registered_name,
+            cpus=cpus,
+            memory_mb=memory_mb,
+            is_public=is_public,
+            emit=_emit,
+        )
         _emit({"type": "done"})
-
+    except SystemExit:
+        raise
     except Exception as e:
         event = {
             "type": "error",
@@ -691,12 +862,6 @@ def create_sandbox_image(
             event["traceback"] = traceback.format_exc()
         _emit(event)
         sys.exit(1)
-    finally:
-        if sandbox is not None:
-            try:
-                sandbox.terminate()
-            except Exception:
-                pass
 
 
 def create_sandbox_image_entrypoint():
