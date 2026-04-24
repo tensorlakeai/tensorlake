@@ -170,10 +170,10 @@ impl ClientBuilder {
             default_headers.insert("X-Forwarded-Project-Id", str_to_header_value(project_id)?);
         }
 
-        let ua = self.user_agent.as_deref().unwrap_or(concat!(
-            "tensorlake-rust-sdk/",
-            env!("CARGO_PKG_VERSION")
-        ));
+        let ua = self
+            .user_agent
+            .as_deref()
+            .unwrap_or(concat!("tensorlake-rust-sdk/", env!("CARGO_PKG_VERSION")));
         let base_client = new_base_client(&default_headers, ua)?;
         let mut builder = ReqwestClientBuilder::new(base_client.clone());
 

@@ -633,7 +633,11 @@ impl CloudSandboxClient {
         })
     }
 
-    fn update_sandbox(&self, sandbox_id: String, request_json: String) -> PyResult<(String, String)> {
+    fn update_sandbox(
+        &self,
+        sandbox_id: String,
+        request_json: String,
+    ) -> PyResult<(String, String)> {
         let request: UpdateSandboxRequest = parse_json_payload(&request_json)?;
         self.run_with_retry(5, move |client| {
             let sandbox_id = sandbox_id.clone();
@@ -720,7 +724,12 @@ impl CloudSandboxClient {
     fn delete_snapshot(&self, snapshot_id: String) -> PyResult<String> {
         self.run_with_retry(5, move |client| {
             let snapshot_id = snapshot_id.clone();
-            async move { client.delete_snapshot(&snapshot_id).await.map(|t| t.trace_id) }
+            async move {
+                client
+                    .delete_snapshot(&snapshot_id)
+                    .await
+                    .map(|t| t.trace_id)
+            }
         })
     }
 
