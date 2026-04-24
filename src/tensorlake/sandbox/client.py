@@ -6,7 +6,7 @@ import json
 import time
 from urllib.parse import urlparse
 
-from tensorlake._tracing import USER_AGENT, Traced
+from tensorlake._tracing import USER_AGENT, Traced, TracedIterator
 
 from . import _defaults
 from .exceptions import (
@@ -342,7 +342,9 @@ class SandboxClient:
             trace_id, response_json = self._rust_client.create_sandbox(
                 request_json=request_model.model_dump_json(exclude_none=True)
             )
-            return Traced(trace_id, CreateSandboxResponse.model_validate_json(response_json))
+            return Traced(
+                trace_id, CreateSandboxResponse.model_validate_json(response_json)
+            )
         except Exception as e:
             _raise_as_sandbox_error(e)
 
@@ -364,7 +366,9 @@ class SandboxClient:
         """
         try:
             trace_id, response_json = self._rust_client.claim_sandbox(pool_id=pool_id)
-            return Traced(trace_id, CreateSandboxResponse.model_validate_json(response_json))
+            return Traced(
+                trace_id, CreateSandboxResponse.model_validate_json(response_json)
+            )
         except Exception as e:
             _raise_as_sandbox_error(e)
 
@@ -383,18 +387,20 @@ class SandboxClient:
             SandboxConnectionError: If the server is unreachable
         """
         try:
-            trace_id, response_json = self._rust_client.get_sandbox_json(sandbox_id=sandbox_id)
+            trace_id, response_json = self._rust_client.get_sandbox_json(
+                sandbox_id=sandbox_id
+            )
             return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
         except Exception as e:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
 
-    def list(self) -> Traced[list[SandboxInfo]]:
+    def list(self) -> TracedIterator[SandboxInfo]:
         """List all sandboxes in the namespace.
 
         Returns:
-            Traced[list[SandboxInfo]] with sandbox list and trace_id
+            TracedIterator[SandboxInfo] — iterable over sandboxes, with .trace_id
 
         Raises:
             RemoteAPIError: If the API request fails
@@ -403,7 +409,7 @@ class SandboxClient:
         try:
             trace_id, response_json = self._rust_client.list_sandboxes_json()
             data = ListSandboxesResponse.model_validate(json.loads(response_json))
-            return Traced(trace_id, data.sandboxes)
+            return TracedIterator(trace_id, data.sandboxes)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
@@ -614,7 +620,9 @@ class SandboxClient:
                 sandbox_id=sandbox_id,
                 content_mode=content_mode.value if content_mode is not None else None,
             )
-            return Traced(trace_id, CreateSnapshotResponse.model_validate_json(response_json))
+            return Traced(
+                trace_id, CreateSnapshotResponse.model_validate_json(response_json)
+            )
         except Exception as e:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
@@ -634,16 +642,18 @@ class SandboxClient:
             SandboxConnectionError: If the server is unreachable
         """
         try:
-            trace_id, response_json = self._rust_client.get_snapshot_json(snapshot_id=snapshot_id)
+            trace_id, response_json = self._rust_client.get_snapshot_json(
+                snapshot_id=snapshot_id
+            )
             return Traced(trace_id, SnapshotInfo.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def list_snapshots(self) -> Traced[list[SnapshotInfo]]:
+    def list_snapshots(self) -> TracedIterator[SnapshotInfo]:
         """List all snapshots in the namespace.
 
         Returns:
-            Traced[list[SnapshotInfo]] with snapshot list and trace_id
+            TracedIterator[SnapshotInfo] — iterable over snapshots, with .trace_id
 
         Raises:
             RemoteAPIError: If the API request fails
@@ -652,7 +662,7 @@ class SandboxClient:
         try:
             trace_id, response_json = self._rust_client.list_snapshots_json()
             data = ListSnapshotsResponse.model_validate(json.loads(response_json))
-            return Traced(trace_id, data.snapshots)
+            return TracedIterator(trace_id, data.snapshots)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
@@ -760,7 +770,9 @@ class SandboxClient:
             trace_id, response_json = self._rust_client.create_pool(
                 request_json=request_model.model_dump_json(exclude_none=True)
             )
-            return Traced(trace_id, CreateSandboxPoolResponse.model_validate_json(response_json))
+            return Traced(
+                trace_id, CreateSandboxPoolResponse.model_validate_json(response_json)
+            )
         except Exception as e:
             _raise_as_sandbox_error(e)
 
@@ -786,11 +798,11 @@ class SandboxClient:
                 raise PoolNotFoundError(pool_id) from None
             _raise_as_sandbox_error(e)
 
-    def list_pools(self) -> Traced[list[SandboxPoolInfo]]:
+    def list_pools(self) -> TracedIterator[SandboxPoolInfo]:
         """List all sandbox pools in the namespace.
 
         Returns:
-            Traced[list[SandboxPoolInfo]] with pool list and trace_id
+            TracedIterator[SandboxPoolInfo] — iterable over pools, with .trace_id
 
         Raises:
             RemoteAPIError: If the API request fails
@@ -799,7 +811,7 @@ class SandboxClient:
         try:
             trace_id, response_json = self._rust_client.list_pools_json()
             data = ListSandboxPoolsResponse.model_validate(json.loads(response_json))
-            return Traced(trace_id, data.pools)
+            return TracedIterator(trace_id, data.pools)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
