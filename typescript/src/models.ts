@@ -69,8 +69,6 @@ export interface CreateSandboxOptions {
   image?: string;
   cpus?: number;
   memoryMb?: number;
-  /** @deprecated Ignored for sandbox creation. Use `diskMb` instead. */
-  ephemeralDiskMb?: number;
   /** Root disk size in megabytes. When omitted, the server uses its default disk size. */
   diskMb?: number;
   /** @deprecated Use `diskMb` instead. */

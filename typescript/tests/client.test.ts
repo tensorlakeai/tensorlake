@@ -106,22 +106,6 @@ describe("SandboxClient", () => {
       client.close();
     });
 
-    it("ignores deprecated ephemeralDiskMb on sandbox create", async () => {
-      mockFetch((_url, init) => {
-        const body = JSON.parse(init?.body as string);
-        expect(body.resources.ephemeral_disk_mb).toBeUndefined();
-        expect(body.resources.disk_mb).toBeUndefined();
-        return new Response(
-          JSON.stringify({ sandbox_id: "sbx-2", status: "pending" }),
-          { status: 200 },
-        );
-      });
-
-      const client = SandboxClient.forLocalhost();
-      await client.create({ ephemeralDiskMb: 25 * 1024 });
-      client.close();
-    });
-
     it("sends name in request body when provided", async () => {
       mockFetch((_url, init) => {
         const body = JSON.parse(init?.body as string);
