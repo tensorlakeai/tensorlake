@@ -91,21 +91,6 @@ describe("SandboxClient", () => {
       client.close();
     });
 
-    it("supports disk_mb as a backwards-compatible alias", async () => {
-      mockFetch((_url, init) => {
-        const body = JSON.parse(init?.body as string);
-        expect(body.resources.disk_mb).toBe(25 * 1024);
-        return new Response(
-          JSON.stringify({ sandbox_id: "sbx-2", status: "pending" }),
-          { status: 200 },
-        );
-      });
-
-      const client = SandboxClient.forLocalhost();
-      await client.create({ disk_mb: 25 * 1024 });
-      client.close();
-    });
-
     it("sends name in request body when provided", async () => {
       mockFetch((_url, init) => {
         const body = JSON.parse(init?.body as string);

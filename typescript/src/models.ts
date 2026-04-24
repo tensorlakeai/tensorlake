@@ -71,8 +71,6 @@ export interface CreateSandboxOptions {
   memoryMb?: number;
   /** Root disk size in megabytes. When omitted, the server uses its default disk size. */
   diskMb?: number;
-  /** @deprecated Use `diskMb` instead. */
-  disk_mb?: number;
   secretNames?: string[];
   timeoutSecs?: number;
   entrypoint?: string[];

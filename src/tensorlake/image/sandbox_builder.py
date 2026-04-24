@@ -882,7 +882,9 @@ def build_sandbox_image(
 
     ctx = _build_context_from_env()
     try:
-        return _run_plan(plan, ctx, cpus, memory_mb, is_public, emit=emit, disk_mb=disk_mb)
+        return _run_plan(
+            plan, ctx, cpus, memory_mb, is_public, emit=emit, disk_mb=disk_mb
+        )
     except SandboxImageError:
         raise
     except Exception as e:
