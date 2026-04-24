@@ -271,6 +271,7 @@ mod tests {
             organization_id: organization_id.map(str::to_string),
             project_id: project_id.map(str::to_string),
             debug: false,
+            show_trace_id: false,
         })
     }
 
