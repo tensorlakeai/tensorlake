@@ -1,8 +1,11 @@
 import json
 import unittest
 
+from tensorlake._tracing import TracedIterator
 from tensorlake.sandbox import Sandbox, SandboxConnectionError
 from tensorlake.sandbox.models import StdinMode
+
+_TRACE_ID = "00-deadbeefdeadbeefdeadbeefdeadbeef-cafebabecafebabe-01"
 
 
 class _FakeRustProxyClient:
@@ -18,7 +21,7 @@ class _FakeRustProxyClient:
 
     def start_process_json(self, payload_json):
         self.start_payload_json = payload_json
-        return json.dumps(
+        return _TRACE_ID, json.dumps(
             {
                 "pid": 101,
                 "status": "running",
@@ -30,7 +33,7 @@ class _FakeRustProxyClient:
         )
 
     def list_processes_json(self):
-        return json.dumps(
+        return _TRACE_ID, json.dumps(
             {
                 "processes": [
                     {
@@ -47,7 +50,7 @@ class _FakeRustProxyClient:
 
     def follow_output_json(self, pid):
         assert pid == 101
-        return [
+        return _TRACE_ID, [
             json.dumps(
                 {
                     "line": "hello",
@@ -59,7 +62,7 @@ class _FakeRustProxyClient:
 
     def run_process_json(self, payload_json):
         self.run_payload_json = payload_json
-        return [
+        return _TRACE_ID, [
             json.dumps(
                 {"line": "out1", "stream": "stdout", "timestamp": 1_700_000_001}
             ),
@@ -73,26 +76,34 @@ class _FakeRustProxyClient:
         ]
 
     def health_json(self):
-        return json.dumps({"healthy": True})
+        return _TRACE_ID, json.dumps({"healthy": True})
+
+
+def _make_sandbox(fake=None):
+    """Return a Sandbox wired to *fake* (or a fresh _FakeRustProxyClient)."""
+    client = fake or _FakeRustProxyClient()
+    return Sandbox(
+        sandbox_id="sbx-1",
+        proxy_url="http://localhost:9443",
+        api_key="k",
+        _proxy_rust_client=client,
+    ), client
 
 
 class TestSandboxRustBackend(unittest.TestCase):
     def test_sandbox_accepts_sandbox_name(self):
-        sandbox = Sandbox(
+        sandbox, _ = _make_sandbox()
+        # Rename so the identifier is set from `identifier=` kwarg.
+        sandbox2 = Sandbox(
             identifier="stable-name",
             proxy_url="http://localhost:9443",
             api_key="k",
+            _proxy_rust_client=_FakeRustProxyClient(),
         )
-
-        self.assertEqual(sandbox._identifier, "stable-name")
+        self.assertEqual(sandbox2._identifier, "stable-name")
 
     def test_start_process_uses_rust_backend(self):
-        sandbox = Sandbox(
-            sandbox_id="sbx-1", proxy_url="http://localhost:9443", api_key="k"
-        )
-        fake = _FakeRustProxyClient()
-        sandbox._rust_client = fake
-        sandbox._base_url = fake.base_url()
+        sandbox, fake = _make_sandbox()
 
         process = sandbox.start_process(
             command="echo",
@@ -107,22 +118,33 @@ class TestSandboxRustBackend(unittest.TestCase):
         self.assertEqual(payload["stdin_mode"], "pipe")
 
     def test_list_processes_uses_rust_backend(self):
-        sandbox = Sandbox(
-            sandbox_id="sbx-1", proxy_url="http://localhost:9443", api_key="k"
-        )
-        sandbox._rust_client = _FakeRustProxyClient()
+        sandbox, _ = _make_sandbox()
+
+        processes = sandbox.list_processes()
+        items = list(processes)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].pid, 101)
+        self.assertEqual(items[0].status, "running")
+
+    def test_list_processes_returns_traced_iterator(self):
+        sandbox, _ = _make_sandbox()
 
         processes = sandbox.list_processes()
 
-        self.assertEqual(len(processes), 1)
-        self.assertEqual(processes[0].pid, 101)
-        self.assertEqual(processes[0].status, "running")
+        self.assertIsInstance(processes, TracedIterator)
+        self.assertEqual(processes.trace_id, _TRACE_ID)
+
+    def test_list_processes_is_iterable(self):
+        sandbox, _ = _make_sandbox()
+
+        processes = sandbox.list_processes()
+
+        pids = [p.pid for p in processes]
+        self.assertEqual(pids, [101])
 
     def test_follow_output_uses_rust_backend(self):
-        sandbox = Sandbox(
-            sandbox_id="sbx-1", proxy_url="http://localhost:9443", api_key="k"
-        )
-        sandbox._rust_client = _FakeRustProxyClient()
+        sandbox, _ = _make_sandbox()
 
         events = list(sandbox.follow_output(101))
 
@@ -130,50 +152,44 @@ class TestSandboxRustBackend(unittest.TestCase):
         self.assertEqual(events[0].line, "hello")
         self.assertEqual(events[0].stream, "stdout")
 
+    def test_follow_output_returns_traced_iterator(self):
+        sandbox, _ = _make_sandbox()
+
+        events = sandbox.follow_output(101)
+
+        self.assertIsInstance(events, TracedIterator)
+        self.assertEqual(events.trace_id, _TRACE_ID)
+
     def test_run_uses_streaming_endpoint(self):
-        sandbox = Sandbox(
-            sandbox_id="sbx-1", proxy_url="http://localhost:9443", api_key="k"
-        )
-        fake = _FakeRustProxyClient()
-        sandbox._rust_client = fake
+        sandbox, fake = _make_sandbox()
 
         result = sandbox.run("echo", args=["hello"])
 
-        # Verify the payload sent to the Rust client.
         payload = json.loads(fake.run_payload_json)
         self.assertEqual(payload["command"], "echo")
         self.assertEqual(payload["args"], ["hello"])
 
-        # Verify stdout/stderr lines are collected from streaming events.
         self.assertEqual(result.stdout, "out1\nout2")
         self.assertEqual(result.stderr, "err1")
         self.assertEqual(result.exit_code, 0)
 
     def test_run_signal_maps_to_negative_exit_code(self):
-        sandbox = Sandbox(
-            sandbox_id="sbx-1", proxy_url="http://localhost:9443", api_key="k"
-        )
-
         class _SignaledFakeClient(_FakeRustProxyClient):
             def run_process_json(self, payload_json):
-                return [json.dumps({"signal": 9})]
+                return _TRACE_ID, [json.dumps({"signal": 9})]
 
-        sandbox._rust_client = _SignaledFakeClient()
+        sandbox, _ = _make_sandbox(_SignaledFakeClient())
 
         result = sandbox.run("sleep", args=["100"])
 
         self.assertEqual(result.exit_code, -9)
 
     def test_run_raises_when_stream_has_no_exit_event(self):
-        sandbox = Sandbox(
-            sandbox_id="sbx-1", proxy_url="http://localhost:9443", api_key="k"
-        )
-
         class _MissingExitFakeClient(_FakeRustProxyClient):
             def run_process_json(self, payload_json):
-                return []
+                return _TRACE_ID, []
 
-        sandbox._rust_client = _MissingExitFakeClient()
+        sandbox, _ = _make_sandbox(_MissingExitFakeClient())
 
         with self.assertRaisesRegex(
             SandboxConnectionError, "stream ended without an exit event"
@@ -193,12 +209,7 @@ class TestSandboxRustBackend(unittest.TestCase):
         previous = sandbox_module.RustCloudSandboxClientError
         try:
             sandbox_module.RustCloudSandboxClientError = FakeRustError
-            sandbox = Sandbox(
-                sandbox_id="sbx-1",
-                proxy_url="http://localhost:9443",
-                api_key="k",
-            )
-            sandbox._rust_client = _FailingRustProxyClient()
+            sandbox, _ = _make_sandbox(_FailingRustProxyClient())
 
             with self.assertRaises(SandboxConnectionError):
                 sandbox.health()

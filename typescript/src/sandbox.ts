@@ -5,7 +5,7 @@ import {
 } from "./desktop.js";
 import * as defaults from "./defaults.js";
 import { SandboxError } from "./errors.js";
-import { HttpClient } from "./http.js";
+import { type Traced, HttpClient } from "./http.js";
 import {
   type CheckpointOptions,
   type CommandResult,
@@ -450,10 +450,11 @@ export class Sandbox {
   /**
    * List snapshots taken from this sandbox.
    */
-  async listSnapshots(): Promise<SnapshotInfo[]> {
+  async listSnapshots(): Promise<Traced<SnapshotInfo[]>> {
     const client = this.requireLifecycleClient("listSnapshots");
     const all = await client.listSnapshots();
-    return all.filter((s) => s.sandboxId === this.sandboxId);
+    const filtered = all.filter((s) => s.sandboxId === this.sandboxId);
+    return Object.assign(filtered, { traceId: all.traceId });
   }
 
   /** Close the HTTP client. The sandbox keeps running. */
@@ -557,12 +558,13 @@ export class Sandbox {
   }
 
   /** List all processes (running and exited) tracked by the sandbox daemon. */
-  async listProcesses(): Promise<ProcessInfo[]> {
+  async listProcesses(): Promise<Traced<ProcessInfo[]>> {
     const raw = await this.http.requestJson<{ processes: Record<string, unknown>[] }>(
       "GET",
       "/api/v1/processes",
     );
-    return (raw.processes ?? []).map((p) => fromSnakeKeys(p) as ProcessInfo);
+    const processes = (raw.processes ?? []).map((p) => fromSnakeKeys(p) as ProcessInfo);
+    return Object.assign(processes, { traceId: raw.traceId });
   }
 
   /** Get current status and metadata for a process by PID. */

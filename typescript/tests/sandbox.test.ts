@@ -67,6 +67,62 @@ describe("Sandbox", () => {
     });
   });
 
+  describe("listProcesses", () => {
+    it("returns an array with traceId", async () => {
+      mockFetch(() =>
+        new Response(
+          JSON.stringify({
+            processes: [
+              {
+                pid: 42,
+                status: "running",
+                command: "bash",
+                args: [],
+                stdin_writable: false,
+                started_at: 1700000000,
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: { traceparent: "00-aabbccdd00112233aabbccdd00112233-cafebabe12345678-01" },
+          },
+        ),
+      );
+
+      const sbx = makeSandbox();
+      const procs = await sbx.listProcesses();
+
+      expect(Array.isArray(procs)).toBe(true);
+      expect(procs).toHaveLength(1);
+      expect(procs[0].pid).toBe(42);
+      expect(typeof procs.traceId).toBe("string");
+      expect(procs.traceId.length).toBeGreaterThan(0);
+      sbx.close();
+    });
+
+    it("list comprehension pattern works on result", async () => {
+      mockFetch(() =>
+        new Response(
+          JSON.stringify({
+            processes: [
+              { pid: 1, status: "running", command: "bash", args: [], stdin_writable: false, started_at: 1700000000 },
+              { pid: 2, status: "exited", command: "ls", args: [], stdin_writable: false, started_at: 1700000001 },
+            ],
+          }),
+          { status: 200 },
+        ),
+      );
+
+      const sbx = makeSandbox();
+      const procs = await sbx.listProcesses();
+      const pids = procs.map((p) => p.pid);
+
+      expect(pids).toEqual([1, 2]);
+      sbx.close();
+    });
+  });
+
   describe("startProcess", () => {
     it("sends correct payload", async () => {
       mockFetch((_url, init) => {

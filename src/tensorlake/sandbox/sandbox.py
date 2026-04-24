@@ -162,15 +162,14 @@ class Sandbox:
         if self._host_header:
             self._proxy_headers["Host"] = self._host_header
 
-        if not _RUST_SANDBOX_PROXY_CLIENT_AVAILABLE:
+        if _proxy_rust_client is not None:
+            self._rust_client = _proxy_rust_client
+            self._base_url = self._rust_client.base_url()
+        elif not _RUST_SANDBOX_PROXY_CLIENT_AVAILABLE:
             raise SandboxError(
                 "Rust Cloud SDK sandbox proxy client is required but unavailable. "
                 "Build/install it with `make build_rust_py_client`."
             )
-
-        if _proxy_rust_client is not None:
-            self._rust_client = _proxy_rust_client
-            self._base_url = self._rust_client.base_url()
         else:
             try:
                 self._rust_client = RustCloudSandboxProxyClient(
@@ -707,12 +706,12 @@ class Sandbox:
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def list_processes(self) -> Traced[list[ProcessInfo]]:
+    def list_processes(self) -> TracedIterator[ProcessInfo]:
         """List all processes in the sandbox."""
         try:
             trace_id, response_json = self._rust_client.list_processes_json()
             data = ListProcessesResponse.model_validate_json(response_json)
-            return Traced(trace_id, data.processes)
+            return TracedIterator(trace_id, data.processes)
         except Exception as e:
             _raise_as_sandbox_error(e)
 

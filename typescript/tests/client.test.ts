@@ -237,6 +237,24 @@ describe("SandboxClient", () => {
       expect(list[0].sandboxId).toBe("sbx-1");
       client.close();
     });
+
+    it("returns traceId on the array", async () => {
+      mockFetch(() =>
+        new Response(
+          JSON.stringify({ sandboxes: [] }),
+          {
+            status: 200,
+            headers: { traceparent: "00-aabbccdd00112233aabbccdd00112233-cafebabe12345678-01" },
+          },
+        ),
+      );
+
+      const client = SandboxClient.forLocalhost();
+      const list = await client.list();
+      expect(typeof list.traceId).toBe("string");
+      expect(list.traceId.length).toBeGreaterThan(0);
+      client.close();
+    });
   });
 
   describe("update", () => {
@@ -608,6 +626,25 @@ describe("SandboxClient", () => {
       expect(info.status).toBe(SnapshotStatus.COMPLETED);
       client.close();
     });
+
+    it("listSnapshots returns traceId on the array", async () => {
+      mockFetch(() =>
+        new Response(
+          JSON.stringify({ snapshots: [] }),
+          {
+            status: 200,
+            headers: { traceparent: "00-aabbccdd00112233aabbccdd00112233-cafebabe12345678-01" },
+          },
+        ),
+      );
+
+      const client = SandboxClient.forLocalhost();
+      const snaps = await client.listSnapshots();
+      expect(Array.isArray(snaps)).toBe(true);
+      expect(typeof snaps.traceId).toBe("string");
+      expect(snaps.traceId.length).toBeGreaterThan(0);
+      client.close();
+    });
   });
 
   describe("pools", () => {
@@ -650,6 +687,25 @@ describe("SandboxClient", () => {
       const info = await client.getPool("pool-1");
       expect(info.poolId).toBe("pool-1");
       expect(info.image).toBe("node:20");
+      client.close();
+    });
+
+    it("listPools returns traceId on the array", async () => {
+      mockFetch(() =>
+        new Response(
+          JSON.stringify({ pools: [] }),
+          {
+            status: 200,
+            headers: { traceparent: "00-aabbccdd00112233aabbccdd00112233-cafebabe12345678-01" },
+          },
+        ),
+      );
+
+      const client = SandboxClient.forLocalhost();
+      const pools = await client.listPools();
+      expect(Array.isArray(pools)).toBe(true);
+      expect(typeof pools.traceId).toBe("string");
+      expect(pools.traceId.length).toBeGreaterThan(0);
       client.close();
     });
   });
