@@ -269,7 +269,8 @@ enum SbxCommands {
     },
 
     /// Create a new sandbox
-    New {
+    #[command(alias = "new")]
+    Create {
         /// Optional name for the sandbox. Named sandboxes support suspend/resume.
         /// Omit to create an ephemeral sandbox (no suspend/resume). When provided, must start
         /// with a lowercase letter, contain only lowercase letters, digits, and hyphens, not end
@@ -753,7 +754,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 SbxCommands::Terminate { sandbox_ids } => {
                     commands::sbx::terminate::run(ctx, &sandbox_ids).await
                 }
-                SbxCommands::New {
+                SbxCommands::Create {
                     name,
                     cpus,
                     memory,
