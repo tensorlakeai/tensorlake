@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
 
+// Erased at runtime — safe despite the module cycle with sandbox-image.ts,
+// which imports Image from here.
+import type { CreateSandboxImageOptions } from "./sandbox-image.js";
+
+const DEFAULT_IMAGE_NAME = "default";
+
 export const ImageBuildOperationType = {
   ADD: "ADD",
   COPY: "COPY",
@@ -56,7 +62,7 @@ export class Image {
       return;
     }
 
-    this._name = nameOrOptions.name ?? "default";
+    this._name = nameOrOptions.name ?? DEFAULT_IMAGE_NAME;
     this._tag = nameOrOptions.tag ?? "latest";
     this._baseImage = nameOrOptions.baseImage ?? null;
   }
@@ -135,8 +141,16 @@ export class Image {
    * and registers the snapshot as a named sandbox template.
    */
   async build(
-    options: import("./sandbox-image.js").CreateSandboxImageOptions = {},
+    options: CreateSandboxImageOptions = {},
   ): Promise<Record<string, unknown>> {
+    if ((options.registeredName ?? this._name) === DEFAULT_IMAGE_NAME) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `Building sandbox image with the default name "${DEFAULT_IMAGE_NAME}". ` +
+          "Pass `registeredName` or `Image({ name })` to avoid collisions " +
+          "with other default-named images in this project.",
+      );
+    }
     const { createSandboxImage } = await import("./sandbox-image.js");
     return createSandboxImage(this, options);
   }

@@ -14,7 +14,7 @@ import httpx
 
 from tensorlake.cli._common import Context
 from tensorlake.image import Image
-from tensorlake.image.image import _ImageBuildOperation, _ImageBuildOperationType
+from tensorlake.image._dockerfile import image_to_dockerfile, render_op_line
 from tensorlake.sandbox import Sandbox, SandboxClient
 from tensorlake.sandbox.models import ProcessStatus, SnapshotContentMode
 
@@ -591,46 +591,18 @@ def _execute_dockerfile_plan(
         )
 
 
-def _render_build_op_for_dockerfile(op: _ImageBuildOperation) -> str:
-    """Render a single build op as a Dockerfile line (mirrors TS renderBuildOp)."""
-    options = op.options or {}
-    options_str = (
-        " " + " ".join(f"--{k}={v}" for k, v in options.items()) if options else ""
-    )
-    if op.type == _ImageBuildOperationType.ENV:
-        return f"ENV{options_str} {op.args[0]}={json.dumps(op.args[1])}"
-    return f"{op.type.name}{options_str} {' '.join(op.args)}"
+def _build_op_to_instruction(op, line_number: int) -> DockerfileInstruction:
+    """Convert an in-memory build op into a DockerfileInstruction the executor understands.
 
-
-def _image_to_dockerfile(image: Image) -> str:
-    """Render a Dockerfile string from an Image (mirrors TS dockerfileContent).
-
-    Unlike the Applications Dockerfile generator in ``tensorlake.image.utils``,
-    this produces a plain Dockerfile with no implicit ``WORKDIR`` or
-    ``tensorlake`` install — matching the TypeScript ``dockerfileContent``.
+    The keyword mirrors ``op.type.name``; the value is the rendered Dockerfile
+    line with the leading keyword stripped so the executor's parsers see the
+    same text they'd see from a real Dockerfile.
     """
-    lines: list[str] = []
-    if image._base_image:
-        lines.append(f"FROM {image._base_image}")
-    for op in image._build_operations:
-        lines.append(_render_build_op_for_dockerfile(op))
-    return "\n".join(lines)
-
-
-def _build_op_to_instruction(
-    op: _ImageBuildOperation, line_number: int
-) -> DockerfileInstruction:
-    """Convert an in-memory build op into a DockerfileInstruction the executor understands."""
-    options = op.options or {}
-    options_str = (
-        " " + " ".join(f"--{k}={v}" for k, v in options.items()) if options else ""
+    rendered = render_op_line(op)
+    keyword, _, value = rendered.partition(" ")
+    return DockerfileInstruction(
+        keyword=keyword, value=value.strip(), line_number=line_number
     )
-    keyword = op.type.name
-    if op.type == _ImageBuildOperationType.ENV:
-        value = f"{options_str} {op.args[0]}={json.dumps(op.args[1])}".lstrip()
-    else:
-        value = f"{options_str} {' '.join(op.args)}".lstrip()
-    return DockerfileInstruction(keyword=keyword, value=value, line_number=line_number)
 
 
 def _load_image_plan(
@@ -656,7 +628,7 @@ def _load_image_plan(
         dockerfile_path=str(Path(resolved_context) / "Dockerfile"),
         context_dir=resolved_context,
         registered_name=registered_name or image.name,
-        dockerfile_text=_image_to_dockerfile(image),
+        dockerfile_text=image_to_dockerfile(image),
         base_image=image._base_image,
         instructions=instructions,
     )
@@ -782,6 +754,9 @@ def _run_plan(
                 pass
 
 
+_DEFAULT_IMAGE_NAME = "default"
+
+
 def build_sandbox_image(
     source: Image | str,
     *,
@@ -828,6 +803,16 @@ def build_sandbox_image(
             f"{type(source).__name__}"
         )
 
+    if plan.registered_name == _DEFAULT_IMAGE_NAME:
+        import warnings
+
+        warnings.warn(
+            f"Building sandbox image with the default name {_DEFAULT_IMAGE_NAME!r}. "
+            "Pass `registered_name=...` or `Image(name=...)` to avoid collisions "
+            "with other default-named images in this project.",
+            stacklevel=2,
+        )
+
     ctx = _build_context_from_env()
     return _run_plan(plan, ctx, cpus, memory_mb, is_public, emit=emit)
 
@@ -840,16 +825,27 @@ def create_sandbox_image(
     is_public: bool = False,
 ):
     """CLI entrypoint: build from a Dockerfile path, emitting NDJSON to stdout."""
+    _emit({"type": "status", "message": f"Loading {dockerfile_path}..."})
+
+    # Load phase: Dockerfile parse / file access. Errors here are user-facing
+    # "failed to load" errors, distinct from build-phase failures below.
     try:
-        _emit({"type": "status", "message": f"Loading {dockerfile_path}..."})
-        build_sandbox_image(
-            dockerfile_path,
-            registered_name=registered_name,
-            cpus=cpus,
-            memory_mb=memory_mb,
-            is_public=is_public,
-            emit=_emit,
-        )
+        plan = _load_dockerfile_plan(dockerfile_path, registered_name)
+    except (FileNotFoundError, ValueError, OSError) as e:
+        event = {
+            "type": "error",
+            "message": f"Failed to load Dockerfile {dockerfile_path}",
+            "details": f"{type(e).__name__}: {e}",
+        }
+        if _debug_enabled():
+            event["traceback"] = traceback.format_exc()
+        _emit(event)
+        sys.exit(1)
+
+    # Build phase: sandbox provisioning, execution, snapshot, register.
+    try:
+        ctx = _build_context_from_env()
+        _run_plan(plan, ctx, cpus, memory_mb, is_public, emit=_emit)
         _emit({"type": "done"})
     except SystemExit:
         raise

@@ -1,10 +1,12 @@
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from tensorlake.cli import create_sandbox_image as create_sandbox_image_module
+from tensorlake.image import Image
 from tensorlake.sandbox.models import SnapshotContentMode
 
 BUILD_CPUS = 2.0
@@ -212,6 +214,104 @@ class TestCreateSandboxImage(unittest.TestCase):
             "sbx-1",
             content_mode=SnapshotContentMode.FILESYSTEM_ONLY,
         )
+
+
+class TestBuildSandboxImageFromImage(unittest.TestCase):
+    def _run_build(self, image: Image, **kwargs):
+        ctx = MagicMock()
+        sandbox = MagicMock()
+        sandbox.sandbox_id = "sbx-1"
+        snapshot = SimpleNamespace(
+            snapshot_id="snap-1",
+            snapshot_uri="s3://snapshots/snap-1.tar.zst",
+        )
+
+        with (
+            patch.object(
+                create_sandbox_image_module,
+                "_build_context_from_env",
+                return_value=ctx,
+            ),
+            patch.object(create_sandbox_image_module, "_execute_dockerfile_plan"),
+            patch.object(
+                create_sandbox_image_module,
+                "_register_image",
+                return_value={"id": "tpl-1"},
+            ) as register_image,
+            patch.object(
+                create_sandbox_image_module,
+                "SandboxClient",
+            ) as sandbox_client_cls,
+        ):
+            sandbox_client = sandbox_client_cls.return_value
+            sandbox_client.create_and_connect.return_value = sandbox
+            sandbox_client.snapshot_and_wait.return_value = snapshot
+
+            result = create_sandbox_image_module.build_sandbox_image(image, **kwargs)
+
+        return result, ctx, register_image, sandbox_client, sandbox
+
+    def test_build_sandbox_image_from_image_renders_expected_dockerfile(self):
+        image = (
+            Image(name="weather-image", base_image="python:3.12-slim")
+            .run("apt-get update")
+            .workdir("/app")
+            .env("APP_ENV", "prod")
+            .copy("./src", "/app/src")
+        )
+
+        _, _, register_image, sandbox_client, _ = self._run_build(image)
+
+        # create_and_connect should boot from the image's base image with the
+        # requested resources (defaults here).
+        sandbox_client.create_and_connect.assert_called_once_with(
+            image="python:3.12-slim",
+            cpus=2.0,
+            memory_mb=4096,
+        )
+
+        # The registered Dockerfile must match exactly what the TS SDK would
+        # generate — no WORKDIR /app or pip install tensorlake injection.
+        expected_dockerfile = "\n".join(
+            [
+                "FROM python:3.12-slim",
+                "RUN apt-get update",
+                "WORKDIR /app",
+                'ENV APP_ENV="prod"',
+                "COPY ./src /app/src",
+            ]
+        )
+        register_image.assert_called_once()
+        register_args = register_image.call_args.args
+        self.assertEqual(register_args[1], "weather-image")  # registered name
+        self.assertEqual(register_args[2], expected_dockerfile)  # dockerfile text
+
+        sandbox_client.snapshot_and_wait.assert_called_once_with(
+            "sbx-1",
+            content_mode=SnapshotContentMode.FILESYSTEM_ONLY,
+        )
+
+    def test_build_sandbox_image_registered_name_overrides_image_name(self):
+        image = Image(name="default-name", base_image="python:3.12-slim")
+        _, _, register_image, _, _ = self._run_build(image, registered_name="override")
+        self.assertEqual(register_image.call_args.args[1], "override")
+
+    def test_build_sandbox_image_warns_on_default_name(self):
+        image = Image(base_image="python:3.12-slim")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self._run_build(image)
+        default_name_warnings = [
+            w for w in caught if "default" in str(w.message).lower()
+        ]
+        self.assertTrue(
+            default_name_warnings,
+            "Expected a warning about building with the default image name",
+        )
+
+    def test_build_sandbox_image_rejects_unknown_source_type(self):
+        with self.assertRaises(TypeError):
+            create_sandbox_image_module.build_sandbox_image(12345)  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":
