@@ -796,7 +796,6 @@ def _run_plan(
                 "image_id": result.get("id", ""),
                 "name": plan.registered_name,
                 "snapshot_id": snapshot.snapshot_id,
-                "snapshot_uri": snapshot.snapshot_uri,
             }
         )
         return result

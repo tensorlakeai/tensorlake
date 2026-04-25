@@ -1022,7 +1022,6 @@ export async function createSandboxImage(
     emit({
       type: "snapshot_created",
       snapshot_id: snapshot.snapshotId,
-      snapshot_uri: snapshot.snapshotUri ?? null,
     });
 
     if (!snapshot.snapshotUri) {
