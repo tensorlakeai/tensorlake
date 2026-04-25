@@ -291,7 +291,7 @@ function sendPtyFrame(socket: WebSocket, frame: Buffer): Promise<void> {
  * through the sandbox proxy.
  */
 export class Sandbox {
-  readonly sandboxId: string;
+  sandboxId: string;
   name: string | null = null;
   traceId: string | null = null;
   private readonly http: HttpClient;
@@ -370,6 +370,7 @@ export class Sandbox {
     const info = await client.get(options.sandboxId); // throws SandboxNotFoundError if not found
     const sandbox = client.connect(options.sandboxId, options.proxyUrl, options.routingHint);
     sandbox.lifecycleClient = client;
+    sandbox.sandboxId = info.sandboxId;
     sandbox.name = info.name ?? null;
     return sandbox;
   }
@@ -429,6 +430,7 @@ export class Sandbox {
   async update(options: UpdateSandboxOptions): Promise<SandboxInfo> {
     const client = this.requireLifecycleClient("update");
     const info = await client.update(this.sandboxId, options);
+    this.sandboxId = info.sandboxId;
     this.name = info.name ?? null;
     return info;
   }

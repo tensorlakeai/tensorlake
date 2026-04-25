@@ -317,10 +317,12 @@ class Sandbox:
             namespace=namespace,
             _internal=True,
         )
-        client.get(sandbox_id)  # raises SandboxNotFoundError if not found
-        return client.connect(
+        info = client.get(sandbox_id).value  # raises SandboxNotFoundError if not found
+        sandbox = client.connect(
             sandbox_id, proxy_url=proxy_url, routing_hint=routing_hint
         )
+        sandbox._cached_info = info
+        return sandbox
 
     # --- Class-level snapshot management ---
 
@@ -570,6 +572,7 @@ class Sandbox:
             exposed_ports=exposed_ports,
         )
         self._cached_info = traced.value
+        self._identifier = traced.value.sandbox_id
         return traced
 
     def __enter__(self) -> Sandbox:
