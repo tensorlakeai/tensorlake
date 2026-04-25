@@ -252,6 +252,18 @@ class TestSandboxRustBackend(unittest.TestCase):
         with self.assertRaises(SandboxError):
             _ = sandbox.status
 
+    def test_status_prefers_canonical_sandbox_id_over_original_identifier(self):
+        sandbox, _ = _make_sandbox()
+        sandbox._identifier = "old-name"
+        sandbox._sandbox_id = "sbx-1"
+        sandbox._lifecycle_client = MagicMock()
+        sandbox._lifecycle_client.get.return_value = Traced(
+            _TRACE_ID, _sandbox_info(status=SandboxStatus.RUNNING)
+        )
+
+        self.assertEqual(sandbox.status, SandboxStatus.RUNNING)
+        sandbox._lifecycle_client.get.assert_called_once_with("sbx-1")
+
     def test_update_calls_lifecycle_client_and_refreshes_name(self):
         sandbox, _ = _make_sandbox()
         sandbox._cached_info = _sandbox_info(name="old-name")
@@ -279,6 +291,25 @@ class TestSandboxRustBackend(unittest.TestCase):
         )
         self.assertEqual(traced.name, "renamed")
         self.assertEqual(sandbox.name, "renamed")
+
+    def test_update_prefers_canonical_sandbox_id_over_original_identifier(self):
+        sandbox, _ = _make_sandbox()
+        sandbox._identifier = "old-name"
+        sandbox._sandbox_id = "sbx-1"
+        sandbox._cached_info = _sandbox_info(name="old-name")
+        sandbox._lifecycle_client = MagicMock()
+        sandbox._lifecycle_client.update_sandbox.return_value = Traced(
+            _TRACE_ID, _sandbox_info(name="new-name")
+        )
+
+        sandbox.update(name="new-name")
+
+        sandbox._lifecycle_client.update_sandbox.assert_called_once_with(
+            "sbx-1",
+            name="new-name",
+            allow_unauthenticated_access=None,
+            exposed_ports=None,
+        )
 
     def test_update_raises_without_lifecycle_client(self):
         sandbox, _ = _make_sandbox()
@@ -309,6 +340,10 @@ class TestSandboxRustBackend(unittest.TestCase):
         with self.assertRaises(SandboxError):
             sandbox.name = ""
         sandbox._lifecycle_client.update_sandbox.assert_not_called()
+
+    def test_sandbox_info_accepts_suspending_status(self):
+        info = _sandbox_info(status=SandboxStatus.SUSPENDING)
+        self.assertEqual(info.status, SandboxStatus.SUSPENDING)
 
     def test_health_maps_connection_error(self):
         class FakeRustError(Exception):

@@ -540,7 +540,8 @@ export class SandboxClient {
       const sandbox = this.connect(result.sandboxId, options?.proxyUrl, routingHint);
       sandbox._setOwner(this);
       sandbox.traceId = result.traceId;
-      sandbox.name = name ?? requestedName;
+      sandbox._setLifecycleIdentifier(result.sandboxId);
+      sandbox._setName(name ?? requestedName);
       return sandbox;
     };
 

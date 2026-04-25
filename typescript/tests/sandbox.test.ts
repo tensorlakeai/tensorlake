@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as undici from "undici";
 import { Sandbox } from "../src/sandbox.js";
+import { SandboxClient } from "../src/client.js";
 import { ProcessStatus, SandboxStatus } from "../src/models.js";
 import { SandboxError } from "../src/errors.js";
 
@@ -345,6 +346,130 @@ describe("Sandbox", () => {
       const sbx = makeSandbox();
       await expect(sbx.update({ name: "x" })).rejects.toThrow(SandboxError);
       sbx.close();
+    });
+
+    it("lifecycle calls stay pinned to canonical sandbox ID after renaming a name-connected handle", async () => {
+      const calls: string[] = [];
+      mockFetch((url, init) => {
+        const method = init?.method ?? "GET";
+        calls.push(`${method} ${url}`);
+
+        if (method === "PATCH") {
+          expect(url).toContain("/sandboxes/sbx-1");
+          return new Response(
+            sandboxInfoBody({ id: "sbx-1", name: "renamed-by-handle" }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/sandboxes/sbx-1")) {
+          return new Response(
+            sandboxInfoBody({ id: "sbx-1", name: "renamed-by-handle", status: "running" }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/sandboxes/my-original-name")) {
+          return new Response(
+            sandboxInfoBody({ id: "sbx-1", name: "my-original-name", status: "running" }),
+            { status: 200 },
+          );
+        }
+
+        return new Response("", { status: 404 });
+      });
+
+      const sbx = await Sandbox.connect({
+        sandboxId: "my-original-name",
+        apiUrl: "http://localhost:8900",
+      });
+      await sbx.update({ name: "renamed-by-handle" });
+      expect(await sbx.status()).toBe(SandboxStatus.RUNNING);
+      expect(sbx.name).toBe("renamed-by-handle");
+
+      const patchCalls = calls.filter((line) => line.startsWith("PATCH "));
+      expect(patchCalls).toHaveLength(1);
+      expect(patchCalls[0]).toContain("/sandboxes/sbx-1");
+      expect(calls.some((line) => line.includes("/sandboxes/my-original-name"))).toBe(true);
+      expect(calls.some((line) => line.includes("/sandboxes/sbx-1"))).toBe(true);
+      sbx.close();
+    });
+
+    it("checkpoint() uses canonical sandbox ID after renaming a SandboxClient.connect(name) handle", async () => {
+      const calls: string[] = [];
+      mockFetch((url, init) => {
+        const method = init?.method ?? "GET";
+        calls.push(`${method} ${url}`);
+
+        if (method === "PATCH") {
+          expect(url).toContain("/sandboxes/my-original-name");
+          return new Response(
+            sandboxInfoBody({ id: "sbx-1", name: "renamed-by-handle" }),
+            { status: 200 },
+          );
+        }
+
+        if (method === "POST") {
+          expect(url).toContain("/sandboxes/sbx-1/snapshot");
+          return new Response(
+            JSON.stringify({ snapshot_id: "snap-1", status: "in_progress" }),
+            { status: 200 },
+          );
+        }
+
+        return new Response("", { status: 404 });
+      });
+
+      const client = new SandboxClient({ apiUrl: "http://localhost:8900" }, true);
+      const sbx = client.connect("my-original-name");
+      sbx._setOwner(client);
+
+      await sbx.update({ name: "renamed-by-handle" });
+      await sbx.checkpoint({ wait: false });
+
+      expect(calls.some((line) => line.startsWith("POST ") && line.includes("/sandboxes/sbx-1/snapshot"))).toBe(true);
+      sbx.close();
+      client.close();
+    });
+
+    it("listSnapshots() filters by canonical sandbox ID after renaming a SandboxClient.connect(name) handle", async () => {
+      mockFetch((url, init) => {
+        const method = init?.method ?? "GET";
+
+        if (method === "PATCH") {
+          expect(url).toContain("/sandboxes/my-original-name");
+          return new Response(
+            sandboxInfoBody({ id: "sbx-1", name: "renamed-by-handle" }),
+            { status: 200 },
+          );
+        }
+
+        if (method === "GET" && url.includes("/snapshots")) {
+          return new Response(
+            JSON.stringify({
+              snapshots: [
+                { snapshot_id: "snap-1", sandbox_id: "sbx-1", status: "completed" },
+                { snapshot_id: "snap-2", sandbox_id: "other-sbx", status: "completed" },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+
+        return new Response("", { status: 404 });
+      });
+
+      const client = new SandboxClient({ apiUrl: "http://localhost:8900" }, true);
+      const sbx = client.connect("my-original-name");
+      sbx._setOwner(client);
+
+      await sbx.update({ name: "renamed-by-handle" });
+      const snaps = await sbx.listSnapshots();
+
+      expect(snaps).toHaveLength(1);
+      expect(snaps[0].snapshotId).toBe("snap-1");
+      sbx.close();
+      client.close();
     });
   });
 

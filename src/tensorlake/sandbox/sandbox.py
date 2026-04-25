@@ -319,8 +319,11 @@ class Sandbox:
         )
         info = client.get(sandbox_id)  # raises SandboxNotFoundError if not found
         sandbox = client.connect(
-            sandbox_id, proxy_url=proxy_url, routing_hint=routing_hint
+            info.sandbox_id,
+            proxy_url=proxy_url,
+            routing_hint=routing_hint or info.routing_hint,
         )
+        sandbox._sandbox_id = info.sandbox_id
         sandbox._cached_info = info.value
         return sandbox
 
@@ -514,8 +517,22 @@ class Sandbox:
                     "Cannot resolve sandbox info: no lifecycle client available. "
                     "Connect via SandboxClient.connect() to enable sandbox_id and name lookup."
                 )
-            self._cached_info = self._lifecycle_client.get(self._identifier).value
+            lookup_id = self._sandbox_id or self._identifier
+            self._cached_info = self._lifecycle_client.get(lookup_id).value
         return self._cached_info
+
+    def _lifecycle_identifier(self) -> str:
+        """Best-effort stable identifier for lifecycle API calls.
+
+        Prefer a known server-assigned sandbox ID, but avoid forcing an extra
+        GET solely to resolve it.
+        """
+        if self._sandbox_id is not None:
+            return self._sandbox_id
+        if self._cached_info is not None:
+            self._sandbox_id = self._cached_info.sandbox_id
+            return self._sandbox_id
+        return self._identifier
 
     @property
     def sandbox_id(self) -> str:
@@ -546,7 +563,10 @@ class Sandbox:
     def status(self) -> SandboxStatus:
         """Current sandbox status fetched fresh from the server."""
         self._require_lifecycle_client("read_status")
-        return self._lifecycle_client.get(self._identifier).value.status
+        info = self._lifecycle_client.get(self._lifecycle_identifier()).value
+        self._sandbox_id = info.sandbox_id
+        self._cached_info = info
+        return info.status
 
     def update(
         self,
@@ -573,11 +593,12 @@ class Sandbox:
         """
         self._require_lifecycle_client("update")
         traced = self._lifecycle_client.update_sandbox(
-            self._identifier,
+            self._lifecycle_identifier(),
             name=name,
             allow_unauthenticated_access=allow_unauthenticated_access,
             exposed_ports=exposed_ports,
         )
+        self._sandbox_id = traced.sandbox_id
         self._cached_info = traced.value
         return traced
 
@@ -603,11 +624,12 @@ class Sandbox:
     def terminate(self):
         """Terminate the sandbox and close the connection."""
         lifecycle_client = self._lifecycle_client
+        delete_identifier = self._sandbox_id or self._identifier
         self._owns_sandbox = False
         self._lifecycle_client = None
         self.close()
         if lifecycle_client is not None:
-            lifecycle_client.delete(self._identifier)
+            lifecycle_client.delete(delete_identifier)
 
     @staticmethod
     def _build_command_payload(
