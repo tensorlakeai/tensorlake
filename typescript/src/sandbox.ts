@@ -368,9 +368,11 @@ export class Sandbox {
     const { SandboxClient } = await import("./client.js");
     const client = new SandboxClient(options, /* _internal */ true);
     const info = await client.get(options.sandboxId); // throws SandboxNotFoundError if not found
-    const sandbox = client.connect(options.sandboxId, options.proxyUrl, options.routingHint);
+    // Bind the proxy client to the stable sandbox UUID, not the user-supplied
+    // name, so a subsequent `update({ name })` rename doesn't leave proxy
+    // traffic targeting a stale routing identity.
+    const sandbox = client.connect(info.sandboxId, options.proxyUrl, options.routingHint);
     sandbox.lifecycleClient = client;
-    sandbox.sandboxId = info.sandboxId;
     sandbox.name = info.name ?? null;
     return sandbox;
   }
