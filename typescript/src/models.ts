@@ -69,7 +69,8 @@ export interface CreateSandboxOptions {
   image?: string;
   cpus?: number;
   memoryMb?: number;
-  ephemeralDiskMb?: number;
+  /** Root disk size in megabytes. When omitted, the server uses its default disk size. */
+  diskMb?: number;
   secretNames?: string[];
   timeoutSecs?: number;
   entrypoint?: string[];

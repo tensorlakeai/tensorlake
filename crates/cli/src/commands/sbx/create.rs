@@ -63,6 +63,7 @@ pub struct CreateArgs<'a> {
     pub name: Option<&'a str>,
     pub cpus: Option<f64>,
     pub memory: Option<i64>,
+    pub disk_mb: Option<u64>,
     pub timeout: Option<i64>,
     pub entrypoint: &'a [String],
     pub snapshot_id: Option<&'a str>,
@@ -80,6 +81,7 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
         name,
         cpus,
         memory,
+        disk_mb,
         timeout,
         entrypoint,
         snapshot_id,
@@ -92,8 +94,15 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
         network_deny,
     } = args;
 
-    let mut body =
-        build_create_request_body(cpus, memory, timeout, entrypoint, snapshot_id, image_name);
+    let mut body = build_create_request_body(
+        cpus,
+        memory,
+        disk_mb,
+        timeout,
+        entrypoint,
+        snapshot_id,
+        image_name,
+    );
     if let Some(n) = name {
         body["name"] = serde_json::Value::String(n.to_string());
     }
@@ -200,6 +209,7 @@ fn print_post_create_tip(ctx: &CliContext, sandbox_id: &str, display_id: &str, i
 fn build_create_request_body(
     cpus: Option<f64>,
     memory: Option<i64>,
+    disk_mb: Option<u64>,
     timeout: Option<i64>,
     entrypoint: &[String],
     snapshot_id: Option<&str>,
@@ -215,6 +225,9 @@ fn build_create_request_body(
         if let Some(memory) = memory {
             resources.insert("memory_mb".to_string(), serde_json::json!(memory));
         }
+        if let Some(disk_mb) = disk_mb {
+            resources.insert("disk_mb".to_string(), serde_json::json!(disk_mb));
+        }
         if !resources.is_empty() {
             body["resources"] = serde_json::Value::Object(resources);
         }
@@ -224,6 +237,9 @@ fn build_create_request_body(
             "cpus": cpus.unwrap_or(DEFAULT_SANDBOX_CPUS),
             "memory_mb": memory.unwrap_or(DEFAULT_SANDBOX_MEMORY_MB),
         });
+        if let Some(disk_mb) = disk_mb {
+            body["resources"]["disk_mb"] = serde_json::json!(disk_mb);
+        }
     }
 
     if let Some(t) = timeout {
@@ -245,16 +261,17 @@ mod tests {
 
     #[test]
     fn create_body_uses_defaults_without_snapshot() {
-        let body = build_create_request_body(None, None, None, &[], None, None);
+        let body = build_create_request_body(None, None, None, None, &[], None, None);
 
         assert_eq!(body["resources"]["cpus"], 1.0);
         assert_eq!(body["resources"]["memory_mb"], 1024);
+        assert!(body["resources"].get("disk_mb").is_none());
         assert!(body.get("snapshot_id").is_none());
     }
 
     #[test]
     fn create_body_omits_resources_for_snapshot_without_overrides() {
-        let body = build_create_request_body(None, None, None, &[], Some("snap-1"), None);
+        let body = build_create_request_body(None, None, None, None, &[], Some("snap-1"), None);
 
         assert_eq!(body["snapshot_id"], "snap-1");
         assert!(body.get("resources").is_none());
@@ -262,10 +279,31 @@ mod tests {
 
     #[test]
     fn create_body_includes_only_explicit_snapshot_overrides() {
-        let body = build_create_request_body(Some(2.5), None, None, &[], Some("snap-1"), None);
+        let body =
+            build_create_request_body(Some(2.5), None, None, None, &[], Some("snap-1"), None);
 
         assert_eq!(body["snapshot_id"], "snap-1");
         assert_eq!(body["resources"]["cpus"], 2.5);
+        assert!(body["resources"].get("memory_mb").is_none());
+    }
+
+    #[test]
+    fn create_body_includes_disk_override_without_snapshot() {
+        let body = build_create_request_body(None, None, Some(25 * 1024), None, &[], None, None);
+
+        assert_eq!(body["resources"]["cpus"], 1.0);
+        assert_eq!(body["resources"]["memory_mb"], 1024);
+        assert_eq!(body["resources"]["disk_mb"], 25 * 1024);
+    }
+
+    #[test]
+    fn create_body_includes_disk_override_for_snapshot_restore() {
+        let body =
+            build_create_request_body(None, None, Some(25 * 1024), None, &[], Some("snap-1"), None);
+
+        assert_eq!(body["snapshot_id"], "snap-1");
+        assert_eq!(body["resources"]["disk_mb"], 25 * 1024);
+        assert!(body["resources"].get("cpus").is_none());
         assert!(body["resources"].get("memory_mb").is_none());
     }
 
@@ -274,6 +312,7 @@ mod tests {
         let body = build_create_request_body(
             None,
             None,
+            Some(25 * 1024),
             None,
             &[],
             None,
@@ -281,6 +320,7 @@ mod tests {
         );
 
         assert_eq!(body["image"], "tensorlake/ubuntu-minimal");
+        assert_eq!(body["resources"]["disk_mb"], 25 * 1024);
         assert!(body.get("snapshot_id").is_none());
     }
 }

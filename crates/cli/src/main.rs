@@ -293,6 +293,10 @@ enum SbxCommands {
         #[arg(short, long)]
         memory: Option<i64>,
 
+        /// Root disk size in GB
+        #[arg(long)]
+        disk: Option<u64>,
+
         /// Timeout in seconds
         #[arg(short, long)]
         timeout: Option<i64>,
@@ -532,6 +536,18 @@ enum ImageCommands {
         #[arg(short = 'n', long)]
         registered_name: Option<String>,
 
+        /// Root disk size in GB for the temporary build sandbox
+        #[arg(long)]
+        disk: Option<u64>,
+
+        /// CPUs for the temporary build sandbox
+        #[arg(long)]
+        cpus: Option<f64>,
+
+        /// Memory in MB for the temporary build sandbox
+        #[arg(long)]
+        memory: Option<i64>,
+
         /// Make this sandbox image publicly accessible
         #[arg(short, long)]
         public: bool,
@@ -767,6 +783,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     name,
                     cpus,
                     memory,
+                    disk,
                     timeout,
                     entrypoint,
                     snapshot,
@@ -778,12 +795,20 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     network_allow,
                     network_deny,
                 } => {
+                    let disk_mb = disk
+                        .map(|value| {
+                            value.checked_mul(1024).ok_or_else(|| {
+                                CliError::usage("--disk is too large to convert to MiB")
+                            })
+                        })
+                        .transpose()?;
                     commands::sbx::create::run(
                         ctx,
                         commands::sbx::create::CreateArgs {
                             name: name.as_deref(),
                             cpus,
                             memory,
+                            disk_mb,
                             timeout,
                             entrypoint: &entrypoint,
                             snapshot_id: snapshot.as_deref(),
@@ -914,12 +939,18 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     ImageCommands::Create {
                         dockerfile_path,
                         registered_name,
+                        disk,
+                        cpus,
+                        memory,
                         public,
                     } => {
                         commands::sbx::image::create::run(
                             ctx,
                             &dockerfile_path,
                             registered_name.as_deref(),
+                            disk,
+                            cpus,
+                            memory,
                             public,
                         )
                         .await
@@ -968,6 +999,38 @@ mod tests {
         let result = Cli::try_parse_from(["tl", "sbx", "clone", "sbx-123", "--times", "0"]);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn image_create_parses_cpu_memory_and_disk_overrides() {
+        let cli = Cli::try_parse_from([
+            "tl",
+            "sbx",
+            "image",
+            "create",
+            "./Dockerfile",
+            "--cpus",
+            "3.5",
+            "--memory",
+            "8192",
+            "--disk",
+            "30",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Image(ImageCommands::Create {
+                cpus,
+                memory,
+                disk,
+                ..
+            })) => {
+                assert_eq!(cpus, Some(3.5));
+                assert_eq!(memory, Some(8192));
+                assert_eq!(disk, Some(30));
+            }
+            _ => panic!("expected sbx image create command"),
+        }
     }
 
     #[test]

@@ -321,6 +321,66 @@ describe("sandbox image helpers", () => {
     expect(sandbox.terminate).toHaveBeenCalled();
   });
 
+  it("createSandboxImage forwards custom disk size to the build sandbox", async () => {
+    vi.stubEnv("TENSORLAKE_API_URL", "https://api.tensorlake.ai");
+    vi.stubEnv("TENSORLAKE_API_KEY", "tl_key_test");
+    vi.stubEnv("INDEXIFY_NAMESPACE", "default");
+    vi.stubEnv("TENSORLAKE_ORGANIZATION_ID", "org_123");
+    vi.stubEnv("TENSORLAKE_PROJECT_ID", "proj_123");
+
+    const tempDir = await mkdir(path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-disk`), {
+      recursive: true,
+    });
+    const dockerfilePath = path.join(tempDir, "Dockerfile");
+    await writeFile(dockerfilePath, "FROM python:3.12-slim\nRUN echo hi\n", "utf8");
+
+    const sandbox = {
+      sandboxId: "sbx-1",
+      run: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" })),
+      startProcess: vi.fn(async () => ({ pid: 1 })),
+      getStdout: vi.fn(async () => ({ pid: 1, lines: [], lineCount: 0 })),
+      getStderr: vi.fn(async () => ({ pid: 1, lines: [], lineCount: 0 })),
+      getProcess: vi.fn(async () => ({
+        pid: 1,
+        status: "exited",
+        stdinWritable: false,
+        command: "sh",
+        args: [],
+        startedAt: new Date(),
+        exitCode: 0,
+      })),
+      writeFile: vi.fn(async () => {}),
+      terminate: vi.fn(async () => {}),
+    };
+
+    const client = {
+      createAndConnect: vi.fn(async () => sandbox),
+      snapshotAndWait: vi.fn(async () => ({
+        snapshotId: "snap-1",
+        snapshotUri: "s3://snapshots/snap-1.tar.zst",
+      })),
+      close: vi.fn(() => {}),
+    };
+
+    await createSandboxImage(
+      dockerfilePath,
+      { diskMb: 25 * 1024 },
+      {
+        emit: () => {},
+        createClient: () => client as never,
+        registerImage: async () => ({ id: "tpl-1" }),
+        sleep: async () => {},
+      },
+    );
+
+    expect(client.createAndConnect).toHaveBeenCalledWith({
+      image: "python:3.12-slim",
+      cpus: 2.0,
+      memoryMb: 4096,
+      diskMb: 25 * 1024,
+    });
+  });
+
   it("createSandboxImage lets the server choose the base image when the Image DSL omits one", async () => {
     vi.stubEnv("TENSORLAKE_API_URL", "https://api.tensorlake.ai");
     vi.stubEnv("TENSORLAKE_API_KEY", "tl_key_test");

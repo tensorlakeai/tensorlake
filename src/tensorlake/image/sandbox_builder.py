@@ -728,6 +728,7 @@ def _run_plan(
     memory_mb: int,
     is_public: bool,
     emit: EmitFn,
+    disk_mb: int | None = None,
 ) -> dict:
     """Materialize a plan in a sandbox, snapshot, and register it."""
     emit(
@@ -746,11 +747,15 @@ def _run_plan(
 
     sandbox = None
     try:
-        sandbox = sandbox_client.create_and_connect(
-            image=plan.base_image,
-            cpus=cpus,
-            memory_mb=memory_mb,
-        )
+        create_kwargs: dict[str, float | int | str] = {
+            "image": plan.base_image,
+            "cpus": cpus,
+            "memory_mb": memory_mb,
+        }
+        if disk_mb is not None:
+            create_kwargs["disk_mb"] = disk_mb
+
+        sandbox = sandbox_client.create_and_connect(**create_kwargs)
         emit(
             {
                 "type": "status",
@@ -791,7 +796,6 @@ def _run_plan(
                 "image_id": result.get("id", ""),
                 "name": plan.registered_name,
                 "snapshot_id": snapshot.snapshot_id,
-                "snapshot_uri": snapshot.snapshot_uri,
             }
         )
         return result
@@ -812,6 +816,7 @@ def build_sandbox_image(
     registered_name: str | None = None,
     cpus: float = 2.0,
     memory_mb: int = 4096,
+    disk_mb: int | None = None,
     is_public: bool = False,
     context_dir: str | None = None,
     verbose: bool = False,
@@ -828,6 +833,7 @@ def build_sandbox_image(
             image's ``name`` or the Dockerfile stem.
         cpus: CPUs for the build sandbox.
         memory_mb: Memory for the build sandbox in MB.
+        disk_mb: Root disk size for the build sandbox in MB.
         is_public: Make the registered image publicly accessible.
         context_dir: Directory used to resolve relative COPY/ADD sources.
             Ignored when ``source`` is a Dockerfile path (the Dockerfile's
@@ -875,7 +881,9 @@ def build_sandbox_image(
 
     ctx = _build_context_from_env()
     try:
-        return _run_plan(plan, ctx, cpus, memory_mb, is_public, emit=emit)
+        return _run_plan(
+            plan, ctx, cpus, memory_mb, is_public, emit=emit, disk_mb=disk_mb
+        )
     except SandboxImageError:
         raise
     except Exception as e:

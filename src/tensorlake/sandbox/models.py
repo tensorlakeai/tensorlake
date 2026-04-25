@@ -71,6 +71,14 @@ class ContainerResourcesInfo(BaseModel):
     ephemeral_disk_mb: int
 
 
+class CreateSandboxResources(BaseModel):
+    """Resource overrides accepted when creating a sandbox."""
+
+    cpus: float
+    memory_mb: int
+    disk_mb: int | None = None
+
+
 class NetworkConfig(BaseModel):
     """Network access control policy for sandbox containers.
 
@@ -114,7 +122,7 @@ class CreateSandboxRequest(BaseModel):
     """Request payload for creating a sandbox."""
 
     image: str | None = None
-    resources: ContainerResourcesInfo
+    resources: CreateSandboxResources
     secret_names: list[str] | None = None
     timeout_secs: int | None = None
     entrypoint: list[str] | None = None
