@@ -529,21 +529,27 @@ export class SandboxClient {
   ): Promise<Sandbox> {
     const startupTimeout = options?.startupTimeout ?? 60;
 
-    let result: Traced<CreateSandboxResponse>;
-    if (options?.poolId != null) {
-      result = await this.claim(options.poolId);
-    } else {
-      result = await this.create(options);
-    }
+    // claim() never sends options.name to the server, so only create() should fall
+    // back to it locally when the server response omits a name.
+    const result = options?.poolId != null
+      ? await this.claim(options.poolId)
+      : await this.create(options);
+    const requestedName = options?.poolId != null ? null : options?.name ?? null;
+
+    const finishConnect = (routingHint: string | undefined, name: string | null | undefined) => {
+      const sandbox = this.connect(result.sandboxId, options?.proxyUrl, routingHint);
+      sandbox._setOwner(this);
+      sandbox.traceId = result.traceId;
+      sandbox._setLifecycleIdentifier(result.sandboxId);
+      sandbox._setName(name ?? requestedName);
+      return sandbox;
+    };
 
     // Fast path: the blocking create/claim response already carries Running status
     // and a short-lived routing hint. Use it immediately to skip an extra poll RTT
     // and let the proxy route the first request without a placement lookup.
     if (result.status === SandboxStatus.RUNNING) {
-      const sandbox = this.connect(result.sandboxId, options?.proxyUrl, result.routingHint);
-      sandbox._setOwner(this);
-      sandbox.traceId = result.traceId;
-      return sandbox;
+      return finishConnect(result.routingHint, result.name);
     }
 
     const deadline = Date.now() + startupTimeout * 1000;
@@ -551,10 +557,7 @@ export class SandboxClient {
     while (Date.now() < deadline) {
       const info = await this.get(result.sandboxId);
       if (info.status === SandboxStatus.RUNNING) {
-        const sandbox = this.connect(result.sandboxId, options?.proxyUrl, info.routingHint);
-        sandbox._setOwner(this);
-        sandbox.traceId = result.traceId;
-        return sandbox;
+        return finishConnect(info.routingHint, info.name);
       }
       if (info.status === SandboxStatus.TERMINATED) {
         throw new SandboxError(

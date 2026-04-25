@@ -23,6 +23,7 @@ import {
   type PtySessionInfo,
   type RunOptions,
   type SandboxClientOptions,
+  type SandboxInfo,
   type SandboxOptions,
   type SendSignalResponse,
   type SnapshotInfo,
@@ -31,6 +32,7 @@ import {
   SnapshotStatus,
   StdinMode,
   type SuspendResumeOptions,
+  type UpdateSandboxOptions,
   fromSnakeKeys,
 } from "./models.js";
 import {
@@ -296,9 +298,12 @@ export class Sandbox {
   private readonly wsHeaders: Record<string, string>;
   private ownsSandbox = false;
   private lifecycleClient: SandboxClient | null = null;
+  private lifecycleIdentifier: string;
+  private sandboxName: string | null = null;
 
   constructor(options: SandboxOptions) {
     this.sandboxId = options.sandboxId;
+    this.lifecycleIdentifier = options.sandboxId;
 
     const proxyUrl = options.proxyUrl ?? defaults.SANDBOX_PROXY_URL;
     const { baseUrl, hostHeader } = resolveProxyTarget(proxyUrl, options.sandboxId);
@@ -325,6 +330,20 @@ export class Sandbox {
       hostHeader,
       routingHint: options.routingHint,
     });
+  }
+
+  get name(): string | null {
+    return this.sandboxName;
+  }
+
+  /** @internal Used by client wiring to keep locally cached name in sync. */
+  _setName(name: string | null): void {
+    this.sandboxName = name;
+  }
+
+  /** @internal Used by lifecycle operations to pin to canonical sandbox ID. */
+  _setLifecycleIdentifier(identifier: string): void {
+    this.lifecycleIdentifier = identifier;
   }
 
   /** @internal Used by SandboxClient.createAndConnect to set ownership. */
@@ -364,9 +383,15 @@ export class Sandbox {
   ): Promise<Sandbox> {
     const { SandboxClient } = await import("./client.js");
     const client = new SandboxClient(options, /* _internal */ true);
-    await client.get(options.sandboxId); // throws SandboxNotFoundError if not found
-    const sandbox = client.connect(options.sandboxId, options.proxyUrl, options.routingHint);
+    const info = await client.get(options.sandboxId); // throws SandboxNotFoundError if not found
+    const sandbox = client.connect(
+      info.sandboxId,
+      options.proxyUrl,
+      options.routingHint ?? info.routingHint,
+    );
     sandbox.lifecycleClient = client;
+    sandbox._setLifecycleIdentifier(info.sandboxId);
+    sandbox._setName(info.name ?? null);
     return sandbox;
   }
 
@@ -405,6 +430,34 @@ export class Sandbox {
   }
 
   /**
+   * Fetch the current sandbox status from the server.
+   *
+   * Always hits the network — the value is not cached locally because the
+   * status changes over the sandbox's lifecycle.
+   */
+  async status(): Promise<SandboxStatus> {
+    const client = this.requireLifecycleClient("read_status");
+    const info = await client.get(this.lifecycleIdentifier);
+    this._setLifecycleIdentifier(info.sandboxId);
+    this._setName(info.name ?? null);
+    return info.status;
+  }
+
+  /**
+   * Update this sandbox's properties (name, exposed ports, proxy auth).
+   *
+   * Naming an ephemeral sandbox makes it non-ephemeral and enables
+   * suspend/resume.
+   */
+  async update(options: UpdateSandboxOptions): Promise<SandboxInfo> {
+    const client = this.requireLifecycleClient("update");
+    const info = await client.update(this.lifecycleIdentifier, options);
+    this._setLifecycleIdentifier(info.sandboxId);
+    this._setName(info.name ?? null);
+    return info;
+  }
+
+  /**
    * Suspend this sandbox.
    *
    * By default blocks until the sandbox is fully `Suspended`. Pass
@@ -412,7 +465,7 @@ export class Sandbox {
    */
   async suspend(options?: SuspendResumeOptions): Promise<void> {
     const client = this.requireLifecycleClient("suspend");
-    await client.suspend(this.sandboxId, options);
+    await client.suspend(this.lifecycleIdentifier, options);
   }
 
   /**
@@ -423,7 +476,7 @@ export class Sandbox {
    */
   async resume(options?: SuspendResumeOptions): Promise<void> {
     const client = this.requireLifecycleClient("resume");
-    await client.resume(this.sandboxId, options);
+    await client.resume(this.lifecycleIdentifier, options);
   }
 
   /**
@@ -437,10 +490,10 @@ export class Sandbox {
   async checkpoint(options?: CheckpointOptions): Promise<SnapshotInfo | undefined> {
     const client = this.requireLifecycleClient("checkpoint");
     if (options?.wait === false) {
-      await client.snapshot(this.sandboxId, { contentMode: options.contentMode });
+      await client.snapshot(this.lifecycleIdentifier, { contentMode: options.contentMode });
       return undefined;
     }
-    return client.snapshotAndWait(this.sandboxId, {
+    return client.snapshotAndWait(this.lifecycleIdentifier, {
       timeout: options?.timeout,
       pollInterval: options?.pollInterval,
       contentMode: options?.contentMode,
@@ -453,7 +506,7 @@ export class Sandbox {
   async listSnapshots(): Promise<Traced<SnapshotInfo[]>> {
     const client = this.requireLifecycleClient("listSnapshots");
     const all = await client.listSnapshots();
-    const filtered = all.filter((s) => s.sandboxId === this.sandboxId);
+    const filtered = all.filter((s) => s.sandboxId === this.lifecycleIdentifier);
     return Object.assign(filtered, { traceId: all.traceId });
   }
 
@@ -469,7 +522,7 @@ export class Sandbox {
     this.lifecycleClient = null;
     this.close();
     if (client) {
-      await client.delete(this.sandboxId);
+      await client.delete(this.lifecycleIdentifier);
     }
   }
 
