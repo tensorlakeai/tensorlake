@@ -1083,8 +1083,6 @@ class SandboxClient:
                 routing_hint=result.routing_hint,
             )
             sandbox._sandbox_id = result.sandbox_id
-            sandbox._name = result.name
-            sandbox._name_loaded = True
             sandbox._owns_sandbox = True
             sandbox._lifecycle_client = self
             sandbox._trace_id = result.trace_id
@@ -1100,8 +1098,6 @@ class SandboxClient:
                     routing_hint=info.routing_hint,
                 )
                 sandbox._sandbox_id = info.sandbox_id
-                sandbox._name = info.name
-                sandbox._name_loaded = True
                 sandbox._cached_info = info
                 sandbox._owns_sandbox = True
                 sandbox._lifecycle_client = self

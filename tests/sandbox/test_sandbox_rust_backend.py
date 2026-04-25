@@ -1,9 +1,16 @@
 import json
 import unittest
+from unittest.mock import MagicMock
 
-from tensorlake._tracing import TracedIterator
+from tensorlake._tracing import Traced, TracedIterator
 from tensorlake.sandbox import Sandbox, SandboxConnectionError
-from tensorlake.sandbox.models import StdinMode
+from tensorlake.sandbox.exceptions import SandboxError
+from tensorlake.sandbox.models import (
+    ContainerResourcesInfo,
+    SandboxInfo,
+    SandboxStatus,
+    StdinMode,
+)
 
 _TRACE_ID = "00-deadbeefdeadbeefdeadbeefdeadbeef-cafebabecafebabe-01"
 
@@ -91,6 +98,19 @@ def _make_sandbox(fake=None):
         ),
         client,
     )
+
+
+def _sandbox_info(status=SandboxStatus.RUNNING, **overrides) -> SandboxInfo:
+    fields = {
+        "id": "sbx-1",
+        "namespace": "default",
+        "status": status,
+        "resources": ContainerResourcesInfo(
+            cpus=1.0, memory_mb=512, ephemeral_disk_mb=1024
+        ),
+    }
+    fields.update(overrides)
+    return SandboxInfo(**fields)
 
 
 class TestSandboxRustBackend(unittest.TestCase):
@@ -198,6 +218,72 @@ class TestSandboxRustBackend(unittest.TestCase):
             SandboxConnectionError, "stream ended without an exit event"
         ):
             sandbox.run("echo", args=["hello"])
+
+    def test_name_property_fetches_via_lifecycle_client(self):
+        sandbox, _ = _make_sandbox()
+        sandbox._lifecycle_client = MagicMock()
+        sandbox._lifecycle_client.get.return_value = Traced(
+            _TRACE_ID, _sandbox_info(name="my-sandbox")
+        )
+
+        self.assertEqual(sandbox.name, "my-sandbox")
+        self.assertEqual(sandbox.name, "my-sandbox")
+        sandbox._lifecycle_client.get.assert_called_once_with("sbx-1")
+
+    def test_name_raises_without_lifecycle_client(self):
+        sandbox, _ = _make_sandbox()
+        with self.assertRaises(SandboxError):
+            _ = sandbox.name
+
+    def test_status_property_fetches_live(self):
+        sandbox, _ = _make_sandbox()
+        sandbox._lifecycle_client = MagicMock()
+        sandbox._lifecycle_client.get.side_effect = [
+            Traced(_TRACE_ID, _sandbox_info(status=SandboxStatus.RUNNING)),
+            Traced(_TRACE_ID, _sandbox_info(status=SandboxStatus.SUSPENDED)),
+        ]
+
+        self.assertEqual(sandbox.status, SandboxStatus.RUNNING)
+        self.assertEqual(sandbox.status, SandboxStatus.SUSPENDED)
+        self.assertEqual(sandbox._lifecycle_client.get.call_count, 2)
+
+    def test_status_raises_without_lifecycle_client(self):
+        sandbox, _ = _make_sandbox()
+        with self.assertRaises(SandboxError):
+            _ = sandbox.status
+
+    def test_update_calls_lifecycle_client_and_refreshes_name(self):
+        sandbox, _ = _make_sandbox()
+        sandbox._cached_info = _sandbox_info(name="old-name")
+        sandbox._lifecycle_client = MagicMock()
+        sandbox._lifecycle_client.update_sandbox.return_value = Traced(
+            _TRACE_ID,
+            _sandbox_info(
+                name="renamed",
+                exposed_ports=[8080],
+                allow_unauthenticated_access=True,
+            ),
+        )
+
+        traced = sandbox.update(
+            name="renamed",
+            allow_unauthenticated_access=True,
+            exposed_ports=[8080],
+        )
+
+        sandbox._lifecycle_client.update_sandbox.assert_called_once_with(
+            "sbx-1",
+            name="renamed",
+            allow_unauthenticated_access=True,
+            exposed_ports=[8080],
+        )
+        self.assertEqual(traced.name, "renamed")
+        self.assertEqual(sandbox.name, "renamed")
+
+    def test_update_raises_without_lifecycle_client(self):
+        sandbox, _ = _make_sandbox()
+        with self.assertRaises(SandboxError):
+            sandbox.update(name="anything")
 
     def test_health_maps_connection_error(self):
         class FakeRustError(Exception):

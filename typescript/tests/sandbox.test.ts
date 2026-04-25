@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as undici from "undici";
 import { Sandbox } from "../src/sandbox.js";
-import { ProcessStatus } from "../src/models.js";
+import { ProcessStatus, SandboxStatus } from "../src/models.js";
+import { SandboxError } from "../src/errors.js";
 
 vi.mock("undici", async (importOriginal) => {
   const actual = await importOriginal<typeof import("undici")>();
@@ -242,6 +243,107 @@ describe("Sandbox", () => {
       expect(info.version).toBe("1.0.0");
       expect(info.uptimeSecs).toBe(3600);
       expect(info.runningProcesses).toBe(2);
+      sbx.close();
+    });
+  });
+
+  describe("name / status / update", () => {
+    function sandboxInfoBody(overrides: Record<string, unknown> = {}) {
+      return JSON.stringify({
+        id: "sbx-1",
+        namespace: "default",
+        status: "running",
+        resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+        secret_names: [],
+        ...overrides,
+      });
+    }
+
+    it("connect() populates name from server info", async () => {
+      mockFetch(() =>
+        new Response(sandboxInfoBody({ name: "my-sandbox" }), { status: 200 }),
+      );
+
+      const sbx = await Sandbox.connect({
+        sandboxId: "sbx-1",
+        apiUrl: "http://localhost:8900",
+      });
+      expect(sbx.name).toBe("my-sandbox");
+      sbx.close();
+    });
+
+    it("connect() leaves name null when server omits it", async () => {
+      mockFetch(() => new Response(sandboxInfoBody(), { status: 200 }));
+
+      const sbx = await Sandbox.connect({
+        sandboxId: "sbx-1",
+        apiUrl: "http://localhost:8900",
+      });
+      expect(sbx.name).toBeNull();
+      sbx.close();
+    });
+
+    it("status() fetches fresh status from the server every call", async () => {
+      const responses = [
+        sandboxInfoBody({ status: "running" }), // initial GET inside Sandbox.connect()
+        sandboxInfoBody({ status: "running" }),
+        sandboxInfoBody({ status: "suspended" }),
+      ];
+      mockFetch(() => new Response(responses.shift()!, { status: 200 }));
+
+      const sbx = await Sandbox.connect({
+        sandboxId: "sbx-1",
+        apiUrl: "http://localhost:8900",
+      });
+      expect(await sbx.status()).toBe(SandboxStatus.RUNNING);
+      expect(await sbx.status()).toBe(SandboxStatus.SUSPENDED);
+      sbx.close();
+    });
+
+    it("status() throws when no lifecycle client is wired", async () => {
+      const sbx = makeSandbox();
+      await expect(sbx.status()).rejects.toThrow(SandboxError);
+      sbx.close();
+    });
+
+    it("update() PATCHes the sandbox and refreshes the local name", async () => {
+      let patchBody: Record<string, unknown> | null = null;
+      let patchUrl = "";
+      mockFetch((url, init) => {
+        if (init?.method === "PATCH") {
+          patchUrl = url;
+          patchBody = JSON.parse(init.body as string);
+          return new Response(
+            sandboxInfoBody({ name: "renamed", exposed_ports: [8080] }),
+            { status: 200 },
+          );
+        }
+        // Initial GET from Sandbox.connect()
+        return new Response(sandboxInfoBody({ name: "old-name" }), {
+          status: 200,
+        });
+      });
+
+      const sbx = await Sandbox.connect({
+        sandboxId: "sbx-1",
+        apiUrl: "http://localhost:8900",
+      });
+      expect(sbx.name).toBe("old-name");
+
+      const info = await sbx.update({ name: "renamed", exposedPorts: [8080] });
+
+      expect(patchUrl).toContain("/sandboxes/sbx-1");
+      expect(patchBody).not.toBeNull();
+      expect(patchBody!.name).toBe("renamed");
+      expect(patchBody!.exposed_ports).toEqual([8080]);
+      expect(info.name).toBe("renamed");
+      expect(sbx.name).toBe("renamed");
+      sbx.close();
+    });
+
+    it("update() throws when no lifecycle client is wired", async () => {
+      const sbx = makeSandbox();
+      await expect(sbx.update({ name: "x" })).rejects.toThrow(SandboxError);
       sbx.close();
     });
   });

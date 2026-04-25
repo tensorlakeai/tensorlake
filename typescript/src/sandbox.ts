@@ -23,6 +23,7 @@ import {
   type PtySessionInfo,
   type RunOptions,
   type SandboxClientOptions,
+  type SandboxInfo,
   type SandboxOptions,
   type SendSignalResponse,
   type SnapshotInfo,
@@ -31,6 +32,7 @@ import {
   SnapshotStatus,
   StdinMode,
   type SuspendResumeOptions,
+  type UpdateSandboxOptions,
   fromSnakeKeys,
 } from "./models.js";
 import {
@@ -290,6 +292,7 @@ function sendPtyFrame(socket: WebSocket, frame: Buffer): Promise<void> {
  */
 export class Sandbox {
   readonly sandboxId: string;
+  name: string | null = null;
   traceId: string | null = null;
   private readonly http: HttpClient;
   private readonly baseUrl: string;
@@ -364,9 +367,10 @@ export class Sandbox {
   ): Promise<Sandbox> {
     const { SandboxClient } = await import("./client.js");
     const client = new SandboxClient(options, /* _internal */ true);
-    await client.get(options.sandboxId); // throws SandboxNotFoundError if not found
+    const info = await client.get(options.sandboxId); // throws SandboxNotFoundError if not found
     const sandbox = client.connect(options.sandboxId, options.proxyUrl, options.routingHint);
     sandbox.lifecycleClient = client;
+    sandbox.name = info.name ?? null;
     return sandbox;
   }
 
@@ -402,6 +406,31 @@ export class Sandbox {
       );
     }
     return this.lifecycleClient;
+  }
+
+  /**
+   * Fetch the current sandbox status from the server.
+   *
+   * Always hits the network — the value is not cached locally because the
+   * status changes over the sandbox's lifecycle.
+   */
+  async status(): Promise<SandboxStatus> {
+    const client = this.requireLifecycleClient("read_status");
+    const info = await client.get(this.sandboxId);
+    return info.status;
+  }
+
+  /**
+   * Update this sandbox's properties (name, exposed ports, proxy auth).
+   *
+   * Naming an ephemeral sandbox makes it non-ephemeral and enables
+   * suspend/resume.
+   */
+  async update(options: UpdateSandboxOptions): Promise<SandboxInfo> {
+    const client = this.requireLifecycleClient("update");
+    const info = await client.update(this.sandboxId, options);
+    this.name = info.name ?? null;
+    return info;
   }
 
   /**

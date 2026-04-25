@@ -94,6 +94,7 @@ export interface CreateSandboxResponse {
   sandboxId: string;
   status: SandboxStatus;
   routingHint?: string;
+  name?: string | null;
 }
 
 export interface SandboxInfo {

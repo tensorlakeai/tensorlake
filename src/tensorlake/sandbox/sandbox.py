@@ -28,6 +28,7 @@ from .models import (
     OutputResponse,
     ProcessInfo,
     SandboxInfo,
+    SandboxStatus,
     SendSignalResponse,
     SnapshotContentMode,
     SnapshotInfo,
@@ -138,8 +139,6 @@ class Sandbox:
 
         self._identifier = sandbox_identifier
         self._sandbox_id: str | None = None
-        self._name: str | None = None
-        self._name_loaded: bool = False
         self._trace_id: str | None = None
         self._cached_info: SandboxInfo | None = None
         self._owns_sandbox: bool = False
@@ -532,11 +531,46 @@ class Sandbox:
     @property
     def name(self) -> str | None:
         """The human-readable name for this sandbox, or None if unnamed."""
-        if self._name_loaded:
-            return self._name
-        self._name = self._fetch_info().name
-        self._name_loaded = True
-        return self._name
+        return self._fetch_info().name
+
+    @property
+    def status(self) -> SandboxStatus:
+        """Current sandbox status fetched fresh from the server."""
+        self._require_lifecycle_client("read_status")
+        return self._lifecycle_client.get(self._identifier).value.status
+
+    def update(
+        self,
+        name: str | None = None,
+        *,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
+    ) -> Traced[SandboxInfo]:
+        """Update this sandbox's properties.
+
+        Supports updating the sandbox name and sandbox proxy access settings.
+        Naming an ephemeral sandbox makes it non-ephemeral and enables
+        suspend/resume.
+
+        Args:
+            name: New name for the sandbox.
+            allow_unauthenticated_access: Whether exposed user ports should be
+                reachable without TensorLake auth.
+            exposed_ports: User ports that should be routable through the
+                sandbox proxy. Port ``9501`` is reserved.
+
+        Returns:
+            Traced[SandboxInfo] with the updated sandbox details.
+        """
+        self._require_lifecycle_client("update")
+        traced = self._lifecycle_client.update_sandbox(
+            self._identifier,
+            name=name,
+            allow_unauthenticated_access=allow_unauthenticated_access,
+            exposed_ports=exposed_ports,
+        )
+        self._cached_info = traced.value
+        return traced
 
     def __enter__(self) -> Sandbox:
         return self
