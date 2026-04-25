@@ -111,7 +111,7 @@ export class SandboxClient {
       resources: {
         cpus: options?.cpus ?? 1.0,
         memory_mb: options?.memoryMb ?? 1024,
-        ephemeral_disk_mb: options?.ephemeralDiskMb ?? 1024,
+        ...(options?.diskMb != null ? { disk_mb: options.diskMb } : {}),
       },
     };
 

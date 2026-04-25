@@ -107,7 +107,7 @@ pub async fn run(
             .map(|v| format!("{} MB", v))
             .unwrap_or_else(|| "-".to_string());
         let disk = resources
-            .and_then(|r| r.get("ephemeral_disk_mb"))
+            .and_then(|r| r.get("disk_mb"))
             .and_then(|v| v.as_i64())
             .map(|v| format!("{} MB", v))
             .unwrap_or_else(|| "-".to_string());

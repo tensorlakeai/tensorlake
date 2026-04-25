@@ -47,6 +47,7 @@ export interface CreateSandboxImageOptions {
   registeredName?: string;
   cpus?: number;
   memoryMb?: number;
+  diskMb?: number;
   isPublic?: boolean;
   contextDir?: string;
   /**
@@ -100,6 +101,7 @@ interface BuildClient {
     image?: string;
     cpus?: number;
     memoryMb?: number;
+    diskMb?: number;
   }): Promise<BuildSandbox>;
   snapshotAndWait(
     sandboxId: string,
@@ -1004,6 +1006,7 @@ export async function createSandboxImage(
       ...(plan.baseImage == null ? {} : { image: plan.baseImage }),
       cpus: options.cpus ?? 2.0,
       memoryMb: options.memoryMb ?? 4096,
+      ...(options.diskMb != null ? { diskMb: options.diskMb } : {}),
     });
 
     emit({
@@ -1019,7 +1022,6 @@ export async function createSandboxImage(
     emit({
       type: "snapshot_created",
       snapshot_id: snapshot.snapshotId,
-      snapshot_uri: snapshot.snapshotUri ?? null,
     });
 
     if (!snapshot.snapshotUri) {
@@ -1069,24 +1071,30 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
       name: { type: "string", short: "n" },
       cpus: { type: "string" },
       memory: { type: "string" },
+      disk: { type: "string" },
       public: { type: "boolean", default: false },
     },
   });
 
   const dockerfilePath = parsed.positionals[0];
   if (!dockerfilePath) {
-    throw new Error("Usage: tensorlake-create-sandbox-image <dockerfile_path> [--name NAME] [--cpus N] [--memory MB] [--public]");
+    throw new Error("Usage: tensorlake-create-sandbox-image <dockerfile_path> [--name NAME] [--cpus N] [--memory MB] [--disk GB] [--public]");
   }
 
   const cpus =
     parsed.values.cpus != null ? Number(parsed.values.cpus) : undefined;
   const memoryMb =
     parsed.values.memory != null ? Number(parsed.values.memory) : undefined;
+  const diskGb =
+    parsed.values.disk != null ? Number(parsed.values.disk) : undefined;
   if (cpus != null && !Number.isFinite(cpus)) {
     throw new Error(`Invalid --cpus value: ${parsed.values.cpus}`);
   }
   if (memoryMb != null && !Number.isInteger(memoryMb)) {
     throw new Error(`Invalid --memory value: ${parsed.values.memory}`);
+  }
+  if (diskGb != null && !Number.isInteger(diskGb)) {
+    throw new Error(`Invalid --disk value: ${parsed.values.disk}`);
   }
 
   await createSandboxImage(
@@ -1095,6 +1103,7 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
       registeredName: parsed.values.name,
       cpus,
       memoryMb,
+      diskMb: diskGb != null ? diskGb * 1024 : undefined,
       isPublic: parsed.values.public,
     },
     { emit: ndjsonStdoutEmit },

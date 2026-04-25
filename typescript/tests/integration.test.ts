@@ -141,7 +141,7 @@ describe(
         image: SANDBOX_IMAGE,
         cpus: SANDBOX_CPUS,
         memoryMb: SANDBOX_MEMORY_MB,
-        ephemeralDiskMb: SANDBOX_DISK_MB,
+        diskMb: SANDBOX_DISK_MB,
         entrypoint: ["sleep", "300"],
       });
       expect(resp.sandboxId).toBeTruthy();

@@ -43,7 +43,6 @@ describe("SandboxClient", () => {
         expect(body.resources).toEqual({
           cpus: 1.0,
           memory_mb: 1024,
-          ephemeral_disk_mb: 1024,
         });
         return new Response(
           JSON.stringify({ sandbox_id: "sbx-1", status: "pending" }),
@@ -64,6 +63,8 @@ describe("SandboxClient", () => {
         expect(body.image).toBe("python:3.12");
         expect(body.resources.cpus).toBe(2);
         expect(body.resources.memory_mb).toBe(1024);
+        expect(body.resources.ephemeral_disk_mb).toBeUndefined();
+        expect(body.resources.disk_mb).toBe(25 * 1024);
         expect(body.secret_names).toEqual(["my-secret"]);
         expect(body.network).toEqual({
           allow_internet_access: false,
@@ -81,6 +82,7 @@ describe("SandboxClient", () => {
         image: "python:3.12",
         cpus: 2,
         memoryMb: 1024,
+        diskMb: 25 * 1024,
         secretNames: ["my-secret"],
         allowInternetAccess: false,
         allowOut: ["8.8.8.8"],

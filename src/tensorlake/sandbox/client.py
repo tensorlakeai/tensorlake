@@ -22,6 +22,7 @@ from .models import (
     ContainerResourcesInfo,
     CreateSandboxPoolResponse,
     CreateSandboxRequest,
+    CreateSandboxResources,
     CreateSandboxResponse,
     CreateSnapshotResponse,
     ListSandboxesResponse,
@@ -279,7 +280,7 @@ class SandboxClient:
         image: str | None = None,
         cpus: float = 1.0,
         memory_mb: int = 1024,
-        ephemeral_disk_mb: int = 1024,
+        disk_mb: int | None = None,
         secret_names: list[str] | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
@@ -297,7 +298,8 @@ class SandboxClient:
                 When omitted, Tensorlake uses the default managed environment.
             cpus: Number of CPUs to allocate
             memory_mb: Memory in megabytes
-            ephemeral_disk_mb: Ephemeral disk space in megabytes
+            disk_mb: Root disk size in megabytes. When omitted, the server
+                uses its default disk size.
             secret_names: List of secret names to inject
             timeout_secs: Timeout in seconds (optional)
             entrypoint: Custom entrypoint command (optional)
@@ -333,10 +335,10 @@ class SandboxClient:
 
         request_model = CreateSandboxRequest(
             image=image,
-            resources=ContainerResourcesInfo(
+            resources=CreateSandboxResources(
                 cpus=cpus,
                 memory_mb=memory_mb,
-                ephemeral_disk_mb=ephemeral_disk_mb,
+                disk_mb=disk_mb,
             ),
             secret_names=secret_names,
             timeout_secs=timeout_secs,
@@ -1004,7 +1006,7 @@ class SandboxClient:
         image: str | None = None,
         cpus: float = 1.0,
         memory_mb: int = 1024,
-        ephemeral_disk_mb: int = 1024,
+        disk_mb: int | None = None,
         secret_names: list[str] | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
@@ -1029,7 +1031,8 @@ class SandboxClient:
                 (optional if using pool).
             cpus: Number of CPUs to allocate
             memory_mb: Memory in megabytes
-            ephemeral_disk_mb: Ephemeral disk space in megabytes
+            disk_mb: Root disk size in megabytes. When omitted, the server
+                uses its default disk size.
             secret_names: List of secret names to inject
             timeout_secs: Timeout in seconds (optional)
             entrypoint: Custom entrypoint command (optional)
@@ -1065,7 +1068,7 @@ class SandboxClient:
                 image=image,
                 cpus=cpus,
                 memory_mb=memory_mb,
-                ephemeral_disk_mb=ephemeral_disk_mb,
+                disk_mb=disk_mb,
                 secret_names=secret_names,
                 timeout_secs=timeout_secs,
                 entrypoint=entrypoint,

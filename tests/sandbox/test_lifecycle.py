@@ -140,7 +140,7 @@ class TestSandboxLifecycle(BaseSandboxTest):
             image=_SANDBOX_IMAGE,
             cpus=_SANDBOX_CPUS,
             memory_mb=_SANDBOX_MEMORY_MB,
-            ephemeral_disk_mb=_SANDBOX_DISK_MB,
+            disk_mb=_SANDBOX_DISK_MB,
             entrypoint=["sleep", "300"],
         )
         self.assertIsNotNone(resp.sandbox_id)
@@ -770,7 +770,7 @@ class TestNamedSandboxIdentifier(BaseSandboxTest):
             image=_SANDBOX_IMAGE,
             cpus=_SANDBOX_CPUS,
             memory_mb=_SANDBOX_MEMORY_MB,
-            ephemeral_disk_mb=_SANDBOX_DISK_MB,
+            disk_mb=_SANDBOX_DISK_MB,
             entrypoint=["sleep", "300"],
             name=self.__class__.sandbox_name,
         )
@@ -869,7 +869,7 @@ class TestSandboxRun(BaseSandboxTest):
             image=_SANDBOX_IMAGE,
             cpus=_SANDBOX_CPUS,
             memory_mb=_SANDBOX_MEMORY_MB,
-            ephemeral_disk_mb=_SANDBOX_DISK_MB,
+            disk_mb=_SANDBOX_DISK_MB,
             entrypoint=["sleep", "300"],
         )
         cls.sandbox_id = resp.sandbox_id
