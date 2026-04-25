@@ -153,14 +153,15 @@ export class SandboxClient {
   }
 
   /** List all sandboxes in the namespace. */
-  async list(): Promise<SandboxInfo[]> {
+  async list(): Promise<Traced<SandboxInfo[]>> {
     const raw = await this.http.requestJson<{ sandboxes: Record<string, unknown>[] }>(
       "GET",
       this.path("sandboxes"),
     );
-    return (raw.sandboxes ?? []).map(
+    const sandboxes = (raw.sandboxes ?? []).map(
       (s) => fromSnakeKeys(s, "sandboxId") as SandboxInfo,
     );
+    return Object.assign(sandboxes, { traceId: raw.traceId });
   }
 
   /** Update sandbox properties such as name, exposed ports, and proxy auth settings. */
@@ -355,14 +356,15 @@ export class SandboxClient {
   }
 
   /** List all snapshots in the namespace. */
-  async listSnapshots(): Promise<SnapshotInfo[]> {
+  async listSnapshots(): Promise<Traced<SnapshotInfo[]>> {
     const raw = await this.http.requestJson<{ snapshots: Record<string, unknown>[] }>(
       "GET",
       this.path("snapshots"),
     );
-    return (raw.snapshots ?? []).map(
+    const snapshots = (raw.snapshots ?? []).map(
       (s) => fromSnakeKeys(s, "snapshotId") as SnapshotInfo,
     );
+    return Object.assign(snapshots, { traceId: raw.traceId });
   }
 
   /** Delete a snapshot by ID. */
@@ -451,14 +453,15 @@ export class SandboxClient {
   }
 
   /** List all sandbox pools in the namespace. */
-  async listPools(): Promise<SandboxPoolInfo[]> {
+  async listPools(): Promise<Traced<SandboxPoolInfo[]>> {
     const raw = await this.http.requestJson<{ pools: Record<string, unknown>[] }>(
       "GET",
       this.path("sandbox-pools"),
     );
-    return (raw.pools ?? []).map(
+    const pools = (raw.pools ?? []).map(
       (p) => fromSnakeKeys(p, "poolId") as SandboxPoolInfo,
     );
+    return Object.assign(pools, { traceId: raw.traceId });
   }
 
   /** Replace the configuration of an existing sandbox pool. */
