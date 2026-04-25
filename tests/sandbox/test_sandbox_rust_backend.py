@@ -285,6 +285,31 @@ class TestSandboxRustBackend(unittest.TestCase):
         with self.assertRaises(SandboxError):
             sandbox.update(name="anything")
 
+    def test_name_setter_delegates_to_update(self):
+        sandbox, _ = _make_sandbox()
+        sandbox._cached_info = _sandbox_info(name="old-env")
+        sandbox._lifecycle_client = MagicMock()
+        sandbox._lifecycle_client.update_sandbox.return_value = Traced(
+            _TRACE_ID, _sandbox_info(name="new-env")
+        )
+
+        sandbox.name = "new-env"
+
+        sandbox._lifecycle_client.update_sandbox.assert_called_once_with(
+            "sbx-1",
+            name="new-env",
+            allow_unauthenticated_access=None,
+            exposed_ports=None,
+        )
+        self.assertEqual(sandbox.name, "new-env")
+
+    def test_name_setter_rejects_empty_string(self):
+        sandbox, _ = _make_sandbox()
+        sandbox._lifecycle_client = MagicMock()
+        with self.assertRaises(SandboxError):
+            sandbox.name = ""
+        sandbox._lifecycle_client.update_sandbox.assert_not_called()
+
     def test_health_maps_connection_error(self):
         class FakeRustError(Exception):
             pass

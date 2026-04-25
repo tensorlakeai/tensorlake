@@ -535,6 +535,13 @@ class Sandbox:
         """The human-readable name for this sandbox, or None if unnamed."""
         return self._fetch_info().name
 
+    @name.setter
+    def name(self, value: str) -> None:
+        """Assign or change this sandbox's name. Equivalent to ``self.update(name=value)``."""
+        if not value:
+            raise SandboxError("sandbox name must be a non-empty string")
+        self.update(name=value)
+
     @property
     def status(self) -> SandboxStatus:
         """Current sandbox status fetched fresh from the server."""
