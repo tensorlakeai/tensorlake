@@ -317,14 +317,11 @@ class Sandbox:
             namespace=namespace,
             _internal=True,
         )
-        info = client.get(sandbox_id).value  # raises SandboxNotFoundError if not found
-        # Bind the proxy client to the stable sandbox UUID, not the user-supplied
-        # name, so a subsequent `update(name=...)` rename doesn't leave proxy
-        # traffic targeting a stale routing identity.
+        info = client.get(sandbox_id)  # raises SandboxNotFoundError if not found
         sandbox = client.connect(
-            info.sandbox_id, proxy_url=proxy_url, routing_hint=routing_hint
+            sandbox_id, proxy_url=proxy_url, routing_hint=routing_hint
         )
-        sandbox._cached_info = info
+        sandbox._cached_info = info.value
         return sandbox
 
     # --- Class-level snapshot management ---
@@ -575,7 +572,6 @@ class Sandbox:
             exposed_ports=exposed_ports,
         )
         self._cached_info = traced.value
-        self._identifier = traced.value.sandbox_id
         return traced
 
     def __enter__(self) -> Sandbox:

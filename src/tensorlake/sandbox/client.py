@@ -1055,6 +1055,9 @@ class SandboxClient:
             SandboxError: If sandbox fails to start or times out
             SandboxConnectionError: If the server is unreachable
         """
+        # claim() never sends `name` to the server, so only the create() path
+        # may fall back to the requested name when caching info locally.
+        requested_name = None if pool_id is not None else name
         if pool_id is not None:
             result = self.claim(pool_id)
         else:
@@ -1086,6 +1089,11 @@ class SandboxClient:
             sandbox._owns_sandbox = True
             sandbox._lifecycle_client = self
             sandbox._trace_id = result.trace_id
+            sandbox._cached_info = SandboxInfo.model_construct(
+                sandbox_id=result.sandbox_id,
+                status=result.status,
+                name=result.name or requested_name,
+            )
             return sandbox
 
         deadline = time.time() + startup_timeout

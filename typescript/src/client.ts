@@ -529,18 +529,18 @@ export class SandboxClient {
   ): Promise<Sandbox> {
     const startupTimeout = options?.startupTimeout ?? 60;
 
-    let result: Traced<CreateSandboxResponse>;
-    if (options?.poolId != null) {
-      result = await this.claim(options.poolId);
-    } else {
-      result = await this.create(options);
-    }
+    // claim() never sends options.name to the server, so only create() should fall
+    // back to it locally when the server response omits a name.
+    const result = options?.poolId != null
+      ? await this.claim(options.poolId)
+      : await this.create(options);
+    const requestedName = options?.poolId != null ? null : options?.name ?? null;
 
     const finishConnect = (routingHint: string | undefined, name: string | null | undefined) => {
       const sandbox = this.connect(result.sandboxId, options?.proxyUrl, routingHint);
       sandbox._setOwner(this);
       sandbox.traceId = result.traceId;
-      sandbox.name = name ?? options?.name ?? null;
+      sandbox.name = name ?? requestedName;
       return sandbox;
     };
 

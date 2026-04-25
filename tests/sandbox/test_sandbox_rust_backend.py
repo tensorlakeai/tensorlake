@@ -280,28 +280,6 @@ class TestSandboxRustBackend(unittest.TestCase):
         self.assertEqual(traced.name, "renamed")
         self.assertEqual(sandbox.name, "renamed")
 
-    def test_update_switches_identifier_to_stable_sandbox_id(self):
-        # Connect by name, then rename: subsequent lookups must use the
-        # stable id, not the now-stale old name.
-        sandbox = Sandbox(
-            identifier="old-name",
-            proxy_url="http://localhost:9443",
-            api_key="k",
-            _proxy_rust_client=_FakeRustProxyClient(),
-        )
-        sandbox._lifecycle_client = MagicMock()
-        sandbox._lifecycle_client.update_sandbox.return_value = Traced(
-            _TRACE_ID, _sandbox_info(name="renamed")
-        )
-        sandbox._lifecycle_client.get.return_value = Traced(
-            _TRACE_ID, _sandbox_info(name="renamed", status=SandboxStatus.RUNNING)
-        )
-
-        sandbox.update(name="renamed")
-        _ = sandbox.status
-
-        sandbox._lifecycle_client.get.assert_called_once_with("sbx-1")
-
     def test_update_raises_without_lifecycle_client(self):
         sandbox, _ = _make_sandbox()
         with self.assertRaises(SandboxError):

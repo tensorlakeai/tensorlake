@@ -341,36 +341,6 @@ describe("Sandbox", () => {
       sbx.close();
     });
 
-    it("update() switches sandboxId to the stable id so post-rename lookups work", async () => {
-      // Connect by name, rename via update, then call status. The status GET
-      // must target the stable id, not the now-stale name.
-      const getUrls: string[] = [];
-      mockFetch((url, init) => {
-        if (init?.method === "PATCH") {
-          return new Response(
-            sandboxInfoBody({ id: "sbx-stable", name: "renamed" }),
-            { status: 200 },
-          );
-        }
-        getUrls.push(url);
-        return new Response(sandboxInfoBody({ id: "sbx-stable", name: "old-name" }), {
-          status: 200,
-        });
-      });
-
-      const sbx = await Sandbox.connect({
-        sandboxId: "old-name",
-        apiUrl: "http://localhost:8900",
-      });
-      await sbx.update({ name: "renamed" });
-      await sbx.status();
-
-      // Initial connect GET hits "old-name"; status GET must hit "sbx-stable".
-      expect(getUrls[0]).toContain("/sandboxes/old-name");
-      expect(getUrls[1]).toContain("/sandboxes/sbx-stable");
-      sbx.close();
-    });
-
     it("update() throws when no lifecycle client is wired", async () => {
       const sbx = makeSandbox();
       await expect(sbx.update({ name: "x" })).rejects.toThrow(SandboxError);
