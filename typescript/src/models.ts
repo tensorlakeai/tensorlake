@@ -96,6 +96,8 @@ export interface CreateSandboxResponse {
   status: SandboxStatus;
   routingHint?: string;
   name?: string | null;
+  terminationReason?: string;
+  errorDetails?: unknown;
 }
 
 export interface SandboxInfo {
@@ -111,6 +113,8 @@ export interface SandboxInfo {
   network?: NetworkConfig;
   poolId?: string;
   outcome?: string;
+  terminationReason?: string;
+  errorDetails?: unknown;
   createdAt?: Date;
   terminatedAt?: Date;
   name?: string;

@@ -149,6 +149,36 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertEqual(request_json["resources"]["disk_mb"], 25 * 1024)
         self.assertNotIn("ephemeral_disk_mb", request_json["resources"])
 
+    def test_create_and_connect_raises_error_details_from_startup_failure(self):
+        class _StartupFailureRustClient(_FakeRustClient):
+            def get_sandbox_json(self, sandbox_id):
+                self.last_get_sandbox_id = sandbox_id
+                return """
+{
+  "id": "sbx-1",
+  "namespace": "default",
+  "status": "terminated",
+  "resources": {
+    "cpus": 1.0,
+    "memory_mb": 512,
+    "ephemeral_disk_mb": 1024
+  },
+  "secret_names": [],
+  "error_details": {
+    "message": "failed to pull image tensorlake/missing-image"
+  }
+}
+"""
+
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = _StartupFailureRustClient()
+
+        with self.assertRaisesRegex(
+            SandboxError,
+            "terminated during startup: failed to pull image tensorlake/missing-image",
+        ):
+            client.create_and_connect(image="tensorlake/missing-image")
+
     def test_list_uses_rust_backend(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
         client._rust_client = _FakeRustClient()
