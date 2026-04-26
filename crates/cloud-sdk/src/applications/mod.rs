@@ -5,7 +5,7 @@
 //! ## Usage
 //!
 //! ```rust,no_run
-//! use tensorlake_cloud_sdk::{ClientBuilder, applications::{ApplicationsClient, models::{ListApplicationsRequest, GetApplicationRequest}}};
+//! use tensorlake::{ClientBuilder, applications::{ApplicationsClient, models::{ListApplicationsRequest, GetApplicationRequest}}};
 //!
 //! async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //!     let client = ClientBuilder::new("https://api.tensorlake.ai")

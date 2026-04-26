@@ -1,9 +1,9 @@
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use comfy_table::Cell;
-use tensorlake_cloud_sdk::ClientBuilder;
-use tensorlake_cloud_sdk::cron::CronClient;
-use tensorlake_cloud_sdk::error::SdkError;
+use tensorlake::ClientBuilder;
+use tensorlake::cron::CronClient;
+use tensorlake::error::SdkError;
 
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};

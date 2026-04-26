@@ -1,6 +1,6 @@
 use rand::Rng;
 use std::env;
-use tensorlake_cloud_sdk::{Sdk, images::models::*};
+use tensorlake::{Sdk, images::models::*};
 
 fn env_var(name: &str) -> Result<String, String> {
     env::var(name).map_err(|_| format!("{name} must be set"))

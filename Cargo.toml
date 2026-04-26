@@ -12,7 +12,7 @@ license = "Apache-2.0"
 async-trait = "0.1"
 
 # Internal crates
-tensorlake-cloud-sdk = { path = "crates/cloud-sdk" }
+tensorlake = { path = "crates/cloud-sdk" }
 
 # Async runtime
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "time", "process", "io-std", "io-util", "signal"] }

@@ -1,6 +1,6 @@
 use data_encoding::BASE64;
 use std::{collections::HashMap, io::Write, time::Duration};
-use tensorlake_cloud_sdk::{applications::models::*, images::models::BuildStatus};
+use tensorlake::{applications::models::*, images::models::BuildStatus};
 use tokio::time::sleep;
 
 use crate::common::random_string;

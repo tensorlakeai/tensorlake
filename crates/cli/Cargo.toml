@@ -14,7 +14,7 @@ name = "tensorlake"
 path = "src/tensorlake.rs"
 
 [dependencies]
-tensorlake-cloud-sdk = { workspace = true }
+tensorlake = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 reqwest = { workspace = true }

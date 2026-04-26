@@ -1,10 +1,10 @@
 use comfy_table::Cell;
-use tensorlake_cloud_sdk::error::SdkError;
-use tensorlake_cloud_sdk::secrets::SecretsClient;
-use tensorlake_cloud_sdk::secrets::models::{
+use tensorlake::error::SdkError;
+use tensorlake::secrets::SecretsClient;
+use tensorlake::secrets::models::{
     DeleteSecretRequest, ListSecretsRequest, NewSecret, UpsertSecret, UpsertSecretRequest,
 };
-use tensorlake_cloud_sdk::{Client, ClientBuilder};
+use tensorlake::{Client, ClientBuilder};
 
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
