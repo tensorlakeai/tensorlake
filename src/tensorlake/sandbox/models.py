@@ -36,6 +36,7 @@ class SandboxStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
     SNAPSHOTTING = "snapshotting"
+    SUSPENDING = "suspending"
     SUSPENDED = "suspended"
     TERMINATED = "terminated"
 
