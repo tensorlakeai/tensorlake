@@ -71,12 +71,14 @@ pub mod cron;
 pub mod document_ai;
 pub mod error;
 pub mod images;
+pub mod sandbox_templates;
 pub mod sandboxes;
 pub mod secrets;
 use applications::*;
 use cron::*;
 use document_ai::*;
 use images::*;
+use sandbox_templates::*;
 use sandboxes::*;
 use secrets::*;
 
@@ -227,6 +229,19 @@ impl Sdk {
     /// ```
     pub fn images(&self) -> ImagesClient {
         ImagesClient::new(self.client.clone())
+    }
+
+    /// Get a client for managing snapshot-backed sandbox image registrations.
+    pub fn sandbox_templates(
+        &self,
+        organization_id: &str,
+        project_id: &str,
+    ) -> SandboxTemplatesClient {
+        SandboxTemplatesClient::new(
+            self.client.clone(),
+            organization_id.to_string(),
+            project_id.to_string(),
+        )
     }
 
     /// Get a client for managing sandbox lifecycle, pools, and snapshots.

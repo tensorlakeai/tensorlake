@@ -47,6 +47,7 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
+shlex = { workspace = true }
 rustpython-parser = "0.3"
 
 [dev-dependencies]
