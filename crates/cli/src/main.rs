@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use std::num::NonZeroUsize;
 
 use auth::context::CliContext;
-use auth::guard::ensure_auth_and_project;
+use auth::guard::{ensure_auth, ensure_auth_and_project};
 use config::resolver;
 use error::CliError;
 
@@ -173,6 +173,10 @@ enum Commands {
     #[command(subcommand)]
     Secrets(SecretsCommands),
 
+    /// Manage SSH public keys for sandbox SSH access
+    #[command(subcommand, name = "ssh-keys", alias = "ssh-key")]
+    SshKeys(SshKeysCommands),
+
     /// List applications
     #[command(name = "ls")]
     Applications(ApplicationsArgs),
@@ -197,6 +201,27 @@ enum SecretsCommands {
         /// Secret names to unset
         #[arg(required = true)]
         secret_names: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SshKeysCommands {
+    /// List the SSH public keys registered to your account
+    Ls,
+    /// Register an SSH public key (path to a `.pub` file or the key body
+    /// itself). The fingerprint is computed server-side.
+    Add {
+        /// Friendly label, e.g. `laptop` or `ci-runner`
+        #[arg(short, long)]
+        name: String,
+        /// Path to an OpenSSH public key file or the literal key body
+        public_key: String,
+    },
+    /// Remove one or more SSH keys (by id or by unique name)
+    Rm {
+        /// Key ids (`ssh_key_…`) or unique names to remove
+        #[arg(required = true)]
+        keys: Vec<String>,
     },
 }
 
@@ -789,6 +814,18 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 SecretsCommands::Rm { secret_names } => {
                     commands::secrets::unset(ctx, &secret_names).await
                 }
+            }
+        }
+        Commands::SshKeys(subcmd) => {
+            // SSH keys live on the user, not on a project — only auth (PAT or
+            // logged-in session) is required, no org/project context.
+            ensure_auth(ctx).await?;
+            match subcmd {
+                SshKeysCommands::Ls => commands::ssh_keys::list(ctx).await,
+                SshKeysCommands::Add { name, public_key } => {
+                    commands::ssh_keys::add(ctx, &name, &public_key).await
+                }
+                SshKeysCommands::Rm { keys } => commands::ssh_keys::remove(ctx, &keys).await,
             }
         }
         Commands::Applications(app_args) => {
