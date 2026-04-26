@@ -8,7 +8,7 @@ pub struct SnapshotDetails {
     pub snapshot_uri: String,
 }
 
-async fn fetch_snapshot_info(
+pub(crate) async fn fetch_snapshot_info(
     ctx: &CliContext,
     client: &reqwest::Client,
     snapshot_id: &str,

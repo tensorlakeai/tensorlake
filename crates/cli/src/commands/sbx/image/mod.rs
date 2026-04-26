@@ -1,6 +1,7 @@
 pub mod create;
 pub mod describe;
 pub mod ls;
+pub mod register;
 
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};

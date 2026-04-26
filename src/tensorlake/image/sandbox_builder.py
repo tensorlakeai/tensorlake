@@ -687,7 +687,10 @@ def _register_image(
     name: str,
     dockerfile: str,
     snapshot_id: str,
+    snapshot_sandbox_id: str,
     snapshot_uri: str,
+    snapshot_size_bytes: int,
+    rootfs_disk_bytes: int,
     is_public: bool = False,
 ) -> dict:
     """POST to Platform API through the ingress to register the image."""
@@ -713,8 +716,11 @@ def _register_image(
         "name": name,
         "dockerfile": dockerfile,
         "snapshotId": snapshot_id,
+        "snapshotSandboxId": snapshot_sandbox_id,
         "snapshotUri": snapshot_uri,
-        "isPublic": is_public,
+        "snapshotSizeBytes": snapshot_size_bytes,
+        "rootfsDiskBytes": rootfs_disk_bytes,
+        "public": is_public,
     }
     resp = httpx.post(url, json=body, headers=inject_traceparent(headers), timeout=30.0)
     resp.raise_for_status()
@@ -782,12 +788,23 @@ def _run_plan(
             raise RuntimeError(
                 f"Snapshot {snapshot.snapshot_id} completed without a snapshot URI"
             )
+        if snapshot.size_bytes is None:
+            raise RuntimeError(
+                f"Snapshot {snapshot.snapshot_id} completed without size_bytes"
+            )
+        if snapshot.rootfs_disk_bytes is None:
+            raise RuntimeError(
+                f"Snapshot {snapshot.snapshot_id} completed without rootfs_disk_bytes"
+            )
         result = _register_image(
             ctx,
             plan.registered_name,
             plan.dockerfile_text,
             snapshot.snapshot_id,
+            snapshot.sandbox_id,
             snapshot.snapshot_uri,
+            snapshot.size_bytes,
+            snapshot.rootfs_disk_bytes,
             is_public,
         )
         emit(

@@ -276,6 +276,7 @@ class SnapshotInfo(BaseModel):
     error: str | None = None
     snapshot_uri: str | None = None
     size_bytes: int | None = None
+    rootfs_disk_bytes: int | None = None
     created_at: OptionalTimestamp = None
 
     model_config = {"populate_by_name": True}

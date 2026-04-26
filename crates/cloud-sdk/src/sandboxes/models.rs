@@ -209,6 +209,8 @@ pub struct SnapshotInfo {
     #[serde(default)]
     pub size_bytes: Option<i64>,
     #[serde(default)]
+    pub rootfs_disk_bytes: Option<u64>,
+    #[serde(default)]
     pub created_at: Option<serde_json::Value>,
 }
 
