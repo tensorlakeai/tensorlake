@@ -10,6 +10,7 @@ pub async fn run(
     image: Option<&str>,
     cpus: f64,
     memory: i64,
+    disk_mb: Option<u64>,
     timeout: Option<f64>,
     workdir: Option<&str>,
     env: &[String],
@@ -34,6 +35,9 @@ pub async fn run(
             "memory_mb": memory,
         },
     });
+    if let Some(disk_mb) = disk_mb {
+        create_body["resources"]["disk_mb"] = serde_json::json!(disk_mb);
+    }
     if let Some(img) = image {
         create_body["image"] = serde_json::Value::String(img.to_string());
     }
