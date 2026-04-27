@@ -36,4 +36,4 @@ jobs:
       - name: Publish to crates.io
         run: cargo publish -p tensorlake
         env:
-          CARGO_REGISTRY_TOKEN: "Bearer ${{ steps.oidc.outputs.token }}"
+          CARGO_REGISTRY_TOKEN: ${{ steps.oidc.outputs.token }}
