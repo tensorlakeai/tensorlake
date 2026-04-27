@@ -1,4 +1,6 @@
-name: Publish tensorlake to crates.io
+name: Release - Rust SDK (crates.io)
+
+run-name: "Release - Rust SDK (crates.io) · ${{ github.ref_name }} · @${{ github.actor }}"
 
 on:
   workflow_dispatch:
@@ -23,5 +25,15 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Obtain OIDC token for crates.io
+        id: oidc
+        run: |
+          token=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=crates.io" | jq -r '.value')
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+
       - name: Publish to crates.io
         run: cargo publish -p tensorlake
+        env:
+          CARGO_REGISTRY_TOKEN: "Bearer ${{ steps.oidc.outputs.token }}"

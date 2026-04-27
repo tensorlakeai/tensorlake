@@ -1,4 +1,6 @@
-name: Release tensorlake npm package
+name: Release - TypeScript SDK (npm)
+
+run-name: "Release - TypeScript SDK (npm) · ${{ github.ref_name }} · @${{ github.actor }}"
 
 on:
   workflow_dispatch:

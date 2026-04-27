@@ -1,4 +1,6 @@
-name: Release Tensorlake CLI binaries
+name: Release - CLI Binaries
+
+run-name: "Release - CLI Binaries · ${{ github.ref_name }} · @${{ github.actor }}"
 
 on:
   workflow_dispatch:
