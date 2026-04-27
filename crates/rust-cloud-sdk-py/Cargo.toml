@@ -10,7 +10,7 @@ name = "_cloud_sdk"
 crate-type = ["cdylib"]
 
 [dependencies]
-tensorlake-cloud-sdk = { workspace = true }
+tensorlake = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }

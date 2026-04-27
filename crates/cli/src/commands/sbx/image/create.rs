@@ -6,7 +6,7 @@ use std::{
 
 use serde_json::{Map, Value};
 use shlex::split as shlex_split;
-use tensorlake_cloud_sdk::{
+use tensorlake::{
     Client,
     sandbox_templates::models::CreateSandboxTemplateRequest,
     sandboxes::{
@@ -1080,7 +1080,7 @@ mod tests {
         resolve_context_source_path, wait_for_snapshot,
     };
     use std::{cell::Cell, io::Write, time::Duration};
-    use tensorlake_cloud_sdk::sandboxes::models::SnapshotInfo;
+    use tensorlake::sandboxes::models::SnapshotInfo;
 
     #[test]
     fn default_registered_name_uses_parent_for_dockerfile() {

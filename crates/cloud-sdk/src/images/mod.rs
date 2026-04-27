@@ -6,7 +6,7 @@
 //! ## Usage
 //!
 //! ```rust
-//! use tensorlake_cloud_sdk::{Sdk, images::models::{ImageBuildRequest, Image}};
+//! use tensorlake::{Sdk, images::models::{ImageBuildRequest, Image}};
 //!
 //! let sdk = Sdk::new("https://api.tensorlake.ai", "your-api-key").unwrap();
 //! let images_client = sdk.images();

@@ -1,7 +1,7 @@
 use crate::auth::context::CliContext;
 use crate::commands::sbx::snapshot::fetch_snapshot_info;
 use crate::error::{CliError, Result};
-use tensorlake_cloud_sdk::sandbox_templates::models::CreateSandboxTemplateRequest;
+use tensorlake::sandbox_templates::models::CreateSandboxTemplateRequest;
 
 #[derive(Debug)]
 struct SnapshotRegistrationMetadata {

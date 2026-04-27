@@ -5,7 +5,7 @@ pub mod register;
 
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
-use tensorlake_cloud_sdk::{Client, ClientBuilder, sandbox_templates::SandboxTemplatesClient};
+use tensorlake::{Client, ClientBuilder, sandbox_templates::SandboxTemplatesClient};
 
 /// Build the sandbox-templates API base URL for the current org/project.
 pub fn templates_base_url(ctx: &CliContext) -> Result<(String, String, String)> {

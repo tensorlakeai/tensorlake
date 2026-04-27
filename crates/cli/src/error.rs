@@ -27,7 +27,7 @@ pub enum CliError {
     TomlSer(#[from] toml::ser::Error),
 
     #[error("{0}")]
-    Sdk(#[from] tensorlake_cloud_sdk::error::SdkError),
+    Sdk(#[from] tensorlake::error::SdkError),
 
     #[error("{0}")]
     Other(#[from] anyhow::Error),
