@@ -7,7 +7,7 @@
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use tensorlake_cloud_sdk::{Sdk, applications::models::ListApplicationsRequest};
+//! use tensorlake::{Sdk, applications::models::ListApplicationsRequest};
 //!
 //! async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Create the SDK client
@@ -31,7 +31,7 @@
 //! Provide your token when creating the SDK:
 //!
 //! ```rust,no_run
-//! use tensorlake_cloud_sdk::Sdk;
+//! use tensorlake::Sdk;
 //!
 //! let sdk = Sdk::new("https://api.tensorlake.ai", "your-token").unwrap();
 //! ```
@@ -49,7 +49,7 @@
 //! The SDK provides detailed error types for different scenarios:
 //!
 //! ```rust,no_run
-//! use tensorlake_cloud_sdk::{Sdk, applications::models::ListApplicationsRequest};
+//! use tensorlake::{Sdk, applications::models::ListApplicationsRequest};
 //!
 //! async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //!     let sdk = Sdk::new("https://api.tensorlake.ai", "your-api-key")?;
@@ -71,12 +71,14 @@ pub mod cron;
 pub mod document_ai;
 pub mod error;
 pub mod images;
+pub mod sandbox_templates;
 pub mod sandboxes;
 pub mod secrets;
 use applications::*;
 use cron::*;
 use document_ai::*;
 use images::*;
+use sandbox_templates::*;
 use sandboxes::*;
 use secrets::*;
 
@@ -91,7 +93,7 @@ pub use client::{Client, ClientBuilder, Traced};
 /// ## Example
 ///
 /// ```rust
-/// use tensorlake_cloud_sdk::Sdk;
+/// use tensorlake::Sdk;
 ///
 /// let sdk = Sdk::new("https://api.tensorlake.ai", "your-api-key").unwrap();
 ///
@@ -123,7 +125,7 @@ impl Sdk {
     /// # Example
     ///
     /// ```rust
-    /// use tensorlake_cloud_sdk::Sdk;
+    /// use tensorlake::Sdk;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let sdk = Sdk::new("https://api.tensorlake.ai", "your-api-key").unwrap();
@@ -157,7 +159,7 @@ impl Sdk {
     /// # Example
     ///
     /// ```rust
-    /// use tensorlake_cloud_sdk::{Sdk, ClientBuilder};
+    /// use tensorlake::{Sdk, ClientBuilder};
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let builder = ClientBuilder::new("https://api.tensorlake.ai")
@@ -186,7 +188,7 @@ impl Sdk {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use tensorlake_cloud_sdk::{Sdk, applications::models::ListApplicationsRequest};
+    /// use tensorlake::{Sdk, applications::models::ListApplicationsRequest};
     ///
     /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
     ///     let sdk = Sdk::new("https://api.tensorlake.ai", "your-api-key")?;
@@ -217,7 +219,7 @@ impl Sdk {
     /// # Example
     ///
     /// ```rust
-    /// use tensorlake_cloud_sdk::Sdk;
+    /// use tensorlake::Sdk;
     ///
     /// let sdk = Sdk::new("https://api.tensorlake.ai", "your-api-key").unwrap();
     /// let images_client = sdk.images();
@@ -227,6 +229,19 @@ impl Sdk {
     /// ```
     pub fn images(&self) -> ImagesClient {
         ImagesClient::new(self.client.clone())
+    }
+
+    /// Get a client for managing snapshot-backed sandbox image registrations.
+    pub fn sandbox_templates(
+        &self,
+        organization_id: &str,
+        project_id: &str,
+    ) -> SandboxTemplatesClient {
+        SandboxTemplatesClient::new(
+            self.client.clone(),
+            organization_id.to_string(),
+            project_id.to_string(),
+        )
     }
 
     /// Get a client for managing sandbox lifecycle, pools, and snapshots.
@@ -263,7 +278,7 @@ impl Sdk {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use tensorlake_cloud_sdk::{Sdk, secrets::models::ListSecretsRequest};
+    /// use tensorlake::{Sdk, secrets::models::ListSecretsRequest};
     ///
     /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
     ///     let sdk = Sdk::new("https://api.tensorlake.ai", "your-api-key")?;

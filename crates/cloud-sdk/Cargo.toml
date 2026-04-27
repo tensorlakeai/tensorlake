@@ -1,10 +1,13 @@
 [package]
-name = "tensorlake-cloud-sdk"
+name = "tensorlake"
 version.workspace = true
 authors = ["support@tensorlake.ai"]
 description = "A Rust SDK for interacting with Tensorlake Cloud APIs."
 license = "Apache-2.0"
 edition = "2024"
+repository = "https://github.com/tensorlakeai/tensorlake"
+homepage = "https://tensorlake.ai"
+documentation = "https://docs.rs/tensorlake"
 
 [dependencies]
 bytes = { workspace = true }

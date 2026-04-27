@@ -126,7 +126,7 @@ Wrapper scripts live in `tensorlake.data/scripts/` and are installed into the vi
 | `tl parse` | `tensorlake-parse` |
 | `tl generate-dockerfiles` | `tensorlake-generate-dockerfiles` |
 
-`tl sbx image create` is served by the TypeScript CLI (`typescript/bin/tensorlake-create-sandbox-image.cjs`) rather than a Python wrapper. Programmatic Python use is available via `tensorlake.image.Image.build()` / `tensorlake.image.sandbox_builder.build_sandbox_image()`.
+`tl sbx image create` is handled directly by the Rust CLI. Programmatic SDK image builds should go through the language-native `Image` DSL APIs rather than passing raw Dockerfile paths into the Python or TypeScript packages.
 
 ### Available Makefile Commands
 

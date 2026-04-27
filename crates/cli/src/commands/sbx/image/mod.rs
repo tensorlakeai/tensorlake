@@ -1,9 +1,11 @@
 pub mod create;
 pub mod describe;
 pub mod ls;
+pub mod register;
 
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
+use tensorlake::{Client, ClientBuilder, sandbox_templates::SandboxTemplatesClient};
 
 /// Build the sandbox-templates API base URL for the current org/project.
 pub fn templates_base_url(ctx: &CliContext) -> Result<(String, String, String)> {
@@ -20,6 +22,37 @@ pub fn templates_base_url(ctx: &CliContext) -> Result<(String, String, String)> 
         proj_id
     );
     Ok((base, org_id, proj_id))
+}
+
+pub fn org_and_project(ctx: &CliContext) -> Result<(String, String)> {
+    let org_id = ctx
+        .effective_organization_id()
+        .ok_or_else(|| CliError::auth("Organization ID is required for --image"))?;
+    let proj_id = ctx
+        .effective_project_id()
+        .ok_or_else(|| CliError::auth("Project ID is required for --image"))?;
+    Ok((org_id, proj_id))
+}
+
+pub fn scoped_cloud_client(ctx: &CliContext) -> Result<Client> {
+    let token = ctx.bearer_token()?;
+    let mut builder = ClientBuilder::new(&ctx.api_url).bearer_token(&token);
+    let use_scope_headers = ctx.personal_access_token.is_some() && ctx.api_key.is_none();
+
+    if use_scope_headers
+        && let (Some(organization_id), Some(project_id)) =
+            (ctx.effective_organization_id(), ctx.effective_project_id())
+    {
+        builder = builder.scope(&organization_id, &project_id);
+    }
+
+    builder.build().map_err(Into::into)
+}
+
+pub fn sandbox_templates_client(ctx: &CliContext) -> Result<SandboxTemplatesClient> {
+    let client = scoped_cloud_client(ctx)?;
+    let (org_id, proj_id) = org_and_project(ctx)?;
+    Ok(SandboxTemplatesClient::new(client, org_id, proj_id))
 }
 
 /// Page through the list, returning the full JSON item if found.

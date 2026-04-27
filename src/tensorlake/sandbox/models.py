@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import BaseModel, BeforeValidator, Field
 
@@ -162,6 +162,8 @@ class CreateSandboxResponse(BaseModel):
     status: SandboxStatus
     routing_hint: str | None = None
     name: str | None = None
+    termination_reason: str | None = None
+    error_details: Any | None = None
 
 
 class SandboxInfo(BaseModel):
@@ -178,6 +180,8 @@ class SandboxInfo(BaseModel):
     network: NetworkConfig | None = None
     pool_id: str | None = None
     outcome: str | None = None
+    termination_reason: str | None = None
+    error_details: Any | None = None
     created_at: OptionalTimestamp = None
     terminated_at: OptionalTimestamp = None
     name: str | None = None
@@ -277,6 +281,7 @@ class SnapshotInfo(BaseModel):
     error: str | None = None
     snapshot_uri: str | None = None
     size_bytes: int | None = None
+    rootfs_disk_bytes: int | None = None
     created_at: OptionalTimestamp = None
 
     model_config = {"populate_by_name": True}

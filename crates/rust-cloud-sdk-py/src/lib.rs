@@ -17,18 +17,18 @@ use reqwest::Method;
 use reqwest::multipart::{Form, Part};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tensorlake_cloud_sdk::document_ai::DocumentAiClient;
-use tensorlake_cloud_sdk::images::ImagesClient;
-use tensorlake_cloud_sdk::images::models::{
+use tensorlake::document_ai::DocumentAiClient;
+use tensorlake::images::ImagesClient;
+use tensorlake::images::models::{
     ApplicationBuildContext, CreateApplicationBuildRequest,
 };
-use tensorlake_cloud_sdk::sandboxes::models::{
+use tensorlake::sandboxes::models::{
     CreateSandboxRequest, SandboxPoolRequest, SnapshotContentMode, UpdateSandboxRequest,
 };
-use tensorlake_cloud_sdk::sandboxes::{
+use tensorlake::sandboxes::{
     SandboxDesktopClient as RustSandboxDesktopClient, SandboxProxyClient, SandboxesClient,
 };
-use tensorlake_cloud_sdk::{Client, ClientBuilder, error::SdkError};
+use tensorlake::{Client, ClientBuilder, error::SdkError};
 use tokio::runtime::Runtime;
 
 create_exception!(_cloud_sdk, CloudApiClientError, PyException);
@@ -1858,7 +1858,7 @@ fn create_image_context_file(
     operations_json: String,
     file_path: String,
 ) -> PyResult<()> {
-    use tensorlake_cloud_sdk::images::models::{Image, ImageBuildOperation};
+    use tensorlake::images::models::{Image, ImageBuildOperation};
 
     let operations: Vec<ImageBuildOperation> =
         serde_json::from_str(&operations_json).map_err(|e| {

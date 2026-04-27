@@ -1,4 +1,6 @@
-name: Release Tensorlake SDK package.
+name: Release - Python SDK (PyPI)
+
+run-name: "Release - Python SDK (PyPI) · ${{ github.ref_name }} · @${{ github.actor }}"
 
 on:
   workflow_dispatch:

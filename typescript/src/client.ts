@@ -551,6 +551,17 @@ export class SandboxClient {
     if (result.status === SandboxStatus.RUNNING) {
       return finishConnect(result.routingHint, result.name);
     }
+    if (
+      result.status === SandboxStatus.SUSPENDED ||
+      result.status === SandboxStatus.TERMINATED
+    ) {
+      throw new SandboxError(
+        formatStartupFailureMessage(result.sandboxId, result.status, {
+          errorDetails: result.errorDetails,
+          terminationReason: result.terminationReason,
+        }),
+      );
+    }
 
     const deadline = Date.now() + startupTimeout * 1000;
 
@@ -559,9 +570,15 @@ export class SandboxClient {
       if (info.status === SandboxStatus.RUNNING) {
         return finishConnect(info.routingHint, info.name);
       }
-      if (info.status === SandboxStatus.TERMINATED) {
+      if (
+        info.status === SandboxStatus.SUSPENDED ||
+        info.status === SandboxStatus.TERMINATED
+      ) {
         throw new SandboxError(
-          `Sandbox ${result.sandboxId} terminated during startup`,
+          formatStartupFailureMessage(result.sandboxId, info.status, {
+            errorDetails: info.errorDetails,
+            terminationReason: info.terminationReason,
+          }),
         );
       }
       await sleep(500);
@@ -581,6 +598,51 @@ export class SandboxClient {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatStartupFailureMessage(
+  sandboxId: string,
+  status: SandboxStatus | string,
+  options: {
+    errorDetails?: unknown;
+    terminationReason?: string;
+  },
+): string {
+  const prefix = status === SandboxStatus.TERMINATED
+    ? `Sandbox ${sandboxId} terminated during startup`
+    : `Sandbox ${sandboxId} became ${status} during startup`;
+  const detail = formatErrorDetails(options.errorDetails);
+  if (detail) {
+    return `${prefix}: ${detail}`;
+  }
+  if (options.terminationReason) {
+    return `${prefix}: termination reason: ${options.terminationReason}`;
+  }
+  return prefix;
+}
+
+function formatErrorDetails(errorDetails: unknown): string | undefined {
+  if (errorDetails == null) return undefined;
+  if (typeof errorDetails === "string") {
+    const detail = errorDetails.trim();
+    return detail || undefined;
+  }
+  if (Array.isArray(errorDetails)) {
+    const parts = errorDetails
+      .map((item) => formatErrorDetails(item))
+      .filter((item): item is string => Boolean(item));
+    return parts.length > 0 ? parts.join("; ") : JSON.stringify(errorDetails);
+  }
+  if (typeof errorDetails === "object") {
+    for (const key of ["message", "detail", "error", "reason"]) {
+      const value = (errorDetails as Record<string, unknown>)[key];
+      if (typeof value === "string" && value.trim()) {
+        return value.trim();
+      }
+    }
+    return JSON.stringify(errorDetails);
+  }
+  return String(errorDetails);
 }
 
 const RESERVED_SANDBOX_MANAGEMENT_PORT = 9501;

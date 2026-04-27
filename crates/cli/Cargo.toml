@@ -14,7 +14,7 @@ name = "tensorlake"
 path = "src/tensorlake.rs"
 
 [dependencies]
-tensorlake-cloud-sdk = { workspace = true }
+tensorlake = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 reqwest = { workspace = true }
@@ -47,6 +47,7 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
+shlex = { workspace = true }
 rustpython-parser = "0.3"
 
 [dev-dependencies]

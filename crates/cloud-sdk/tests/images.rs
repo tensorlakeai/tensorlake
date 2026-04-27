@@ -1,5 +1,5 @@
-use tensorlake_cloud_sdk::images::models::*;
-use tensorlake_cloud_sdk::{ClientBuilder, images::ImagesClient};
+use tensorlake::images::models::*;
+use tensorlake::{ClientBuilder, images::ImagesClient};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 

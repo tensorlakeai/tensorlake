@@ -183,7 +183,10 @@ describe("sandbox image helpers", () => {
       createAndConnect: vi.fn(async () => sandbox),
       snapshotAndWait: vi.fn(async () => ({
         snapshotId: "snap-1",
+        sandboxId: "sbx-source-1",
         snapshotUri: "s3://snapshots/snap-1.tar.zst",
+        sizeBytes: 123,
+        rootfsDiskBytes: 10 * 1024 * 1024 * 1024,
       })),
       close: vi.fn(() => {}),
     };
@@ -220,7 +223,10 @@ describe("sandbox image helpers", () => {
       "sandbox-image",
       `${dockerfileText}\n`,
       "snap-1",
+      "sbx-source-1",
       "s3://snapshots/snap-1.tar.zst",
+      123,
+      10 * 1024 * 1024 * 1024,
       false,
     );
     expect(sandbox.terminate).toHaveBeenCalled();
@@ -271,7 +277,10 @@ describe("sandbox image helpers", () => {
       createAndConnect: vi.fn(async () => sandbox),
       snapshotAndWait: vi.fn(async () => ({
         snapshotId: "snap-1",
+        sandboxId: "sbx-source-1",
         snapshotUri: "s3://snapshots/snap-1.tar.zst",
+        sizeBytes: 123,
+        rootfsDiskBytes: 10 * 1024 * 1024 * 1024,
       })),
       close: vi.fn(() => {}),
     };
@@ -315,7 +324,10 @@ describe("sandbox image helpers", () => {
         "RUN cat /workspace/hello.txt",
       ].join("\n"),
       "snap-1",
+      "sbx-source-1",
       "s3://snapshots/snap-1.tar.zst",
+      123,
+      10 * 1024 * 1024 * 1024,
       false,
     );
     expect(sandbox.terminate).toHaveBeenCalled();
@@ -357,7 +369,10 @@ describe("sandbox image helpers", () => {
       createAndConnect: vi.fn(async () => sandbox),
       snapshotAndWait: vi.fn(async () => ({
         snapshotId: "snap-1",
+        sandboxId: "sbx-source-1",
         snapshotUri: "s3://snapshots/snap-1.tar.zst",
+        sizeBytes: 123,
+        rootfsDiskBytes: 10 * 1024 * 1024 * 1024,
       })),
       close: vi.fn(() => {}),
     };
@@ -419,7 +434,10 @@ describe("sandbox image helpers", () => {
       createAndConnect: vi.fn(async () => sandbox),
       snapshotAndWait: vi.fn(async () => ({
         snapshotId: "snap-1",
+        sandboxId: "sbx-source-1",
         snapshotUri: "s3://snapshots/snap-1.tar.zst",
+        sizeBytes: 123,
+        rootfsDiskBytes: 10 * 1024 * 1024 * 1024,
       })),
       close: vi.fn(() => {}),
     };
@@ -453,7 +471,10 @@ describe("sandbox image helpers", () => {
         "RUN echo ready",
       ].join("\n"),
       "snap-1",
+      "sbx-source-1",
       "s3://snapshots/snap-1.tar.zst",
+      123,
+      10 * 1024 * 1024 * 1024,
       false,
     );
   });
@@ -498,7 +519,10 @@ describe("sandbox image helpers", () => {
       createAndConnect: vi.fn(async () => sandbox),
       snapshotAndWait: vi.fn(async () => ({
         snapshotId: "snap-1",
+        sandboxId: "sbx-source-1",
         snapshotUri: "s3://snapshots/snap-1.tar.zst",
+        sizeBytes: 123,
+        rootfsDiskBytes: 10 * 1024 * 1024 * 1024,
       })),
       close: vi.fn(() => {}),
     };

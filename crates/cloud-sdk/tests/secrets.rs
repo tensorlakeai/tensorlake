@@ -1,4 +1,4 @@
-use tensorlake_cloud_sdk::secrets::models::*;
+use tensorlake::secrets::models::*;
 
 use crate::common::random_string;
 

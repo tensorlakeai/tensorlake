@@ -5,7 +5,7 @@ use docker_credentials_config::{DockerConfig, image_registry};
 use futures::StreamExt;
 use http_body_util::{Either, Full};
 use minijinja::Environment;
-use tensorlake_cloud_sdk::images::models::{Image, ImageBuildOperation, ImageBuildOperationType};
+use tensorlake::images::models::{Image, ImageBuildOperation, ImageBuildOperationType};
 
 use crate::error::{CliError, Result};
 
