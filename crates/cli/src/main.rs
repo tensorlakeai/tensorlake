@@ -526,6 +526,23 @@ enum SbxCommands {
 
 #[derive(Subcommand)]
 enum ImageCommands {
+    /// Register a custom snapshot-backed sandbox image name
+    Register {
+        /// Image name to register
+        image_name: String,
+
+        /// Completed snapshot ID backing this image
+        snapshot_id: String,
+
+        /// Dockerfile to store in the platform sandbox template registry
+        #[arg(long = "dockerfile", value_name = "PATH")]
+        dockerfile_path: String,
+
+        /// Whether the registered image should be public
+        #[arg(long)]
+        public: bool,
+    },
+
     /// Register a sandbox image from a Dockerfile
     Create {
         /// Path to the Dockerfile
@@ -862,7 +879,9 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     }
                     None => {
                         let sandbox_id = snapshot_args.sandbox_id.ok_or_else(|| {
-                            CliError::usage("checkpoint requires a sandbox ID or the 'ls' subcommand")
+                            CliError::usage(
+                                "checkpoint requires a sandbox ID or the 'ls' subcommand",
+                            )
                         })?;
                         commands::sbx::snapshot::run(ctx, &sandbox_id, snapshot_args.timeout).await
                     }
@@ -936,6 +955,21 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     .await
                 }
                 SbxCommands::Image(image_cmd) => match image_cmd {
+                    ImageCommands::Register {
+                        image_name,
+                        snapshot_id,
+                        dockerfile_path,
+                        public,
+                    } => {
+                        commands::sbx::image::register::run(
+                            ctx,
+                            &image_name,
+                            &snapshot_id,
+                            &dockerfile_path,
+                            public,
+                        )
+                        .await
+                    }
                     ImageCommands::Create {
                         dockerfile_path,
                         registered_name,
@@ -1020,16 +1054,44 @@ mod tests {
 
         match cli.command {
             Commands::Sbx(SbxCommands::Image(ImageCommands::Create {
-                cpus,
-                memory,
-                disk,
-                ..
+                cpus, memory, disk, ..
             })) => {
                 assert_eq!(cpus, Some(3.5));
                 assert_eq!(memory, Some(8192));
                 assert_eq!(disk, Some(30));
             }
             _ => panic!("expected sbx image create command"),
+        }
+    }
+
+    #[test]
+    fn image_register_parses_name_and_snapshot_id() {
+        let cli = Cli::try_parse_from([
+            "tl",
+            "sbx",
+            "image",
+            "register",
+            "mighty-agent-0.0.69",
+            "snap_123",
+            "--dockerfile",
+            "./Dockerfile",
+            "--public",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Image(ImageCommands::Register {
+                image_name,
+                snapshot_id,
+                dockerfile_path,
+                public,
+            })) => {
+                assert_eq!(image_name, "mighty-agent-0.0.69");
+                assert_eq!(snapshot_id, "snap_123");
+                assert_eq!(dockerfile_path, "./Dockerfile");
+                assert!(public);
+            }
+            _ => panic!("expected sbx image register command"),
         }
     }
 

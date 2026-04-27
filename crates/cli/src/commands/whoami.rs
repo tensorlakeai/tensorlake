@@ -57,10 +57,7 @@ pub async fn run(ctx: &mut CliContext, output_json: bool) -> Result<()> {
                 obj.insert("keyId".to_string(), serde_json::Value::String(id));
             }
             if let Some(org) = ctx.introspect_org_id() {
-                obj.insert(
-                    "organizationId".to_string(),
-                    serde_json::Value::String(org),
-                );
+                obj.insert("organizationId".to_string(), serde_json::Value::String(org));
             }
             if let Some(proj) = ctx.introspect_project_id() {
                 obj.insert("projectId".to_string(), serde_json::Value::String(proj));
@@ -77,10 +74,7 @@ pub async fn run(ctx: &mut CliContext, output_json: bool) -> Result<()> {
                 );
             }
             if let Some(org) = pat_org {
-                obj.insert(
-                    "organizationId".to_string(),
-                    serde_json::Value::String(org),
-                );
+                obj.insert("organizationId".to_string(), serde_json::Value::String(org));
             }
             if let Some(proj) = pat_project {
                 obj.insert("projectId".to_string(), serde_json::Value::String(proj));

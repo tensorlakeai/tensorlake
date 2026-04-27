@@ -122,7 +122,10 @@ interface CreateSandboxImageDeps {
     name: string,
     dockerfile: string,
     snapshotId: string,
+    snapshotSandboxId: string,
     snapshotUri: string,
+    snapshotSizeBytes: number,
+    rootfsDiskBytes: number,
     isPublic: boolean,
   ) => Promise<Record<string, unknown>>;
   sleep?: (ms: number) => Promise<void>;
@@ -919,7 +922,10 @@ async function registerImage(
   name: string,
   dockerfile: string,
   snapshotId: string,
+  snapshotSandboxId: string,
   snapshotUri: string,
+  snapshotSizeBytes: number,
+  rootfsDiskBytes: number,
   isPublic: boolean,
 ): Promise<Record<string, unknown>> {
   if (!context.organizationId || !context.projectId) {
@@ -955,8 +961,11 @@ async function registerImage(
       name,
       dockerfile,
       snapshotId,
+      snapshotSandboxId,
       snapshotUri,
-      isPublic,
+      snapshotSizeBytes,
+      rootfsDiskBytes,
+      public: isPublic,
     }),
   });
 
@@ -1029,6 +1038,16 @@ export async function createSandboxImage(
         `Snapshot ${snapshot.snapshotId} is missing snapshotUri and cannot be registered as a sandbox image.`,
       );
     }
+    if (snapshot.sizeBytes == null) {
+      throw new Error(
+        `Snapshot ${snapshot.snapshotId} is missing sizeBytes and cannot be registered as a sandbox image.`,
+      );
+    }
+    if (snapshot.rootfsDiskBytes == null) {
+      throw new Error(
+        `Snapshot ${snapshot.snapshotId} is missing rootfsDiskBytes and cannot be registered as a sandbox image.`,
+      );
+    }
 
     emit({
       type: "status",
@@ -1039,7 +1058,10 @@ export async function createSandboxImage(
       plan.registeredName,
       plan.dockerfileText,
       snapshot.snapshotId,
+      snapshot.sandboxId,
       snapshot.snapshotUri,
+      snapshot.sizeBytes,
+      snapshot.rootfsDiskBytes,
       options.isPublic ?? false,
     );
 

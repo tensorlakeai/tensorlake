@@ -86,6 +86,10 @@ pub struct CreateSandboxResponse {
     pub routing_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub termination_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_details: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -111,6 +115,8 @@ pub struct SandboxInfo {
     pub outcome: Option<String>,
     #[serde(default)]
     pub termination_reason: Option<String>,
+    #[serde(default)]
+    pub error_details: Option<serde_json::Value>,
     #[serde(default)]
     pub created_at: Option<serde_json::Value>,
     #[serde(default)]
@@ -210,6 +216,8 @@ pub struct SnapshotInfo {
     pub snapshot_uri: Option<String>,
     #[serde(default)]
     pub size_bytes: Option<i64>,
+    #[serde(default)]
+    pub rootfs_disk_bytes: Option<u64>,
     #[serde(default)]
     pub created_at: Option<serde_json::Value>,
 }

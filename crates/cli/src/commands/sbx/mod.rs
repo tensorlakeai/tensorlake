@@ -197,12 +197,48 @@ fn sandbox_termination_detail(info: &serde_json::Value) -> Option<String> {
     }
 }
 
+fn error_details_message(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(message) => {
+            let trimmed = message.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        serde_json::Value::Array(items) => {
+            let parts: Vec<String> = items.iter().filter_map(error_details_message).collect();
+            if parts.is_empty() {
+                serde_json::to_string(value).ok()
+            } else {
+                Some(parts.join("; "))
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for key in ["message", "detail", "error", "reason"] {
+                if let Some(serde_json::Value::String(message)) = map.get(key) {
+                    let trimmed = message.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+            serde_json::to_string(value).ok()
+        }
+        _ => Some(value.to_string()),
+    }
+}
+
+fn sandbox_failure_detail(info: &serde_json::Value) -> Option<String> {
+    info.get("error_details")
+        .and_then(error_details_message)
+        .or_else(|| sandbox_termination_detail(info))
+}
+
 fn format_sandbox_wait_termination_message(
     subject: &str,
     target_status: &str,
     info: &serde_json::Value,
 ) -> String {
-    if let Some(detail) = sandbox_termination_detail(info) {
+    if let Some(detail) = sandbox_failure_detail(info) {
         format!("{subject} failed to reach '{target_status}': {detail}")
     } else {
         format!("{subject} terminated while waiting to reach '{target_status}'")
@@ -345,7 +381,8 @@ fn parse_numeric_timestamp(timestamp: f64) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_created_at, format_sandbox_wait_termination_message, sandbox_termination_detail,
+        error_details_message, format_created_at, format_sandbox_wait_termination_message,
+        sandbox_termination_detail,
     };
     use chrono::{Duration, Utc};
 
@@ -419,6 +456,39 @@ mod tests {
         assert_eq!(
             message,
             "Sandbox failed to reach 'running': termination reason: StartupFailedInternalError"
+        );
+    }
+
+    #[test]
+    fn error_details_message_prefers_message_field() {
+        let details = serde_json::json!({
+            "message": "failed to pull image tensorlake/missing-image",
+            "phase": "pull",
+        });
+
+        let detail = error_details_message(&details);
+
+        assert_eq!(
+            detail.as_deref(),
+            Some("failed to pull image tensorlake/missing-image")
+        );
+    }
+
+    #[test]
+    fn sandbox_wait_termination_message_prefers_error_details() {
+        let info = serde_json::json!({
+            "status": "terminated",
+            "termination_reason": "StartupFailedInternalError",
+            "error_details": {
+                "message": "failed to pull image tensorlake/missing-image",
+            },
+        });
+
+        let message = format_sandbox_wait_termination_message("Sandbox", "running", &info);
+
+        assert_eq!(
+            message,
+            "Sandbox failed to reach 'running': failed to pull image tensorlake/missing-image"
         );
     }
 }

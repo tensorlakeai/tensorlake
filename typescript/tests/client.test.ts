@@ -551,6 +551,39 @@ describe("SandboxClient", () => {
     });
   });
 
+  describe("createAndConnect", () => {
+    it("includes sandbox errorDetails in startup failures", async () => {
+      vi.mocked(undici.fetch)
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({ sandbox_id: "sbx-1", status: "pending" }),
+            { status: 200 },
+          ),
+        )
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              id: "sbx-1",
+              namespace: "default",
+              status: "terminated",
+              resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+              secret_names: [],
+              error_details: { message: "failed to pull image tensorlake/missing-image" },
+            }),
+            { status: 200 },
+          ),
+        );
+
+      const client = SandboxClient.forLocalhost();
+      await expect(
+        client.createAndConnect({ image: "tensorlake/missing-image" }),
+      ).rejects.toThrow(
+        "Sandbox sbx-1 terminated during startup: failed to pull image tensorlake/missing-image",
+      );
+      client.close();
+    });
+  });
+
   describe("snapshots", () => {
     it("creates a snapshot", async () => {
       mockFetch(() =>

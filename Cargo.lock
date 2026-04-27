@@ -2812,6 +2812,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "shlex",
  "tempfile",
  "tensorlake-cloud-sdk",
  "thiserror 2.0.18",
