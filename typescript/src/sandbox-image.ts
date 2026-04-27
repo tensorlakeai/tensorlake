@@ -1093,30 +1093,30 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
       name: { type: "string", short: "n" },
       cpus: { type: "string" },
       memory: { type: "string" },
-      disk: { type: "string" },
+      disk_mb: { type: "string" },
       public: { type: "boolean", default: false },
     },
   });
 
   const dockerfilePath = parsed.positionals[0];
   if (!dockerfilePath) {
-    throw new Error("Usage: tensorlake-create-sandbox-image <dockerfile_path> [--name NAME] [--cpus N] [--memory MB] [--disk GB] [--public]");
+    throw new Error("Usage: tensorlake-create-sandbox-image <dockerfile_path> [--name NAME] [--cpus N] [--memory MB] [--disk_mb MB] [--public]");
   }
 
   const cpus =
     parsed.values.cpus != null ? Number(parsed.values.cpus) : undefined;
   const memoryMb =
     parsed.values.memory != null ? Number(parsed.values.memory) : undefined;
-  const diskGb =
-    parsed.values.disk != null ? Number(parsed.values.disk) : undefined;
+  const diskMb =
+    parsed.values.disk_mb != null ? Number(parsed.values.disk_mb) : undefined;
   if (cpus != null && !Number.isFinite(cpus)) {
     throw new Error(`Invalid --cpus value: ${parsed.values.cpus}`);
   }
   if (memoryMb != null && !Number.isInteger(memoryMb)) {
     throw new Error(`Invalid --memory value: ${parsed.values.memory}`);
   }
-  if (diskGb != null && !Number.isInteger(diskGb)) {
-    throw new Error(`Invalid --disk value: ${parsed.values.disk}`);
+  if (diskMb != null && !Number.isInteger(diskMb)) {
+    throw new Error(`Invalid --disk_mb value: ${parsed.values.disk_mb}`);
   }
 
   await createSandboxImage(
@@ -1125,7 +1125,7 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
       registeredName: parsed.values.name,
       cpus,
       memoryMb,
-      diskMb: diskGb != null ? diskGb * 1024 : undefined,
+      diskMb,
       isPublic: parsed.values.public,
     },
     { emit: ndjsonStdoutEmit },

@@ -62,7 +62,7 @@ pub async fn run(
     ctx: &CliContext,
     dockerfile_path: &str,
     registered_name: Option<&str>,
-    disk_gb: Option<u64>,
+    disk_mb: Option<u64>,
     cpus: Option<f64>,
     memory_mb: Option<i64>,
     is_public: bool,
@@ -78,13 +78,7 @@ pub async fn run(
     let resources = CreateSandboxResources {
         cpus: cpus.unwrap_or(DEFAULT_CPUS),
         memory_mb: memory_mb.unwrap_or(DEFAULT_MEMORY_MB),
-        disk_mb: disk_gb
-            .map(|gib| {
-                gib.checked_mul(1024).ok_or_else(|| {
-                    CliError::usage("disk size is too large to express in MiB".to_string())
-                })
-            })
-            .transpose()?,
+        disk_mb,
     };
 
     eprintln!("⚙️  Creating build sandbox...");

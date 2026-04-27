@@ -293,9 +293,13 @@ enum SbxCommands {
         #[arg(short, long)]
         memory: Option<i64>,
 
-        /// Root disk size in GB
-        #[arg(long)]
-        disk: Option<u64>,
+        /// Root disk size in MB (default: 10240 for new sandboxes)
+        #[arg(long = "disk_mb")]
+        disk_mb: Option<u64>,
+
+        /// Deprecated: root disk size in GB
+        #[arg(long = "disk", hide = true, conflicts_with = "disk_mb")]
+        disk_gb: Option<u64>,
 
         /// Timeout in seconds
         #[arg(short, long)]
@@ -435,6 +439,10 @@ enum SbxCommands {
         #[arg(short, long, default_value = "1024")]
         memory: i64,
 
+        /// Root disk size in MB (default: 10240 for new sandboxes)
+        #[arg(long = "disk_mb")]
+        disk_mb: Option<u64>,
+
         /// Command timeout in seconds
         #[arg(short, long)]
         timeout: Option<f64>,
@@ -553,9 +561,13 @@ enum ImageCommands {
         #[arg(short = 'n', long)]
         registered_name: Option<String>,
 
-        /// Root disk size in GB for the temporary build sandbox
-        #[arg(long)]
-        disk: Option<u64>,
+        /// Root disk size in MB for the temporary build sandbox (default: 10240 for new sandboxes)
+        #[arg(long = "disk_mb")]
+        disk_mb: Option<u64>,
+
+        /// Deprecated: root disk size in GB for the temporary build sandbox
+        #[arg(long = "disk", hide = true, conflicts_with = "disk_mb")]
+        disk_gb: Option<u64>,
 
         /// CPUs for the temporary build sandbox
         #[arg(long)]
@@ -800,7 +812,8 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     name,
                     cpus,
                     memory,
-                    disk,
+                    disk_mb,
+                    disk_gb,
                     timeout,
                     entrypoint,
                     snapshot,
@@ -812,13 +825,17 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     network_allow,
                     network_deny,
                 } => {
-                    let disk_mb = disk
-                        .map(|value| {
-                            value.checked_mul(1024).ok_or_else(|| {
-                                CliError::usage("--disk is too large to convert to MiB")
+                    let disk_mb = if let Some(value) = disk_mb {
+                        Some(value)
+                    } else {
+                        disk_gb
+                            .map(|value| {
+                                value.checked_mul(1024).ok_or_else(|| {
+                                    CliError::usage("--disk is too large to convert to MiB")
+                                })
                             })
-                        })
-                        .transpose()?;
+                            .transpose()?
+                    };
                     commands::sbx::create::run(
                         ctx,
                         commands::sbx::create::CreateArgs {
@@ -908,6 +925,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     image,
                     cpus,
                     memory,
+                    disk_mb,
                     timeout,
                     workdir,
                     env,
@@ -925,6 +943,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         image.as_deref(),
                         cpus,
                         memory,
+                        disk_mb,
                         timeout,
                         workdir.as_deref(),
                         &env,
@@ -973,16 +992,28 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     ImageCommands::Create {
                         dockerfile_path,
                         registered_name,
-                        disk,
+                        disk_mb,
+                        disk_gb,
                         cpus,
                         memory,
                         public,
                     } => {
+                        let disk_mb = if let Some(value) = disk_mb {
+                            Some(value)
+                        } else {
+                            disk_gb
+                                .map(|value| {
+                                    value.checked_mul(1024).ok_or_else(|| {
+                                        CliError::usage("--disk is too large to convert to MiB")
+                                    })
+                                })
+                                .transpose()?
+                        };
                         commands::sbx::image::create::run(
                             ctx,
                             &dockerfile_path,
                             registered_name.as_deref(),
-                            disk,
+                            disk_mb,
                             cpus,
                             memory,
                             public,
@@ -1036,6 +1067,72 @@ mod tests {
     }
 
     #[test]
+    fn sbx_run_parses_disk_mb_override() {
+        let cli = Cli::try_parse_from([
+            "tl",
+            "sbx",
+            "run",
+            "--disk_mb",
+            "30720",
+            "echo",
+            "hello",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Run { disk_mb, .. }) => {
+                assert_eq!(disk_mb, Some(30720));
+            }
+            _ => panic!("expected sbx run command"),
+        }
+    }
+
+    #[test]
+    fn sbx_create_parses_disk_mb_override() {
+        let cli = Cli::try_parse_from([
+            "tl",
+            "sbx",
+            "create",
+            "--disk_mb",
+            "30720",
+            "--image",
+            "tensorlake/ubuntu-minimal",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Create { disk_mb, .. }) => {
+                assert_eq!(disk_mb, Some(30720));
+            }
+            _ => panic!("expected sbx create command"),
+        }
+    }
+
+    #[test]
+    fn sbx_create_parses_hidden_disk_gb_override() {
+        let cli = Cli::try_parse_from([
+            "tl",
+            "sbx",
+            "create",
+            "--disk",
+            "25",
+            "--image",
+            "tensorlake/ubuntu-minimal",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Create {
+                disk_mb, disk_gb, ..
+            }) => {
+                assert_eq!(disk_mb, None);
+                assert_eq!(disk_gb, Some(25));
+            }
+            _ => panic!("expected sbx create command"),
+        }
+    }
+
+    #[test]
     fn image_create_parses_cpu_memory_and_disk_overrides() {
         let cli = Cli::try_parse_from([
             "tl",
@@ -1047,18 +1144,42 @@ mod tests {
             "3.5",
             "--memory",
             "8192",
-            "--disk",
-            "30",
+            "--disk_mb",
+            "30720",
         ])
         .unwrap();
 
         match cli.command {
             Commands::Sbx(SbxCommands::Image(ImageCommands::Create {
-                cpus, memory, disk, ..
+                cpus, memory, disk_mb, ..
             })) => {
                 assert_eq!(cpus, Some(3.5));
                 assert_eq!(memory, Some(8192));
-                assert_eq!(disk, Some(30));
+                assert_eq!(disk_mb, Some(30720));
+            }
+            _ => panic!("expected sbx image create command"),
+        }
+    }
+
+    #[test]
+    fn image_create_parses_hidden_disk_gb_override() {
+        let cli = Cli::try_parse_from([
+            "tl",
+            "sbx",
+            "image",
+            "create",
+            "./Dockerfile",
+            "--disk",
+            "25",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Image(ImageCommands::Create {
+                disk_mb, disk_gb, ..
+            })) => {
+                assert_eq!(disk_mb, None);
+                assert_eq!(disk_gb, Some(25));
             }
             _ => panic!("expected sbx image create command"),
         }
