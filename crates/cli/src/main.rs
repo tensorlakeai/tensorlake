@@ -439,6 +439,10 @@ enum SbxCommands {
         #[arg(short, long, default_value = "1024")]
         memory: i64,
 
+        /// Root disk size in MB (default: 10240 for new sandboxes)
+        #[arg(long = "disk_mb")]
+        disk_mb: Option<u64>,
+
         /// Command timeout in seconds
         #[arg(short, long)]
         timeout: Option<f64>,
@@ -921,6 +925,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     image,
                     cpus,
                     memory,
+                    disk_mb,
                     timeout,
                     workdir,
                     env,
@@ -938,6 +943,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         image.as_deref(),
                         cpus,
                         memory,
+                        disk_mb,
                         timeout,
                         workdir.as_deref(),
                         &env,
@@ -1058,6 +1064,27 @@ mod tests {
         let result = Cli::try_parse_from(["tl", "sbx", "clone", "sbx-123", "--times", "0"]);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn sbx_run_parses_disk_mb_override() {
+        let cli = Cli::try_parse_from([
+            "tl",
+            "sbx",
+            "run",
+            "--disk_mb",
+            "30720",
+            "echo",
+            "hello",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Run { disk_mb, .. }) => {
+                assert_eq!(disk_mb, Some(30720));
+            }
+            _ => panic!("expected sbx run command"),
+        }
     }
 
     #[test]
