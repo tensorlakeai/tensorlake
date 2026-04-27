@@ -293,9 +293,9 @@ enum SbxCommands {
         #[arg(short, long)]
         memory: Option<i64>,
 
-        /// Root disk size in GB
-        #[arg(long)]
-        disk: Option<u64>,
+        /// Root disk size in MB (default: 10240 for new sandboxes)
+        #[arg(long = "disk_mb")]
+        disk_mb: Option<u64>,
 
         /// Timeout in seconds
         #[arg(short, long)]
@@ -553,9 +553,9 @@ enum ImageCommands {
         #[arg(short = 'n', long)]
         registered_name: Option<String>,
 
-        /// Root disk size in GB for the temporary build sandbox
-        #[arg(long)]
-        disk: Option<u64>,
+        /// Root disk size in MB for the temporary build sandbox (default: 10240 for new sandboxes)
+        #[arg(long = "disk_mb")]
+        disk_mb: Option<u64>,
 
         /// CPUs for the temporary build sandbox
         #[arg(long)]
@@ -800,7 +800,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     name,
                     cpus,
                     memory,
-                    disk,
+                    disk_mb,
                     timeout,
                     entrypoint,
                     snapshot,
@@ -812,13 +812,6 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     network_allow,
                     network_deny,
                 } => {
-                    let disk_mb = disk
-                        .map(|value| {
-                            value.checked_mul(1024).ok_or_else(|| {
-                                CliError::usage("--disk is too large to convert to MiB")
-                            })
-                        })
-                        .transpose()?;
                     commands::sbx::create::run(
                         ctx,
                         commands::sbx::create::CreateArgs {
@@ -973,7 +966,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     ImageCommands::Create {
                         dockerfile_path,
                         registered_name,
-                        disk,
+                        disk_mb,
                         cpus,
                         memory,
                         public,
@@ -982,7 +975,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             ctx,
                             &dockerfile_path,
                             registered_name.as_deref(),
-                            disk,
+                            disk_mb,
                             cpus,
                             memory,
                             public,
@@ -1036,6 +1029,27 @@ mod tests {
     }
 
     #[test]
+    fn sbx_create_parses_disk_mb_override() {
+        let cli = Cli::try_parse_from([
+            "tl",
+            "sbx",
+            "create",
+            "--disk_mb",
+            "30720",
+            "--image",
+            "tensorlake/ubuntu-minimal",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Create { disk_mb, .. }) => {
+                assert_eq!(disk_mb, Some(30720));
+            }
+            _ => panic!("expected sbx create command"),
+        }
+    }
+
+    #[test]
     fn image_create_parses_cpu_memory_and_disk_overrides() {
         let cli = Cli::try_parse_from([
             "tl",
@@ -1047,18 +1061,18 @@ mod tests {
             "3.5",
             "--memory",
             "8192",
-            "--disk",
-            "30",
+            "--disk_mb",
+            "30720",
         ])
         .unwrap();
 
         match cli.command {
             Commands::Sbx(SbxCommands::Image(ImageCommands::Create {
-                cpus, memory, disk, ..
+                cpus, memory, disk_mb, ..
             })) => {
                 assert_eq!(cpus, Some(3.5));
                 assert_eq!(memory, Some(8192));
-                assert_eq!(disk, Some(30));
+                assert_eq!(disk_mb, Some(30720));
             }
             _ => panic!("expected sbx image create command"),
         }
