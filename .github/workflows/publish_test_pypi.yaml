@@ -1,4 +1,6 @@
-name: Release Tensorlake SDK package to TestPyPi.
+name: Release - Python SDK (TestPyPI)
+
+run-name: "Release - Python SDK (TestPyPI) · ${{ github.ref_name }} · @${{ github.actor }}"
 
 on:
   pull_request:
