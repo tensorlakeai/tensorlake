@@ -53,6 +53,9 @@ jobs:
       - name: Run unit tests
         run: npm test
 
+      - name: Run snapshot-focused SDK unit tests
+        run: npm test -- tests/client.test.ts tests/sandbox-image.test.ts
+
   integration-tests:
     name: Integration tests
     runs-on: ubuntu-latest

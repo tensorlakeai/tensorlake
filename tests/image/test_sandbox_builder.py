@@ -91,7 +91,10 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
         sandbox.sandbox_id = "sbx-1"
         snapshot = SimpleNamespace(
             snapshot_id="snap-1",
+            sandbox_id="sbx-1",
             snapshot_uri="s3://snapshots/snap-1.tar.zst",
+            size_bytes=1234,
+            rootfs_disk_bytes=25 * 1024 * 1024 * 1024,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -136,7 +139,10 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             "sandbox-image",
             dockerfile_text + "\n",
             "snap-1",
+            "sbx-1",
             "s3://snapshots/snap-1.tar.zst",
+            1234,
+            25 * 1024 * 1024 * 1024,
             False,
         )
         sandbox.terminate.assert_called_once_with()
@@ -155,7 +161,10 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
         sandbox.sandbox_id = "sbx-1"
         snapshot = SimpleNamespace(
             snapshot_id="snap-1",
+            sandbox_id="sbx-1",
             snapshot_uri="s3://snapshots/snap-1.tar.zst",
+            size_bytes=1234,
+            rootfs_disk_bytes=25 * 1024 * 1024 * 1024,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -192,7 +201,10 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             "custom-name",
             dockerfile_text,
             "snap-1",
+            "sbx-1",
             "s3://snapshots/snap-1.tar.zst",
+            1234,
+            25 * 1024 * 1024 * 1024,
             True,
         )
 
@@ -208,7 +220,10 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
         sandbox.sandbox_id = "sbx-1"
         snapshot = SimpleNamespace(
             snapshot_id="snap-1",
+            sandbox_id="sbx-1",
             snapshot_uri="s3://snapshots/snap-1.tar.zst",
+            size_bytes=1234,
+            rootfs_disk_bytes=25 * 1024 * 1024 * 1024,
         )
 
         build_ctx, execute, register_image, sandbox_client_cls = _make_build_patches(

@@ -118,6 +118,15 @@ jobs:
       - name: Build and lint tensorlake
         run: make build && make check
 
+      - name: Run sandbox/image SDK unit tests
+        env:
+          PYTHONPATH: src
+        run: |
+          poetry run python -m unittest \
+            tests.sandbox.test_client_rust_backend \
+            tests.sandbox.test_sandbox_rust_backend \
+            tests.image.test_sandbox_builder
+
       - name: Set up Docker
         uses: docker/setup-docker-action@v4
 

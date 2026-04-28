@@ -47,10 +47,12 @@ class _FakeRustClient:
 
     def create_sandbox(self, request_json):
         self.create_request_json = request_json
-        return '{"sandbox_id":"sbx-1","status":"pending"}'
+        return ("trace-create-sandbox", '{"sandbox_id":"sbx-1","status":"pending"}')
 
     def list_sandboxes_json(self):
-        return """
+        return (
+            "trace-list-sandboxes",
+            """
 {
   "sandboxes": [
     {
@@ -66,11 +68,14 @@ class _FakeRustClient:
     }
   ]
 }
-"""
+""",
+        )
 
     def get_sandbox_json(self, sandbox_id):
         self.last_get_sandbox_id = sandbox_id
-        return """
+        return (
+            "trace-get-sandbox",
+            """
 {
   "id": "sbx-1",
   "namespace": "default",
@@ -85,7 +90,8 @@ class _FakeRustClient:
   "exposed_ports": [8080],
   "sandbox_url": "https://sbx-1.sandbox.tensorlake.ai"
 }
-"""
+""",
+        )
 
     def update_sandbox(self, sandbox_id, request_json):
         self.last_get_sandbox_id = sandbox_id
@@ -108,7 +114,7 @@ class _FakeRustClient:
             "exposed_ports": payload.get("exposed_ports", []),
             "sandbox_url": f"https://{sandbox_id}.sandbox.tensorlake.ai",
         }
-        return json.dumps(response)
+        return ("trace-update-sandbox", json.dumps(response))
 
 
 class TestSandboxClientRustBackend(unittest.TestCase):
@@ -158,7 +164,9 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         class _StartupFailureRustClient(_FakeRustClient):
             def get_sandbox_json(self, sandbox_id):
                 self.last_get_sandbox_id = sandbox_id
-                return """
+                return (
+                    "trace-get-sandbox",
+                    """
 {
   "id": "sbx-1",
   "namespace": "default",
@@ -173,7 +181,8 @@ class TestSandboxClientRustBackend(unittest.TestCase):
     "message": "failed to pull image tensorlake/missing-image"
   }
 }
-"""
+""",
+                )
 
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
         client._rust_client = _StartupFailureRustClient()
@@ -189,10 +198,11 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         client._rust_client = _FakeRustClient()
 
         sandboxes = client.list()
+        sandboxes_list = list(sandboxes)
 
-        self.assertEqual(len(sandboxes), 1)
-        self.assertEqual(sandboxes[0].sandbox_id, "sbx-1")
-        self.assertEqual(sandboxes[0].status, "running")
+        self.assertEqual(len(sandboxes_list), 1)
+        self.assertEqual(sandboxes_list[0].sandbox_id, "sbx-1")
+        self.assertEqual(sandboxes_list[0].status, "running")
 
     def test_update_sandbox_sends_port_access_fields(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
@@ -263,7 +273,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         fake = _FakeRustClient()
         client._rust_client = fake
 
-        client.suspend("my-env")
+        client.suspend("my-env", wait=False)
 
         self.assertEqual(fake.suspend_calls, ["my-env"])
         self.assertEqual(fake.resume_calls, [])
@@ -273,7 +283,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         fake = _FakeRustClient()
         client._rust_client = fake
 
-        client.resume("my-env")
+        client.resume("my-env", wait=False)
 
         self.assertEqual(fake.resume_calls, ["my-env"])
         self.assertEqual(fake.suspend_calls, [])
