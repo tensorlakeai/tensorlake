@@ -155,6 +155,18 @@ pub fn sandbox_proxy_base(ctx: &CliContext, sandbox_id: &str) -> (String, Option
     (format!("{}/{}", proxy_url, sandbox_id), None)
 }
 
+/// Apply the optional Host header override returned by [`sandbox_proxy_base`]
+/// to a request builder.
+pub fn with_host(
+    req: reqwest::RequestBuilder,
+    host_override: Option<String>,
+) -> reqwest::RequestBuilder {
+    match host_override {
+        Some(host) => req.header(reqwest::header::HOST, host),
+        None => req,
+    }
+}
+
 /// Resolve the sandbox proxy URL from env or api_url.
 fn resolve_proxy_url(api_url: &str) -> String {
     if let Ok(url) = std::env::var("TENSORLAKE_SANDBOX_PROXY_URL") {
