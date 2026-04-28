@@ -33,9 +33,9 @@ from .models import (
     SandboxPortAccess,
     SandboxStatus,
     SendSignalResponse,
-    SnapshotContentMode,
     SnapshotInfo,
     SnapshotStatus,
+    SnapshotType,
     StdinMode,
 )
 from .pty import Pty
@@ -60,7 +60,7 @@ __all__ = [
     "NetworkConfig",
     # Snapshot models
     "SnapshotStatus",
-    "SnapshotContentMode",
+    "SnapshotType",
     "SnapshotInfo",
     "CreateSnapshotResponse",
     # Command result

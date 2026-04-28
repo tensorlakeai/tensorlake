@@ -41,7 +41,7 @@ pub async fn create_snapshot_with_details(
     ctx: &CliContext,
     sandbox_id: &str,
     timeout: f64,
-    content_mode: Option<&str>,
+    snapshot_type: Option<&str>,
 ) -> Result<SnapshotDetails> {
     let client = ctx.client()?;
 
@@ -49,9 +49,9 @@ pub async fn create_snapshot_with_details(
 
     let url = sandbox_endpoint(ctx, &format!("sandboxes/{}/snapshot", sandbox_id));
     let request = client.post(url);
-    let resp = if let Some(mode) = content_mode {
+    let resp = if let Some(t) = snapshot_type {
         request
-            .json(&serde_json::json!({"snapshot_content_mode": mode}))
+            .json(&serde_json::json!({"snapshot_type": t}))
             .send()
             .await
             .map_err(CliError::Http)?
@@ -146,10 +146,10 @@ pub async fn create_snapshot(
     ctx: &CliContext,
     sandbox_id: &str,
     timeout: f64,
-    content_mode: Option<&str>,
+    snapshot_type: Option<&str>,
 ) -> Result<String> {
     Ok(
-        create_snapshot_with_details(ctx, sandbox_id, timeout, content_mode)
+        create_snapshot_with_details(ctx, sandbox_id, timeout, snapshot_type)
             .await?
             .snapshot_id,
     )
@@ -159,9 +159,9 @@ pub async fn run(
     ctx: &CliContext,
     sandbox_id: &str,
     timeout: f64,
-    content_mode: Option<&str>,
+    snapshot_type: Option<&str>,
 ) -> Result<()> {
-    let snapshot_id = create_snapshot(ctx, sandbox_id, timeout, content_mode).await?;
+    let snapshot_id = create_snapshot(ctx, sandbox_id, timeout, snapshot_type).await?;
     println!("{}", snapshot_id);
     Ok(())
 }

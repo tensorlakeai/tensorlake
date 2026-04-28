@@ -4,8 +4,8 @@ import { parseArgs } from "node:util";
 import {
   type CommandResult,
   type ProcessInfo,
-  type SnapshotContentMode,
   type SnapshotInfo,
+  type SnapshotType,
 } from "./models.js";
 import { type OutputResponse, ProcessStatus } from "./models.js";
 import { SandboxClient } from "./client.js";
@@ -108,7 +108,7 @@ interface BuildClient {
     options?: {
       timeout?: number;
       pollInterval?: number;
-      contentMode?: SnapshotContentMode;
+      snapshotType?: SnapshotType;
     },
   ): Promise<SnapshotInfo>;
   close(): void;
@@ -1026,7 +1026,7 @@ export async function createSandboxImage(
 
     emit({ type: "status", message: "Creating snapshot..." });
     const snapshot = await client.snapshotAndWait(sandbox.sandboxId, {
-      contentMode: "filesystem_only",
+      snapshotType: "filesystem",
     });
     emit({
       type: "snapshot_created",

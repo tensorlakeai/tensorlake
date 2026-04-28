@@ -5,7 +5,7 @@ from unittest.mock import patch
 from tensorlake.sandbox import (
     PoolInUseError,
     SandboxNotFoundError,
-    SnapshotContentMode,
+    SnapshotType,
 )
 from tensorlake.sandbox.client import SandboxClient
 from tensorlake.sandbox.exceptions import SandboxError
@@ -29,16 +29,20 @@ class _FakeRustClient:
     def resume_sandbox(self, sandbox_id):
         self.resume_calls.append(sandbox_id)
 
-    def create_snapshot(self, sandbox_id, content_mode=None):
-        self.create_snapshot_calls.append((sandbox_id, content_mode))
-        return '{"snapshot_id":"snap-1","status":"in_progress"}'
+    def create_snapshot(self, sandbox_id, snapshot_type=None):
+        self.create_snapshot_calls.append((sandbox_id, snapshot_type))
+        return (
+            "trace-create",
+            '{"snapshot_id":"snap-1","status":"in_progress"}',
+        )
 
     def get_snapshot_json(self, snapshot_id):
         return (
+            "trace-get",
             '{"id":"snap-1","namespace":"default","sandbox_id":"sbx-1",'
             '"base_image":"python:3.12","status":"completed",'
-            '"content_mode":"filesystem_only",'
-            '"snapshot_uri":"s3://snap-1.tar.zst"}'
+            '"snapshot_type":"filesystem",'
+            '"snapshot_uri":"s3://snap-1.tar.zst"}',
         )
 
     def create_sandbox(self, request_json):
@@ -376,24 +380,24 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         finally:
             sandbox_client_module.RustCloudSandboxClientError = previous
 
-    def test_snapshot_threads_content_mode_to_rust_backend(self):
+    def test_snapshot_threads_snapshot_type_to_rust_backend(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
         fake = _FakeRustClient()
         client._rust_client = fake
 
         info = client.snapshot_and_wait(
             "sbx-1",
-            content_mode=SnapshotContentMode.FILESYSTEM_ONLY,
+            snapshot_type=SnapshotType.FILESYSTEM,
         )
 
         self.assertEqual(len(fake.create_snapshot_calls), 1)
-        sandbox_id, content_mode = fake.create_snapshot_calls[0]
+        sandbox_id, snapshot_type = fake.create_snapshot_calls[0]
         self.assertEqual(sandbox_id, "sbx-1")
-        self.assertEqual(content_mode, "filesystem_only")
+        self.assertEqual(snapshot_type, "filesystem")
         self.assertEqual(info.snapshot_id, "snap-1")
-        self.assertEqual(info.content_mode, SnapshotContentMode.FILESYSTEM_ONLY)
+        self.assertEqual(info.snapshot_type, SnapshotType.FILESYSTEM)
 
-    def test_snapshot_omits_content_mode_when_none(self):
+    def test_snapshot_omits_snapshot_type_when_none(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
         fake = _FakeRustClient()
         client._rust_client = fake
@@ -401,24 +405,8 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         client.snapshot_and_wait("sbx-1")
 
         self.assertEqual(len(fake.create_snapshot_calls), 1)
-        _, content_mode = fake.create_snapshot_calls[0]
-        self.assertIsNone(content_mode)
-
-    def test_get_snapshot_accepts_legacy_snapshot_content_mode_alias(self):
-        class _LegacySnapshotModeRustClient(_FakeRustClient):
-            def get_snapshot_json(self, snapshot_id):
-                return (
-                    '{"id":"snap-1","namespace":"default","sandbox_id":"sbx-1",'
-                    '"base_image":"python:3.12","status":"completed",'
-                    '"snapshot_content_mode":"full",'
-                    '"snapshot_uri":"s3://snap-1.tar.zst"}'
-                )
-
-        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
-        client._rust_client = _LegacySnapshotModeRustClient()
-
-        traced = client.get_snapshot("snap-1")
-        self.assertEqual(traced.content_mode, SnapshotContentMode.FULL)
+        _, snapshot_type = fake.create_snapshot_calls[0]
+        self.assertIsNone(snapshot_type)
 
 
 if __name__ == "__main__":

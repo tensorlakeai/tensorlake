@@ -604,23 +604,22 @@ struct SnapshotArgs {
     #[arg(short, long, default_value = "300", requires = "sandbox_id")]
     timeout: f64,
 
-    /// Snapshot content mode. Defaults to `filesystem` when omitted. `full` captures VM memory + filesystem state, `filesystem` captures filesystem only.
+    /// Snapshot type. Defaults to `filesystem` when omitted. `memory` captures VM memory + filesystem state, `filesystem` captures filesystem only.
     #[arg(long, value_enum, requires = "sandbox_id")]
-    content_mode: Option<SnapshotContentModeArg>,
+    snapshot_type: Option<SnapshotTypeArg>,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-enum SnapshotContentModeArg {
-    Full,
-    #[value(alias = "filesystem_only")]
+enum SnapshotTypeArg {
+    Memory,
     Filesystem,
 }
 
-impl SnapshotContentModeArg {
+impl SnapshotTypeArg {
     fn as_wire_value(self) -> &'static str {
         match self {
-            Self::Full => "full",
-            Self::Filesystem => "filesystem_only",
+            Self::Memory => "memory",
+            Self::Filesystem => "filesystem",
         }
     }
 }
@@ -925,8 +924,8 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             &sandbox_id,
                             snapshot_args.timeout,
                             snapshot_args
-                                .content_mode
-                                .map(SnapshotContentModeArg::as_wire_value),
+                                .snapshot_type
+                                .map(SnapshotTypeArg::as_wire_value),
                         )
                         .await
                     }
@@ -1095,47 +1094,44 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_content_mode_maps_to_wire_values() {
-        assert_eq!(SnapshotContentModeArg::Full.as_wire_value(), "full");
-        assert_eq!(
-            SnapshotContentModeArg::Filesystem.as_wire_value(),
-            "filesystem_only"
-        );
+    fn snapshot_type_maps_to_wire_values() {
+        assert_eq!(SnapshotTypeArg::Memory.as_wire_value(), "memory");
+        assert_eq!(SnapshotTypeArg::Filesystem.as_wire_value(), "filesystem");
     }
 
     #[test]
-    fn sbx_checkpoint_parses_full_content_mode() {
+    fn sbx_checkpoint_parses_memory_snapshot_type() {
         let cli = Cli::try_parse_from([
             "tl",
             "sbx",
             "checkpoint",
             "sbx-123",
-            "--content-mode",
-            "full",
+            "--snapshot-type",
+            "memory",
         ])
         .unwrap();
 
         match cli.command {
             Commands::Sbx(SbxCommands::Checkpoint(SnapshotArgs {
                 sandbox_id,
-                content_mode,
+                snapshot_type,
                 ..
             })) => {
                 assert_eq!(sandbox_id.as_deref(), Some("sbx-123"));
-                assert_eq!(content_mode, Some(SnapshotContentModeArg::Full));
+                assert_eq!(snapshot_type, Some(SnapshotTypeArg::Memory));
             }
             _ => panic!("expected sbx checkpoint command"),
         }
     }
 
     #[test]
-    fn sbx_checkpoint_parses_filesystem_content_mode() {
+    fn sbx_checkpoint_parses_filesystem_snapshot_type() {
         let cli = Cli::try_parse_from([
             "tl",
             "sbx",
             "checkpoint",
             "sbx-123",
-            "--content-mode",
+            "--snapshot-type",
             "filesystem",
         ])
         .unwrap();
@@ -1143,31 +1139,11 @@ mod tests {
         match cli.command {
             Commands::Sbx(SbxCommands::Checkpoint(SnapshotArgs {
                 sandbox_id,
-                content_mode,
+                snapshot_type,
                 ..
             })) => {
                 assert_eq!(sandbox_id.as_deref(), Some("sbx-123"));
-                assert_eq!(content_mode, Some(SnapshotContentModeArg::Filesystem));
-            }
-            _ => panic!("expected sbx checkpoint command"),
-        }
-    }
-
-    #[test]
-    fn sbx_checkpoint_accepts_filesystem_only_content_mode_alias() {
-        let cli = Cli::try_parse_from([
-            "tl",
-            "sbx",
-            "checkpoint",
-            "sbx-123",
-            "--content-mode",
-            "filesystem_only",
-        ])
-        .unwrap();
-
-        match cli.command {
-            Commands::Sbx(SbxCommands::Checkpoint(SnapshotArgs { content_mode, .. })) => {
-                assert_eq!(content_mode, Some(SnapshotContentModeArg::Filesystem));
+                assert_eq!(snapshot_type, Some(SnapshotTypeArg::Filesystem));
             }
             _ => panic!("expected sbx checkpoint command"),
         }

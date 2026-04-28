@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from tensorlake.image import Image
 from tensorlake.image import sandbox_builder as sbm
-from tensorlake.sandbox.models import SnapshotContentMode
+from tensorlake.sandbox.models import SnapshotType
 
 BUILD_CPUS = 2.0
 BUILD_MEMORY_MB = 4096
@@ -146,7 +146,7 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
         # and broke `tl sbx new --image`).
         sandbox_client.snapshot_and_wait.assert_called_once_with(
             "sbx-1",
-            content_mode=SnapshotContentMode.FILESYSTEM_ONLY,
+            snapshot_type=SnapshotType.FILESYSTEM,
         )
 
     def test_public_flag_and_registered_name(self):
@@ -263,7 +263,7 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
 
         sandbox_client.snapshot_and_wait.assert_called_once_with(
             "sbx-1",
-            content_mode=SnapshotContentMode.FILESYSTEM_ONLY,
+            snapshot_type=SnapshotType.FILESYSTEM,
         )
 
     def test_registered_name_overrides_image_name(self):
