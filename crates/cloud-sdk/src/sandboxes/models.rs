@@ -218,6 +218,8 @@ pub struct SnapshotInfo {
     pub size_bytes: Option<i64>,
     #[serde(default)]
     pub rootfs_disk_bytes: Option<u64>,
+    #[serde(default, alias = "snapshot_content_mode")]
+    pub content_mode: Option<SnapshotContentMode>,
     #[serde(default)]
     pub created_at: Option<serde_json::Value>,
 }
@@ -398,5 +400,31 @@ mod tests {
             serde_json::to_string(&body).unwrap(),
             r#"{"snapshot_content_mode":"filesystem_only"}"#
         );
+    }
+
+    #[test]
+    fn snapshot_info_deserializes_content_mode() {
+        let json = r#"{
+            "id":"snap-1",
+            "namespace":"default",
+            "sandbox_id":"sbx-1",
+            "status":"completed",
+            "content_mode":"filesystem_only"
+        }"#;
+        let info: SnapshotInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.content_mode, Some(SnapshotContentMode::FilesystemOnly));
+    }
+
+    #[test]
+    fn snapshot_info_deserializes_legacy_snapshot_content_mode_alias() {
+        let json = r#"{
+            "id":"snap-1",
+            "namespace":"default",
+            "sandbox_id":"sbx-1",
+            "status":"completed",
+            "snapshot_content_mode":"full"
+        }"#;
+        let info: SnapshotInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.content_mode, Some(SnapshotContentMode::Full));
     }
 }

@@ -648,6 +648,7 @@ describe("SandboxClient", () => {
             sandbox_id: "sbx-1",
             base_image: "python:3.12",
             status: "completed",
+            content_mode: "filesystem_only",
             created_at: 1700000000,
           }),
           { status: 200 },
@@ -659,6 +660,29 @@ describe("SandboxClient", () => {
       expect(info.snapshotId).toBe("snap-1");
       expect(info.baseImage).toBe("python:3.12");
       expect(info.status).toBe(SnapshotStatus.COMPLETED);
+      expect(info.contentMode).toBe("filesystem_only");
+      client.close();
+    });
+
+    it("normalizes legacy snapshot_content_mode alias in snapshot info", async () => {
+      mockFetch(() =>
+        new Response(
+          JSON.stringify({
+            id: "snap-1",
+            namespace: "default",
+            sandbox_id: "sbx-1",
+            base_image: "python:3.12",
+            status: "completed",
+            snapshot_content_mode: "full",
+            created_at: 1700000000,
+          }),
+          { status: 200 },
+        ),
+      );
+
+      const client = SandboxClient.forLocalhost();
+      const info = await client.getSnapshot("snap-1");
+      expect(info.contentMode).toBe("full");
       client.close();
     });
 

@@ -37,6 +37,7 @@ class _FakeRustClient:
         return (
             '{"id":"snap-1","namespace":"default","sandbox_id":"sbx-1",'
             '"base_image":"python:3.12","status":"completed",'
+            '"content_mode":"filesystem_only",'
             '"snapshot_uri":"s3://snap-1.tar.zst"}'
         )
 
@@ -390,6 +391,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertEqual(sandbox_id, "sbx-1")
         self.assertEqual(content_mode, "filesystem_only")
         self.assertEqual(info.snapshot_id, "snap-1")
+        self.assertEqual(info.content_mode, SnapshotContentMode.FILESYSTEM_ONLY)
 
     def test_snapshot_omits_content_mode_when_none(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
@@ -401,6 +403,22 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertEqual(len(fake.create_snapshot_calls), 1)
         _, content_mode = fake.create_snapshot_calls[0]
         self.assertIsNone(content_mode)
+
+    def test_get_snapshot_accepts_legacy_snapshot_content_mode_alias(self):
+        class _LegacySnapshotModeRustClient(_FakeRustClient):
+            def get_snapshot_json(self, snapshot_id):
+                return (
+                    '{"id":"snap-1","namespace":"default","sandbox_id":"sbx-1",'
+                    '"base_image":"python:3.12","status":"completed",'
+                    '"snapshot_content_mode":"full",'
+                    '"snapshot_uri":"s3://snap-1.tar.zst"}'
+                )
+
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = _LegacySnapshotModeRustClient()
+
+        traced = client.get_snapshot("snap-1")
+        self.assertEqual(traced.content_mode, SnapshotContentMode.FULL)
 
 
 if __name__ == "__main__":

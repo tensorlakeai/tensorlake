@@ -143,6 +143,7 @@ export interface SnapshotInfo {
   sandboxId: string;
   baseImage: string;
   status: SnapshotStatus;
+  contentMode?: SnapshotContentMode;
   error?: string;
   snapshotUri?: string;
   sizeBytes?: number;

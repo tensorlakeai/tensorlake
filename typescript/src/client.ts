@@ -28,6 +28,18 @@ import {
 import { Sandbox } from "./sandbox.js";
 import { isLocalhost, lifecyclePath, resolveProxyUrl } from "./url.js";
 
+type SnapshotInfoWithLegacyMode = SnapshotInfo & {
+  snapshotContentMode?: SnapshotInfo["contentMode"];
+};
+
+function normalizeSnapshotInfo(snapshot: SnapshotInfoWithLegacyMode): SnapshotInfo {
+  if (snapshot.contentMode == null && snapshot.snapshotContentMode != null) {
+    snapshot.contentMode = snapshot.snapshotContentMode;
+  }
+  delete (snapshot as { snapshotContentMode?: SnapshotInfo["contentMode"] }).snapshotContentMode;
+  return snapshot;
+}
+
 /**
  * Client for managing TensorLake sandboxes, pools, and snapshots.
  *
@@ -352,7 +364,7 @@ export class SandboxClient {
       "GET",
       this.path(`snapshots/${snapshotId}`),
     );
-    return fromSnakeKeys(raw, "snapshotId") as SnapshotInfo;
+    return normalizeSnapshotInfo(fromSnakeKeys(raw, "snapshotId") as SnapshotInfoWithLegacyMode);
   }
 
   /** List all snapshots in the namespace. */
@@ -362,7 +374,7 @@ export class SandboxClient {
       this.path("snapshots"),
     );
     const snapshots = (raw.snapshots ?? []).map(
-      (s) => fromSnakeKeys(s, "snapshotId") as SnapshotInfo,
+      (s) => normalizeSnapshotInfo(fromSnakeKeys(s, "snapshotId") as SnapshotInfoWithLegacyMode),
     );
     return Object.assign(snapshots, { traceId: raw.traceId });
   }

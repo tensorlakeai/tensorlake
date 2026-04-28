@@ -1185,6 +1185,7 @@ mod tests {
                     snapshot_uri: None,
                     size_bytes: None,
                     rootfs_disk_bytes: None,
+                    content_mode: None,
                     created_at: None,
                 })
             }

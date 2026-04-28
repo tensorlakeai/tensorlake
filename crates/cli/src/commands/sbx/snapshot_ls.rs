@@ -43,6 +43,7 @@ pub async fn run(ctx: &CliContext) -> Result<()> {
     let mut table = new_table(&[
         "ID",
         "Status",
+        "Content Mode",
         "Sandbox ID",
         "Base Image",
         "Size",
@@ -59,6 +60,7 @@ pub async fn run(ctx: &CliContext) -> Result<()> {
             .get("status")
             .and_then(|v| v.as_str())
             .unwrap_or("-");
+        let content_mode = format_content_mode(snapshot);
         let sandbox_id = snapshot
             .get("sandbox_id")
             .and_then(|v| v.as_str())
@@ -73,6 +75,7 @@ pub async fn run(ctx: &CliContext) -> Result<()> {
         table.add_row(vec![
             Cell::new(snapshot_id),
             Cell::new(status),
+            Cell::new(content_mode),
             Cell::new(sandbox_id),
             Cell::new(base_image),
             Cell::new(size),
@@ -98,5 +101,50 @@ fn format_size(size_bytes: Option<&serde_json::Value>) -> String {
         format!("{:.1} KB", size_bytes as f64 / 1024.0)
     } else {
         format!("{} B", size_bytes)
+    }
+}
+
+fn format_content_mode(snapshot: &serde_json::Value) -> String {
+    let raw_mode = snapshot
+        .get("content_mode")
+        .or_else(|| snapshot.get("snapshot_content_mode"))
+        .and_then(|v| v.as_str());
+
+    match raw_mode {
+        Some("filesystem") => "filesystem_only".to_string(),
+        Some("memory") => "full".to_string(),
+        Some(mode) => mode.to_string(),
+        None => "-".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_content_mode;
+
+    #[test]
+    fn format_content_mode_uses_content_mode_field() {
+        let snapshot = serde_json::json!({"content_mode": "filesystem_only"});
+        assert_eq!(format_content_mode(&snapshot), "filesystem_only");
+    }
+
+    #[test]
+    fn format_content_mode_uses_legacy_snapshot_content_mode_field() {
+        let snapshot = serde_json::json!({"snapshot_content_mode": "full"});
+        assert_eq!(format_content_mode(&snapshot), "full");
+    }
+
+    #[test]
+    fn format_content_mode_normalizes_alias_values() {
+        let filesystem_snapshot = serde_json::json!({"content_mode": "filesystem"});
+        let memory_snapshot = serde_json::json!({"content_mode": "memory"});
+        assert_eq!(format_content_mode(&filesystem_snapshot), "filesystem_only");
+        assert_eq!(format_content_mode(&memory_snapshot), "full");
+    }
+
+    #[test]
+    fn format_content_mode_handles_missing_mode() {
+        let snapshot = serde_json::json!({});
+        assert_eq!(format_content_mode(&snapshot), "-");
     }
 }

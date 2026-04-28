@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated, Any
 
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import AliasChoices, BaseModel, BeforeValidator, Field
 
 
 def _parse_timestamp(v: int | float | datetime | None) -> datetime | None:
@@ -278,6 +278,10 @@ class SnapshotInfo(BaseModel):
     sandbox_id: str
     base_image: str | None = None
     status: SnapshotStatus
+    content_mode: SnapshotContentMode | None = Field(
+        default=None,
+        validation_alias=AliasChoices("content_mode", "snapshot_content_mode"),
+    )
     error: str | None = None
     snapshot_uri: str | None = None
     size_bytes: int | None = None
