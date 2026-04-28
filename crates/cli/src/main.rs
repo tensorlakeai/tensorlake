@@ -603,6 +603,26 @@ struct SnapshotArgs {
     /// Max seconds to wait
     #[arg(short, long, default_value = "300", requires = "sandbox_id")]
     timeout: f64,
+
+    /// Snapshot content mode. Defaults to `filesystem` when omitted. `full` captures VM memory + filesystem state, `filesystem` captures filesystem only.
+    #[arg(long, value_enum, requires = "sandbox_id")]
+    content_mode: Option<SnapshotContentModeArg>,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum SnapshotContentModeArg {
+    Full,
+    #[value(alias = "filesystem_only")]
+    Filesystem,
+}
+
+impl SnapshotContentModeArg {
+    fn as_wire_value(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Filesystem => "filesystem_only",
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -900,7 +920,15 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 "checkpoint requires a sandbox ID or the 'ls' subcommand",
                             )
                         })?;
-                        commands::sbx::snapshot::run(ctx, &sandbox_id, snapshot_args.timeout).await
+                        commands::sbx::snapshot::run(
+                            ctx,
+                            &sandbox_id,
+                            snapshot_args.timeout,
+                            snapshot_args
+                                .content_mode
+                                .map(SnapshotContentModeArg::as_wire_value),
+                        )
+                        .await
                     }
                 },
                 SbxCommands::Clone {
@@ -1067,17 +1095,88 @@ mod tests {
     }
 
     #[test]
-    fn sbx_run_parses_disk_mb_override() {
+    fn snapshot_content_mode_maps_to_wire_values() {
+        assert_eq!(SnapshotContentModeArg::Full.as_wire_value(), "full");
+        assert_eq!(
+            SnapshotContentModeArg::Filesystem.as_wire_value(),
+            "filesystem_only"
+        );
+    }
+
+    #[test]
+    fn sbx_checkpoint_parses_full_content_mode() {
         let cli = Cli::try_parse_from([
             "tl",
             "sbx",
-            "run",
-            "--disk_mb",
-            "30720",
-            "echo",
-            "hello",
+            "checkpoint",
+            "sbx-123",
+            "--content-mode",
+            "full",
         ])
         .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Checkpoint(SnapshotArgs {
+                sandbox_id,
+                content_mode,
+                ..
+            })) => {
+                assert_eq!(sandbox_id.as_deref(), Some("sbx-123"));
+                assert_eq!(content_mode, Some(SnapshotContentModeArg::Full));
+            }
+            _ => panic!("expected sbx checkpoint command"),
+        }
+    }
+
+    #[test]
+    fn sbx_checkpoint_parses_filesystem_content_mode() {
+        let cli = Cli::try_parse_from([
+            "tl",
+            "sbx",
+            "checkpoint",
+            "sbx-123",
+            "--content-mode",
+            "filesystem",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Checkpoint(SnapshotArgs {
+                sandbox_id,
+                content_mode,
+                ..
+            })) => {
+                assert_eq!(sandbox_id.as_deref(), Some("sbx-123"));
+                assert_eq!(content_mode, Some(SnapshotContentModeArg::Filesystem));
+            }
+            _ => panic!("expected sbx checkpoint command"),
+        }
+    }
+
+    #[test]
+    fn sbx_checkpoint_accepts_filesystem_only_content_mode_alias() {
+        let cli = Cli::try_parse_from([
+            "tl",
+            "sbx",
+            "checkpoint",
+            "sbx-123",
+            "--content-mode",
+            "filesystem_only",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Checkpoint(SnapshotArgs { content_mode, .. })) => {
+                assert_eq!(content_mode, Some(SnapshotContentModeArg::Filesystem));
+            }
+            _ => panic!("expected sbx checkpoint command"),
+        }
+    }
+
+    #[test]
+    fn sbx_run_parses_disk_mb_override() {
+        let cli = Cli::try_parse_from(["tl", "sbx", "run", "--disk_mb", "30720", "echo", "hello"])
+            .unwrap();
 
         match cli.command {
             Commands::Sbx(SbxCommands::Run { disk_mb, .. }) => {
@@ -1151,7 +1250,10 @@ mod tests {
 
         match cli.command {
             Commands::Sbx(SbxCommands::Image(ImageCommands::Create {
-                cpus, memory, disk_mb, ..
+                cpus,
+                memory,
+                disk_mb,
+                ..
             })) => {
                 assert_eq!(cpus, Some(3.5));
                 assert_eq!(memory, Some(8192));

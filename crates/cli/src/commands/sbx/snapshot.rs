@@ -155,8 +155,13 @@ pub async fn create_snapshot(
     )
 }
 
-pub async fn run(ctx: &CliContext, sandbox_id: &str, timeout: f64) -> Result<()> {
-    let snapshot_id = create_snapshot(ctx, sandbox_id, timeout, None).await?;
+pub async fn run(
+    ctx: &CliContext,
+    sandbox_id: &str,
+    timeout: f64,
+    content_mode: Option<&str>,
+) -> Result<()> {
+    let snapshot_id = create_snapshot(ctx, sandbox_id, timeout, content_mode).await?;
     println!("{}", snapshot_id);
     Ok(())
 }
