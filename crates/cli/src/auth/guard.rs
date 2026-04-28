@@ -5,6 +5,43 @@ use crate::config::resolver;
 use crate::error::{CliError, Result};
 use crate::project::detection::find_project_root;
 
+/// Ensure the caller is authenticated, but do not require an
+/// organization/project context. Used by user-scoped commands like
+/// `ssh-keys` that act on the user's profile rather than a project.
+pub async fn ensure_auth(ctx: &mut CliContext) -> Result<()> {
+    if ctx.has_authentication() {
+        return Ok(());
+    }
+    eprintln!("It seems like you're not logged in. Let's log you in...\n");
+    let login_result = match run_login_flow(ctx, true).await {
+        Ok(result) => result,
+        Err(CliError::Cancelled) => {
+            return Err(CliError::auth(
+                "Login cancelled. Set TENSORLAKE_API_KEY or run 'tl login' to authenticate.",
+            ));
+        }
+        Err(e) => return Err(e),
+    };
+    let resolved = resolver::resolve(
+        Some(&ctx.api_url),
+        Some(&ctx.cloud_url),
+        None,
+        Some(&login_result.token),
+        Some(&ctx.namespace),
+        login_result.organization_id.as_deref(),
+        login_result.project_id.as_deref(),
+        ctx.debug,
+        ctx.show_trace_id,
+    );
+    *ctx = CliContext::from_resolved(resolved);
+    if !ctx.has_authentication() {
+        return Err(CliError::auth(
+            "Authentication failed. Please try running 'tl login' manually.",
+        ));
+    }
+    Ok(())
+}
+
 /// Ensure authentication and org/project are available.
 /// Triggers login and/or init flows as needed.
 pub async fn ensure_auth_and_project(ctx: &mut CliContext) -> Result<()> {
