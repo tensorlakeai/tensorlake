@@ -12,6 +12,7 @@ from .exceptions import (
     SandboxNotFoundError,
 )
 from .models import (
+    CheckpointType,
     CommandResult,
     ContainerResourcesInfo,
     CreateSandboxPoolResponse,
@@ -62,6 +63,7 @@ __all__ = [
     "SnapshotStatus",
     "SnapshotType",
     "SnapshotInfo",
+    "CheckpointType",
     "CreateSnapshotResponse",
     # Command result
     "CommandResult",

@@ -64,6 +64,20 @@ class SnapshotType(str, Enum):
     FILESYSTEM = "filesystem"
 
 
+class CheckpointType(str, Enum):
+    """Checkpoint type for :meth:`Sandbox.checkpoint`.
+
+    - ``MEMORY``: Capture VM memory + filesystem state. Sandboxes
+      restored from this checkpoint warm-restore VM memory and running
+      processes.
+    - ``FILESYSTEM``: Capture filesystem state only. Sandboxes restored
+      from this checkpoint cold-boot from the snapshot tarball.
+    """
+
+    MEMORY = "memory"
+    FILESYSTEM = "filesystem"
+
+
 class ContainerResourcesInfo(BaseModel):
     """Container resource configuration."""
 

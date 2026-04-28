@@ -18,6 +18,7 @@ from .exceptions import (
     SandboxError,
 )
 from .models import (
+    CheckpointType,
     CommandResult,
     DaemonInfo,
     HealthResponse,
@@ -467,7 +468,7 @@ class Sandbox:
         wait: bool = True,
         timeout: float = 300,
         poll_interval: float = 1.0,
-        checkpoint_type: SnapshotType | None = None,
+        checkpoint_type: CheckpointType | None = None,
     ) -> SnapshotInfo | None:
         """Create a snapshot of this sandbox's filesystem.
 
@@ -488,16 +489,19 @@ class Sandbox:
             SandboxError: If the snapshot fails or times out.
         """
         self._require_lifecycle_client("checkpoint")
+        snapshot_type = (
+            SnapshotType(checkpoint_type.value) if checkpoint_type is not None else None
+        )
         if not wait:
             self._lifecycle_client.snapshot(
-                self.sandbox_id, snapshot_type=checkpoint_type
+                self.sandbox_id, snapshot_type=snapshot_type
             )
             return None
         return self._lifecycle_client.snapshot_and_wait(
             self.sandbox_id,
             timeout=timeout,
             poll_interval=poll_interval,
-            snapshot_type=checkpoint_type,
+            snapshot_type=snapshot_type,
         ).value
 
     def list_snapshots(self) -> TracedIterator[SnapshotInfo]:

@@ -27,6 +27,16 @@ export enum SnapshotStatus {
  */
 export type SnapshotType = "memory" | "filesystem";
 
+/**
+ * Checkpoint type for {@link Sandbox.checkpoint}.
+ *
+ * - `"memory"`: Capture VM memory + filesystem state. Sandboxes restored
+ *   from this checkpoint warm-restore VM memory and running processes.
+ * - `"filesystem"`: Capture filesystem state only. Sandboxes restored from
+ *   this checkpoint cold-boot from the snapshot tarball.
+ */
+export type CheckpointType = "memory" | "filesystem";
+
 export enum ProcessStatus {
   RUNNING = "running",
   EXITED = "exited",
@@ -355,7 +365,7 @@ export interface SuspendResumeOptions {
 }
 
 export interface CheckpointOptions extends SuspendResumeOptions {
-  checkpointType?: SnapshotType;
+  checkpointType?: CheckpointType;
 }
 
 export interface ConnectOptions {
