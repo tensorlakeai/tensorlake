@@ -604,7 +604,7 @@ struct SnapshotArgs {
     #[arg(short, long, default_value = "300", requires = "sandbox_id")]
     timeout: f64,
 
-    /// Snapshot type. Defaults to `filesystem` when omitted. `memory` captures VM memory + filesystem state, `filesystem` captures filesystem only.
+    /// Optional snapshot type. When omitted, the client sends no `snapshot_type` and the server applies its default (currently `filesystem`). `memory` captures VM memory + filesystem state, `filesystem` captures filesystem only.
     #[arg(long, value_enum, requires = "sandbox_id")]
     snapshot_type: Option<SnapshotTypeArg>,
 }
