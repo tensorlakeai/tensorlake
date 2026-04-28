@@ -604,9 +604,9 @@ struct SnapshotArgs {
     #[arg(short, long, default_value = "300", requires = "sandbox_id")]
     timeout: f64,
 
-    /// Optional snapshot type. When omitted, the client sends no `snapshot_type` and the server applies its default (currently `filesystem`). `memory` captures VM memory + filesystem state, `filesystem` captures filesystem only.
+    /// Optional checkpoint type. When omitted, the client sends no `snapshot_type` and the server applies its default (currently `filesystem`). `memory` captures VM memory + filesystem state, `filesystem` captures filesystem only.
     #[arg(long, value_enum, requires = "sandbox_id")]
-    snapshot_type: Option<SnapshotTypeArg>,
+    checkpoint_type: Option<SnapshotTypeArg>,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -924,7 +924,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             &sandbox_id,
                             snapshot_args.timeout,
                             snapshot_args
-                                .snapshot_type
+                                .checkpoint_type
                                 .map(SnapshotTypeArg::as_wire_value),
                         )
                         .await
@@ -1094,19 +1094,19 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_type_maps_to_wire_values() {
+    fn checkpoint_type_maps_to_wire_values() {
         assert_eq!(SnapshotTypeArg::Memory.as_wire_value(), "memory");
         assert_eq!(SnapshotTypeArg::Filesystem.as_wire_value(), "filesystem");
     }
 
     #[test]
-    fn sbx_checkpoint_parses_memory_snapshot_type() {
+    fn sbx_checkpoint_parses_memory_checkpoint_type() {
         let cli = Cli::try_parse_from([
             "tl",
             "sbx",
             "checkpoint",
             "sbx-123",
-            "--snapshot-type",
+            "--checkpoint-type",
             "memory",
         ])
         .unwrap();
@@ -1114,24 +1114,24 @@ mod tests {
         match cli.command {
             Commands::Sbx(SbxCommands::Checkpoint(SnapshotArgs {
                 sandbox_id,
-                snapshot_type,
+                checkpoint_type,
                 ..
             })) => {
                 assert_eq!(sandbox_id.as_deref(), Some("sbx-123"));
-                assert_eq!(snapshot_type, Some(SnapshotTypeArg::Memory));
+                assert_eq!(checkpoint_type, Some(SnapshotTypeArg::Memory));
             }
             _ => panic!("expected sbx checkpoint command"),
         }
     }
 
     #[test]
-    fn sbx_checkpoint_parses_filesystem_snapshot_type() {
+    fn sbx_checkpoint_parses_filesystem_checkpoint_type() {
         let cli = Cli::try_parse_from([
             "tl",
             "sbx",
             "checkpoint",
             "sbx-123",
-            "--snapshot-type",
+            "--checkpoint-type",
             "filesystem",
         ])
         .unwrap();
@@ -1139,11 +1139,11 @@ mod tests {
         match cli.command {
             Commands::Sbx(SbxCommands::Checkpoint(SnapshotArgs {
                 sandbox_id,
-                snapshot_type,
+                checkpoint_type,
                 ..
             })) => {
                 assert_eq!(sandbox_id.as_deref(), Some("sbx-123"));
-                assert_eq!(snapshot_type, Some(SnapshotTypeArg::Filesystem));
+                assert_eq!(checkpoint_type, Some(SnapshotTypeArg::Filesystem));
             }
             _ => panic!("expected sbx checkpoint command"),
         }

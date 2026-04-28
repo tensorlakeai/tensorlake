@@ -490,13 +490,13 @@ export class Sandbox {
   async checkpoint(options?: CheckpointOptions): Promise<SnapshotInfo | undefined> {
     const client = this.requireLifecycleClient("checkpoint");
     if (options?.wait === false) {
-      await client.snapshot(this.lifecycleIdentifier, { snapshotType: options.snapshotType });
+      await client.snapshot(this.lifecycleIdentifier, { snapshotType: options.checkpointType });
       return undefined;
     }
     return client.snapshotAndWait(this.lifecycleIdentifier, {
       timeout: options?.timeout,
       pollInterval: options?.pollInterval,
-      snapshotType: options?.snapshotType,
+      snapshotType: options?.checkpointType,
     });
   }
 

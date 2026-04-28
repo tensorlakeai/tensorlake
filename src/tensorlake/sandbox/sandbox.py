@@ -467,7 +467,7 @@ class Sandbox:
         wait: bool = True,
         timeout: float = 300,
         poll_interval: float = 1.0,
-        snapshot_type: SnapshotType | None = None,
+        checkpoint_type: SnapshotType | None = None,
     ) -> SnapshotInfo | None:
         """Create a snapshot of this sandbox's filesystem.
 
@@ -479,7 +479,7 @@ class Sandbox:
             wait: If True (default), poll until the snapshot is committed.
             timeout: Max seconds to wait when wait=True (default 300).
             poll_interval: Seconds between polls when wait=True (default 1.0).
-            snapshot_type: Optional snapshot type.
+            checkpoint_type: Optional checkpoint type.
 
         Returns:
             Completed SnapshotInfo when wait=True; None when wait=False.
@@ -490,14 +490,14 @@ class Sandbox:
         self._require_lifecycle_client("checkpoint")
         if not wait:
             self._lifecycle_client.snapshot(
-                self.sandbox_id, snapshot_type=snapshot_type
+                self.sandbox_id, snapshot_type=checkpoint_type
             )
             return None
         return self._lifecycle_client.snapshot_and_wait(
             self.sandbox_id,
             timeout=timeout,
             poll_interval=poll_interval,
-            snapshot_type=snapshot_type,
+            snapshot_type=checkpoint_type,
         ).value
 
     def list_snapshots(self) -> TracedIterator[SnapshotInfo]:

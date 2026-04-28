@@ -355,7 +355,7 @@ export interface SuspendResumeOptions {
 }
 
 export interface CheckpointOptions extends SuspendResumeOptions {
-  snapshotType?: SnapshotType;
+  checkpointType?: SnapshotType;
 }
 
 export interface ConnectOptions {
