@@ -326,17 +326,17 @@ export class SandboxClient {
    * status — the snapshot is created asynchronously. Poll `getSnapshot()` until
    * `completed` or `failed`, or use `snapshotAndWait()` to block automatically.
    *
-   * @param options.contentMode - `"filesystem_only"` for cold-boot snapshots (e.g. image builds).
-   *   Omit to use the server default (full VM snapshot).
+   * @param options.snapshotType - `"filesystem"` for cold-boot snapshots (e.g. image builds).
+   *   Omit to use the server default (`filesystem`).
    */
   async snapshot(
     sandboxId: string,
     options?: SnapshotOptions,
   ): Promise<CreateSnapshotResponse> {
-    // Preserve today's wire shape (no body) when contentMode is not set.
+    // Preserve today's wire shape (no body) when snapshotType is not set.
     const requestOptions =
-      options?.contentMode != null
-        ? { body: { snapshot_content_mode: options.contentMode } }
+      options?.snapshotType != null
+        ? { body: { snapshot_type: options.snapshotType } }
         : undefined;
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "POST",
@@ -385,7 +385,7 @@ export class SandboxClient {
    * @param sandboxId - ID of the running sandbox to snapshot.
    * @param options.timeout - Max seconds to wait (default 300).
    * @param options.pollInterval - Seconds between status polls (default 1).
-   * @param options.contentMode - Content mode passed through to `snapshot()`.
+   * @param options.snapshotType - Snapshot type passed through to `snapshot()`.
    * @throws {SandboxError} If the snapshot fails or `timeout` elapses.
    */
   async snapshotAndWait(
@@ -396,7 +396,7 @@ export class SandboxClient {
     const pollInterval = options?.pollInterval ?? 1;
 
     const result = await this.snapshot(sandboxId, {
-      contentMode: options?.contentMode,
+      snapshotType: options?.snapshotType,
     });
     const deadline = Date.now() + timeout * 1000;
 

@@ -23,7 +23,7 @@ use tensorlake::images::models::{
     ApplicationBuildContext, CreateApplicationBuildRequest,
 };
 use tensorlake::sandboxes::models::{
-    CreateSandboxRequest, SandboxPoolRequest, SnapshotContentMode, UpdateSandboxRequest,
+    CreateSandboxRequest, SandboxPoolRequest, SnapshotType, UpdateSandboxRequest,
 };
 use tensorlake::sandboxes::{
     SandboxDesktopClient as RustSandboxDesktopClient, SandboxProxyClient, SandboxesClient,
@@ -672,26 +672,26 @@ impl CloudSandboxClient {
         })
     }
 
-    #[pyo3(signature = (sandbox_id, content_mode=None))]
+    #[pyo3(signature = (sandbox_id, snapshot_type=None))]
     fn create_snapshot(
         &self,
         sandbox_id: String,
-        content_mode: Option<String>,
+        snapshot_type: Option<String>,
     ) -> PyResult<(String, String)> {
-        let parsed_mode = match content_mode.as_deref() {
+        let parsed_type = match snapshot_type.as_deref() {
             None => None,
-            Some("full") => Some(SnapshotContentMode::Full),
-            Some("filesystem_only") => Some(SnapshotContentMode::FilesystemOnly),
+            Some("memory") => Some(SnapshotType::Memory),
+            Some("filesystem") => Some(SnapshotType::Filesystem),
             Some(other) => {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "invalid snapshot content_mode '{other}': expected 'full' or 'filesystem_only'"
+                    "invalid snapshot_type '{other}': expected 'memory' or 'filesystem'"
                 )));
             }
         };
         self.run_with_retry(5, move |client| {
             let sandbox_id = sandbox_id.clone();
             async move {
-                let traced = client.snapshot(&sandbox_id, parsed_mode).await?;
+                let traced = client.snapshot(&sandbox_id, parsed_type).await?;
                 let trace_id = traced.trace_id.clone();
                 let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
                 Ok((trace_id, json))

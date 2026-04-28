@@ -18,8 +18,7 @@ use models::{
     CreateSnapshotResponse, DaemonInfo, HealthResponse, ListDirectoryResponse,
     ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse,
     OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo, SandboxPoolInfo,
-    SandboxPoolRequest, SendSignalResponse, SnapshotContentMode, SnapshotInfo,
-    UpdateSandboxRequest,
+    SandboxPoolRequest, SendSignalResponse, SnapshotInfo, SnapshotType, UpdateSandboxRequest,
 };
 
 /// A client for managing sandbox lifecycle, pool, and snapshot APIs.
@@ -125,17 +124,15 @@ impl SandboxesClient {
     pub async fn snapshot(
         &self,
         sandbox_id: &str,
-        content_mode: Option<SnapshotContentMode>,
+        snapshot_type: Option<SnapshotType>,
     ) -> Result<Traced<CreateSnapshotResponse>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/snapshot"));
-        let req = if content_mode.is_some() {
-            let body = CreateSnapshotRequest {
-                snapshot_content_mode: content_mode,
-            };
+        let req = if snapshot_type.is_some() {
+            let body = CreateSnapshotRequest { snapshot_type };
             self.client
                 .build_post_json_request(Method::POST, &uri, &body)?
         } else {
-            // Preserve today's wire shape (no body) for callers that don't set a content mode.
+            // Preserve today's wire shape (no body) for callers that don't set a snapshot type.
             self.client.request(Method::POST, &uri).build()?
         };
         self.client.execute_json(req).await

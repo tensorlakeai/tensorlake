@@ -184,15 +184,15 @@ pub struct ListSandboxPoolsResponse {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SnapshotContentMode {
-    Full,
-    FilesystemOnly,
+pub enum SnapshotType {
+    Memory,
+    Filesystem,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CreateSnapshotRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub snapshot_content_mode: Option<SnapshotContentMode>,
+    pub snapshot_type: Option<SnapshotType>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -218,6 +218,8 @@ pub struct SnapshotInfo {
     pub size_bytes: Option<i64>,
     #[serde(default)]
     pub rootfs_disk_bytes: Option<u64>,
+    #[serde(default)]
+    pub snapshot_type: Option<SnapshotType>,
     #[serde(default)]
     pub created_at: Option<serde_json::Value>,
 }
@@ -324,21 +326,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snapshot_content_mode_serializes_as_snake_case() {
+    fn snapshot_type_serializes_as_snake_case() {
         assert_eq!(
-            serde_json::to_string(&SnapshotContentMode::Full).unwrap(),
-            "\"full\""
+            serde_json::to_string(&SnapshotType::Memory).unwrap(),
+            "\"memory\""
         );
         assert_eq!(
-            serde_json::to_string(&SnapshotContentMode::FilesystemOnly).unwrap(),
-            "\"filesystem_only\""
+            serde_json::to_string(&SnapshotType::Filesystem).unwrap(),
+            "\"filesystem\""
         );
     }
 
     #[test]
-    fn create_snapshot_request_skips_none_content_mode() {
+    fn create_snapshot_request_skips_none_snapshot_type() {
         let body = CreateSnapshotRequest {
-            snapshot_content_mode: None,
+            snapshot_type: None,
         };
         assert_eq!(serde_json::to_string(&body).unwrap(), "{}");
     }
@@ -390,13 +392,26 @@ mod tests {
     }
 
     #[test]
-    fn create_snapshot_request_serializes_filesystem_only() {
+    fn create_snapshot_request_serializes_filesystem() {
         let body = CreateSnapshotRequest {
-            snapshot_content_mode: Some(SnapshotContentMode::FilesystemOnly),
+            snapshot_type: Some(SnapshotType::Filesystem),
         };
         assert_eq!(
             serde_json::to_string(&body).unwrap(),
-            r#"{"snapshot_content_mode":"filesystem_only"}"#
+            r#"{"snapshot_type":"filesystem"}"#
         );
+    }
+
+    #[test]
+    fn snapshot_info_deserializes_snapshot_type() {
+        let json = r#"{
+            "id":"snap-1",
+            "namespace":"default",
+            "sandbox_id":"sbx-1",
+            "status":"completed",
+            "snapshot_type":"filesystem"
+        }"#;
+        let info: SnapshotInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.snapshot_type, Some(SnapshotType::Filesystem));
     }
 }

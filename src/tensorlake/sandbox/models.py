@@ -49,19 +49,33 @@ class SnapshotStatus(str, Enum):
     FAILED = "failed"
 
 
-class SnapshotContentMode(str, Enum):
-    """Content mode for snapshot creation.
+class SnapshotType(str, Enum):
+    """User-facing snapshot type for sandbox snapshot creation.
 
-    - ``FULL``: Full VM snapshot (memory + filesystem state). Sandboxes
+    - ``MEMORY``: Capture VM memory + filesystem state. Sandboxes
       restored from this snapshot warm-restore VM memory.
-    - ``FILESYSTEM_ONLY``: Filesystem-only snapshot. Sandboxes restored
+    - ``FILESYSTEM``: Capture filesystem state only. Sandboxes restored
       from this snapshot cold-boot from the snapshot tarball instead of
       warm-restoring VM state. Use this for sandbox image builds so that
       the restored sandbox bypasses Firecracker's overlay-path constraints.
     """
 
-    FULL = "full"
-    FILESYSTEM_ONLY = "filesystem_only"
+    MEMORY = "memory"
+    FILESYSTEM = "filesystem"
+
+
+class CheckpointType(str, Enum):
+    """Checkpoint type for :meth:`Sandbox.checkpoint`.
+
+    - ``MEMORY``: Capture VM memory + filesystem state. Sandboxes
+      restored from this checkpoint warm-restore VM memory and running
+      processes.
+    - ``FILESYSTEM``: Capture filesystem state only. Sandboxes restored
+      from this checkpoint cold-boot from the snapshot tarball.
+    """
+
+    MEMORY = "memory"
+    FILESYSTEM = "filesystem"
 
 
 class ContainerResourcesInfo(BaseModel):
@@ -278,6 +292,7 @@ class SnapshotInfo(BaseModel):
     sandbox_id: str
     base_image: str | None = None
     status: SnapshotStatus
+    snapshot_type: SnapshotType | None = None
     error: str | None = None
     snapshot_uri: str | None = None
     size_bytes: int | None = None

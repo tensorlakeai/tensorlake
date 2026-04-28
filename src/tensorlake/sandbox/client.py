@@ -34,9 +34,9 @@ from .models import (
     SandboxPoolRequest,
     SandboxPortAccess,
     SandboxStatus,
-    SnapshotContentMode,
     SnapshotInfo,
     SnapshotStatus,
+    SnapshotType,
     UpdateSandboxRequest,
 )
 
@@ -692,7 +692,7 @@ class SandboxClient:
     def snapshot(
         self,
         sandbox_id: str,
-        content_mode: SnapshotContentMode | None = None,
+        snapshot_type: SnapshotType | None = None,
     ) -> Traced[CreateSnapshotResponse]:
         """Create a snapshot of a running sandbox's filesystem.
 
@@ -701,11 +701,11 @@ class SandboxClient:
 
         Args:
             sandbox_id: ID of the running sandbox to snapshot.
-            content_mode: Optional content mode for the snapshot. When
-                ``None`` (default) the server picks its default. Use
-                :attr:`SnapshotContentMode.FILESYSTEM_ONLY` for snapshots
-                that should be cold-booted by sandboxes restoring from
-                them (e.g. sandbox image builds).
+            snapshot_type: Optional snapshot type. When ``None`` (default)
+                the server picks its default. Use
+                :attr:`SnapshotType.FILESYSTEM` for snapshots that should be
+                cold-booted by sandboxes restoring from them (e.g. sandbox
+                image builds).
 
         Returns:
             Traced[CreateSnapshotResponse] with snapshot_id, status, and trace_id
@@ -718,7 +718,9 @@ class SandboxClient:
         try:
             trace_id, response_json = self._rust_client.create_snapshot(
                 sandbox_id=sandbox_id,
-                content_mode=content_mode.value if content_mode is not None else None,
+                snapshot_type=(
+                    snapshot_type.value if snapshot_type is not None else None
+                ),
             )
             return Traced(
                 trace_id, CreateSnapshotResponse.model_validate_json(response_json)
@@ -787,7 +789,7 @@ class SandboxClient:
         sandbox_id: str,
         timeout: float = 300,
         poll_interval: float = 1.0,
-        content_mode: SnapshotContentMode | None = None,
+        snapshot_type: SnapshotType | None = None,
     ) -> Traced[SnapshotInfo]:
         """Create a snapshot and wait for it to complete.
 
@@ -795,8 +797,8 @@ class SandboxClient:
             sandbox_id: ID of the running sandbox to snapshot
             timeout: Max seconds to wait for completion (default 300)
             poll_interval: Seconds between status polls (default 1)
-            content_mode: Optional content mode for the snapshot. See
-                :meth:`snapshot` for details.
+            snapshot_type: Optional snapshot type. See :meth:`snapshot` for
+                details.
 
         Returns:
             Traced[SnapshotInfo] with completed snapshot details and trace_id
@@ -804,7 +806,7 @@ class SandboxClient:
         Raises:
             SandboxError: If snapshot fails or times out
         """
-        traced_create = self.snapshot(sandbox_id, content_mode=content_mode)
+        traced_create = self.snapshot(sandbox_id, snapshot_type=snapshot_type)
         deadline = time.time() + timeout
         while time.time() < deadline:
             traced_info = self.get_snapshot(traced_create.snapshot_id)

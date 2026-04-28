@@ -50,7 +50,7 @@ export {
   ContainerState,
 } from "./models.js";
 
-export type { SnapshotContentMode, SnapshotOptions } from "./models.js";
+export type { CheckpointType, SnapshotType, SnapshotOptions } from "./models.js";
 
 export type {
   BinaryPayload,

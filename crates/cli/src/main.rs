@@ -628,6 +628,25 @@ struct SnapshotArgs {
     /// Max seconds to wait
     #[arg(short, long, default_value = "300", requires = "sandbox_id")]
     timeout: f64,
+
+    /// Optional checkpoint type. When omitted, the client sends no `snapshot_type` and the server applies its default (currently `filesystem`). `memory` captures VM memory + filesystem state, `filesystem` captures filesystem only.
+    #[arg(long, value_enum, requires = "sandbox_id")]
+    checkpoint_type: Option<SnapshotTypeArg>,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum SnapshotTypeArg {
+    Memory,
+    Filesystem,
+}
+
+impl SnapshotTypeArg {
+    fn as_wire_value(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Filesystem => "filesystem",
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -937,7 +956,15 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 "checkpoint requires a sandbox ID or the 'ls' subcommand",
                             )
                         })?;
-                        commands::sbx::snapshot::run(ctx, &sandbox_id, snapshot_args.timeout).await
+                        commands::sbx::snapshot::run(
+                            ctx,
+                            &sandbox_id,
+                            snapshot_args.timeout,
+                            snapshot_args
+                                .checkpoint_type
+                                .map(SnapshotTypeArg::as_wire_value),
+                        )
+                        .await
                     }
                 },
                 SbxCommands::Clone {
@@ -1104,17 +1131,65 @@ mod tests {
     }
 
     #[test]
-    fn sbx_run_parses_disk_mb_override() {
+    fn checkpoint_type_maps_to_wire_values() {
+        assert_eq!(SnapshotTypeArg::Memory.as_wire_value(), "memory");
+        assert_eq!(SnapshotTypeArg::Filesystem.as_wire_value(), "filesystem");
+    }
+
+    #[test]
+    fn sbx_checkpoint_parses_memory_checkpoint_type() {
         let cli = Cli::try_parse_from([
             "tl",
             "sbx",
-            "run",
-            "--disk_mb",
-            "30720",
-            "echo",
-            "hello",
+            "checkpoint",
+            "sbx-123",
+            "--checkpoint-type",
+            "memory",
         ])
         .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Checkpoint(SnapshotArgs {
+                sandbox_id,
+                checkpoint_type,
+                ..
+            })) => {
+                assert_eq!(sandbox_id.as_deref(), Some("sbx-123"));
+                assert_eq!(checkpoint_type, Some(SnapshotTypeArg::Memory));
+            }
+            _ => panic!("expected sbx checkpoint command"),
+        }
+    }
+
+    #[test]
+    fn sbx_checkpoint_parses_filesystem_checkpoint_type() {
+        let cli = Cli::try_parse_from([
+            "tl",
+            "sbx",
+            "checkpoint",
+            "sbx-123",
+            "--checkpoint-type",
+            "filesystem",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Checkpoint(SnapshotArgs {
+                sandbox_id,
+                checkpoint_type,
+                ..
+            })) => {
+                assert_eq!(sandbox_id.as_deref(), Some("sbx-123"));
+                assert_eq!(checkpoint_type, Some(SnapshotTypeArg::Filesystem));
+            }
+            _ => panic!("expected sbx checkpoint command"),
+        }
+    }
+
+    #[test]
+    fn sbx_run_parses_disk_mb_override() {
+        let cli = Cli::try_parse_from(["tl", "sbx", "run", "--disk_mb", "30720", "echo", "hello"])
+            .unwrap();
 
         match cli.command {
             Commands::Sbx(SbxCommands::Run { disk_mb, .. }) => {
@@ -1188,7 +1263,10 @@ mod tests {
 
         match cli.command {
             Commands::Sbx(SbxCommands::Image(ImageCommands::Create {
-                cpus, memory, disk_mb, ..
+                cpus,
+                memory,
+                disk_mb,
+                ..
             })) => {
                 assert_eq!(cpus, Some(3.5));
                 assert_eq!(memory, Some(8192));

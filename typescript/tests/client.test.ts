@@ -601,7 +601,7 @@ describe("SandboxClient", () => {
     });
 
     it("omits request body when no snapshot options are provided", async () => {
-      // Pins down backwards compatibility: when contentMode is unset we
+      // Pins down backwards compatibility: when snapshotType is unset we
       // must not change the wire shape for existing callers.
       mockFetch((_url, init) => {
         expect(init?.method).toBe("POST");
@@ -617,14 +617,14 @@ describe("SandboxClient", () => {
       client.close();
     });
 
-    it("sends snapshot_content_mode in body when contentMode is provided", async () => {
-      // Regression: sandbox image builds MUST pass `filesystem_only` so
-      // that restored sandboxes cold-boot (see PR #583 for the original
+    it("sends snapshot_type in body when snapshotType is provided", async () => {
+      // Regression: sandbox image builds MUST pass `filesystem` so that
+      // restored sandboxes cold-boot (see PR #583 for the original
       // regression that broke `tl sbx new --image`).
       mockFetch((_url, init) => {
         expect(init?.method).toBe("POST");
         const body = JSON.parse(String(init?.body ?? "{}"));
-        expect(body.snapshot_content_mode).toBe("filesystem_only");
+        expect(body.snapshot_type).toBe("filesystem");
         return new Response(
           JSON.stringify({ snapshot_id: "snap-1", status: "in_progress" }),
           { status: 200 },
@@ -633,7 +633,7 @@ describe("SandboxClient", () => {
 
       const client = SandboxClient.forLocalhost();
       const result = await client.snapshot("sbx-1", {
-        contentMode: "filesystem_only",
+        snapshotType: "filesystem",
       });
       expect(result.snapshotId).toBe("snap-1");
       client.close();
@@ -648,6 +648,7 @@ describe("SandboxClient", () => {
             sandbox_id: "sbx-1",
             base_image: "python:3.12",
             status: "completed",
+            snapshot_type: "filesystem",
             created_at: 1700000000,
           }),
           { status: 200 },
@@ -659,6 +660,7 @@ describe("SandboxClient", () => {
       expect(info.snapshotId).toBe("snap-1");
       expect(info.baseImage).toBe("python:3.12");
       expect(info.status).toBe(SnapshotStatus.COMPLETED);
+      expect(info.snapshotType).toBe("filesystem");
       client.close();
     });
 

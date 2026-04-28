@@ -14,7 +14,7 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, timeout: f64, times: usize)
         eprintln!("Cloning sandbox {} into {} copies...", sandbox_id, times);
     }
 
-    let snapshot_id = snapshot::create_snapshot(ctx, sandbox_id, timeout, None).await?;
+    let snapshot_id = snapshot::create_snapshot(ctx, sandbox_id, timeout, Some("memory")).await?;
 
     if times > 1 {
         eprintln!(

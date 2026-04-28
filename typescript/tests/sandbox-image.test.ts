@@ -213,7 +213,7 @@ describe("sandbox image helpers", () => {
     // snapshot so restored sandboxes cold-boot (see PR #583).
     expect(client.snapshotAndWait).toHaveBeenCalledWith(
       "sbx-1",
-      expect.objectContaining({ contentMode: "filesystem_only" }),
+      expect.objectContaining({ snapshotType: "filesystem" }),
     );
     expect(registerImage).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -305,7 +305,7 @@ describe("sandbox image helpers", () => {
     });
     expect(client.snapshotAndWait).toHaveBeenCalledWith(
       "sbx-1",
-      expect.objectContaining({ contentMode: "filesystem_only" }),
+      expect.objectContaining({ snapshotType: "filesystem" }),
     );
     expect(writeFileMock).toHaveBeenCalledWith(
       "/workspace/hello.txt",
@@ -461,7 +461,7 @@ describe("sandbox image helpers", () => {
     });
     expect(client.snapshotAndWait).toHaveBeenCalledWith(
       "sbx-1",
-      expect.objectContaining({ contentMode: "filesystem_only" }),
+      expect.objectContaining({ snapshotType: "filesystem" }),
     );
     expect(registerImage).toHaveBeenCalledWith(
       expect.anything(),

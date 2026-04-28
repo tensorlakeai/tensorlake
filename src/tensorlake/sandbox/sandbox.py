@@ -18,6 +18,7 @@ from .exceptions import (
     SandboxError,
 )
 from .models import (
+    CheckpointType,
     CommandResult,
     DaemonInfo,
     HealthResponse,
@@ -30,8 +31,8 @@ from .models import (
     SandboxInfo,
     SandboxStatus,
     SendSignalResponse,
-    SnapshotContentMode,
     SnapshotInfo,
+    SnapshotType,
     StdinMode,
 )
 
@@ -467,7 +468,7 @@ class Sandbox:
         wait: bool = True,
         timeout: float = 300,
         poll_interval: float = 1.0,
-        content_mode: SnapshotContentMode | None = None,
+        checkpoint_type: CheckpointType | None = None,
     ) -> SnapshotInfo | None:
         """Create a snapshot of this sandbox's filesystem.
 
@@ -479,7 +480,7 @@ class Sandbox:
             wait: If True (default), poll until the snapshot is committed.
             timeout: Max seconds to wait when wait=True (default 300).
             poll_interval: Seconds between polls when wait=True (default 1.0).
-            content_mode: Optional content mode for the snapshot.
+            checkpoint_type: Optional checkpoint type.
 
         Returns:
             Completed SnapshotInfo when wait=True; None when wait=False.
@@ -488,14 +489,19 @@ class Sandbox:
             SandboxError: If the snapshot fails or times out.
         """
         self._require_lifecycle_client("checkpoint")
+        snapshot_type = (
+            SnapshotType(checkpoint_type.value) if checkpoint_type is not None else None
+        )
         if not wait:
-            self._lifecycle_client.snapshot(self.sandbox_id, content_mode=content_mode)
+            self._lifecycle_client.snapshot(
+                self.sandbox_id, snapshot_type=snapshot_type
+            )
             return None
         return self._lifecycle_client.snapshot_and_wait(
             self.sandbox_id,
             timeout=timeout,
             poll_interval=poll_interval,
-            content_mode=content_mode,
+            snapshot_type=snapshot_type,
         ).value
 
     def list_snapshots(self) -> TracedIterator[SnapshotInfo]:

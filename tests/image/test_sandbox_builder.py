@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from tensorlake.image import Image
 from tensorlake.image import sandbox_builder as sbm
-from tensorlake.sandbox.models import SnapshotContentMode
+from tensorlake.sandbox.models import SnapshotType
 
 BUILD_CPUS = 2.0
 BUILD_MEMORY_MB = 4096
@@ -91,7 +91,10 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
         sandbox.sandbox_id = "sbx-1"
         snapshot = SimpleNamespace(
             snapshot_id="snap-1",
+            sandbox_id="sbx-1",
             snapshot_uri="s3://snapshots/snap-1.tar.zst",
+            size_bytes=1234,
+            rootfs_disk_bytes=25 * 1024 * 1024 * 1024,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -136,7 +139,10 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             "sandbox-image",
             dockerfile_text + "\n",
             "snap-1",
+            "sbx-1",
             "s3://snapshots/snap-1.tar.zst",
+            1234,
+            25 * 1024 * 1024 * 1024,
             False,
         )
         sandbox.terminate.assert_called_once_with()
@@ -146,7 +152,7 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
         # and broke `tl sbx new --image`).
         sandbox_client.snapshot_and_wait.assert_called_once_with(
             "sbx-1",
-            content_mode=SnapshotContentMode.FILESYSTEM_ONLY,
+            snapshot_type=SnapshotType.FILESYSTEM,
         )
 
     def test_public_flag_and_registered_name(self):
@@ -155,7 +161,10 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
         sandbox.sandbox_id = "sbx-1"
         snapshot = SimpleNamespace(
             snapshot_id="snap-1",
+            sandbox_id="sbx-1",
             snapshot_uri="s3://snapshots/snap-1.tar.zst",
+            size_bytes=1234,
+            rootfs_disk_bytes=25 * 1024 * 1024 * 1024,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -192,7 +201,10 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             "custom-name",
             dockerfile_text,
             "snap-1",
+            "sbx-1",
             "s3://snapshots/snap-1.tar.zst",
+            1234,
+            25 * 1024 * 1024 * 1024,
             True,
         )
 
@@ -208,7 +220,10 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
         sandbox.sandbox_id = "sbx-1"
         snapshot = SimpleNamespace(
             snapshot_id="snap-1",
+            sandbox_id="sbx-1",
             snapshot_uri="s3://snapshots/snap-1.tar.zst",
+            size_bytes=1234,
+            rootfs_disk_bytes=25 * 1024 * 1024 * 1024,
         )
 
         build_ctx, execute, register_image, sandbox_client_cls = _make_build_patches(
@@ -263,7 +278,7 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
 
         sandbox_client.snapshot_and_wait.assert_called_once_with(
             "sbx-1",
-            content_mode=SnapshotContentMode.FILESYSTEM_ONLY,
+            snapshot_type=SnapshotType.FILESYSTEM,
         )
 
     def test_registered_name_overrides_image_name(self):

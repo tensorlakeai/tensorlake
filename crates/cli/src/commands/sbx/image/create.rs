@@ -12,8 +12,7 @@ use tensorlake::{
     sandboxes::{
         SandboxProxyClient, SandboxesClient,
         models::{
-            CreateSandboxRequest, CreateSandboxResources, ProcessInfo, SnapshotContentMode,
-            SnapshotInfo,
+            CreateSandboxRequest, CreateSandboxResources, ProcessInfo, SnapshotInfo, SnapshotType,
         },
     },
 };
@@ -166,7 +165,7 @@ async fn create_snapshot_and_wait(
     sandbox_id: &str,
 ) -> Result<SnapshotRegistrationMetadata> {
     let snapshot = sandboxes
-        .snapshot(sandbox_id, Some(SnapshotContentMode::FilesystemOnly))
+        .snapshot(sandbox_id, Some(SnapshotType::Filesystem))
         .await?;
     let snapshot_id = snapshot.snapshot_id.clone();
 
@@ -1185,6 +1184,7 @@ mod tests {
                     snapshot_uri: None,
                     size_bytes: None,
                     rootfs_disk_bytes: None,
+                    snapshot_type: None,
                     created_at: None,
                 })
             }

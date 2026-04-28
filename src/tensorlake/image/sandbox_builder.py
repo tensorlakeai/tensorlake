@@ -25,7 +25,7 @@ import httpx
 from tensorlake._tracing import USER_AGENT, inject_traceparent
 from tensorlake.cli._common import Context
 from tensorlake.sandbox import Sandbox, SandboxClient
-from tensorlake.sandbox.models import ProcessStatus, SnapshotContentMode
+from tensorlake.sandbox.models import ProcessStatus, SnapshotType
 
 from ._dockerfile import image_to_dockerfile, render_op_line
 from .image import Image
@@ -774,7 +774,7 @@ def _run_plan(
         emit({"type": "status", "message": "Creating snapshot..."})
         snapshot = sandbox_client.snapshot_and_wait(
             sandbox.sandbox_id,
-            content_mode=SnapshotContentMode.FILESYSTEM_ONLY,
+            snapshot_type=SnapshotType.FILESYSTEM,
         )
         emit(
             {

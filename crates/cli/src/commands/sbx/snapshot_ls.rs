@@ -43,6 +43,7 @@ pub async fn run(ctx: &CliContext) -> Result<()> {
     let mut table = new_table(&[
         "ID",
         "Status",
+        "Type",
         "Sandbox ID",
         "Base Image",
         "Size",
@@ -59,6 +60,7 @@ pub async fn run(ctx: &CliContext) -> Result<()> {
             .get("status")
             .and_then(|v| v.as_str())
             .unwrap_or("-");
+        let snapshot_type = format_snapshot_type(snapshot);
         let sandbox_id = snapshot
             .get("sandbox_id")
             .and_then(|v| v.as_str())
@@ -73,6 +75,7 @@ pub async fn run(ctx: &CliContext) -> Result<()> {
         table.add_row(vec![
             Cell::new(snapshot_id),
             Cell::new(status),
+            Cell::new(snapshot_type),
             Cell::new(sandbox_id),
             Cell::new(base_image),
             Cell::new(size),
@@ -98,5 +101,36 @@ fn format_size(size_bytes: Option<&serde_json::Value>) -> String {
         format!("{:.1} KB", size_bytes as f64 / 1024.0)
     } else {
         format!("{} B", size_bytes)
+    }
+}
+
+fn format_snapshot_type(snapshot: &serde_json::Value) -> String {
+    snapshot
+        .get("snapshot_type")
+        .and_then(|v| v.as_str())
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_snapshot_type;
+
+    #[test]
+    fn format_snapshot_type_uses_snapshot_type_field() {
+        let snapshot = serde_json::json!({"snapshot_type": "filesystem"});
+        assert_eq!(format_snapshot_type(&snapshot), "filesystem");
+    }
+
+    #[test]
+    fn format_snapshot_type_handles_memory() {
+        let snapshot = serde_json::json!({"snapshot_type": "memory"});
+        assert_eq!(format_snapshot_type(&snapshot), "memory");
+    }
+
+    #[test]
+    fn format_snapshot_type_handles_missing_field() {
+        let snapshot = serde_json::json!({});
+        assert_eq!(format_snapshot_type(&snapshot), "-");
     }
 }

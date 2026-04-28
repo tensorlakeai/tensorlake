@@ -16,16 +16,26 @@ export enum SnapshotStatus {
 }
 
 /**
- * Content mode for snapshot creation.
+ * Snapshot type for sandbox snapshot creation.
  *
- * - `"full"`: Full VM snapshot (memory + filesystem state). Sandboxes
- *   restored from this snapshot warm-restore VM memory.
- * - `"filesystem_only"`: Filesystem-only snapshot. Sandboxes restored from
+ * - `"memory"`: Capture VM memory + filesystem state. Sandboxes restored
+ *   from this snapshot warm-restore VM memory.
+ * - `"filesystem"`: Capture filesystem state only. Sandboxes restored from
  *   this snapshot cold-boot from the snapshot tarball instead of warm-
  *   restoring VM state. Use this for sandbox image builds so that the
  *   restored sandbox bypasses Firecracker's overlay-path constraints.
  */
-export type SnapshotContentMode = "full" | "filesystem_only";
+export type SnapshotType = "memory" | "filesystem";
+
+/**
+ * Checkpoint type for {@link Sandbox.checkpoint}.
+ *
+ * - `"memory"`: Capture VM memory + filesystem state. Sandboxes restored
+ *   from this checkpoint warm-restore VM memory and running processes.
+ * - `"filesystem"`: Capture filesystem state only. Sandboxes restored from
+ *   this checkpoint cold-boot from the snapshot tarball.
+ */
+export type CheckpointType = "memory" | "filesystem";
 
 export enum ProcessStatus {
   RUNNING = "running",
@@ -143,6 +153,7 @@ export interface SnapshotInfo {
   sandboxId: string;
   baseImage: string;
   status: SnapshotStatus;
+  snapshotType?: SnapshotType;
   error?: string;
   snapshotUri?: string;
   sizeBytes?: number;
@@ -152,11 +163,11 @@ export interface SnapshotInfo {
 
 export interface SnapshotOptions {
   /**
-   * Optional content mode for the snapshot. When omitted the server picks
-   * its default. Use `"filesystem_only"` for snapshots intended for sandbox
-   * image builds so that restored sandboxes cold-boot.
+   * Optional snapshot type. When omitted the server picks its default. Use
+   * `"filesystem"` for snapshots intended for sandbox image builds so that
+   * restored sandboxes cold-boot.
    */
-  contentMode?: SnapshotContentMode;
+  snapshotType?: SnapshotType;
 }
 
 export interface SnapshotAndWaitOptions extends SnapshotOptions {
@@ -354,7 +365,7 @@ export interface SuspendResumeOptions {
 }
 
 export interface CheckpointOptions extends SuspendResumeOptions {
-  contentMode?: SnapshotContentMode;
+  checkpointType?: CheckpointType;
 }
 
 export interface ConnectOptions {

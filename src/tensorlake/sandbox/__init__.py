@@ -12,6 +12,7 @@ from .exceptions import (
     SandboxNotFoundError,
 )
 from .models import (
+    CheckpointType,
     CommandResult,
     ContainerResourcesInfo,
     CreateSandboxPoolResponse,
@@ -33,9 +34,9 @@ from .models import (
     SandboxPortAccess,
     SandboxStatus,
     SendSignalResponse,
-    SnapshotContentMode,
     SnapshotInfo,
     SnapshotStatus,
+    SnapshotType,
     StdinMode,
 )
 from .pty import Pty
@@ -60,8 +61,9 @@ __all__ = [
     "NetworkConfig",
     # Snapshot models
     "SnapshotStatus",
-    "SnapshotContentMode",
+    "SnapshotType",
     "SnapshotInfo",
+    "CheckpointType",
     "CreateSnapshotResponse",
     # Command result
     "CommandResult",
