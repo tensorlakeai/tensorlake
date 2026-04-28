@@ -2,9 +2,8 @@ use std::io::Read;
 use std::time::Duration;
 
 use crate::auth::context::CliContext;
-use crate::commands::sbx::{parse_env_vars, sandbox_proxy_base};
+use crate::commands::sbx::{parse_env_vars, sandbox_proxy_base, with_host};
 use crate::error::{CliError, Result};
-use crate::http;
 use tokio::sync::mpsc;
 
 const OP_DATA: u8 = 0x00;
@@ -34,10 +33,11 @@ pub async fn run(
     let env_dict = parse_env_vars(env)?;
     let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
 
-    // Build a client with auth headers and optional Host override
-    let mut headers = reqwest::header::HeaderMap::new();
+    // Build headers for the WebSocket upgrade (tungstenite bypasses reqwest).
+    // ctx.client() handles auth + traceparent for the HTTP POST below.
+    let mut ws_headers = reqwest::header::HeaderMap::new();
     if let Ok(token) = ctx.bearer_token() {
-        headers.insert(
+        ws_headers.insert(
             reqwest::header::AUTHORIZATION,
             format!("Bearer {}", token).parse().map_err(|e| {
                 CliError::Other(anyhow::anyhow!("invalid bearer token header: {}", e))
@@ -45,7 +45,7 @@ pub async fn run(
         );
     }
     if let Some(org_id) = ctx.effective_organization_id() {
-        headers.insert(
+        ws_headers.insert(
             "X-Forwarded-Organization-Id",
             org_id.parse().map_err(|e| {
                 CliError::Other(anyhow::anyhow!("invalid organization id header: {}", e))
@@ -53,7 +53,7 @@ pub async fn run(
         );
     }
     if let Some(proj_id) = ctx.effective_project_id() {
-        headers.insert(
+        ws_headers.insert(
             "X-Forwarded-Project-Id",
             proj_id.parse().map_err(|e| {
                 CliError::Other(anyhow::anyhow!("invalid project id header: {}", e))
@@ -61,16 +61,13 @@ pub async fn run(
         );
     }
     if let Some(ref host) = host_override {
-        headers.insert(
+        ws_headers.insert(
             reqwest::header::HOST,
             host.parse()
                 .map_err(|e| CliError::Other(anyhow::anyhow!("invalid host header: {}", e)))?,
         );
     }
-    let client = http::client_builder()
-        .default_headers(headers.clone())
-        .build()
-        .map_err(|e| CliError::Other(anyhow::anyhow!("{}", e)))?;
+    let client = ctx.client()?;
 
     // Get terminal size
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
@@ -109,12 +106,13 @@ pub async fn run(
     let pty_payload =
         build_pty_create_payload(shell, shell_args, workdir, &term_val, rows, cols, env_dict)?;
 
-    let pty_resp = client
-        .post(format!("{}/api/v1/pty", proxy_base))
-        .json(&pty_payload)
-        .send()
-        .await
-        .map_err(CliError::Http)?;
+    let pty_resp = with_host(
+        client.post(format!("{}/api/v1/pty", proxy_base)).json(&pty_payload),
+        host_override.clone(),
+    )
+    .send()
+    .await
+    .map_err(CliError::Http)?;
 
     if !pty_resp.status().is_success() {
         let status = pty_resp.status();
@@ -153,7 +151,7 @@ pub async fn run(
         })?;
 
     // Add auth headers and PTY token to WebSocket request
-    for (key, value) in &headers {
+    for (key, value) in &ws_headers {
         request.headers_mut().insert(key.clone(), value.clone());
     }
     request.headers_mut().insert(

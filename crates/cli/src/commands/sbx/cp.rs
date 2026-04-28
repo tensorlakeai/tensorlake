@@ -1,33 +1,8 @@
 use std::path::Path;
 
 use crate::auth::context::CliContext;
-use crate::commands::sbx::{parse_sandbox_path, sandbox_proxy_base};
+use crate::commands::sbx::{parse_sandbox_path, sandbox_proxy_base, with_host};
 use crate::error::{CliError, Result};
-use crate::http;
-
-/// Build a reqwest client with auth headers and optional Host override for the sandbox proxy.
-fn build_proxy_client(ctx: &CliContext, host_override: Option<&str>) -> Result<reqwest::Client> {
-    let mut headers = reqwest::header::HeaderMap::new();
-    if let Ok(token) = ctx.bearer_token() {
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", token).parse().unwrap(),
-        );
-    }
-    if let Some(org_id) = ctx.effective_organization_id() {
-        headers.insert("X-Forwarded-Organization-Id", org_id.parse().unwrap());
-    }
-    if let Some(proj_id) = ctx.effective_project_id() {
-        headers.insert("X-Forwarded-Project-Id", proj_id.parse().unwrap());
-    }
-    if let Some(host) = host_override {
-        headers.insert(reqwest::header::HOST, host.parse().unwrap());
-    }
-    http::client_builder()
-        .default_headers(headers)
-        .build()
-        .map_err(|e| CliError::Other(anyhow::anyhow!("{}", e)))
-}
 
 pub async fn run(ctx: &CliContext, src: &str, dest: &str) -> Result<()> {
     let (src_sbx, src_path) = parse_sandbox_path(src);
@@ -47,17 +22,19 @@ pub async fn run(ctx: &CliContext, src: &str, dest: &str) -> Result<()> {
     if let Some(sandbox_id) = src_sbx {
         // Download: sandbox -> local
         let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
-        let client = build_proxy_client(ctx, host_override.as_deref())?;
+        let client = ctx.client()?;
 
-        let resp = client
-            .get(format!(
+        let resp = with_host(
+            client.get(format!(
                 "{}/api/v1/files?path={}",
                 proxy_base,
                 urlencoding::encode(src_path)
-            ))
-            .send()
-            .await
-            .map_err(CliError::Http)?;
+            )),
+            host_override,
+        )
+        .send()
+        .await
+        .map_err(CliError::Http)?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -91,18 +68,21 @@ pub async fn run(ctx: &CliContext, src: &str, dest: &str) -> Result<()> {
 
         let data = std::fs::read(src_path)?;
         let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
-        let client = build_proxy_client(ctx, host_override.as_deref())?;
+        let client = ctx.client()?;
 
-        let resp = client
-            .put(format!(
-                "{}/api/v1/files?path={}",
-                proxy_base,
-                urlencoding::encode(dest_path)
-            ))
-            .body(data.clone())
-            .send()
-            .await
-            .map_err(CliError::Http)?;
+        let resp = with_host(
+            client
+                .put(format!(
+                    "{}/api/v1/files?path={}",
+                    proxy_base,
+                    urlencoding::encode(dest_path)
+                ))
+                .body(data.clone()),
+            host_override,
+        )
+        .send()
+        .await
+        .map_err(CliError::Http)?;
 
         if !resp.status().is_success() {
             let status = resp.status();

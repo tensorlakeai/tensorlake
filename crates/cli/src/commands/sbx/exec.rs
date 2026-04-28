@@ -3,9 +3,8 @@ use futures::StreamExt;
 use reqwest::header::ACCEPT;
 
 use crate::auth::context::CliContext;
-use crate::commands::sbx::{parse_env_vars, sandbox_proxy_base};
+use crate::commands::sbx::{parse_env_vars, sandbox_proxy_base, with_host};
 use crate::error::{CliError, Result};
-use crate::http;
 
 pub async fn run(
     ctx: &CliContext,
@@ -18,29 +17,7 @@ pub async fn run(
 ) -> Result<()> {
     let env_dict = parse_env_vars(env)?;
     let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
-
-    // Build a client with optional Host header override (for localhost proxy)
-    let mut client_builder = http::client_builder();
-    if let Ok(token) = ctx.bearer_token() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", token).parse().unwrap(),
-        );
-        if let Some(org_id) = ctx.effective_organization_id() {
-            headers.insert("X-Forwarded-Organization-Id", org_id.parse().unwrap());
-        }
-        if let Some(proj_id) = ctx.effective_project_id() {
-            headers.insert("X-Forwarded-Project-Id", proj_id.parse().unwrap());
-        }
-        if let Some(ref host) = host_override {
-            headers.insert(reqwest::header::HOST, host.parse().unwrap());
-        }
-        client_builder = client_builder.default_headers(headers);
-    }
-    let client = client_builder
-        .build()
-        .map_err(|e| CliError::Other(anyhow::anyhow!("{}", e)))?;
+    let client = ctx.client()?;
 
     // Build request body
     let mut body = serde_json::json!({
@@ -60,13 +37,16 @@ pub async fn run(
     }
 
     // Single streaming POST: start process + stream output + get exit code
-    let resp = client
-        .post(format!("{}/api/v1/processes/run", proxy_base))
-        .header(ACCEPT, "text/event-stream")
-        .json(&body)
-        .send()
-        .await
-        .map_err(CliError::Http)?;
+    let resp = with_host(
+        client
+            .post(format!("{}/api/v1/processes/run", proxy_base))
+            .header(ACCEPT, "text/event-stream")
+            .json(&body),
+        host_override,
+    )
+    .send()
+    .await
+    .map_err(CliError::Http)?;
 
     if !resp.status().is_success() {
         let status = resp.status();
