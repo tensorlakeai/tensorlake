@@ -76,6 +76,12 @@ pub struct SandboxPoolRequest {
     pub max_containers: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warm_containers: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_unauthenticated_access: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exposed_ports: Option<Vec<u16>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkConfig>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -169,6 +175,15 @@ pub struct SandboxPoolInfo {
     pub max_containers: Option<i64>,
     #[serde(default)]
     pub warm_containers: Option<i64>,
+    /// Server-derived; not configurable on create/update.
+    #[serde(default)]
+    pub min_containers: Option<i64>,
+    #[serde(default)]
+    pub allow_unauthenticated_access: bool,
+    #[serde(default)]
+    pub exposed_ports: Option<Vec<u16>>,
+    #[serde(default)]
+    pub network_policy: Option<NetworkConfig>,
     #[serde(default)]
     pub containers: Option<Vec<PoolContainerInfo>>,
     #[serde(default)]
@@ -400,6 +415,99 @@ mod tests {
             serde_json::to_string(&body).unwrap(),
             r#"{"snapshot_type":"filesystem"}"#
         );
+    }
+
+    #[test]
+    fn sandbox_pool_request_skips_new_optional_fields_when_none() {
+        let body = SandboxPoolRequest {
+            image: Some("alpine".into()),
+            resources: ContainerResourcesInfo {
+                cpus: 0.5,
+                memory_mb: 512,
+                ephemeral_disk_mb: 0,
+            },
+            secret_names: None,
+            timeout_secs: 0,
+            entrypoint: None,
+            max_containers: None,
+            warm_containers: None,
+            allow_unauthenticated_access: None,
+            exposed_ports: None,
+            network: None,
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(!json.contains("allow_unauthenticated_access"));
+        assert!(!json.contains("exposed_ports"));
+        assert!(!json.contains("network"));
+    }
+
+    #[test]
+    fn sandbox_pool_request_serializes_new_fields_when_set() {
+        let body = SandboxPoolRequest {
+            image: Some("alpine".into()),
+            resources: ContainerResourcesInfo {
+                cpus: 0.5,
+                memory_mb: 512,
+                ephemeral_disk_mb: 0,
+            },
+            secret_names: None,
+            timeout_secs: 0,
+            entrypoint: None,
+            max_containers: None,
+            warm_containers: None,
+            allow_unauthenticated_access: Some(true),
+            exposed_ports: Some(vec![8080, 9000]),
+            network: Some(NetworkConfig {
+                allow_internet_access: false,
+                allow_out: vec!["10.0.0.0/8".into()],
+                deny_out: vec![],
+            }),
+        };
+        let value: serde_json::Value = serde_json::to_value(&body).unwrap();
+        assert_eq!(value["allow_unauthenticated_access"], true);
+        assert_eq!(value["exposed_ports"], serde_json::json!([8080, 9000]));
+        assert_eq!(value["network"]["allow_internet_access"], false);
+        assert_eq!(value["network"]["allow_out"], serde_json::json!(["10.0.0.0/8"]));
+    }
+
+    #[test]
+    fn sandbox_pool_info_deserializes_new_fields() {
+        let json = r#"{
+            "id": "pool-1",
+            "namespace": "default",
+            "image": "alpine",
+            "resources": {"cpus": 0.5, "memory_mb": 512, "ephemeral_disk_mb": 0},
+            "min_containers": 1,
+            "allow_unauthenticated_access": true,
+            "exposed_ports": [8080],
+            "network_policy": {
+                "allow_internet_access": false,
+                "allow_out": [],
+                "deny_out": ["1.2.3.4/32"]
+            }
+        }"#;
+        let info: SandboxPoolInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.min_containers, Some(1));
+        assert!(info.allow_unauthenticated_access);
+        assert_eq!(info.exposed_ports, Some(vec![8080]));
+        let net = info.network_policy.expect("network_policy");
+        assert!(!net.allow_internet_access);
+        assert_eq!(net.deny_out, vec!["1.2.3.4/32"]);
+    }
+
+    #[test]
+    fn sandbox_pool_info_defaults_when_new_fields_absent() {
+        let json = r#"{
+            "id": "pool-1",
+            "namespace": "default",
+            "image": "alpine",
+            "resources": {"cpus": 0.5, "memory_mb": 512, "ephemeral_disk_mb": 0}
+        }"#;
+        let info: SandboxPoolInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.min_containers, None);
+        assert!(!info.allow_unauthenticated_access);
+        assert_eq!(info.exposed_ports, None);
+        assert!(info.network_policy.is_none());
     }
 
     #[test]

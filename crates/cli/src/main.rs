@@ -555,6 +555,141 @@ enum SbxCommands {
     /// Manage sandbox images
     #[command(subcommand)]
     Image(ImageCommands),
+
+    /// Manage sandbox pools (warm-container fleets)
+    #[command(subcommand)]
+    Pool(PoolCommands),
+}
+
+#[derive(Subcommand)]
+enum PoolCommands {
+    /// Create a new sandbox pool
+    Create {
+        /// Sandbox image name to boot from (registered image name or e.g. tensorlake/ubuntu-minimal)
+        #[arg(short, long)]
+        image: Option<String>,
+
+        /// Number of CPUs per container (default: 1.0)
+        #[arg(short, long)]
+        cpus: Option<f64>,
+
+        /// Memory in MB per container (default: 1024)
+        #[arg(short, long)]
+        memory: Option<i64>,
+
+        /// Ephemeral disk size in MB per container (default: 1024)
+        #[arg(long = "disk_mb")]
+        disk_mb: Option<u64>,
+
+        /// Per-sandbox timeout in seconds (0 or omitted = no timeout)
+        #[arg(short, long)]
+        timeout: Option<i64>,
+
+        /// Entrypoint command parts
+        #[arg(short, long)]
+        entrypoint: Vec<String>,
+
+        /// Maximum total containers allowed in this pool
+        #[arg(long)]
+        max_containers: Option<i64>,
+
+        /// Number of warm containers to keep ready
+        #[arg(long)]
+        warm_containers: Option<i64>,
+
+        /// Expose a port via the sandbox proxy on every claimed sandbox (can be repeated)
+        #[arg(short = 'x', long = "expose", value_parser = parse_user_port)]
+        ports: Vec<u16>,
+
+        /// Allow unauthenticated proxy access on claimed sandboxes
+        #[arg(long, hide = true)]
+        allow_unauthenticated_access: bool,
+
+        /// Block all outbound internet access on claimed sandboxes
+        #[arg(short = 'N', long)]
+        no_internet: bool,
+
+        /// Allow outbound traffic to this IP or CIDR (can be repeated)
+        #[arg(short = 'A', long = "network-allow")]
+        network_allow: Vec<String>,
+
+        /// Deny outbound traffic to this IP or CIDR (can be repeated)
+        #[arg(short = 'D', long = "network-deny")]
+        network_deny: Vec<String>,
+    },
+
+    /// List sandbox pools
+    Ls {
+        /// Print only pool IDs, one per line
+        #[arg(short, long)]
+        quiet: bool,
+    },
+
+    /// Show pool detail and current containers
+    Get {
+        /// Pool ID
+        pool_id: String,
+    },
+
+    /// Update a sandbox pool. Only provided flags are changed; others are
+    /// preserved. Network and proxy access settings are not yet exposed
+    /// here — recreate the pool to change those.
+    Update {
+        /// Pool ID
+        pool_id: String,
+
+        /// Sandbox image name
+        #[arg(short, long)]
+        image: Option<String>,
+
+        /// Number of CPUs per container
+        #[arg(short, long)]
+        cpus: Option<f64>,
+
+        /// Memory in MB per container
+        #[arg(short, long)]
+        memory: Option<i64>,
+
+        /// Ephemeral disk size in MB per container
+        #[arg(long = "disk_mb")]
+        disk_mb: Option<u64>,
+
+        /// Per-sandbox timeout in seconds
+        #[arg(short, long)]
+        timeout: Option<i64>,
+
+        /// Entrypoint command parts (replaces existing when non-empty)
+        #[arg(short, long)]
+        entrypoint: Vec<String>,
+
+        /// Maximum total containers allowed in this pool
+        #[arg(long)]
+        max_containers: Option<i64>,
+
+        /// Number of warm containers to keep ready
+        #[arg(long)]
+        warm_containers: Option<i64>,
+    },
+
+    /// Delete a sandbox pool
+    Rm {
+        /// Pool ID
+        pool_id: String,
+
+        /// Skip confirmation prompt and terminate active sandboxes
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Claim a sandbox from the pool
+    Claim {
+        /// Pool ID
+        pool_id: String,
+
+        /// Return immediately with the sandbox ID instead of waiting for it to be running
+        #[arg(long)]
+        no_wait: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1094,6 +1229,82 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     remote_port,
                     listen_port,
                 } => commands::sbx::tunnel::run(ctx, &sandbox_id, remote_port, listen_port).await,
+                SbxCommands::Pool(pool_cmd) => match pool_cmd {
+                    PoolCommands::Create {
+                        image,
+                        cpus,
+                        memory,
+                        disk_mb,
+                        timeout,
+                        entrypoint,
+                        max_containers,
+                        warm_containers,
+                        ports,
+                        allow_unauthenticated_access,
+                        no_internet,
+                        network_allow,
+                        network_deny,
+                    } => {
+                        commands::sbx::pool::create::run(
+                            ctx,
+                            commands::sbx::pool::create::CreateArgs {
+                                image: image.as_deref(),
+                                cpus,
+                                memory,
+                                disk_mb,
+                                timeout,
+                                entrypoint: &entrypoint,
+                                max_containers,
+                                warm_containers,
+                                ports: &ports,
+                                allow_unauthenticated_access,
+                                no_internet,
+                                network_allow: &network_allow,
+                                network_deny: &network_deny,
+                            },
+                        )
+                        .await
+                    }
+                    PoolCommands::Ls { quiet } => {
+                        commands::sbx::pool::ls::run(ctx, quiet).await
+                    }
+                    PoolCommands::Get { pool_id } => {
+                        commands::sbx::pool::get::run(ctx, &pool_id).await
+                    }
+                    PoolCommands::Update {
+                        pool_id,
+                        image,
+                        cpus,
+                        memory,
+                        disk_mb,
+                        timeout,
+                        entrypoint,
+                        max_containers,
+                        warm_containers,
+                    } => {
+                        commands::sbx::pool::update::run(
+                            ctx,
+                            commands::sbx::pool::update::UpdateArgs {
+                                pool_id: &pool_id,
+                                image: image.as_deref(),
+                                cpus,
+                                memory,
+                                disk_mb,
+                                timeout,
+                                entrypoint: &entrypoint,
+                                max_containers,
+                                warm_containers,
+                            },
+                        )
+                        .await
+                    }
+                    PoolCommands::Rm { pool_id, force } => {
+                        commands::sbx::pool::rm::run(ctx, &pool_id, force).await
+                    }
+                    PoolCommands::Claim { pool_id, no_wait } => {
+                        commands::sbx::pool::claim::run(ctx, &pool_id, !no_wait).await
+                    }
+                },
             }
         }
     }

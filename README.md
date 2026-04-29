@@ -112,23 +112,48 @@ with client.create_and_connect(snapshot_id=snapshot.snapshot_id) as sandbox:
 
 ### Sandbox Pools
 
-Pre-warm containers for fast startup:
+Pre-warm containers for fast startup. Pool-level network and proxy settings
+are inherited by every claimed sandbox.
 
 ```python
-# Create a pool with warm containers
+from tensorlake.sandbox import NetworkConfig
+
+# Create a pool with warm containers, exposed ports, and an outbound network policy
 pool = client.create_pool(
     image="tensorlake/ubuntu-minimal",
     warm_containers=3,
+    max_containers=10,
+    allow_unauthenticated_access=True,
+    exposed_ports=[8080],
+    network=NetworkConfig(
+        allow_internet_access=False,
+        allow_out=["10.0.0.0/8"],
+    ),
 )
 
 # Claim a sandbox instantly from the pool
 resp = client.claim(pool.pool_id)
 sandbox = client.connect(resp.sandbox_id)
 
-# Named sandboxes can be reconnected later by name
-named = client.create(image="tensorlake/ubuntu-minimal", name="stable-name")
-sandbox = client.connect("stable-name")
+# Patch-merge update — pass only the fields you want to change
+client.update_pool(pool.pool_id, warm_containers=5)
+
+# Force-delete to terminate active sandboxes alongside the pool
+client.delete_pool(pool.pool_id, force=True)
 ```
+
+From the CLI:
+
+```bash
+tl sbx pool create --image tensorlake/ubuntu-minimal --warm-containers 3 --max-containers 10
+tl sbx pool ls
+tl sbx pool claim <pool-id>            # waits for the sandbox to be running
+tl sbx pool update <pool-id> --warm-containers 5
+tl sbx pool rm <pool-id> --force       # terminates active sandboxes too
+```
+
+See [docs/sandbox-pools-cli-reference.md](docs/sandbox-pools-cli-reference.md)
+for the full CLI reference.
 
 ---
 

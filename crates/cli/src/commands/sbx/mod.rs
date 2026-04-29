@@ -5,6 +5,7 @@ pub mod exec;
 pub mod image;
 pub mod ls;
 pub mod name;
+pub mod pool;
 pub mod port;
 pub mod resume;
 pub mod run;

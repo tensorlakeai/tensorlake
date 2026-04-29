@@ -199,8 +199,20 @@ impl SandboxesClient {
         self.client.execute_json(req).await
     }
 
-    pub async fn delete_pool(&self, pool_id: &str) -> Result<Traced<()>, SdkError> {
-        let uri = self.endpoint(&format!("sandbox-pools/{pool_id}"));
+    /// Delete a sandbox pool. When `force` is true, the server terminates any
+    /// active sandboxes claimed from the pool (`?force=true`). Without
+    /// `force`, the server returns 409 if the pool still has active sandboxes.
+    pub async fn delete_pool(
+        &self,
+        pool_id: &str,
+        force: bool,
+    ) -> Result<Traced<()>, SdkError> {
+        let path = if force {
+            format!("sandbox-pools/{pool_id}?force=true")
+        } else {
+            format!("sandbox-pools/{pool_id}")
+        };
+        let uri = self.endpoint(&path);
         let req = self.client.request(Method::DELETE, &uri).build()?;
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
