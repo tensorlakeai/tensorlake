@@ -374,7 +374,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
             def close(self):
                 return None
 
-            def delete_pool(self, pool_id):
+            def delete_pool(self, pool_id, force=False):
                 raise FakeRustError(("remote_api", 409, f"pool {pool_id} is in use"))
 
         import tensorlake.sandbox.client as sandbox_client_module

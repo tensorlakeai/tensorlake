@@ -164,6 +164,9 @@ class SandboxPoolRequest(BaseModel):
     entrypoint: list[str] | None = None
     max_containers: int | None = None
     warm_containers: int | None = None
+    allow_unauthenticated_access: bool | None = None
+    exposed_ports: list[int] | None = None
+    network: NetworkConfig | None = None
 
 
 # --- Response models ---
@@ -261,6 +264,10 @@ class SandboxPoolInfo(BaseModel):
     entrypoint: list[str] | None = None
     max_containers: int | None = None
     warm_containers: int | None = None
+    min_containers: int | None = None
+    allow_unauthenticated_access: bool = False
+    exposed_ports: list[int] | None = None
+    network_policy: NetworkConfig | None = None
     containers: list[PoolContainerInfo] | None = None
     created_at: OptionalTimestamp = None
     updated_at: OptionalTimestamp = None

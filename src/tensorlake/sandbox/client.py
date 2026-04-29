@@ -834,6 +834,9 @@ class SandboxClient:
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
         warm_containers: int | None = None,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
+        network: NetworkConfig | None = None,
     ) -> Traced[CreateSandboxPoolResponse]:
         """Create a new sandbox pool.
 
@@ -848,6 +851,13 @@ class SandboxClient:
             entrypoint: Custom entrypoint command (optional)
             max_containers: Maximum number of containers in pool
             warm_containers: Number of warm containers to maintain
+            allow_unauthenticated_access: When True, sandboxes claimed from
+                this pool accept unauthenticated proxy traffic on exposed
+                ports. Required for public-facing services.
+            exposed_ports: TCP ports (>9501) to expose through the proxy on
+                every claimed sandbox.
+            network: Outbound network policy applied to every claimed
+                sandbox.
 
         Returns:
             CreateSandboxPoolResponse with pool_id and namespace
@@ -866,6 +876,9 @@ class SandboxClient:
             entrypoint=entrypoint,
             max_containers=max_containers,
             warm_containers=warm_containers,
+            allow_unauthenticated_access=allow_unauthenticated_access,
+            exposed_ports=exposed_ports,
+            network=network,
         )
 
         try:
@@ -920,17 +933,25 @@ class SandboxClient:
     def update_pool(
         self,
         pool_id: str,
-        image: str,
-        cpus: float = 1.0,
-        memory_mb: int = 1024,
-        ephemeral_disk_mb: int = 1024,
+        image: str | None = None,
+        cpus: float | None = None,
+        memory_mb: int | None = None,
+        ephemeral_disk_mb: int | None = None,
         secret_names: list[str] | None = None,
-        timeout_secs: int = 0,
+        timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
         warm_containers: int | None = None,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
+        network: NetworkConfig | None = None,
     ) -> Traced[SandboxPoolInfo]:
         """Update a sandbox pool configuration.
+
+        Patch-like: only fields you pass are changed. The API requires a
+        full PUT body, so this method first fetches current pool state and
+        merges your overrides before sending. ``None`` for a field means
+        "don't change"; pass an explicit empty list / value to clear.
 
         Args:
             pool_id: ID of the pool to update
@@ -940,10 +961,16 @@ class SandboxClient:
             memory_mb: Memory in megabytes
             ephemeral_disk_mb: Ephemeral disk space in megabytes
             secret_names: List of secret names to inject
-            timeout_secs: Timeout in seconds (default: 0 = no timeout)
-            entrypoint: Custom entrypoint command (optional)
+            timeout_secs: Timeout in seconds (0 = no timeout)
+            entrypoint: Custom entrypoint command
             max_containers: Maximum number of containers in pool
             warm_containers: Number of warm containers to maintain
+            allow_unauthenticated_access: Whether claimed sandboxes accept
+                unauthenticated proxy traffic on exposed ports.
+            exposed_ports: TCP ports (>9501) to expose through the proxy on
+                every claimed sandbox.
+            network: Outbound network policy applied to every claimed
+                sandbox.
 
         Returns:
             SandboxPoolInfo with updated pool details
@@ -953,16 +980,49 @@ class SandboxClient:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
-        request_model = SandboxPoolRequest(
-            image=image,
-            resources=ContainerResourcesInfo(
-                cpus=cpus, memory_mb=memory_mb, ephemeral_disk_mb=ephemeral_disk_mb
+        current = self.get_pool(pool_id).value
+
+        merged_resources = ContainerResourcesInfo(
+            cpus=cpus if cpus is not None else current.resources.cpus,
+            memory_mb=(
+                memory_mb if memory_mb is not None else current.resources.memory_mb
             ),
-            secret_names=secret_names,
-            timeout_secs=timeout_secs,
-            entrypoint=entrypoint,
-            max_containers=max_containers,
-            warm_containers=warm_containers,
+            ephemeral_disk_mb=(
+                ephemeral_disk_mb
+                if ephemeral_disk_mb is not None
+                else current.resources.ephemeral_disk_mb
+            ),
+        )
+
+        request_model = SandboxPoolRequest(
+            image=image if image is not None else current.image,
+            resources=merged_resources,
+            secret_names=(
+                secret_names if secret_names is not None else current.secret_names
+            ),
+            timeout_secs=(
+                timeout_secs if timeout_secs is not None else current.timeout_secs
+            ),
+            entrypoint=entrypoint if entrypoint is not None else current.entrypoint,
+            max_containers=(
+                max_containers
+                if max_containers is not None
+                else current.max_containers
+            ),
+            warm_containers=(
+                warm_containers
+                if warm_containers is not None
+                else current.warm_containers
+            ),
+            allow_unauthenticated_access=(
+                allow_unauthenticated_access
+                if allow_unauthenticated_access is not None
+                else current.allow_unauthenticated_access
+            ),
+            exposed_ports=(
+                exposed_ports if exposed_ports is not None else current.exposed_ports
+            ),
+            network=network if network is not None else current.network_policy,
         )
 
         try:
@@ -976,20 +1036,24 @@ class SandboxClient:
                 raise PoolNotFoundError(pool_id) from None
             _raise_as_sandbox_error(e)
 
-    def delete_pool(self, pool_id: str) -> Traced[None]:
+    def delete_pool(self, pool_id: str, force: bool = False) -> Traced[None]:
         """Delete a sandbox pool.
 
         Args:
             pool_id: ID of the pool to delete
+            force: When True, terminates any sandboxes still claimed from
+                the pool before deleting it. When False (default), the API
+                returns 409 (raised as PoolInUseError) if the pool still
+                has active sandboxes.
 
         Raises:
             PoolNotFoundError: If pool doesn't exist
-            PoolInUseError: If pool has active containers
+            PoolInUseError: If pool has active containers and force=False
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
         try:
-            trace_id = self._rust_client.delete_pool(pool_id=pool_id)
+            trace_id = self._rust_client.delete_pool(pool_id=pool_id, force=force)
             return Traced(trace_id, None)
         except Exception as e:
             kind, status_code, message = _parse_rust_client_error_fields(e)
