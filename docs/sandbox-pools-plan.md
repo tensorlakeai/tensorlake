@@ -135,7 +135,14 @@ cannot name the resulting sandbox — the API takes an empty body.
   `POST /sandbox-pools/{id}/sandboxes`. Low priority; users can rename via
   `tl sbx name` afterward.
 
-### 6. `tl sbx create --pool <id>` as an alias for claim?
+### 6. docs.tensorlake.ai sandbox guide
+
+The public docs site lives in a separate repo. The Sandbox Pools section
+there currently has TypeScript examples only; the Python equivalents need
+to be added in a parallel PR against that repo, mirroring the README and
+the new `docs/sandbox-pools-cli-reference.md` in this PR.
+
+### 7. `tl sbx create --pool <id>` as an alias for claim?
 
 Considered and deferred. TS SDK uses `Sandbox.create({poolId})` as the only
 surface; Python SDK has both `Sandbox.create()` and `client.claim()`. Keeping
