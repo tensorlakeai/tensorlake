@@ -782,10 +782,16 @@ impl CloudSandboxClient {
         })
     }
 
-    fn delete_pool(&self, pool_id: String) -> PyResult<String> {
+    #[pyo3(signature = (pool_id, force=false))]
+    fn delete_pool(&self, pool_id: String, force: bool) -> PyResult<String> {
         self.run_with_retry(5, move |client| {
             let pool_id = pool_id.clone();
-            async move { client.delete_pool(&pool_id).await.map(|t| t.trace_id) }
+            async move {
+                client
+                    .delete_pool(&pool_id, force)
+                    .await
+                    .map(|t| t.trace_id)
+            }
         })
     }
 
