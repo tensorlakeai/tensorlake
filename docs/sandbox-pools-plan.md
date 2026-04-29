@@ -66,10 +66,10 @@ Three patterns, all of which already exist — no new infrastructure.
 
 ### 5. Documentation updates (last step of the change)
 
-- Python SDK reference (sandbox client + models)
-- CLI reference (new `tl sbx pool` group)
-- docs.tensorlake.ai sandbox guide — add Python pool examples alongside the
-  existing TS examples
+- Python SDK docstrings on `create_pool` / `update_pool` / `delete_pool`
+- CLI `--help` text on each `tl sbx pool` subcommand
+- README's Sandbox Pools section — Python + CLI examples
+- New `docs/sandbox-pools-cli-reference.md` for the full CLI surface
 
 ## Backend / cross-team gaps (NOT in this change)
 
@@ -135,14 +135,7 @@ cannot name the resulting sandbox — the API takes an empty body.
   `POST /sandbox-pools/{id}/sandboxes`. Low priority; users can rename via
   `tl sbx name` afterward.
 
-### 6. docs.tensorlake.ai sandbox guide
-
-The public docs site lives in a separate repo. The Sandbox Pools section
-there currently has TypeScript examples only; the Python equivalents need
-to be added in a parallel PR against that repo, mirroring the README and
-the new `docs/sandbox-pools-cli-reference.md` in this PR.
-
-### 7. `tl sbx create --pool <id>` as an alias for claim?
+### 6. `tl sbx create --pool <id>` as an alias for claim?
 
 Considered and deferred. TS SDK uses `Sandbox.create({poolId})` as the only
 surface; Python SDK has both `Sandbox.create()` and `client.claim()`. Keeping
