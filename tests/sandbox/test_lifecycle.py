@@ -208,6 +208,8 @@ class TestPoolLifecycle(BaseSandboxTest):
             memory_mb=_SANDBOX_MEMORY_MB,
             ephemeral_disk_mb=_SANDBOX_DISK_MB,
             entrypoint=["sleep", "300"],
+            allow_unauthenticated_access=True,
+            exposed_ports=[8080],
         )
         self.assertIsNotNone(resp.pool_id)
         self.__class__.pool_id = resp.pool_id
@@ -219,6 +221,8 @@ class TestPoolLifecycle(BaseSandboxTest):
         self.assertEqual(info.image, _SANDBOX_IMAGE)
         self.assertAlmostEqual(info.resources.cpus, _SANDBOX_CPUS, places=2)
         self.assertEqual(info.resources.memory_mb, _SANDBOX_MEMORY_MB)
+        self.assertTrue(info.allow_unauthenticated_access)
+        self.assertEqual(info.exposed_ports, [8080])
 
     def test_3_list_pools(self):
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
@@ -226,18 +230,20 @@ class TestPoolLifecycle(BaseSandboxTest):
         ids = [p.pool_id for p in pools]
         self.assertIn(self.__class__.pool_id, ids)
 
-    def test_4_update_pool(self):
+    def test_4_update_pool_partial_preserves_unspecified_fields(self):
+        """Patch-merge: passing only warm_containers must not change image/resources."""
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
         updated = self.client.update_pool(
             pool_id=self.__class__.pool_id,
-            image=_SANDBOX_IMAGE,
-            cpus=_SANDBOX_CPUS,
-            memory_mb=2048,
-            ephemeral_disk_mb=_SANDBOX_DISK_MB,
             warm_containers=1,
         )
-        self.assertEqual(updated.resources.memory_mb, 2048)
         self.assertEqual(updated.warm_containers, 1)
+        # Fields we did not pass must be preserved as-is.
+        self.assertEqual(updated.image, _SANDBOX_IMAGE)
+        self.assertAlmostEqual(updated.resources.cpus, _SANDBOX_CPUS, places=2)
+        self.assertEqual(updated.resources.memory_mb, _SANDBOX_MEMORY_MB)
+        self.assertTrue(updated.allow_unauthenticated_access)
+        self.assertEqual(updated.exposed_ports, [8080])
 
     def test_5_delete_pool(self):
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
@@ -462,6 +468,72 @@ class TestWarmContainers(BaseSandboxTest):
             time.sleep(2)
             self.client.delete_pool(self.__class__.pool_id)
             self.__class__.pool_id = None
+
+
+# ---------------------------------------------------------------------------
+# TestPoolForceDelete
+# ---------------------------------------------------------------------------
+
+
+class TestPoolForceDelete(BaseSandboxTest):
+    """Force-delete a pool that still has an active claimed sandbox.
+
+    Verifies that delete_pool(force=True) succeeds and terminates the
+    sandbox in the same call, vs. the no-force path which raises
+    PoolInUseError (covered by TestPoolWithSandboxes.test_4).
+    """
+
+    pool_id: str | None = None
+    sandbox_id: str | None = None
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.sandbox_id:
+            try:
+                cls.client.delete(cls.sandbox_id)
+            except Exception:
+                pass
+        if cls.pool_id:
+            try:
+                cls.client.delete_pool(cls.pool_id, force=True)
+            except Exception:
+                pass
+        super().tearDownClass()
+
+    def test_1_create_pool_and_claim_sandbox(self):
+        resp = self.client.create_pool(
+            image=_SANDBOX_IMAGE,
+            cpus=_SANDBOX_CPUS,
+            memory_mb=_SANDBOX_MEMORY_MB,
+            ephemeral_disk_mb=_SANDBOX_DISK_MB,
+            entrypoint=["sleep", "300"],
+            warm_containers=1,
+        )
+        self.assertIsNotNone(resp.pool_id)
+        self.__class__.pool_id = resp.pool_id
+
+        claim = self.client.claim(resp.pool_id)
+        self.assertIsNotNone(claim.sandbox_id)
+        self.__class__.sandbox_id = claim.sandbox_id
+        _poll_sandbox_status(
+            self.client, claim.sandbox_id, SandboxStatus.RUNNING, timeout=60
+        )
+
+    def test_2_force_delete_succeeds_with_active_sandbox(self):
+        self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
+        self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_1")
+
+        # Without force this would raise PoolInUseError; force=True must succeed.
+        self.client.delete_pool(self.__class__.pool_id, force=True)
+        self.__class__.pool_id = None
+
+        _poll_sandbox_status(
+            self.client,
+            self.__class__.sandbox_id,
+            SandboxStatus.TERMINATED,
+            timeout=30,
+        )
+        self.__class__.sandbox_id = None
 
 
 # ---------------------------------------------------------------------------

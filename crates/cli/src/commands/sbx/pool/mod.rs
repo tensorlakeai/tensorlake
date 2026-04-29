@@ -266,6 +266,48 @@ mod tests {
     }
 
     #[test]
+    fn create_body_setting_port_implicitly_allows_unauthenticated() {
+        // apply_proxy_access_settings forces allow_unauthenticated_access=true
+        // whenever any port is exposed, so ports work end-to-end without an
+        // extra flag.
+        let body = build_pool_create_body(&PoolBodyArgs {
+            image: Some("alpine"),
+            entrypoint: &[],
+            ports: &[8080],
+            allow_unauthenticated_access: false,
+            network_allow: &[],
+            network_deny: &[],
+            ..Default::default()
+        });
+        assert_eq!(body["exposed_ports"], serde_json::json!([8080]));
+        assert_eq!(body["allow_unauthenticated_access"], true);
+    }
+
+    #[test]
+    fn merge_update_body_handles_pool_without_optional_fields() {
+        // Minimal current state — pool was created without entrypoint,
+        // network policy, ports, etc. Update should still succeed.
+        let current = serde_json::json!({
+            "image": "alpine",
+            "resources": {"cpus": 1.0, "memory_mb": 1024, "ephemeral_disk_mb": 1024},
+        });
+        let overrides = PoolBodyArgs {
+            warm_containers: Some(2),
+            entrypoint: &[],
+            ports: &[],
+            network_allow: &[],
+            network_deny: &[],
+            ..Default::default()
+        };
+        let body = merge_pool_update_body(&current, &overrides);
+        assert_eq!(body["image"], "alpine");
+        assert_eq!(body["warm_containers"], 2);
+        assert!(body.get("entrypoint").is_none());
+        assert!(body.get("network").is_none());
+        assert!(body.get("exposed_ports").is_none());
+    }
+
+    #[test]
     fn merge_update_body_renames_network_policy_to_network() {
         let current = serde_json::json!({
             "image": "alpine",

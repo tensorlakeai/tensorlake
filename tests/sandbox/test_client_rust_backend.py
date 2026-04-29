@@ -418,6 +418,124 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         _, snapshot_type = fake.create_snapshot_calls[0]
         self.assertIsNone(snapshot_type)
 
+    def test_create_pool_sends_new_proxy_and_network_fields(self):
+        from tensorlake.sandbox import NetworkConfig
+
+        captured: dict = {}
+
+        class _PoolFake:
+            def close(self):
+                return None
+
+            def create_pool(self, request_json):
+                captured["create"] = request_json
+                return ("trace-create-pool", '{"pool_id":"pool-1","namespace":"default"}')
+
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = _PoolFake()
+
+        client.create_pool(
+            image="alpine",
+            cpus=0.5,
+            memory_mb=512,
+            ephemeral_disk_mb=0,
+            allow_unauthenticated_access=True,
+            exposed_ports=[8080],
+            network=NetworkConfig(
+                allow_internet_access=False,
+                allow_out=["10.0.0.0/8"],
+                deny_out=[],
+            ),
+        )
+
+        body = json.loads(captured["create"])
+        self.assertEqual(body["allow_unauthenticated_access"], True)
+        self.assertEqual(body["exposed_ports"], [8080])
+        self.assertEqual(body["network"]["allow_internet_access"], False)
+        self.assertEqual(body["network"]["allow_out"], ["10.0.0.0/8"])
+
+    def test_update_pool_patch_merges_with_current_state(self):
+        captured: dict = {}
+
+        class _PoolFake:
+            def close(self):
+                return None
+
+            def get_pool_json(self, pool_id):
+                captured["get"] = pool_id
+                response = {
+                    "id": pool_id,
+                    "namespace": "default",
+                    "image": "alpine",
+                    "resources": {
+                        "cpus": 0.5,
+                        "memory_mb": 256,
+                        "ephemeral_disk_mb": 1024,
+                    },
+                    "secret_names": [],
+                    "timeout_secs": 60,
+                    "entrypoint": ["bash"],
+                    "max_containers": 10,
+                    "warm_containers": 3,
+                    "allow_unauthenticated_access": True,
+                    "exposed_ports": [8080],
+                    "network_policy": {
+                        "allow_internet_access": False,
+                        "allow_out": ["10.0.0.0/8"],
+                        "deny_out": [],
+                    },
+                }
+                return ("trace-get-pool", json.dumps(response))
+
+            def update_pool(self, pool_id, request_json):
+                captured["update"] = request_json
+                response = {
+                    "id": pool_id,
+                    "namespace": "default",
+                    "image": "alpine",
+                    "resources": {"cpus": 0.5, "memory_mb": 256, "ephemeral_disk_mb": 1024},
+                    "warm_containers": 5,
+                }
+                return ("trace-update-pool", json.dumps(response))
+
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = _PoolFake()
+
+        client.update_pool(pool_id="pool-1", warm_containers=5)
+
+        body = json.loads(captured["update"])
+        self.assertEqual(body["image"], "alpine")
+        self.assertEqual(body["resources"]["cpus"], 0.5)
+        self.assertEqual(body["resources"]["memory_mb"], 256)
+        self.assertEqual(body["timeout_secs"], 60)
+        self.assertEqual(body["entrypoint"], ["bash"])
+        self.assertEqual(body["max_containers"], 10)
+        self.assertEqual(body["warm_containers"], 5)
+        self.assertEqual(body["allow_unauthenticated_access"], True)
+        self.assertEqual(body["exposed_ports"], [8080])
+        self.assertEqual(body["network"]["allow_out"], ["10.0.0.0/8"])
+        self.assertNotIn("network_policy", body)
+
+    def test_delete_pool_threads_force_flag(self):
+        captured: dict = {}
+
+        class _PoolFake:
+            def close(self):
+                return None
+
+            def delete_pool(self, pool_id, force=False):
+                captured["pool_id"] = pool_id
+                captured["force"] = force
+                return "trace-delete-pool"
+
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = _PoolFake()
+
+        client.delete_pool("pool-1", force=True)
+
+        self.assertEqual(captured["pool_id"], "pool-1")
+        self.assertEqual(captured["force"], True)
+
 
 if __name__ == "__main__":
     unittest.main()
