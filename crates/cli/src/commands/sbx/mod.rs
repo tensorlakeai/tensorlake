@@ -23,7 +23,7 @@ use tokio::time::{Duration, Instant};
 
 /// Build the lifecycle API base URL for sandbox CRUD operations.
 ///
-/// Cloud mode: `{api_url}/sandboxes`, `{api_url}/snapshots/...`
+/// Cloud mode: `{sandbox_url}/sandboxes` where sandbox_url = `sandbox.tensorlake.*`
 /// Localhost mode: `{api_url}/v1/namespaces/{namespace}/sandboxes`
 pub fn sandbox_endpoint(ctx: &CliContext, endpoint: &str) -> String {
     if is_localhost(&ctx.api_url) {
@@ -32,7 +32,7 @@ pub fn sandbox_endpoint(ctx: &CliContext, endpoint: &str) -> String {
             ctx.api_url, ctx.namespace, endpoint
         )
     } else {
-        format!("{}/{}", ctx.api_url, endpoint)
+        format!("{}/{}", resolve_sandbox_lifecycle_url(&ctx.api_url), endpoint)
     }
 }
 
@@ -133,8 +133,9 @@ pub async fn wait_for_sandbox_status(
 
 /// Build the proxy base URL for a specific sandbox (process/file/PTY operations).
 ///
-/// The proxy URL uses subdomain-based routing: `{sandbox_id}.sandbox.example.com`
-/// For localhost, it uses `localhost:9443` with a Host header override.
+/// Cloud: returns the apex proxy domain; callers must inject `X-Tensorlake-Sandbox-Id`
+/// via [`with_sandbox_headers`].
+/// Localhost: returns the proxy URL as-is with a `Host` header override.
 pub fn sandbox_proxy_base(ctx: &CliContext, sandbox_id: &str) -> (String, Option<String>) {
     let proxy_url = resolve_proxy_url(&ctx.api_url);
 
@@ -145,26 +146,45 @@ pub fn sandbox_proxy_base(ctx: &CliContext, sandbox_id: &str) -> (String, Option
             let host_header = format!("{}.local", sandbox_id);
             return (proxy_url, Some(host_header));
         }
-        // Cloud: prefix sandbox_id as subdomain
+        // Cloud: use apex domain; sandbox routing is via X-Tensorlake-Sandbox-Id header
         let port_part = parsed.port().map(|p| format!(":{}", p)).unwrap_or_default();
-        let base_url = format!("{}://{}.{}{}", parsed.scheme(), sandbox_id, host, port_part);
+        let base_url = format!("{}://{host}{port_part}", parsed.scheme());
         return (base_url, None);
     }
 
     // Fallback
-    (format!("{}/{}", proxy_url, sandbox_id), None)
+    (proxy_url, None)
 }
 
-/// Apply the optional Host header override returned by [`sandbox_proxy_base`]
-/// to a request builder.
-pub fn with_host(
+/// Apply sandbox routing headers to a request builder.
+///
+/// For localhost (host_override is Some): sets the `Host` header.
+/// For cloud (host_override is None): sets `X-Tensorlake-Sandbox-Id`.
+pub fn with_sandbox_headers(
     req: reqwest::RequestBuilder,
+    sandbox_id: &str,
     host_override: Option<String>,
 ) -> reqwest::RequestBuilder {
     match host_override {
         Some(host) => req.header(reqwest::header::HOST, host),
-        None => req,
+        None => req.header("X-Tensorlake-Sandbox-Id", sandbox_id),
     }
+}
+
+/// Derive the sandbox lifecycle base URL (create/suspend/terminate/...) from the API URL.
+///
+/// Converts `api.tensorlake.*` → `sandbox.tensorlake.*`. Localhost is unchanged.
+pub fn resolve_sandbox_lifecycle_url(api_url: &str) -> String {
+    if is_localhost(api_url) {
+        return api_url.to_string();
+    }
+    if let Ok(parsed) = url::Url::parse(api_url) {
+        let host = parsed.host_str().unwrap_or("");
+        if let Some(rest) = host.strip_prefix("api.") {
+            return format!("{}://sandbox.{}", parsed.scheme(), rest);
+        }
+    }
+    "https://sandbox.tensorlake.ai".to_string()
 }
 
 /// Resolve the sandbox proxy URL from env or api_url.

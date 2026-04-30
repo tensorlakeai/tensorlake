@@ -306,7 +306,7 @@ export class Sandbox {
     this.lifecycleIdentifier = options.sandboxId;
 
     const proxyUrl = options.proxyUrl ?? defaults.SANDBOX_PROXY_URL;
-    const { baseUrl, hostHeader } = resolveProxyTarget(proxyUrl, options.sandboxId);
+    const { baseUrl, hostHeader, sandboxIdHeader } = resolveProxyTarget(proxyUrl, options.sandboxId);
     this.baseUrl = baseUrl;
     this.wsHeaders = {};
     if (options.apiKey) {
@@ -321,6 +321,9 @@ export class Sandbox {
     if (hostHeader) {
       this.wsHeaders.Host = hostHeader;
     }
+    if (sandboxIdHeader) {
+      this.wsHeaders["X-Tensorlake-Sandbox-Id"] = sandboxIdHeader;
+    }
 
     this.http = new HttpClient({
       baseUrl,
@@ -328,6 +331,7 @@ export class Sandbox {
       organizationId: options.organizationId,
       projectId: options.projectId,
       hostHeader,
+      sandboxIdHeader,
       routingHint: options.routingHint,
     });
   }
@@ -374,8 +378,8 @@ export class Sandbox {
   /**
    * Attach to an existing sandbox and return a connected handle.
    *
-   * Verifies the sandbox exists via a server GET call, then returns a handle
-   * in whatever state the sandbox is in. Does **not** auto-resume a suspended
+   * Returns immediately without contacting the server. Call `sandbox.info()`
+   * to fetch the current state on demand. Does **not** auto-resume a suspended
    * sandbox — call `sandbox.resume()` explicitly.
    */
   static async connect(
@@ -383,15 +387,12 @@ export class Sandbox {
   ): Promise<Sandbox> {
     const { SandboxClient } = await import("./client.js");
     const client = new SandboxClient(options, /* _internal */ true);
-    const info = await client.get(options.sandboxId); // throws SandboxNotFoundError if not found
     const sandbox = client.connect(
-      info.sandboxId,
+      options.sandboxId,
       options.proxyUrl,
-      options.routingHint ?? info.routingHint,
+      options.routingHint,
     );
     sandbox.lifecycleClient = client;
-    sandbox._setLifecycleIdentifier(info.sandboxId);
-    sandbox._setName(info.name ?? null);
     return sandbox;
   }
 
@@ -417,6 +418,24 @@ export class Sandbox {
     await client.deleteSnapshot(snapshotId);
   }
 
+  /** List all sandboxes. No sandbox handle needed. */
+  static async list(
+    options?: Partial<SandboxClientOptions>,
+  ): Promise<SandboxInfo[]> {
+    const { SandboxClient } = await import("./client.js");
+    const client = new SandboxClient(options, /* _internal */ true);
+    return client.list();
+  }
+
+  /** List all snapshots in the project. No sandbox handle needed. */
+  static async listSnapshots(
+    options?: Partial<SandboxClientOptions>,
+  ): Promise<SnapshotInfo[]> {
+    const { SandboxClient } = await import("./client.js");
+    const client = new SandboxClient(options, /* _internal */ true);
+    return client.listSnapshots();
+  }
+
   // --- Instance lifecycle methods ---
 
   private requireLifecycleClient(operation: string): SandboxClient {
@@ -427,6 +446,15 @@ export class Sandbox {
       );
     }
     return this.lifecycleClient;
+  }
+
+  /** Fetch the current sandbox information from the server on demand. */
+  async info(): Promise<Traced<SandboxInfo>> {
+    const client = this.requireLifecycleClient("info");
+    const info = await client.get(this.lifecycleIdentifier);
+    this._setLifecycleIdentifier(info.sandboxId);
+    this._setName(info.name ?? null);
+    return info;
   }
 
   /**
@@ -449,7 +477,7 @@ export class Sandbox {
    * Naming an ephemeral sandbox makes it non-ephemeral and enables
    * suspend/resume.
    */
-  async update(options: UpdateSandboxOptions): Promise<SandboxInfo> {
+  async update(options: UpdateSandboxOptions): Promise<Traced<SandboxInfo>> {
     const client = this.requireLifecycleClient("update");
     const info = await client.update(this.lifecycleIdentifier, options);
     this._setLifecycleIdentifier(info.sandboxId);
@@ -487,7 +515,7 @@ export class Sandbox {
    * the completed `SnapshotInfo`. Pass `{ wait: false }` to fire-and-return
    * (returns `undefined`).
    */
-  async checkpoint(options?: CheckpointOptions): Promise<SnapshotInfo | undefined> {
+  async checkpoint(options?: CheckpointOptions): Promise<Traced<SnapshotInfo> | undefined> {
     const client = this.requireLifecycleClient("checkpoint");
     if (options?.wait === false) {
       await client.snapshot(this.lifecycleIdentifier, { snapshotType: options.checkpointType });
@@ -534,7 +562,7 @@ export class Sandbox {
    * Uses a single streaming `POST /api/v1/processes/run` request that starts
    * the process, streams output, and delivers the exit code over one connection.
    */
-  async run(command: string, options?: RunOptions): Promise<CommandResult> {
+  async run(command: string, options?: RunOptions): Promise<Traced<CommandResult>> {
     const body: Record<string, unknown> = { command };
     if (options?.args) body.args = options.args;
     if (options?.env) body.env = options.env;
@@ -546,6 +574,7 @@ export class Sandbox {
       "/api/v1/processes/run",
       { json: body },
     );
+    const traceId = sseStream.traceId;
 
     const stdoutLines: string[] = [];
     const stderrLines: string[] = [];
@@ -567,11 +596,10 @@ export class Sandbox {
       }
     }
 
-    return {
-      exitCode,
-      stdout: stdoutLines.join("\n"),
-      stderr: stderrLines.join("\n"),
-    };
+    return Object.assign(
+      { exitCode, stdout: stdoutLines.join("\n"), stderr: stderrLines.join("\n") },
+      { traceId },
+    );
   }
 
   // --- Process management ---
@@ -587,7 +615,7 @@ export class Sandbox {
   async startProcess(
     command: string,
     options?: StartProcessOptions,
-  ): Promise<ProcessInfo> {
+  ): Promise<Traced<ProcessInfo>> {
     const payload: Record<string, unknown> = { command };
     if (options?.args != null) payload.args = options.args;
     if (options?.env != null) payload.env = options.env;
@@ -607,7 +635,7 @@ export class Sandbox {
       "/api/v1/processes",
       { body: payload },
     );
-    return fromSnakeKeys(raw) as ProcessInfo;
+    return Object.assign(fromSnakeKeys(raw) as ProcessInfo, { traceId: raw.traceId });
   }
 
   /** List all processes (running and exited) tracked by the sandbox daemon. */
@@ -621,12 +649,12 @@ export class Sandbox {
   }
 
   /** Get current status and metadata for a process by PID. */
-  async getProcess(pid: number): Promise<ProcessInfo> {
+  async getProcess(pid: number): Promise<Traced<ProcessInfo>> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",
       `/api/v1/processes/${pid}`,
     );
-    return fromSnakeKeys(raw) as ProcessInfo;
+    return Object.assign(fromSnakeKeys(raw) as ProcessInfo, { traceId: raw.traceId });
   }
 
   /** Send SIGKILL to a process. */
@@ -635,13 +663,13 @@ export class Sandbox {
   }
 
   /** Send an arbitrary signal to a process (e.g. `15` for SIGTERM, `9` for SIGKILL). */
-  async sendSignal(pid: number, signal: number): Promise<SendSignalResponse> {
+  async sendSignal(pid: number, signal: number): Promise<Traced<SendSignalResponse>> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "POST",
       `/api/v1/processes/${pid}/signal`,
       { body: { signal } },
     );
-    return fromSnakeKeys(raw) as SendSignalResponse;
+    return Object.assign(fromSnakeKeys(raw) as SendSignalResponse, { traceId: raw.traceId });
   }
 
   // --- Process I/O ---
@@ -660,30 +688,30 @@ export class Sandbox {
   }
 
   /** Return all captured stdout lines produced so far by a process. */
-  async getStdout(pid: number): Promise<OutputResponse> {
+  async getStdout(pid: number): Promise<Traced<OutputResponse>> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",
       `/api/v1/processes/${pid}/stdout`,
     );
-    return fromSnakeKeys(raw) as OutputResponse;
+    return Object.assign(fromSnakeKeys(raw) as OutputResponse, { traceId: raw.traceId });
   }
 
   /** Return all captured stderr lines produced so far by a process. */
-  async getStderr(pid: number): Promise<OutputResponse> {
+  async getStderr(pid: number): Promise<Traced<OutputResponse>> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",
       `/api/v1/processes/${pid}/stderr`,
     );
-    return fromSnakeKeys(raw) as OutputResponse;
+    return Object.assign(fromSnakeKeys(raw) as OutputResponse, { traceId: raw.traceId });
   }
 
   /** Return all captured stdout+stderr lines produced so far by a process. */
-  async getOutput(pid: number): Promise<OutputResponse> {
+  async getOutput(pid: number): Promise<Traced<OutputResponse>> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",
       `/api/v1/processes/${pid}/output`,
     );
-    return fromSnakeKeys(raw) as OutputResponse;
+    return Object.assign(fromSnakeKeys(raw) as OutputResponse, { traceId: raw.traceId });
   }
 
   // --- Streaming (SSE) ---
@@ -745,7 +773,7 @@ export class Sandbox {
   // --- File operations ---
 
   /** Read a file from the sandbox and return its raw bytes. */
-  async readFile(path: string): Promise<Uint8Array> {
+  async readFile(path: string): Promise<Traced<Uint8Array>> {
     return this.http.requestBytes(
       "GET",
       `/api/v1/files?path=${encodeURIComponent(path)}`,
@@ -770,12 +798,12 @@ export class Sandbox {
   }
 
   /** List the contents of a directory in the sandbox. */
-  async listDirectory(path: string): Promise<ListDirectoryResponse> {
+  async listDirectory(path: string): Promise<Traced<ListDirectoryResponse>> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",
       `/api/v1/files/list?path=${encodeURIComponent(path)}`,
     );
-    return fromSnakeKeys(raw) as ListDirectoryResponse;
+    return Object.assign(fromSnakeKeys(raw) as ListDirectoryResponse, { traceId: raw.traceId });
   }
 
   // --- PTY ---
@@ -783,7 +811,7 @@ export class Sandbox {
   /** Create an interactive PTY session. Returns a `sessionId` and `token` for WebSocket connection via `connectPty()`. */
   async createPtySession(
     options: CreatePtySessionOptions,
-  ): Promise<PtySessionInfo> {
+  ): Promise<Traced<PtySessionInfo>> {
     const payload: Record<string, unknown> = {
       command: options.command,
       rows: options.rows ?? 24,
@@ -798,7 +826,7 @@ export class Sandbox {
       "/api/v1/pty",
       { body: payload },
     );
-    return fromSnakeKeys(raw) as PtySessionInfo;
+    return Object.assign(fromSnakeKeys(raw) as PtySessionInfo, { traceId: raw.traceId });
   }
 
   /** Create a PTY session and connect to it immediately. Cleans up the session if the WebSocket connection fails. */
@@ -890,20 +918,20 @@ export class Sandbox {
   // --- Health ---
 
   /** Check the sandbox daemon health. */
-  async health(): Promise<HealthResponse> {
+  async health(): Promise<Traced<HealthResponse>> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",
       "/api/v1/health",
     );
-    return fromSnakeKeys(raw) as HealthResponse;
+    return Object.assign(fromSnakeKeys(raw) as HealthResponse, { traceId: raw.traceId });
   }
 
   /** Get sandbox daemon info (version, uptime, process counts). */
-  async info(): Promise<DaemonInfo> {
+  async daemonInfo(): Promise<Traced<DaemonInfo>> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",
       "/api/v1/info",
     );
-    return fromSnakeKeys(raw) as DaemonInfo;
+    return Object.assign(fromSnakeKeys(raw) as DaemonInfo, { traceId: raw.traceId });
   }
 }

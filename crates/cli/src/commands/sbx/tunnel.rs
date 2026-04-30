@@ -28,7 +28,7 @@ pub async fn run(
     let listen_port = listen_port.unwrap_or(remote_port);
     let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
     let ws_url = build_tunnel_url(&proxy_base, remote_port)?;
-    let headers = build_proxy_headers(ctx, host_override.as_deref())?;
+    let headers = build_proxy_headers(ctx, sandbox_id, host_override.as_deref())?;
 
     let listen_addr = format!("127.0.0.1:{listen_port}");
     let listener = TcpListener::bind(&listen_addr).await.map_err(|error| {
@@ -84,7 +84,11 @@ fn build_tunnel_url(proxy_base: &str, remote_port: u16) -> Result<String> {
     Ok(url.to_string())
 }
 
-fn build_proxy_headers(ctx: &CliContext, host_override: Option<&str>) -> Result<HeaderMap> {
+fn build_proxy_headers(
+    ctx: &CliContext,
+    sandbox_id: &str,
+    host_override: Option<&str>,
+) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(
         AUTHORIZATION,
@@ -115,6 +119,13 @@ fn build_proxy_headers(ctx: &CliContext, host_override: Option<&str>) -> Result<
             HOST,
             HeaderValue::from_str(host)
                 .map_err(|error| CliError::Other(anyhow!("invalid host header: {}", error)))?,
+        );
+    } else {
+        headers.insert(
+            HeaderName::from_static("x-tensorlake-sandbox-id"),
+            HeaderValue::from_str(sandbox_id).map_err(|error| {
+                CliError::Other(anyhow!("invalid sandbox id header: {}", error))
+            })?,
         );
     }
 

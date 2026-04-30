@@ -2,7 +2,7 @@ use std::io::Read;
 use std::time::Duration;
 
 use crate::auth::context::CliContext;
-use crate::commands::sbx::{parse_env_vars, sandbox_proxy_base, with_host};
+use crate::commands::sbx::{parse_env_vars, sandbox_proxy_base, with_sandbox_headers};
 use crate::error::{CliError, Result};
 use tokio::sync::mpsc;
 
@@ -66,6 +66,13 @@ pub async fn run(
             host.parse()
                 .map_err(|e| CliError::Other(anyhow::anyhow!("invalid host header: {}", e)))?,
         );
+    } else {
+        ws_headers.insert(
+            reqwest::header::HeaderName::from_static("x-tensorlake-sandbox-id"),
+            sandbox_id.parse().map_err(|e| {
+                CliError::Other(anyhow::anyhow!("invalid sandbox id header: {}", e))
+            })?,
+        );
     }
     let client = ctx.client()?;
 
@@ -106,8 +113,9 @@ pub async fn run(
     let pty_payload =
         build_pty_create_payload(shell, shell_args, workdir, &term_val, rows, cols, env_dict)?;
 
-    let pty_resp = with_host(
+    let pty_resp = with_sandbox_headers(
         client.post(format!("{}/api/v1/pty", proxy_base)).json(&pty_payload),
+        sandbox_id,
         host_override.clone(),
     )
     .send()

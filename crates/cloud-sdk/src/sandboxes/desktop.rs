@@ -35,13 +35,16 @@ impl SandboxDesktopClient {
     pub async fn connect(
         client: Client,
         host_override: Option<String>,
+        sandbox_id: Option<String>,
         port: u16,
         password: Option<String>,
         shared: bool,
         connect_timeout: Duration,
     ) -> Result<Self, SdkError> {
         let session = timeout(connect_timeout, async move {
-            let transport = TunnelConnection::connect(client, host_override, port).await?;
+            let transport =
+                TunnelConnection::connect(client, host_override, sandbox_id.as_deref(), port)
+                    .await?;
             DesktopSession::connect(transport, password, shared).await
         })
         .await
@@ -153,10 +156,12 @@ impl TunnelConnection {
     async fn connect(
         client: Client,
         host_override: Option<String>,
+        sandbox_id: Option<&str>,
         remote_port: u16,
     ) -> Result<Self, SdkError> {
         let ws_url = build_tunnel_url(client.base_url(), remote_port)?;
-        let headers = build_tunnel_headers(client.default_headers(), host_override.as_deref())?;
+        let headers =
+            build_tunnel_headers(client.default_headers(), host_override.as_deref(), sandbox_id)?;
 
         let mut request = ws_url.into_client_request().map_err(|error| {
             SdkError::ClientError(format!("failed to build tunnel request: {error}"))
@@ -1114,11 +1119,19 @@ fn build_tunnel_url(base_url: &str, remote_port: u16) -> Result<String, SdkError
 fn build_tunnel_headers(
     mut headers: HeaderMap,
     host_override: Option<&str>,
+    sandbox_id: Option<&str>,
 ) -> Result<HeaderMap, SdkError> {
     if let Some(host) = host_override {
         headers.insert(
             HOST,
             host.parse::<reqwest::header::HeaderValue>()
+                .map_err(|error| SdkError::InvalidHeaderValue(error.to_string()))?,
+        );
+    }
+    if let Some(id) = sandbox_id {
+        headers.insert(
+            reqwest::header::HeaderName::from_static("x-tensorlake-sandbox-id"),
+            id.parse::<reqwest::header::HeaderValue>()
                 .map_err(|error| SdkError::InvalidHeaderValue(error.to_string()))?,
         );
     }

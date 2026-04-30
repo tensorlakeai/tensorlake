@@ -1,4 +1,5 @@
 use crate::auth::context::CliContext;
+use crate::commands::sbx::resolve_sandbox_lifecycle_url;
 use crate::error::Result;
 
 fn mask_credential(value: &str) -> String {
@@ -41,7 +42,8 @@ pub async fn run(ctx: &mut CliContext, output_json: bool) -> Result<()> {
             "endpoints".to_string(),
             serde_json::json!({
                 "dashboard": ctx.cloud_url,
-                "api": ctx.api_url,
+                "cloudApi": ctx.api_url,
+                "sandboxApi": resolve_sandbox_lifecycle_url(&ctx.api_url),
             }),
         );
 
@@ -93,8 +95,9 @@ pub async fn run(ctx: &mut CliContext, output_json: bool) -> Result<()> {
     }
 
     println!("Endpoints");
-    println!("  Dashboard : {}", ctx.cloud_url);
-    println!("  API       : {}", ctx.api_url);
+    println!("  Dashboard   : {}", ctx.cloud_url);
+    println!("  Cloud API   : {}", ctx.api_url);
+    println!("  Sandbox API : {}", resolve_sandbox_lifecycle_url(&ctx.api_url));
 
     if has_api_key || has_pat {
         println!();

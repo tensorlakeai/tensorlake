@@ -212,6 +212,7 @@ pub struct SandboxProxyClient {
     client: Client,
     host_override: Option<String>,
     routing_hint: Option<String>,
+    sandbox_id: Option<String>,
 }
 
 impl SandboxProxyClient {
@@ -220,6 +221,7 @@ impl SandboxProxyClient {
             client,
             host_override,
             routing_hint: None,
+            sandbox_id: None,
         }
     }
 
@@ -228,10 +230,18 @@ impl SandboxProxyClient {
         self
     }
 
+    pub fn with_sandbox_id(mut self, id: Option<String>) -> Self {
+        self.sandbox_id = id;
+        self
+    }
+
     fn request(&self, method: Method, path: &str) -> reqwest_middleware::RequestBuilder {
         let mut request_builder = self.client.request(method, path);
         if let Some(host) = self.host_override.as_deref() {
             request_builder = request_builder.header("Host", host);
+        }
+        if let Some(id) = self.sandbox_id.as_deref() {
+            request_builder = request_builder.header("X-Tensorlake-Sandbox-Id", id);
         }
         if let Some(hint) = self.routing_hint.as_deref() {
             request_builder = request_builder.header("X-Tensorlake-Route-Hint", hint);

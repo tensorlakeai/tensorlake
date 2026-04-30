@@ -3,7 +3,7 @@ use futures::StreamExt;
 use reqwest::header::ACCEPT;
 
 use crate::auth::context::CliContext;
-use crate::commands::sbx::{parse_env_vars, sandbox_proxy_base, with_host};
+use crate::commands::sbx::{parse_env_vars, sandbox_proxy_base, with_sandbox_headers};
 use crate::error::{CliError, Result};
 
 pub async fn run(
@@ -37,11 +37,12 @@ pub async fn run(
     }
 
     // Single streaming POST: start process + stream output + get exit code
-    let resp = with_host(
+    let resp = with_sandbox_headers(
         client
             .post(format!("{}/api/v1/processes/run", proxy_base))
             .header(ACCEPT, "text/event-stream")
             .json(&body),
+        sandbox_id,
         host_override,
     )
     .send()

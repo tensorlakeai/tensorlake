@@ -161,6 +161,8 @@ class Sandbox:
             self._proxy_headers["X-Forwarded-Project-Id"] = project_id
         if self._host_header:
             self._proxy_headers["Host"] = self._host_header
+        else:
+            self._proxy_headers["X-Tensorlake-Sandbox-Id"] = sandbox_identifier
 
         if _proxy_rust_client is not None:
             self._rust_client = _proxy_rust_client
@@ -289,9 +291,9 @@ class Sandbox:
     ) -> "Sandbox":
         """Attach to an existing sandbox and return a connected handle.
 
-        Verifies the sandbox exists via a server GET call, then returns a
-        handle in whatever state the sandbox is in. Does **not** auto-resume
-        a suspended sandbox — call ``sandbox.resume()`` explicitly.
+        Returns immediately without contacting the server. Call ``sandbox.info()``
+        to fetch the current state on demand.  Does **not** auto-resume a
+        suspended sandbox — call ``sandbox.resume()`` explicitly.
 
         Args:
             sandbox_id: ID or name of the sandbox to attach to.
@@ -305,9 +307,6 @@ class Sandbox:
 
         Returns:
             Connected Sandbox handle (does not auto-terminate on context exit).
-
-        Raises:
-            SandboxNotFoundError: If the sandbox does not exist.
         """
         from .client import SandboxClient
 
@@ -319,15 +318,11 @@ class Sandbox:
             namespace=namespace,
             _internal=True,
         )
-        info = client.get(sandbox_id)  # raises SandboxNotFoundError if not found
-        sandbox = client.connect(
-            info.sandbox_id,
+        return client.connect(
+            sandbox_id,
             proxy_url=proxy_url,
-            routing_hint=routing_hint or info.routing_hint,
+            routing_hint=routing_hint,
         )
-        sandbox._sandbox_id = info.sandbox_id
-        sandbox._cached_info = info.value
-        return sandbox
 
     # --- Class-level snapshot management ---
 
@@ -401,6 +396,41 @@ class Sandbox:
             _internal=True,
         )
         client.delete_snapshot(snapshot_id)
+
+    @classmethod
+    def list(
+        cls,
+        api_key: str | None = _defaults.API_KEY,
+        api_url: str = _defaults.API_URL,
+        organization_id: str | None = None,
+        project_id: str | None = None,
+        namespace: str | None = _defaults.NAMESPACE,
+    ) -> TracedIterator[SandboxInfo]:
+        """List all sandboxes in the namespace.
+
+        No sandbox handle is needed.
+
+        Args:
+            api_key: Tensorlake API key (defaults to TENSORLAKE_API_KEY env var).
+            api_url: API server URL (defaults to TENSORLAKE_API_URL env var).
+            organization_id: Organization ID for multi-tenant access.
+            project_id: Project ID for scoping resources.
+            namespace: Namespace for local-server deployments.
+
+        Returns:
+            TracedIterator[SandboxInfo] — iterable over all sandboxes.
+        """
+        from .client import SandboxClient
+
+        client = SandboxClient(
+            api_url=api_url,
+            api_key=api_key,
+            organization_id=organization_id,
+            project_id=project_id,
+            namespace=namespace,
+            _internal=True,
+        )
+        return client.list()
 
     # --- Instance lifecycle methods ---
 
@@ -527,6 +557,17 @@ class Sandbox:
             lookup_id = self._sandbox_id or self._identifier
             self._cached_info = self._lifecycle_client.get(lookup_id).value
         return self._cached_info
+
+    def info(self) -> SandboxInfo:
+        """Fetch the current sandbox information from the server on demand.
+
+        Returns:
+            SandboxInfo with the latest state from the server.
+
+        Raises:
+            SandboxError: If no lifecycle client is available.
+        """
+        return self._fetch_info()
 
     def _lifecycle_identifier(self) -> str:
         """Best-effort stable identifier for lifecycle API calls.
@@ -1128,7 +1169,7 @@ class Sandbox:
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def info(self) -> Traced[DaemonInfo]:
+    def daemon_info(self) -> Traced[DaemonInfo]:
         """Get container daemon info (version, uptime, process counts)."""
         try:
             trace_id, response_json = self._rust_client.info_json()

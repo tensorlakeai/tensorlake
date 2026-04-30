@@ -26,7 +26,7 @@ import {
   toSnakeKeys,
 } from "./models.js";
 import { Sandbox } from "./sandbox.js";
-import { isLocalhost, lifecyclePath, resolveProxyUrl } from "./url.js";
+import { isLocalhost, lifecyclePath, resolveProxyUrl, resolveSandboxLifecycleUrl } from "./url.js";
 
 /**
  * Client for managing TensorLake sandboxes, pools, and snapshots.
@@ -58,7 +58,7 @@ export class SandboxClient {
     this.local = isLocalhost(this.apiUrl);
 
     this.http = new HttpClient({
-      baseUrl: this.apiUrl,
+      baseUrl: resolveSandboxLifecycleUrl(this.apiUrl),
       apiKey: this.apiKey,
       organizationId: this.organizationId,
       projectId: this.projectId,
@@ -144,12 +144,12 @@ export class SandboxClient {
   }
 
   /** Get current state and metadata for a sandbox by ID. */
-  async get(sandboxId: string): Promise<SandboxInfo> {
+  async get(sandboxId: string): Promise<Traced<SandboxInfo>> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",
       this.path(`sandboxes/${sandboxId}`),
     );
-    return fromSnakeKeys(raw, "sandboxId") as SandboxInfo;
+    return Object.assign(fromSnakeKeys(raw, "sandboxId") as SandboxInfo, { traceId: raw.traceId });
   }
 
   /** List all sandboxes in the namespace. */
@@ -165,7 +165,7 @@ export class SandboxClient {
   }
 
   /** Update sandbox properties such as name, exposed ports, and proxy auth settings. */
-  async update(sandboxId: string, options: UpdateSandboxOptions): Promise<SandboxInfo> {
+  async update(sandboxId: string, options: UpdateSandboxOptions): Promise<Traced<SandboxInfo>> {
     const body: Record<string, unknown> = {};
     if (options.name != null) body.name = options.name;
     if (options.allowUnauthenticatedAccess != null) {
@@ -182,7 +182,7 @@ export class SandboxClient {
       this.path(`sandboxes/${sandboxId}`),
       { body },
     );
-    return fromSnakeKeys(raw, "sandboxId") as SandboxInfo;
+    return Object.assign(fromSnakeKeys(raw, "sandboxId") as SandboxInfo, { traceId: raw.traceId });
   }
 
   /** Get the current proxy port settings for a sandbox. */
@@ -347,12 +347,12 @@ export class SandboxClient {
   }
 
   /** Get current status and metadata for a snapshot by ID. */
-  async getSnapshot(snapshotId: string): Promise<SnapshotInfo> {
+  async getSnapshot(snapshotId: string): Promise<Traced<SnapshotInfo>> {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",
       this.path(`snapshots/${snapshotId}`),
     );
-    return fromSnakeKeys(raw, "snapshotId") as SnapshotInfo;
+    return Object.assign(fromSnakeKeys(raw, "snapshotId") as SnapshotInfo, { traceId: raw.traceId });
   }
 
   /** List all snapshots in the namespace. */
@@ -391,7 +391,7 @@ export class SandboxClient {
   async snapshotAndWait(
     sandboxId: string,
     options?: SnapshotAndWaitOptions,
-  ): Promise<SnapshotInfo> {
+  ): Promise<Traced<SnapshotInfo>> {
     const timeout = options?.timeout ?? 300;
     const pollInterval = options?.pollInterval ?? 1;
 

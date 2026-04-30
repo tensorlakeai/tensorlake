@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::auth::context::CliContext;
-use crate::commands::sbx::{parse_sandbox_path, sandbox_proxy_base, with_host};
+use crate::commands::sbx::{parse_sandbox_path, sandbox_proxy_base, with_sandbox_headers};
 use crate::error::{CliError, Result};
 
 pub async fn run(ctx: &CliContext, src: &str, dest: &str) -> Result<()> {
@@ -24,12 +24,13 @@ pub async fn run(ctx: &CliContext, src: &str, dest: &str) -> Result<()> {
         let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
         let client = ctx.client()?;
 
-        let resp = with_host(
+        let resp = with_sandbox_headers(
             client.get(format!(
                 "{}/api/v1/files?path={}",
                 proxy_base,
                 urlencoding::encode(src_path)
             )),
+            sandbox_id,
             host_override,
         )
         .send()
@@ -70,7 +71,7 @@ pub async fn run(ctx: &CliContext, src: &str, dest: &str) -> Result<()> {
         let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
         let client = ctx.client()?;
 
-        let resp = with_host(
+        let resp = with_sandbox_headers(
             client
                 .put(format!(
                     "{}/api/v1/files?path={}",
@@ -78,6 +79,7 @@ pub async fn run(ctx: &CliContext, src: &str, dest: &str) -> Result<()> {
                     urlencoding::encode(dest_path)
                 ))
                 .body(data.clone()),
+            sandbox_id,
             host_override,
         )
         .send()

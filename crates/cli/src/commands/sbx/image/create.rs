@@ -154,8 +154,10 @@ fn sandbox_proxy_client(
     routing_hint: Option<String>,
 ) -> Result<SandboxProxyClient> {
     let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
+    let sandbox_id_header = host_override.is_none().then(|| sandbox_id.to_string());
     Ok(
         SandboxProxyClient::new(client.with_base_url(&proxy_base), host_override)
+            .with_sandbox_id(sandbox_id_header)
             .with_routing_hint(routing_hint),
     )
 }

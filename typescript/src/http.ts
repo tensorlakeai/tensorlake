@@ -19,6 +19,7 @@ export interface HttpClientOptions {
   organizationId?: string;
   projectId?: string;
   hostHeader?: string;
+  sandboxIdHeader?: string;
   routingHint?: string;
   maxRetries?: number;
   retryBackoffMs?: number;
@@ -31,6 +32,7 @@ setGlobalDispatcher(
     allowH2: true,
   }),
 );
+
 
 type RequestBody = BodyInit | Uint8Array | ArrayBuffer;
 
@@ -101,6 +103,9 @@ export class HttpClient {
     }
     if (options.hostHeader) {
       this.headers["Host"] = options.hostHeader;
+    }
+    if (options.sandboxIdHeader) {
+      this.headers["X-Tensorlake-Sandbox-Id"] = options.sandboxIdHeader;
     }
     if (options.routingHint) {
       this.headers["X-Tensorlake-Route-Hint"] = options.routingHint;

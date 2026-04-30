@@ -48,14 +48,14 @@ export function resolveProxyUrl(apiUrl: string): string {
  * Resolve the proxy target for a specific sandbox.
  *
  * - Localhost: base URL stays the same, Host header set to `{sandboxId}.local`
- * - Cloud: sandbox ID becomes a subdomain of the proxy host
+ * - Cloud: apex proxy domain with `X-Tensorlake-Sandbox-Id` header
  *
- * Returns `{ baseUrl, hostHeader }`.
+ * Returns `{ baseUrl, hostHeader, sandboxIdHeader }`.
  */
 export function resolveProxyTarget(
   proxyUrl: string,
   sandboxId: string,
-): { baseUrl: string; hostHeader: string | undefined } {
+): { baseUrl: string; hostHeader: string | undefined; sandboxIdHeader: string | undefined } {
   try {
     const parsed = new URL(proxyUrl);
     const host = parsed.hostname;
@@ -64,20 +64,45 @@ export function resolveProxyTarget(
       return {
         baseUrl: trimTrailingSlashes(proxyUrl),
         hostHeader: `${sandboxId}.local`,
+        sandboxIdHeader: undefined,
       };
     }
 
     const port = parsed.port ? `:${parsed.port}` : "";
     return {
-      baseUrl: `${parsed.protocol}//${sandboxId}.${host}${port}`,
+      baseUrl: `${parsed.protocol}//${host}${port}`,
       hostHeader: undefined,
+      sandboxIdHeader: sandboxId,
     };
   } catch {
     return {
       baseUrl: `${trimTrailingSlashes(proxyUrl)}/${sandboxId}`,
       hostHeader: undefined,
+      sandboxIdHeader: undefined,
     };
   }
+}
+
+/**
+ * Derive the sandbox lifecycle URL from the API URL.
+ *
+ * Transforms `api.X` → `sandbox.X` for cloud. Returns the URL unchanged for
+ * localhost or unrecognised patterns.
+ */
+export function resolveSandboxLifecycleUrl(apiUrl: string): string {
+  if (isLocalhost(apiUrl)) return apiUrl;
+
+  try {
+    const parsed = new URL(apiUrl);
+    if (parsed.hostname.startsWith("api.")) {
+      parsed.hostname = "sandbox." + parsed.hostname.slice(4);
+      return parsed.toString().replace(/\/$/, "");
+    }
+  } catch {
+    // fall through
+  }
+
+  return apiUrl;
 }
 
 /**
