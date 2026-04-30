@@ -26,7 +26,7 @@ import {
   toSnakeKeys,
 } from "./models.js";
 import { Sandbox } from "./sandbox.js";
-import { isLocalhost, lifecyclePath, resolveProxyUrl, resolveSandboxLifecycleUrl } from "./url.js";
+import { isLocalhost, lifecyclePath, resolveProxyUrl } from "./url.js";
 
 /**
  * Client for managing TensorLake sandboxes, pools, and snapshots.
@@ -58,7 +58,7 @@ export class SandboxClient {
     this.local = isLocalhost(this.apiUrl);
 
     this.http = new HttpClient({
-      baseUrl: resolveSandboxLifecycleUrl(this.apiUrl),
+      baseUrl: this.apiUrl,
       apiKey: this.apiKey,
       organizationId: this.organizationId,
       projectId: this.projectId,
