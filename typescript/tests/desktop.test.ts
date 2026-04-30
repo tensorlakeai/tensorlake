@@ -412,7 +412,7 @@ describe("DesktopSession", () => {
     const socket = MockWebSocket.instances[0];
 
     expect(socket.url).toBe(
-      "wss://sbx-1.sandbox.tensorlake.ai/api/v1/tunnels/tcp?port=5901",
+      "wss://sandbox.tensorlake.ai/api/v1/tunnels/tcp?port=5901",
     );
     expect(socket.options?.headers?.Authorization).toBe("Bearer test-api-key");
     expect(socket.sent[0].toString("ascii")).toBe("RFB 003.008\n");

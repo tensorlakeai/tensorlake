@@ -546,8 +546,7 @@ impl CloudSandboxClient {
         namespace: Option<String>,
         user_agent: Option<String>,
     ) -> PyResult<Self> {
-        let sandbox_lifecycle_url = resolve_sandbox_lifecycle_url(&api_url);
-        let mut builder = ClientBuilder::new(&sandbox_lifecycle_url);
+        let mut builder = ClientBuilder::new(&api_url);
         if let Some(token) = api_key.as_deref() {
             builder = builder.bearer_token(token);
         }
@@ -1851,23 +1850,6 @@ fn resolve_proxy_target(
     let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
     let base_url = format!("{}://{host}{port}", parsed.scheme());
     Ok((base_url, None, Some(sandbox_id.to_string())))
-}
-
-/// Derive the sandbox lifecycle URL from the API URL.
-///
-/// Converts `api.tensorlake.*` → `sandbox.tensorlake.*` for cloud deployments.
-/// Localhost URLs are returned unchanged.
-fn resolve_sandbox_lifecycle_url(api_url: &str) -> String {
-    if is_localhost_api_url(api_url) {
-        return api_url.to_string();
-    }
-    if let Ok(parsed) = reqwest::Url::parse(api_url) {
-        let host = parsed.host_str().unwrap_or("");
-        if let Some(rest) = host.strip_prefix("api.") {
-            return format!("{}://sandbox.{rest}", parsed.scheme());
-        }
-    }
-    "https://sandbox.tensorlake.ai".to_string()
 }
 
 fn is_localhost_api_url(api_url: &str) -> bool {

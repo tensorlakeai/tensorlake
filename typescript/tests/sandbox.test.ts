@@ -225,7 +225,7 @@ describe("Sandbox", () => {
     });
   });
 
-  describe("info", () => {
+  describe("daemonInfo", () => {
     it("returns daemon info", async () => {
       mockFetch(() =>
         new Response(
@@ -240,7 +240,7 @@ describe("Sandbox", () => {
       );
 
       const sbx = makeSandbox();
-      const info = await sbx.info();
+      const info = await sbx.daemonInfo();
       expect(info.version).toBe("1.0.0");
       expect(info.uptimeSecs).toBe(3600);
       expect(info.runningProcesses).toBe(2);
@@ -260,7 +260,7 @@ describe("Sandbox", () => {
       });
     }
 
-    it("connect() populates name from server info", async () => {
+    it("connect() is lazy — info() populates name on demand", async () => {
       mockFetch(() =>
         new Response(sandboxInfoBody({ name: "my-sandbox" }), { status: 200 }),
       );
@@ -269,13 +269,13 @@ describe("Sandbox", () => {
         sandboxId: "sbx-1",
         apiUrl: "http://localhost:8900",
       });
+      expect(sbx.name).toBeNull(); // lazy: no GET on connect
+      await sbx.info();
       expect(sbx.name).toBe("my-sandbox");
       sbx.close();
     });
 
-    it("connect() leaves name null when server omits it", async () => {
-      mockFetch(() => new Response(sandboxInfoBody(), { status: 200 }));
-
+    it("connect() leaves name null until info() is called", async () => {
       const sbx = await Sandbox.connect({
         sandboxId: "sbx-1",
         apiUrl: "http://localhost:8900",
@@ -286,7 +286,6 @@ describe("Sandbox", () => {
 
     it("status() fetches fresh status from the server every call", async () => {
       const responses = [
-        sandboxInfoBody({ status: "running" }), // initial GET inside Sandbox.connect()
         sandboxInfoBody({ status: "running" }),
         sandboxInfoBody({ status: "suspended" }),
       ];
@@ -319,17 +318,14 @@ describe("Sandbox", () => {
             { status: 200 },
           );
         }
-        // Initial GET from Sandbox.connect()
-        return new Response(sandboxInfoBody({ name: "old-name" }), {
-          status: 200,
-        });
+        return new Response("", { status: 404 });
       });
 
       const sbx = await Sandbox.connect({
         sandboxId: "sbx-1",
         apiUrl: "http://localhost:8900",
       });
-      expect(sbx.name).toBe("old-name");
+      expect(sbx.name).toBeNull(); // lazy connect: no initial GET
 
       const info = await sbx.update({ name: "renamed", exposedPorts: [8080] });
 
@@ -348,14 +344,15 @@ describe("Sandbox", () => {
       sbx.close();
     });
 
-    it("lifecycle calls stay pinned to canonical sandbox ID after renaming a name-connected handle", async () => {
+    it("lifecycle calls stay pinned to canonical sandbox ID after the first mutating call resolves it", async () => {
       const calls: string[] = [];
       mockFetch((url, init) => {
         const method = init?.method ?? "GET";
         calls.push(`${method} ${url}`);
 
         if (method === "PATCH") {
-          expect(url).toContain("/sandboxes/sbx-1");
+          // First mutating call uses the name; response reveals the canonical UUID.
+          expect(url).toContain("/sandboxes/my-original-name");
           return new Response(
             sandboxInfoBody({ id: "sbx-1", name: "renamed-by-handle" }),
             { status: 200 },
@@ -365,13 +362,6 @@ describe("Sandbox", () => {
         if (url.includes("/sandboxes/sbx-1")) {
           return new Response(
             sandboxInfoBody({ id: "sbx-1", name: "renamed-by-handle", status: "running" }),
-            { status: 200 },
-          );
-        }
-
-        if (url.includes("/sandboxes/my-original-name")) {
-          return new Response(
-            sandboxInfoBody({ id: "sbx-1", name: "my-original-name", status: "running" }),
             { status: 200 },
           );
         }
@@ -389,8 +379,8 @@ describe("Sandbox", () => {
 
       const patchCalls = calls.filter((line) => line.startsWith("PATCH "));
       expect(patchCalls).toHaveLength(1);
-      expect(patchCalls[0]).toContain("/sandboxes/sbx-1");
-      expect(calls.some((line) => line.includes("/sandboxes/my-original-name"))).toBe(true);
+      expect(patchCalls[0]).toContain("/sandboxes/my-original-name");
+      // After update resolves the canonical ID, subsequent calls use the UUID.
       expect(calls.some((line) => line.includes("/sandboxes/sbx-1"))).toBe(true);
       sbx.close();
     });
@@ -481,7 +471,7 @@ describe("Sandbox", () => {
       });
       const url = sbx.ptyWsUrl("sess-1", "tok-1");
       expect(url).toBe(
-        "wss://sbx-1.sandbox.tensorlake.ai/api/v1/pty/sess-1/ws?token=tok-1",
+        "wss://sandbox.tensorlake.ai/api/v1/pty/sess-1/ws?token=tok-1",
       );
       sbx.close();
     });

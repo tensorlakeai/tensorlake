@@ -64,22 +64,24 @@ describe("resolveProxyTarget", () => {
     expect(result.hostHeader).toBe("sbx-123.local");
   });
 
-  it("uses subdomain for cloud", () => {
+  it("uses apex domain + sandbox ID header for cloud", () => {
     const result = resolveProxyTarget(
       "https://sandbox.tensorlake.ai",
       "sbx-123",
     );
-    expect(result.baseUrl).toBe("https://sbx-123.sandbox.tensorlake.ai");
+    expect(result.baseUrl).toBe("https://sandbox.tensorlake.ai");
     expect(result.hostHeader).toBeUndefined();
+    expect(result.sandboxIdHeader).toBe("sbx-123");
   });
 
-  it("preserves port in cloud subdomain", () => {
+  it("preserves port in cloud apex domain", () => {
     const result = resolveProxyTarget(
       "https://sandbox.example.com:8443",
       "sbx-abc",
     );
-    expect(result.baseUrl).toBe("https://sbx-abc.sandbox.example.com:8443");
+    expect(result.baseUrl).toBe("https://sandbox.example.com:8443");
     expect(result.hostHeader).toBeUndefined();
+    expect(result.sandboxIdHeader).toBe("sbx-abc");
   });
 
   it("strips trailing slash from localhost", () => {

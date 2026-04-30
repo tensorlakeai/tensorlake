@@ -126,7 +126,7 @@ describe("TcpTunnel", () => {
     await once(client, "connect");
     const socket = await waitForSocket(0);
     expect(socket.url).toBe(
-      "wss://sbx-1.sandbox.tensorlake.ai/api/v1/tunnels/tcp?port=8080",
+      "wss://sandbox.tensorlake.ai/api/v1/tunnels/tcp?port=8080",
     );
     expect(socket.options?.headers?.Authorization).toBe("Bearer test-api-key");
 

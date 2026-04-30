@@ -125,7 +125,7 @@ describe("Sandbox PTY", () => {
 
     const socket = MockWebSocket.instances[0];
     expect(socket.url).toBe(
-      "wss://sbx-1.sandbox.tensorlake.ai/api/v1/pty/sess-1/ws?token=tok-1",
+      "wss://sandbox.tensorlake.ai/api/v1/pty/sess-1/ws?token=tok-1",
     );
     expect(socket.options?.headers?.["X-PTY-Token"]).toBe("tok-1");
     expect(socket.sent[0]).toEqual(Buffer.from([0x02]));
@@ -217,7 +217,7 @@ describe("Sandbox PTY", () => {
 
     await expect(pty.kill()).resolves.toBeUndefined();
     expect(vi.mocked(undici.fetch)).toHaveBeenCalledWith(
-      "https://sbx-1.sandbox.tensorlake.ai/api/v1/pty/sess-4",
+      "https://sandbox.tensorlake.ai/api/v1/pty/sess-4",
       expect.objectContaining({
         method: "DELETE",
       }),
@@ -249,7 +249,7 @@ describe("Sandbox PTY", () => {
     ).rejects.toThrow(/mock websocket connect failure|READY completed/);
 
     expect(vi.mocked(undici.fetch)).toHaveBeenCalledWith(
-      "https://sbx-1.sandbox.tensorlake.ai/api/v1/pty/sess-fail",
+      "https://sandbox.tensorlake.ai/api/v1/pty/sess-fail",
       expect.objectContaining({
         method: "DELETE",
       }),
