@@ -341,7 +341,7 @@ describe(
     });
 
     it("gets daemon info", async () => {
-      const info = await sandbox.info();
+      const info = await sandbox.daemonInfo();
       expect(info.version, `sandbox ${sandbox.sandboxId}: version`).toBeTruthy();
       expect(info.uptimeSecs, `sandbox ${sandbox.sandboxId}: uptimeSecs`).toBeGreaterThanOrEqual(0);
     });
