@@ -33,16 +33,6 @@ setGlobalDispatcher(
   }),
 );
 
-const prewarmedOrigins = new Set<string>();
-
-// Prime the undici connection pool for an origin the first time it is seen.
-// A HEAD / request triggers the TCP+TLS+HTTP2 handshake so subsequent real
-// requests do not pay that cost. Errors are silently ignored.
-function prewarmOrigin(baseUrl: string): void {
-  if (prewarmedOrigins.has(baseUrl)) return;
-  prewarmedOrigins.add(baseUrl);
-  undiciFetch(`${baseUrl}/`, { method: "HEAD" }).catch(() => {});
-}
 
 type RequestBody = BodyInit | Uint8Array | ArrayBuffer;
 
@@ -98,14 +88,6 @@ export class HttpClient {
     this.maxRetries = options.maxRetries ?? defaults.MAX_RETRIES;
     this.retryBackoffMs = options.retryBackoffMs ?? defaults.RETRY_BACKOFF_MS;
     this.timeoutMs = options.timeoutMs ?? defaults.DEFAULT_HTTP_TIMEOUT_MS;
-
-    // Pre-warm the HTTP/2 session for cloud origins on first use.
-    try {
-      const { hostname } = new URL(this.baseUrl);
-      if (hostname !== "localhost" && hostname !== "127.0.0.1") {
-        prewarmOrigin(this.baseUrl);
-      }
-    } catch { /* ignore unparseable URLs */ }
 
     this.headers = {
       "User-Agent": `tensorlake-typescript-sdk/${defaults.SDK_VERSION}`,
