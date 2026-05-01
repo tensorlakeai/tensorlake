@@ -70,7 +70,7 @@ pub async fn run(
     let plan = load_dockerfile_plan(dockerfile_path, registered_name)?;
     eprintln!("⚙️  Selected image name: {}", plan.registered_name);
 
-    let client = super::scoped_cloud_client(ctx)?;
+    let client = super::sandbox_lifecycle_client(ctx)?;
     let sandboxes = SandboxesClient::new(client.clone(), ctx.namespace.clone(), is_localhost(ctx));
     let templates = super::sandbox_templates_client(ctx)?;
 

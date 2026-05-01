@@ -26,7 +26,7 @@ import {
   toSnakeKeys,
 } from "./models.js";
 import { Sandbox } from "./sandbox.js";
-import { isLocalhost, lifecyclePath, resolveProxyUrl } from "./url.js";
+import { isLocalhost, lifecyclePath, resolveProxyUrl, resolveSandboxLifecycleUrl } from "./url.js";
 
 /**
  * Client for managing TensorLake sandboxes, pools, and snapshots.
@@ -58,7 +58,7 @@ export class SandboxClient {
     this.local = isLocalhost(this.apiUrl);
 
     this.http = new HttpClient({
-      baseUrl: this.apiUrl,
+      baseUrl: resolveSandboxLifecycleUrl(this.apiUrl),
       apiKey: this.apiKey,
       organizationId: this.organizationId,
       projectId: this.projectId,
@@ -107,6 +107,7 @@ export class SandboxClient {
 
   /** Create a new sandbox. Returns immediately; the sandbox may still be starting. Use `createAndConnect()` for a blocking, ready-to-use handle. */
   async create(options?: CreateSandboxOptions): Promise<Traced<CreateSandboxResponse>> {
+    console.log(`[tensorlake] sandbox create → ${resolveSandboxLifecycleUrl(this.apiUrl)}`);
     const body: Record<string, unknown> = {
       resources: {
         cpus: options?.cpus ?? 1.0,

@@ -55,6 +55,22 @@ pub fn sandbox_templates_client(ctx: &CliContext) -> Result<SandboxTemplatesClie
     Ok(SandboxTemplatesClient::new(client, org_id, proj_id))
 }
 
+pub fn sandbox_lifecycle_client(ctx: &CliContext) -> Result<Client> {
+    let lifecycle_url = crate::commands::sbx::resolve_sandbox_lifecycle_url(&ctx.api_url);
+    let token = ctx.bearer_token()?;
+    let mut builder = ClientBuilder::new(&lifecycle_url).bearer_token(&token);
+    let use_scope_headers = ctx.personal_access_token.is_some() && ctx.api_key.is_none();
+
+    if use_scope_headers
+        && let (Some(organization_id), Some(project_id)) =
+            (ctx.effective_organization_id(), ctx.effective_project_id())
+    {
+        builder = builder.scope(&organization_id, &project_id);
+    }
+
+    builder.build().map_err(Into::into)
+}
+
 /// Page through the list, returning the full JSON item if found.
 pub async fn find_image_item_in_paginated_list(
     ctx: &CliContext,

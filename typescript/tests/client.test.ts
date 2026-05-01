@@ -781,4 +781,56 @@ describe("SandboxClient", () => {
       client.close();
     });
   });
+
+  describe("URL routing", () => {
+    it("routes sandbox create to sandbox.tensorlake.ai for cloud", async () => {
+      let capturedUrl = "";
+      mockFetch((url) => {
+        capturedUrl = url;
+        return new Response(
+          JSON.stringify({ sandbox_id: "sbx-1", status: "pending" }),
+          { status: 200 },
+        );
+      });
+
+      const client = new SandboxClient({ apiUrl: "https://api.tensorlake.ai", apiKey: "key" }, true);
+      await client.create();
+      expect(capturedUrl).toContain("sandbox.tensorlake.ai");
+      expect(capturedUrl).not.toContain("api.tensorlake.ai");
+      client.close();
+    });
+
+    it("routes sandbox create to sandbox.tensorlake.dev when api.tensorlake.dev is set", async () => {
+      let capturedUrl = "";
+      mockFetch((url) => {
+        capturedUrl = url;
+        return new Response(
+          JSON.stringify({ sandbox_id: "sbx-1", status: "pending" }),
+          { status: 200 },
+        );
+      });
+
+      const client = new SandboxClient({ apiUrl: "https://api.tensorlake.dev", apiKey: "key" }, true);
+      await client.create();
+      expect(capturedUrl).toContain("sandbox.tensorlake.dev");
+      expect(capturedUrl).not.toContain("api.tensorlake.dev");
+      client.close();
+    });
+
+    it("routes sandbox create to localhost when local", async () => {
+      let capturedUrl = "";
+      mockFetch((url) => {
+        capturedUrl = url;
+        return new Response(
+          JSON.stringify({ sandbox_id: "sbx-1", status: "pending" }),
+          { status: 200 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await client.create();
+      expect(capturedUrl).toContain("localhost");
+      client.close();
+    });
+  });
 });

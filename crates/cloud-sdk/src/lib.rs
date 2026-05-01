@@ -85,6 +85,22 @@ use secrets::*;
 mod client;
 pub use client::{Client, ClientBuilder, Traced};
 
+/// Derive the sandbox lifecycle base URL from the API URL.
+///
+/// Converts `api.tensorlake.*` → `sandbox.tensorlake.*`. Localhost is unchanged.
+pub fn resolve_sandbox_lifecycle_url(api_url: &str) -> String {
+    if let Ok(parsed) = url::Url::parse(api_url) {
+        let host = parsed.host_str().unwrap_or("");
+        if host == "localhost" || host == "127.0.0.1" {
+            return api_url.to_string();
+        }
+        if let Some(rest) = host.strip_prefix("api.") {
+            return format!("{}://sandbox.{}", parsed.scheme(), rest);
+        }
+    }
+    "https://sandbox.tensorlake.ai".to_string()
+}
+
 /// The main entry point for the Tensorlake Cloud SDK.
 ///
 /// The `Sdk` struct provides a unified interface to all Tensorlake Cloud services.
@@ -104,6 +120,7 @@ pub use client::{Client, ClientBuilder, Traced};
 #[derive(Clone)]
 pub struct Sdk {
     client: Client,
+    api_url: String,
 }
 
 impl Sdk {
@@ -136,7 +153,7 @@ impl Sdk {
         let client = ClientBuilder::new(base_url)
             .bearer_token(bearer_token)
             .build()?;
-        Ok(Self { client })
+        Ok(Self { client, api_url: base_url.to_string() })
     }
 
     /// Create a new SDK instance using a client builder.
@@ -170,8 +187,9 @@ impl Sdk {
     /// # }
     /// ```
     pub fn with_client_builder(builder: ClientBuilder) -> Result<Self, error::SdkError> {
+        let api_url = builder.base_url().to_string();
         let client = builder.build()?;
-        Ok(Self { client })
+        Ok(Self { client, api_url })
     }
 
     /// Get a client for managing applications and requests.
@@ -252,8 +270,9 @@ impl Sdk {
     /// * `use_namespaced_endpoints` - If true, use `/v1/namespaces/{namespace}/...`
     ///   paths. If false, use cloud-style top-level paths such as `/sandboxes`.
     pub fn sandboxes(&self, namespace: &str, use_namespaced_endpoints: bool) -> SandboxesClient {
+        let lifecycle_client = self.client.with_base_url(&resolve_sandbox_lifecycle_url(&self.api_url));
         SandboxesClient::new(
-            self.client.clone(),
+            lifecycle_client,
             namespace.to_string(),
             use_namespaced_endpoints,
         )

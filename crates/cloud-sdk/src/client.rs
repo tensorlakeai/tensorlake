@@ -94,6 +94,10 @@ pub struct ClientBuilder {
 }
 
 impl ClientBuilder {
+    pub(crate) fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     /// Create a new [`ClientBuilder`] with the specified base URL.
     ///
     /// # Arguments
