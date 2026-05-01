@@ -107,7 +107,6 @@ export class SandboxClient {
 
   /** Create a new sandbox. Returns immediately; the sandbox may still be starting. Use `createAndConnect()` for a blocking, ready-to-use handle. */
   async create(options?: CreateSandboxOptions): Promise<Traced<CreateSandboxResponse>> {
-    console.log(`[tensorlake] sandbox create → ${resolveSandboxLifecycleUrl(this.apiUrl)}`);
     const body: Record<string, unknown> = {
       resources: {
         cpus: options?.cpus ?? 1.0,
