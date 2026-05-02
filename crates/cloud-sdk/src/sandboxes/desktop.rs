@@ -4,9 +4,12 @@ use std::time::Duration;
 
 use des::Des;
 use des::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
+use eventsource_stream::Eventsource;
 use futures::{SinkExt, StreamExt};
 use png::{BitDepth, ColorType};
-use reqwest::header::{HOST, HeaderMap};
+use reqwest::Method;
+use reqwest::header::{ACCEPT, HOST, HeaderMap};
+use serde_json::json;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep, timeout};
@@ -15,6 +18,17 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use url::Url;
 
 use crate::{Client, error::SdkError};
+
+/// How long each individual `bash`-builtin port probe is allowed to run inside
+/// the sandbox before the daemon kills it. Two seconds comfortably covers a
+/// successful TCP connect on a healthy port and bounds the cost of each retry
+/// when the port is still refusing connections.
+const PORT_PROBE_PROCESS_TIMEOUT_SECS: u64 = 2;
+
+/// Pause between port-probe attempts. The probe itself is cheap (~5–10 ms when
+/// the port is up), so the cap on probe rate is more about avoiding daemon
+/// chatter than throughput.
+const PORT_PROBE_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
 const SECURITY_TYPE_NONE: u8 = 1;
 const SECURITY_TYPE_VNC_AUTH: u8 = 2;
@@ -40,7 +54,16 @@ impl SandboxDesktopClient {
         shared: bool,
         connect_timeout: Duration,
     ) -> Result<Self, SdkError> {
+        // Wait for the VNC port to be reachable inside the sandbox before
+        // attempting the WebSocket tunnel handshake. Without this, freshly
+        // created sandboxes (where the in-VM `vncserver` systemd unit is
+        // still starting) race the tunnel: the dataplane gets `Connection
+        // refused` on 127.0.0.1:<port> and the proxy returns 502 before
+        // VNC has had a chance to bind. The wait is bounded by
+        // `connect_timeout` along with the WS handshake and VNC negotiation
+        // that follow — total wall-clock is what the caller asked for.
         let session = timeout(connect_timeout, async move {
+            wait_for_port_ready(&client, port).await?;
             let transport = TunnelConnection::connect(client, host_override, port).await?;
             DesktopSession::connect(transport, password, shared).await
         })
@@ -142,6 +165,66 @@ impl SandboxDesktopClient {
         let session = self.session.lock().await;
         Ok((session.width, session.height))
     }
+}
+
+/// Poll the in-sandbox daemon until the requested port accepts a TCP connection
+/// from `127.0.0.1`. The probe runs `bash -c 'exec 3<>/dev/tcp/127.0.0.1/<port>'`
+/// via the daemon's `/api/v1/processes/run` endpoint; bash's `/dev/tcp` builtin
+/// returns exit 0 when the connect succeeds and non-zero on `Connection
+/// refused` / timeout. `bash` is present on every sandbox image we ship.
+///
+/// Loops forever; the caller is expected to wrap this in an outer
+/// `tokio::time::timeout` (see [`SandboxDesktopClient::connect`]). Treats
+/// transient errors (e.g. SSE stream hiccups) as "not ready yet" and retries;
+/// only persistent SDK errors that bubble out of the underlying request will
+/// surface here.
+async fn wait_for_port_ready(client: &Client, port: u16) -> Result<(), SdkError> {
+    loop {
+        match probe_port_once(client, port).await {
+            Ok(true) => return Ok(()),
+            Ok(false) | Err(_) => sleep(PORT_PROBE_RETRY_INTERVAL).await,
+        }
+    }
+}
+
+/// One probe attempt. Returns `Ok(true)` if `bash`'s `/dev/tcp` connect
+/// succeeded (exit 0), `Ok(false)` otherwise. Errors are returned for
+/// non-process-level failures (transport, JSON shape) so the caller can decide
+/// whether to retry.
+async fn probe_port_once(client: &Client, port: u16) -> Result<bool, SdkError> {
+    let payload = json!({
+        "command": "/bin/bash",
+        "args": ["-c", format!("exec 3<>/dev/tcp/127.0.0.1/{port}")],
+        "timeout_secs": PORT_PROBE_PROCESS_TIMEOUT_SECS,
+    });
+    let req = client
+        .request(Method::POST, "/api/v1/processes/run")
+        .header(ACCEPT, "text/event-stream")
+        .json(&payload)
+        .build()?;
+    let response = client.execute(req).await?;
+    let mut stream = response.bytes_stream().eventsource();
+    while let Some(event) = stream.next().await {
+        let msg = match event {
+            Ok(m) => m,
+            // Mid-stream transport errors should not be fatal — treat as
+            // "not ready, try again".
+            Err(_) => return Ok(false),
+        };
+        let parsed: serde_json::Value = match serde_json::from_str(&msg.data) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let Some(exit_code) = parsed.get("exit_code").and_then(|v| v.as_i64()) {
+            return Ok(exit_code == 0);
+        }
+        if parsed.get("signal").is_some() {
+            // Killed by signal (e.g. SIGTERM from timeout) — treat as not ready.
+            return Ok(false);
+        }
+    }
+    // Stream ended without an Exited event — daemon hiccup, retry.
+    Ok(false)
 }
 
 struct TunnelConnection {

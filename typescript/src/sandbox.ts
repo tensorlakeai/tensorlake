@@ -865,14 +865,69 @@ export class Sandbox {
 
   /** Connect to a sandbox VNC session for programmatic desktop control. */
   async connectDesktop(options?: ConnectDesktopOptions): Promise<Desktop> {
+    const port = options?.port ?? 5901;
+    const connectTimeout = options?.connectTimeout ?? 10;
+
+    // Wait for the VNC port to be reachable inside the sandbox before
+    // attempting the WebSocket tunnel handshake. Without this, freshly
+    // created sandboxes (where the in-VM `vncserver` systemd unit is
+    // still starting) race the tunnel: the dataplane gets `Connection
+    // refused` on 127.0.0.1:<port> and the proxy returns 502 before
+    // VNC has had a chance to bind. The wait is bounded by
+    // `connectTimeout` along with the WS handshake and VNC negotiation
+    // that follow — total wall-clock is what the caller asked for.
+    const startMs = Date.now();
+    const deadlineMs = startMs + connectTimeout * 1000;
+    await this.waitForPortReady(port, deadlineMs);
+    const remainingSecs = Math.max(0.1, (deadlineMs - Date.now()) / 1000);
+
     return Desktop.connect({
       baseUrl: this.baseUrl,
       wsHeaders: this.wsHeaders,
-      port: options?.port,
+      port,
       password: options?.password,
       shared: options?.shared,
-      connectTimeout: options?.connectTimeout,
+      connectTimeout: remainingSecs,
     });
+  }
+
+  /**
+   * Poll the in-sandbox daemon until `127.0.0.1:port` accepts a TCP connection.
+   * Uses `bash`'s `/dev/tcp` builtin via `processes/run` — no extra deps in
+   * the sandbox image. `bash` is present on every image we ship.
+   */
+  private async waitForPortReady(
+    port: number,
+    deadlineMs: number,
+  ): Promise<void> {
+    const probeIntervalMs = 250;
+    const probeProcessTimeoutSecs = 2;
+    let lastError: unknown;
+
+    while (Date.now() < deadlineMs) {
+      try {
+        const result = await this.run("/bin/bash", {
+          args: ["-c", `exec 3<>/dev/tcp/127.0.0.1/${port}`],
+          timeout: probeProcessTimeoutSecs,
+        });
+        if (result.exitCode === 0) {
+          return;
+        }
+      } catch (error) {
+        lastError = error;
+      }
+      const remainingMs = deadlineMs - Date.now();
+      if (remainingMs <= 0) break;
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(probeIntervalMs, remainingMs)),
+      );
+    }
+
+    const detail =
+      lastError instanceof Error ? `: ${lastError.message}` : "";
+    throw new SandboxError(
+      `port ${port} did not become reachable inside sandbox within the connect timeout${detail}`,
+    );
   }
 
   ptyWsUrl(sessionId: string, token: string): string {
