@@ -243,6 +243,15 @@ describe("DesktopSession", () => {
     vi.resetModules();
     ({ DesktopSession } = await import("../src/desktop.js"));
     ({ Sandbox } = await import("../src/sandbox.js"));
+    // `connectDesktop` probes the in-sandbox VNC port via `Sandbox.run`
+    // before opening the WebSocket tunnel. Tests don't have a real daemon
+    // behind `sandbox.tensorlake.ai` (only the `ws` module is mocked), so
+    // short-circuit the probe to return "port is ready" immediately.
+    vi.spyOn(Sandbox.prototype, "run").mockResolvedValue({
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    });
   });
 
   afterEach(() => {
