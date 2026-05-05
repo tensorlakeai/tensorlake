@@ -292,6 +292,13 @@ enum SbxCommands {
         quiet: bool,
     },
 
+    /// Show detailed information for a sandbox
+    #[command(alias = "info")]
+    Describe {
+        /// Sandbox ID or name
+        sandbox_id: String,
+    },
+
     /// Terminate one or more sandboxes
     #[command(name = "terminate", alias = "stop")]
     Terminate {
@@ -861,6 +868,9 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     running,
                     quiet,
                 } => commands::sbx::ls::run(ctx, running, all, quiet).await,
+                SbxCommands::Describe { sandbox_id } => {
+                    commands::sbx::describe::run(ctx, &sandbox_id).await
+                }
                 SbxCommands::Terminate { sandbox_ids } => {
                     commands::sbx::terminate::run(ctx, &sandbox_ids).await
                 }

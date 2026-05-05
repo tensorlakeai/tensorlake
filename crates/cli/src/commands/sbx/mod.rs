@@ -1,6 +1,7 @@
 pub mod clone;
 pub mod cp;
 pub mod create;
+pub mod describe;
 pub mod exec;
 pub mod image;
 pub mod ls;
