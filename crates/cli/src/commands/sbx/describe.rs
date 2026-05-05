@@ -8,15 +8,7 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str) -> Result<()> {
 
     let resp = client.get(&url).send().await.map_err(CliError::Http)?;
 
-    let item = if resp.status().is_success() {
-        resp.json::<serde_json::Value>()
-            .await
-            .map_err(CliError::Http)?
-    } else if resp.status().as_u16() == 404 {
-        find_by_name(ctx, sandbox_id).await?.ok_or_else(|| {
-            CliError::Other(anyhow::anyhow!("sandbox '{}' not found", sandbox_id))
-        })?
-    } else {
+    if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         return Err(CliError::Other(anyhow::anyhow!(
@@ -25,39 +17,11 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str) -> Result<()> {
             status,
             body
         )));
-    };
-
-    print_sandbox_details(&item);
-    Ok(())
-}
-
-async fn find_by_name(
-    ctx: &CliContext,
-    name: &str,
-) -> Result<Option<serde_json::Value>> {
-    let client = ctx.client()?;
-    let url = sandbox_endpoint(ctx, "sandboxes");
-    let resp = client.get(&url).send().await.map_err(CliError::Http)?;
-
-    if !resp.status().is_success() {
-        return Ok(None);
     }
 
-    let body: serde_json::Value = resp.json().await.map_err(CliError::Http)?;
-    let sandboxes = body
-        .get("sandboxes")
-        .or_else(|| body.get("items"))
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let found = sandboxes.into_iter().find(|s| {
-        s.get("name")
-            .and_then(|v| v.as_str())
-            .is_some_and(|n| n == name)
-    });
-
-    Ok(found)
+    let item = resp.json::<serde_json::Value>().await.map_err(CliError::Http)?;
+    print_sandbox_details(&item);
+    Ok(())
 }
 
 fn print_sandbox_details(item: &serde_json::Value) {
