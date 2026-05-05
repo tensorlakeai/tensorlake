@@ -99,6 +99,13 @@ fn print_sandbox_details(item: &serde_json::Value) {
         .unwrap_or_default();
     println!("Timeout:         {}", timeout);
 
+    let sandbox_url = item
+        .get("sandbox_url")
+        .or_else(|| item.get("sandboxUrl"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    println!("URL:             {}", sandbox_url);
+
     let entrypoint = item
         .get("entrypoint")
         .and_then(|v| v.as_array())
@@ -137,13 +144,6 @@ fn print_sandbox_details(item: &serde_json::Value) {
         .unwrap_or_default();
     println!("Ports:           {}", ports);
 
-    let sandbox_url = item
-        .get("sandbox_url")
-        .or_else(|| item.get("sandboxUrl"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    println!("URL:             {}", sandbox_url);
-
     let allow_out = network
         .and_then(|n| n.get("allow_out"))
         .and_then(|v| v.as_array())
@@ -168,23 +168,25 @@ fn print_sandbox_details(item: &serde_json::Value) {
         .unwrap_or_default();
     println!("Deny out:        {}", deny_out);
 
-    // Termination group
-    let terminated_at = item
-        .get("terminated_at")
-        .filter(|v| !v.is_null())
-        .map(|v| format_created_at(Some(v)))
-        .unwrap_or_default();
-    println!("Terminated:      {}", terminated_at);
+    // Termination group — only shown for terminated sandboxes
+    if status.eq_ignore_ascii_case("terminated") {
+        let terminated_at = item
+            .get("terminated_at")
+            .filter(|v| !v.is_null())
+            .map(|v| format_created_at(Some(v)))
+            .unwrap_or_default();
+        println!("Terminated:      {}", terminated_at);
 
-    let reason = item
-        .get("termination_reason")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    println!("Reason:          {}", reason);
+        let reason = item
+            .get("termination_reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        println!("Reason:          {}", reason);
 
-    let outcome = item
-        .get("outcome")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    println!("Outcome:         {}", outcome);
+        let outcome = item
+            .get("outcome")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        println!("Outcome:         {}", outcome);
+    }
 }
