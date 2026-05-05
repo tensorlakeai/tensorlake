@@ -68,6 +68,30 @@ fn print_sandbox_details(item: &serde_json::Value) {
     println!("Memory:          {}", memory);
     println!("Disk:            {}", disk);
 
+    let allow_unauthenticated = item
+        .get("allow_unauthenticated_access")
+        .or_else(|| item.get("allow_unauthenticated_proxy_access"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    println!(
+        "Proxy auth:      {}",
+        if allow_unauthenticated {
+            "unauthenticated"
+        } else {
+            "required"
+        }
+    );
+
+    let network = item.get("network");
+    let internet = network
+        .and_then(|n| n.get("allow_internet_access"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    println!("Internet:        {}", if internet { "allowed" } else { "blocked" });
+
+    println!("Created:         {}", format_created_at(item.get("created_at")));
+
+    // Optional fields
     let timeout = item
         .get("timeout_secs")
         .and_then(|v| v.as_i64())
@@ -120,27 +144,6 @@ fn print_sandbox_details(item: &serde_json::Value) {
         .unwrap_or("");
     println!("URL:             {}", sandbox_url);
 
-    let allow_unauthenticated = item
-        .get("allow_unauthenticated_access")
-        .or_else(|| item.get("allow_unauthenticated_proxy_access"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    println!(
-        "Proxy auth:      {}",
-        if allow_unauthenticated {
-            "unauthenticated"
-        } else {
-            "required"
-        }
-    );
-
-    let network = item.get("network");
-    let internet = network
-        .and_then(|n| n.get("allow_internet_access"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    println!("Internet:        {}", if internet { "allowed" } else { "blocked" });
-
     let allow_out = network
         .and_then(|n| n.get("allow_out"))
         .and_then(|v| v.as_array())
@@ -165,8 +168,7 @@ fn print_sandbox_details(item: &serde_json::Value) {
         .unwrap_or_default();
     println!("Deny out:        {}", deny_out);
 
-    println!("Created:         {}", format_created_at(item.get("created_at")));
-
+    // Termination group
     let terminated_at = item
         .get("terminated_at")
         .filter(|v| !v.is_null())
