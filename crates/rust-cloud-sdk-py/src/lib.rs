@@ -2604,6 +2604,11 @@ fn create_image_context_file(
 
 #[pymodule]
 fn _cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Eager-init the shared tokio runtime at import time so the first sync
+    // call (e.g. sandbox.create()) doesn't pay worker-thread spawn cost.
+    // TTI benchmarks measure from create() to first runCommand(), so this
+    // cost must land outside that window.
+    let _ = shared_runtime();
     module.add("CloudApiClientError", _py.get_type::<CloudApiClientError>())?;
     module.add(
         "CloudSandboxClientError",
