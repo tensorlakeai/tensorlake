@@ -228,7 +228,9 @@ class AsyncSandboxClient:
 
     async def list(self) -> TracedIterator[SandboxInfo]:
         try:
-            trace_id, response_json = await self._rust_client.list_sandboxes_json_async()
+            trace_id, response_json = (
+                await self._rust_client.list_sandboxes_json_async()
+            )
             data = ListSandboxesResponse.model_validate(json.loads(response_json))
             return TracedIterator(trace_id, data.sandboxes)
         except Exception as e:
@@ -351,9 +353,7 @@ class AsyncSandboxClient:
                     f"Sandbox {sandbox_id!r} terminated while waiting for suspend"
                 )
             await asyncio.sleep(poll_interval)
-        raise SandboxError(
-            f"Sandbox {sandbox_id!r} did not suspend within {timeout}s"
-        )
+        raise SandboxError(f"Sandbox {sandbox_id!r} did not suspend within {timeout}s")
 
     async def resume(
         self,
@@ -382,9 +382,7 @@ class AsyncSandboxClient:
                     f"Sandbox {sandbox_id!r} terminated while waiting for resume"
                 )
             await asyncio.sleep(poll_interval)
-        raise SandboxError(
-            f"Sandbox {sandbox_id!r} did not resume within {timeout}s"
-        )
+        raise SandboxError(f"Sandbox {sandbox_id!r} did not resume within {timeout}s")
 
     # --- Snapshots ---
 
@@ -419,7 +417,9 @@ class AsyncSandboxClient:
 
     async def list_snapshots(self) -> TracedIterator[SnapshotInfo]:
         try:
-            trace_id, response_json = await self._rust_client.list_snapshots_json_async()
+            trace_id, response_json = (
+                await self._rust_client.list_snapshots_json_async()
+            )
             data = ListSnapshotsResponse.model_validate(json.loads(response_json))
             return TracedIterator(trace_id, data.snapshots)
         except Exception as e:

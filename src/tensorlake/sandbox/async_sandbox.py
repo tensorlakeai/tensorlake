@@ -434,7 +434,9 @@ class AsyncSandbox:
 
     async def list_processes(self) -> TracedIterator[ProcessInfo]:
         try:
-            trace_id, response_json = await self._rust_client.list_processes_json_async()
+            trace_id, response_json = (
+                await self._rust_client.list_processes_json_async()
+            )
             data = ListProcessesResponse.model_validate_json(response_json)
             return TracedIterator(trace_id, data.processes)
         except Exception as e:
