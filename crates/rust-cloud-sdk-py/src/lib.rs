@@ -38,10 +38,17 @@ create_exception!(_cloud_sdk, CloudDocumentAIClientError, PyException);
 
 const DEFAULT_HTTP_REQUEST_TIMEOUT_SEC: f64 = 5.0;
 
+// Single tokio runtime for the whole process: pyo3-async-runtimes' runtime,
+// which `future_into_py` already drives. Routing sync `block_on` through here
+// too keeps every client (sync and async) on the same runtime instead of each
+// pyclass spawning its own.
+fn shared_runtime() -> &'static Runtime {
+    pyo3_async_runtimes::tokio::get_runtime()
+}
+
 #[pyclass]
 pub struct CloudApiClient {
     client: Client,
-    runtime: Runtime,
     api_url: String,
     namespace: String,
 }
@@ -74,17 +81,9 @@ impl CloudApiClient {
         }
 
         let client = builder.build().map_err(into_py_error)?;
-        let runtime = Runtime::new().map_err(|e| {
-            CloudApiClientError::new_err((
-                "internal",
-                Option::<u16>::None,
-                format!("failed to create tokio runtime: {e}"),
-            ))
-        })?;
 
         Ok(Self {
             client,
-            runtime,
             api_url,
             namespace: namespace.unwrap_or_else(|| "default".to_string()),
         })
@@ -532,7 +531,6 @@ impl CloudApiClient {
 #[pyclass]
 pub struct CloudSandboxClient {
     client: SandboxesClient,
-    runtime: Runtime,
 }
 
 #[pymethods]
@@ -564,13 +562,6 @@ impl CloudSandboxClient {
         }
 
         let client = builder.build().map_err(into_sandbox_py_error)?;
-        let runtime = Runtime::new().map_err(|e| {
-            CloudSandboxClientError::new_err((
-                "internal",
-                Option::<u16>::None,
-                format!("failed to create tokio runtime: {e}"),
-            ))
-        })?;
         let use_namespaced_endpoints = is_localhost_api_url(&api_url);
         let sandboxes_client = SandboxesClient::new(
             client,
@@ -580,7 +571,6 @@ impl CloudSandboxClient {
 
         Ok(Self {
             client: sandboxes_client,
-            runtime,
         })
     }
 
@@ -1129,49 +1119,32 @@ impl CloudSandboxClient {
         let proxy = SandboxProxyClient::new(shared_client, host_override)
             .with_sandbox_id(sandbox_id_header)
             .with_routing_hint(routing_hint);
-        let runtime = Runtime::new().map_err(|e| {
-            CloudSandboxClientError::new_err((
-                "internal",
-                Option::<u16>::None,
-                format!("failed to create tokio runtime: {e}"),
-            ))
-        })?;
         Ok(CloudSandboxProxyClient {
             client: proxy,
-            runtime,
             base_url,
         })
     }
 }
 
 impl CloudSandboxProxyClient {
-    fn run_with_retry<T, F, Fut>(&self, max_retries: usize, mut operation: F) -> PyResult<T>
+    fn run_with_retry<T, F, Fut>(&self, max_retries: usize, operation: F) -> PyResult<T>
     where
         F: FnMut(SandboxProxyClient) -> Fut,
         Fut: Future<Output = Result<T, SdkError>>,
     {
-        let mut retries = 0usize;
-        loop {
-            match self.runtime.block_on(operation(self.client.clone())) {
-                Ok(value) => return Ok(value),
-                Err(err) => {
-                    if !is_retryable(&err) || retries >= max_retries {
-                        return Err(into_sandbox_py_error(err));
-                    }
-
-                    retries += 1;
-                    let sleep_time = calculate_sleep_time(retries);
-                    std::thread::sleep(Duration::from_secs_f64(sleep_time));
-                }
-            }
-        }
+        run_with_retry_blocking(
+            self.client.clone(),
+            max_retries,
+            "rust sandbox proxy request",
+            into_sandbox_py_error,
+            operation,
+        )
     }
 }
 
 #[pyclass]
 pub struct CloudSandboxProxyClient {
     client: SandboxProxyClient,
-    runtime: Runtime,
     base_url: String,
 }
 
@@ -1207,20 +1180,12 @@ impl CloudSandboxProxyClient {
         }
 
         let client = builder.build().map_err(into_sandbox_py_error)?;
-        let runtime = Runtime::new().map_err(|e| {
-            CloudSandboxClientError::new_err((
-                "internal",
-                Option::<u16>::None,
-                format!("failed to create tokio runtime: {e}"),
-            ))
-        })?;
         let sandbox_proxy_client = SandboxProxyClient::new(client, host_override)
             .with_sandbox_id(sandbox_id_header)
             .with_routing_hint(routing_hint);
 
         Ok(Self {
             client: sandbox_proxy_client,
-            runtime,
             base_url,
         })
     }
@@ -1847,7 +1812,6 @@ impl CloudSandboxProxyClient {
 #[pyclass]
 pub struct CloudSandboxDesktopClient {
     client: RustSandboxDesktopClient,
-    runtime: Runtime,
 }
 
 #[pymethods]
@@ -1885,15 +1849,8 @@ impl CloudSandboxDesktopClient {
         }
 
         let client = builder.build().map_err(into_sandbox_py_error)?;
-        let runtime = Runtime::new().map_err(|e| {
-            CloudSandboxClientError::new_err((
-                "internal",
-                Option::<u16>::None,
-                format!("failed to create tokio runtime: {e}"),
-            ))
-        })?;
         let connect_timeout = duration_from_seconds("connect_timeout_sec", connect_timeout_sec)?;
-        let desktop_client = runtime
+        let desktop_client = shared_runtime()
             .block_on(RustSandboxDesktopClient::connect(
                 client,
                 host_override,
@@ -1907,12 +1864,11 @@ impl CloudSandboxDesktopClient {
 
         Ok(Self {
             client: desktop_client,
-            runtime,
         })
     }
 
     fn close(&self) -> PyResult<()> {
-        self.runtime
+        shared_runtime()
             .block_on(self.client.close())
             .map_err(into_sandbox_py_error)
     }
@@ -1923,36 +1879,35 @@ impl CloudSandboxDesktopClient {
         timeout_sec: f64,
     ) -> PyResult<Py<pyo3::types::PyBytes>> {
         let timeout_sec = duration_from_seconds("timeout_sec", timeout_sec)?;
-        let png = self
-            .runtime
+        let png = shared_runtime()
             .block_on(self.client.screenshot(timeout_sec))
             .map_err(into_sandbox_py_error)?;
         Ok(pyo3::types::PyBytes::new(py, &png).into())
     }
 
     fn move_mouse(&self, x: u16, y: u16) -> PyResult<()> {
-        self.runtime
+        shared_runtime()
             .block_on(self.client.move_mouse(x, y))
             .map_err(into_sandbox_py_error)
     }
 
     #[pyo3(signature = (button="left", x=None, y=None))]
     fn mouse_press(&self, button: &str, x: Option<u16>, y: Option<u16>) -> PyResult<()> {
-        self.runtime
+        shared_runtime()
             .block_on(self.client.mouse_press(button, x, y))
             .map_err(into_sandbox_py_error)
     }
 
     #[pyo3(signature = (button="left", x=None, y=None))]
     fn mouse_release(&self, button: &str, x: Option<u16>, y: Option<u16>) -> PyResult<()> {
-        self.runtime
+        shared_runtime()
             .block_on(self.client.mouse_release(button, x, y))
             .map_err(into_sandbox_py_error)
     }
 
     #[pyo3(signature = (button="left", x=None, y=None))]
     fn click(&self, button: &str, x: Option<u16>, y: Option<u16>) -> PyResult<()> {
-        self.runtime
+        shared_runtime()
             .block_on(self.client.click(button, x, y))
             .map_err(into_sandbox_py_error)
     }
@@ -1965,52 +1920,52 @@ impl CloudSandboxDesktopClient {
         y: Option<u16>,
         delay_ms: u64,
     ) -> PyResult<()> {
-        self.runtime
+        shared_runtime()
             .block_on(self.client.double_click(button, x, y, delay_ms))
             .map_err(into_sandbox_py_error)
     }
 
     #[pyo3(signature = (steps, x=None, y=None))]
     fn scroll(&self, steps: i32, x: Option<u16>, y: Option<u16>) -> PyResult<()> {
-        self.runtime
+        shared_runtime()
             .block_on(self.client.scroll(steps, x, y))
             .map_err(into_sandbox_py_error)
     }
 
     fn key_down(&self, key: &str) -> PyResult<()> {
-        self.runtime
+        shared_runtime()
             .block_on(self.client.key_down(key))
             .map_err(into_sandbox_py_error)
     }
 
     fn key_up(&self, key: &str) -> PyResult<()> {
-        self.runtime
+        shared_runtime()
             .block_on(self.client.key_up(key))
             .map_err(into_sandbox_py_error)
     }
 
     fn press(&self, keys: Vec<String>) -> PyResult<()> {
-        self.runtime
+        shared_runtime()
             .block_on(self.client.press(&keys))
             .map_err(into_sandbox_py_error)
     }
 
     fn type_text(&self, text: String) -> PyResult<()> {
-        self.runtime
+        shared_runtime()
             .block_on(self.client.type_text(&text))
             .map_err(into_sandbox_py_error)
     }
 
     #[getter]
     fn width(&self) -> PyResult<u16> {
-        self.runtime
+        shared_runtime()
             .block_on(async { self.client.dimensions().await.map(|(width, _)| width) })
             .map_err(into_sandbox_py_error)
     }
 
     #[getter]
     fn height(&self) -> PyResult<u16> {
-        self.runtime
+        shared_runtime()
             .block_on(async { self.client.dimensions().await.map(|(_, height)| height) })
             .map_err(into_sandbox_py_error)
     }
@@ -2019,7 +1974,6 @@ impl CloudSandboxDesktopClient {
 #[pyclass]
 pub struct CloudDocumentAIClient {
     client: DocumentAiClient,
-    runtime: Runtime,
 }
 
 #[pymethods]
@@ -2031,18 +1985,10 @@ impl CloudDocumentAIClient {
             .bearer_token(&api_key)
             .build()
             .map_err(into_document_ai_py_error)?;
-        let runtime = Runtime::new().map_err(|e| {
-            CloudDocumentAIClientError::new_err((
-                "internal",
-                Option::<u16>::None,
-                format!("failed to create tokio runtime: {e}"),
-            ))
-        })?;
         let document_ai_client = DocumentAiClient::new(client);
 
         Ok(Self {
             client: document_ai_client,
-            runtime,
         })
     }
 
@@ -2112,84 +2058,83 @@ impl CloudDocumentAIClient {
     }
 }
 
+fn run_with_retry_blocking<C, T, F, Fut>(
+    client: C,
+    max_retries: usize,
+    label: &str,
+    into_err: fn(SdkError) -> PyErr,
+    mut operation: F,
+) -> PyResult<T>
+where
+    C: Clone,
+    F: FnMut(C) -> Fut,
+    Fut: Future<Output = Result<T, SdkError>>,
+{
+    let mut retries = 0usize;
+    loop {
+        match shared_runtime().block_on(operation(client.clone())) {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                if !is_retryable(&err) || retries >= max_retries {
+                    return Err(into_err(err));
+                }
+
+                retries += 1;
+                let sleep_time = calculate_sleep_time(retries);
+                eprintln!(
+                    "Retrying {label} after {sleep_time:.2} seconds. Retry count: {retries}. Retryable exception: {err}"
+                );
+                std::thread::sleep(Duration::from_secs_f64(sleep_time));
+            }
+        }
+    }
+}
+
 impl CloudApiClient {
-    fn run_with_retry<T, F, Fut>(&self, max_retries: usize, mut operation: F) -> PyResult<T>
+    fn run_with_retry<T, F, Fut>(&self, max_retries: usize, operation: F) -> PyResult<T>
     where
         F: FnMut(Client) -> Fut,
         Fut: Future<Output = Result<T, SdkError>>,
     {
-        let mut retries = 0usize;
-        loop {
-            match self.runtime.block_on(operation(self.client.clone())) {
-                Ok(value) => return Ok(value),
-                Err(err) => {
-                    if !is_retryable(&err) || retries >= max_retries {
-                        return Err(into_py_error(err));
-                    }
-
-                    retries += 1;
-                    let sleep_time = calculate_sleep_time(retries);
-                    eprintln!(
-                        "Retrying rust cloud API request after {sleep_time:.2} seconds. Retry count: {retries}. Retryable exception: {err}"
-                    );
-                    std::thread::sleep(Duration::from_secs_f64(sleep_time));
-                }
-            }
-        }
+        run_with_retry_blocking(
+            self.client.clone(),
+            max_retries,
+            "rust cloud API request",
+            into_py_error,
+            operation,
+        )
     }
 }
 
 impl CloudSandboxClient {
-    fn run_with_retry<T, F, Fut>(&self, max_retries: usize, mut operation: F) -> PyResult<T>
+    fn run_with_retry<T, F, Fut>(&self, max_retries: usize, operation: F) -> PyResult<T>
     where
         F: FnMut(SandboxesClient) -> Fut,
         Fut: Future<Output = Result<T, SdkError>>,
     {
-        let mut retries = 0usize;
-        loop {
-            match self.runtime.block_on(operation(self.client.clone())) {
-                Ok(value) => return Ok(value),
-                Err(err) => {
-                    if !is_retryable(&err) || retries >= max_retries {
-                        return Err(into_sandbox_py_error(err));
-                    }
-
-                    retries += 1;
-                    let sleep_time = calculate_sleep_time(retries);
-                    eprintln!(
-                        "Retrying rust sandbox API request after {sleep_time:.2} seconds. Retry count: {retries}. Retryable exception: {err}"
-                    );
-                    std::thread::sleep(Duration::from_secs_f64(sleep_time));
-                }
-            }
-        }
+        run_with_retry_blocking(
+            self.client.clone(),
+            max_retries,
+            "rust sandbox API request",
+            into_sandbox_py_error,
+            operation,
+        )
     }
 }
 
 impl CloudDocumentAIClient {
-    fn run_with_retry<T, F, Fut>(&self, max_retries: usize, mut operation: F) -> PyResult<T>
+    fn run_with_retry<T, F, Fut>(&self, max_retries: usize, operation: F) -> PyResult<T>
     where
         F: FnMut(DocumentAiClient) -> Fut,
         Fut: Future<Output = Result<T, SdkError>>,
     {
-        let mut retries = 0usize;
-        loop {
-            match self.runtime.block_on(operation(self.client.clone())) {
-                Ok(value) => return Ok(value),
-                Err(err) => {
-                    if !is_retryable(&err) || retries >= max_retries {
-                        return Err(into_document_ai_py_error(err));
-                    }
-
-                    retries += 1;
-                    let sleep_time = calculate_sleep_time(retries);
-                    eprintln!(
-                        "Retrying rust document-ai request after {sleep_time:.2} seconds. Retry count: {retries}. Retryable exception: {err}"
-                    );
-                    std::thread::sleep(Duration::from_secs_f64(sleep_time));
-                }
-            }
-        }
+        run_with_retry_blocking(
+            self.client.clone(),
+            max_retries,
+            "rust document-ai request",
+            into_document_ai_py_error,
+            operation,
+        )
     }
 }
 

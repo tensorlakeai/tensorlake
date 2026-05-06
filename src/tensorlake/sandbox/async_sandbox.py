@@ -411,7 +411,7 @@ class AsyncSandbox:
         stdout_mode: OutputMode = OutputMode.CAPTURE,
         stderr_mode: OutputMode = OutputMode.CAPTURE,
     ) -> Traced[ProcessInfo]:
-        payload = self._build_command_payload(
+        payload = Sandbox._build_command_payload(
             command,
             args,
             env,
