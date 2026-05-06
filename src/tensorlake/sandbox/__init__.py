@@ -1,5 +1,7 @@
 """Tensorlake Sandbox SDK - Client for managing and interacting with sandboxes."""
 
+from .async_client import AsyncSandboxClient
+from .async_sandbox import AsyncSandbox
 from .client import SandboxClient
 from .desktop import Desktop
 from .exceptions import (
@@ -45,8 +47,10 @@ from .sandbox import Sandbox
 __all__ = [
     # Lifecycle management
     "SandboxClient",
+    "AsyncSandboxClient",
     # Sandbox interaction
     "Sandbox",
+    "AsyncSandbox",
     "Pty",
     "Desktop",
     # Lifecycle models

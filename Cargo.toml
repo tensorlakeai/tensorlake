@@ -85,6 +85,7 @@ gethostname = "0.5"
 
 # Python bindings
 pyo3 = { version = "0.28.2", features = ["abi3-py310", "extension-module"] }
+pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
 
 [profile.release]
 codegen-units = 1

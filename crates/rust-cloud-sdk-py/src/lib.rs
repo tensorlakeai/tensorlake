@@ -30,6 +30,7 @@ use tensorlake::sandboxes::{
 };
 use tensorlake::{Client, ClientBuilder, error::SdkError};
 use tokio::runtime::Runtime;
+use pyo3_async_runtimes::tokio::future_into_py;
 
 create_exception!(_cloud_sdk, CloudApiClientError, PyException);
 create_exception!(_cloud_sdk, CloudSandboxClientError, PyException);
@@ -790,6 +791,327 @@ impl CloudSandboxClient {
         })
     }
 
+    // ---- Async variants (Python awaitables backed by future_into_py) ----
+
+    fn create_sandbox_async<'py>(
+        &self,
+        py: Python<'py>,
+        request_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let request: CreateSandboxRequest = parse_json_payload(&request_json)?;
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| {
+                let request = request.clone();
+                async move { c.create(&request).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn claim_sandbox_async<'py>(
+        &self,
+        py: Python<'py>,
+        pool_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| {
+                let pool_id = pool_id.clone();
+                async move { c.claim(&pool_id).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn get_sandbox_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        sandbox_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| {
+                let sandbox_id = sandbox_id.clone();
+                async move { c.get(&sandbox_id).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn list_sandboxes_json_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| async move { c.list().await })
+                .await
+                .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let response = serde_json::json!({ "sandboxes": *traced });
+            let json = serde_json::to_string(&response).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn update_sandbox_async<'py>(
+        &self,
+        py: Python<'py>,
+        sandbox_id: String,
+        request_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let request: UpdateSandboxRequest = parse_json_payload(&request_json)?;
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| {
+                let sandbox_id = sandbox_id.clone();
+                let request = request.clone();
+                async move { c.update(&sandbox_id, &request).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn delete_sandbox_async<'py>(
+        &self,
+        py: Python<'py>,
+        sandbox_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let trace_id = retry_async_op(client, 5, move |c| {
+                let sandbox_id = sandbox_id.clone();
+                async move { c.delete(&sandbox_id).await.map(|t| t.trace_id) }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            Ok(trace_id)
+        })
+    }
+
+    fn suspend_sandbox_async<'py>(
+        &self,
+        py: Python<'py>,
+        sandbox_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let trace_id = retry_async_op(client, 5, move |c| {
+                let sandbox_id = sandbox_id.clone();
+                async move { c.suspend(&sandbox_id).await.map(|t| t.trace_id) }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            Ok(trace_id)
+        })
+    }
+
+    fn resume_sandbox_async<'py>(
+        &self,
+        py: Python<'py>,
+        sandbox_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let trace_id = retry_async_op(client, 5, move |c| {
+                let sandbox_id = sandbox_id.clone();
+                async move { c.resume(&sandbox_id).await.map(|t| t.trace_id) }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            Ok(trace_id)
+        })
+    }
+
+    #[pyo3(signature = (sandbox_id, snapshot_type=None))]
+    fn create_snapshot_async<'py>(
+        &self,
+        py: Python<'py>,
+        sandbox_id: String,
+        snapshot_type: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let parsed_type = match snapshot_type.as_deref() {
+            None => None,
+            Some("memory") => Some(SnapshotType::Memory),
+            Some("filesystem") => Some(SnapshotType::Filesystem),
+            Some(other) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "invalid snapshot_type '{other}': expected 'memory' or 'filesystem'"
+                )));
+            }
+        };
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| {
+                let sandbox_id = sandbox_id.clone();
+                async move { c.snapshot(&sandbox_id, parsed_type).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn get_snapshot_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        snapshot_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| {
+                let snapshot_id = snapshot_id.clone();
+                async move { c.get_snapshot(&snapshot_id).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn list_snapshots_json_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| async move {
+                c.list_snapshots().await
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let response = serde_json::json!({ "snapshots": *traced });
+            let json = serde_json::to_string(&response).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn delete_snapshot_async<'py>(
+        &self,
+        py: Python<'py>,
+        snapshot_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let trace_id = retry_async_op(client, 5, move |c| {
+                let snapshot_id = snapshot_id.clone();
+                async move { c.delete_snapshot(&snapshot_id).await.map(|t| t.trace_id) }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            Ok(trace_id)
+        })
+    }
+
+    fn create_pool_async<'py>(
+        &self,
+        py: Python<'py>,
+        request_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let request: SandboxPoolRequest = parse_json_payload(&request_json)?;
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| {
+                let request = request.clone();
+                async move { c.create_pool(&request).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn get_pool_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        pool_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| {
+                let pool_id = pool_id.clone();
+                async move { c.get_pool(&pool_id).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn list_pools_json_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| async move {
+                c.list_pools().await
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let response = serde_json::json!({ "pools": *traced });
+            let json = serde_json::to_string(&response).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn update_pool_async<'py>(
+        &self,
+        py: Python<'py>,
+        pool_id: String,
+        request_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let request: SandboxPoolRequest = parse_json_payload(&request_json)?;
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| {
+                let pool_id = pool_id.clone();
+                let request = request.clone();
+                async move { c.update_pool(&pool_id, &request).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn delete_pool_async<'py>(
+        &self,
+        py: Python<'py>,
+        pool_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let trace_id = retry_async_op(client, 5, move |c| {
+                let pool_id = pool_id.clone();
+                async move { c.delete_pool(&pool_id).await.map(|t| t.trace_id) }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            Ok(trace_id)
+        })
+    }
+
     /// Create a proxy client for the given sandbox that shares this client's HTTP connection
     /// pool. All proxy clients created this way reuse the same underlying reqwest::Client,
     /// so HTTP/2 connections can be coalesced: only the first sandbox in a session pays the
@@ -1137,6 +1459,386 @@ impl CloudSandboxProxyClient {
             let traced = client.info().await?;
             let trace_id = traced.trace_id.clone();
             let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    // ---- Async variants (Python awaitables backed by future_into_py) ----
+
+    fn start_process_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        payload_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let payload: Value = parse_json_payload(&payload_json)?;
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| {
+                let payload = payload.clone();
+                async move { c.start_process(&payload).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn list_processes_json_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| async move {
+                c.list_processes().await
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let processes = traced.into_inner();
+            let response = serde_json::json!({ "processes": processes });
+            let json = serde_json::to_string(&response).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn get_process_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        pid: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| async move {
+                c.get_process(pid).await
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn kill_process_async<'py>(&self, py: Python<'py>, pid: i64) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let trace_id = retry_async_op(client, 5, move |c| async move {
+                c.kill_process(pid).await.map(|t| t.trace_id)
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            Ok(trace_id)
+        })
+    }
+
+    fn send_signal_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        pid: i64,
+        signal: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| async move {
+                c.send_signal(pid, signal).await
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn write_stdin_async<'py>(
+        &self,
+        py: Python<'py>,
+        pid: i64,
+        data: Vec<u8>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let trace_id = retry_async_op(client, 5, move |c| {
+                let data = data.clone();
+                async move { c.write_stdin(pid, data).await.map(|t| t.trace_id) }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            Ok(trace_id)
+        })
+    }
+
+    fn close_stdin_async<'py>(&self, py: Python<'py>, pid: i64) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let trace_id = retry_async_op(client, 5, move |c| async move {
+                c.close_stdin(pid).await.map(|t| t.trace_id)
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            Ok(trace_id)
+        })
+    }
+
+    fn get_stdout_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        pid: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| async move {
+                c.get_stdout(pid).await
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn get_stderr_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        pid: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| async move {
+                c.get_stderr(pid).await
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn get_output_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        pid: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| async move {
+                c.get_output(pid).await
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn follow_stdout_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        pid: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 10, move |c| async move {
+                c.follow_stdout(pid).await
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let events: Vec<String> = traced
+                .into_inner()
+                .into_iter()
+                .map(|event| serde_json::to_string(&event).map_err(sandbox_serde_err))
+                .collect::<Result<Vec<String>, _>>()?;
+            Ok((trace_id, events))
+        })
+    }
+
+    fn follow_stderr_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        pid: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 10, move |c| async move {
+                c.follow_stderr(pid).await
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let events: Vec<String> = traced
+                .into_inner()
+                .into_iter()
+                .map(|event| serde_json::to_string(&event).map_err(sandbox_serde_err))
+                .collect::<Result<Vec<String>, _>>()?;
+            Ok((trace_id, events))
+        })
+    }
+
+    fn follow_output_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        pid: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 10, move |c| async move {
+                c.follow_output(pid).await
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let events: Vec<String> = traced
+                .into_inner()
+                .into_iter()
+                .map(|event| serde_json::to_string(&event).map_err(sandbox_serde_err))
+                .collect::<Result<Vec<String>, _>>()?;
+            Ok((trace_id, events))
+        })
+    }
+
+    fn read_file_bytes_async<'py>(
+        &self,
+        py: Python<'py>,
+        path: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let (trace_id, data): (String, Vec<u8>) = retry_async_op(client, 5, move |c| {
+                let path = path.clone();
+                async move {
+                    let traced = c.read_file(&path).await?;
+                    Ok((traced.trace_id.clone(), traced.into_inner()))
+                }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            Ok((trace_id, data))
+        })
+    }
+
+    fn write_file_async<'py>(
+        &self,
+        py: Python<'py>,
+        path: String,
+        content: Vec<u8>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let trace_id = retry_async_op(client, 5, move |c| {
+                let path = path.clone();
+                let content = content.clone();
+                async move { c.write_file(&path, content).await.map(|t| t.trace_id) }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            Ok(trace_id)
+        })
+    }
+
+    fn delete_file_async<'py>(
+        &self,
+        py: Python<'py>,
+        path: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let trace_id = retry_async_op(client, 5, move |c| {
+                let path = path.clone();
+                async move { c.delete_file(&path).await.map(|t| t.trace_id) }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            Ok(trace_id)
+        })
+    }
+
+    fn list_directory_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        path: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| {
+                let path = path.clone();
+                async move { c.list_directory(&path).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn create_pty_session_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        payload_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let payload: Value = parse_json_payload(&payload_json)?;
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| {
+                let payload = payload.clone();
+                async move { c.create_pty_session(&payload).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn run_process_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        payload_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let payload: Value = parse_json_payload(&payload_json)?;
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| {
+                let payload = payload.clone();
+                async move { c.run_process(&payload).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let events: Vec<String> = traced
+                .into_inner()
+                .into_iter()
+                .map(|event| serde_json::to_string(&event).map_err(sandbox_serde_err))
+                .collect::<Result<Vec<String>, _>>()?;
+            Ok((trace_id, events))
+        })
+    }
+
+    fn health_json_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| async move { c.health().await })
+                .await
+                .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn info_json_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| async move { c.info().await })
+                .await
+                .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
             Ok((trace_id, json))
         })
     }
@@ -1489,6 +2191,36 @@ impl CloudDocumentAIClient {
             }
         }
     }
+}
+
+async fn retry_async_op<C, T, F, Fut>(
+    client: C,
+    max_retries: usize,
+    op: F,
+) -> Result<T, SdkError>
+where
+    C: Clone,
+    F: Fn(C) -> Fut,
+    Fut: Future<Output = Result<T, SdkError>>,
+{
+    let mut retries = 0usize;
+    loop {
+        match op(client.clone()).await {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                if !is_retryable(&err) || retries >= max_retries {
+                    return Err(err);
+                }
+                retries += 1;
+                let sleep_time = calculate_sleep_time(retries);
+                tokio::time::sleep(Duration::from_secs_f64(sleep_time)).await;
+            }
+        }
+    }
+}
+
+fn sandbox_serde_err(err: serde_json::Error) -> PyErr {
+    into_sandbox_py_error(SdkError::from(err))
 }
 
 fn calculate_sleep_time(retries: usize) -> f64 {
