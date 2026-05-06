@@ -135,9 +135,9 @@ class AsyncSandboxClient:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.close()
+        await self.close()
 
-    def close(self) -> None:
+    async def close(self) -> None:
         self._rust_client.close()
 
     def _is_localhost(self) -> bool:
@@ -341,8 +341,8 @@ class AsyncSandboxClient:
             _raise_as_sandbox_error(e)
         if not wait:
             return Traced(trace_id, None)
-        deadline = asyncio.get_event_loop().time() + timeout
-        while asyncio.get_event_loop().time() < deadline:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
             info = (await self.get(sandbox_id)).value
             if info.status == SandboxStatus.SUSPENDED:
                 return Traced(trace_id, None)
@@ -372,8 +372,8 @@ class AsyncSandboxClient:
             _raise_as_sandbox_error(e)
         if not wait:
             return Traced(trace_id, None)
-        deadline = asyncio.get_event_loop().time() + timeout
-        while asyncio.get_event_loop().time() < deadline:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
             info = (await self.get(sandbox_id)).value
             if info.status == SandboxStatus.RUNNING:
                 return Traced(trace_id, None)
@@ -442,8 +442,8 @@ class AsyncSandboxClient:
         snapshot_type: SnapshotType | None = None,
     ) -> Traced[SnapshotInfo]:
         traced_create = await self.snapshot(sandbox_id, snapshot_type=snapshot_type)
-        deadline = asyncio.get_event_loop().time() + timeout
-        while asyncio.get_event_loop().time() < deadline:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
             traced_info = await self.get_snapshot(traced_create.snapshot_id)
             if traced_info.status == SnapshotStatus.COMPLETED:
                 return traced_info
@@ -656,8 +656,8 @@ class AsyncSandboxClient:
                 )
             )
 
-        deadline = asyncio.get_event_loop().time() + startup_timeout
-        while asyncio.get_event_loop().time() < deadline:
+        deadline = asyncio.get_running_loop().time() + startup_timeout
+        while asyncio.get_running_loop().time() < deadline:
             info = await self.get(result.sandbox_id)
             if info.status == SandboxStatus.RUNNING:
                 sandbox = await self.connect(
@@ -666,7 +666,7 @@ class AsyncSandboxClient:
                     routing_hint=info.routing_hint,
                 )
                 sandbox._sandbox_id = info.sandbox_id
-                sandbox._cached_info = info
+                sandbox._cached_info = info.value
                 sandbox._owns_sandbox = True
                 sandbox._lifecycle_client = self
                 sandbox._trace_id = result.trace_id

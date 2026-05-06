@@ -222,7 +222,10 @@ class AsyncSandbox:
     ) -> None:
         self._require_lifecycle_client("suspend")
         await self._lifecycle_client.suspend(
-            self.sandbox_id, wait=wait, timeout=timeout, poll_interval=poll_interval
+            self._lifecycle_identifier(),
+            wait=wait,
+            timeout=timeout,
+            poll_interval=poll_interval,
         )
 
     async def resume(
@@ -233,7 +236,10 @@ class AsyncSandbox:
     ) -> None:
         self._require_lifecycle_client("resume")
         await self._lifecycle_client.resume(
-            self.sandbox_id, wait=wait, timeout=timeout, poll_interval=poll_interval
+            self._lifecycle_identifier(),
+            wait=wait,
+            timeout=timeout,
+            poll_interval=poll_interval,
         )
 
     async def checkpoint(
@@ -249,11 +255,11 @@ class AsyncSandbox:
         )
         if not wait:
             await self._lifecycle_client.snapshot(
-                self.sandbox_id, snapshot_type=snapshot_type
+                self._lifecycle_identifier(), snapshot_type=snapshot_type
             )
             return None
         traced = await self._lifecycle_client.snapshot_and_wait(
-            self.sandbox_id,
+            self._lifecycle_identifier(),
             timeout=timeout,
             poll_interval=poll_interval,
             snapshot_type=snapshot_type,
@@ -263,7 +269,7 @@ class AsyncSandbox:
     async def list_snapshots(self) -> TracedIterator[SnapshotInfo]:
         self._require_lifecycle_client("list_snapshots")
         all_snaps = await self._lifecycle_client.list_snapshots()
-        my_id = self.sandbox_id
+        my_id = self._lifecycle_identifier()
         filtered = [s for s in all_snaps if s.sandbox_id == my_id]
         return TracedIterator(all_snaps.trace_id, filtered)
 
