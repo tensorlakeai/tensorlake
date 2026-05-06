@@ -385,8 +385,6 @@ class AsyncSandbox:
                 elif event.get("signal") is not None:
                     exit_code = -event["signal"]
         if exit_code is None:
-            from .exceptions import SandboxConnectionError
-
             raise SandboxConnectionError(
                 "sandbox process stream ended without an exit event"
             )

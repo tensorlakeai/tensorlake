@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 import warnings
+from typing import NoReturn
 from urllib.parse import urlparse
 
 from tensorlake._tracing import USER_AGENT, Traced, TracedIterator
@@ -104,7 +105,7 @@ def _resolve_sandbox_identifier(
     return resolved
 
 
-def _raise_as_sandbox_error(e: Exception) -> None:
+def _raise_as_sandbox_error(e: Exception) -> NoReturn:
     if isinstance(e, SandboxError):
         raise
 
@@ -627,7 +628,6 @@ class SandboxClient:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
-            raise  # unreachable — satisfies type checker
         if not wait:
             return Traced(trace_id, None)
         deadline = time.time() + timeout
@@ -672,7 +672,6 @@ class SandboxClient:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
-            raise  # unreachable — satisfies type checker
         if not wait:
             return Traced(trace_id, None)
         deadline = time.time() + timeout

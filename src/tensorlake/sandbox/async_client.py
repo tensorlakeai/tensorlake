@@ -339,7 +339,6 @@ class AsyncSandboxClient:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
-            raise
         if not wait:
             return Traced(trace_id, None)
         deadline = asyncio.get_event_loop().time() + timeout
@@ -371,7 +370,6 @@ class AsyncSandboxClient:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
-            raise
         if not wait:
             return Traced(trace_id, None)
         deadline = asyncio.get_event_loop().time() + timeout
