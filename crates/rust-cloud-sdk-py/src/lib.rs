@@ -1849,12 +1849,12 @@ impl CloudSandboxDesktopClient {
         }
 
         let client = builder.build().map_err(into_sandbox_py_error)?;
+        let proxy_client = SandboxProxyClient::new(client, host_override)
+            .with_sandbox_id(sandbox_id_header);
         let connect_timeout = duration_from_seconds("connect_timeout_sec", connect_timeout_sec)?;
         let desktop_client = shared_runtime()
             .block_on(RustSandboxDesktopClient::connect(
-                client,
-                host_override,
-                sandbox_id_header,
+                proxy_client,
                 port,
                 password,
                 shared,

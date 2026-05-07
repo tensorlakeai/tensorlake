@@ -235,6 +235,18 @@ impl SandboxProxyClient {
         self
     }
 
+    pub fn http_client(&self) -> &Client {
+        &self.client
+    }
+
+    pub fn host_override(&self) -> Option<&str> {
+        self.host_override.as_deref()
+    }
+
+    pub fn sandbox_id(&self) -> Option<&str> {
+        self.sandbox_id.as_deref()
+    }
+
     fn request(&self, method: Method, path: &str) -> reqwest_middleware::RequestBuilder {
         let mut request_builder = self.client.request(method, path);
         if let Some(host) = self.host_override.as_deref() {
