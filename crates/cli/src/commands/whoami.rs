@@ -97,7 +97,10 @@ pub async fn run(ctx: &mut CliContext, output_json: bool) -> Result<()> {
     println!("Endpoints");
     println!("  Dashboard   : {}", ctx.cloud_url);
     println!("  Cloud API   : {}", ctx.api_url);
-    println!("  Sandbox API : {}", resolve_sandbox_lifecycle_url(&ctx.api_url));
+    println!(
+        "  Sandbox API : {}",
+        resolve_sandbox_lifecycle_url(&ctx.api_url)
+    );
 
     if has_api_key || has_pat {
         println!();

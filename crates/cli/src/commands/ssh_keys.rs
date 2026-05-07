@@ -123,9 +123,8 @@ pub async fn remove(ctx: &CliContext, key_ids: &[String]) -> Result<()> {
 
     let mut removed = 0_usize;
     for raw in key_ids {
-        let resolved = resolve_key_id(raw, &listing).ok_or_else(|| {
-            CliError::usage(format!("no ssh key matches \"{raw}\""))
-        })?;
+        let resolved = resolve_key_id(raw, &listing)
+            .ok_or_else(|| CliError::usage(format!("no ssh key matches \"{raw}\"")))?;
         let path = format!("{BASE_PATH}/{resolved}");
         let request = client
             .request(Method::DELETE, &path)
@@ -162,9 +161,8 @@ fn resolve_key_id(input: &str, listing: &[ApiSshKey]) -> Option<String> {
 fn read_public_key(arg: &str) -> Result<String> {
     let path = std::path::Path::new(arg);
     if path.is_file() {
-        std::fs::read_to_string(path).map_err(|e| {
-            CliError::usage(format!("failed to read {}: {e}", path.display()))
-        })
+        std::fs::read_to_string(path)
+            .map_err(|e| CliError::usage(format!("failed to read {}: {e}", path.display())))
     } else {
         Ok(arg.to_string())
     }
@@ -185,12 +183,10 @@ fn http_client(ctx: &CliContext) -> Result<Client> {
 
 fn map_sdk_error(error: SdkError) -> CliError {
     match error {
-        SdkError::Authentication(_) => {
-            CliError::auth("authentication failed; run 'tl login'")
+        SdkError::Authentication(_) => CliError::auth("authentication failed; run 'tl login'"),
+        SdkError::Authorization(_) => {
+            CliError::auth("permission denied; run 'tl login' or check your account permissions")
         }
-        SdkError::Authorization(_) => CliError::auth(
-            "permission denied; run 'tl login' or check your account permissions",
-        ),
         SdkError::ServerError { status, message } => {
             let code = status.as_u16();
             if (400..500).contains(&code) {
@@ -248,14 +244,23 @@ mod tests {
 
     #[test]
     fn resolve_id_matches_exact_id_first() {
-        let listing = vec![mk("ssh_key_aaa", "laptop"), mk("ssh_key_bbb", "ssh_key_aaa")];
-        assert_eq!(resolve_key_id("ssh_key_aaa", &listing).as_deref(), Some("ssh_key_aaa"));
+        let listing = vec![
+            mk("ssh_key_aaa", "laptop"),
+            mk("ssh_key_bbb", "ssh_key_aaa"),
+        ];
+        assert_eq!(
+            resolve_key_id("ssh_key_aaa", &listing).as_deref(),
+            Some("ssh_key_aaa")
+        );
     }
 
     #[test]
     fn resolve_id_matches_unique_name() {
         let listing = vec![mk("ssh_key_aaa", "laptop"), mk("ssh_key_bbb", "desktop")];
-        assert_eq!(resolve_key_id("desktop", &listing).as_deref(), Some("ssh_key_bbb"));
+        assert_eq!(
+            resolve_key_id("desktop", &listing).as_deref(),
+            Some("ssh_key_bbb")
+        );
     }
 
     #[test]

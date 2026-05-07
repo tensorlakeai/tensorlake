@@ -33,7 +33,11 @@ pub fn sandbox_endpoint(ctx: &CliContext, endpoint: &str) -> String {
             ctx.api_url, ctx.namespace, endpoint
         )
     } else {
-        format!("{}/{}", resolve_sandbox_lifecycle_url(&ctx.api_url), endpoint)
+        format!(
+            "{}/{}",
+            resolve_sandbox_lifecycle_url(&ctx.api_url),
+            endpoint
+        )
     }
 }
 

@@ -4,11 +4,9 @@ use std::time::Duration;
 
 use des::Des;
 use des::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
-use eventsource_stream::Eventsource;
 use futures::{SinkExt, StreamExt};
 use png::{BitDepth, ColorType};
-use reqwest::Method;
-use reqwest::header::{ACCEPT, HOST, HeaderMap};
+use reqwest::header::{HOST, HeaderMap};
 use serde_json::json;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -17,6 +15,7 @@ use tokio_tungstenite::tungstenite::{self, Message, client::IntoClientRequest};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use url::Url;
 
+use super::{SandboxProxyClient, models::RunProcessEvent};
 use crate::{Client, error::SdkError};
 
 /// How long each individual `bash`-builtin port probe is allowed to run inside
@@ -47,9 +46,7 @@ pub struct SandboxDesktopClient {
 
 impl SandboxDesktopClient {
     pub async fn connect(
-        client: Client,
-        host_override: Option<String>,
-        sandbox_id: Option<String>,
+        proxy_client: SandboxProxyClient,
         port: u16,
         password: Option<String>,
         shared: bool,
@@ -64,7 +61,11 @@ impl SandboxDesktopClient {
         // `connect_timeout` along with the WS handshake and VNC negotiation
         // that follow — total wall-clock is what the caller asked for.
         let session = timeout(connect_timeout, async move {
-            wait_for_port_ready(&client, port).await?;
+            wait_for_port_ready(&proxy_client, port).await?;
+            // Extract routing context before consuming proxy_client into the tunnel.
+            let host_override = proxy_client.host_override().map(str::to_string);
+            let sandbox_id = proxy_client.sandbox_id().map(str::to_string);
+            let client = proxy_client.http_client().clone();
             let transport =
                 TunnelConnection::connect(client, host_override, sandbox_id.as_deref(), port)
                     .await?;
@@ -178,55 +179,31 @@ impl SandboxDesktopClient {
 ///
 /// Loops forever; the caller is expected to wrap this in an outer
 /// `tokio::time::timeout` (see [`SandboxDesktopClient::connect`]). Treats
-/// transient errors (e.g. SSE stream hiccups) as "not ready yet" and retries;
-/// only persistent SDK errors that bubble out of the underlying request will
-/// surface here.
-async fn wait_for_port_ready(client: &Client, port: u16) -> Result<(), SdkError> {
+/// transient errors (e.g. SSE stream hiccups) as "not ready yet" and retries.
+async fn wait_for_port_ready(proxy_client: &SandboxProxyClient, port: u16) -> Result<(), SdkError> {
     loop {
-        match probe_port_once(client, port).await {
+        match probe_port_once(proxy_client, port).await {
             Ok(true) => return Ok(()),
             Ok(false) | Err(_) => sleep(PORT_PROBE_RETRY_INTERVAL).await,
         }
     }
 }
 
-/// One probe attempt. Returns `Ok(true)` if `bash`'s `/dev/tcp` connect
-/// succeeded (exit 0), `Ok(false)` otherwise. Errors are returned for
-/// non-process-level failures (transport, JSON shape) so the caller can decide
-/// whether to retry.
-async fn probe_port_once(client: &Client, port: u16) -> Result<bool, SdkError> {
+/// One probe attempt. Returns `Ok(true)` if bash's `/dev/tcp` connect succeeded
+/// (exit 0), `Ok(false)` otherwise. Uses `SandboxProxyClient::run_process` so
+/// sandbox routing headers are applied automatically.
+async fn probe_port_once(proxy_client: &SandboxProxyClient, port: u16) -> Result<bool, SdkError> {
     let payload = json!({
         "command": "/bin/bash",
         "args": ["-c", format!("exec 3<>/dev/tcp/127.0.0.1/{port}")],
         "timeout_secs": PORT_PROBE_PROCESS_TIMEOUT_SECS,
     });
-    let req = client
-        .request(Method::POST, "/api/v1/processes/run")
-        .header(ACCEPT, "text/event-stream")
-        .json(&payload)
-        .build()?;
-    let response = client.execute(req).await?;
-    let mut stream = response.bytes_stream().eventsource();
-    while let Some(event) = stream.next().await {
-        let msg = match event {
-            Ok(m) => m,
-            // Mid-stream transport errors should not be fatal — treat as
-            // "not ready, try again".
-            Err(_) => return Ok(false),
-        };
-        let parsed: serde_json::Value = match serde_json::from_str(&msg.data) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if let Some(exit_code) = parsed.get("exit_code").and_then(|v| v.as_i64()) {
-            return Ok(exit_code == 0);
-        }
-        if parsed.get("signal").is_some() {
-            // Killed by signal (e.g. SIGTERM from timeout) — treat as not ready.
-            return Ok(false);
+    let events = proxy_client.run_process(&payload).await?.into_inner();
+    for event in events {
+        if let RunProcessEvent::Exited { exit_code, .. } = event {
+            return Ok(exit_code == Some(0));
         }
     }
-    // Stream ended without an Exited event — daemon hiccup, retry.
     Ok(false)
 }
 
@@ -243,8 +220,11 @@ impl TunnelConnection {
         remote_port: u16,
     ) -> Result<Self, SdkError> {
         let ws_url = build_tunnel_url(client.base_url(), remote_port)?;
-        let headers =
-            build_tunnel_headers(client.default_headers(), host_override.as_deref(), sandbox_id)?;
+        let headers = build_tunnel_headers(
+            client.default_headers(),
+            host_override.as_deref(),
+            sandbox_id,
+        )?;
 
         let mut request = ws_url.into_client_request().map_err(|error| {
             SdkError::ClientError(format!("failed to build tunnel request: {error}"))

@@ -19,7 +19,10 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str) -> Result<()> {
         )));
     }
 
-    let item = resp.json::<serde_json::Value>().await.map_err(CliError::Http)?;
+    let item = resp
+        .json::<serde_json::Value>()
+        .await
+        .map_err(CliError::Http)?;
     print_sandbox_details(&item);
     Ok(())
 }
@@ -87,9 +90,15 @@ fn print_sandbox_details(item: &serde_json::Value) {
         .and_then(|n| n.get("allow_internet_access"))
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
-    println!("Internet:        {}", if internet { "allowed" } else { "blocked" });
+    println!(
+        "Internet:        {}",
+        if internet { "allowed" } else { "blocked" }
+    );
 
-    println!("Created:         {}", format_created_at(item.get("created_at")));
+    println!(
+        "Created:         {}",
+        format_created_at(item.get("created_at"))
+    );
 
     // Optional fields
     let timeout = item
@@ -183,10 +192,7 @@ fn print_sandbox_details(item: &serde_json::Value) {
             .unwrap_or("");
         println!("Reason:          {}", reason);
 
-        let outcome = item
-            .get("outcome")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let outcome = item.get("outcome").and_then(|v| v.as_str()).unwrap_or("");
         println!("Outcome:         {}", outcome);
     }
 }

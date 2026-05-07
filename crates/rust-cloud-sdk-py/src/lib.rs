@@ -13,15 +13,14 @@ use futures::StreamExt;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
+use pyo3_async_runtimes::tokio::future_into_py;
 use reqwest::Method;
 use reqwest::multipart::{Form, Part};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tensorlake::document_ai::DocumentAiClient;
 use tensorlake::images::ImagesClient;
-use tensorlake::images::models::{
-    ApplicationBuildContext, CreateApplicationBuildRequest,
-};
+use tensorlake::images::models::{ApplicationBuildContext, CreateApplicationBuildRequest};
 use tensorlake::sandboxes::models::{
     CreateSandboxRequest, SandboxPoolRequest, SnapshotType, UpdateSandboxRequest,
 };
@@ -30,7 +29,6 @@ use tensorlake::sandboxes::{
 };
 use tensorlake::{Client, ClientBuilder, error::SdkError};
 use tokio::runtime::Runtime;
-use pyo3_async_runtimes::tokio::future_into_py;
 
 create_exception!(_cloud_sdk, CloudApiClientError, PyException);
 create_exception!(_cloud_sdk, CloudSandboxClientError, PyException);
@@ -980,11 +978,10 @@ impl CloudSandboxClient {
     fn list_snapshots_json_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
         future_into_py(py, async move {
-            let traced = retry_async_op(client, 5, move |c| async move {
-                c.list_snapshots().await
-            })
-            .await
-            .map_err(into_sandbox_py_error)?;
+            let traced =
+                retry_async_op(client, 5, move |c| async move { c.list_snapshots().await })
+                    .await
+                    .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
             let response = serde_json::json!({ "snapshots": *traced });
             let json = serde_json::to_string(&response).map_err(sandbox_serde_err)?;
@@ -1051,11 +1048,9 @@ impl CloudSandboxClient {
     fn list_pools_json_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
         future_into_py(py, async move {
-            let traced = retry_async_op(client, 5, move |c| async move {
-                c.list_pools().await
-            })
-            .await
-            .map_err(into_sandbox_py_error)?;
+            let traced = retry_async_op(client, 5, move |c| async move { c.list_pools().await })
+                .await
+                .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
             let response = serde_json::json!({ "pools": *traced });
             let json = serde_json::to_string(&response).map_err(sandbox_serde_err)?;
@@ -1453,11 +1448,10 @@ impl CloudSandboxProxyClient {
     fn list_processes_json_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
         future_into_py(py, async move {
-            let traced = retry_async_op(client, 5, move |c| async move {
-                c.list_processes().await
-            })
-            .await
-            .map_err(into_sandbox_py_error)?;
+            let traced =
+                retry_async_op(client, 5, move |c| async move { c.list_processes().await })
+                    .await
+                    .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
             let processes = traced.into_inner();
             let response = serde_json::json!({ "processes": processes });
@@ -1473,11 +1467,10 @@ impl CloudSandboxProxyClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
         future_into_py(py, async move {
-            let traced = retry_async_op(client, 5, move |c| async move {
-                c.get_process(pid).await
-            })
-            .await
-            .map_err(into_sandbox_py_error)?;
+            let traced =
+                retry_async_op(client, 5, move |c| async move { c.get_process(pid).await })
+                    .await
+                    .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
             let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
             Ok((trace_id, json))
@@ -1545,54 +1538,36 @@ impl CloudSandboxProxyClient {
         })
     }
 
-    fn get_stdout_json_async<'py>(
-        &self,
-        py: Python<'py>,
-        pid: i64,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn get_stdout_json_async<'py>(&self, py: Python<'py>, pid: i64) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
         future_into_py(py, async move {
-            let traced = retry_async_op(client, 5, move |c| async move {
-                c.get_stdout(pid).await
-            })
-            .await
-            .map_err(into_sandbox_py_error)?;
+            let traced = retry_async_op(client, 5, move |c| async move { c.get_stdout(pid).await })
+                .await
+                .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
             let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
             Ok((trace_id, json))
         })
     }
 
-    fn get_stderr_json_async<'py>(
-        &self,
-        py: Python<'py>,
-        pid: i64,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn get_stderr_json_async<'py>(&self, py: Python<'py>, pid: i64) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
         future_into_py(py, async move {
-            let traced = retry_async_op(client, 5, move |c| async move {
-                c.get_stderr(pid).await
-            })
-            .await
-            .map_err(into_sandbox_py_error)?;
+            let traced = retry_async_op(client, 5, move |c| async move { c.get_stderr(pid).await })
+                .await
+                .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
             let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
             Ok((trace_id, json))
         })
     }
 
-    fn get_output_json_async<'py>(
-        &self,
-        py: Python<'py>,
-        pid: i64,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn get_output_json_async<'py>(&self, py: Python<'py>, pid: i64) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
         future_into_py(py, async move {
-            let traced = retry_async_op(client, 5, move |c| async move {
-                c.get_output(pid).await
-            })
-            .await
-            .map_err(into_sandbox_py_error)?;
+            let traced = retry_async_op(client, 5, move |c| async move { c.get_output(pid).await })
+                .await
+                .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
             let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
             Ok((trace_id, json))
@@ -1606,9 +1581,11 @@ impl CloudSandboxProxyClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
         future_into_py(py, async move {
-            let traced = retry_async_op(client, 10, move |c| async move {
-                c.follow_stdout(pid).await
-            })
+            let traced = retry_async_op(
+                client,
+                10,
+                move |c| async move { c.follow_stdout(pid).await },
+            )
             .await
             .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
@@ -1628,9 +1605,11 @@ impl CloudSandboxProxyClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
         future_into_py(py, async move {
-            let traced = retry_async_op(client, 10, move |c| async move {
-                c.follow_stderr(pid).await
-            })
+            let traced = retry_async_op(
+                client,
+                10,
+                move |c| async move { c.follow_stderr(pid).await },
+            )
             .await
             .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
@@ -1650,9 +1629,11 @@ impl CloudSandboxProxyClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
         future_into_py(py, async move {
-            let traced = retry_async_op(client, 10, move |c| async move {
-                c.follow_output(pid).await
-            })
+            let traced = retry_async_op(
+                client,
+                10,
+                move |c| async move { c.follow_output(pid).await },
+            )
             .await
             .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
@@ -1704,11 +1685,7 @@ impl CloudSandboxProxyClient {
         })
     }
 
-    fn delete_file_async<'py>(
-        &self,
-        py: Python<'py>,
-        path: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn delete_file_async<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
         future_into_py(py, async move {
             let trace_id = retry_async_op(client, 5, move |c| {
@@ -1849,12 +1826,12 @@ impl CloudSandboxDesktopClient {
         }
 
         let client = builder.build().map_err(into_sandbox_py_error)?;
+        let proxy_client =
+            SandboxProxyClient::new(client, host_override).with_sandbox_id(sandbox_id_header);
         let connect_timeout = duration_from_seconds("connect_timeout_sec", connect_timeout_sec)?;
         let desktop_client = shared_runtime()
             .block_on(RustSandboxDesktopClient::connect(
-                client,
-                host_override,
-                sandbox_id_header,
+                proxy_client,
                 port,
                 password,
                 shared,
@@ -2138,11 +2115,7 @@ impl CloudDocumentAIClient {
     }
 }
 
-async fn retry_async_op<C, T, F, Fut>(
-    client: C,
-    max_retries: usize,
-    op: F,
-) -> Result<T, SdkError>
+async fn retry_async_op<C, T, F, Fut>(client: C, max_retries: usize, op: F) -> Result<T, SdkError>
 where
     C: Clone,
     F: Fn(C) -> Fut,
