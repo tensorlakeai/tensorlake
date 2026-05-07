@@ -15,8 +15,8 @@ use tokio_tungstenite::tungstenite::{self, Message, client::IntoClientRequest};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use url::Url;
 
-use crate::{Client, error::SdkError};
 use super::{SandboxProxyClient, models::RunProcessEvent};
+use crate::{Client, error::SdkError};
 
 /// How long each individual `bash`-builtin port probe is allowed to run inside
 /// the sandbox before the daemon kills it. Two seconds comfortably covers a
@@ -220,8 +220,11 @@ impl TunnelConnection {
         remote_port: u16,
     ) -> Result<Self, SdkError> {
         let ws_url = build_tunnel_url(client.base_url(), remote_port)?;
-        let headers =
-            build_tunnel_headers(client.default_headers(), host_override.as_deref(), sandbox_id)?;
+        let headers = build_tunnel_headers(
+            client.default_headers(),
+            host_override.as_deref(),
+            sandbox_id,
+        )?;
 
         let mut request = ws_url.into_client_request().map_err(|error| {
             SdkError::ClientError(format!("failed to build tunnel request: {error}"))
