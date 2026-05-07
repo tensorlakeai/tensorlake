@@ -153,7 +153,10 @@ impl Sdk {
         let client = ClientBuilder::new(base_url)
             .bearer_token(bearer_token)
             .build()?;
-        Ok(Self { client, api_url: base_url.to_string() })
+        Ok(Self {
+            client,
+            api_url: base_url.to_string(),
+        })
     }
 
     /// Create a new SDK instance using a client builder.
@@ -270,7 +273,9 @@ impl Sdk {
     /// * `use_namespaced_endpoints` - If true, use `/v1/namespaces/{namespace}/...`
     ///   paths. If false, use cloud-style top-level paths such as `/sandboxes`.
     pub fn sandboxes(&self, namespace: &str, use_namespaced_endpoints: bool) -> SandboxesClient {
-        let lifecycle_client = self.client.with_base_url(&resolve_sandbox_lifecycle_url(&self.api_url));
+        let lifecycle_client = self
+            .client
+            .with_base_url(&resolve_sandbox_lifecycle_url(&self.api_url));
         SandboxesClient::new(
             lifecycle_client,
             namespace.to_string(),

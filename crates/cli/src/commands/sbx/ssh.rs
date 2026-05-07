@@ -114,7 +114,9 @@ pub async fn run(
         build_pty_create_payload(shell, shell_args, workdir, &term_val, rows, cols, env_dict)?;
 
     let pty_resp = with_sandbox_headers(
-        client.post(format!("{}/api/v1/pty", proxy_base)).json(&pty_payload),
+        client
+            .post(format!("{}/api/v1/pty", proxy_base))
+            .json(&pty_payload),
         sandbox_id,
         host_override.clone(),
     )
