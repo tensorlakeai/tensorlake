@@ -215,6 +215,8 @@ pub struct SnapshotInfo {
     #[serde(default)]
     pub snapshot_uri: Option<String>,
     #[serde(default)]
+    pub snapshot_format_version: Option<String>,
+    #[serde(default)]
     pub size_bytes: Option<i64>,
     #[serde(default)]
     pub rootfs_disk_bytes: Option<u64>,

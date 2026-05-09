@@ -185,6 +185,7 @@ describe("sandbox image helpers", () => {
         snapshotId: "snap-1",
         sandboxId: "sbx-source-1",
         snapshotUri: "s3://snapshots/snap-1.tar.zst",
+        snapshotFormatVersion: "durable_archive_v1",
         sizeBytes: 123,
         rootfsDiskBytes: 10 * 1024 * 1024 * 1024,
       })),
@@ -228,6 +229,7 @@ describe("sandbox image helpers", () => {
       123,
       10 * 1024 * 1024 * 1024,
       false,
+      "durable_archive_v1",
     );
     expect(sandbox.terminate).toHaveBeenCalled();
     expect(writeFileMock).toHaveBeenCalled();
@@ -279,6 +281,7 @@ describe("sandbox image helpers", () => {
         snapshotId: "snap-1",
         sandboxId: "sbx-source-1",
         snapshotUri: "s3://snapshots/snap-1.tar.zst",
+        snapshotFormatVersion: "durable_archive_v1",
         sizeBytes: 123,
         rootfsDiskBytes: 10 * 1024 * 1024 * 1024,
       })),
@@ -329,6 +332,7 @@ describe("sandbox image helpers", () => {
       123,
       10 * 1024 * 1024 * 1024,
       false,
+      "durable_archive_v1",
     );
     expect(sandbox.terminate).toHaveBeenCalled();
   });
@@ -371,6 +375,7 @@ describe("sandbox image helpers", () => {
         snapshotId: "snap-1",
         sandboxId: "sbx-source-1",
         snapshotUri: "s3://snapshots/snap-1.tar.zst",
+        snapshotFormatVersion: "durable_archive_v1",
         sizeBytes: 123,
         rootfsDiskBytes: 10 * 1024 * 1024 * 1024,
       })),
@@ -436,6 +441,7 @@ describe("sandbox image helpers", () => {
         snapshotId: "snap-1",
         sandboxId: "sbx-source-1",
         snapshotUri: "s3://snapshots/snap-1.tar.zst",
+        snapshotFormatVersion: "durable_archive_v1",
         sizeBytes: 123,
         rootfsDiskBytes: 10 * 1024 * 1024 * 1024,
       })),
@@ -476,6 +482,7 @@ describe("sandbox image helpers", () => {
       123,
       10 * 1024 * 1024 * 1024,
       false,
+      "durable_archive_v1",
     );
   });
 

@@ -127,6 +127,7 @@ interface CreateSandboxImageDeps {
     snapshotSizeBytes: number,
     rootfsDiskBytes: number,
     isPublic: boolean,
+    snapshotFormatVersion?: string,
   ) => Promise<Record<string, unknown>>;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -927,6 +928,7 @@ async function registerImage(
   snapshotSizeBytes: number,
   rootfsDiskBytes: number,
   isPublic: boolean,
+  snapshotFormatVersion?: string,
 ): Promise<Record<string, unknown>> {
   if (!context.organizationId || !context.projectId) {
     throw new Error(
@@ -963,6 +965,7 @@ async function registerImage(
       snapshotId,
       snapshotSandboxId,
       snapshotUri,
+      ...(snapshotFormatVersion ? { snapshotFormatVersion } : {}),
       snapshotSizeBytes,
       rootfsDiskBytes,
       public: isPublic,
@@ -1063,6 +1066,7 @@ export async function createSandboxImage(
       snapshot.sizeBytes,
       snapshot.rootfsDiskBytes,
       options.isPublic ?? false,
+      snapshot.snapshotFormatVersion,
     );
 
     emit({

@@ -53,6 +53,7 @@ struct SnapshotRegistrationMetadata {
     snapshot_id: String,
     sandbox_id: String,
     snapshot_uri: String,
+    snapshot_format_version: Option<String>,
     snapshot_size_bytes: u64,
     rootfs_disk_bytes: u64,
 }
@@ -122,6 +123,7 @@ pub async fn run(
                 snapshot_id: snapshot.snapshot_id.clone(),
                 snapshot_sandbox_id: snapshot.sandbox_id.clone(),
                 snapshot_uri: snapshot.snapshot_uri.clone(),
+                snapshot_format_version: snapshot.snapshot_format_version.clone(),
                 snapshot_size_bytes: snapshot.snapshot_size_bytes,
                 rootfs_disk_bytes: snapshot.rootfs_disk_bytes,
                 public: is_public,
@@ -255,6 +257,7 @@ fn parse_completed_snapshot(info: &SnapshotInfo) -> Result<SnapshotRegistrationM
         snapshot_id: info.snapshot_id.clone(),
         sandbox_id: info.sandbox_id.clone(),
         snapshot_uri,
+        snapshot_format_version: info.snapshot_format_version.clone(),
         snapshot_size_bytes,
         rootfs_disk_bytes,
     })
@@ -1184,6 +1187,7 @@ mod tests {
                     status: "pending".to_string(),
                     error: None,
                     snapshot_uri: None,
+                    snapshot_format_version: None,
                     size_bytes: None,
                     rootfs_disk_bytes: None,
                     snapshot_type: None,
