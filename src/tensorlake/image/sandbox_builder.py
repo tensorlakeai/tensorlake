@@ -692,6 +692,7 @@ def _register_image(
     snapshot_size_bytes: int,
     rootfs_disk_bytes: int,
     is_public: bool = False,
+    snapshot_format_version: str | None = None,
 ) -> dict:
     """POST to Platform API through the ingress to register the image."""
     org_id = ctx.organization_id
@@ -722,6 +723,8 @@ def _register_image(
         "rootfsDiskBytes": rootfs_disk_bytes,
         "public": is_public,
     }
+    if snapshot_format_version:
+        body["snapshotFormatVersion"] = snapshot_format_version
     resp = httpx.post(url, json=body, headers=inject_traceparent(headers), timeout=30.0)
     resp.raise_for_status()
     return resp.json()
@@ -806,6 +809,7 @@ def _run_plan(
             snapshot.size_bytes,
             snapshot.rootfs_disk_bytes,
             is_public,
+            getattr(snapshot, "snapshot_format_version", None),
         )
         emit(
             {

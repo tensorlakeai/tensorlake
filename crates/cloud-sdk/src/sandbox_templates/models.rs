@@ -8,6 +8,8 @@ pub struct CreateSandboxTemplateRequest {
     pub snapshot_id: String,
     pub snapshot_sandbox_id: String,
     pub snapshot_uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_format_version: Option<String>,
     pub snapshot_size_bytes: u64,
     pub rootfs_disk_bytes: u64,
     pub public: bool,
@@ -26,6 +28,8 @@ pub struct SandboxTemplate {
     pub snapshot_sandbox_id: Option<String>,
     #[serde(default)]
     pub snapshot_uri: Option<String>,
+    #[serde(default)]
+    pub snapshot_format_version: Option<String>,
     #[serde(default)]
     pub snapshot_size_bytes: Option<u64>,
     #[serde(default)]
@@ -46,6 +50,7 @@ mod tests {
             snapshot_id: "snap-1".to_string(),
             snapshot_sandbox_id: "sbx-1".to_string(),
             snapshot_uri: "s3://snapshots/snap-1".to_string(),
+            snapshot_format_version: Some("durable_archive_v1".to_string()),
             snapshot_size_bytes: 123,
             rootfs_disk_bytes: 456,
             public: true,
@@ -54,7 +59,7 @@ mod tests {
         let json = serde_json::to_string(&request).unwrap();
         assert_eq!(
             json,
-            r#"{"name":"image1","dockerfile":"FROM ubuntu:24.04\n","snapshotId":"snap-1","snapshotSandboxId":"sbx-1","snapshotUri":"s3://snapshots/snap-1","snapshotSizeBytes":123,"rootfsDiskBytes":456,"public":true}"#
+            r#"{"name":"image1","dockerfile":"FROM ubuntu:24.04\n","snapshotId":"snap-1","snapshotSandboxId":"sbx-1","snapshotUri":"s3://snapshots/snap-1","snapshotFormatVersion":"durable_archive_v1","snapshotSizeBytes":123,"rootfsDiskBytes":456,"public":true}"#
         );
     }
 }

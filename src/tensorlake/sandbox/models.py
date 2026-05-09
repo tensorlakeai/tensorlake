@@ -295,6 +295,7 @@ class SnapshotInfo(BaseModel):
     snapshot_type: SnapshotType | None = None
     error: str | None = None
     snapshot_uri: str | None = None
+    snapshot_format_version: str | None = None
     size_bytes: int | None = None
     rootfs_disk_bytes: int | None = None
     created_at: OptionalTimestamp = None

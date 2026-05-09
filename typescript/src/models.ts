@@ -156,6 +156,7 @@ export interface SnapshotInfo {
   snapshotType?: SnapshotType;
   error?: string;
   snapshotUri?: string;
+  snapshotFormatVersion?: string;
   sizeBytes?: number;
   rootfsDiskBytes?: number;
   createdAt?: Date;

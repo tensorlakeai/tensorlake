@@ -93,6 +93,7 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             snapshot_id="snap-1",
             sandbox_id="sbx-1",
             snapshot_uri="s3://snapshots/snap-1.tar.zst",
+            snapshot_format_version="durable_archive_v1",
             size_bytes=1234,
             rootfs_disk_bytes=25 * 1024 * 1024 * 1024,
         )
@@ -144,6 +145,7 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             1234,
             25 * 1024 * 1024 * 1024,
             False,
+            "durable_archive_v1",
         )
         sandbox.terminate.assert_called_once_with()
         # Regression: sandbox image builds MUST request a filesystem-only
@@ -163,6 +165,7 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             snapshot_id="snap-1",
             sandbox_id="sbx-1",
             snapshot_uri="s3://snapshots/snap-1.tar.zst",
+            snapshot_format_version="durable_archive_v1",
             size_bytes=1234,
             rootfs_disk_bytes=25 * 1024 * 1024 * 1024,
         )
@@ -206,6 +209,7 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             1234,
             25 * 1024 * 1024 * 1024,
             True,
+            "durable_archive_v1",
         )
 
     def test_load_errors_raise_SandboxImageLoadError(self):
@@ -222,6 +226,7 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
             snapshot_id="snap-1",
             sandbox_id="sbx-1",
             snapshot_uri="s3://snapshots/snap-1.tar.zst",
+            snapshot_format_version="durable_archive_v1",
             size_bytes=1234,
             rootfs_disk_bytes=25 * 1024 * 1024 * 1024,
         )

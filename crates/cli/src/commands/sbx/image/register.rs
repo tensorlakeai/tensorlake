@@ -7,6 +7,7 @@ use tensorlake::sandbox_templates::models::CreateSandboxTemplateRequest;
 struct SnapshotRegistrationMetadata {
     sandbox_id: String,
     snapshot_uri: String,
+    snapshot_format_version: Option<String>,
     snapshot_size_bytes: u64,
     rootfs_disk_bytes: u64,
 }
@@ -80,9 +81,17 @@ fn parse_snapshot_registration_metadata(
             ))
         })?;
 
+    let snapshot_format_version = info
+        .get("snapshot_format_version")
+        .or_else(|| info.get("snapshotFormatVersion"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+
     Ok(SnapshotRegistrationMetadata {
         sandbox_id,
         snapshot_uri,
+        snapshot_format_version,
         snapshot_size_bytes,
         rootfs_disk_bytes,
     })
@@ -110,6 +119,7 @@ pub async fn run(
             snapshot_id: snapshot_id.to_string(),
             snapshot_sandbox_id: snapshot.sandbox_id.clone(),
             snapshot_uri: snapshot.snapshot_uri.clone(),
+            snapshot_format_version: snapshot.snapshot_format_version.clone(),
             snapshot_size_bytes: snapshot.snapshot_size_bytes,
             rootfs_disk_bytes: snapshot.rootfs_disk_bytes,
             public: is_public,
@@ -146,6 +156,7 @@ mod tests {
                 "status": "in_progress",
                 "sandbox_id": "sbx-1",
                 "snapshot_uri": "s3://snapshots/snap-1.tar.zst",
+                "snapshot_format_version": "durable_archive_v1",
                 "size_bytes": 123,
                 "rootfs_disk_bytes": 10 * 1024 * 1024 * 1024_u64,
             }),
@@ -166,6 +177,7 @@ mod tests {
                 "status": "completed",
                 "sandbox_id": "sbx-1",
                 "snapshot_uri": "s3://snapshots/snap-1.tar.zst",
+                "snapshot_format_version": "durable_archive_v1",
                 "size_bytes": 123,
                 "rootfs_disk_bytes": 10 * 1024 * 1024 * 1024_u64,
             }),
@@ -174,6 +186,10 @@ mod tests {
 
         assert_eq!(metadata.sandbox_id, "sbx-1");
         assert_eq!(metadata.snapshot_uri, "s3://snapshots/snap-1.tar.zst");
+        assert_eq!(
+            metadata.snapshot_format_version.as_deref(),
+            Some("durable_archive_v1")
+        );
         assert_eq!(metadata.snapshot_size_bytes, 123);
         assert_eq!(metadata.rootfs_disk_bytes, 10 * 1024 * 1024 * 1024_u64);
     }
