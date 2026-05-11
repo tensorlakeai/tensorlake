@@ -50,6 +50,13 @@ _UNSUPPORTED_DOCKERFILE_INSTRUCTIONS = {
 }
 
 _DEFAULT_IMAGE_NAME = "default"
+_REMOTE_BUILD_SCRATCH_DIR = "/tmp/tl-rootfs-build"
+_REMOTE_BUILD_SPEC_PATH = "/tmp/tl-rootfs-build/build-spec.json"
+_REMOTE_BUILD_METADATA_PATH = "/tmp/tl-rootfs-build/metadata.json"
+_REMOTE_BUILD_CONTEXT_DIR = "/tmp/tl-rootfs-build/context"
+_REMOTE_ROOTFS_PATH = "/dev/vda"
+_REMOTE_PARENT_ROOTFS_PATH = "/tmp/tl-rootfs-build/parent-rootfs.img"
+_LEGACY_IMAGE_BUILD_ENV = "TENSORLAKE_ENABLE_LEGACY_IMAGE_BUILD"
 
 
 # --- Public exceptions ------------------------------------------------------
@@ -730,7 +737,239 @@ def _register_image(
     return resp.json()
 
 
-def _run_plan(
+def _prepare_offline_rootfs_build(
+    ctx: Context,
+    plan: DockerfileBuildPlan,
+    is_public: bool,
+) -> dict:
+    org_id = ctx.organization_id
+    proj_id = ctx.project_id
+    if not org_id or not proj_id:
+        raise RuntimeError(
+            "Organization ID and Project ID are required. Run 'tl login' and 'tl init'."
+        )
+
+    url = f"{ctx.api_url}/platform/v1/organizations/{org_id}/projects/{proj_id}/sandbox-template-builds"
+    bearer_token = ctx.api_key or ctx.personal_access_token
+    headers = {
+        "Authorization": f"Bearer {bearer_token}",
+        "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
+    }
+    if ctx.personal_access_token and not ctx.api_key:
+        headers["X-Forwarded-Organization-Id"] = org_id
+        headers["X-Forwarded-Project-Id"] = proj_id
+
+    resp = httpx.post(
+        url,
+        json={
+            "name": plan.registered_name,
+            "dockerfile": plan.dockerfile_text,
+            "baseImage": plan.base_image,
+            "public": is_public,
+        },
+        headers=inject_traceparent(headers),
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _complete_offline_rootfs_build(
+    ctx: Context,
+    build_id: str,
+    metadata: dict,
+) -> dict:
+    org_id = ctx.organization_id
+    proj_id = ctx.project_id
+    if not org_id or not proj_id:
+        raise RuntimeError(
+            "Organization ID and Project ID are required. Run 'tl login' and 'tl init'."
+        )
+
+    url = f"{ctx.api_url}/platform/v1/organizations/{org_id}/projects/{proj_id}/sandbox-template-builds/{build_id}/complete"
+    bearer_token = ctx.api_key or ctx.personal_access_token
+    headers = {
+        "Authorization": f"Bearer {bearer_token}",
+        "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
+    }
+    if ctx.personal_access_token and not ctx.api_key:
+        headers["X-Forwarded-Organization-Id"] = org_id
+        headers["X-Forwarded-Project-Id"] = proj_id
+
+    body = {
+        "snapshotId": metadata["snapshot_id"],
+        "snapshotUri": metadata["snapshot_uri"],
+        "snapshotFormatVersion": metadata["snapshot_format_version"],
+        "snapshotSizeBytes": metadata["snapshot_size_bytes"],
+        "rootfsDiskBytes": metadata["rootfs_disk_bytes"],
+        "rootfsNodeKind": metadata["rootfs_node_kind"],
+    }
+    if metadata.get("parent_manifest_uri"):
+        body["parentManifestUri"] = metadata["parent_manifest_uri"]
+
+    resp = httpx.post(
+        url,
+        json=body,
+        headers=inject_traceparent(headers),
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _upload_build_context(
+    sandbox: Sandbox,
+    context_dir: str,
+    emit: EmitFn = _noop_emit,
+) -> None:
+    context_path = Path(context_dir)
+    if not context_path.exists():
+        return
+
+    _run_streaming(sandbox, "mkdir", ["-p", _REMOTE_BUILD_CONTEXT_DIR], emit=emit)
+    for local_path in context_path.rglob("*"):
+        if not local_path.is_file():
+            continue
+        rel = local_path.relative_to(context_path).as_posix()
+        remote_path = posixpath.join(_REMOTE_BUILD_CONTEXT_DIR, rel)
+        remote_parent = posixpath.dirname(remote_path)
+        _run_streaming(sandbox, "mkdir", ["-p", remote_parent], emit=emit)
+        sandbox.write_file(remote_path, local_path.read_bytes())
+
+
+def _copy_parent_rootfs_for_diff(
+    sandbox: Sandbox,
+    emit: EmitFn = _noop_emit,
+) -> None:
+    emit({"type": "status", "message": "Capturing parent rootfs for diff"})
+    _run_streaming(
+        sandbox,
+        "sh",
+        [
+            "-c",
+            (
+                f"mkdir -p {shlex.quote(_REMOTE_BUILD_SCRATCH_DIR)} "
+                f"&& dd if={shlex.quote(_REMOTE_ROOTFS_PATH)} "
+                f"of={shlex.quote(_REMOTE_PARENT_ROOTFS_PATH)} "
+                "bs=16M conv=sparse status=none && sync"
+            ),
+        ],
+        emit=emit,
+    )
+
+
+def _run_plan_remote_builder(
+    plan: DockerfileBuildPlan,
+    ctx: Context,
+    cpus: float,
+    memory_mb: int,
+    is_public: bool,
+    emit: EmitFn,
+    disk_mb: int | None,
+    prepared: dict,
+) -> dict:
+    builder = prepared["builder"]
+    build_id = prepared["buildId"]
+    sandbox_client = SandboxClient(
+        api_url=ctx.api_url,
+        api_key=ctx.api_key or ctx.personal_access_token,
+        organization_id=ctx.organization_id,
+        project_id=ctx.project_id,
+    )
+
+    sandbox = None
+    try:
+        emit({"type": "status", "message": "Starting rootfs builder sandbox..."})
+        builder_disk_mb = (
+            builder.get("diskMb", disk_mb)
+            if disk_mb is not None
+            else builder.get("diskMb")
+        )
+        sandbox = sandbox_client.create_and_connect(
+            image=builder["image"],
+            cpus=builder.get("cpus", cpus),
+            memory_mb=builder.get("memoryMb", memory_mb),
+            disk_mb=builder_disk_mb,
+        )
+        emit(
+            {
+                "type": "status",
+                "message": f"Builder sandbox {sandbox.sandbox_id} is running",
+            }
+        )
+
+        _upload_build_context(sandbox, plan.context_dir, emit=emit)
+        if prepared["rootfsNodeKind"] == "diff":
+            _copy_parent_rootfs_for_diff(sandbox, emit=emit)
+        _execute_dockerfile_plan(sandbox, plan, emit=emit)
+        build_spec = {
+            **prepared,
+            "name": plan.registered_name,
+            "dockerfile": plan.dockerfile_text,
+            "baseImage": plan.base_image,
+            "contextDir": _REMOTE_BUILD_CONTEXT_DIR,
+            "rootfsPath": _REMOTE_ROOTFS_PATH,
+            "isPublic": is_public,
+        }
+        if prepared["rootfsNodeKind"] == "diff":
+            build_spec["parentRootfsPath"] = _REMOTE_PARENT_ROOTFS_PATH
+        sandbox.write_file(
+            _REMOTE_BUILD_SPEC_PATH,
+            json.dumps(build_spec, separators=(",", ":")).encode("utf-8"),
+        )
+
+        emit({"type": "status", "message": "Running rootfs builder..."})
+        result = sandbox.run(
+            builder.get("command", "tl-rootfs-build"),
+            args=[
+                "--spec",
+                _REMOTE_BUILD_SPEC_PATH,
+                "--metadata-out",
+                _REMOTE_BUILD_METADATA_PATH,
+            ],
+            timeout=3600,
+            working_dir=_REMOTE_BUILD_SCRATCH_DIR,
+        )
+        if result.stdout:
+            emit({"type": "build_log", "stream": "stdout", "message": result.stdout})
+        if result.stderr:
+            emit({"type": "build_log", "stream": "stderr", "message": result.stderr})
+        if result.exit_code != 0:
+            raise RuntimeError(
+                f"Rootfs builder exited with code {result.exit_code}: {result.stderr}"
+            )
+
+        metadata = json.loads(
+            sandbox.read_file(_REMOTE_BUILD_METADATA_PATH).value.decode("utf-8")
+        )
+        emit(
+            {
+                "type": "snapshot_created",
+                "snapshot_id": metadata.get("snapshot_id", ""),
+            }
+        )
+        emit({"type": "status", "message": "Registering image..."})
+        registered = _complete_offline_rootfs_build(ctx, build_id, metadata)
+        emit(
+            {
+                "type": "image_registered",
+                "image_id": registered.get("id", ""),
+                "name": plan.registered_name,
+                "snapshot_id": metadata.get("snapshot_id", ""),
+            }
+        )
+        return registered
+    finally:
+        if sandbox is not None:
+            try:
+                sandbox.terminate()
+            except Exception:
+                pass
+
+
+def _run_plan_legacy(
     plan: DockerfileBuildPlan,
     ctx: Context,
     cpus: float,
@@ -826,6 +1065,48 @@ def _run_plan(
                 sandbox.terminate()
             except Exception:
                 pass
+
+
+def _run_plan(
+    plan: DockerfileBuildPlan,
+    ctx: Context,
+    cpus: float,
+    memory_mb: int,
+    is_public: bool,
+    emit: EmitFn,
+    disk_mb: int | None = None,
+) -> dict:
+    try:
+        prepared = _prepare_offline_rootfs_build(ctx, plan, is_public)
+    except Exception as exc:
+        if os.getenv(_LEGACY_IMAGE_BUILD_ENV, "").lower() not in {"1", "true", "yes"}:
+            raise RuntimeError(
+                "offline rootfs builder prepare failed and legacy runtime "
+                f"snapshot image registration is disabled: {exc}"
+            ) from exc
+        emit(
+            {
+                "type": "warning",
+                "message": (
+                    "Offline rootfs builder prepare failed; falling back to legacy "
+                    f"filesystem snapshot flow because {_LEGACY_IMAGE_BUILD_ENV}=1: {exc}"
+                ),
+            }
+        )
+        return _run_plan_legacy(
+            plan, ctx, cpus, memory_mb, is_public, emit=emit, disk_mb=disk_mb
+        )
+
+    return _run_plan_remote_builder(
+        plan,
+        ctx,
+        cpus,
+        memory_mb,
+        is_public,
+        emit,
+        disk_mb,
+        prepared,
+    )
 
 
 # --- Public API -----------------------------------------------------------

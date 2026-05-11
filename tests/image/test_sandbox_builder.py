@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 import warnings
@@ -85,6 +86,16 @@ def _make_build_patches(ctx, sandbox, snapshot):
 
 
 class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
+    def setUp(self):
+        self._legacy_env = patch.dict(
+            "os.environ",
+            {"TENSORLAKE_ENABLE_LEGACY_IMAGE_BUILD": "1"},
+        )
+        self._legacy_env.start()
+
+    def tearDown(self):
+        self._legacy_env.stop()
+
     def test_registers_snapshot_from_dockerfile(self):
         ctx = MagicMock()
         sandbox = MagicMock()
@@ -115,6 +126,11 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             )
             with (
                 build_ctx,
+                patch.object(
+                    sbm,
+                    "_prepare_offline_rootfs_build",
+                    side_effect=RuntimeError("offline disabled in legacy test"),
+                ),
                 execute as execute_mock,
                 register_image as register_mock,
                 sandbox_client_cls as sandbox_client_cls_mock,
@@ -183,6 +199,11 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             )
             with (
                 build_ctx,
+                patch.object(
+                    sbm,
+                    "_prepare_offline_rootfs_build",
+                    side_effect=RuntimeError("offline disabled in legacy test"),
+                ),
                 execute,
                 register_image as register_mock,
                 sandbox_client_cls as sandbox_client_cls_mock,
@@ -218,6 +239,16 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
 
 
 class TestBuildSandboxImageFromImage(unittest.TestCase):
+    def setUp(self):
+        self._legacy_env = patch.dict(
+            "os.environ",
+            {"TENSORLAKE_ENABLE_LEGACY_IMAGE_BUILD": "1"},
+        )
+        self._legacy_env.start()
+
+    def tearDown(self):
+        self._legacy_env.stop()
+
     def _run_build(self, image: Image, **kwargs):
         ctx = MagicMock()
         sandbox = MagicMock()
@@ -236,6 +267,11 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
         )
         with (
             build_ctx,
+            patch.object(
+                sbm,
+                "_prepare_offline_rootfs_build",
+                side_effect=RuntimeError("offline disabled in legacy test"),
+            ),
             execute,
             register_image as register_mock,
             sandbox_client_cls as sandbox_client_cls_mock,
@@ -307,6 +343,114 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
     def test_rejects_unknown_source_type(self):
         with self.assertRaises(TypeError):
             sbm.build_sandbox_image(12345)  # type: ignore[arg-type]
+
+
+class TestOfflineRootfsBuilder(unittest.TestCase):
+    def test_remote_builder_applies_dockerfile_before_snapshotting_diff(self):
+        ctx = SimpleNamespace(
+            api_url="https://api.example.test",
+            api_key="key",
+            personal_access_token=None,
+            organization_id="org_1",
+            project_id="project_1",
+        )
+        sandbox = MagicMock()
+        sandbox.sandbox_id = "sbx-builder"
+        sandbox.run.return_value = SimpleNamespace(stdout="", stderr="", exit_code=0)
+        sandbox.read_file.return_value = SimpleNamespace(
+            value=json.dumps(
+                {
+                    "snapshot_id": "snap-child",
+                    "snapshot_uri": "s3://snapshots/child.tlsnap",
+                    "snapshot_format_version": "durable_archive_v1",
+                    "snapshot_size_bytes": 123,
+                    "rootfs_disk_bytes": 10 * 1024 * 1024 * 1024,
+                    "rootfs_node_kind": "diff",
+                    "parent_manifest_uri": "s3://snapshots/parent.tlsnap",
+                }
+            ).encode("utf-8")
+        )
+        prepared = {
+            "buildId": "build_1",
+            "snapshotId": "snap-child",
+            "snapshotUri": "s3://snapshots/child.tlsnap",
+            "rootfsNodeKind": "diff",
+            "builder": {
+                "image": "base-private",
+                "command": "tl-rootfs-build",
+                "cpus": 2,
+                "memoryMb": 4096,
+                "diskMb": 32768,
+            },
+            "upload": {
+                "kind": "single_put",
+                "method": "PUT",
+                "url": "https://upload.example.test",
+            },
+        }
+
+        plan = sbm.DockerfileBuildPlan(
+            dockerfile_path="Dockerfile",
+            context_dir="/no/such/context",
+            registered_name="child",
+            dockerfile_text="FROM base-private\nRUN touch /child\n",
+            base_image="base-private",
+            instructions=[
+                sbm.DockerfileInstruction("RUN", "touch /child", 2),
+            ],
+        )
+
+        with (
+            patch.object(sbm, "SandboxClient") as sandbox_client_cls,
+            patch.object(sbm, "_upload_build_context") as upload_context,
+            patch.object(sbm, "_copy_parent_rootfs_for_diff") as copy_parent,
+            patch.object(sbm, "_execute_dockerfile_plan") as execute_plan,
+            patch.object(
+                sbm,
+                "_complete_offline_rootfs_build",
+                return_value={"id": "template_1"},
+            ) as complete,
+        ):
+            sandbox_client_cls.return_value.create_and_connect.return_value = sandbox
+            result = sbm._run_plan_remote_builder(
+                plan,
+                ctx,  # type: ignore[arg-type]
+                BUILD_CPUS,
+                BUILD_MEMORY_MB,
+                False,
+                sbm._noop_emit,
+                None,
+                prepared,
+            )
+
+        self.assertEqual(result, {"id": "template_1"})
+        sandbox_client_cls.return_value.create_and_connect.assert_called_once_with(
+            image="base-private",
+            cpus=2,
+            memory_mb=4096,
+            disk_mb=32768,
+        )
+        upload_context.assert_called_once_with(
+            sandbox,
+            "/no/such/context",
+            emit=sbm._noop_emit,
+        )
+        copy_parent.assert_called_once_with(sandbox, emit=sbm._noop_emit)
+        execute_plan.assert_called_once_with(sandbox, plan, emit=sbm._noop_emit)
+        spec = json.loads(sandbox.write_file.call_args.args[1].decode("utf-8"))
+        self.assertEqual(spec["rootfsPath"], "/dev/vda")
+        self.assertEqual(
+            spec["parentRootfsPath"],
+            "/tmp/tl-rootfs-build/parent-rootfs.img",
+        )
+        sandbox.run.assert_called_once()
+        self.assertEqual(sandbox.run.call_args.args[0], "tl-rootfs-build")
+        self.assertEqual(
+            sandbox.run.call_args.kwargs["working_dir"],
+            "/tmp/tl-rootfs-build",
+        )
+        complete.assert_called_once()
+        sandbox.terminate.assert_called_once_with()
 
 
 if __name__ == "__main__":

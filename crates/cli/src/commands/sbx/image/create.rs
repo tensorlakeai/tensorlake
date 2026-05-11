@@ -4,11 +4,15 @@ use std::{
     time::Duration,
 };
 
+use serde::Deserialize;
 use serde_json::{Map, Value};
 use shlex::split as shlex_split;
 use tensorlake::{
     Client,
-    sandbox_templates::models::CreateSandboxTemplateRequest,
+    sandbox_templates::models::{
+        CompleteSandboxTemplateBuildRequest, CreateSandboxTemplateRequest,
+        PrepareSandboxTemplateBuildRequest, RootfsNodeKind, SandboxTemplateBuildPrepared,
+    },
     sandboxes::{
         SandboxProxyClient, SandboxesClient,
         models::{
@@ -26,6 +30,13 @@ use crate::{
 const BUILD_SANDBOX_PIP_ENV: &[(&str, &str)] = &[("PIP_BREAK_SYSTEM_PACKAGES", "1")];
 const DEFAULT_CPUS: f64 = 2.0;
 const DEFAULT_MEMORY_MB: i64 = 4096;
+const REMOTE_BUILD_SCRATCH_DIR: &str = "/tmp/tl-rootfs-build";
+const REMOTE_BUILD_SPEC_PATH: &str = "/tmp/tl-rootfs-build/build-spec.json";
+const REMOTE_BUILD_METADATA_PATH: &str = "/tmp/tl-rootfs-build/metadata.json";
+const REMOTE_BUILD_CONTEXT_DIR: &str = "/tmp/tl-rootfs-build/context";
+const REMOTE_ROOTFS_PATH: &str = "/dev/vda";
+const REMOTE_PARENT_ROOTFS_PATH: &str = "/tmp/tl-rootfs-build/parent-rootfs.img";
+const LEGACY_IMAGE_BUILD_ENV: &str = "TENSORLAKE_ENABLE_LEGACY_IMAGE_BUILD";
 const SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SNAPSHOT_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(300);
@@ -58,6 +69,18 @@ struct SnapshotRegistrationMetadata {
     rootfs_disk_bytes: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct RootfsBuildMetadata {
+    snapshot_id: String,
+    snapshot_uri: String,
+    snapshot_format_version: String,
+    rootfs_node_kind: RootfsNodeKind,
+    snapshot_size_bytes: u64,
+    rootfs_disk_bytes: u64,
+    #[serde(default)]
+    parent_manifest_uri: Option<String>,
+}
+
 pub async fn run(
     ctx: &CliContext,
     dockerfile_path: &str,
@@ -71,6 +94,152 @@ pub async fn run(
     let plan = load_dockerfile_plan(dockerfile_path, registered_name)?;
     eprintln!("⚙️  Selected image name: {}", plan.registered_name);
 
+    match run_offline_rootfs_builder(ctx, &plan, disk_mb, cpus, memory_mb, is_public).await {
+        Ok(()) => return Ok(()),
+        Err(error) if legacy_image_build_enabled() => {
+            eprintln!(
+                "⚠️  Offline rootfs builder failed; falling back to legacy filesystem snapshot flow because {LEGACY_IMAGE_BUILD_ENV}=1: {error}"
+            );
+        }
+        Err(error) => {
+            return Err(CliError::Other(anyhow::anyhow!(
+                "offline rootfs builder flow failed and legacy runtime snapshot image registration is disabled: {error}"
+            )));
+        }
+    }
+
+    run_legacy_filesystem_builder(ctx, &plan, disk_mb, cpus, memory_mb, is_public).await
+}
+
+async fn run_offline_rootfs_builder(
+    ctx: &CliContext,
+    plan: &DockerfileBuildPlan,
+    _disk_mb: Option<u64>,
+    _cpus: Option<f64>,
+    _memory_mb: Option<i64>,
+    is_public: bool,
+) -> Result<()> {
+    let client = super::sandbox_lifecycle_client(ctx)?;
+    let sandboxes = SandboxesClient::new(client.clone(), ctx.namespace.clone(), is_localhost(ctx));
+    let templates = super::sandbox_templates_client(ctx)?;
+    let prepared = templates
+        .prepare_build(&PrepareSandboxTemplateBuildRequest {
+            name: plan.registered_name.clone(),
+            dockerfile: plan.dockerfile_text.clone(),
+            base_image: Some(plan.base_image.clone()),
+            public: is_public,
+        })
+        .await?
+        .into_inner();
+
+    let resources = CreateSandboxResources {
+        cpus: prepared.builder.cpus,
+        memory_mb: prepared.builder.memory_mb,
+        disk_mb: Some(prepared.builder.disk_mb),
+    };
+
+    eprintln!(
+        "⚙️  Creating rootfs builder sandbox from {}...",
+        prepared.builder.image
+    );
+    let created = sandboxes
+        .create(&CreateSandboxRequest {
+            image: Some(prepared.builder.image.clone()),
+            resources,
+            secret_names: None,
+            timeout_secs: None,
+            entrypoint: None,
+            network: None,
+            snapshot_id: None,
+            name: None,
+        })
+        .await?;
+    let sandbox_id = created.sandbox_id.clone();
+    let routing_hint = created.routing_hint.clone();
+
+    let result = async {
+        wait_for_sandbox_status(
+            ctx,
+            &sandbox_id,
+            &format!("Waiting for rootfs builder sandbox {sandbox_id}"),
+            "running",
+            DEFAULT_SANDBOX_WAIT_TIMEOUT,
+        )
+        .await?;
+        eprintln!("⚙️  Rootfs builder sandbox {sandbox_id} is running");
+
+        let proxy = sandbox_proxy_client(ctx, &client, &sandbox_id, routing_hint)?;
+        upload_build_context(&proxy, &plan.context_dir).await?;
+        if prepared.rootfs_node_kind == RootfsNodeKind::Diff {
+            copy_parent_rootfs_for_diff(&proxy).await?;
+        }
+        execute_dockerfile_plan(&proxy, plan).await?;
+        let build_spec = build_remote_build_spec(&prepared, plan, is_public)?;
+        proxy
+            .write_file(REMOTE_BUILD_SPEC_PATH, build_spec)
+            .await
+            .map_err(CliError::from)?;
+
+        eprintln!("⚙️  Running rootfs builder...");
+        run_streaming_process(
+            &proxy,
+            &prepared.builder.command,
+            vec![
+                "--spec".to_string(),
+                REMOTE_BUILD_SPEC_PATH.to_string(),
+                "--metadata-out".to_string(),
+                REMOTE_BUILD_METADATA_PATH.to_string(),
+            ],
+            None,
+            Some(REMOTE_BUILD_SCRATCH_DIR.to_string()),
+        )
+        .await?;
+
+        let metadata = read_rootfs_build_metadata(&proxy).await?;
+        eprintln!("📸 Snapshot created: {}", metadata.snapshot_id);
+        eprintln!("⚙️  Registering image '{}'...", plan.registered_name);
+        let registered = templates
+            .complete_build(
+                &prepared.build_id,
+                &CompleteSandboxTemplateBuildRequest {
+                    snapshot_id: metadata.snapshot_id.clone(),
+                    snapshot_uri: metadata.snapshot_uri.clone(),
+                    snapshot_format_version: metadata.snapshot_format_version.clone(),
+                    snapshot_size_bytes: metadata.snapshot_size_bytes,
+                    rootfs_disk_bytes: metadata.rootfs_disk_bytes,
+                    rootfs_node_kind: metadata.rootfs_node_kind,
+                    parent_manifest_uri: metadata.parent_manifest_uri.clone(),
+                },
+            )
+            .await?;
+
+        let template_id = registered.id.as_deref().unwrap_or("-");
+        eprintln!(
+            "✅ Image '{}' registered ({})",
+            plan.registered_name, template_id
+        );
+        Ok(())
+    }
+    .await;
+
+    if let Err(error) = sandboxes.delete(&sandbox_id).await {
+        eprintln!(
+            "⚠️  Failed to terminate build sandbox {} during cleanup: {}",
+            sandbox_id, error
+        );
+    }
+
+    result
+}
+
+async fn run_legacy_filesystem_builder(
+    ctx: &CliContext,
+    plan: &DockerfileBuildPlan,
+    disk_mb: Option<u64>,
+    cpus: Option<f64>,
+    memory_mb: Option<i64>,
+    is_public: bool,
+) -> Result<()> {
     let client = super::sandbox_lifecycle_client(ctx)?;
     let sandboxes = SandboxesClient::new(client.clone(), ctx.namespace.clone(), is_localhost(ctx));
     let templates = super::sandbox_templates_client(ctx)?;
@@ -109,7 +278,7 @@ pub async fn run(
         eprintln!("⚙️  Build sandbox {sandbox_id} is running");
 
         let proxy = sandbox_proxy_client(ctx, &client, &sandbox_id, routing_hint)?;
-        execute_dockerfile_plan(&proxy, &plan).await?;
+        execute_dockerfile_plan(&proxy, plan).await?;
 
         eprintln!("⚙️  Creating snapshot...");
         let snapshot = create_snapshot_and_wait(&sandboxes, &sandbox_id).await?;
@@ -147,6 +316,110 @@ pub async fn run(
     }
 
     result
+}
+
+fn legacy_image_build_enabled() -> bool {
+    std::env::var(LEGACY_IMAGE_BUILD_ENV)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+async fn upload_build_context(proxy: &SandboxProxyClient, context_dir: &Path) -> Result<()> {
+    run_streaming_process(
+        proxy,
+        "mkdir",
+        vec!["-p".to_string(), REMOTE_BUILD_CONTEXT_DIR.to_string()],
+        None,
+        None,
+    )
+    .await?;
+
+    for (full_path, relative_path) in collect_dir_files(context_dir, context_dir)? {
+        let remote_path = join_posix(REMOTE_BUILD_CONTEXT_DIR, &relative_path);
+        ensure_remote_parent_dir(proxy, &remote_path, &[]).await?;
+        let content = tokio::fs::read(&full_path).await.map_err(CliError::Io)?;
+        proxy.write_file(&remote_path, content).await?;
+    }
+
+    Ok(())
+}
+
+async fn copy_parent_rootfs_for_diff(proxy: &SandboxProxyClient) -> Result<()> {
+    eprintln!("⚙️  Capturing parent rootfs for offline diff...");
+    run_streaming_process(
+        proxy,
+        "sh",
+        vec![
+            "-c".to_string(),
+            format!(
+                "mkdir -p {scratch} && dd if={rootfs} of={parent} bs=16M conv=sparse status=none && sync",
+                scratch = shell_quote(REMOTE_BUILD_SCRATCH_DIR),
+                rootfs = shell_quote(REMOTE_ROOTFS_PATH),
+                parent = shell_quote(REMOTE_PARENT_ROOTFS_PATH),
+            ),
+        ],
+        None,
+        None,
+    )
+    .await
+}
+
+fn build_remote_build_spec(
+    prepared: &SandboxTemplateBuildPrepared,
+    plan: &DockerfileBuildPlan,
+    is_public: bool,
+) -> Result<Vec<u8>> {
+    let mut spec = serde_json::to_value(prepared)
+        .map_err(|error| CliError::Other(anyhow::anyhow!("failed to encode build spec: {error}")))?
+        .as_object()
+        .cloned()
+        .ok_or_else(|| {
+            CliError::Other(anyhow::anyhow!(
+                "prepared sandbox template build did not encode as an object"
+            ))
+        })?;
+    spec.insert(
+        "name".to_string(),
+        Value::String(plan.registered_name.clone()),
+    );
+    spec.insert(
+        "dockerfile".to_string(),
+        Value::String(plan.dockerfile_text.clone()),
+    );
+    spec.insert(
+        "baseImage".to_string(),
+        Value::String(plan.base_image.clone()),
+    );
+    spec.insert(
+        "contextDir".to_string(),
+        Value::String(REMOTE_BUILD_CONTEXT_DIR.to_string()),
+    );
+    spec.insert(
+        "rootfsPath".to_string(),
+        Value::String(REMOTE_ROOTFS_PATH.to_string()),
+    );
+    if prepared.rootfs_node_kind == RootfsNodeKind::Diff {
+        spec.insert(
+            "parentRootfsPath".to_string(),
+            Value::String(REMOTE_PARENT_ROOTFS_PATH.to_string()),
+        );
+    }
+    spec.insert("isPublic".to_string(), Value::Bool(is_public));
+
+    serde_json::to_vec(&Value::Object(spec)).map_err(|error| {
+        CliError::Other(anyhow::anyhow!("failed to serialize build spec: {error}"))
+    })
+}
+
+async fn read_rootfs_build_metadata(proxy: &SandboxProxyClient) -> Result<RootfsBuildMetadata> {
+    let bytes = proxy.read_file(REMOTE_BUILD_METADATA_PATH).await?;
+    serde_json::from_slice(bytes.as_slice()).map_err(|error| {
+        CliError::Other(anyhow::anyhow!(
+            "failed to parse rootfs builder metadata {}: {}",
+            REMOTE_BUILD_METADATA_PATH,
+            error
+        ))
+    })
 }
 
 fn sandbox_proxy_client(

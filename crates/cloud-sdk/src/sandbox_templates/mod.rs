@@ -7,7 +7,10 @@ use crate::{
 
 pub mod models;
 
-use models::{CreateSandboxTemplateRequest, SandboxTemplate};
+use models::{
+    CompleteSandboxTemplateBuildRequest, CreateSandboxTemplateRequest,
+    PrepareSandboxTemplateBuildRequest, SandboxTemplate, SandboxTemplateBuildPrepared,
+};
 
 #[derive(Clone)]
 pub struct SandboxTemplatesClient {
@@ -36,6 +39,13 @@ impl SandboxTemplatesClient {
         )
     }
 
+    fn builds_endpoint(&self) -> String {
+        format!(
+            "/platform/v1/organizations/{}/projects/{}/sandbox-template-builds",
+            self.organization_id, self.project_id
+        )
+    }
+
     pub async fn create(
         &self,
         request: &CreateSandboxTemplateRequest,
@@ -43,6 +53,28 @@ impl SandboxTemplatesClient {
         let req = self
             .client
             .build_post_json_request(Method::POST, &self.endpoint(), request)?;
+        self.client.execute_json(req).await
+    }
+
+    pub async fn prepare_build(
+        &self,
+        request: &PrepareSandboxTemplateBuildRequest,
+    ) -> Result<Traced<SandboxTemplateBuildPrepared>, SdkError> {
+        let req =
+            self.client
+                .build_post_json_request(Method::POST, &self.builds_endpoint(), request)?;
+        self.client.execute_json(req).await
+    }
+
+    pub async fn complete_build(
+        &self,
+        build_id: &str,
+        request: &CompleteSandboxTemplateBuildRequest,
+    ) -> Result<Traced<SandboxTemplate>, SdkError> {
+        let uri = format!("{}/{build_id}/complete", self.builds_endpoint());
+        let req = self
+            .client
+            .build_post_json_request(Method::POST, &uri, request)?;
         self.client.execute_json(req).await
     }
 }

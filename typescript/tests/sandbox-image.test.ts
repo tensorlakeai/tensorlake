@@ -553,4 +553,150 @@ describe("sandbox image helpers", () => {
     expect(registerImage).not.toHaveBeenCalled();
     expect(sandbox.terminate).toHaveBeenCalled();
   });
+
+  it("offline rootfs builder applies Dockerfile before snapshotting a diff", async () => {
+    vi.stubEnv("TENSORLAKE_API_URL", "https://api.tensorlake.ai");
+    vi.stubEnv("TENSORLAKE_API_KEY", "tl_key_test");
+    vi.stubEnv("INDEXIFY_NAMESPACE", "default");
+    vi.stubEnv("TENSORLAKE_ORGANIZATION_ID", "org_123");
+    vi.stubEnv("TENSORLAKE_PROJECT_ID", "proj_123");
+
+    const tempDir = await mkdir(
+      path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-offline`),
+      { recursive: true },
+    );
+    const dockerfilePath = path.join(tempDir, "Dockerfile");
+    await writeFile(
+      dockerfilePath,
+      "FROM base-private\nRUN touch /child\n",
+      "utf8",
+    );
+
+    const writes: Array<{ path: string; content: Uint8Array }> = [];
+    const sandbox = {
+      sandboxId: "sbx-builder",
+      run: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" })),
+      startProcess: vi.fn(async () => ({ pid: 1 })),
+      getStdout: vi.fn(async () => ({ pid: 1, lines: [], lineCount: 0 })),
+      getStderr: vi.fn(async () => ({ pid: 1, lines: [], lineCount: 0 })),
+      getProcess: vi.fn(async () => ({
+        pid: 1,
+        status: "exited",
+        stdinWritable: false,
+        command: "sh",
+        args: [],
+        startedAt: new Date(),
+        exitCode: 0,
+      })),
+      writeFile: vi.fn(async (filePath: string, content: Uint8Array) => {
+        writes.push({ path: filePath, content });
+      }),
+      readFile: vi.fn(async () =>
+        new TextEncoder().encode(
+          JSON.stringify({
+            snapshot_id: "snap-child",
+            snapshot_uri: "s3://snapshots/child.tlsnap",
+            snapshot_format_version: "durable_archive_v1",
+            rootfs_node_kind: "diff",
+            snapshot_size_bytes: 123,
+            rootfs_disk_bytes: 10 * 1024 * 1024 * 1024,
+            parent_manifest_uri: "s3://snapshots/parent.tlsnap",
+          }),
+        ),
+      ),
+      terminate: vi.fn(async () => {}),
+    };
+
+    const client = {
+      createAndConnect: vi.fn(async () => sandbox),
+      snapshotAndWait: vi.fn(),
+      close: vi.fn(() => {}),
+    };
+    const completeRootfsBuild = vi.fn(async () => ({ id: "tpl-1" }));
+
+    await createSandboxImage(
+      dockerfilePath,
+      {},
+      {
+        emit: () => {},
+        createClient: () => client as never,
+        prepareRootfsBuild: async () => ({
+          buildId: "build_1",
+          snapshotId: "snap-child",
+          snapshotUri: "s3://snapshots/child.tlsnap",
+          rootfsNodeKind: "diff",
+          builder: {
+            image: "base-private",
+            command: "tl-rootfs-build",
+            buildSpecVersion: "rootfs-build-spec-v1",
+            cpus: 2,
+            memoryMb: 4096,
+            diskMb: 32768,
+          },
+          upload: {
+            kind: "single_put",
+            method: "PUT",
+            url: "https://upload.example.test",
+          },
+        }),
+        completeRootfsBuild,
+        sleep: async () => {},
+      },
+    );
+
+    expect(client.createAndConnect).toHaveBeenCalledWith({
+      image: "base-private",
+      cpus: 2,
+      memoryMb: 4096,
+      diskMb: 32768,
+    });
+    expect(sandbox.run).toHaveBeenCalledWith("sh", {
+      args: [
+        "-c",
+        expect.stringContaining(
+          "dd if='/dev/vda' of='/tmp/tl-rootfs-build/parent-rootfs.img'",
+        ),
+      ],
+      env: undefined,
+      workingDir: undefined,
+    });
+    expect(sandbox.startProcess).toHaveBeenCalledWith(
+      "sh",
+      expect.objectContaining({
+        args: ["-c", "touch /child"],
+        workingDir: "/",
+      }),
+    );
+    expect(sandbox.run).toHaveBeenCalledWith(
+      "tl-rootfs-build",
+      expect.objectContaining({
+        args: [
+          "--spec",
+          "/tmp/tl-rootfs-build/build-spec.json",
+          "--metadata-out",
+          "/tmp/tl-rootfs-build/metadata.json",
+        ],
+        timeout: 3600,
+        workingDir: "/tmp/tl-rootfs-build",
+      }),
+    );
+    const specWrite = writes.find(
+      (write) => write.path === "/tmp/tl-rootfs-build/build-spec.json",
+    );
+    expect(specWrite).toBeDefined();
+    const spec = JSON.parse(new TextDecoder().decode(specWrite!.content));
+    expect(spec.rootfsPath).toBe("/dev/vda");
+    expect(spec.parentRootfsPath).toBe(
+      "/tmp/tl-rootfs-build/parent-rootfs.img",
+    );
+    expect(completeRootfsBuild).toHaveBeenCalledWith(
+      expect.anything(),
+      "build_1",
+      expect.objectContaining({
+        snapshot_id: "snap-child",
+        rootfs_node_kind: "diff",
+      }),
+    );
+    expect(sandbox.terminate).toHaveBeenCalled();
+  });
 });

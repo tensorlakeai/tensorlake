@@ -12,6 +12,13 @@ import { SandboxClient } from "./client.js";
 import { Image, dockerfileContent } from "./image.js";
 
 const BUILD_SANDBOX_PIP_ENV = { PIP_BREAK_SYSTEM_PACKAGES: "1" } as const;
+const REMOTE_BUILD_SCRATCH_DIR = "/tmp/tl-rootfs-build";
+const REMOTE_BUILD_SPEC_PATH = "/tmp/tl-rootfs-build/build-spec.json";
+const REMOTE_BUILD_METADATA_PATH = "/tmp/tl-rootfs-build/metadata.json";
+const REMOTE_BUILD_CONTEXT_DIR = "/tmp/tl-rootfs-build/context";
+const REMOTE_ROOTFS_PATH = "/dev/vda";
+const REMOTE_PARENT_ROOTFS_PATH = "/tmp/tl-rootfs-build/parent-rootfs.img";
+const LEGACY_IMAGE_BUILD_ENV = "TENSORLAKE_ENABLE_LEGACY_IMAGE_BUILD";
 const IGNORED_DOCKERFILE_INSTRUCTIONS = new Set([
   "CMD",
   "ENTRYPOINT",
@@ -93,6 +100,7 @@ interface BuildSandbox {
   getStderr(pid: number): Promise<OutputResponse>;
   getProcess(pid: number): Promise<ProcessInfo>;
   writeFile(path: string, content: Uint8Array): Promise<void>;
+  readFile(path: string): Promise<Uint8Array>;
   terminate(): Promise<void>;
 }
 
@@ -129,7 +137,40 @@ interface CreateSandboxImageDeps {
     isPublic: boolean,
     snapshotFormatVersion?: string,
   ) => Promise<Record<string, unknown>>;
+  prepareRootfsBuild?: (
+    context: BuildContext,
+    plan: DockerfileBuildPlan,
+    isPublic: boolean,
+  ) => Promise<PreparedRootfsBuild>;
+  completeRootfsBuild?: (
+    context: BuildContext,
+    buildId: string,
+    metadata: Record<string, unknown>,
+  ) => Promise<Record<string, unknown>>;
   sleep?: (ms: number) => Promise<void>;
+}
+
+interface PreparedRootfsBuild {
+  buildId: string;
+  snapshotId: string;
+  snapshotUri: string;
+  rootfsNodeKind: "base" | "diff";
+  builder: {
+    image: string;
+    command?: string;
+    buildSpecVersion: string;
+    cpus?: number;
+    memoryMb?: number;
+    diskMb?: number;
+  };
+  upload: {
+    kind: "single_put";
+    method: "PUT";
+    url: string;
+    headers?: Record<string, string>;
+    expiresAt?: string;
+  };
+  parent?: Record<string, unknown>;
 }
 
 export function defaultRegisteredName(dockerfilePath: string): string {
@@ -396,7 +437,10 @@ function parseCopyLikeValues(
   };
 }
 
-function parseEnvPairs(value: string, lineNumber: number): Array<[string, string]> {
+function parseEnvPairs(
+  value: string,
+  lineNumber: number,
+): Array<[string, string]> {
   const tokens = shellSplit(value);
   if (tokens.length === 0) {
     throw new Error(`line ${lineNumber}: ENV must include a key and value`);
@@ -419,7 +463,10 @@ function parseEnvPairs(value: string, lineNumber: number): Array<[string, string
   return [[tokens[0], tokens.slice(1).join(" ")]];
 }
 
-function resolveContainerPath(containerPath: string, workingDir: string): string {
+function resolveContainerPath(
+  containerPath: string,
+  workingDir: string,
+): string {
   if (!containerPath) {
     return workingDir;
   }
@@ -501,12 +548,16 @@ export async function loadDockerfilePlan(
 
 export function loadImagePlan(
   image: Image,
-  options: Pick<CreateSandboxImageOptions, "registeredName" | "contextDir"> = {},
+  options: Pick<
+    CreateSandboxImageOptions,
+    "registeredName" | "contextDir"
+  > = {},
 ): DockerfileBuildPlan {
   const contextDir = path.resolve(options.contextDir ?? process.cwd());
   const dockerfileText = dockerfileContent(image);
   const logicalLines = logicalDockerfileLines(dockerfileText);
-  const instructions = image.baseImage == null ? logicalLines : logicalLines.slice(1);
+  const instructions =
+    image.baseImage == null ? logicalLines : logicalLines.slice(1);
 
   return {
     dockerfilePath: path.join(contextDir, "Dockerfile"),
@@ -545,6 +596,12 @@ function stderrEmit(event: Record<string, unknown>) {
 function debugEnabled(): boolean {
   return ["1", "true", "yes", "on"].includes(
     (process.env.TENSORLAKE_DEBUG ?? "").toLowerCase(),
+  );
+}
+
+function legacyImageBuildEnabled(): boolean {
+  return ["1", "true", "yes", "on"].includes(
+    (process.env[LEGACY_IMAGE_BUILD_ENV] ?? "").toLowerCase(),
   );
 }
 
@@ -641,7 +698,11 @@ async function runStreaming(
   }
 
   const exitCode =
-    info.exitCode != null ? info.exitCode : info.signal != null ? -info.signal : 0;
+    info.exitCode != null
+      ? info.exitCode
+      : info.signal != null
+        ? -info.signal
+        : 0;
   if (exitCode !== 0) {
     throw new Error(
       `Command '${command} ${args.join(" ")}' failed with exit code ${exitCode}`,
@@ -662,7 +723,10 @@ function emitOutputLines(
 
 function isPathWithinContext(contextDir: string, localPath: string): boolean {
   const relative = path.relative(contextDir, localPath);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  return (
+    relative === "" ||
+    (!relative.startsWith("..") && !path.isAbsolute(relative))
+  );
 }
 
 function resolveContextSourcePath(contextDir: string, source: string): string {
@@ -702,11 +766,10 @@ async function copyLocalPathToSandbox(
       await runChecked(sandbox, "mkdir", ["-p", destinationPath]);
       await copyLocalPathToSandbox(sandbox, sourcePath, destinationPath);
     } else if (entry.isFile()) {
-      await runChecked(
-        sandbox,
-        "mkdir",
-        ["-p", path.posix.dirname(destinationPath)],
-      );
+      await runChecked(sandbox, "mkdir", [
+        "-p",
+        path.posix.dirname(destinationPath),
+      ]);
       await sandbox.writeFile(destinationPath, await readFile(sourcePath));
     }
   }
@@ -782,9 +845,13 @@ async function addUrlToSandbox(
 ) {
   let destinationPath = resolveContainerPath(destination, workingDir);
   const parsedUrl = new URL(url);
-  const fileName = path.posix.basename(parsedUrl.pathname.replace(/\/$/, "")) || "downloaded";
+  const fileName =
+    path.posix.basename(parsedUrl.pathname.replace(/\/$/, "")) || "downloaded";
   if (destinationPath.endsWith("/")) {
-    destinationPath = path.posix.join(destinationPath.replace(/\/$/, ""), fileName);
+    destinationPath = path.posix.join(
+      destinationPath.replace(/\/$/, ""),
+      fileName,
+    );
   }
 
   const parentDir = path.posix.dirname(destinationPath) || "/";
@@ -836,7 +903,9 @@ async function executeDockerfilePlan(
     if (keyword === "WORKDIR") {
       const tokens = shellSplit(value);
       if (tokens.length !== 1) {
-        throw new Error(`line ${lineNumber}: WORKDIR must include exactly one path`);
+        throw new Error(
+          `line ${lineNumber}: WORKDIR must include exactly one path`,
+        );
       }
       workingDir = resolveContainerPath(tokens[0], workingDir);
       emit({ type: "status", message: `WORKDIR ${workingDir}` });
@@ -877,10 +946,7 @@ async function executeDockerfilePlan(
         lineNumber,
         keyword,
       );
-      if (
-        sources.length === 1 &&
-        /^https?:\/\//.test(sources[0])
-      ) {
+      if (sources.length === 1 && /^https?:\/\//.test(sources[0])) {
         await addUrlToSandbox(
           sandbox,
           emit,
@@ -982,18 +1048,161 @@ async function registerImage(
   return text ? (JSON.parse(text) as Record<string, unknown>) : {};
 }
 
+function platformAuthHeaders(context: BuildContext): Record<string, string> {
+  const bearerToken = context.apiKey ?? context.personalAccessToken;
+  if (!bearerToken) {
+    throw new Error("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT.");
+  }
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${bearerToken}`,
+    "Content-Type": "application/json",
+  };
+  if (context.personalAccessToken && !context.apiKey) {
+    if (context.organizationId) {
+      headers["X-Forwarded-Organization-Id"] = context.organizationId;
+    }
+    if (context.projectId) {
+      headers["X-Forwarded-Project-Id"] = context.projectId;
+    }
+  }
+  return headers;
+}
+
+async function prepareRootfsBuild(
+  context: BuildContext,
+  plan: DockerfileBuildPlan,
+  isPublic: boolean,
+): Promise<PreparedRootfsBuild> {
+  if (!context.organizationId || !context.projectId) {
+    throw new Error(
+      "Organization ID and Project ID are required. Run 'tl login' and 'tl init'.",
+    );
+  }
+
+  const baseUrl = context.apiUrl.replace(/\/+$/, "");
+  const url =
+    `${baseUrl}/platform/v1/organizations/` +
+    `${encodeURIComponent(context.organizationId)}/projects/` +
+    `${encodeURIComponent(context.projectId)}/sandbox-template-builds`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: platformAuthHeaders(context),
+    body: JSON.stringify({
+      name: plan.registeredName,
+      dockerfile: plan.dockerfileText,
+      ...(plan.baseImage ? { baseImage: plan.baseImage } : {}),
+      public: isPublic,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `${response.status} ${response.statusText}: ${await response.text()}`,
+    );
+  }
+  return (await response.json()) as PreparedRootfsBuild;
+}
+
+async function completeRootfsBuild(
+  context: BuildContext,
+  buildId: string,
+  metadata: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (!context.organizationId || !context.projectId) {
+    throw new Error(
+      "Organization ID and Project ID are required. Run 'tl login' and 'tl init'.",
+    );
+  }
+
+  const baseUrl = context.apiUrl.replace(/\/+$/, "");
+  const url =
+    `${baseUrl}/platform/v1/organizations/` +
+    `${encodeURIComponent(context.organizationId)}/projects/` +
+    `${encodeURIComponent(context.projectId)}/sandbox-template-builds/` +
+    `${encodeURIComponent(buildId)}/complete`;
+
+  const body: Record<string, unknown> = {
+    snapshotId: metadata.snapshot_id,
+    snapshotUri: metadata.snapshot_uri,
+    snapshotFormatVersion: metadata.snapshot_format_version,
+    snapshotSizeBytes: metadata.snapshot_size_bytes,
+    rootfsDiskBytes: metadata.rootfs_disk_bytes,
+    rootfsNodeKind: metadata.rootfs_node_kind,
+  };
+  if (metadata.parent_manifest_uri != null) {
+    body.parentManifestUri = metadata.parent_manifest_uri;
+  }
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: platformAuthHeaders(context),
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `${response.status} ${response.statusText}: ${await response.text()}`,
+    );
+  }
+  const text = await response.text();
+  return text ? (JSON.parse(text) as Record<string, unknown>) : {};
+}
+
+async function uploadBuildContext(
+  sandbox: BuildSandbox,
+  localDir: string,
+  remoteDir: string,
+) {
+  await sandbox.run("mkdir", { args: ["-p", remoteDir] });
+  async function visit(dir: string, relBase = "") {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const localPath = path.join(dir, entry.name);
+      const relPath = relBase
+        ? path.posix.join(relBase, entry.name)
+        : entry.name;
+      const remotePath = path.posix.join(remoteDir, relPath);
+      if (entry.isDirectory()) {
+        await sandbox.run("mkdir", { args: ["-p", remotePath] });
+        await visit(localPath, relPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      await sandbox.run("mkdir", {
+        args: ["-p", path.posix.dirname(remotePath)],
+      });
+      await sandbox.writeFile(remotePath, await readFile(localPath));
+    }
+  }
+  await visit(localDir);
+}
+
+async function copyParentRootfsForDiff(
+  sandbox: BuildSandbox,
+  emit: (event: Record<string, unknown>) => void,
+) {
+  emit({ type: "status", message: "Capturing parent rootfs for diff" });
+  await runChecked(sandbox, "sh", [
+    "-c",
+    `mkdir -p ${shellQuote(REMOTE_BUILD_SCRATCH_DIR)} && dd if=${shellQuote(REMOTE_ROOTFS_PATH)} of=${shellQuote(REMOTE_PARENT_ROOTFS_PATH)} bs=16M conv=sparse status=none && sync`,
+  ]);
+}
+
 export async function createSandboxImage(
   source: SandboxImageSource,
   options: CreateSandboxImageOptions = {},
   deps: CreateSandboxImageDeps = {},
 ) {
   const emit = deps.emit ?? (options.verbose ? stderrEmit : noopEmit);
-  const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+  const sleep =
+    deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   const context = buildContextFromEnv();
   const clientFactory = deps.createClient ?? createDefaultClient;
-  const register =
-    deps.registerImage ??
-    ((...args) => registerImage(...args));
+  const register = deps.registerImage ?? ((...args) => registerImage(...args));
+  const prepare =
+    deps.prepareRootfsBuild ??
+    (deps.registerImage == null ? prepareRootfsBuild : undefined);
+  const complete = deps.completeRootfsBuild ?? completeRootfsBuild;
 
   const sourceLabel =
     typeof source === "string" ? source : `Image(${source.name})`;
@@ -1014,6 +1223,130 @@ export async function createSandboxImage(
   let sandbox: BuildSandbox | undefined;
 
   try {
+    if (prepare) {
+      try {
+        const prepared = await prepare(
+          context,
+          plan,
+          options.isPublic ?? false,
+        );
+        emit({
+          type: "status",
+          message: `Starting rootfs builder sandbox from ${prepared.builder.image}...`,
+        });
+        const builderDiskMb = prepared.builder.diskMb ?? options.diskMb;
+        sandbox = await client.createAndConnect({
+          image: prepared.builder.image,
+          cpus: prepared.builder.cpus ?? options.cpus ?? 2.0,
+          memoryMb: prepared.builder.memoryMb ?? options.memoryMb ?? 4096,
+          ...(builderDiskMb != null ? { diskMb: builderDiskMb } : {}),
+        });
+
+        await uploadBuildContext(
+          sandbox,
+          plan.contextDir,
+          REMOTE_BUILD_CONTEXT_DIR,
+        );
+        if (prepared.rootfsNodeKind === "diff") {
+          await copyParentRootfsForDiff(sandbox, emit);
+        }
+        await executeDockerfilePlan(sandbox, plan, emit, sleep);
+        await sandbox.writeFile(
+          REMOTE_BUILD_SPEC_PATH,
+          new TextEncoder().encode(
+            JSON.stringify({
+              ...prepared,
+              name: plan.registeredName,
+              dockerfile: plan.dockerfileText,
+              baseImage: plan.baseImage,
+              contextDir: REMOTE_BUILD_CONTEXT_DIR,
+              rootfsPath: REMOTE_ROOTFS_PATH,
+              ...(prepared.rootfsNodeKind === "diff"
+                ? { parentRootfsPath: REMOTE_PARENT_ROOTFS_PATH }
+                : {}),
+              isPublic: options.isPublic ?? false,
+            }),
+          ),
+        );
+
+        const result = await sandbox.run(
+          prepared.builder.command ?? "tl-rootfs-build",
+          {
+            args: [
+              "--spec",
+              REMOTE_BUILD_SPEC_PATH,
+              "--metadata-out",
+              REMOTE_BUILD_METADATA_PATH,
+            ],
+            timeout: 3600,
+            workingDir: REMOTE_BUILD_SCRATCH_DIR,
+          },
+        );
+        if (result.stdout) {
+          emit({ type: "build_log", stream: "stdout", message: result.stdout });
+        }
+        if (result.stderr) {
+          emit({ type: "build_log", stream: "stderr", message: result.stderr });
+        }
+        if (result.exitCode !== 0) {
+          throw new Error(
+            `Rootfs builder exited with code ${result.exitCode}: ${result.stderr}`,
+          );
+        }
+
+        const metadata = JSON.parse(
+          new TextDecoder().decode(
+            await sandbox.readFile(REMOTE_BUILD_METADATA_PATH),
+          ),
+        ) as Record<string, unknown>;
+        emit({
+          type: "snapshot_created",
+          snapshot_id: metadata.snapshot_id,
+        });
+        const registered = await complete(context, prepared.buildId, metadata);
+        emit({
+          type: "image_registered",
+          name: plan.registeredName,
+          image_id:
+            (typeof registered.id === "string" && registered.id) ||
+            (typeof registered.templateId === "string" &&
+              registered.templateId) ||
+            "",
+        });
+        emit({ type: "done" });
+        return registered;
+      } catch (error) {
+        if (!legacyImageBuildEnabled()) {
+          if (sandbox) {
+            try {
+              await sandbox.terminate();
+            } catch {
+              // Ignore cleanup failures while preserving the builder error.
+            }
+            sandbox = undefined;
+          }
+          throw new Error(
+            "Offline rootfs builder flow failed and legacy runtime snapshot image registration is disabled: " +
+              String(error instanceof Error ? error.message : error),
+          );
+        }
+        emit({
+          type: "warning",
+          message:
+            `Offline rootfs builder failed; falling back to legacy filesystem snapshot flow because ${LEGACY_IMAGE_BUILD_ENV}=1: ` +
+            String(error instanceof Error ? error.message : error),
+        });
+        if (sandbox) {
+          try {
+            await sandbox.terminate();
+          } catch {
+            // Ignore cleanup failures and continue with the legacy path.
+          }
+          sandbox = undefined;
+        }
+      }
+    }
+
     sandbox = await client.createAndConnect({
       ...(plan.baseImage == null ? {} : { image: plan.baseImage }),
       cpus: options.cpus ?? 2.0,
@@ -1104,7 +1437,9 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
 
   const dockerfilePath = parsed.positionals[0];
   if (!dockerfilePath) {
-    throw new Error("Usage: tensorlake-create-sandbox-image <dockerfile_path> [--name NAME] [--cpus N] [--memory MB] [--disk_mb MB] [--public]");
+    throw new Error(
+      "Usage: tensorlake-create-sandbox-image <dockerfile_path> [--name NAME] [--cpus N] [--memory MB] [--disk_mb MB] [--public]",
+    );
   }
 
   const cpus =
