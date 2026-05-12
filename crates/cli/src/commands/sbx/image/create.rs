@@ -47,7 +47,7 @@ struct DockerfileBuildPlan {
     base_image: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PreparedSandboxTemplateBuild {
     build_id: String,
@@ -58,7 +58,7 @@ struct PreparedSandboxTemplateBuild {
     parent: Option<PreparedRootfsParent>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PreparedRootfsBuilder {
     image: String,
@@ -68,10 +68,12 @@ struct PreparedRootfsBuilder {
     disk_mb: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PreparedRootfsParent {
     parent_manifest_uri: String,
+    #[serde(default)]
+    rootfs_disk_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -112,9 +114,8 @@ pub async fn run(
 
     let client = super::sandbox_lifecycle_client(ctx)?;
     let sandboxes = SandboxesClient::new(client.clone(), ctx.namespace.clone(), is_localhost(ctx));
-    let builder_disk_mb = disk_mb
-        .map(|requested| requested.max(prepared.builder.disk_mb))
-        .unwrap_or(prepared.builder.disk_mb);
+    let rootfs_disk_bytes = rootfs_disk_bytes(disk_mb, &prepared)?;
+    let builder_disk_mb = rootfs_disk_bytes_to_mb(rootfs_disk_bytes)?.max(prepared.builder.disk_mb);
     let resources = CreateSandboxResources {
         cpus: cpus.unwrap_or(prepared.builder.cpus),
         memory_mb: memory_mb.unwrap_or(prepared.builder.memory_mb),
@@ -153,7 +154,7 @@ pub async fn run(
 
         let proxy = sandbox_proxy_client(ctx, &client, &sandbox_id, routing_hint)?;
         wait_for_proxy_ready(&proxy).await?;
-        upload_build_inputs(&proxy, &plan, &prepared_spec, disk_mb).await?;
+        upload_build_inputs(&proxy, &plan, &prepared, &prepared_spec, disk_mb).await?;
 
         eprintln!("⚙️  Running offline rootfs builder...");
         run_rootfs_builder(&proxy, &prepared.builder.command).await?;
@@ -308,6 +309,7 @@ fn is_transient_proxy_error(error: &CliError) -> bool {
 async fn upload_build_inputs(
     proxy: &SandboxProxyClient,
     plan: &DockerfileBuildPlan,
+    prepared: &PreparedSandboxTemplateBuild,
     prepared_spec: &Value,
     disk_mb: Option<u64>,
 ) -> Result<()> {
@@ -315,7 +317,7 @@ async fn upload_build_inputs(
     copy_local_path(proxy, &plan.context_dir, REMOTE_CONTEXT_DIR).await?;
 
     let docker_config_json = resolved_docker_config_json().await?;
-    let spec = build_rootfs_spec(prepared_spec, plan, disk_mb, docker_config_json)?;
+    let spec = build_rootfs_spec(prepared_spec, prepared, plan, disk_mb, docker_config_json)?;
     ensure_remote_parent_dir(proxy, REMOTE_SPEC_PATH).await?;
     proxy
         .write_file(
@@ -328,6 +330,7 @@ async fn upload_build_inputs(
 
 fn build_rootfs_spec(
     prepared_spec: &Value,
+    prepared: &PreparedSandboxTemplateBuild,
     plan: &DockerfileBuildPlan,
     disk_mb: Option<u64>,
     docker_config_json: Option<String>,
@@ -353,7 +356,7 @@ fn build_rootfs_spec(
     );
     object.insert(
         "rootfsDiskBytes".to_string(),
-        Value::Number(rootfs_disk_bytes(disk_mb)?.into()),
+        Value::Number(rootfs_disk_bytes(disk_mb, prepared)?.into()),
     );
     if let Some(docker_config_json) = docker_config_json {
         object.insert(
@@ -365,11 +368,29 @@ fn build_rootfs_spec(
     Ok(spec)
 }
 
-fn rootfs_disk_bytes(disk_mb: Option<u64>) -> Result<u64> {
-    disk_mb
-        .unwrap_or(DEFAULT_ROOTFS_DISK_MB)
-        .checked_mul(1024 * 1024)
-        .ok_or_else(|| CliError::usage("--disk_mb is too large to convert to bytes"))
+fn rootfs_disk_bytes(disk_mb: Option<u64>, prepared: &PreparedSandboxTemplateBuild) -> Result<u64> {
+    if let Some(disk_mb) = disk_mb {
+        return disk_mb
+            .checked_mul(1024 * 1024)
+            .ok_or_else(|| CliError::usage("--disk_mb is too large to convert to bytes"));
+    }
+
+    if let Some(parent) = &prepared.parent {
+        return parent.rootfs_disk_bytes.ok_or_else(|| {
+            CliError::Other(anyhow::anyhow!(
+                "platform API did not return parent rootfsDiskBytes for diff build; pass --disk_mb explicitly or update Platform API"
+            ))
+        });
+    }
+
+    Ok(DEFAULT_ROOTFS_DISK_MB * 1024 * 1024)
+}
+
+fn rootfs_disk_bytes_to_mb(rootfs_disk_bytes: u64) -> Result<u64> {
+    rootfs_disk_bytes
+        .checked_add((1024 * 1024) - 1)
+        .ok_or_else(|| CliError::usage("rootfsDiskBytes is too large to convert to megabytes"))
+        .map(|bytes| bytes / (1024 * 1024))
 }
 
 async fn resolved_docker_config_json() -> Result<Option<String>> {
@@ -916,7 +937,7 @@ mod tests {
         CompleteSandboxTemplateBuildRequest, PreparedRootfsBuilder, PreparedRootfsParent,
         PreparedSandboxTemplateBuild, build_rootfs_spec, complete_request_from_metadata,
         default_registered_name, load_dockerfile_plan, logical_dockerfile_lines, normalize_posix,
-        rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes,
+        rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
     };
     use serde_json::{Value, json};
     use std::io::Write;
@@ -969,13 +990,46 @@ mod tests {
 
     #[test]
     fn rootfs_disk_bytes_uses_default_and_validates_overflow() {
-        assert_eq!(rootfs_disk_bytes(None).unwrap(), 10 * 1024 * 1024 * 1024);
-        assert!(rootfs_disk_bytes(Some(u64::MAX)).is_err());
+        let mut base = prepared_build("base");
+        base.parent = None;
+        let diff = prepared_build("diff");
+
+        assert_eq!(
+            rootfs_disk_bytes(None, &base).unwrap(),
+            10 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            rootfs_disk_bytes(None, &diff).unwrap(),
+            20 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            rootfs_disk_bytes(Some(2048), &diff).unwrap(),
+            2048 * 1024 * 1024
+        );
+        assert!(rootfs_disk_bytes(Some(u64::MAX), &base).is_err());
+    }
+
+    #[test]
+    fn rootfs_disk_bytes_requires_parent_size_for_diff_default() {
+        let mut prepared = prepared_build("diff");
+        prepared.parent.as_mut().unwrap().rootfs_disk_bytes = None;
+
+        let error = rootfs_disk_bytes(None, &prepared).unwrap_err();
+        assert!(
+            error.to_string().contains("parent rootfsDiskBytes"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rootfs_disk_bytes_to_mb_rounds_up() {
+        assert_eq!(rootfs_disk_bytes_to_mb(1024 * 1024).unwrap(), 1);
+        assert_eq!(rootfs_disk_bytes_to_mb((1024 * 1024) + 1).unwrap(), 2);
     }
 
     #[test]
     fn build_rootfs_spec_adds_cli_builder_inputs() {
-        let prepared = json!({
+        let prepared_spec = json!({
             "buildId": "build-1",
             "snapshotId": "snapshot-1",
             "snapshotUri": "s3://bucket/snapshot.tlsnap",
@@ -1000,6 +1054,8 @@ mod tests {
                 "guestBootContract": "supervisor-init-wrapper-v1"
             }
         });
+        let prepared: PreparedSandboxTemplateBuild =
+            serde_json::from_value(prepared_spec.clone()).unwrap();
         let plan = super::DockerfileBuildPlan {
             context_dir: "/tmp/context".into(),
             registered_name: "child".to_string(),
@@ -1007,7 +1063,14 @@ mod tests {
             base_image: "alpine".to_string(),
         };
 
-        let spec = build_rootfs_spec(&prepared, &plan, Some(2048), Some("{}".to_string())).unwrap();
+        let spec = build_rootfs_spec(
+            &prepared_spec,
+            &prepared,
+            &plan,
+            Some(2048),
+            Some("{}".to_string()),
+        )
+        .unwrap();
         assert_eq!(spec["dockerfile"], "FROM alpine\nRUN echo hi\n");
         assert_eq!(
             spec["contextDir"],
@@ -1015,6 +1078,21 @@ mod tests {
         );
         assert_eq!(spec["rootfsDiskBytes"], 2048_u64 * 1024 * 1024);
         assert_eq!(spec["dockerConfigJson"], "{}");
+    }
+
+    #[test]
+    fn build_rootfs_spec_defaults_diff_to_parent_rootfs_size() {
+        let prepared = prepared_build("diff");
+        let prepared_spec = serde_json::to_value(&prepared).unwrap();
+        let plan = super::DockerfileBuildPlan {
+            context_dir: "/tmp/context".into(),
+            registered_name: "child".to_string(),
+            dockerfile_text: "FROM parent\nRUN echo hi\n".to_string(),
+            base_image: "parent".to_string(),
+        };
+
+        let spec = build_rootfs_spec(&prepared_spec, &prepared, &plan, None, None).unwrap();
+        assert_eq!(spec["rootfsDiskBytes"], 20_u64 * 1024 * 1024 * 1024);
     }
 
     #[test]
@@ -1096,6 +1174,7 @@ mod tests {
             },
             parent: Some(PreparedRootfsParent {
                 parent_manifest_uri: "s3://bucket/parent.tlsnap".to_string(),
+                rootfs_disk_bytes: Some(20 * 1024 * 1024 * 1024),
             }),
         }
     }
