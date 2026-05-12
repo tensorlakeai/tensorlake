@@ -951,9 +951,11 @@ export async function registerImage(
   } else {
     if (!context.organizationId || !context.projectId) {
       throw new Error(
-        "Organization ID and Project ID are required when authenticating with " +
-          "a Personal Access Token. Set TENSORLAKE_API_KEY to skip this " +
-          "requirement, or run 'tl login' and 'tl init'.",
+        "Personal Access Token authentication requires " +
+          "TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID to be set " +
+          "(e.g. via 'tl login && tl init'). To skip this requirement, " +
+          "authenticate with TENSORLAKE_API_KEY instead — API keys are " +
+          "bound to a single project at creation.",
       );
     }
     url =
