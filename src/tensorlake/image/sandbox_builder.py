@@ -701,9 +701,7 @@ def _register_image(
     # headers for that path.
     bearer_token = ctx.api_key or ctx.personal_access_token
     if not bearer_token:
-        raise RuntimeError(
-            "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials."
-        )
+        raise RuntimeError("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.")
 
     headers = {
         "Authorization": f"Bearer {bearer_token}",

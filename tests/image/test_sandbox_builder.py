@@ -410,9 +410,7 @@ class TestRegisterImage(unittest.TestCase):
 
     def test_pat_without_scope_raises(self):
         ctx = self._make_ctx(personal_access_token="tl_pat_xyz")
-        with self.assertRaisesRegex(
-            RuntimeError, "Personal Access Token"
-        ):
+        with self.assertRaisesRegex(RuntimeError, "Personal Access Token"):
             sbm._register_image(
                 ctx,
                 "img",
