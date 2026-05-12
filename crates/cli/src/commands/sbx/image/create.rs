@@ -6,11 +6,13 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use docker_credentials_config::DockerConfig;
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use shlex::split as shlex_split;
 use tensorlake::{
     Client,
+    error::SdkError,
     sandboxes::{
         SandboxProxyClient, SandboxesClient,
         models::{CreateSandboxRequest, CreateSandboxResources, ProcessInfo},
@@ -27,6 +29,8 @@ const DEFAULT_ROOTFS_DISK_MB: u64 = 10 * 1024;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(300);
 const PROCESS_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const PROCESS_EXIT_POLL_ATTEMPTS: usize = 10;
+const PROXY_READY_TIMEOUT: Duration = Duration::from_secs(120);
+const PROXY_READY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const REMOTE_BUILD_DIR: &str = "/var/lib/tensorlake/rootfs-builder/build";
 const REMOTE_CONTEXT_DIR: &str = "/var/lib/tensorlake/rootfs-builder/build/context";
 const REMOTE_SPEC_PATH: &str = "/var/lib/tensorlake/rootfs-builder/build/spec.json";
@@ -148,6 +152,7 @@ pub async fn run(
         eprintln!("⚙️  Rootfs builder sandbox {sandbox_id} is running");
 
         let proxy = sandbox_proxy_client(ctx, &client, &sandbox_id, routing_hint)?;
+        wait_for_proxy_ready(&proxy).await?;
         upload_build_inputs(&proxy, &plan, &prepared_spec, disk_mb).await?;
 
         eprintln!("⚙️  Running offline rootfs builder...");
@@ -265,6 +270,39 @@ fn sandbox_proxy_client(
             .with_sandbox_id(sandbox_id_header)
             .with_routing_hint(routing_hint),
     )
+}
+
+async fn wait_for_proxy_ready(proxy: &SandboxProxyClient) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + PROXY_READY_TIMEOUT;
+    loop {
+        match run_streaming_process(proxy, "/bin/true", Vec::new(), None, None).await {
+            Ok(()) => return Ok(()),
+            Err(error) if is_transient_proxy_error(&error) => {
+                if tokio::time::Instant::now() > deadline {
+                    return Err(error);
+                }
+                tokio::time::sleep(PROXY_READY_POLL_INTERVAL).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn is_transient_proxy_error(error: &CliError) -> bool {
+    match error {
+        CliError::Sdk(SdkError::ServerError { status, message }) => {
+            matches!(
+                *status,
+                StatusCode::BAD_GATEWAY
+                    | StatusCode::SERVICE_UNAVAILABLE
+                    | StatusCode::GATEWAY_TIMEOUT
+            ) || (*status == StatusCode::BAD_REQUEST && message.contains("not running"))
+                || message.contains("PROXY_ERROR")
+                || message.contains("Failed to proxy request")
+        }
+        CliError::Http(error) => error.is_timeout() || error.is_connect(),
+        _ => false,
+    }
 }
 
 async fn upload_build_inputs(
