@@ -7,6 +7,8 @@ import {
   loadImagePlan,
   loadDockerfilePlan,
   logicalDockerfileLines,
+  registerImage,
+  type BuildContext,
 } from "../src/sandbox-image.js";
 import { Image, dockerfileContent } from "../src/image.js";
 
@@ -552,5 +554,144 @@ describe("sandbox image helpers", () => {
     expect(sandbox.writeFile).not.toHaveBeenCalled();
     expect(registerImage).not.toHaveBeenCalled();
     expect(sandbox.terminate).toHaveBeenCalled();
+  });
+});
+
+describe("registerImage url selection", () => {
+  const baseContext: BuildContext = {
+    apiUrl: "https://api.tensorlake.test",
+    apiKey: undefined,
+    personalAccessToken: undefined,
+    namespace: "default",
+    organizationId: undefined,
+    projectId: undefined,
+    debug: false,
+  };
+
+  function stubFetch() {
+    const fetchMock = vi.fn(async () =>
+      Promise.resolve(
+        new Response(JSON.stringify({ id: "tpl-1" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("uses the scope-less URL when authenticating with an API key", async () => {
+    const fetchMock = stubFetch();
+    await registerImage(
+      { ...baseContext, apiKey: "tl_apiKey_abc" },
+      "img",
+      "FROM python",
+      "snap-1",
+      "sbx-1",
+      "s3://x",
+      100,
+      200,
+      false,
+    );
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://api.tensorlake.test/platform/v1/sandbox-templates");
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer tl_apiKey_abc");
+    expect(headers["X-Forwarded-Organization-Id"]).toBeUndefined();
+    expect(headers["X-Forwarded-Project-Id"]).toBeUndefined();
+  });
+
+  it("ignores env org/project values when an API key is present", async () => {
+    const fetchMock = stubFetch();
+    await registerImage(
+      {
+        ...baseContext,
+        apiKey: "tl_apiKey_abc",
+        organizationId: "org_env",
+        projectId: "proj_env",
+      },
+      "img",
+      "FROM python",
+      "snap-1",
+      "sbx-1",
+      "s3://x",
+      100,
+      200,
+      false,
+    );
+
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).not.toContain("/organizations/");
+    expect(url).not.toContain("/projects/");
+  });
+
+  it("keeps the scoped URL and X-Forwarded headers for PAT auth", async () => {
+    const fetchMock = stubFetch();
+    await registerImage(
+      {
+        ...baseContext,
+        personalAccessToken: "tl_pat_xyz",
+        organizationId: "org_1",
+        projectId: "proj_1",
+      },
+      "img",
+      "FROM python",
+      "snap-1",
+      "sbx-1",
+      "s3://x",
+      100,
+      200,
+      false,
+    );
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(
+      "https://api.tensorlake.test/platform/v1/organizations/org_1/projects/proj_1/sandbox-templates",
+    );
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers["X-Forwarded-Organization-Id"]).toBe("org_1");
+    expect(headers["X-Forwarded-Project-Id"]).toBe("proj_1");
+    expect(headers.Authorization).toBe("Bearer tl_pat_xyz");
+  });
+
+  it("throws when authenticating with PAT but no org/project", async () => {
+    stubFetch();
+    await expect(
+      registerImage(
+        { ...baseContext, personalAccessToken: "tl_pat_xyz" },
+        "img",
+        "FROM python",
+        "snap-1",
+        "sbx-1",
+        "s3://x",
+        100,
+        200,
+        false,
+      ),
+    ).rejects.toThrow(/Personal Access Token/);
+  });
+
+  it("throws when no credentials are configured at all", async () => {
+    stubFetch();
+    await expect(
+      registerImage(
+        { ...baseContext },
+        "img",
+        "FROM python",
+        "snap-1",
+        "sbx-1",
+        "s3://x",
+        100,
+        200,
+        false,
+      ),
+    ).rejects.toThrow(/Missing TENSORLAKE_API_KEY/);
   });
 });
