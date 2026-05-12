@@ -135,6 +135,13 @@ async fn run_offline_rootfs_builder(
         .await?
         .into_inner();
 
+    if requires_oci_base_import(&prepared, plan) {
+        return Err(CliError::Other(anyhow::anyhow!(
+            "Platform API prepared this Dockerfile as a customer-owned rootfs base for OCI image {:?}, but this CLI cannot yet materialize OCI filesystems inside the offline rootfs builder. Use a registered Tensorlake rootfs base for now, or wait for the Docker export rootfs materializer.",
+            plan.base_image
+        )));
+    }
+
     let resources = CreateSandboxResources {
         cpus: prepared.builder.cpus,
         memory_mb: prepared.builder.memory_mb,
@@ -380,6 +387,13 @@ async fn copy_parent_rootfs_for_diff(proxy: &SandboxProxyClient) -> Result<()> {
         None,
     )
     .await
+}
+
+fn requires_oci_base_import(
+    prepared: &SandboxTemplateBuildPrepared,
+    plan: &DockerfileBuildPlan,
+) -> bool {
+    prepared.rootfs_node_kind == RootfsNodeKind::Base && prepared.builder.image != plan.base_image
 }
 
 fn build_remote_build_spec(
@@ -1364,12 +1378,15 @@ fn file_name_string(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_registered_name, load_dockerfile_plan, logical_dockerfile_lines, normalize_posix,
-        parse_copy_like_values, parse_env_pairs, resolve_container_path,
-        resolve_context_source_path, resolve_rootfs_builder_command, wait_for_snapshot,
+        DockerfileBuildPlan, default_registered_name, load_dockerfile_plan,
+        logical_dockerfile_lines, normalize_posix, parse_copy_like_values, parse_env_pairs,
+        requires_oci_base_import, resolve_container_path, resolve_context_source_path,
+        resolve_rootfs_builder_command, wait_for_snapshot,
     };
-    use std::{cell::Cell, io::Write, time::Duration};
-    use tensorlake::sandboxes::models::SnapshotInfo;
+    use std::{cell::Cell, io::Write, path::PathBuf, time::Duration};
+    use tensorlake::{
+        sandbox_templates::models::SandboxTemplateBuildPrepared, sandboxes::models::SnapshotInfo,
+    };
 
     #[test]
     fn default_registered_name_uses_parent_for_dockerfile() {
@@ -1445,6 +1462,46 @@ mod tests {
             resolve_rootfs_builder_command(""),
             "/usr/local/bin/tl-rootfs-build"
         );
+    }
+
+    #[test]
+    fn requires_oci_base_import_when_base_builder_differs_from_from_image() {
+        let plan = DockerfileBuildPlan {
+            context_dir: PathBuf::from("/tmp/context"),
+            registered_name: "alpine-custom".to_string(),
+            dockerfile_text: "FROM alpine:3.20\n".to_string(),
+            base_image: "alpine:3.20".to_string(),
+            instructions: vec![],
+        };
+        let prepared: SandboxTemplateBuildPrepared = serde_json::from_value(serde_json::json!({
+            "buildId": "build_1",
+            "snapshotId": "snap-base",
+            "snapshotUri": "s3://snapshots/base.tlsnap",
+            "rootfsNodeKind": "base",
+            "builder": {
+                "image": "tensorlake/rootfs-builder",
+                "command": "tl-rootfs-build",
+                "buildSpecVersion": "rootfs-build-spec-v1",
+                "cpus": 2.0,
+                "memoryMb": 4096,
+                "diskMb": 32768
+            },
+            "upload": {
+                "kind": "single_put",
+                "method": "PUT",
+                "url": "https://upload.example.test",
+                "headers": {},
+                "expiresAt": "2026-05-12T00:00:00.000Z"
+            },
+            "runtimeContract": {
+                "guestRuntimeLayout": "external-drive",
+                "guestRuntimeDriveFormat": "ext4",
+                "guestBootContract": "supervisor-init"
+            }
+        }))
+        .unwrap();
+
+        assert!(requires_oci_base_import(&prepared, &plan));
     }
 
     #[test]

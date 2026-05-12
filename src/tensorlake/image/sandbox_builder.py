@@ -870,6 +870,16 @@ def _copy_parent_rootfs_for_diff(
     )
 
 
+def _requires_oci_base_import(prepared: dict, plan: DockerfileBuildPlan) -> bool:
+    builder = prepared.get("builder")
+    builder_image = builder.get("image") if isinstance(builder, dict) else None
+    return (
+        prepared.get("rootfsNodeKind") == "base"
+        and bool(plan.base_image)
+        and builder_image != plan.base_image
+    )
+
+
 def _run_plan_remote_builder(
     plan: DockerfileBuildPlan,
     ctx: Context,
@@ -882,6 +892,15 @@ def _run_plan_remote_builder(
 ) -> dict:
     builder = prepared["builder"]
     build_id = prepared["buildId"]
+    if _requires_oci_base_import(prepared, plan):
+        raise SandboxImageBuildError(
+            "Platform API prepared this Dockerfile as a customer-owned rootfs "
+            f"base for OCI image {plan.base_image!r}, but this SDK cannot yet "
+            "materialize OCI filesystems inside the offline rootfs builder. "
+            "Use a registered Tensorlake rootfs base for now, or wait for the "
+            "Docker export rootfs materializer."
+        )
+
     sandbox_client = SandboxClient(
         api_url=ctx.api_url,
         api_key=ctx.api_key or ctx.personal_access_token,

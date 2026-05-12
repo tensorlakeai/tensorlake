@@ -458,6 +458,57 @@ class TestOfflineRootfsBuilder(unittest.TestCase):
         complete.assert_called_once()
         sandbox.terminate.assert_called_once_with()
 
+    def test_remote_builder_rejects_unmaterialized_oci_base_import(self):
+        ctx = SimpleNamespace(
+            api_url="https://api.example.test",
+            api_key="key",
+            personal_access_token=None,
+            organization_id="org_1",
+            project_id="project_1",
+        )
+        prepared = {
+            "buildId": "build_1",
+            "snapshotId": "snap-base",
+            "snapshotUri": "s3://snapshots/base.tlsnap",
+            "rootfsNodeKind": "base",
+            "builder": {
+                "image": "tensorlake/rootfs-builder",
+                "command": "tl-rootfs-build",
+                "cpus": 2,
+                "memoryMb": 4096,
+                "diskMb": 32768,
+            },
+            "upload": {
+                "kind": "single_put",
+                "method": "PUT",
+                "url": "https://upload.example.test",
+            },
+        }
+        plan = sbm.DockerfileBuildPlan(
+            dockerfile_path="Dockerfile",
+            context_dir="/no/such/context",
+            registered_name="alpine-custom",
+            dockerfile_text="FROM alpine:3.20\n",
+            base_image="alpine:3.20",
+            instructions=[],
+        )
+
+        with patch.object(sbm, "SandboxClient") as sandbox_client_cls:
+            with self.assertRaises(sbm.SandboxImageBuildError) as err:
+                sbm._run_plan_remote_builder(
+                    plan,
+                    ctx,  # type: ignore[arg-type]
+                    BUILD_CPUS,
+                    BUILD_MEMORY_MB,
+                    False,
+                    sbm._noop_emit,
+                    None,
+                    prepared,
+                )
+
+        self.assertIn("customer-owned rootfs base", str(err.exception))
+        sandbox_client_cls.assert_not_called()
+
     def test_remote_builder_respects_absolute_command(self):
         self.assertEqual(
             sbm._resolve_rootfs_builder_command("/opt/bin/tl-rootfs-build"),

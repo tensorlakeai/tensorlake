@@ -700,4 +700,58 @@ describe("sandbox image helpers", () => {
     );
     expect(sandbox.terminate).toHaveBeenCalled();
   });
+
+  it("offline rootfs builder rejects unmaterialized OCI base imports", async () => {
+    vi.stubEnv("TENSORLAKE_API_URL", "https://api.tensorlake.ai");
+    vi.stubEnv("TENSORLAKE_API_KEY", "tl_key_test");
+    vi.stubEnv("INDEXIFY_NAMESPACE", "default");
+    vi.stubEnv("TENSORLAKE_ORGANIZATION_ID", "org_123");
+    vi.stubEnv("TENSORLAKE_PROJECT_ID", "proj_123");
+
+    const tempDir = await mkdir(
+      path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-oci-base`),
+      { recursive: true },
+    );
+    const dockerfilePath = path.join(tempDir, "Dockerfile");
+    await writeFile(dockerfilePath, "FROM alpine:3.20\n", "utf8");
+
+    const client = {
+      createAndConnect: vi.fn(),
+      snapshotAndWait: vi.fn(),
+      close: vi.fn(() => {}),
+    };
+
+    await expect(
+      createSandboxImage(
+        dockerfilePath,
+        {},
+        {
+          emit: () => {},
+          createClient: () => client as never,
+          prepareRootfsBuild: async () => ({
+            buildId: "build_1",
+            snapshotId: "snap-base",
+            snapshotUri: "s3://snapshots/base.tlsnap",
+            rootfsNodeKind: "base",
+            builder: {
+              image: "tensorlake/rootfs-builder",
+              command: "tl-rootfs-build",
+              buildSpecVersion: "rootfs-build-spec-v1",
+              cpus: 2,
+              memoryMb: 4096,
+              diskMb: 32768,
+            },
+            upload: {
+              kind: "single_put",
+              method: "PUT",
+              url: "https://upload.example.test",
+            },
+          }),
+          sleep: async () => {},
+        },
+      ),
+    ).rejects.toThrow("customer-owned rootfs base");
+
+    expect(client.createAndConnect).not.toHaveBeenCalled();
+  });
 });

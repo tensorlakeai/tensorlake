@@ -1203,6 +1203,17 @@ async function copyParentRootfsForDiff(
   ]);
 }
 
+function requiresOciBaseImport(
+  prepared: PreparedRootfsBuild,
+  plan: DockerfileBuildPlan,
+): boolean {
+  return (
+    prepared.rootfsNodeKind === "base" &&
+    plan.baseImage != null &&
+    prepared.builder.image !== plan.baseImage
+  );
+}
+
 export async function createSandboxImage(
   source: SandboxImageSource,
   options: CreateSandboxImageOptions = {},
@@ -1245,6 +1256,11 @@ export async function createSandboxImage(
           plan,
           options.isPublic ?? false,
         );
+        if (requiresOciBaseImport(prepared, plan)) {
+          throw new Error(
+            `Platform API prepared this Dockerfile as a customer-owned rootfs base for OCI image ${JSON.stringify(plan.baseImage)}, but this SDK cannot yet materialize OCI filesystems inside the offline rootfs builder. Use a registered Tensorlake rootfs base for now, or wait for the Docker export rootfs materializer.`,
+          );
+        }
         emit({
           type: "status",
           message: `Starting rootfs builder sandbox from ${prepared.builder.image}...`,
