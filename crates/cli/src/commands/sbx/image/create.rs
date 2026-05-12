@@ -31,6 +31,9 @@ const REMOTE_BUILD_DIR: &str = "/var/lib/tensorlake/rootfs-builder/build";
 const REMOTE_CONTEXT_DIR: &str = "/var/lib/tensorlake/rootfs-builder/build/context";
 const REMOTE_SPEC_PATH: &str = "/var/lib/tensorlake/rootfs-builder/build/spec.json";
 const REMOTE_METADATA_PATH: &str = "/var/lib/tensorlake/rootfs-builder/build/metadata.json";
+const ROOTFS_BUILDER_BIN_DIR: &str = "/usr/local/bin";
+const ROOTFS_BUILDER_PATH: &str = "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const ROOTFS_BUILDER_COMMAND: &str = "tl-rootfs-build";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DockerfileBuildPlan {
@@ -386,14 +389,32 @@ async fn run_rootfs_builder(proxy: &SandboxProxyClient, command: &str) -> Result
         REMOTE_METADATA_PATH.to_string(),
     ]);
 
+    let executable = rootfs_builder_executable(executable);
     run_streaming_process(
         proxy,
-        executable,
+        &executable,
         args,
-        None,
+        Some(rootfs_builder_env()),
         Some(REMOTE_BUILD_DIR.to_string()),
     )
     .await
+}
+
+fn rootfs_builder_executable(executable: &str) -> String {
+    if executable == ROOTFS_BUILDER_COMMAND {
+        format!("{ROOTFS_BUILDER_BIN_DIR}/{ROOTFS_BUILDER_COMMAND}")
+    } else {
+        executable.to_string()
+    }
+}
+
+fn rootfs_builder_env() -> Map<String, Value> {
+    let mut env = Map::new();
+    env.insert(
+        "PATH".to_string(),
+        Value::String(ROOTFS_BUILDER_PATH.to_string()),
+    );
+    env
 }
 
 async fn read_build_metadata(proxy: &SandboxProxyClient) -> Result<Value> {
@@ -857,7 +878,7 @@ mod tests {
         CompleteSandboxTemplateBuildRequest, PreparedRootfsBuilder, PreparedRootfsParent,
         PreparedSandboxTemplateBuild, build_rootfs_spec, complete_request_from_metadata,
         default_registered_name, load_dockerfile_plan, logical_dockerfile_lines, normalize_posix,
-        rootfs_disk_bytes,
+        rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes,
     };
     use serde_json::{Value, json};
     use std::io::Write;
@@ -956,6 +977,24 @@ mod tests {
         );
         assert_eq!(spec["rootfsDiskBytes"], 2048_u64 * 1024 * 1024);
         assert_eq!(spec["dockerConfigJson"], "{}");
+    }
+
+    #[test]
+    fn rootfs_builder_command_uses_installed_path_and_tool_path() {
+        assert_eq!(
+            rootfs_builder_executable("tl-rootfs-build"),
+            "/usr/local/bin/tl-rootfs-build"
+        );
+        assert_eq!(
+            rootfs_builder_executable("/custom/tl-rootfs-build"),
+            "/custom/tl-rootfs-build"
+        );
+
+        let env = rootfs_builder_env();
+        assert_eq!(
+            env.get("PATH").and_then(Value::as_str),
+            Some("/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        );
     }
 
     #[test]
