@@ -56,6 +56,9 @@ _REMOTE_BUILD_METADATA_PATH = "/tmp/tl-rootfs-build/metadata.json"
 _REMOTE_BUILD_CONTEXT_DIR = "/tmp/tl-rootfs-build/context"
 _REMOTE_ROOTFS_PATH = "/dev/vda"
 _REMOTE_PARENT_ROOTFS_PATH = "/tmp/tl-rootfs-build/parent-rootfs.img"
+_ROOTFS_BUILDER_COMMAND_DIR = "/usr/local/bin"
+_ROOTFS_BUILDER_DEFAULT_COMMAND = "tl-rootfs-build"
+_ROOTFS_BUILDER_ENV = {"PATH": "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
 _LEGACY_IMAGE_BUILD_ENV = "TENSORLAKE_ENABLE_LEGACY_IMAGE_BUILD"
 
 
@@ -819,6 +822,13 @@ def _complete_offline_rootfs_build(
     return resp.json()
 
 
+def _resolve_rootfs_builder_command(command: str | None) -> str:
+    resolved = command or _ROOTFS_BUILDER_DEFAULT_COMMAND
+    if "/" in resolved:
+        return resolved
+    return posixpath.join(_ROOTFS_BUILDER_COMMAND_DIR, resolved)
+
+
 def _upload_build_context(
     sandbox: Sandbox,
     context_dir: str,
@@ -922,13 +932,14 @@ def _run_plan_remote_builder(
 
         emit({"type": "status", "message": "Running rootfs builder..."})
         result = sandbox.run(
-            builder.get("command", "tl-rootfs-build"),
+            _resolve_rootfs_builder_command(builder.get("command")),
             args=[
                 "--spec",
                 _REMOTE_BUILD_SPEC_PATH,
                 "--metadata-out",
                 _REMOTE_BUILD_METADATA_PATH,
             ],
+            env=_ROOTFS_BUILDER_ENV,
             timeout=3600,
             working_dir=_REMOTE_BUILD_SCRATCH_DIR,
         )

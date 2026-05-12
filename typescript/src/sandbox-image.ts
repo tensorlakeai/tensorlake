@@ -18,6 +18,11 @@ const REMOTE_BUILD_METADATA_PATH = "/tmp/tl-rootfs-build/metadata.json";
 const REMOTE_BUILD_CONTEXT_DIR = "/tmp/tl-rootfs-build/context";
 const REMOTE_ROOTFS_PATH = "/dev/vda";
 const REMOTE_PARENT_ROOTFS_PATH = "/tmp/tl-rootfs-build/parent-rootfs.img";
+const ROOTFS_BUILDER_COMMAND_DIR = "/usr/local/bin";
+const ROOTFS_BUILDER_DEFAULT_COMMAND = "tl-rootfs-build";
+const ROOTFS_BUILDER_ENV = {
+  PATH: "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+} as const;
 const LEGACY_IMAGE_BUILD_ENV = "TENSORLAKE_ENABLE_LEGACY_IMAGE_BUILD";
 const IGNORED_DOCKERFILE_INSTRUCTIONS = new Set([
   "CMD",
@@ -603,6 +608,16 @@ function legacyImageBuildEnabled(): boolean {
   return ["1", "true", "yes", "on"].includes(
     (process.env[LEGACY_IMAGE_BUILD_ENV] ?? "").toLowerCase(),
   );
+}
+
+function resolveRootfsBuilderCommand(command?: string): string {
+  const resolved =
+    command == null || command.length === 0
+      ? ROOTFS_BUILDER_DEFAULT_COMMAND
+      : command;
+  return resolved.includes("/")
+    ? resolved
+    : `${ROOTFS_BUILDER_COMMAND_DIR}/${resolved}`;
 }
 
 function buildContextFromEnv(): BuildContext {
@@ -1270,7 +1285,7 @@ export async function createSandboxImage(
         );
 
         const result = await sandbox.run(
-          prepared.builder.command ?? "tl-rootfs-build",
+          resolveRootfsBuilderCommand(prepared.builder.command),
           {
             args: [
               "--spec",
@@ -1278,6 +1293,7 @@ export async function createSandboxImage(
               "--metadata-out",
               REMOTE_BUILD_METADATA_PATH,
             ],
+            env: ROOTFS_BUILDER_ENV,
             timeout: 3600,
             workingDir: REMOTE_BUILD_SCRATCH_DIR,
           },

@@ -36,6 +36,9 @@ const REMOTE_BUILD_METADATA_PATH: &str = "/tmp/tl-rootfs-build/metadata.json";
 const REMOTE_BUILD_CONTEXT_DIR: &str = "/tmp/tl-rootfs-build/context";
 const REMOTE_ROOTFS_PATH: &str = "/dev/vda";
 const REMOTE_PARENT_ROOTFS_PATH: &str = "/tmp/tl-rootfs-build/parent-rootfs.img";
+const ROOTFS_BUILDER_COMMAND_DIR: &str = "/usr/local/bin";
+const ROOTFS_BUILDER_DEFAULT_COMMAND: &str = "tl-rootfs-build";
+const ROOTFS_BUILDER_PATH: &str = "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const LEGACY_IMAGE_BUILD_ENV: &str = "TENSORLAKE_ENABLE_LEGACY_IMAGE_BUILD";
 const SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SNAPSHOT_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -181,16 +184,18 @@ async fn run_offline_rootfs_builder(
             .map_err(CliError::from)?;
 
         eprintln!("⚙️  Running rootfs builder...");
+        let builder_command = resolve_rootfs_builder_command(&prepared.builder.command);
+        let builder_env = vec![("PATH".to_string(), ROOTFS_BUILDER_PATH.to_string())];
         run_streaming_process(
             &proxy,
-            &prepared.builder.command,
+            &builder_command,
             vec![
                 "--spec".to_string(),
                 REMOTE_BUILD_SPEC_PATH.to_string(),
                 "--metadata-out".to_string(),
                 REMOTE_BUILD_METADATA_PATH.to_string(),
             ],
-            None,
+            Some(build_env_map(&builder_env)),
             Some(REMOTE_BUILD_SCRATCH_DIR.to_string()),
         )
         .await?;
@@ -230,6 +235,19 @@ async fn run_offline_rootfs_builder(
     }
 
     result
+}
+
+fn resolve_rootfs_builder_command(command: &str) -> String {
+    let command = if command.is_empty() {
+        ROOTFS_BUILDER_DEFAULT_COMMAND
+    } else {
+        command
+    };
+    if command.contains('/') {
+        command.to_string()
+    } else {
+        format!("{ROOTFS_BUILDER_COMMAND_DIR}/{command}")
+    }
 }
 
 async fn run_legacy_filesystem_builder(
@@ -1348,7 +1366,7 @@ mod tests {
     use super::{
         default_registered_name, load_dockerfile_plan, logical_dockerfile_lines, normalize_posix,
         parse_copy_like_values, parse_env_pairs, resolve_container_path,
-        resolve_context_source_path, wait_for_snapshot,
+        resolve_context_source_path, resolve_rootfs_builder_command, wait_for_snapshot,
     };
     use std::{cell::Cell, io::Write, time::Duration};
     use tensorlake::sandboxes::models::SnapshotInfo;
@@ -1410,6 +1428,22 @@ mod tests {
         assert_eq!(
             resolve_container_path("dst/", "/workspace"),
             "/workspace/dst/"
+        );
+    }
+
+    #[test]
+    fn resolve_rootfs_builder_command_prefers_usr_local_bin_for_bare_commands() {
+        assert_eq!(
+            resolve_rootfs_builder_command("tl-rootfs-build"),
+            "/usr/local/bin/tl-rootfs-build"
+        );
+        assert_eq!(
+            resolve_rootfs_builder_command("/opt/tl-rootfs-build"),
+            "/opt/tl-rootfs-build"
+        );
+        assert_eq!(
+            resolve_rootfs_builder_command(""),
+            "/usr/local/bin/tl-rootfs-build"
         );
     }
 

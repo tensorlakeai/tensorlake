@@ -444,13 +444,25 @@ class TestOfflineRootfsBuilder(unittest.TestCase):
             "/tmp/tl-rootfs-build/parent-rootfs.img",
         )
         sandbox.run.assert_called_once()
-        self.assertEqual(sandbox.run.call_args.args[0], "tl-rootfs-build")
+        self.assertEqual(
+            sandbox.run.call_args.args[0], "/usr/local/bin/tl-rootfs-build"
+        )
         self.assertEqual(
             sandbox.run.call_args.kwargs["working_dir"],
             "/tmp/tl-rootfs-build",
         )
+        self.assertEqual(
+            sandbox.run.call_args.kwargs["env"],
+            {"PATH": "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+        )
         complete.assert_called_once()
         sandbox.terminate.assert_called_once_with()
+
+    def test_remote_builder_respects_absolute_command(self):
+        self.assertEqual(
+            sbm._resolve_rootfs_builder_command("/opt/bin/tl-rootfs-build"),
+            "/opt/bin/tl-rootfs-build",
+        )
 
 
 if __name__ == "__main__":

@@ -668,7 +668,7 @@ describe("sandbox image helpers", () => {
       }),
     );
     expect(sandbox.run).toHaveBeenCalledWith(
-      "tl-rootfs-build",
+      "/usr/local/bin/tl-rootfs-build",
       expect.objectContaining({
         args: [
           "--spec",
@@ -676,6 +676,7 @@ describe("sandbox image helpers", () => {
           "--metadata-out",
           "/tmp/tl-rootfs-build/metadata.json",
         ],
+        env: { PATH: "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" },
         timeout: 3600,
         workingDir: "/tmp/tl-rootfs-build",
       }),
