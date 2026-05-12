@@ -309,5 +309,135 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
             sbm.build_sandbox_image(12345)  # type: ignore[arg-type]
 
 
+class TestRegisterImage(unittest.TestCase):
+    """Coverage for _register_image's branching on api_key vs PAT auth."""
+
+    def _make_ctx(self, **overrides):
+        defaults = dict(
+            api_url="https://api.tensorlake.test",
+            api_key=None,
+            personal_access_token=None,
+            organization_id=None,
+            project_id=None,
+        )
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    def _mock_response(self):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"id": "tpl-1"}
+        return resp
+
+    def test_api_key_uses_scope_less_route_without_forwarded_headers(self):
+        ctx = self._make_ctx(api_key="tl_apiKey_abc")
+        with patch.object(sbm, "httpx") as httpx_mock:
+            httpx_mock.post.return_value = self._mock_response()
+            sbm._register_image(
+                ctx,
+                "img",
+                "FROM python",
+                "snap-1",
+                "sbx-1",
+                "s3://x",
+                100,
+                200,
+            )
+
+        call_kwargs = httpx_mock.post.call_args
+        url = call_kwargs.args[0]
+        headers = call_kwargs.kwargs["headers"]
+        self.assertEqual(
+            url, "https://api.tensorlake.test/platform/v1/sandbox-templates"
+        )
+        self.assertEqual(headers["Authorization"], "Bearer tl_apiKey_abc")
+        self.assertNotIn("X-Forwarded-Organization-Id", headers)
+        self.assertNotIn("X-Forwarded-Project-Id", headers)
+
+    def test_api_key_ignores_env_var_org_project(self):
+        # Even if the user has org/project env vars set, the API-key path
+        # ignores them — platform-api resolves scope from the bearer token.
+        ctx = self._make_ctx(
+            api_key="tl_apiKey_abc",
+            organization_id="org_env",
+            project_id="proj_env",
+        )
+        with patch.object(sbm, "httpx") as httpx_mock:
+            httpx_mock.post.return_value = self._mock_response()
+            sbm._register_image(
+                ctx,
+                "img",
+                "FROM python",
+                "snap-1",
+                "sbx-1",
+                "s3://x",
+                100,
+                200,
+            )
+
+        url = httpx_mock.post.call_args.args[0]
+        self.assertNotIn("/organizations/", url)
+        self.assertNotIn("/projects/", url)
+
+    def test_pat_keeps_scoped_url_and_forwarded_headers(self):
+        ctx = self._make_ctx(
+            personal_access_token="tl_pat_xyz",
+            organization_id="org_1",
+            project_id="proj_1",
+        )
+        with patch.object(sbm, "httpx") as httpx_mock:
+            httpx_mock.post.return_value = self._mock_response()
+            sbm._register_image(
+                ctx,
+                "img",
+                "FROM python",
+                "snap-1",
+                "sbx-1",
+                "s3://x",
+                100,
+                200,
+            )
+
+        url = httpx_mock.post.call_args.args[0]
+        headers = httpx_mock.post.call_args.kwargs["headers"]
+        self.assertEqual(
+            url,
+            "https://api.tensorlake.test/platform/v1/organizations/org_1/projects/proj_1/sandbox-templates",
+        )
+        self.assertEqual(headers["Authorization"], "Bearer tl_pat_xyz")
+        self.assertEqual(headers["X-Forwarded-Organization-Id"], "org_1")
+        self.assertEqual(headers["X-Forwarded-Project-Id"], "proj_1")
+
+    def test_pat_without_scope_raises(self):
+        ctx = self._make_ctx(personal_access_token="tl_pat_xyz")
+        with self.assertRaisesRegex(
+            RuntimeError, "Personal Access Token"
+        ):
+            sbm._register_image(
+                ctx,
+                "img",
+                "FROM python",
+                "snap-1",
+                "sbx-1",
+                "s3://x",
+                100,
+                200,
+            )
+
+    def test_no_credentials_raises(self):
+        ctx = self._make_ctx()
+        with self.assertRaisesRegex(RuntimeError, "Missing TENSORLAKE_API_KEY"):
+            sbm._register_image(
+                ctx,
+                "img",
+                "FROM python",
+                "snap-1",
+                "sbx-1",
+                "s3://x",
+                100,
+                200,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

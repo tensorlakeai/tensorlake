@@ -60,7 +60,7 @@ export interface CreateSandboxImageOptions {
 
 export type SandboxImageSource = string | Image;
 
-interface BuildContext {
+export interface BuildContext {
   apiUrl: string;
   apiKey?: string;
   personalAccessToken?: string;
@@ -918,7 +918,7 @@ async function executeDockerfilePlan(
   }
 }
 
-async function registerImage(
+export async function registerImage(
   context: BuildContext,
   name: string,
   dockerfile: string,
@@ -930,28 +930,36 @@ async function registerImage(
   isPublic: boolean,
   snapshotFormatVersion?: string,
 ): Promise<Record<string, unknown>> {
-  if (!context.organizationId || !context.projectId) {
-    throw new Error(
-      "Organization ID and Project ID are required. Run 'tl login' and 'tl init'.",
-    );
-  }
-
   const bearerToken = context.apiKey ?? context.personalAccessToken;
   if (!bearerToken) {
     throw new Error("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT.");
   }
 
   const baseUrl = context.apiUrl.replace(/\/+$/, "");
-  const url =
-    `${baseUrl}/platform/v1/organizations/` +
-    `${encodeURIComponent(context.organizationId)}/projects/` +
-    `${encodeURIComponent(context.projectId)}/sandbox-templates`;
 
+  // API key auth: platform-api resolves org/project from the key itself, so
+  // we hit the scope-less route and skip the env var requirement.
+  // PAT auth isn't project-scoped — keep the explicit IDs and X-Forwarded
+  // headers for that path.
   const headers: Record<string, string> = {
     Authorization: `Bearer ${bearerToken}`,
     "Content-Type": "application/json",
   };
-  if (context.personalAccessToken && !context.apiKey) {
+  let url: string;
+  if (context.apiKey) {
+    url = `${baseUrl}/platform/v1/sandbox-templates`;
+  } else {
+    if (!context.organizationId || !context.projectId) {
+      throw new Error(
+        "Organization ID and Project ID are required when authenticating with " +
+          "a Personal Access Token. Set TENSORLAKE_API_KEY to skip this " +
+          "requirement, or run 'tl login' and 'tl init'.",
+      );
+    }
+    url =
+      `${baseUrl}/platform/v1/organizations/` +
+      `${encodeURIComponent(context.organizationId)}/projects/` +
+      `${encodeURIComponent(context.projectId)}/sandbox-templates`;
     headers["X-Forwarded-Organization-Id"] = context.organizationId;
     headers["X-Forwarded-Project-Id"] = context.projectId;
   }
