@@ -55,9 +55,11 @@ jobs:
             cloud_sdk_interpreter: python3
           - os: macos-14
             target: aarch64
+            rust_target: aarch64-apple-darwin
             cloud_sdk_interpreter: python3.10
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            rust_target: x86_64-pc-windows-msvc
             cloud_sdk_interpreter: python
     steps:
       - uses: actions/checkout@v4
@@ -66,6 +68,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+
+      - name: Install Rust toolchain
+        if: runner.os != 'Linux'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.rust_target }}
 
       - name: Cache Rust build artifacts (macOS)
         if: runner.os == 'macOS'
