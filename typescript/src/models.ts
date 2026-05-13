@@ -11,6 +11,7 @@ export enum SandboxStatus {
 
 export enum SnapshotStatus {
   IN_PROGRESS = "in_progress",
+  LOCAL_READY = "local_ready",
   COMPLETED = "completed",
   FAILED = "failed",
 }
@@ -36,6 +37,8 @@ export type SnapshotType = "memory" | "filesystem";
  *   this checkpoint cold-boot from the snapshot tarball.
  */
 export type CheckpointType = "memory" | "filesystem";
+
+export type SnapshotWaitCondition = "local_ready" | "completed";
 
 export enum ProcessStatus {
   RUNNING = "running",
@@ -174,6 +177,8 @@ export interface SnapshotOptions {
 export interface SnapshotAndWaitOptions extends SnapshotOptions {
   timeout?: number;
   pollInterval?: number;
+  /** Defaults to `"local_ready"`, which is enough to resume from a snapshot. */
+  waitUntil?: SnapshotWaitCondition;
 }
 
 // --- Pools ---
@@ -367,6 +372,8 @@ export interface SuspendResumeOptions {
 
 export interface CheckpointOptions extends SuspendResumeOptions {
   checkpointType?: CheckpointType;
+  /** Defaults to `"local_ready"`, which is enough to resume from a checkpoint. */
+  waitUntil?: SnapshotWaitCondition;
 }
 
 export interface ConnectOptions {

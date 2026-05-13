@@ -55,7 +55,9 @@ from .models import (
     SnapshotInfo,
     SnapshotStatus,
     SnapshotType,
+    SnapshotWaitCondition,
     UpdateSandboxRequest,
+    snapshot_satisfies_wait_condition,
 )
 
 
@@ -440,12 +442,18 @@ class AsyncSandboxClient:
         timeout: float = 300,
         poll_interval: float = 1.0,
         snapshot_type: SnapshotType | None = None,
+        wait_until: SnapshotWaitCondition | str = SnapshotWaitCondition.LOCAL_READY,
     ) -> Traced[SnapshotInfo]:
+        try:
+            wait_condition = SnapshotWaitCondition(wait_until)
+        except ValueError as e:
+            raise SandboxError("wait_until must be 'local_ready' or 'completed'") from e
+
         traced_create = await self.snapshot(sandbox_id, snapshot_type=snapshot_type)
         deadline = asyncio.get_running_loop().time() + timeout
         while asyncio.get_running_loop().time() < deadline:
             traced_info = await self.get_snapshot(traced_create.snapshot_id)
-            if traced_info.status == SnapshotStatus.COMPLETED:
+            if snapshot_satisfies_wait_condition(traced_info.status, wait_condition):
                 return traced_info
             if traced_info.status == SnapshotStatus.FAILED:
                 raise SandboxError(
@@ -453,7 +461,7 @@ class AsyncSandboxClient:
                 )
             await asyncio.sleep(poll_interval)
         raise SandboxError(
-            f"Snapshot {traced_create.snapshot_id} did not complete within {timeout}s"
+            f"Snapshot {traced_create.snapshot_id} did not reach {wait_condition.value} within {timeout}s"
         )
 
     # --- Pools ---

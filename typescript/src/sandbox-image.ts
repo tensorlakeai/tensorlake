@@ -6,6 +6,7 @@ import {
   type ProcessInfo,
   type SnapshotInfo,
   type SnapshotType,
+  type SnapshotWaitCondition,
 } from "./models.js";
 import { type OutputResponse, ProcessStatus } from "./models.js";
 import { SandboxClient } from "./client.js";
@@ -109,6 +110,7 @@ interface BuildClient {
       timeout?: number;
       pollInterval?: number;
       snapshotType?: SnapshotType;
+      waitUntil?: SnapshotWaitCondition;
     },
   ): Promise<SnapshotInfo>;
   close(): void;
@@ -1040,6 +1042,7 @@ export async function createSandboxImage(
     emit({ type: "status", message: "Creating snapshot..." });
     const snapshot = await client.snapshotAndWait(sandbox.sandboxId, {
       snapshotType: "filesystem",
+      waitUntil: "completed",
     });
     emit({
       type: "snapshot_created",

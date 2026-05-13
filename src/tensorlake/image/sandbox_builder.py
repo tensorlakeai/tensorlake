@@ -25,7 +25,7 @@ import httpx
 from tensorlake._tracing import USER_AGENT, inject_traceparent
 from tensorlake.cli._common import Context
 from tensorlake.sandbox import Sandbox, SandboxClient
-from tensorlake.sandbox.models import ProcessStatus, SnapshotType
+from tensorlake.sandbox.models import ProcessStatus, SnapshotType, SnapshotWaitCondition
 
 from ._dockerfile import image_to_dockerfile, render_op_line
 from .image import Image
@@ -789,6 +789,7 @@ def _run_plan(
         snapshot = sandbox_client.snapshot_and_wait(
             sandbox.sandbox_id,
             snapshot_type=SnapshotType.FILESYSTEM,
+            wait_until=SnapshotWaitCondition.COMPLETED,
         )
         emit(
             {

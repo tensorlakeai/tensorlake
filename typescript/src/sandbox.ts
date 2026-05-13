@@ -29,7 +29,6 @@ import {
   type SnapshotInfo,
   type StartProcessOptions,
   SandboxStatus,
-  SnapshotStatus,
   StdinMode,
   type SuspendResumeOptions,
   type UpdateSandboxOptions,
@@ -508,11 +507,10 @@ export class Sandbox {
   }
 
   /**
-   * Create a snapshot of this sandbox's filesystem and wait for it to
-   * be committed.
+   * Create a checkpoint of this sandbox and wait for it to be locally ready.
    *
-   * By default blocks until the snapshot artifact is ready and returns
-   * the completed `SnapshotInfo`. Pass `{ wait: false }` to fire-and-return
+   * By default blocks until the checkpoint is resumable and returns
+   * `SnapshotInfo`. Pass `{ wait: false }` to fire-and-return
    * (returns `undefined`).
    */
   async checkpoint(options?: CheckpointOptions): Promise<Traced<SnapshotInfo> | undefined> {
@@ -525,6 +523,7 @@ export class Sandbox {
       timeout: options?.timeout,
       pollInterval: options?.pollInterval,
       snapshotType: options?.checkpointType,
+      waitUntil: options?.waitUntil,
     });
   }
 

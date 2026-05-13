@@ -32,6 +32,7 @@ from .models import (
     SendSignalResponse,
     SnapshotInfo,
     SnapshotType,
+    SnapshotWaitCondition,
     StdinMode,
 )
 from .sandbox import (
@@ -249,6 +250,7 @@ class AsyncSandbox:
         timeout: float = 300,
         poll_interval: float = 1.0,
         checkpoint_type: CheckpointType | None = None,
+        wait_until: SnapshotWaitCondition | str = SnapshotWaitCondition.LOCAL_READY,
     ) -> SnapshotInfo | None:
         self._require_lifecycle_client("checkpoint")
         snapshot_type = (
@@ -264,6 +266,7 @@ class AsyncSandbox:
             timeout=timeout,
             poll_interval=poll_interval,
             snapshot_type=snapshot_type,
+            wait_until=wait_until,
         )
         return traced.value
 

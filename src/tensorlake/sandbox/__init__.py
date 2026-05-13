@@ -39,6 +39,7 @@ from .models import (
     SnapshotInfo,
     SnapshotStatus,
     SnapshotType,
+    SnapshotWaitCondition,
     StdinMode,
 )
 from .pty import Pty
@@ -66,6 +67,7 @@ __all__ = [
     # Snapshot models
     "SnapshotStatus",
     "SnapshotType",
+    "SnapshotWaitCondition",
     "SnapshotInfo",
     "CheckpointType",
     "CreateSnapshotResponse",

@@ -38,7 +38,9 @@ from .models import (
     SnapshotInfo,
     SnapshotStatus,
     SnapshotType,
+    SnapshotWaitCondition,
     UpdateSandboxRequest,
+    snapshot_satisfies_wait_condition,
 )
 
 try:
@@ -696,7 +698,7 @@ class SandboxClient:
         """Create a snapshot of a running sandbox's filesystem.
 
         This is an asynchronous operation. Poll with :meth:`get_snapshot`
-        until the status is ``completed`` or ``failed``.
+        until the status is ``local_ready``, ``completed``, or ``failed``.
 
         Args:
             sandbox_id: ID of the running sandbox to snapshot.
@@ -789,27 +791,38 @@ class SandboxClient:
         timeout: float = 300,
         poll_interval: float = 1.0,
         snapshot_type: SnapshotType | None = None,
+        wait_until: SnapshotWaitCondition | str = SnapshotWaitCondition.LOCAL_READY,
     ) -> Traced[SnapshotInfo]:
-        """Create a snapshot and wait for it to complete.
+        """Create a snapshot and wait until it is resumable.
 
         Args:
             sandbox_id: ID of the running sandbox to snapshot
-            timeout: Max seconds to wait for completion (default 300)
+            timeout: Max seconds to wait (default 300)
             poll_interval: Seconds between status polls (default 1)
             snapshot_type: Optional snapshot type. See :meth:`snapshot` for
                 details.
+            wait_until: Snapshot readiness condition. Defaults to
+                :attr:`SnapshotWaitCondition.LOCAL_READY`, which is enough to
+                resume from the snapshot. Use
+                :attr:`SnapshotWaitCondition.COMPLETED` when durable
+                ``snapshot_uri`` metadata is required.
 
         Returns:
-            Traced[SnapshotInfo] with completed snapshot details and trace_id
+            Traced[SnapshotInfo] with snapshot details and trace_id
 
         Raises:
             SandboxError: If snapshot fails or times out
         """
+        try:
+            wait_condition = SnapshotWaitCondition(wait_until)
+        except ValueError as e:
+            raise SandboxError("wait_until must be 'local_ready' or 'completed'") from e
+
         traced_create = self.snapshot(sandbox_id, snapshot_type=snapshot_type)
         deadline = time.time() + timeout
         while time.time() < deadline:
             traced_info = self.get_snapshot(traced_create.snapshot_id)
-            if traced_info.status == SnapshotStatus.COMPLETED:
+            if snapshot_satisfies_wait_condition(traced_info.status, wait_condition):
                 return traced_info
             if traced_info.status == SnapshotStatus.FAILED:
                 raise SandboxError(
@@ -817,7 +830,7 @@ class SandboxClient:
                 )
             time.sleep(poll_interval)
         raise SandboxError(
-            f"Snapshot {traced_create.snapshot_id} did not complete within {timeout}s"
+            f"Snapshot {traced_create.snapshot_id} did not reach {wait_condition.value} within {timeout}s"
         )
 
     # --- Pool operations ---

@@ -437,7 +437,7 @@ enum SbxCommands {
         /// Source sandbox ID or name
         sandbox_id: String,
 
-        /// Max seconds to wait for snapshot completion
+        /// Max seconds to wait for the snapshot to become locally ready
         #[arg(short, long, default_value = "300")]
         timeout: f64,
 
