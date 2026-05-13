@@ -2882,6 +2882,7 @@ dependencies = [
  "futures",
  "pyo3",
  "pyo3-async-runtimes",
+ "pyo3-build-config",
  "reqwest",
  "serde",
  "serde_json",
