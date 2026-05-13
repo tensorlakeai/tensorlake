@@ -46,7 +46,9 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: v1-rust-no-bin
           key: ${{ matrix.target }}
+          cache-bin: false
 
       - name: Build CLI
         run: cargo build --release -p tensorlake-cli --bin tensorlake --target ${{ matrix.target }}

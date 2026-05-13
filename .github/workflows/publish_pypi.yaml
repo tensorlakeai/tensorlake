@@ -78,6 +78,9 @@ jobs:
       - name: Cache Rust build artifacts (macOS)
         if: runner.os == 'macOS'
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust-no-bin
+          cache-bin: false
 
       - name: Build Cloud SDK wheel
         uses: PyO3/maturin-action@v1

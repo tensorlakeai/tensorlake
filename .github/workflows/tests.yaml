@@ -42,6 +42,9 @@ jobs:
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust-no-bin
+          cache-bin: false
 
       - name: Run Rust workspace tests
         run: cargo test --workspace
@@ -107,6 +110,9 @@ jobs:
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust-no-bin
+          cache-bin: false
 
       - name: Install Poetry
         uses: snok/install-poetry@v1
@@ -230,6 +236,9 @@ jobs:
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust-no-bin
+          cache-bin: false
 
       - name: Install Poetry
         uses: snok/install-poetry@v1
