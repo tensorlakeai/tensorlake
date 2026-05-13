@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -33,6 +34,7 @@ from .models import (
     SendSignalResponse,
     SnapshotInfo,
     SnapshotType,
+    SnapshotWaitCondition,
     StdinMode,
 )
 
@@ -499,21 +501,23 @@ class Sandbox:
         timeout: float = 300,
         poll_interval: float = 1.0,
         checkpoint_type: CheckpointType | None = None,
+        wait_until: SnapshotWaitCondition | str = SnapshotWaitCondition.LOCAL_READY,
     ) -> SnapshotInfo | None:
-        """Create a snapshot of this sandbox's filesystem.
+        """Create a checkpoint of this sandbox.
 
-        By default blocks until the snapshot artifact is committed and
-        returns the completed ``SnapshotInfo``. Pass ``wait=False`` to
+        By default blocks until the snapshot is locally ready and resumable.
+        Pass ``wait=False`` to
         fire-and-return (returns ``None``).
 
         Args:
-            wait: If True (default), poll until the snapshot is committed.
+            wait: If True (default), poll until the requested wait condition.
             timeout: Max seconds to wait when wait=True (default 300).
             poll_interval: Seconds between polls when wait=True (default 1.0).
             checkpoint_type: Optional checkpoint type.
+            wait_until: Snapshot readiness condition. Defaults to local-ready.
 
         Returns:
-            Completed SnapshotInfo when wait=True; None when wait=False.
+            SnapshotInfo when wait=True; None when wait=False.
 
         Raises:
             SandboxError: If the snapshot fails or times out.
@@ -532,6 +536,7 @@ class Sandbox:
             timeout=timeout,
             poll_interval=poll_interval,
             snapshot_type=snapshot_type,
+            wait_until=wait_until,
         ).value
 
     def list_snapshots(self) -> TracedIterator[SnapshotInfo]:
@@ -969,6 +974,23 @@ class Sandbox:
         """
         try:
             trace_id = self._rust_client.write_file(path=path, content=content)
+            return Traced(trace_id, None)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    def upload_file(
+        self, local_path: str | os.PathLike[str], path: str
+    ) -> Traced[None]:
+        """Stream a local file into the sandbox.
+
+        Args:
+            local_path: Local file path to upload
+            path: Absolute destination path inside the sandbox
+        """
+        try:
+            trace_id = self._rust_client.upload_file(
+                path=path, local_path=os.fspath(local_path)
+            )
             return Traced(trace_id, None)
         except Exception as e:
             _raise_as_sandbox_error(e)

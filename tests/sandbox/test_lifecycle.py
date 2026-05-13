@@ -27,7 +27,7 @@ _SANDBOX_IMAGE = os.environ.get(
 )
 _SANDBOX_CPUS = 1.0
 _SANDBOX_MEMORY_MB = 1024
-_SANDBOX_DISK_MB = 1024
+_SANDBOX_DISK_MB = 10240
 
 
 # ---------------------------------------------------------------------------

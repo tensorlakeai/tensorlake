@@ -25,7 +25,7 @@ import httpx
 from tensorlake._tracing import USER_AGENT, inject_traceparent
 from tensorlake.cli._common import Context
 from tensorlake.sandbox import Sandbox, SandboxClient
-from tensorlake.sandbox.models import ProcessStatus, SnapshotType
+from tensorlake.sandbox.models import ProcessStatus, SnapshotType, SnapshotWaitCondition
 
 from ._dockerfile import image_to_dockerfile, render_op_line
 from .image import Image
@@ -467,16 +467,14 @@ def _run_streaming(
 def _copy_to_sandbox(sandbox: Sandbox, local_path: str, remote_path: str):
     """Copy a local file or directory into the sandbox."""
     if os.path.isfile(local_path):
-        with open(local_path, "rb") as f:
-            sandbox.write_file(remote_path, f.read())
+        sandbox.upload_file(local_path, remote_path)
     elif os.path.isdir(local_path):
         for root, _dirs, files in os.walk(local_path):
             for filename in files:
                 full = os.path.join(root, filename)
                 rel = os.path.relpath(full, local_path)
                 dest = posixpath.join(remote_path, rel)
-                with open(full, "rb") as f:
-                    sandbox.write_file(dest, f.read())
+                sandbox.upload_file(full, dest)
     else:
         raise FileNotFoundError(f"Local path not found: {local_path}")
 
@@ -791,6 +789,7 @@ def _run_plan(
         snapshot = sandbox_client.snapshot_and_wait(
             sandbox.sandbox_id,
             snapshot_type=SnapshotType.FILESYSTEM,
+            wait_until=SnapshotWaitCondition.COMPLETED,
         )
         emit(
             {

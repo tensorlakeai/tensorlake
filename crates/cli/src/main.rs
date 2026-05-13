@@ -437,7 +437,7 @@ enum SbxCommands {
         /// Source sandbox ID or name
         sandbox_id: String,
 
-        /// Max seconds to wait for snapshot completion
+        /// Max seconds to wait for the snapshot to become locally ready
         #[arg(short, long, default_value = "300")]
         timeout: f64,
 
@@ -593,11 +593,11 @@ enum ImageCommands {
         #[arg(short = 'n', long)]
         registered_name: Option<String>,
 
-        /// Root disk size in MB for the temporary build sandbox (default: 10240 for new sandboxes)
+        /// Root disk size in MB for the generated sandbox image (default: 10240)
         #[arg(long = "disk_mb")]
         disk_mb: Option<u64>,
 
-        /// Deprecated: root disk size in GB for the temporary build sandbox
+        /// Deprecated: root disk size in GB for the generated sandbox image
         #[arg(long = "disk", hide = true, conflicts_with = "disk_mb")]
         disk_gb: Option<u64>,
 

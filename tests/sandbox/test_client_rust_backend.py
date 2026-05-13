@@ -5,7 +5,9 @@ from unittest.mock import patch
 from tensorlake.sandbox import (
     PoolInUseError,
     SandboxNotFoundError,
+    SnapshotStatus,
     SnapshotType,
+    SnapshotWaitCondition,
 )
 from tensorlake.sandbox.client import SandboxClient
 from tensorlake.sandbox.exceptions import SandboxError
@@ -406,6 +408,52 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertEqual(snapshot_type, "filesystem")
         self.assertEqual(info.snapshot_id, "snap-1")
         self.assertEqual(info.snapshot_type, SnapshotType.FILESYSTEM)
+
+    def test_snapshot_and_wait_returns_on_local_ready_by_default(self):
+        class _LocalReadyRustClient(_FakeRustClient):
+            def get_snapshot_json(self, snapshot_id):
+                return (
+                    "trace-get",
+                    '{"id":"snap-1","namespace":"default","sandbox_id":"sbx-1",'
+                    '"base_image":"python:3.12","status":"local_ready"}',
+                )
+
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = _LocalReadyRustClient()
+
+        info = client.snapshot_and_wait("sbx-1")
+
+        self.assertEqual(info.status, SnapshotStatus.LOCAL_READY)
+        self.assertIsNone(info.snapshot_uri)
+
+    def test_snapshot_and_wait_can_wait_for_completed(self):
+        class _SnapshotSequenceRustClient(_FakeRustClient):
+            def __init__(self):
+                super().__init__()
+                self.get_calls = 0
+
+            def get_snapshot_json(self, snapshot_id):
+                self.get_calls += 1
+                status = "local_ready" if self.get_calls == 1 else "completed"
+                return (
+                    "trace-get",
+                    '{"id":"snap-1","namespace":"default","sandbox_id":"sbx-1",'
+                    f'"base_image":"python:3.12","status":"{status}",'
+                    '"snapshot_uri":"s3://snap-1.tar.zst"}',
+                )
+
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _SnapshotSequenceRustClient()
+        client._rust_client = fake
+
+        info = client.snapshot_and_wait(
+            "sbx-1",
+            poll_interval=0,
+            wait_until=SnapshotWaitCondition.COMPLETED,
+        )
+
+        self.assertEqual(info.status, SnapshotStatus.COMPLETED)
+        self.assertEqual(fake.get_calls, 2)
 
     def test_snapshot_omits_snapshot_type_when_none(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")

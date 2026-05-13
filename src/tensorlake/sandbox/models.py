@@ -45,8 +45,37 @@ class SnapshotStatus(str, Enum):
     """Status of a snapshot."""
 
     IN_PROGRESS = "in_progress"
+    LOCAL_READY = "local_ready"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class SnapshotWaitCondition(str, Enum):
+    """Snapshot readiness condition to wait for."""
+
+    LOCAL_READY = "local_ready"
+    COMPLETED = "completed"
+
+
+def snapshot_satisfies_wait_condition(
+    status: SnapshotStatus | str,
+    wait_until: SnapshotWaitCondition | str,
+) -> bool:
+    """Return whether a snapshot status satisfies the requested wait condition."""
+
+    status_value = status.value if isinstance(status, SnapshotStatus) else str(status)
+    wait_value = (
+        wait_until.value
+        if isinstance(wait_until, SnapshotWaitCondition)
+        else SnapshotWaitCondition(wait_until).value
+    )
+
+    if wait_value == SnapshotWaitCondition.LOCAL_READY.value:
+        return status_value in (
+            SnapshotStatus.LOCAL_READY.value,
+            SnapshotStatus.COMPLETED.value,
+        )
+    return status_value == SnapshotStatus.COMPLETED.value
 
 
 class SnapshotType(str, Enum):

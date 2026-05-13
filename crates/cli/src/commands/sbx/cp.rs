@@ -1,5 +1,10 @@
 use std::path::Path;
 
+use futures::StreamExt;
+use reqwest::header::CONTENT_LENGTH;
+use tokio::io::AsyncWriteExt;
+use tokio_util::io::ReaderStream;
+
 use crate::auth::context::CliContext;
 use crate::commands::sbx::{parse_sandbox_path, sandbox_proxy_base, with_sandbox_headers};
 use crate::error::{CliError, Result};
@@ -47,7 +52,6 @@ pub async fn run(ctx: &CliContext, src: &str, dest: &str) -> Result<()> {
             )));
         }
 
-        let data = resp.bytes().await.map_err(CliError::Http)?;
         let mut final_dest = dest_path.to_string();
         if Path::new(dest_path).is_dir() {
             let filename = Path::new(src_path)
@@ -56,8 +60,17 @@ pub async fn run(ctx: &CliContext, src: &str, dest: &str) -> Result<()> {
                 .unwrap_or("file");
             final_dest = Path::new(dest_path).join(filename).display().to_string();
         }
-        std::fs::write(&final_dest, &data)?;
-        println!("{} -> {} ({} bytes)", src, final_dest, data.len());
+
+        let mut file = tokio::fs::File::create(&final_dest).await?;
+        let mut downloaded = 0u64;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(CliError::Http)?;
+            file.write_all(&chunk).await?;
+            downloaded += chunk.len() as u64;
+        }
+        file.flush().await?;
+        println!("{} -> {} ({} bytes)", src, final_dest, downloaded);
     } else if let Some(sandbox_id) = dest_sbx {
         // Upload: local -> sandbox
         if !Path::new(src_path).is_file() {
@@ -67,7 +80,9 @@ pub async fn run(ctx: &CliContext, src: &str, dest: &str) -> Result<()> {
             )));
         }
 
-        let data = std::fs::read(src_path)?;
+        let file = tokio::fs::File::open(src_path).await?;
+        let size = file.metadata().await?.len();
+        let stream = ReaderStream::new(file);
         let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
         let client = ctx.client()?;
 
@@ -78,7 +93,8 @@ pub async fn run(ctx: &CliContext, src: &str, dest: &str) -> Result<()> {
                     proxy_base,
                     urlencoding::encode(dest_path)
                 ))
-                .body(data.clone()),
+                .header(CONTENT_LENGTH, size)
+                .body(reqwest::Body::wrap_stream(stream)),
             sandbox_id,
             host_override,
         )
@@ -95,7 +111,7 @@ pub async fn run(ctx: &CliContext, src: &str, dest: &str) -> Result<()> {
                 body
             )));
         }
-        println!("{} -> {} ({} bytes)", src_path, dest, data.len());
+        println!("{} -> {} ({} bytes)", src_path, dest, size);
     }
 
     Ok(())

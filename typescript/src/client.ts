@@ -19,6 +19,7 @@ import {
   type SnapshotInfo,
   type SnapshotOptions,
   SnapshotStatus,
+  type SnapshotWaitCondition,
   type SuspendResumeOptions,
   type UpdatePoolOptions,
   type UpdateSandboxOptions,
@@ -324,7 +325,8 @@ export class SandboxClient {
    *
    * This call **returns immediately** with a `snapshotId` and `in_progress`
    * status — the snapshot is created asynchronously. Poll `getSnapshot()` until
-   * `completed` or `failed`, or use `snapshotAndWait()` to block automatically.
+   * `local_ready`, `completed`, or `failed`, or use `snapshotAndWait()` to
+   * block automatically.
    *
    * @param options.snapshotType - `"filesystem"` for cold-boot snapshots (e.g. image builds).
    *   Omit to use the server default (`filesystem`).
@@ -376,9 +378,11 @@ export class SandboxClient {
   }
 
   /**
-   * Create a snapshot and block until it is committed.
+   * Create a snapshot and block until it is locally ready.
    *
-   * Combines `snapshot()` with polling `getSnapshot()` until `completed`.
+   * Combines `snapshot()` with polling `getSnapshot()` until `local_ready`
+   * or `completed`. Pass `{ waitUntil: "completed" }` when durable
+   * `snapshotUri` metadata is required.
    * Prefer `sandbox.checkpoint()` on a `Sandbox` handle for the same behavior
    * without managing the client separately.
    *
@@ -394,6 +398,7 @@ export class SandboxClient {
   ): Promise<Traced<SnapshotInfo>> {
     const timeout = options?.timeout ?? 300;
     const pollInterval = options?.pollInterval ?? 1;
+    const waitUntil = options?.waitUntil ?? "local_ready";
 
     const result = await this.snapshot(sandboxId, {
       snapshotType: options?.snapshotType,
@@ -402,7 +407,7 @@ export class SandboxClient {
 
     while (Date.now() < deadline) {
       const info = await this.getSnapshot(result.snapshotId);
-      if (info.status === SnapshotStatus.COMPLETED) return info;
+      if (snapshotStatusSatisfiesWaitCondition(info.status, waitUntil)) return info;
       if (info.status === SnapshotStatus.FAILED) {
         throw new SandboxError(
           `Snapshot ${result.snapshotId} failed: ${info.error}`,
@@ -412,7 +417,7 @@ export class SandboxClient {
     }
 
     throw new SandboxError(
-      `Snapshot ${result.snapshotId} did not complete within ${timeout}s`,
+      `Snapshot ${result.snapshotId} did not reach ${waitUntil} within ${timeout}s`,
     );
   }
 
@@ -598,6 +603,16 @@ export class SandboxClient {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function snapshotStatusSatisfiesWaitCondition(
+  status: SnapshotStatus | string,
+  waitUntil: SnapshotWaitCondition,
+): boolean {
+  if (waitUntil === "local_ready") {
+    return status === SnapshotStatus.LOCAL_READY || status === SnapshotStatus.COMPLETED;
+  }
+  return status === SnapshotStatus.COMPLETED;
 }
 
 function formatStartupFailureMessage(

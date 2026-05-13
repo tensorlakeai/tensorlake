@@ -5,7 +5,9 @@ from unittest.mock import patch
 from tensorlake.sandbox import (
     PoolInUseError,
     SandboxNotFoundError,
+    SnapshotStatus,
     SnapshotType,
+    SnapshotWaitCondition,
 )
 from tensorlake.sandbox.async_client import AsyncSandboxClient
 from tensorlake.sandbox.exceptions import SandboxError
@@ -485,6 +487,50 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot_type, "filesystem")
         self.assertEqual(info.snapshot_id, "snap-1")
         self.assertEqual(info.snapshot_type, SnapshotType.FILESYSTEM)
+
+    async def test_snapshot_and_wait_returns_on_local_ready_by_default(self):
+        class _LocalReadyRustClient(_FakeAsyncRustClient):
+            async def get_snapshot_json_async(self, *, snapshot_id):
+                return (
+                    "trace-get",
+                    '{"id":"snap-1","namespace":"default","sandbox_id":"sbx-1",'
+                    '"base_image":"python:3.12","status":"local_ready"}',
+                )
+
+        client = _make_client(_LocalReadyRustClient())
+
+        info = await client.snapshot_and_wait("sbx-1")
+
+        self.assertEqual(info.status, SnapshotStatus.LOCAL_READY)
+        self.assertIsNone(info.snapshot_uri)
+
+    async def test_snapshot_and_wait_can_wait_for_completed(self):
+        class _SnapshotSequenceRustClient(_FakeAsyncRustClient):
+            def __init__(self):
+                super().__init__()
+                self.get_calls = 0
+
+            async def get_snapshot_json_async(self, *, snapshot_id):
+                self.get_calls += 1
+                status = "local_ready" if self.get_calls == 1 else "completed"
+                return (
+                    "trace-get",
+                    '{"id":"snap-1","namespace":"default","sandbox_id":"sbx-1",'
+                    f'"base_image":"python:3.12","status":"{status}",'
+                    '"snapshot_uri":"s3://snap-1.tar.zst"}',
+                )
+
+        fake = _SnapshotSequenceRustClient()
+        client = _make_client(fake)
+
+        info = await client.snapshot_and_wait(
+            "sbx-1",
+            poll_interval=0,
+            wait_until=SnapshotWaitCondition.COMPLETED,
+        )
+
+        self.assertEqual(info.status, SnapshotStatus.COMPLETED)
+        self.assertEqual(fake.get_calls, 2)
 
     async def test_snapshot_omits_snapshot_type_when_none(self):
         fake = _FakeAsyncRustClient()

@@ -179,13 +179,11 @@ impl CliContext {
                 .map(|s| s.to_string()),
         };
 
-        // For API keys, set org/project from introspection
-        if self.organization_id.is_none() {
-            self.organization_id = result.organization_id.clone();
-        }
-        if self.project_id.is_none() {
-            self.project_id = result.project_id.clone();
-        }
+        // API keys are scoped to exactly one project. Treat the server-returned
+        // scope as authoritative so stale local config cannot route API-key
+        // requests to an unrelated org/project and trigger confusing 403s.
+        self.organization_id = result.organization_id.clone();
+        self.project_id = result.project_id.clone();
 
         self.introspect_cache = Some(result);
         Ok(())

@@ -664,6 +664,66 @@ describe("SandboxClient", () => {
       client.close();
     });
 
+    it("snapshotAndWait returns on local_ready by default", async () => {
+      mockFetch((_url, init) => {
+        if (init?.method === "POST") {
+          return new Response(
+            JSON.stringify({ snapshot_id: "snap-1", status: "in_progress" }),
+            { status: 200 },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            id: "snap-1",
+            namespace: "default",
+            sandbox_id: "sbx-1",
+            base_image: "python:3.12",
+            status: "local_ready",
+          }),
+          { status: 200 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost();
+      const info = await client.snapshotAndWait("sbx-1");
+      expect(info.status).toBe(SnapshotStatus.LOCAL_READY);
+      expect(info.snapshotUri).toBeUndefined();
+      client.close();
+    });
+
+    it("snapshotAndWait can wait for completed snapshots", async () => {
+      let getCalls = 0;
+      mockFetch((_url, init) => {
+        if (init?.method === "POST") {
+          return new Response(
+            JSON.stringify({ snapshot_id: "snap-1", status: "in_progress" }),
+            { status: 200 },
+          );
+        }
+        getCalls += 1;
+        return new Response(
+          JSON.stringify({
+            id: "snap-1",
+            namespace: "default",
+            sandbox_id: "sbx-1",
+            base_image: "python:3.12",
+            status: getCalls === 1 ? "local_ready" : "completed",
+            snapshot_uri: "s3://snap-1.tar.zst",
+          }),
+          { status: 200 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost();
+      const info = await client.snapshotAndWait("sbx-1", {
+        pollInterval: 0,
+        waitUntil: "completed",
+      });
+      expect(info.status).toBe(SnapshotStatus.COMPLETED);
+      expect(getCalls).toBe(2);
+      client.close();
+    });
+
     it("listSnapshots returns traceId on the array", async () => {
       mockFetch(() =>
         new Response(

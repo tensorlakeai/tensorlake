@@ -8,6 +8,7 @@ asyncio event loop instead of blocking a worker thread.
 from __future__ import annotations
 
 import json
+import os
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -31,6 +32,7 @@ from .models import (
     SendSignalResponse,
     SnapshotInfo,
     SnapshotType,
+    SnapshotWaitCondition,
     StdinMode,
 )
 from .sandbox import (
@@ -248,6 +250,7 @@ class AsyncSandbox:
         timeout: float = 300,
         poll_interval: float = 1.0,
         checkpoint_type: CheckpointType | None = None,
+        wait_until: SnapshotWaitCondition | str = SnapshotWaitCondition.LOCAL_READY,
     ) -> SnapshotInfo | None:
         self._require_lifecycle_client("checkpoint")
         snapshot_type = (
@@ -263,6 +266,7 @@ class AsyncSandbox:
             timeout=timeout,
             poll_interval=poll_interval,
             snapshot_type=snapshot_type,
+            wait_until=wait_until,
         )
         return traced.value
 
@@ -558,6 +562,17 @@ class AsyncSandbox:
         try:
             trace_id = await self._rust_client.write_file_async(
                 path=path, content=content
+            )
+            return Traced(trace_id, None)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    async def upload_file(
+        self, local_path: str | os.PathLike[str], path: str
+    ) -> Traced[None]:
+        try:
+            trace_id = await self._rust_client.upload_file_async(
+                path=path, local_path=os.fspath(local_path)
             )
             return Traced(trace_id, None)
         except Exception as e:

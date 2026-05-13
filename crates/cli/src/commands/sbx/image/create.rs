@@ -1,19 +1,21 @@
 use std::{
-    ffi::OsString,
+    collections::HashMap,
     path::{Path, PathBuf},
     time::Duration,
 };
 
-use serde_json::{Map, Value};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use docker_credentials_config::DockerConfig;
+use reqwest::StatusCode;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
 use shlex::split as shlex_split;
 use tensorlake::{
     Client,
-    sandbox_templates::models::CreateSandboxTemplateRequest,
+    error::SdkError,
     sandboxes::{
         SandboxProxyClient, SandboxesClient,
-        models::{
-            CreateSandboxRequest, CreateSandboxResources, ProcessInfo, SnapshotInfo, SnapshotType,
-        },
+        models::{CreateSandboxRequest, CreateSandboxResources, ProcessInfo},
     },
 };
 
@@ -23,21 +25,19 @@ use crate::{
     error::{CliError, Result},
 };
 
-const BUILD_SANDBOX_PIP_ENV: &[(&str, &str)] = &[("PIP_BREAK_SYSTEM_PACKAGES", "1")];
-const DEFAULT_CPUS: f64 = 2.0;
-const DEFAULT_MEMORY_MB: i64 = 4096;
-const SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_secs(1);
-const SNAPSHOT_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_ROOTFS_DISK_MB: u64 = 10 * 1024;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(300);
 const PROCESS_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const PROCESS_EXIT_POLL_ATTEMPTS: usize = 10;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DockerfileInstruction {
-    keyword: String,
-    value: String,
-    line_number: usize,
-}
+const PROXY_READY_TIMEOUT: Duration = Duration::from_secs(120);
+const PROXY_READY_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const REMOTE_BUILD_DIR: &str = "/var/lib/tensorlake/rootfs-builder/build";
+const REMOTE_CONTEXT_DIR: &str = "/var/lib/tensorlake/rootfs-builder/build/context";
+const REMOTE_SPEC_PATH: &str = "/var/lib/tensorlake/rootfs-builder/build/spec.json";
+const REMOTE_METADATA_PATH: &str = "/var/lib/tensorlake/rootfs-builder/build/metadata.json";
+const ROOTFS_BUILDER_BIN_DIR: &str = "/usr/local/bin";
+const ROOTFS_BUILDER_PATH: &str = "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const ROOTFS_BUILDER_COMMAND: &str = "tl-rootfs-build";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DockerfileBuildPlan {
@@ -45,17 +45,48 @@ struct DockerfileBuildPlan {
     registered_name: String,
     dockerfile_text: String,
     base_image: String,
-    instructions: Vec<DockerfileInstruction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SnapshotRegistrationMetadata {
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreparedSandboxTemplateBuild {
+    build_id: String,
     snapshot_id: String,
-    sandbox_id: String,
     snapshot_uri: String,
-    snapshot_format_version: Option<String>,
+    rootfs_node_kind: String,
+    builder: PreparedRootfsBuilder,
+    parent: Option<PreparedRootfsParent>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreparedRootfsBuilder {
+    image: String,
+    command: String,
+    cpus: f64,
+    memory_mb: i64,
+    disk_mb: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreparedRootfsParent {
+    parent_manifest_uri: String,
+    #[serde(default)]
+    rootfs_disk_bytes: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompleteSandboxTemplateBuildRequest {
+    snapshot_id: String,
+    snapshot_uri: String,
+    snapshot_format_version: String,
     snapshot_size_bytes: u64,
     rootfs_disk_bytes: u64,
+    rootfs_node_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_manifest_uri: Option<String>,
 }
 
 pub async fn run(
@@ -71,20 +102,33 @@ pub async fn run(
     let plan = load_dockerfile_plan(dockerfile_path, registered_name)?;
     eprintln!("⚙️  Selected image name: {}", plan.registered_name);
 
+    eprintln!("⚙️  Preparing rootfs build...");
+    let (prepared, prepared_spec) = prepare_rootfs_build(ctx, &plan, is_public).await?;
+    eprintln!(
+        "⚙️  Build mode: Rootfs{}",
+        match prepared.rootfs_node_kind.as_str() {
+            "diff" => "Diff",
+            _ => "Base",
+        }
+    );
+
     let client = super::sandbox_lifecycle_client(ctx)?;
     let sandboxes = SandboxesClient::new(client.clone(), ctx.namespace.clone(), is_localhost(ctx));
-    let templates = super::sandbox_templates_client(ctx)?;
-
+    let rootfs_disk_bytes = rootfs_disk_bytes(disk_mb, &prepared)?;
+    let builder_disk_mb = rootfs_disk_bytes_to_mb(rootfs_disk_bytes)?.max(prepared.builder.disk_mb);
     let resources = CreateSandboxResources {
-        cpus: cpus.unwrap_or(DEFAULT_CPUS),
-        memory_mb: memory_mb.unwrap_or(DEFAULT_MEMORY_MB),
-        disk_mb,
+        cpus: cpus.unwrap_or(prepared.builder.cpus),
+        memory_mb: memory_mb.unwrap_or(prepared.builder.memory_mb),
+        disk_mb: Some(builder_disk_mb),
     };
 
-    eprintln!("⚙️  Creating build sandbox...");
+    eprintln!(
+        "⚙️  Creating rootfs builder sandbox from {}...",
+        prepared.builder.image
+    );
     let created = sandboxes
         .create(&CreateSandboxRequest {
-            image: Some(plan.base_image.clone()),
+            image: Some(prepared.builder.image.clone()),
             resources,
             secret_names: None,
             timeout_secs: None,
@@ -101,36 +145,26 @@ pub async fn run(
         wait_for_sandbox_status(
             ctx,
             &sandbox_id,
-            &format!("Waiting for build sandbox {sandbox_id}"),
+            &format!("Waiting for rootfs builder sandbox {sandbox_id}"),
             "running",
             DEFAULT_SANDBOX_WAIT_TIMEOUT,
         )
         .await?;
-        eprintln!("⚙️  Build sandbox {sandbox_id} is running");
+        eprintln!("⚙️  Rootfs builder sandbox {sandbox_id} is running");
 
         let proxy = sandbox_proxy_client(ctx, &client, &sandbox_id, routing_hint)?;
-        execute_dockerfile_plan(&proxy, &plan).await?;
+        wait_for_proxy_ready(&proxy).await?;
+        upload_build_inputs(&proxy, &plan, &prepared, &prepared_spec, disk_mb).await?;
 
-        eprintln!("⚙️  Creating snapshot...");
-        let snapshot = create_snapshot_and_wait(&sandboxes, &sandbox_id).await?;
-        eprintln!("📸 Snapshot created: {}", snapshot.snapshot_id);
+        eprintln!("⚙️  Running offline rootfs builder...");
+        run_rootfs_builder(&proxy, &prepared.builder.command).await?;
 
-        eprintln!("⚙️  Registering image '{}'...", plan.registered_name);
-        let registered = templates
-            .create(&CreateSandboxTemplateRequest {
-                name: plan.registered_name.clone(),
-                dockerfile: plan.dockerfile_text.clone(),
-                snapshot_id: snapshot.snapshot_id.clone(),
-                snapshot_sandbox_id: snapshot.sandbox_id.clone(),
-                snapshot_uri: snapshot.snapshot_uri.clone(),
-                snapshot_format_version: snapshot.snapshot_format_version.clone(),
-                snapshot_size_bytes: snapshot.snapshot_size_bytes,
-                rootfs_disk_bytes: snapshot.rootfs_disk_bytes,
-                public: is_public,
-            })
-            .await?;
+        let metadata = read_build_metadata(&proxy).await?;
+        let complete_request = complete_request_from_metadata(&prepared, &metadata)?;
 
-        let template_id = registered.id.as_deref().unwrap_or("-");
+        eprintln!("⚙️  Completing image registration...");
+        let registered = complete_rootfs_build(ctx, &prepared.build_id, &complete_request).await?;
+        let template_id = registered.get("id").and_then(Value::as_str).unwrap_or("-");
         eprintln!(
             "✅ Image '{}' registered ({})",
             plan.registered_name, template_id
@@ -141,12 +175,87 @@ pub async fn run(
 
     if let Err(error) = sandboxes.delete(&sandbox_id).await {
         eprintln!(
-            "⚠️  Failed to terminate build sandbox {} during cleanup: {}",
+            "⚠️  Failed to terminate rootfs builder sandbox {} during cleanup: {}",
             sandbox_id, error
         );
     }
 
     result
+}
+
+async fn prepare_rootfs_build(
+    ctx: &CliContext,
+    plan: &DockerfileBuildPlan,
+    is_public: bool,
+) -> Result<(PreparedSandboxTemplateBuild, Value)> {
+    let client = ctx.client()?;
+    let url = sandbox_template_builds_url(ctx)?;
+    let response = client
+        .post(url)
+        .json(&json!({
+            "name": plan.registered_name,
+            "dockerfile": plan.dockerfile_text,
+            "baseImage": plan.base_image,
+            "public": is_public,
+        }))
+        .send()
+        .await
+        .map_err(CliError::Http)?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(CliError::Other(anyhow::anyhow!(
+            "failed to prepare sandbox image build (HTTP {}): {}",
+            status,
+            body
+        )));
+    }
+
+    let raw: Value = response.json().await.map_err(CliError::Http)?;
+    let prepared = serde_json::from_value(raw.clone()).map_err(CliError::Json)?;
+    Ok((prepared, raw))
+}
+
+async fn complete_rootfs_build(
+    ctx: &CliContext,
+    build_id: &str,
+    request: &CompleteSandboxTemplateBuildRequest,
+) -> Result<Value> {
+    let client = ctx.client()?;
+    let url = format!(
+        "{}/{}/complete",
+        sandbox_template_builds_url(ctx)?,
+        build_id
+    );
+    let response = client
+        .post(url)
+        .json(request)
+        .send()
+        .await
+        .map_err(CliError::Http)?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(CliError::Other(anyhow::anyhow!(
+            "failed to complete sandbox image build (HTTP {}): {}",
+            status,
+            body
+        )));
+    }
+
+    response.json().await.map_err(CliError::Http)
+}
+
+fn sandbox_template_builds_url(ctx: &CliContext) -> Result<String> {
+    let (org_id, project_id) = super::org_and_project(ctx)?;
+    Ok(format!(
+        "{}/platform/v1/organizations/{}/projects/{}/sandbox-template-builds",
+        ctx.api_url.trim_end_matches('/'),
+        org_id,
+        project_id
+    ))
 }
 
 fn sandbox_proxy_client(
@@ -164,221 +273,291 @@ fn sandbox_proxy_client(
     )
 }
 
-async fn create_snapshot_and_wait(
-    sandboxes: &SandboxesClient,
-    sandbox_id: &str,
-) -> Result<SnapshotRegistrationMetadata> {
-    let snapshot = sandboxes
-        .snapshot(sandbox_id, Some(SnapshotType::Filesystem))
-        .await?;
-    let snapshot_id = snapshot.snapshot_id.clone();
-
-    wait_for_snapshot(&snapshot_id, SNAPSHOT_WAIT_TIMEOUT, || {
-        let snapshot_id = snapshot_id.clone();
-        async move {
-            sandboxes
-                .get_snapshot(&snapshot_id)
-                .await
-                .map(|snapshot| snapshot.into_inner())
-                .map_err(Into::into)
+async fn wait_for_proxy_ready(proxy: &SandboxProxyClient) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + PROXY_READY_TIMEOUT;
+    loop {
+        match run_streaming_process(proxy, "/bin/true", Vec::new(), None, None).await {
+            Ok(()) => return Ok(()),
+            Err(error) if is_transient_proxy_error(&error) => {
+                if tokio::time::Instant::now() > deadline {
+                    return Err(error);
+                }
+                tokio::time::sleep(PROXY_READY_POLL_INTERVAL).await;
+            }
+            Err(error) => return Err(error),
         }
-    })
+    }
+}
+
+fn is_transient_proxy_error(error: &CliError) -> bool {
+    match error {
+        CliError::Sdk(SdkError::ServerError { status, message }) => {
+            matches!(
+                *status,
+                StatusCode::BAD_GATEWAY
+                    | StatusCode::SERVICE_UNAVAILABLE
+                    | StatusCode::GATEWAY_TIMEOUT
+            ) || (*status == StatusCode::BAD_REQUEST && message.contains("not running"))
+                || message.contains("PROXY_ERROR")
+                || message.contains("Failed to proxy request")
+        }
+        CliError::Http(error) => error.is_timeout() || error.is_connect(),
+        _ => false,
+    }
+}
+
+async fn upload_build_inputs(
+    proxy: &SandboxProxyClient,
+    plan: &DockerfileBuildPlan,
+    prepared: &PreparedSandboxTemplateBuild,
+    prepared_spec: &Value,
+    disk_mb: Option<u64>,
+) -> Result<()> {
+    eprintln!("⚙️  Uploading build context...");
+    copy_local_path(proxy, &plan.context_dir, REMOTE_CONTEXT_DIR).await?;
+
+    let docker_config_json = resolved_docker_config_json().await?;
+    let spec = build_rootfs_spec(prepared_spec, prepared, plan, disk_mb, docker_config_json)?;
+    ensure_remote_parent_dir(proxy, REMOTE_SPEC_PATH).await?;
+    proxy
+        .write_file(
+            REMOTE_SPEC_PATH,
+            serde_json::to_vec_pretty(&spec).map_err(CliError::Json)?,
+        )
+        .await?;
+    Ok(())
+}
+
+fn build_rootfs_spec(
+    prepared_spec: &Value,
+    prepared: &PreparedSandboxTemplateBuild,
+    plan: &DockerfileBuildPlan,
+    disk_mb: Option<u64>,
+    docker_config_json: Option<String>,
+) -> Result<Value> {
+    let mut spec = prepared_spec.clone();
+    let object = spec.as_object_mut().ok_or_else(|| {
+        CliError::Other(anyhow::anyhow!(
+            "platform API returned a non-object rootfs build spec"
+        ))
+    })?;
+
+    object.insert(
+        "dockerfile".to_string(),
+        Value::String(plan.dockerfile_text.clone()),
+    );
+    object.insert(
+        "contextDir".to_string(),
+        Value::String(REMOTE_CONTEXT_DIR.to_string()),
+    );
+    object.insert(
+        "baseImage".to_string(),
+        Value::String(plan.base_image.clone()),
+    );
+    object.insert(
+        "rootfsDiskBytes".to_string(),
+        Value::Number(rootfs_disk_bytes(disk_mb, prepared)?.into()),
+    );
+    if let Some(docker_config_json) = docker_config_json {
+        object.insert(
+            "dockerConfigJson".to_string(),
+            Value::String(docker_config_json),
+        );
+    }
+
+    Ok(spec)
+}
+
+fn rootfs_disk_bytes(disk_mb: Option<u64>, prepared: &PreparedSandboxTemplateBuild) -> Result<u64> {
+    if let Some(disk_mb) = disk_mb {
+        return disk_mb
+            .checked_mul(1024 * 1024)
+            .ok_or_else(|| CliError::usage("--disk_mb is too large to convert to bytes"));
+    }
+
+    if let Some(parent) = &prepared.parent {
+        return parent.rootfs_disk_bytes.ok_or_else(|| {
+            CliError::Other(anyhow::anyhow!(
+                "platform API did not return parent rootfsDiskBytes for diff build; pass --disk_mb explicitly or update Platform API"
+            ))
+        });
+    }
+
+    Ok(DEFAULT_ROOTFS_DISK_MB * 1024 * 1024)
+}
+
+fn rootfs_disk_bytes_to_mb(rootfs_disk_bytes: u64) -> Result<u64> {
+    rootfs_disk_bytes
+        .checked_add((1024 * 1024) - 1)
+        .ok_or_else(|| CliError::usage("rootfsDiskBytes is too large to convert to megabytes"))
+        .map(|bytes| bytes / (1024 * 1024))
+}
+
+async fn resolved_docker_config_json() -> Result<Option<String>> {
+    let docker_config = DockerConfig::load().await.map_err(|error| {
+        CliError::Other(anyhow::anyhow!("Failed to load Docker config: {error}"))
+    })?;
+    let credentials = docker_config.all_credentials();
+    if credentials.is_empty() {
+        return Ok(None);
+    }
+
+    docker_config_json_from_credentials(credentials)
+        .map(Some)
+        .map_err(CliError::Json)
+}
+
+fn docker_config_json_from_credentials(
+    credentials: HashMap<String, bollard::auth::DockerCredentials>,
+) -> serde_json::Result<String> {
+    let mut auths = Map::new();
+    for (registry, creds) in credentials {
+        let mut entry = Map::new();
+        if let Some(identity_token) = creds.identitytoken {
+            entry.insert("identitytoken".to_string(), Value::String(identity_token));
+        }
+        if let (Some(username), Some(password)) = (creds.username, creds.password) {
+            let encoded = STANDARD.encode(format!("{username}:{password}"));
+            entry.insert("auth".to_string(), Value::String(encoded));
+        }
+        if !entry.is_empty() {
+            auths.insert(registry, Value::Object(entry));
+        }
+    }
+
+    serde_json::to_string(&json!({ "auths": auths }))
+}
+
+async fn run_rootfs_builder(proxy: &SandboxProxyClient, command: &str) -> Result<()> {
+    let parts = shlex_split(command).ok_or_else(|| {
+        CliError::Other(anyhow::anyhow!(
+            "invalid rootfs builder command returned by platform API: {}",
+            command
+        ))
+    })?;
+    let Some((executable, command_args)) = parts.split_first() else {
+        return Err(CliError::Other(anyhow::anyhow!(
+            "empty rootfs builder command returned by platform API"
+        )));
+    };
+    let mut args = command_args.to_vec();
+    args.extend([
+        "--spec".to_string(),
+        REMOTE_SPEC_PATH.to_string(),
+        "--metadata-out".to_string(),
+        REMOTE_METADATA_PATH.to_string(),
+    ]);
+
+    let executable = rootfs_builder_executable(executable);
+    run_streaming_process(
+        proxy,
+        &executable,
+        args,
+        Some(rootfs_builder_env()),
+        Some(REMOTE_BUILD_DIR.to_string()),
+    )
     .await
 }
 
-async fn wait_for_snapshot<F, Fut>(
-    snapshot_id: &str,
-    timeout: Duration,
-    mut fetch_snapshot: F,
-) -> Result<SnapshotRegistrationMetadata>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<SnapshotInfo>>,
-{
-    let deadline = tokio::time::Instant::now() + timeout;
-
-    loop {
-        if tokio::time::Instant::now() >= deadline {
-            return Err(CliError::Other(anyhow::anyhow!(
-                "snapshot {} did not complete within {}s",
-                snapshot_id,
-                timeout.as_secs()
-            )));
-        }
-
-        let info = fetch_snapshot().await?;
-        match info.status.as_str() {
-            "completed" => return parse_completed_snapshot(&info),
-            "failed" => {
-                let error = info.error.as_deref().unwrap_or("unknown error");
-                return Err(CliError::Other(anyhow::anyhow!(
-                    "snapshot {} failed: {}",
-                    snapshot_id,
-                    error
-                )));
-            }
-            _ => {
-                tokio::time::sleep(SNAPSHOT_POLL_INTERVAL).await;
-            }
-        }
+fn rootfs_builder_executable(executable: &str) -> String {
+    if executable == ROOTFS_BUILDER_COMMAND {
+        format!("{ROOTFS_BUILDER_BIN_DIR}/{ROOTFS_BUILDER_COMMAND}")
+    } else {
+        executable.to_string()
     }
 }
 
-fn parse_completed_snapshot(info: &SnapshotInfo) -> Result<SnapshotRegistrationMetadata> {
-    let snapshot_uri = info.snapshot_uri.clone().ok_or_else(|| {
-        CliError::Other(anyhow::anyhow!(
-            "snapshot {} completed without snapshot_uri",
-            info.snapshot_id
-        ))
-    })?;
-    let snapshot_size_bytes = info
-        .size_bytes
-        .ok_or_else(|| {
-            CliError::Other(anyhow::anyhow!(
-                "snapshot {} completed without size_bytes",
-                info.snapshot_id
-            ))
-        })?
-        .try_into()
-        .map_err(|_| {
-            CliError::Other(anyhow::anyhow!(
-                "snapshot {} reported a negative size_bytes",
-                info.snapshot_id
-            ))
-        })?;
-    let rootfs_disk_bytes = info.rootfs_disk_bytes.ok_or_else(|| {
-        CliError::Other(anyhow::anyhow!(
-            "snapshot {} completed without rootfs_disk_bytes",
-            info.snapshot_id
-        ))
-    })?;
+fn rootfs_builder_env() -> Map<String, Value> {
+    let mut env = Map::new();
+    env.insert(
+        "PATH".to_string(),
+        Value::String(ROOTFS_BUILDER_PATH.to_string()),
+    );
+    env
+}
 
-    Ok(SnapshotRegistrationMetadata {
-        snapshot_id: info.snapshot_id.clone(),
-        sandbox_id: info.sandbox_id.clone(),
-        snapshot_uri,
-        snapshot_format_version: info.snapshot_format_version.clone(),
-        snapshot_size_bytes,
-        rootfs_disk_bytes,
+async fn read_build_metadata(proxy: &SandboxProxyClient) -> Result<Value> {
+    let content = proxy.read_file(REMOTE_METADATA_PATH).await?.into_inner();
+    serde_json::from_slice(&content).map_err(CliError::Json)
+}
+
+fn complete_request_from_metadata(
+    prepared: &PreparedSandboxTemplateBuild,
+    metadata: &Value,
+) -> Result<CompleteSandboxTemplateBuildRequest> {
+    let rootfs_node_kind = metadata_string(metadata, "rootfs_node_kind", "rootfsNodeKind")
+        .unwrap_or_else(|| prepared.rootfs_node_kind.clone());
+    let parent_manifest_uri = metadata_string(metadata, "parent_manifest_uri", "parentManifestUri")
+        .or_else(|| {
+            (rootfs_node_kind == "diff")
+                .then(|| {
+                    prepared
+                        .parent
+                        .as_ref()
+                        .map(|parent| parent.parent_manifest_uri.clone())
+                })
+                .flatten()
+        });
+
+    if rootfs_node_kind == "diff" && parent_manifest_uri.is_none() {
+        return Err(CliError::Other(anyhow::anyhow!(
+            "rootfs diff build completed without parent_manifest_uri"
+        )));
+    }
+
+    Ok(CompleteSandboxTemplateBuildRequest {
+        snapshot_id: metadata_string(metadata, "snapshot_id", "snapshotId")
+            .unwrap_or_else(|| prepared.snapshot_id.clone()),
+        snapshot_uri: metadata_string(metadata, "snapshot_uri", "snapshotUri")
+            .unwrap_or_else(|| prepared.snapshot_uri.clone()),
+        snapshot_format_version: required_metadata_string(
+            metadata,
+            "snapshot_format_version",
+            "snapshotFormatVersion",
+        )?,
+        snapshot_size_bytes: required_metadata_u64(
+            metadata,
+            "snapshot_size_bytes",
+            "snapshotSizeBytes",
+        )?,
+        rootfs_disk_bytes: required_metadata_u64(metadata, "rootfs_disk_bytes", "rootfsDiskBytes")?,
+        rootfs_node_kind,
+        parent_manifest_uri,
     })
 }
 
-async fn execute_dockerfile_plan(
-    proxy: &SandboxProxyClient,
-    plan: &DockerfileBuildPlan,
-) -> Result<()> {
-    let mut process_env = BUILD_SANDBOX_PIP_ENV
-        .iter()
-        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-        .collect::<Vec<(String, String)>>();
-    let mut working_dir = "/".to_string();
+fn required_metadata_string(metadata: &Value, snake_key: &str, camel_key: &str) -> Result<String> {
+    metadata_string(metadata, snake_key, camel_key).ok_or_else(|| {
+        CliError::Other(anyhow::anyhow!(
+            "rootfs builder metadata is missing {}",
+            snake_key
+        ))
+    })
+}
 
-    for instruction in &plan.instructions {
-        match instruction.keyword.as_str() {
-            "RUN" => {
-                eprintln!("⚙️  RUN {}", instruction.value);
-                run_streaming_process(
-                    proxy,
-                    "sh",
-                    vec!["-c".to_string(), instruction.value.clone()],
-                    Some(build_env_map(&process_env)),
-                    Some(working_dir.clone()),
-                )
-                .await?;
-            }
-            "WORKDIR" => {
-                let tokens = shlex_split(&instruction.value).ok_or_else(|| {
-                    CliError::Other(anyhow::anyhow!(
-                        "line {}: invalid WORKDIR syntax",
-                        instruction.line_number
-                    ))
-                })?;
-                if tokens.len() != 1 {
-                    return Err(CliError::Other(anyhow::anyhow!(
-                        "line {}: WORKDIR must include exactly one path",
-                        instruction.line_number
-                    )));
-                }
-                working_dir = resolve_container_path(&tokens[0], &working_dir);
-                eprintln!("⚙️  WORKDIR {}", working_dir);
-                run_streaming_process(
-                    proxy,
-                    "mkdir",
-                    vec!["-p".to_string(), working_dir.clone()],
-                    Some(build_env_map(&process_env)),
-                    None,
-                )
-                .await?;
-            }
-            "ENV" => {
-                for (key, value) in parse_env_pairs(&instruction.value, instruction.line_number)? {
-                    eprintln!("⚙️  ENV {}={}", key, value);
-                    process_env.push((key.clone(), value.clone()));
-                    persist_env_var(proxy, &process_env, &key, &value).await?;
-                }
-            }
-            "COPY" => {
-                let (_, sources, destination) = parse_copy_like_values(
-                    &instruction.value,
-                    instruction.line_number,
-                    &instruction.keyword,
-                )?;
-                copy_from_context(
-                    proxy,
-                    &plan.context_dir,
-                    &sources,
-                    &destination,
-                    &working_dir,
-                    &instruction.keyword,
-                    &process_env,
-                )
-                .await?;
-            }
-            "ADD" => {
-                let (_, sources, destination) = parse_copy_like_values(
-                    &instruction.value,
-                    instruction.line_number,
-                    &instruction.keyword,
-                )?;
-                if sources.len() == 1 && is_http_source(&sources[0]) {
-                    add_url_to_sandbox(
-                        proxy,
-                        &sources[0],
-                        &destination,
-                        &working_dir,
-                        &process_env,
-                    )
-                    .await?;
-                } else {
-                    copy_from_context(
-                        proxy,
-                        &plan.context_dir,
-                        &sources,
-                        &destination,
-                        &working_dir,
-                        &instruction.keyword,
-                        &process_env,
-                    )
-                    .await?;
-                }
-            }
-            "CMD" | "ENTRYPOINT" | "EXPOSE" | "HEALTHCHECK" | "LABEL" | "STOPSIGNAL" | "VOLUME" => {
-                eprintln!(
-                    "⚠️  Skipping Dockerfile instruction '{}' during snapshot materialization. It is still preserved in the registered Dockerfile.",
-                    instruction.keyword
-                );
-            }
-            other => {
-                return Err(CliError::Other(anyhow::anyhow!(
-                    "line {}: Dockerfile instruction '{}' is not supported for sandbox image creation",
-                    instruction.line_number,
-                    other
-                )));
-            }
-        }
-    }
+fn metadata_string(metadata: &Value, snake_key: &str, camel_key: &str) -> Option<String> {
+    metadata
+        .get(snake_key)
+        .or_else(|| metadata.get(camel_key))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
 
-    Ok(())
+fn required_metadata_u64(metadata: &Value, snake_key: &str, camel_key: &str) -> Result<u64> {
+    metadata
+        .get(snake_key)
+        .or_else(|| metadata.get(camel_key))
+        .and_then(|value| match value {
+            Value::Number(number) => number.as_u64(),
+            Value::String(value) => value.parse::<u64>().ok(),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            CliError::Other(anyhow::anyhow!(
+                "rootfs builder metadata is missing numeric {}",
+                snake_key
+            ))
+        })
 }
 
 async fn run_streaming_process(
@@ -455,135 +634,22 @@ async fn run_streaming_process(
     Ok(())
 }
 
-async fn persist_env_var(
-    proxy: &SandboxProxyClient,
-    process_env: &[(String, String)],
-    key: &str,
-    value: &str,
-) -> Result<()> {
-    let escaped_value = value.replace('\\', "\\\\").replace('"', "\\\"");
-    let export_line = format!("export {key}=\"{escaped_value}\"");
-    run_streaming_process(
-        proxy,
-        "sh",
-        vec![
-            "-c".to_string(),
-            format!(
-                "printf '%s\\n' {} >> /etc/environment",
-                shell_quote(&export_line)
-            ),
-        ],
-        Some(build_env_map(process_env)),
-        None,
-    )
-    .await
-}
-
-async fn copy_from_context(
-    proxy: &SandboxProxyClient,
-    context_dir: &Path,
-    sources: &[String],
-    destination: &str,
-    working_dir: &str,
-    keyword: &str,
-    process_env: &[(String, String)],
-) -> Result<()> {
-    let destination_path = resolve_container_path(destination, working_dir);
-    if sources.len() > 1 && !destination_path.ends_with('/') {
-        return Err(CliError::Other(anyhow::anyhow!(
-            "{} with multiple sources requires a directory destination ending in '/'",
-            keyword
-        )));
-    }
-
-    for source in sources {
-        let local_source = resolve_context_source_path(context_dir, source)?;
-        let remote_destination = if sources.len() > 1 {
-            join_posix(
-                destination_path.trim_end_matches('/'),
-                file_name_string(Path::new(source))?.as_str(),
-            )
-        } else if local_source.is_file() && destination_path.ends_with('/') {
-            join_posix(
-                destination_path.trim_end_matches('/'),
-                file_name_string(Path::new(source))?.as_str(),
-            )
-        } else {
-            destination_path.clone()
-        };
-
-        eprintln!("⚙️  {} {} -> {}", keyword, source, remote_destination);
-        copy_local_path(proxy, &local_source, &remote_destination, process_env).await?;
-    }
-
-    Ok(())
-}
-
-async fn add_url_to_sandbox(
-    proxy: &SandboxProxyClient,
-    url: &str,
-    destination: &str,
-    working_dir: &str,
-    process_env: &[(String, String)],
-) -> Result<()> {
-    let mut destination_path = resolve_container_path(destination, working_dir);
-    let parsed = url::Url::parse(url).map_err(|error| {
-        CliError::Other(anyhow::anyhow!("invalid ADD URL '{}': {}", url, error))
-    })?;
-    let file_name = parsed
-        .path_segments()
-        .and_then(|segments| segments.filter(|segment| !segment.is_empty()).next_back())
-        .unwrap_or("downloaded");
-    if destination_path.ends_with('/') {
-        destination_path = join_posix(destination_path.trim_end_matches('/'), file_name);
-    }
-    let parent_dir = parent_posix(&destination_path);
-
-    eprintln!("⚙️  ADD {} -> {}", url, destination_path);
-    run_streaming_process(
-        proxy,
-        "mkdir",
-        vec!["-p".to_string(), parent_dir.clone()],
-        Some(build_env_map(process_env)),
-        None,
-    )
-    .await?;
-    run_streaming_process(
-        proxy,
-        "sh",
-        vec![
-            "-c".to_string(),
-            format!(
-                "curl -fsSL --location {} -o {}",
-                shell_quote(url),
-                shell_quote(&destination_path)
-            ),
-        ],
-        Some(build_env_map(process_env)),
-        Some(working_dir.to_string()),
-    )
-    .await
-}
-
 async fn copy_local_path(
     proxy: &SandboxProxyClient,
     local_path: &Path,
     remote_path: &str,
-    process_env: &[(String, String)],
 ) -> Result<()> {
     if local_path.is_file() {
-        ensure_remote_parent_dir(proxy, remote_path, process_env).await?;
-        let content = tokio::fs::read(local_path).await.map_err(CliError::Io)?;
-        proxy.write_file(remote_path, content).await?;
+        ensure_remote_parent_dir(proxy, remote_path).await?;
+        proxy.upload_file(remote_path, local_path).await?;
         return Ok(());
     }
 
     if local_path.is_dir() {
         for (full_path, relative_path) in collect_dir_files(local_path, local_path)? {
             let remote_destination = join_posix(remote_path, &relative_path);
-            ensure_remote_parent_dir(proxy, &remote_destination, process_env).await?;
-            let content = tokio::fs::read(&full_path).await.map_err(CliError::Io)?;
-            proxy.write_file(&remote_destination, content).await?;
+            ensure_remote_parent_dir(proxy, &remote_destination).await?;
+            proxy.upload_file(&remote_destination, &full_path).await?;
         }
         return Ok(());
     }
@@ -594,54 +660,16 @@ async fn copy_local_path(
     )))
 }
 
-async fn ensure_remote_parent_dir(
-    proxy: &SandboxProxyClient,
-    remote_path: &str,
-    process_env: &[(String, String)],
-) -> Result<()> {
+async fn ensure_remote_parent_dir(proxy: &SandboxProxyClient, remote_path: &str) -> Result<()> {
     let parent_dir = parent_posix(remote_path);
     run_streaming_process(
         proxy,
         "mkdir",
         vec!["-p".to_string(), parent_dir],
-        Some(build_env_map(process_env)),
+        None,
         None,
     )
     .await
-}
-
-fn resolve_context_source_path(context_dir: &Path, source: &str) -> Result<PathBuf> {
-    let resolved_context_dir = std::fs::canonicalize(context_dir).map_err(CliError::Io)?;
-    let candidate = if Path::new(source).is_absolute() {
-        PathBuf::from(source)
-    } else {
-        resolved_context_dir.join(source)
-    };
-    let resolved_source = std::fs::canonicalize(&candidate).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            CliError::Other(anyhow::anyhow!(
-                "Local path not found: {}",
-                candidate.display()
-            ))
-        } else {
-            CliError::Io(error)
-        }
-    })?;
-
-    if !resolved_source.starts_with(&resolved_context_dir) {
-        return Err(CliError::Other(anyhow::anyhow!(
-            "Local path escapes the build context: {}",
-            source
-        )));
-    }
-
-    Ok(resolved_source)
-}
-
-fn build_env_map(env: &[(String, String)]) -> Map<String, Value> {
-    env.iter()
-        .map(|(key, value)| (key.clone(), Value::String(value.clone())))
-        .collect()
 }
 
 fn is_localhost(ctx: &CliContext) -> bool {
@@ -670,7 +698,6 @@ fn load_dockerfile_plan(
 
     let dockerfile_text = std::fs::read_to_string(&absolute_path).map_err(CliError::Io)?;
     let mut base_image: Option<String> = None;
-    let mut instructions = Vec::new();
 
     for (line_number, line) in logical_dockerfile_lines(&dockerfile_text) {
         let (keyword, value) = split_instruction(&line, line_number)?;
@@ -682,22 +709,7 @@ fn load_dockerfile_plan(
                 )));
             }
             base_image = Some(parse_from_value(&value, line_number)?);
-            continue;
         }
-
-        if matches!(keyword.as_str(), "ARG" | "ONBUILD" | "SHELL" | "USER") {
-            return Err(CliError::Other(anyhow::anyhow!(
-                "line {}: Dockerfile instruction '{}' is not supported for sandbox image creation",
-                line_number,
-                keyword
-            )));
-        }
-
-        instructions.push(DockerfileInstruction {
-            keyword,
-            value,
-            line_number,
-        });
     }
 
     let base_image = base_image.ok_or_else(|| {
@@ -716,7 +728,6 @@ fn load_dockerfile_plan(
             .unwrap_or_else(|| default_registered_name(&absolute_path)),
         dockerfile_text,
         base_image,
-        instructions,
     })
 }
 
@@ -862,136 +873,6 @@ fn strip_leading_flags(value: &str) -> Result<(Vec<(String, String)>, String)> {
     Ok((flags, remaining))
 }
 
-fn parse_copy_like_values(
-    value: &str,
-    line_number: usize,
-    keyword: &str,
-) -> Result<(Vec<(String, String)>, Vec<String>, String)> {
-    let (flags, payload) = strip_leading_flags(value)?;
-    if flags.iter().any(|(key, _)| key == "from") {
-        return Err(CliError::Other(anyhow::anyhow!(
-            "line {}: {} --from is not supported for sandbox image creation",
-            line_number,
-            keyword
-        )));
-    }
-    let payload = payload.trim();
-    if payload.is_empty() {
-        return Err(CliError::Other(anyhow::anyhow!(
-            "line {}: {} must include source and destination",
-            line_number,
-            keyword
-        )));
-    }
-
-    let parts = if payload.starts_with('[') {
-        let items: Vec<String> = serde_json::from_str(payload).map_err(|error| {
-            CliError::Other(anyhow::anyhow!(
-                "line {}: invalid JSON array syntax for {}: {}",
-                line_number,
-                keyword,
-                error
-            ))
-        })?;
-        if items.len() < 2 {
-            return Err(CliError::Other(anyhow::anyhow!(
-                "line {}: {} JSON array form requires at least two string values",
-                line_number,
-                keyword
-            )));
-        }
-        items
-    } else {
-        let parts = shlex_split(payload).ok_or_else(|| {
-            CliError::Other(anyhow::anyhow!(
-                "line {}: invalid {} syntax",
-                line_number,
-                keyword
-            ))
-        })?;
-        if parts.len() < 2 {
-            return Err(CliError::Other(anyhow::anyhow!(
-                "line {}: {} must include at least one source and one destination",
-                line_number,
-                keyword
-            )));
-        }
-        parts
-    };
-
-    let (destination, sources) = parts.split_last().unwrap();
-    Ok((flags, sources.to_vec(), destination.clone()))
-}
-
-fn parse_env_pairs(value: &str, line_number: usize) -> Result<Vec<(String, String)>> {
-    let tokens = shlex_split(value).ok_or_else(|| {
-        CliError::Other(anyhow::anyhow!(
-            "line {}: invalid ENV syntax '{}'",
-            line_number,
-            value
-        ))
-    })?;
-    if tokens.is_empty() {
-        return Err(CliError::Other(anyhow::anyhow!(
-            "line {}: ENV must include a key and value",
-            line_number
-        )));
-    }
-
-    if tokens.iter().all(|token| token.contains('=')) {
-        return tokens
-            .into_iter()
-            .map(|token| {
-                let (key, env_value) = token.split_once('=').ok_or_else(|| {
-                    CliError::Other(anyhow::anyhow!(
-                        "line {}: invalid ENV token '{}'",
-                        line_number,
-                        token
-                    ))
-                })?;
-                if key.is_empty() {
-                    return Err(CliError::Other(anyhow::anyhow!(
-                        "line {}: invalid ENV token '{}'",
-                        line_number,
-                        token
-                    )));
-                }
-                Ok((key.to_string(), env_value.to_string()))
-            })
-            .collect();
-    }
-
-    if tokens.len() < 2 {
-        return Err(CliError::Other(anyhow::anyhow!(
-            "line {}: ENV must include a key and value",
-            line_number
-        )));
-    }
-
-    Ok(vec![(tokens[0].clone(), tokens[1..].join(" "))])
-}
-
-fn resolve_container_path(path: &str, working_dir: &str) -> String {
-    if path.is_empty() {
-        return working_dir.to_string();
-    }
-    let preserve_trailing_slash = path.ends_with('/');
-    let raw = if path.starts_with('/') {
-        path.to_string()
-    } else if working_dir == "/" {
-        format!("/{}", path)
-    } else {
-        format!("{}/{}", working_dir.trim_end_matches('/'), path)
-    };
-
-    let normalized = normalize_posix(&raw);
-    if preserve_trailing_slash && normalized != "/" {
-        format!("{}/", normalized.trim_end_matches('/'))
-    } else {
-        normalized
-    }
-}
-
 fn normalize_posix(path: &str) -> String {
     let mut parts = Vec::new();
     for segment in path.split('/') {
@@ -1026,16 +907,6 @@ fn join_posix(base: &str, child: &str) -> String {
     normalize_posix(&format!("{}/{}", base.trim_end_matches('/'), child))
 }
 
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-fn is_http_source(source: &str) -> bool {
-    url::Url::parse(source)
-        .map(|url| matches!(url.scheme(), "http" | "https"))
-        .unwrap_or(false)
-}
-
 fn collect_dir_files(root: &Path, current: &Path) -> Result<Vec<(PathBuf, String)>> {
     let mut files = Vec::new();
     for entry in std::fs::read_dir(current).map_err(CliError::Io)? {
@@ -1058,27 +929,16 @@ fn collect_dir_files(root: &Path, current: &Path) -> Result<Vec<(PathBuf, String
     Ok(files)
 }
 
-fn file_name_string(path: &Path) -> Result<String> {
-    path.file_name()
-        .map(OsString::from)
-        .and_then(|value| value.into_string().ok())
-        .ok_or_else(|| {
-            CliError::Other(anyhow::anyhow!(
-                "path '{}' has no file name",
-                path.display()
-            ))
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
+        CompleteSandboxTemplateBuildRequest, PreparedRootfsBuilder, PreparedRootfsParent,
+        PreparedSandboxTemplateBuild, build_rootfs_spec, complete_request_from_metadata,
         default_registered_name, load_dockerfile_plan, logical_dockerfile_lines, normalize_posix,
-        parse_copy_like_values, parse_env_pairs, resolve_container_path,
-        resolve_context_source_path, wait_for_snapshot,
+        rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
     };
-    use std::{cell::Cell, io::Write, time::Duration};
-    use tensorlake::sandboxes::models::SnapshotInfo;
+    use serde_json::{Value, json};
+    use std::io::Write;
 
     #[test]
     fn default_registered_name_uses_parent_for_dockerfile() {
@@ -1099,53 +959,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_copy_like_values_supports_json_array_form() {
-        let (_, sources, destination) =
-            parse_copy_like_values(r#"["a.txt", "b.txt", "/dst/"]"#, 1, "COPY").unwrap();
-        assert_eq!(sources, vec!["a.txt".to_string(), "b.txt".to_string()]);
-        assert_eq!(destination, "/dst/");
-    }
-
-    #[test]
-    fn parse_env_pairs_supports_equals_form() {
-        let pairs = parse_env_pairs("A=1 B=two", 1).unwrap();
-        assert_eq!(
-            pairs,
-            vec![
-                ("A".to_string(), "1".to_string()),
-                ("B".to_string(), "two".to_string())
-            ]
-        );
-    }
-
-    #[test]
-    fn resolve_container_path_normalizes_relative_paths() {
-        assert_eq!(
-            resolve_container_path("app", "/workspace"),
-            "/workspace/app"
-        );
-        assert_eq!(
-            resolve_container_path("../bin", "/workspace/app"),
-            "/workspace/bin"
-        );
-        assert_eq!(normalize_posix("/a//b/../c"), "/a/c");
-    }
-
-    #[test]
-    fn resolve_container_path_preserves_trailing_slash_for_directories() {
-        assert_eq!(resolve_container_path("/dst/", "/"), "/dst/");
-        assert_eq!(
-            resolve_container_path("dst/", "/workspace"),
-            "/workspace/dst/"
-        );
-    }
-
-    #[test]
     fn load_dockerfile_plan_reads_base_image_and_name() {
         let temp_dir = tempfile::tempdir().unwrap();
         let dockerfile_path = temp_dir.path().join("Dockerfile");
         let mut file = std::fs::File::create(&dockerfile_path).unwrap();
-        writeln!(file, "FROM python:3.12-slim\nRUN echo hi").unwrap();
+        writeln!(file, "FROM python:3.12-slim\nUSER app\nRUN echo hi").unwrap();
 
         let plan = load_dockerfile_plan(dockerfile_path.to_str().unwrap(), None).unwrap();
         assert_eq!(plan.base_image, "python:3.12-slim");
@@ -1153,52 +971,212 @@ mod tests {
             plan.registered_name,
             temp_dir.path().file_name().unwrap().to_string_lossy()
         );
-        assert_eq!(plan.instructions.len(), 1);
     }
 
     #[test]
-    fn resolve_context_source_path_rejects_escaping_the_build_context() {
+    fn load_dockerfile_plan_rejects_multistage_builds() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let context_dir = temp_dir.path().join("context");
-        std::fs::create_dir_all(&context_dir).unwrap();
-        let outside_file = temp_dir.path().join("secret.txt");
-        std::fs::write(&outside_file, b"secret").unwrap();
+        let dockerfile_path = temp_dir.path().join("Dockerfile");
+        std::fs::write(&dockerfile_path, "FROM alpine AS build\nFROM scratch\n").unwrap();
 
-        let error = resolve_context_source_path(&context_dir, "../secret.txt").unwrap_err();
+        let error = load_dockerfile_plan(dockerfile_path.to_str().unwrap(), None).unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("Local path escapes the build context"),
+            error.to_string().contains("multi-stage Dockerfiles"),
             "{error}"
         );
     }
 
-    #[tokio::test]
-    async fn wait_for_snapshot_times_out() {
-        let polls = Cell::new(0usize);
-        let error = wait_for_snapshot("snap-1", Duration::from_secs(0), || {
-            polls.set(polls.get() + 1);
-            async {
-                Ok(SnapshotInfo {
-                    snapshot_id: "snap-1".to_string(),
-                    namespace: "ns".to_string(),
-                    sandbox_id: "sbx-1".to_string(),
-                    base_image: None,
-                    status: "pending".to_string(),
-                    error: None,
-                    snapshot_uri: None,
-                    snapshot_format_version: None,
-                    size_bytes: None,
-                    rootfs_disk_bytes: None,
-                    snapshot_type: None,
-                    created_at: None,
-                })
-            }
-        })
-        .await
-        .unwrap_err();
+    #[test]
+    fn rootfs_disk_bytes_uses_default_and_validates_overflow() {
+        let mut base = prepared_build("base");
+        base.parent = None;
+        let diff = prepared_build("diff");
 
-        assert!(error.to_string().contains("did not complete within 0s"));
-        assert_eq!(polls.get(), 0);
+        assert_eq!(
+            rootfs_disk_bytes(None, &base).unwrap(),
+            10 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            rootfs_disk_bytes(None, &diff).unwrap(),
+            20 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            rootfs_disk_bytes(Some(2048), &diff).unwrap(),
+            2048 * 1024 * 1024
+        );
+        assert!(rootfs_disk_bytes(Some(u64::MAX), &base).is_err());
     }
+
+    #[test]
+    fn rootfs_disk_bytes_requires_parent_size_for_diff_default() {
+        let mut prepared = prepared_build("diff");
+        prepared.parent.as_mut().unwrap().rootfs_disk_bytes = None;
+
+        let error = rootfs_disk_bytes(None, &prepared).unwrap_err();
+        assert!(
+            error.to_string().contains("parent rootfsDiskBytes"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rootfs_disk_bytes_to_mb_rounds_up() {
+        assert_eq!(rootfs_disk_bytes_to_mb(1024 * 1024).unwrap(), 1);
+        assert_eq!(rootfs_disk_bytes_to_mb((1024 * 1024) + 1).unwrap(), 2);
+    }
+
+    #[test]
+    fn build_rootfs_spec_adds_cli_builder_inputs() {
+        let prepared_spec = json!({
+            "buildId": "build-1",
+            "snapshotId": "snapshot-1",
+            "snapshotUri": "s3://bucket/snapshot.tlsnap",
+            "rootfsNodeKind": "base",
+            "builder": {
+                "image": "tensorlake/rootfs-builder",
+                "command": "tl-rootfs-build",
+                "cpus": 2,
+                "memoryMb": 4096,
+                "diskMb": 30720
+            },
+            "upload": {
+                "kind": "single_put",
+                "method": "PUT",
+                "url": "https://example/upload",
+                "headers": {},
+                "expiresAt": "2026-05-12T00:00:00Z"
+            },
+            "runtimeContract": {
+                "guestRuntimeLayout": "embedded",
+                "guestRuntimeDriveFormat": "none",
+                "guestBootContract": "supervisor-init-wrapper-v1"
+            }
+        });
+        let prepared: PreparedSandboxTemplateBuild =
+            serde_json::from_value(prepared_spec.clone()).unwrap();
+        let plan = super::DockerfileBuildPlan {
+            context_dir: "/tmp/context".into(),
+            registered_name: "child".to_string(),
+            dockerfile_text: "FROM alpine\nRUN echo hi\n".to_string(),
+            base_image: "alpine".to_string(),
+        };
+
+        let spec = build_rootfs_spec(
+            &prepared_spec,
+            &prepared,
+            &plan,
+            Some(2048),
+            Some("{}".to_string()),
+        )
+        .unwrap();
+        assert_eq!(spec["dockerfile"], "FROM alpine\nRUN echo hi\n");
+        assert_eq!(
+            spec["contextDir"],
+            "/var/lib/tensorlake/rootfs-builder/build/context"
+        );
+        assert_eq!(spec["rootfsDiskBytes"], 2048_u64 * 1024 * 1024);
+        assert_eq!(spec["dockerConfigJson"], "{}");
+    }
+
+    #[test]
+    fn build_rootfs_spec_defaults_diff_to_parent_rootfs_size() {
+        let prepared = prepared_build("diff");
+        let prepared_spec = serde_json::to_value(&prepared).unwrap();
+        let plan = super::DockerfileBuildPlan {
+            context_dir: "/tmp/context".into(),
+            registered_name: "child".to_string(),
+            dockerfile_text: "FROM parent\nRUN echo hi\n".to_string(),
+            base_image: "parent".to_string(),
+        };
+
+        let spec = build_rootfs_spec(&prepared_spec, &prepared, &plan, None, None).unwrap();
+        assert_eq!(spec["rootfsDiskBytes"], 20_u64 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn rootfs_builder_command_uses_installed_path_and_tool_path() {
+        assert_eq!(
+            rootfs_builder_executable("tl-rootfs-build"),
+            "/usr/local/bin/tl-rootfs-build"
+        );
+        assert_eq!(
+            rootfs_builder_executable("/custom/tl-rootfs-build"),
+            "/custom/tl-rootfs-build"
+        );
+
+        let env = rootfs_builder_env();
+        assert_eq!(
+            env.get("PATH").and_then(Value::as_str),
+            Some("/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        );
+    }
+
+    #[test]
+    fn complete_request_maps_snapshotter_metadata_to_platform_api_shape() {
+        let prepared = prepared_build("diff");
+        let metadata = json!({
+            "snapshot_id": "snapshot-1",
+            "snapshot_uri": "s3://bucket/child.tlsnap",
+            "snapshot_format_version": "durable_archive_v1",
+            "snapshot_size_bytes": 1234,
+            "rootfs_disk_bytes": 10 * 1024 * 1024 * 1024_u64,
+            "rootfs_node_kind": "diff",
+            "parent_manifest_uri": "s3://bucket/parent.tlsnap"
+        });
+
+        let request = complete_request_from_metadata(&prepared, &metadata).unwrap();
+        let body = serde_json::to_value(&request).unwrap();
+        assert_eq!(body["snapshotId"], "snapshot-1");
+        assert_eq!(body["snapshotUri"], "s3://bucket/child.tlsnap");
+        assert_eq!(body["snapshotFormatVersion"], "durable_archive_v1");
+        assert_eq!(body["snapshotSizeBytes"], 1234);
+        assert_eq!(body["rootfsNodeKind"], "diff");
+        assert_eq!(body["parentManifestUri"], "s3://bucket/parent.tlsnap");
+    }
+
+    #[test]
+    fn complete_request_uses_prepared_parent_for_diff_when_metadata_omits_it() {
+        let prepared = prepared_build("diff");
+        let metadata = json!({
+            "snapshot_format_version": "durable_archive_v1",
+            "snapshot_size_bytes": "1234",
+            "rootfs_disk_bytes": 10 * 1024 * 1024 * 1024_u64
+        });
+
+        let request = complete_request_from_metadata(&prepared, &metadata).unwrap();
+        assert_eq!(request.snapshot_id, "snapshot-prepared");
+        assert_eq!(request.snapshot_uri, "s3://bucket/prepared.tlsnap");
+        assert_eq!(
+            request.parent_manifest_uri.as_deref(),
+            Some("s3://bucket/parent.tlsnap")
+        );
+    }
+
+    #[test]
+    fn normalize_posix_collapses_dot_segments() {
+        assert_eq!(normalize_posix("/a//b/../c"), "/a/c");
+    }
+
+    fn prepared_build(rootfs_node_kind: &str) -> PreparedSandboxTemplateBuild {
+        PreparedSandboxTemplateBuild {
+            build_id: "build-1".to_string(),
+            snapshot_id: "snapshot-prepared".to_string(),
+            snapshot_uri: "s3://bucket/prepared.tlsnap".to_string(),
+            rootfs_node_kind: rootfs_node_kind.to_string(),
+            builder: PreparedRootfsBuilder {
+                image: "tensorlake/rootfs-builder".to_string(),
+                command: "tl-rootfs-build".to_string(),
+                cpus: 2.0,
+                memory_mb: 4096,
+                disk_mb: 30720,
+            },
+            parent: Some(PreparedRootfsParent {
+                parent_manifest_uri: "s3://bucket/parent.tlsnap".to_string(),
+                rootfs_disk_bytes: Some(20 * 1024 * 1024 * 1024),
+            }),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn assert_serialize(_: &CompleteSandboxTemplateBuildRequest, _: &Value) {}
 }
