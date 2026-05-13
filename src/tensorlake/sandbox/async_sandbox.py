@@ -8,6 +8,7 @@ asyncio event loop instead of blocking a worker thread.
 from __future__ import annotations
 
 import json
+import os
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -558,6 +559,17 @@ class AsyncSandbox:
         try:
             trace_id = await self._rust_client.write_file_async(
                 path=path, content=content
+            )
+            return Traced(trace_id, None)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    async def upload_file(
+        self, local_path: str | os.PathLike[str], path: str
+    ) -> Traced[None]:
+        try:
+            trace_id = await self._rust_client.upload_file_async(
+                path=path, local_path=os.fspath(local_path)
             )
             return Traced(trace_id, None)
         except Exception as e:

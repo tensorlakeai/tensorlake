@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -969,6 +970,23 @@ class Sandbox:
         """
         try:
             trace_id = self._rust_client.write_file(path=path, content=content)
+            return Traced(trace_id, None)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    def upload_file(
+        self, local_path: str | os.PathLike[str], path: str
+    ) -> Traced[None]:
+        """Stream a local file into the sandbox.
+
+        Args:
+            local_path: Local file path to upload
+            path: Absolute destination path inside the sandbox
+        """
+        try:
+            trace_id = self._rust_client.upload_file(
+                path=path, local_path=os.fspath(local_path)
+            )
             return Traced(trace_id, None)
         except Exception as e:
             _raise_as_sandbox_error(e)

@@ -467,16 +467,14 @@ def _run_streaming(
 def _copy_to_sandbox(sandbox: Sandbox, local_path: str, remote_path: str):
     """Copy a local file or directory into the sandbox."""
     if os.path.isfile(local_path):
-        with open(local_path, "rb") as f:
-            sandbox.write_file(remote_path, f.read())
+        sandbox.upload_file(local_path, remote_path)
     elif os.path.isdir(local_path):
         for root, _dirs, files in os.walk(local_path):
             for filename in files:
                 full = os.path.join(root, filename)
                 rel = os.path.relpath(full, local_path)
                 dest = posixpath.join(remote_path, rel)
-                with open(full, "rb") as f:
-                    sandbox.write_file(dest, f.read())
+                sandbox.upload_file(full, dest)
     else:
         raise FileNotFoundError(f"Local path not found: {local_path}")
 

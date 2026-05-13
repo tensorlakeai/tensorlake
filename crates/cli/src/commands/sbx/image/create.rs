@@ -641,8 +641,7 @@ async fn copy_local_path(
 ) -> Result<()> {
     if local_path.is_file() {
         ensure_remote_parent_dir(proxy, remote_path).await?;
-        let content = tokio::fs::read(local_path).await.map_err(CliError::Io)?;
-        proxy.write_file(remote_path, content).await?;
+        proxy.upload_file(remote_path, local_path).await?;
         return Ok(());
     }
 
@@ -650,8 +649,7 @@ async fn copy_local_path(
         for (full_path, relative_path) in collect_dir_files(local_path, local_path)? {
             let remote_destination = join_posix(remote_path, &relative_path);
             ensure_remote_parent_dir(proxy, &remote_destination).await?;
-            let content = tokio::fs::read(&full_path).await.map_err(CliError::Io)?;
-            proxy.write_file(&remote_destination, content).await?;
+            proxy.upload_file(&remote_destination, &full_path).await?;
         }
         return Ok(());
     }

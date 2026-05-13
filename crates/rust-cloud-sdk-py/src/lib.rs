@@ -1353,6 +1353,17 @@ impl CloudSandboxProxyClient {
         })
     }
 
+    fn upload_file(&self, path: String, local_path: String) -> PyResult<String> {
+        self.run_with_retry(5, move |client| {
+            let path = path.clone();
+            let local_path = local_path.clone();
+            async move {
+                let traced = client.upload_file(&path, local_path).await?;
+                Ok(traced.trace_id)
+            }
+        })
+    }
+
     fn delete_file(&self, path: String) -> PyResult<String> {
         self.run_with_retry(5, move |client| {
             let path = path.clone();
@@ -1678,6 +1689,25 @@ impl CloudSandboxProxyClient {
                 let path = path.clone();
                 let content = content.clone();
                 async move { c.write_file(&path, content).await.map(|t| t.trace_id) }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            Ok(trace_id)
+        })
+    }
+
+    fn upload_file_async<'py>(
+        &self,
+        py: Python<'py>,
+        path: String,
+        local_path: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let trace_id = retry_async_op(client, 5, move |c| {
+                let path = path.clone();
+                let local_path = local_path.clone();
+                async move { c.upload_file(&path, local_path).await.map(|t| t.trace_id) }
             })
             .await
             .map_err(into_sandbox_py_error)?;

@@ -4,8 +4,11 @@ pub mod models;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use reqwest::Method;
-use reqwest::header::ACCEPT;
+use reqwest::header::{ACCEPT, CONTENT_LENGTH};
 use serde_json::Value;
+use std::path::Path;
+use tokio::fs::File;
+use tokio_util::io::ReaderStream;
 
 use crate::{
     client::{Client, Traced},
@@ -466,6 +469,23 @@ impl SandboxProxyClient {
             .request(Method::PUT, "/api/v1/files")
             .query(&[("path", path)])
             .body(content)
+            .build()?;
+        Ok(self.client.execute_traced(req).await?.map(|_| ()))
+    }
+
+    pub async fn upload_file(
+        &self,
+        path: &str,
+        local_path: impl AsRef<Path>,
+    ) -> Result<Traced<()>, SdkError> {
+        let file = File::open(local_path.as_ref()).await?;
+        let size = file.metadata().await?.len();
+        let stream = ReaderStream::new(file);
+        let req = self
+            .request(Method::PUT, "/api/v1/files")
+            .query(&[("path", path)])
+            .header(CONTENT_LENGTH, size)
+            .body(reqwest::Body::wrap_stream(stream))
             .build()?;
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
