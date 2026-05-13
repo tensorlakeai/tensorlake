@@ -25,7 +25,7 @@ import { Sandbox } from "../src/sandbox.js";
 const SANDBOX_IMAGE = "tensorlake/ubuntu-minimal";
 const SANDBOX_CPUS = 1.0;
 const SANDBOX_MEMORY_MB = 1024;
-const SANDBOX_DISK_MB = 1024;
+const SANDBOX_DISK_MB = 10240;
 
 // ---------------------------------------------------------------------------
 // Helpers
