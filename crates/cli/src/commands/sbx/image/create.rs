@@ -28,6 +28,8 @@ pub async fn run(
         project_id: ctx.effective_project_id(),
         namespace: ctx.namespace.clone(),
         dockerfile_path: PathBuf::from(dockerfile_path),
+        dockerfile_text: None,
+        context_dir: None,
         registered_name: registered_name.map(str::to_string),
         disk_mb,
         builder_disk_mb,

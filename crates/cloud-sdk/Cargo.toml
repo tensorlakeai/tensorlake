@@ -20,6 +20,7 @@ derive_builder = { workspace = true }
 flate2 = { workspace = true }
 futures = { workspace = true }
 hex = { workspace = true }
+ignore = { workspace = true }
 pin-project-lite = { workspace = true }
 png = { workspace = true }
 reqwest = { workspace = true }

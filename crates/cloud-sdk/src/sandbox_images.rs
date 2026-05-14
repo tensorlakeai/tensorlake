@@ -6,6 +6,7 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use docker_credentials_config::DockerConfig;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -81,6 +82,8 @@ pub struct SandboxImageBuildOptions {
     pub project_id: Option<String>,
     pub namespace: String,
     pub dockerfile_path: PathBuf,
+    pub dockerfile_text: Option<String>,
+    pub context_dir: Option<PathBuf>,
     pub registered_name: Option<String>,
     pub disk_mb: Option<u64>,
     pub builder_disk_mb: Option<u64>,
@@ -165,7 +168,16 @@ where
     emit(SandboxImageBuildEvent::Status(
         "Loading Dockerfile...".to_string(),
     ));
-    let plan = load_dockerfile_plan(&options.dockerfile_path, options.registered_name.as_deref())?;
+    let plan = if let Some(dockerfile_text) = &options.dockerfile_text {
+        load_dockerfile_text_plan(
+            &options.dockerfile_path,
+            options.context_dir.as_deref(),
+            dockerfile_text.clone(),
+            options.registered_name.as_deref(),
+        )?
+    } else {
+        load_dockerfile_plan(&options.dockerfile_path, options.registered_name.as_deref())?
+    };
     emit(SandboxImageBuildEvent::Status(format!(
         "Selected image name: {}",
         plan.registered_name
@@ -970,6 +982,32 @@ fn load_dockerfile_plan(
     }
 
     let dockerfile_text = std::fs::read_to_string(&absolute_path)?;
+    load_dockerfile_text_plan(&absolute_path, None, dockerfile_text, registered_name)
+}
+
+fn load_dockerfile_text_plan(
+    dockerfile_path: &Path,
+    context_dir: Option<&Path>,
+    dockerfile_text: String,
+    registered_name: Option<&str>,
+) -> Result<DockerfileBuildPlan> {
+    let absolute_path = if dockerfile_path.is_absolute() {
+        dockerfile_path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(dockerfile_path)
+    };
+    let context_dir = if let Some(context_dir) = context_dir {
+        if context_dir.is_absolute() {
+            context_dir.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(context_dir)
+        }
+    } else {
+        absolute_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf()
+    };
     let mut base_image: Option<String> = None;
 
     for (line_number, line) in logical_dockerfile_lines(&dockerfile_text) {
@@ -990,10 +1028,7 @@ fn load_dockerfile_plan(
     })?;
 
     Ok(DockerfileBuildPlan {
-        context_dir: absolute_path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .to_path_buf(),
+        context_dir,
         registered_name: registered_name
             .map(str::to_string)
             .unwrap_or_else(|| default_registered_name(&absolute_path)),
@@ -1178,12 +1213,49 @@ fn join_posix(base: &str, child: &str) -> String {
 
 fn collect_dir_files(root: &Path, current: &Path) -> Result<Vec<(PathBuf, String)>> {
     let mut files = Vec::new();
+    let dockerignore = dockerignore_matcher(root)?;
+    collect_dir_files_filtered(root, current, dockerignore.as_ref(), &mut files)?;
+    Ok(files)
+}
+
+fn dockerignore_matcher(root: &Path) -> Result<Option<Gitignore>> {
+    let dockerignore_path = root.join(".dockerignore");
+    if !dockerignore_path.is_file() {
+        return Ok(None);
+    }
+
+    let mut builder = GitignoreBuilder::new(root);
+    if let Some(error) = builder.add(&dockerignore_path) {
+        return Err(SandboxImageBuildError::other(format!(
+            "failed to parse {}: {}",
+            dockerignore_path.display(),
+            error
+        )));
+    }
+    builder
+        .build()
+        .map(Some)
+        .map_err(|error| SandboxImageBuildError::other(error.to_string()))
+}
+
+fn collect_dir_files_filtered(
+    root: &Path,
+    current: &Path,
+    dockerignore: Option<&Gitignore>,
+    files: &mut Vec<(PathBuf, String)>,
+) -> Result<()> {
     for entry in std::fs::read_dir(current)? {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            files.extend(collect_dir_files(root, &path)?);
+            if is_dockerignored(root, &path, true, dockerignore) {
+                continue;
+            }
+            collect_dir_files_filtered(root, &path, dockerignore, files)?;
         } else if path.is_file() {
+            if is_dockerignored(root, &path, false, dockerignore) {
+                continue;
+            }
             let relative = path
                 .strip_prefix(root)
                 .map_err(|error| SandboxImageBuildError::other(error.to_string()))?;
@@ -1195,16 +1267,35 @@ fn collect_dir_files(root: &Path, current: &Path) -> Result<Vec<(PathBuf, String
             files.push((path, relative));
         }
     }
-    Ok(files)
+    Ok(())
+}
+
+fn is_dockerignored(
+    root: &Path,
+    path: &Path,
+    is_dir: bool,
+    dockerignore: Option<&Gitignore>,
+) -> bool {
+    let Some(dockerignore) = dockerignore else {
+        return false;
+    };
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    if relative.as_os_str().is_empty() {
+        return false;
+    }
+    dockerignore.matched(relative, is_dir).is_ignore()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         CompleteSandboxTemplateBuildRequest, PreparedRootfsBuilder, PreparedRootfsParent,
-        PreparedSandboxTemplateBuild, build_rootfs_spec, complete_request_from_metadata,
-        default_registered_name, load_dockerfile_plan, logical_dockerfile_lines, normalize_posix,
-        rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
+        PreparedSandboxTemplateBuild, build_rootfs_spec, collect_dir_files,
+        complete_request_from_metadata, default_registered_name, load_dockerfile_plan,
+        load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix, rootfs_builder_env,
+        rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
     };
     use serde_json::{Value, json};
     use std::io::Write;
@@ -1253,6 +1344,26 @@ mod tests {
             error.to_string().contains("multi-stage Dockerfiles"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn load_dockerfile_text_plan_uses_explicit_context_without_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let context_dir = temp_dir.path().join("context");
+        std::fs::create_dir(&context_dir).unwrap();
+        let dockerfile_path = context_dir.join("Dockerfile.generated");
+
+        let plan = load_dockerfile_text_plan(
+            &dockerfile_path,
+            Some(&context_dir),
+            "FROM python:3.12-slim\nRUN echo hi\n".to_string(),
+            Some("generated"),
+        )
+        .unwrap();
+
+        assert_eq!(plan.context_dir, context_dir);
+        assert_eq!(plan.base_image, "python:3.12-slim");
+        assert_eq!(plan.registered_name, "generated");
     }
 
     #[test]
@@ -1424,6 +1535,30 @@ mod tests {
     #[test]
     fn normalize_posix_collapses_dot_segments() {
         assert_eq!(normalize_posix("/a//b/../c"), "/a/c");
+    }
+
+    #[test]
+    fn collect_dir_files_honors_dockerignore() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        std::fs::write(root.join(".dockerignore"), "ignored.txt\ncache/drop.txt\n").unwrap();
+        std::fs::write(root.join("included.txt"), "included").unwrap();
+        std::fs::write(root.join("ignored.txt"), "ignored").unwrap();
+        std::fs::create_dir(root.join("cache")).unwrap();
+        std::fs::write(root.join("cache/drop.txt"), "drop").unwrap();
+        std::fs::write(root.join("cache/keep.txt"), "keep").unwrap();
+
+        let mut files = collect_dir_files(root, root)
+            .unwrap()
+            .into_iter()
+            .map(|(_, relative)| relative)
+            .collect::<Vec<_>>();
+        files.sort();
+
+        assert_eq!(
+            files,
+            vec![".dockerignore", "cache/keep.txt", "included.txt"]
+        );
     }
 
     fn prepared_build(rootfs_node_kind: &str) -> PreparedSandboxTemplateBuild {

@@ -63,6 +63,7 @@ thiserror = "2.0.18"
 anyhow = "1.0.102"
 derive_builder = "0.20"
 pin-project-lite = "0.2.17"
+ignore = "0.4"
 
 # Compression & archives
 flate2 = "1.1.9"

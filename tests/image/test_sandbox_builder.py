@@ -137,6 +137,8 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             "default",
             False,
             sbm.USER_AGENT,
+            None,
+            None,
             ANY,
         )
 
@@ -177,6 +179,8 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             "default",
             False,
             sbm.USER_AGENT,
+            None,
+            None,
             ANY,
         )
 
@@ -205,6 +209,8 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
                 memory_mb=BUILD_MEMORY_MB,
                 disk_mb=None,
                 builder_disk_mb=None,
+                dockerfile_text=None,
+                context_dir=None,
                 is_public=False,
                 emit=emitted.append,
             )
@@ -225,7 +231,9 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
 
             def fake_rust_builder(*args, **_kwargs):
                 captured["args"] = args
-                captured["dockerfile_text"] = Path(args[2]).read_text(encoding="utf-8")
+                captured["dockerfile_path"] = args[2]
+                captured["dockerfile_text"] = args[14]
+                captured["context_dir"] = args[15]
                 return '{"id":"tpl-1","snapshot_id":"snap-1"}'
 
             rust_builder_mock.side_effect = fake_rust_builder
@@ -263,6 +271,19 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
         image = Image(name="default-name", base_image="python:3.12-slim")
         _, _, rust_builder, _ = self._run_build(image, registered_name="override")
         self.assertEqual(rust_builder.call_args.args[3], "override")
+
+    def test_image_build_does_not_write_generated_dockerfile_into_context(self):
+        image = Image(name="context-image", base_image="python:3.12-slim").copy(
+            ".", "/app"
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "input.txt").write_text("hello", encoding="utf-8")
+            _, _, _, captured = self._run_build(image, context_dir=tmpdir)
+            generated = list(Path(tmpdir).glob(".tensorlake-image-*.Dockerfile"))
+
+        self.assertEqual(captured["context_dir"], tmpdir)
+        self.assertEqual(generated, [])
 
     def test_warns_on_default_name(self):
         image = Image(base_image="python:3.12-slim")

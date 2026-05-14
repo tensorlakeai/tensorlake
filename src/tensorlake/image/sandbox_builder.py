@@ -14,7 +14,6 @@ import json
 import os
 import posixpath
 import shlex
-import tempfile
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -841,24 +840,6 @@ def _run_plan(
                 pass
 
 
-def _write_generated_dockerfile(plan: DockerfileBuildPlan) -> str:
-    context_dir = Path(plan.context_dir)
-    context_dir.mkdir(parents=True, exist_ok=True)
-    handle = tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=context_dir,
-        prefix=".tensorlake-image-",
-        suffix=".Dockerfile",
-        delete=False,
-    )
-    with handle:
-        handle.write(plan.dockerfile_text)
-        if not plan.dockerfile_text.endswith("\n"):
-            handle.write("\n")
-    return handle.name
-
-
 def _rust_build_sandbox_image(*args, **kwargs) -> str:
     try:
         from tensorlake._cloud_sdk import (
@@ -874,6 +855,8 @@ def _run_rust_image_create(
     dockerfile_path: str,
     registered_name: str,
     *,
+    dockerfile_text: str | None,
+    context_dir: str | None,
     cpus: float,
     memory_mb: int,
     disk_mb: int | None,
@@ -908,6 +891,8 @@ def _run_rust_image_create(
         ctx.namespace,
         ctx.personal_access_token is not None and ctx.api_key is None,
         USER_AGENT,
+        dockerfile_text,
+        context_dir,
         forward_event,
     )
     try:
@@ -1002,15 +987,19 @@ def build_sandbox_image(
             stacklevel=2,
         )
 
-    cli_dockerfile_path = plan.dockerfile_path
-    generated_dockerfile_path: str | None = None
+    dockerfile_text = None
+    rust_context_dir = None
     try:
         if isinstance(source, Image):
-            generated_dockerfile_path = _write_generated_dockerfile(plan)
-            cli_dockerfile_path = generated_dockerfile_path
+            dockerfile_text = plan.dockerfile_text
+            if not dockerfile_text.endswith("\n"):
+                dockerfile_text += "\n"
+            rust_context_dir = plan.context_dir
         return _run_rust_image_create(
-            cli_dockerfile_path,
+            plan.dockerfile_path,
             plan.registered_name,
+            dockerfile_text=dockerfile_text,
+            context_dir=rust_context_dir,
             cpus=cpus,
             memory_mb=memory_mb,
             disk_mb=disk_mb,
@@ -1022,9 +1011,3 @@ def build_sandbox_image(
         raise
     except Exception as e:
         raise SandboxImageBuildError(f"{type(e).__name__}: {e}") from e
-    finally:
-        if generated_dockerfile_path is not None:
-            try:
-                os.unlink(generated_dockerfile_path)
-            except OSError:
-                pass
