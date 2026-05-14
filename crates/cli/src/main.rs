@@ -601,6 +601,19 @@ enum ImageCommands {
         #[arg(long = "disk", hide = true, conflicts_with = "disk_mb")]
         disk_gb: Option<u64>,
 
+        /// Disk size in MB for the temporary build sandbox. Defaults to the
+        /// larger of the rootfs size and the platform-provided builder disk.
+        /// Use this to give `docker build` more scratch space than the output
+        /// rootfs (e.g. building a child image that writes large transient
+        /// files), without changing the rootfs size and breaking the rootfs
+        /// diff size-equality check against the parent.
+        #[arg(long = "builder_disk_mb")]
+        builder_disk_mb: Option<u64>,
+
+        /// Builder disk size in GB (convenience alias for --builder_disk_mb)
+        #[arg(long = "builder_disk", hide = true, conflicts_with = "builder_disk_mb")]
+        builder_disk_gb: Option<u64>,
+
         /// CPUs for the temporary build sandbox
         #[arg(long)]
         cpus: Option<f64>,
@@ -1068,6 +1081,8 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         registered_name,
                         disk_mb,
                         disk_gb,
+                        builder_disk_mb,
+                        builder_disk_gb,
                         cpus,
                         memory,
                         public,
@@ -1083,11 +1098,25 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 })
                                 .transpose()?
                         };
+                        let builder_disk_mb = if let Some(value) = builder_disk_mb {
+                            Some(value)
+                        } else {
+                            builder_disk_gb
+                                .map(|value| {
+                                    value.checked_mul(1024).ok_or_else(|| {
+                                        CliError::usage(
+                                            "--builder_disk is too large to convert to MiB",
+                                        )
+                                    })
+                                })
+                                .transpose()?
+                        };
                         commands::sbx::image::create::run(
                             ctx,
                             &dockerfile_path,
                             registered_name.as_deref(),
                             disk_mb,
+                            builder_disk_mb,
                             cpus,
                             memory,
                             public,

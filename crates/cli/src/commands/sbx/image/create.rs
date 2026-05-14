@@ -94,6 +94,7 @@ pub async fn run(
     dockerfile_path: &str,
     registered_name: Option<&str>,
     disk_mb: Option<u64>,
+    builder_disk_mb_override: Option<u64>,
     cpus: Option<f64>,
     memory_mb: Option<i64>,
     is_public: bool,
@@ -115,7 +116,11 @@ pub async fn run(
     let client = super::sandbox_lifecycle_client(ctx)?;
     let sandboxes = SandboxesClient::new(client.clone(), ctx.namespace.clone(), is_localhost(ctx));
     let rootfs_disk_bytes = rootfs_disk_bytes(disk_mb, &prepared)?;
-    let builder_disk_mb = rootfs_disk_bytes_to_mb(rootfs_disk_bytes)?.max(prepared.builder.disk_mb);
+    let builder_disk_mb = resolve_builder_disk_mb(
+        builder_disk_mb_override,
+        rootfs_disk_bytes,
+        prepared.builder.disk_mb,
+    )?;
     let resources = CreateSandboxResources {
         cpus: cpus.unwrap_or(prepared.builder.cpus),
         memory_mb: memory_mb.unwrap_or(prepared.builder.memory_mb),
@@ -391,6 +396,22 @@ fn rootfs_disk_bytes_to_mb(rootfs_disk_bytes: u64) -> Result<u64> {
         .checked_add((1024 * 1024) - 1)
         .ok_or_else(|| CliError::usage("rootfsDiskBytes is too large to convert to megabytes"))
         .map(|bytes| bytes / (1024 * 1024))
+}
+
+// An explicit --builder_disk_mb wins outright so callers can size the build
+// sandbox independently of the rootfs (e.g. a Dockerfile that writes large
+// transient files but produces a small rootfs). Otherwise fall back to the
+// previous behavior: at least as large as the rootfs, and never below the
+// platform-provided default.
+fn resolve_builder_disk_mb(
+    builder_disk_mb_override: Option<u64>,
+    rootfs_disk_bytes: u64,
+    prepared_builder_disk_mb: u64,
+) -> Result<u64> {
+    if let Some(value) = builder_disk_mb_override {
+        return Ok(value);
+    }
+    Ok(rootfs_disk_bytes_to_mb(rootfs_disk_bytes)?.max(prepared_builder_disk_mb))
 }
 
 async fn resolved_docker_config_json() -> Result<Option<String>> {
@@ -935,7 +956,8 @@ mod tests {
         CompleteSandboxTemplateBuildRequest, PreparedRootfsBuilder, PreparedRootfsParent,
         PreparedSandboxTemplateBuild, build_rootfs_spec, complete_request_from_metadata,
         default_registered_name, load_dockerfile_plan, logical_dockerfile_lines, normalize_posix,
-        rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
+        resolve_builder_disk_mb, rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes,
+        rootfs_disk_bytes_to_mb,
     };
     use serde_json::{Value, json};
     use std::io::Write;
@@ -1016,6 +1038,36 @@ mod tests {
         assert!(
             error.to_string().contains("parent rootfsDiskBytes"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn resolve_builder_disk_mb_prefers_explicit_override() {
+        // Override wins even when smaller than the rootfs — operators may
+        // intentionally size the builder differently from the output rootfs.
+        let rootfs_bytes = 20 * 1024 * 1024 * 1024;
+        let prepared_disk_mb = 30_720;
+        assert_eq!(
+            resolve_builder_disk_mb(Some(40_960), rootfs_bytes, prepared_disk_mb).unwrap(),
+            40_960
+        );
+        assert_eq!(
+            resolve_builder_disk_mb(Some(2048), rootfs_bytes, prepared_disk_mb).unwrap(),
+            2048
+        );
+    }
+
+    #[test]
+    fn resolve_builder_disk_mb_falls_back_to_max_of_rootfs_and_prepared() {
+        // 20 GiB rootfs > 30 GiB prepared → rootfs wins.
+        assert_eq!(
+            resolve_builder_disk_mb(None, 40 * 1024 * 1024 * 1024, 30_720).unwrap(),
+            40 * 1024,
+        );
+        // 10 GiB rootfs < 30 GiB prepared → prepared wins.
+        assert_eq!(
+            resolve_builder_disk_mb(None, 10 * 1024 * 1024 * 1024, 30_720).unwrap(),
+            30_720,
         );
     }
 
