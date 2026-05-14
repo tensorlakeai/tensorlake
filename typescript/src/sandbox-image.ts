@@ -1,6 +1,9 @@
-import { readFile, readdir, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import path from "node:path";
 import { parseArgs } from "node:util";
+import { fileURLToPath } from "node:url";
 import {
   type CommandResult,
   type ProcessInfo,
@@ -49,6 +52,7 @@ export interface CreateSandboxImageOptions {
   cpus?: number;
   memoryMb?: number;
   diskMb?: number;
+  builderDiskMb?: number;
   isPublic?: boolean;
   contextDir?: string;
   /**
@@ -118,6 +122,10 @@ interface BuildClient {
 
 interface CreateSandboxImageDeps {
   emit?: (event: Record<string, unknown>) => void;
+  runCli?: (
+    args: string[],
+    emit: (event: Record<string, unknown>) => void,
+  ) => Promise<string>;
   createClient?: (context: BuildContext) => BuildClient;
   registerImage?: (
     context: BuildContext,
@@ -542,6 +550,76 @@ function stderrEmit(event: Record<string, unknown>) {
   } else if (message) {
     process.stderr.write(`[${type}] ${message}\n`);
   }
+}
+
+function packagedTlBinary(): string | null {
+  const extension = process.platform === "win32" ? ".exe" : "";
+  const distDir = path.dirname(fileURLToPath(import.meta.url));
+  const candidate = path.join(
+    distDir,
+    "bin",
+    `${process.platform}-${process.arch}`,
+    `tl${extension}`,
+  );
+  return existsSync(candidate) ? candidate : null;
+}
+
+function tensorlakeCliCommand(): string {
+  return process.env.TENSORLAKE_CLI ?? packagedTlBinary() ?? "tl";
+}
+
+async function runTensorlakeCli(
+  args: string[],
+  emit: (event: Record<string, unknown>) => void,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(tensorlakeCliCommand(), args, {
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+      for (const line of chunk.split(/\r?\n/)) {
+        if (line) {
+          emit({ type: "build_log", stream: "stderr", message: line });
+        }
+      }
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve(stdout);
+        return;
+      }
+      reject(
+        new Error(
+          `tl sbx image create failed with exit code ${code}: ${stderr.trim() || stdout.trim()}`,
+        ),
+      );
+    });
+  });
+}
+
+async function writeGeneratedDockerfile(plan: DockerfileBuildPlan): Promise<string> {
+  const filePath = path.join(
+    plan.contextDir,
+    `.tensorlake-image-${process.pid}-${Date.now()}.Dockerfile`,
+  );
+  await writeFile(
+    filePath,
+    plan.dockerfileText.endsWith("\n")
+      ? plan.dockerfileText
+      : `${plan.dockerfileText}\n`,
+    "utf8",
+  );
+  return filePath;
 }
 
 function debugEnabled(): boolean {
@@ -999,6 +1077,86 @@ export async function createSandboxImage(
   options: CreateSandboxImageOptions = {},
   deps: CreateSandboxImageDeps = {},
 ) {
+  if ((deps.createClient != null || deps.registerImage != null) && deps.runCli == null) {
+    return createSandboxImageLegacy(source, options, deps);
+  }
+
+  const emit = deps.emit ?? (options.verbose ? stderrEmit : noopEmit);
+  const runCli = deps.runCli ?? runTensorlakeCli;
+
+  const sourceLabel =
+    typeof source === "string" ? source : `Image(${source.name})`;
+  emit({ type: "status", message: `Loading ${sourceLabel}...` });
+  const plan =
+    typeof source === "string"
+      ? await loadDockerfilePlan(source, options.registeredName)
+      : loadImagePlan(source, options);
+  emit({
+    type: "status",
+    message:
+      `Building image '${plan.registeredName}' through Rust image builder...`,
+  });
+
+  let generatedDockerfilePath: string | null = null;
+  try {
+    let dockerfilePath = plan.dockerfilePath;
+    if (typeof source !== "string") {
+      generatedDockerfilePath = await writeGeneratedDockerfile(plan);
+      dockerfilePath = generatedDockerfilePath;
+    }
+
+    const args = [
+      "sbx",
+      "image",
+      "create",
+      dockerfilePath,
+      "--name",
+      plan.registeredName,
+      "--cpus",
+      String(options.cpus ?? 2.0),
+      "--memory",
+      String(options.memoryMb ?? 4096),
+      "--json",
+    ];
+    if (options.diskMb != null) {
+      args.push("--disk_mb", String(options.diskMb));
+    }
+    if (options.builderDiskMb != null) {
+      args.push("--builder_disk_mb", String(options.builderDiskMb));
+    }
+    if (options.isPublic ?? false) {
+      args.push("--public");
+    }
+
+    const output = await runCli(args, emit);
+    const result = output.trim()
+      ? (JSON.parse(output) as Record<string, unknown>)
+      : {};
+
+    emit({
+      type: "image_registered",
+      name: plan.registeredName,
+      image_id:
+        (typeof result.id === "string" && result.id) ||
+        (typeof result.templateId === "string" && result.templateId) ||
+        "",
+    });
+    emit({ type: "done" });
+    return result;
+  } finally {
+    if (generatedDockerfilePath != null) {
+      try {
+        await unlink(generatedDockerfilePath);
+      } catch {}
+    }
+  }
+}
+
+async function createSandboxImageLegacy(
+  source: SandboxImageSource,
+  options: CreateSandboxImageOptions = {},
+  deps: CreateSandboxImageDeps = {},
+) {
   const emit = deps.emit ?? (options.verbose ? stderrEmit : noopEmit);
   const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   const context = buildContextFromEnv();
@@ -1111,13 +1269,14 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
       cpus: { type: "string" },
       memory: { type: "string" },
       disk_mb: { type: "string" },
+      builder_disk_mb: { type: "string" },
       public: { type: "boolean", default: false },
     },
   });
 
   const dockerfilePath = parsed.positionals[0];
   if (!dockerfilePath) {
-    throw new Error("Usage: tensorlake-create-sandbox-image <dockerfile_path> [--name NAME] [--cpus N] [--memory MB] [--disk_mb MB] [--public]");
+    throw new Error("Usage: tensorlake-create-sandbox-image <dockerfile_path> [--name NAME] [--cpus N] [--memory MB] [--disk_mb MB] [--builder_disk_mb MB] [--public]");
   }
 
   const cpus =
@@ -1126,6 +1285,10 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
     parsed.values.memory != null ? Number(parsed.values.memory) : undefined;
   const diskMb =
     parsed.values.disk_mb != null ? Number(parsed.values.disk_mb) : undefined;
+  const builderDiskMb =
+    parsed.values.builder_disk_mb != null
+      ? Number(parsed.values.builder_disk_mb)
+      : undefined;
   if (cpus != null && !Number.isFinite(cpus)) {
     throw new Error(`Invalid --cpus value: ${parsed.values.cpus}`);
   }
@@ -1135,6 +1298,11 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
   if (diskMb != null && !Number.isInteger(diskMb)) {
     throw new Error(`Invalid --disk_mb value: ${parsed.values.disk_mb}`);
   }
+  if (builderDiskMb != null && !Number.isInteger(builderDiskMb)) {
+    throw new Error(
+      `Invalid --builder_disk_mb value: ${parsed.values.builder_disk_mb}`,
+    );
+  }
 
   await createSandboxImage(
     dockerfilePath,
@@ -1143,6 +1311,7 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
       cpus,
       memoryMb,
       diskMb,
+      builderDiskMb,
       isPublic: parsed.values.public,
     },
     { emit: ndjsonStdoutEmit },

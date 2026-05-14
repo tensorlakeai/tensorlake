@@ -2798,11 +2798,14 @@ dependencies = [
 name = "tensorlake"
 version = "0.5.10"
 dependencies = [
+ "base64",
+ "bollard",
  "bytes",
  "chrono",
  "data-encoding",
  "derive_builder",
  "des",
+ "docker-credentials-config",
  "eventsource-stream",
  "flate2",
  "futures",
@@ -2819,6 +2822,7 @@ dependencies = [
  "serde_repr",
  "serde_with",
  "sha2",
+ "shlex",
  "tar",
  "tempfile",
  "thiserror 2.0.18",
