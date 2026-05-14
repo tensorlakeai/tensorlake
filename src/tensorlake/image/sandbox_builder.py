@@ -861,7 +861,9 @@ def _write_generated_dockerfile(plan: DockerfileBuildPlan) -> str:
 
 def _rust_build_sandbox_image(*args, **kwargs) -> str:
     try:
-        from tensorlake._cloud_sdk import build_sandbox_image as rust_build_sandbox_image
+        from tensorlake._cloud_sdk import (
+            build_sandbox_image as rust_build_sandbox_image,
+        )
     except ImportError:
         from _cloud_sdk import build_sandbox_image as rust_build_sandbox_image
 
@@ -887,6 +889,10 @@ def _run_rust_image_create(
         )
 
     emit({"type": "status", "message": f"Building image '{registered_name}'..."})
+
+    def forward_event(event: dict) -> None:
+        emit(dict(event))
+
     result_json = _rust_build_sandbox_image(
         ctx.api_url,
         token,
@@ -902,6 +908,7 @@ def _run_rust_image_create(
         ctx.namespace,
         ctx.personal_access_token is not None and ctx.api_key is None,
         USER_AGENT,
+        forward_event,
     )
     try:
         result = json.loads(result_json) if result_json.strip() else {}

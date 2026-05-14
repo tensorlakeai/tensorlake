@@ -14,6 +14,7 @@ use futures::StreamExt;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use pyo3_async_runtimes::tokio::future_into_py;
 use reqwest::Method;
 use reqwest::multipart::{Form, Part};
@@ -22,6 +23,7 @@ use serde_json::Value;
 use tensorlake::document_ai::DocumentAiClient;
 use tensorlake::images::ImagesClient;
 use tensorlake::images::models::{ApplicationBuildContext, CreateApplicationBuildRequest};
+use tensorlake::sandbox_images::SandboxImageBuildEvent;
 use tensorlake::sandboxes::models::{
     CreateSandboxRequest, SandboxPoolRequest, SnapshotType, UpdateSandboxRequest,
 };
@@ -2622,8 +2624,10 @@ fn create_image_context_file(
     namespace=None,
     use_scope_headers=false,
     user_agent=None,
+    emit=None,
 ))]
 fn build_sandbox_image(
+    py: Python<'_>,
     api_url: String,
     token: String,
     dockerfile_path: String,
@@ -2638,6 +2642,7 @@ fn build_sandbox_image(
     namespace: Option<String>,
     use_scope_headers: bool,
     user_agent: Option<String>,
+    emit: Option<Py<PyAny>>,
 ) -> PyResult<String> {
     let options = tensorlake::sandbox_images::SandboxImageBuildOptions {
         api_url,
@@ -2656,10 +2661,17 @@ fn build_sandbox_image(
         user_agent,
     };
 
-    let result = shared_runtime()
-        .block_on(
-            async move { tensorlake::sandbox_images::build_sandbox_image(options, |_| {}).await },
-        )
+    let result = py
+        .detach(move || {
+            shared_runtime().block_on(async move {
+                tensorlake::sandbox_images::build_sandbox_image(options, |event| {
+                    if let Some(callback) = emit.as_ref() {
+                        emit_sandbox_image_event(callback, event);
+                    }
+                })
+                .await
+            })
+        })
         .map_err(|error| {
             CloudSandboxClientError::new_err((
                 "sandbox_image_build",
@@ -2675,6 +2687,29 @@ fn build_sandbox_image(
             error.to_string(),
         ))
     })
+}
+
+fn emit_sandbox_image_event(callback: &Py<PyAny>, event: SandboxImageBuildEvent) {
+    let _ = Python::attach(|py| -> PyResult<()> {
+        let dict = PyDict::new(py);
+        match event {
+            SandboxImageBuildEvent::Status(message) => {
+                dict.set_item("type", "status")?;
+                dict.set_item("message", message)?;
+            }
+            SandboxImageBuildEvent::BuildLog { stream, message } => {
+                dict.set_item("type", "build_log")?;
+                dict.set_item("stream", stream)?;
+                dict.set_item("message", message)?;
+            }
+            SandboxImageBuildEvent::Warning(message) => {
+                dict.set_item("type", "warning")?;
+                dict.set_item("message", message)?;
+            }
+        }
+        callback.call1(py, (dict,))?;
+        Ok(())
+    });
 }
 
 #[pymodule]

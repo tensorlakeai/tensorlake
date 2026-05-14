@@ -1,30 +1,20 @@
-import { existsSync } from "node:fs";
-import { readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { readFile, readdir, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { fileURLToPath } from "node:url";
-import {
-  type CommandResult,
-  type ProcessInfo,
-  type SnapshotInfo,
-  type SnapshotType,
-  type SnapshotWaitCondition,
-} from "./models.js";
+import { type CommandResult, type ProcessInfo } from "./models.js";
 import { type OutputResponse, ProcessStatus } from "./models.js";
 import { SandboxClient } from "./client.js";
 import { Image, dockerfileContent } from "./image.js";
 
-const BUILD_SANDBOX_PIP_ENV = { PIP_BREAK_SYSTEM_PACKAGES: "1" } as const;
-const IGNORED_DOCKERFILE_INSTRUCTIONS = new Set([
-  "CMD",
-  "ENTRYPOINT",
-  "EXPOSE",
-  "HEALTHCHECK",
-  "LABEL",
-  "STOPSIGNAL",
-  "VOLUME",
-]);
+const DEFAULT_ROOTFS_DISK_MB = 10 * 1024;
+const REMOTE_BUILD_DIR = "/var/lib/tensorlake/rootfs-builder/build";
+const REMOTE_CONTEXT_DIR = "/var/lib/tensorlake/rootfs-builder/build/context";
+const REMOTE_SPEC_PATH = "/var/lib/tensorlake/rootfs-builder/build/spec.json";
+const REMOTE_METADATA_PATH = "/var/lib/tensorlake/rootfs-builder/build/metadata.json";
+const ROOTFS_BUILDER_BIN_DIR = "/usr/local/bin";
+const ROOTFS_BUILDER_PATH = "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const ROOTFS_BUILDER_COMMAND = "tl-rootfs-build";
 const UNSUPPORTED_DOCKERFILE_INSTRUCTIONS = new Set([
   "ARG",
   "ONBUILD",
@@ -98,6 +88,7 @@ interface BuildSandbox {
   getStderr(pid: number): Promise<OutputResponse>;
   getProcess(pid: number): Promise<ProcessInfo>;
   writeFile(path: string, content: Uint8Array): Promise<void>;
+  readFile(path: string): Promise<Uint8Array>;
   terminate(): Promise<void>;
 }
 
@@ -108,37 +99,52 @@ interface BuildClient {
     memoryMb?: number;
     diskMb?: number;
   }): Promise<BuildSandbox>;
-  snapshotAndWait(
-    sandboxId: string,
-    options?: {
-      timeout?: number;
-      pollInterval?: number;
-      snapshotType?: SnapshotType;
-      waitUntil?: SnapshotWaitCondition;
-    },
-  ): Promise<SnapshotInfo>;
   close(): void;
+}
+
+interface PreparedSandboxTemplateBuild {
+  buildId: string;
+  snapshotId: string;
+  snapshotUri: string;
+  rootfsNodeKind: string;
+  builder: PreparedRootfsBuilder;
+  parent?: PreparedRootfsParent | null;
+  [key: string]: unknown;
+}
+
+interface PreparedRootfsBuilder {
+  image: string;
+  command: string;
+  cpus: number;
+  memoryMb: number;
+  diskMb: number;
+}
+
+interface PreparedRootfsParent {
+  parentManifestUri: string;
+  rootfsDiskBytes?: number | null;
+}
+
+interface ResolvedBuildContext extends BuildContext {
+  organizationId: string;
+  projectId: string;
+  bearerToken: string;
+  useScopeHeaders: boolean;
+}
+
+interface CompleteSandboxTemplateBuildRequest {
+  snapshotId: string;
+  snapshotUri: string;
+  snapshotFormatVersion: string;
+  snapshotSizeBytes: number;
+  rootfsDiskBytes: number;
+  rootfsNodeKind: string;
+  parentManifestUri?: string;
 }
 
 interface CreateSandboxImageDeps {
   emit?: (event: Record<string, unknown>) => void;
-  runCli?: (
-    args: string[],
-    emit: (event: Record<string, unknown>) => void,
-  ) => Promise<string>;
   createClient?: (context: BuildContext) => BuildClient;
-  registerImage?: (
-    context: BuildContext,
-    name: string,
-    dockerfile: string,
-    snapshotId: string,
-    snapshotSandboxId: string,
-    snapshotUri: string,
-    snapshotSizeBytes: number,
-    rootfsDiskBytes: number,
-    isPublic: boolean,
-    snapshotFormatVersion?: string,
-  ) => Promise<Record<string, unknown>>;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -293,13 +299,6 @@ function shellSplit(input: string): string[] {
   return tokens;
 }
 
-function shellQuote(value: string): string {
-  if (!value) {
-    return "''";
-  }
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
 function stripLeadingFlags(value: string): {
   flags: Record<string, string>;
   remaining: string;
@@ -345,98 +344,6 @@ function parseFromValue(value: string, lineNumber: number): string {
     throw new Error(`line ${lineNumber}: unsupported FROM syntax '${value}'`);
   }
   return tokens[0];
-}
-
-function parseCopyLikeValues(
-  value: string,
-  lineNumber: number,
-  keyword: string,
-): {
-  flags: Record<string, string>;
-  sources: string[];
-  destination: string;
-} {
-  const { flags, remaining } = stripLeadingFlags(value);
-  if ("from" in flags) {
-    throw new Error(
-      `line ${lineNumber}: ${keyword} --from is not supported for sandbox image creation`,
-    );
-  }
-
-  const payload = remaining.trim();
-  if (!payload) {
-    throw new Error(
-      `line ${lineNumber}: ${keyword} must include source and destination`,
-    );
-  }
-
-  let parts: string[];
-  if (payload.startsWith("[")) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(payload);
-    } catch (error) {
-      throw new Error(
-        `line ${lineNumber}: invalid JSON array syntax for ${keyword}: ${(error as Error).message}`,
-      );
-    }
-    if (
-      !Array.isArray(parsed) ||
-      parsed.length < 2 ||
-      parsed.some((item) => typeof item !== "string")
-    ) {
-      throw new Error(
-        `line ${lineNumber}: ${keyword} JSON array form requires at least two string values`,
-      );
-    }
-    parts = parsed as string[];
-  } else {
-    parts = shellSplit(payload);
-    if (parts.length < 2) {
-      throw new Error(
-        `line ${lineNumber}: ${keyword} must include at least one source and one destination`,
-      );
-    }
-  }
-
-  return {
-    flags,
-    sources: parts.slice(0, -1),
-    destination: parts[parts.length - 1],
-  };
-}
-
-function parseEnvPairs(value: string, lineNumber: number): Array<[string, string]> {
-  const tokens = shellSplit(value);
-  if (tokens.length === 0) {
-    throw new Error(`line ${lineNumber}: ENV must include a key and value`);
-  }
-
-  if (tokens.every((token) => token.includes("="))) {
-    return tokens.map((token) => {
-      const [key, envValue] = token.split(/=(.*)/s, 2);
-      if (!key) {
-        throw new Error(`line ${lineNumber}: invalid ENV token '${token}'`);
-      }
-      return [key, envValue] as [string, string];
-    });
-  }
-
-  if (tokens.length < 2) {
-    throw new Error(`line ${lineNumber}: ENV must include a key and value`);
-  }
-
-  return [[tokens[0], tokens.slice(1).join(" ")]];
-}
-
-function resolveContainerPath(containerPath: string, workingDir: string): string {
-  if (!containerPath) {
-    return workingDir;
-  }
-  const normalized = containerPath.startsWith("/")
-    ? path.posix.normalize(containerPath)
-    : path.posix.normalize(path.posix.join(workingDir, containerPath));
-  return normalized.startsWith("/") ? normalized : `/${normalized}`;
 }
 
 function buildPlanFromDockerfileText(
@@ -552,76 +459,6 @@ function stderrEmit(event: Record<string, unknown>) {
   }
 }
 
-function packagedTlBinary(): string | null {
-  const extension = process.platform === "win32" ? ".exe" : "";
-  const distDir = path.dirname(fileURLToPath(import.meta.url));
-  const candidate = path.join(
-    distDir,
-    "bin",
-    `${process.platform}-${process.arch}`,
-    `tl${extension}`,
-  );
-  return existsSync(candidate) ? candidate : null;
-}
-
-function tensorlakeCliCommand(): string {
-  return process.env.TENSORLAKE_CLI ?? packagedTlBinary() ?? "tl";
-}
-
-async function runTensorlakeCli(
-  args: string[],
-  emit: (event: Record<string, unknown>) => void,
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(tensorlakeCliCommand(), args, {
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
-      for (const line of chunk.split(/\r?\n/)) {
-        if (line) {
-          emit({ type: "build_log", stream: "stderr", message: line });
-        }
-      }
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve(stdout);
-        return;
-      }
-      reject(
-        new Error(
-          `tl sbx image create failed with exit code ${code}: ${stderr.trim() || stdout.trim()}`,
-        ),
-      );
-    });
-  });
-}
-
-async function writeGeneratedDockerfile(plan: DockerfileBuildPlan): Promise<string> {
-  const filePath = path.join(
-    plan.contextDir,
-    `.tensorlake-image-${process.pid}-${Date.now()}.Dockerfile`,
-  );
-  await writeFile(
-    filePath,
-    plan.dockerfileText.endsWith("\n")
-      ? plan.dockerfileText
-      : `${plan.dockerfileText}\n`,
-    "utf8",
-  );
-  return filePath;
-}
-
 function debugEnabled(): boolean {
   return ["1", "true", "yes", "on"].includes(
     (process.env.TENSORLAKE_DEBUG ?? "").toLowerCase(),
@@ -641,13 +478,382 @@ function buildContextFromEnv(): BuildContext {
 }
 
 function createDefaultClient(context: BuildContext): BuildClient {
+  const useScopeHeaders = context.personalAccessToken != null && context.apiKey == null;
   return new SandboxClient({
     apiUrl: context.apiUrl,
     apiKey: context.apiKey ?? context.personalAccessToken,
-    organizationId: context.organizationId,
-    projectId: context.projectId,
+    organizationId: useScopeHeaders ? context.organizationId : undefined,
+    projectId: useScopeHeaders ? context.projectId : undefined,
     namespace: context.namespace,
   });
+}
+
+function baseApiUrl(context: Pick<BuildContext, "apiUrl">): string {
+  return context.apiUrl.replace(/\/+$/, "");
+}
+
+function scopedBuildsPath(context: ResolvedBuildContext): string {
+  return (
+    `/platform/v1/organizations/${encodeURIComponent(context.organizationId)}` +
+    `/projects/${encodeURIComponent(context.projectId)}/sandbox-template-builds`
+  );
+}
+
+function platformHeaders(
+  context: Pick<
+    ResolvedBuildContext,
+    "bearerToken" | "useScopeHeaders" | "organizationId" | "projectId"
+  >,
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${context.bearerToken}`,
+    "Content-Type": "application/json",
+  };
+  if (context.useScopeHeaders) {
+    headers["X-Forwarded-Organization-Id"] = context.organizationId;
+    headers["X-Forwarded-Project-Id"] = context.projectId;
+  }
+  return headers;
+}
+
+async function requestJson<T>(
+  url: string,
+  init: RequestInit,
+  errorPrefix: string,
+): Promise<T> {
+  const response = await fetch(url, init);
+  if (!response.ok) {
+    throw new Error(
+      `${errorPrefix} (HTTP ${response.status}): ${await response.text()}`,
+    );
+  }
+
+  const text = await response.text();
+  return (text ? JSON.parse(text) : {}) as T;
+}
+
+async function resolveBuildContext(context: BuildContext): Promise<ResolvedBuildContext> {
+  const bearerToken = context.apiKey ?? context.personalAccessToken;
+  if (!bearerToken) {
+    throw new Error("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT.");
+  }
+
+  if (context.apiKey) {
+    const scope = await requestJson<{
+      organizationId: string;
+      projectId: string;
+    }>(
+      `${baseApiUrl(context)}/platform/v1/keys/introspect`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${bearerToken}`,
+          "Content-Type": "application/json",
+        },
+      },
+      "API key introspection failed",
+    );
+    if (!scope.organizationId || !scope.projectId) {
+      throw new Error("API key introspection response is missing organizationId or projectId");
+    }
+    return {
+      ...context,
+      bearerToken,
+      organizationId: scope.organizationId,
+      projectId: scope.projectId,
+      useScopeHeaders: false,
+    };
+  }
+
+  if (!context.organizationId || !context.projectId) {
+    throw new Error(
+      "Personal Access Token authentication requires " +
+        "TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID to be set " +
+        "(e.g. via 'tl login && tl init'). To skip this requirement, " +
+        "authenticate with TENSORLAKE_API_KEY instead — API keys are " +
+        "bound to a single project at creation.",
+    );
+  }
+
+  return {
+    ...context,
+    bearerToken,
+    organizationId: context.organizationId,
+    projectId: context.projectId,
+    useScopeHeaders: true,
+  };
+}
+
+async function prepareRootfsBuild(
+  context: ResolvedBuildContext,
+  plan: DockerfileBuildPlan,
+  isPublic: boolean,
+): Promise<{ prepared: PreparedSandboxTemplateBuild; spec: Record<string, unknown> }> {
+  if (!plan.baseImage) {
+    throw new Error("Sandbox image builds require a Dockerfile FROM image or Image baseImage");
+  }
+
+  const spec = await requestJson<Record<string, unknown>>(
+    `${baseApiUrl(context)}${scopedBuildsPath(context)}`,
+    {
+      method: "POST",
+      headers: platformHeaders(context),
+      body: JSON.stringify({
+        name: plan.registeredName,
+        dockerfile: plan.dockerfileText,
+        baseImage: plan.baseImage,
+        public: isPublic,
+      }),
+    },
+    "failed to prepare sandbox image build",
+  );
+
+  return { prepared: parsePreparedBuild(spec), spec };
+}
+
+function parsePreparedBuild(raw: Record<string, unknown>): PreparedSandboxTemplateBuild {
+  const builder = raw.builder as Record<string, unknown> | undefined;
+  if (!builder) {
+    throw new Error("platform API response is missing rootfs builder configuration");
+  }
+  const prepared: PreparedSandboxTemplateBuild = {
+    ...raw,
+    buildId: requiredString(raw, "buildId"),
+    snapshotId: requiredString(raw, "snapshotId"),
+    snapshotUri: requiredString(raw, "snapshotUri"),
+    rootfsNodeKind: requiredString(raw, "rootfsNodeKind"),
+    builder: {
+      image: requiredString(builder, "image"),
+      command: requiredString(builder, "command"),
+      cpus: requiredNumber(builder, "cpus"),
+      memoryMb: requiredNumber(builder, "memoryMb"),
+      diskMb: requiredNumber(builder, "diskMb"),
+    },
+  };
+  const parent = raw.parent as Record<string, unknown> | undefined;
+  if (parent != null) {
+    prepared.parent = {
+      parentManifestUri: requiredString(parent, "parentManifestUri"),
+      rootfsDiskBytes: optionalNumber(parent, "rootfsDiskBytes"),
+    };
+  }
+  return prepared;
+}
+
+async function completeRootfsBuild(
+  context: ResolvedBuildContext,
+  buildId: string,
+  request: CompleteSandboxTemplateBuildRequest,
+): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    `${baseApiUrl(context)}${scopedBuildsPath(context)}/${encodeURIComponent(buildId)}/complete`,
+    {
+      method: "POST",
+      headers: platformHeaders(context),
+      body: JSON.stringify(request),
+    },
+    "failed to complete sandbox image build",
+  );
+}
+
+async function resolvedDockerConfigJson(): Promise<string | undefined> {
+  const configDir = process.env.DOCKER_CONFIG ?? path.join(homedir(), ".docker");
+  const configPath = path.join(configDir, "config.json");
+  try {
+    const content = await readFile(configPath, "utf8");
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    const auths = parsed.auths as Record<string, unknown> | undefined;
+    if (auths != null && Object.keys(auths).length > 0) {
+      return JSON.stringify({ auths });
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+  return undefined;
+}
+
+function rootfsDiskBytes(
+  diskMb: number | undefined,
+  prepared: PreparedSandboxTemplateBuild,
+): number {
+  if (diskMb != null) {
+    return diskMb * 1024 * 1024;
+  }
+  if (prepared.parent != null) {
+    if (prepared.parent.rootfsDiskBytes == null) {
+      throw new Error(
+        "platform API did not return parent rootfsDiskBytes for diff build; pass diskMb explicitly or update Platform API",
+      );
+    }
+    return prepared.parent.rootfsDiskBytes;
+  }
+  return DEFAULT_ROOTFS_DISK_MB * 1024 * 1024;
+}
+
+function rootfsDiskBytesToMb(bytes: number): number {
+  return Math.ceil(bytes / (1024 * 1024));
+}
+
+async function buildRootfsSpec(
+  preparedSpec: Record<string, unknown>,
+  prepared: PreparedSandboxTemplateBuild,
+  plan: DockerfileBuildPlan,
+  diskMb: number | undefined,
+): Promise<Record<string, unknown>> {
+  const spec: Record<string, unknown> = {
+    ...preparedSpec,
+    dockerfile: plan.dockerfileText,
+    contextDir: REMOTE_CONTEXT_DIR,
+    baseImage: plan.baseImage,
+    rootfsDiskBytes: rootfsDiskBytes(diskMb, prepared),
+  };
+  const dockerConfigJson = await resolvedDockerConfigJson();
+  if (dockerConfigJson != null) {
+    spec.dockerConfigJson = dockerConfigJson;
+  }
+  return spec;
+}
+
+function rootfsBuilderExecutable(executable: string): string {
+  return executable === ROOTFS_BUILDER_COMMAND
+    ? `${ROOTFS_BUILDER_BIN_DIR}/${ROOTFS_BUILDER_COMMAND}`
+    : executable;
+}
+
+function rootfsBuilderEnv(): Record<string, string> {
+  return { PATH: ROOTFS_BUILDER_PATH };
+}
+
+async function runRootfsBuilder(
+  sandbox: BuildSandbox,
+  command: string,
+  emit: (event: Record<string, unknown>) => void,
+  sleep: (ms: number) => Promise<void>,
+) {
+  const parts = shellSplit(command);
+  const [executable, ...commandArgs] = parts;
+  if (!executable) {
+    throw new Error("empty rootfs builder command returned by platform API");
+  }
+  await runStreaming(
+    sandbox,
+    emit,
+    sleep,
+    rootfsBuilderExecutable(executable),
+    [...commandArgs, "--spec", REMOTE_SPEC_PATH, "--metadata-out", REMOTE_METADATA_PATH],
+    rootfsBuilderEnv(),
+    REMOTE_BUILD_DIR,
+  );
+}
+
+function metadataString(
+  metadata: Record<string, unknown>,
+  snakeKey: string,
+  camelKey: string,
+): string | undefined {
+  const value = metadata[snakeKey] ?? metadata[camelKey];
+  return typeof value === "string" ? value : undefined;
+}
+
+function metadataNumber(
+  metadata: Record<string, unknown>,
+  snakeKey: string,
+  camelKey: string,
+): number | undefined {
+  const value = metadata[snakeKey] ?? metadata[camelKey];
+  if (typeof value === "number") {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function completeRequestFromMetadata(
+  prepared: PreparedSandboxTemplateBuild,
+  metadata: Record<string, unknown>,
+): CompleteSandboxTemplateBuildRequest {
+  const rootfsNodeKind =
+    metadataString(metadata, "rootfs_node_kind", "rootfsNodeKind") ??
+    prepared.rootfsNodeKind;
+  const parentManifestUri =
+    metadataString(metadata, "parent_manifest_uri", "parentManifestUri") ??
+    (rootfsNodeKind === "diff" ? prepared.parent?.parentManifestUri : undefined);
+  if (rootfsNodeKind === "diff" && parentManifestUri == null) {
+    throw new Error("rootfs diff build completed without parent_manifest_uri");
+  }
+
+  const snapshotFormatVersion = metadataString(
+    metadata,
+    "snapshot_format_version",
+    "snapshotFormatVersion",
+  );
+  const snapshotSizeBytes = metadataNumber(
+    metadata,
+    "snapshot_size_bytes",
+    "snapshotSizeBytes",
+  );
+  const rootfsDiskBytesValue = metadataNumber(
+    metadata,
+    "rootfs_disk_bytes",
+    "rootfsDiskBytes",
+  );
+  if (!snapshotFormatVersion) {
+    throw new Error("rootfs builder metadata is missing snapshot_format_version");
+  }
+  if (snapshotSizeBytes == null) {
+    throw new Error("rootfs builder metadata is missing numeric snapshot_size_bytes");
+  }
+  if (rootfsDiskBytesValue == null) {
+    throw new Error("rootfs builder metadata is missing numeric rootfs_disk_bytes");
+  }
+
+  return {
+    snapshotId:
+      metadataString(metadata, "snapshot_id", "snapshotId") ?? prepared.snapshotId,
+    snapshotUri:
+      metadataString(metadata, "snapshot_uri", "snapshotUri") ?? prepared.snapshotUri,
+    snapshotFormatVersion,
+    snapshotSizeBytes,
+    rootfsDiskBytes: rootfsDiskBytesValue,
+    rootfsNodeKind,
+    ...(parentManifestUri ? { parentManifestUri } : {}),
+  };
+}
+
+function requiredString(object: Record<string, unknown>, key: string): string {
+  const value = object[key];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`expected '${key}' to be a non-empty string`);
+  }
+  return value;
+}
+
+function requiredNumber(object: Record<string, unknown>, key: string): number {
+  const value = object[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`expected '${key}' to be a finite number`);
+  }
+  return value;
+}
+
+function optionalNumber(
+  object: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const value = object[key];
+  if (value == null) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`expected '${key}' to be a finite number`);
+  }
+  return value;
 }
 
 async function runChecked(
@@ -740,20 +946,6 @@ function emitOutputLines(
   }
 }
 
-function isPathWithinContext(contextDir: string, localPath: string): boolean {
-  const relative = path.relative(contextDir, localPath);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
-function resolveContextSourcePath(contextDir: string, source: string): string {
-  const resolvedContextDir = path.resolve(contextDir);
-  const resolvedSource = path.resolve(resolvedContextDir, source);
-  if (!isPathWithinContext(resolvedContextDir, resolvedSource)) {
-    throw new Error(`Local path escapes the build context: ${source}`);
-  }
-  return resolvedSource;
-}
-
 async function copyLocalPathToSandbox(
   sandbox: BuildSandbox,
   localPath: string,
@@ -789,212 +981,6 @@ async function copyLocalPathToSandbox(
       );
       await sandbox.writeFile(destinationPath, await readFile(sourcePath));
     }
-  }
-}
-
-async function persistEnvVar(
-  sandbox: BuildSandbox,
-  processEnv: Record<string, string>,
-  key: string,
-  value: string,
-) {
-  const exportLine = `export ${key}=${shellQuote(value)}`;
-  await runChecked(
-    sandbox,
-    "sh",
-    ["-c", `printf '%s\\n' ${shellQuote(exportLine)} >> /etc/environment`],
-    processEnv,
-  );
-}
-
-async function copyFromContext(
-  sandbox: BuildSandbox,
-  emit: (event: Record<string, unknown>) => void,
-  contextDir: string,
-  sources: string[],
-  destination: string,
-  workingDir: string,
-  keyword: string,
-) {
-  const destinationPath = resolveContainerPath(destination, workingDir);
-  if (sources.length > 1 && !destinationPath.endsWith("/")) {
-    throw new Error(
-      `${keyword} with multiple sources requires a directory destination ending in '/'`,
-    );
-  }
-
-  for (const source of sources) {
-    const localSource = resolveContextSourcePath(contextDir, source);
-    const localStats = await stat(localSource).catch(() => null);
-    if (!localStats) {
-      throw new Error(`Local path not found: ${localSource}`);
-    }
-
-    let remoteDestination = destinationPath;
-    if (sources.length > 1) {
-      remoteDestination = path.posix.join(
-        destinationPath.replace(/\/$/, ""),
-        path.posix.basename(source.replace(/\/$/, "")),
-      );
-    } else if (localStats.isFile() && destinationPath.endsWith("/")) {
-      remoteDestination = path.posix.join(
-        destinationPath.replace(/\/$/, ""),
-        path.basename(source),
-      );
-    }
-
-    emit({
-      type: "status",
-      message: `${keyword} ${source} -> ${remoteDestination}`,
-    });
-    await copyLocalPathToSandbox(sandbox, localSource, remoteDestination);
-  }
-}
-
-async function addUrlToSandbox(
-  sandbox: BuildSandbox,
-  emit: (event: Record<string, unknown>) => void,
-  url: string,
-  destination: string,
-  workingDir: string,
-  processEnv: Record<string, string>,
-  sleep: (ms: number) => Promise<void>,
-) {
-  let destinationPath = resolveContainerPath(destination, workingDir);
-  const parsedUrl = new URL(url);
-  const fileName = path.posix.basename(parsedUrl.pathname.replace(/\/$/, "")) || "downloaded";
-  if (destinationPath.endsWith("/")) {
-    destinationPath = path.posix.join(destinationPath.replace(/\/$/, ""), fileName);
-  }
-
-  const parentDir = path.posix.dirname(destinationPath) || "/";
-  emit({
-    type: "status",
-    message: `ADD ${url} -> ${destinationPath}`,
-  });
-  await runChecked(sandbox, "mkdir", ["-p", parentDir], processEnv);
-  await runStreaming(
-    sandbox,
-    emit,
-    sleep,
-    "sh",
-    [
-      "-c",
-      `curl -fsSL --location ${shellQuote(url)} -o ${shellQuote(destinationPath)}`,
-    ],
-    processEnv,
-    workingDir,
-  );
-}
-
-async function executeDockerfilePlan(
-  sandbox: BuildSandbox,
-  plan: DockerfileBuildPlan,
-  emit: (event: Record<string, unknown>) => void,
-  sleep: (ms: number) => Promise<void>,
-) {
-  const processEnv: Record<string, string> = { ...BUILD_SANDBOX_PIP_ENV };
-  let workingDir = "/";
-
-  for (const instruction of plan.instructions) {
-    const { keyword, value, lineNumber } = instruction;
-
-    if (keyword === "RUN") {
-      emit({ type: "status", message: `RUN ${value}` });
-      await runStreaming(
-        sandbox,
-        emit,
-        sleep,
-        "sh",
-        ["-c", value],
-        processEnv,
-        workingDir,
-      );
-      continue;
-    }
-
-    if (keyword === "WORKDIR") {
-      const tokens = shellSplit(value);
-      if (tokens.length !== 1) {
-        throw new Error(`line ${lineNumber}: WORKDIR must include exactly one path`);
-      }
-      workingDir = resolveContainerPath(tokens[0], workingDir);
-      emit({ type: "status", message: `WORKDIR ${workingDir}` });
-      await runChecked(sandbox, "mkdir", ["-p", workingDir], processEnv);
-      continue;
-    }
-
-    if (keyword === "ENV") {
-      for (const [key, envValue] of parseEnvPairs(value, lineNumber)) {
-        emit({ type: "status", message: `ENV ${key}=${envValue}` });
-        processEnv[key] = envValue;
-        await persistEnvVar(sandbox, processEnv, key, envValue);
-      }
-      continue;
-    }
-
-    if (keyword === "COPY") {
-      const { sources, destination } = parseCopyLikeValues(
-        value,
-        lineNumber,
-        keyword,
-      );
-      await copyFromContext(
-        sandbox,
-        emit,
-        plan.contextDir,
-        sources,
-        destination,
-        workingDir,
-        keyword,
-      );
-      continue;
-    }
-
-    if (keyword === "ADD") {
-      const { sources, destination } = parseCopyLikeValues(
-        value,
-        lineNumber,
-        keyword,
-      );
-      if (
-        sources.length === 1 &&
-        /^https?:\/\//.test(sources[0])
-      ) {
-        await addUrlToSandbox(
-          sandbox,
-          emit,
-          sources[0],
-          destination,
-          workingDir,
-          processEnv,
-          sleep,
-        );
-      } else {
-        await copyFromContext(
-          sandbox,
-          emit,
-          plan.contextDir,
-          sources,
-          destination,
-          workingDir,
-          keyword,
-        );
-      }
-      continue;
-    }
-
-    if (IGNORED_DOCKERFILE_INSTRUCTIONS.has(keyword)) {
-      emit({
-        type: "warning",
-        message: `Skipping Dockerfile instruction '${keyword}' during snapshot materialization. It is still preserved in the registered Dockerfile.`,
-      });
-      continue;
-    }
-
-    throw new Error(
-      `line ${lineNumber}: Dockerfile instruction '${keyword}' is not supported for sandbox image creation`,
-    );
   }
 }
 
@@ -1077,93 +1063,10 @@ export async function createSandboxImage(
   options: CreateSandboxImageOptions = {},
   deps: CreateSandboxImageDeps = {},
 ) {
-  if ((deps.createClient != null || deps.registerImage != null) && deps.runCli == null) {
-    return createSandboxImageLegacy(source, options, deps);
-  }
-
-  const emit = deps.emit ?? (options.verbose ? stderrEmit : noopEmit);
-  const runCli = deps.runCli ?? runTensorlakeCli;
-
-  const sourceLabel =
-    typeof source === "string" ? source : `Image(${source.name})`;
-  emit({ type: "status", message: `Loading ${sourceLabel}...` });
-  const plan =
-    typeof source === "string"
-      ? await loadDockerfilePlan(source, options.registeredName)
-      : loadImagePlan(source, options);
-  emit({
-    type: "status",
-    message:
-      `Building image '${plan.registeredName}' through Rust image builder...`,
-  });
-
-  let generatedDockerfilePath: string | null = null;
-  try {
-    let dockerfilePath = plan.dockerfilePath;
-    if (typeof source !== "string") {
-      generatedDockerfilePath = await writeGeneratedDockerfile(plan);
-      dockerfilePath = generatedDockerfilePath;
-    }
-
-    const args = [
-      "sbx",
-      "image",
-      "create",
-      dockerfilePath,
-      "--name",
-      plan.registeredName,
-      "--cpus",
-      String(options.cpus ?? 2.0),
-      "--memory",
-      String(options.memoryMb ?? 4096),
-      "--json",
-    ];
-    if (options.diskMb != null) {
-      args.push("--disk_mb", String(options.diskMb));
-    }
-    if (options.builderDiskMb != null) {
-      args.push("--builder_disk_mb", String(options.builderDiskMb));
-    }
-    if (options.isPublic ?? false) {
-      args.push("--public");
-    }
-
-    const output = await runCli(args, emit);
-    const result = output.trim()
-      ? (JSON.parse(output) as Record<string, unknown>)
-      : {};
-
-    emit({
-      type: "image_registered",
-      name: plan.registeredName,
-      image_id:
-        (typeof result.id === "string" && result.id) ||
-        (typeof result.templateId === "string" && result.templateId) ||
-        "",
-    });
-    emit({ type: "done" });
-    return result;
-  } finally {
-    if (generatedDockerfilePath != null) {
-      try {
-        await unlink(generatedDockerfilePath);
-      } catch {}
-    }
-  }
-}
-
-async function createSandboxImageLegacy(
-  source: SandboxImageSource,
-  options: CreateSandboxImageOptions = {},
-  deps: CreateSandboxImageDeps = {},
-) {
   const emit = deps.emit ?? (options.verbose ? stderrEmit : noopEmit);
   const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   const context = buildContextFromEnv();
   const clientFactory = deps.createClient ?? createDefaultClient;
-  const register =
-    deps.registerImage ??
-    ((...args) => registerImage(...args));
 
   const sourceLabel =
     typeof source === "string" ? source : `Image(${source.name})`;
@@ -1174,70 +1077,76 @@ async function createSandboxImageLegacy(
       : loadImagePlan(source, options);
   emit({
     type: "status",
+    message: `Selected image name: ${plan.registeredName}`,
+  });
+
+  emit({ type: "status", message: "Preparing rootfs build..." });
+  const resolvedContext = await resolveBuildContext(context);
+  const { prepared, spec: preparedSpec } = await prepareRootfsBuild(
+    resolvedContext,
+    plan,
+    options.isPublic ?? false,
+  );
+  emit({
+    type: "status",
     message:
-      plan.baseImage == null
-        ? "Starting build sandbox with the default server image..."
-        : `Starting build sandbox from ${plan.baseImage}...`,
+      prepared.rootfsNodeKind === "diff"
+        ? "Build mode: RootfsDiff"
+        : "Build mode: RootfsBase",
   });
 
   const client = clientFactory(context);
   let sandbox: BuildSandbox | undefined;
 
   try {
+    const outputRootfsDiskBytes = rootfsDiskBytes(options.diskMb, prepared);
+    const builderDiskMb = Math.max(
+      rootfsDiskBytesToMb(outputRootfsDiskBytes),
+      options.builderDiskMb ?? prepared.builder.diskMb,
+    );
+
+    emit({
+      type: "status",
+      message: `Creating rootfs builder sandbox from ${prepared.builder.image}...`,
+    });
     sandbox = await client.createAndConnect({
-      ...(plan.baseImage == null ? {} : { image: plan.baseImage }),
-      cpus: options.cpus ?? 2.0,
-      memoryMb: options.memoryMb ?? 4096,
-      ...(options.diskMb != null ? { diskMb: options.diskMb } : {}),
+      image: prepared.builder.image,
+      cpus: options.cpus ?? prepared.builder.cpus,
+      memoryMb: options.memoryMb ?? prepared.builder.memoryMb,
+      diskMb: builderDiskMb,
     });
-
     emit({
       type: "status",
-      message: `Materializing image in sandbox ${sandbox.sandboxId}...`,
+      message: `Rootfs builder sandbox ${sandbox.sandboxId} is running`,
     });
-    await executeDockerfilePlan(sandbox, plan, emit, sleep);
+    emit({ type: "status", message: "Uploading build context..." });
+    await copyLocalPathToSandbox(sandbox, plan.contextDir, REMOTE_CONTEXT_DIR);
+    const spec = await buildRootfsSpec(
+      preparedSpec,
+      prepared,
+      plan,
+      options.diskMb,
+    );
+    await runChecked(sandbox, "mkdir", ["-p", path.posix.dirname(REMOTE_SPEC_PATH)]);
+    await sandbox.writeFile(
+      REMOTE_SPEC_PATH,
+      new TextEncoder().encode(JSON.stringify(spec, null, 2)),
+    );
 
-    emit({ type: "status", message: "Creating snapshot..." });
-    const snapshot = await client.snapshotAndWait(sandbox.sandboxId, {
-      snapshotType: "filesystem",
-      waitUntil: "completed",
-    });
-    emit({
-      type: "snapshot_created",
-      snapshot_id: snapshot.snapshotId,
-    });
+    emit({ type: "status", message: "Running offline rootfs builder..." });
+    await runRootfsBuilder(sandbox, prepared.builder.command, emit, sleep);
 
-    if (!snapshot.snapshotUri) {
-      throw new Error(
-        `Snapshot ${snapshot.snapshotId} is missing snapshotUri and cannot be registered as a sandbox image.`,
-      );
-    }
-    if (snapshot.sizeBytes == null) {
-      throw new Error(
-        `Snapshot ${snapshot.snapshotId} is missing sizeBytes and cannot be registered as a sandbox image.`,
-      );
-    }
-    if (snapshot.rootfsDiskBytes == null) {
-      throw new Error(
-        `Snapshot ${snapshot.snapshotId} is missing rootfsDiskBytes and cannot be registered as a sandbox image.`,
-      );
-    }
+    const metadataBytes = await sandbox.readFile(REMOTE_METADATA_PATH);
+    const metadata = JSON.parse(
+      new TextDecoder().decode(metadataBytes),
+    ) as Record<string, unknown>;
+    const completeRequest = completeRequestFromMetadata(prepared, metadata);
 
-    emit({
-      type: "status",
-      message: `Registering image '${plan.registeredName}'...`,
-    });
-    const result = await register(
-      context,
-      plan.registeredName,
-      plan.dockerfileText,
-      snapshot.snapshotId,
-      snapshot.sandboxId,
-      snapshot.snapshotUri,
-      snapshot.sizeBytes,
-      snapshot.rootfsDiskBytes,
-      options.isPublic ?? false,
-      snapshot.snapshotFormatVersion,
+    emit({ type: "status", message: "Completing image registration..." });
+    const result = await completeRootfsBuild(
+      resolvedContext,
+      prepared.buildId,
+      completeRequest,
     );
 
     emit({

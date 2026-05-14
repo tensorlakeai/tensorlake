@@ -3,11 +3,10 @@ import unittest
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from tensorlake.image import Image
 from tensorlake.image import sandbox_builder as sbm
-from tensorlake.sandbox.models import SnapshotType, SnapshotWaitCondition
 
 BUILD_CPUS = 2.0
 BUILD_MEMORY_MB = 4096
@@ -74,29 +73,34 @@ class TestDockerfileParsing(unittest.TestCase):
                 sbm._load_dockerfile_plan(str(dockerfile_path), None)
 
 
-def _make_build_patches(ctx, sandbox, snapshot):
+def _make_ctx(**overrides):
+    defaults = dict(
+        api_url="https://api.tensorlake.test",
+        api_key="tl_apiKey_abc",
+        personal_access_token=None,
+        organization_id="org_1",
+        project_id="proj_1",
+        namespace="default",
+    )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def _make_build_patches(ctx):
     """Common mock bundle for exercising build_sandbox_image without networking."""
     return (
         patch.object(sbm, "_build_context_from_env", return_value=ctx),
-        patch.object(sbm, "_execute_dockerfile_plan"),
-        patch.object(sbm, "_register_image", return_value={"id": "tpl-1"}),
-        patch.object(sbm, "SandboxClient"),
+        patch.object(
+            sbm,
+            "_rust_build_sandbox_image",
+            return_value='{"id":"tpl-1","snapshot_id":"snap-1"}',
+        ),
     )
 
 
 class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
     def test_registers_snapshot_from_dockerfile(self):
-        ctx = MagicMock()
-        sandbox = MagicMock()
-        sandbox.sandbox_id = "sbx-1"
-        snapshot = SimpleNamespace(
-            snapshot_id="snap-1",
-            sandbox_id="sbx-1",
-            snapshot_uri="s3://snapshots/snap-1.tar.zst",
-            snapshot_format_version="durable_archive_v1",
-            size_bytes=1234,
-            rootfs_disk_bytes=25 * 1024 * 1024 * 1024,
-        )
+        ctx = _make_ctx()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             dockerfile_path = Path(tmpdir) / "sandbox-image.Dockerfile"
@@ -110,66 +114,34 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             )
             dockerfile_path.write_text(dockerfile_text + "\n", encoding="utf-8")
 
-            build_ctx, execute, register_image, sandbox_client_cls = (
-                _make_build_patches(ctx, sandbox, snapshot)
-            )
-            with (
-                build_ctx,
-                execute as execute_mock,
-                register_image as register_mock,
-                sandbox_client_cls as sandbox_client_cls_mock,
-            ):
-                sandbox_client = sandbox_client_cls_mock.return_value
-                sandbox_client.create_and_connect.return_value = sandbox
-                sandbox_client.snapshot_and_wait.return_value = snapshot
-
+            build_ctx, rust_builder = _make_build_patches(ctx)
+            with build_ctx, rust_builder as rust_builder_mock:
                 sbm.build_sandbox_image(
                     str(dockerfile_path),
                     cpus=BUILD_CPUS,
                     memory_mb=BUILD_MEMORY_MB,
                 )
 
-        sandbox_client.create_and_connect.assert_called_once_with(
-            image="python:3.12-slim",
-            cpus=BUILD_CPUS,
-            memory_mb=BUILD_MEMORY_MB,
-        )
-        execute_mock.assert_called_once()
-        register_mock.assert_called_once_with(
-            ctx,
+        rust_builder_mock.assert_called_once_with(
+            "https://api.tensorlake.test",
+            "tl_apiKey_abc",
+            str(dockerfile_path.resolve()),
             "sandbox-image",
-            dockerfile_text + "\n",
-            "snap-1",
-            "sbx-1",
-            "s3://snapshots/snap-1.tar.zst",
-            1234,
-            25 * 1024 * 1024 * 1024,
+            None,
+            None,
+            BUILD_CPUS,
+            BUILD_MEMORY_MB,
             False,
-            "durable_archive_v1",
-        )
-        sandbox.terminate.assert_called_once_with()
-        # Regression: sandbox image builds MUST request a filesystem-only
-        # snapshot so the resulting image cold-boots on restore (see PR
-        # #583 for the original regression that produced Full snapshots
-        # and broke `tl sbx new --image`).
-        sandbox_client.snapshot_and_wait.assert_called_once_with(
-            "sbx-1",
-            snapshot_type=SnapshotType.FILESYSTEM,
-            wait_until=SnapshotWaitCondition.COMPLETED,
+            "org_1",
+            "proj_1",
+            "default",
+            False,
+            sbm.USER_AGENT,
+            ANY,
         )
 
     def test_public_flag_and_registered_name(self):
-        ctx = MagicMock()
-        sandbox = MagicMock()
-        sandbox.sandbox_id = "sbx-1"
-        snapshot = SimpleNamespace(
-            snapshot_id="snap-1",
-            sandbox_id="sbx-1",
-            snapshot_uri="s3://snapshots/snap-1.tar.zst",
-            snapshot_format_version="durable_archive_v1",
-            size_bytes=1234,
-            rootfs_disk_bytes=25 * 1024 * 1024 * 1024,
-        )
+        ctx = _make_ctx()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             dockerfile_path = Path(tmpdir) / "Dockerfile"
@@ -177,77 +149,89 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
                 "FROM python:3.12-slim\nRUN echo hi\n",
                 encoding="utf-8",
             )
-            dockerfile_text = dockerfile_path.read_text(encoding="utf-8")
 
-            build_ctx, execute, register_image, sandbox_client_cls = (
-                _make_build_patches(ctx, sandbox, snapshot)
-            )
-            with (
-                build_ctx,
-                execute,
-                register_image as register_mock,
-                sandbox_client_cls as sandbox_client_cls_mock,
-            ):
-                sandbox_client = sandbox_client_cls_mock.return_value
-                sandbox_client.create_and_connect.return_value = sandbox
-                sandbox_client.snapshot_and_wait.return_value = snapshot
-
+            build_ctx, rust_builder = _make_build_patches(ctx)
+            with build_ctx, rust_builder as rust_builder_mock:
                 sbm.build_sandbox_image(
                     str(dockerfile_path),
                     registered_name="custom-name",
                     cpus=BUILD_CPUS,
                     memory_mb=BUILD_MEMORY_MB,
+                    disk_mb=25 * 1024,
+                    builder_disk_mb=32 * 1024,
                     is_public=True,
                 )
 
-        register_mock.assert_called_once_with(
-            ctx,
+        rust_builder_mock.assert_called_once_with(
+            "https://api.tensorlake.test",
+            "tl_apiKey_abc",
+            str(dockerfile_path.resolve()),
             "custom-name",
-            dockerfile_text,
-            "snap-1",
-            "sbx-1",
-            "s3://snapshots/snap-1.tar.zst",
-            1234,
-            25 * 1024 * 1024 * 1024,
+            25 * 1024,
+            32 * 1024,
+            BUILD_CPUS,
+            BUILD_MEMORY_MB,
             True,
-            "durable_archive_v1",
+            "org_1",
+            "proj_1",
+            "default",
+            False,
+            sbm.USER_AGENT,
+            ANY,
         )
 
     def test_load_errors_raise_SandboxImageLoadError(self):
         with self.assertRaises(sbm.SandboxImageLoadError):
             sbm.build_sandbox_image("/nonexistent/Dockerfile")
 
+    def test_rust_builder_events_are_forwarded_to_emit(self):
+        ctx = _make_ctx()
+        emitted: list[dict] = []
+
+        def fake_rust_builder(*args):
+            args[-1]({"type": "status", "message": "builder running"})
+            return '{"id":"tpl-1","snapshot_id":"snap-1"}'
+
+        with (
+            patch.object(sbm, "_build_context_from_env", return_value=ctx),
+            patch.object(
+                sbm, "_rust_build_sandbox_image", side_effect=fake_rust_builder
+            ),
+        ):
+            sbm._run_rust_image_create(
+                "/tmp/Dockerfile",
+                "img",
+                cpus=BUILD_CPUS,
+                memory_mb=BUILD_MEMORY_MB,
+                disk_mb=None,
+                builder_disk_mb=None,
+                is_public=False,
+                emit=emitted.append,
+            )
+
+        self.assertIn(
+            {"type": "status", "message": "Building image 'img'..."},
+            emitted,
+        )
+        self.assertIn({"type": "status", "message": "builder running"}, emitted)
+
 
 class TestBuildSandboxImageFromImage(unittest.TestCase):
     def _run_build(self, image: Image, **kwargs):
-        ctx = MagicMock()
-        sandbox = MagicMock()
-        sandbox.sandbox_id = "sbx-1"
-        snapshot = SimpleNamespace(
-            snapshot_id="snap-1",
-            sandbox_id="sbx-1",
-            snapshot_uri="s3://snapshots/snap-1.tar.zst",
-            snapshot_format_version="durable_archive_v1",
-            size_bytes=1234,
-            rootfs_disk_bytes=25 * 1024 * 1024 * 1024,
-        )
+        ctx = _make_ctx()
+        build_ctx, rust_builder = _make_build_patches(ctx)
+        captured: dict[str, object] = {}
+        with build_ctx, rust_builder as rust_builder_mock:
 
-        build_ctx, execute, register_image, sandbox_client_cls = _make_build_patches(
-            ctx, sandbox, snapshot
-        )
-        with (
-            build_ctx,
-            execute,
-            register_image as register_mock,
-            sandbox_client_cls as sandbox_client_cls_mock,
-        ):
-            sandbox_client = sandbox_client_cls_mock.return_value
-            sandbox_client.create_and_connect.return_value = sandbox
-            sandbox_client.snapshot_and_wait.return_value = snapshot
+            def fake_rust_builder(*args, **_kwargs):
+                captured["args"] = args
+                captured["dockerfile_text"] = Path(args[2]).read_text(encoding="utf-8")
+                return '{"id":"tpl-1","snapshot_id":"snap-1"}'
 
+            rust_builder_mock.side_effect = fake_rust_builder
             result = sbm.build_sandbox_image(image, **kwargs)
 
-        return result, ctx, register_mock, sandbox_client, sandbox
+        return result, ctx, rust_builder_mock, captured
 
     def test_renders_expected_dockerfile(self):
         image = (
@@ -258,13 +242,7 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
             .copy("./src", "/app/src")
         )
 
-        _, _, register_image, sandbox_client, _ = self._run_build(image)
-
-        sandbox_client.create_and_connect.assert_called_once_with(
-            image="python:3.12-slim",
-            cpus=2.0,
-            memory_mb=4096,
-        )
+        _, _, rust_builder, captured = self._run_build(image)
 
         # The registered Dockerfile must match exactly what the TS SDK would
         # generate — no WORKDIR /app or pip install tensorlake injection.
@@ -277,21 +255,14 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
                 "COPY ./src /app/src",
             ]
         )
-        register_image.assert_called_once()
-        register_args = register_image.call_args.args
-        self.assertEqual(register_args[1], "weather-image")
-        self.assertEqual(register_args[2], expected_dockerfile)
-
-        sandbox_client.snapshot_and_wait.assert_called_once_with(
-            "sbx-1",
-            snapshot_type=SnapshotType.FILESYSTEM,
-            wait_until=SnapshotWaitCondition.COMPLETED,
-        )
+        rust_builder.assert_called_once()
+        self.assertEqual(rust_builder.call_args.args[3], "weather-image")
+        self.assertEqual(captured["dockerfile_text"], expected_dockerfile + "\n")
 
     def test_registered_name_overrides_image_name(self):
         image = Image(name="default-name", base_image="python:3.12-slim")
-        _, _, register_image, _, _ = self._run_build(image, registered_name="override")
-        self.assertEqual(register_image.call_args.args[1], "override")
+        _, _, rust_builder, _ = self._run_build(image, registered_name="override")
+        self.assertEqual(rust_builder.call_args.args[3], "override")
 
     def test_warns_on_default_name(self):
         image = Image(base_image="python:3.12-slim")
