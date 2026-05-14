@@ -597,6 +597,10 @@ enum ImageCommands {
         #[arg(long = "disk_mb")]
         disk_mb: Option<u64>,
 
+        /// Root disk size in MB for the temporary builder sandbox
+        #[arg(long = "builder_disk_mb")]
+        builder_disk_mb: Option<u64>,
+
         /// Deprecated: root disk size in GB for the generated sandbox image
         #[arg(long = "disk", hide = true, conflicts_with = "disk_mb")]
         disk_gb: Option<u64>,
@@ -612,6 +616,10 @@ enum ImageCommands {
         /// Make this sandbox image publicly accessible
         #[arg(short, long)]
         public: bool,
+
+        /// Print the registered sandbox image JSON response to stdout
+        #[arg(long = "json", hide = true)]
+        json: bool,
     },
 
     /// List all sandbox images
@@ -1067,10 +1075,12 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         dockerfile_path,
                         registered_name,
                         disk_mb,
+                        builder_disk_mb,
                         disk_gb,
                         cpus,
                         memory,
                         public,
+                        json,
                     } => {
                         let disk_mb = if let Some(value) = disk_mb {
                             Some(value)
@@ -1088,9 +1098,11 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             &dockerfile_path,
                             registered_name.as_deref(),
                             disk_mb,
+                            builder_disk_mb,
                             cpus,
                             memory,
                             public,
+                            json,
                         )
                         .await
                     }
@@ -1268,6 +1280,8 @@ mod tests {
             "8192",
             "--disk_mb",
             "30720",
+            "--builder_disk_mb",
+            "65536",
         ])
         .unwrap();
 
@@ -1276,11 +1290,13 @@ mod tests {
                 cpus,
                 memory,
                 disk_mb,
+                builder_disk_mb,
                 ..
             })) => {
                 assert_eq!(cpus, Some(3.5));
                 assert_eq!(memory, Some(8192));
                 assert_eq!(disk_mb, Some(30720));
+                assert_eq!(builder_disk_mb, Some(65536));
             }
             _ => panic!("expected sbx image create command"),
         }

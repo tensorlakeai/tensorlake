@@ -71,6 +71,7 @@ pub mod cron;
 pub mod document_ai;
 pub mod error;
 pub mod images;
+pub mod sandbox_images;
 pub mod sandbox_templates;
 pub mod sandboxes;
 pub mod secrets;

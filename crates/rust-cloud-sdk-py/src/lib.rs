@@ -7,12 +7,14 @@
 use std::error::Error as StdError;
 use std::future::Future;
 use std::io::Write;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use futures::StreamExt;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use pyo3_async_runtimes::tokio::future_into_py;
 use reqwest::Method;
 use reqwest::multipart::{Form, Part};
@@ -21,6 +23,7 @@ use serde_json::Value;
 use tensorlake::document_ai::DocumentAiClient;
 use tensorlake::images::ImagesClient;
 use tensorlake::images::models::{ApplicationBuildContext, CreateApplicationBuildRequest};
+use tensorlake::sandbox_images::SandboxImageBuildEvent;
 use tensorlake::sandboxes::models::{
     CreateSandboxRequest, SandboxPoolRequest, SnapshotType, UpdateSandboxRequest,
 };
@@ -2605,6 +2608,116 @@ fn create_image_context_file(
     Ok(())
 }
 
+#[pyfunction]
+#[pyo3(signature = (
+    api_url,
+    token,
+    dockerfile_path,
+    registered_name=None,
+    disk_mb=None,
+    builder_disk_mb=None,
+    cpus=None,
+    memory_mb=None,
+    is_public=false,
+    organization_id=None,
+    project_id=None,
+    namespace=None,
+    use_scope_headers=false,
+    user_agent=None,
+    dockerfile_text=None,
+    context_dir=None,
+    emit=None,
+))]
+fn build_sandbox_image(
+    py: Python<'_>,
+    api_url: String,
+    token: String,
+    dockerfile_path: String,
+    registered_name: Option<String>,
+    disk_mb: Option<u64>,
+    builder_disk_mb: Option<u64>,
+    cpus: Option<f64>,
+    memory_mb: Option<i64>,
+    is_public: bool,
+    organization_id: Option<String>,
+    project_id: Option<String>,
+    namespace: Option<String>,
+    use_scope_headers: bool,
+    user_agent: Option<String>,
+    dockerfile_text: Option<String>,
+    context_dir: Option<String>,
+    emit: Option<Py<PyAny>>,
+) -> PyResult<String> {
+    let options = tensorlake::sandbox_images::SandboxImageBuildOptions {
+        api_url,
+        bearer_token: token,
+        use_scope_headers,
+        organization_id,
+        project_id,
+        namespace: namespace.unwrap_or_else(|| "default".to_string()),
+        dockerfile_path: PathBuf::from(dockerfile_path),
+        dockerfile_text,
+        context_dir: context_dir.map(PathBuf::from),
+        registered_name,
+        disk_mb,
+        builder_disk_mb,
+        cpus,
+        memory_mb,
+        is_public,
+        user_agent,
+    };
+
+    let result = py
+        .detach(move || {
+            shared_runtime().block_on(async move {
+                tensorlake::sandbox_images::build_sandbox_image(options, |event| {
+                    if let Some(callback) = emit.as_ref() {
+                        emit_sandbox_image_event(callback, event);
+                    }
+                })
+                .await
+            })
+        })
+        .map_err(|error| {
+            CloudSandboxClientError::new_err((
+                "sandbox_image_build",
+                Option::<u16>::None,
+                error.to_string(),
+            ))
+        })?;
+
+    serde_json::to_string(&result).map_err(|error| {
+        CloudSandboxClientError::new_err((
+            "sandbox_image_build",
+            Option::<u16>::None,
+            error.to_string(),
+        ))
+    })
+}
+
+fn emit_sandbox_image_event(callback: &Py<PyAny>, event: SandboxImageBuildEvent) {
+    let _ = Python::attach(|py| -> PyResult<()> {
+        let dict = PyDict::new(py);
+        match event {
+            SandboxImageBuildEvent::Status(message) => {
+                dict.set_item("type", "status")?;
+                dict.set_item("message", message)?;
+            }
+            SandboxImageBuildEvent::BuildLog { stream, message } => {
+                dict.set_item("type", "build_log")?;
+                dict.set_item("stream", stream)?;
+                dict.set_item("message", message)?;
+            }
+            SandboxImageBuildEvent::Warning(message) => {
+                dict.set_item("type", "warning")?;
+                dict.set_item("message", message)?;
+            }
+        }
+        callback.call1(py, (dict,))?;
+        Ok(())
+    });
+}
+
 #[pymodule]
 fn _cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     // Eager-init the shared tokio runtime at import time so the first sync
@@ -2627,5 +2740,6 @@ fn _cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<CloudSandboxDesktopClient>()?;
     module.add_class::<CloudDocumentAIClient>()?;
     module.add_function(wrap_pyfunction!(create_image_context_file, module)?)?;
+    module.add_function(wrap_pyfunction!(build_sandbox_image, module)?)?;
     Ok(())
 }

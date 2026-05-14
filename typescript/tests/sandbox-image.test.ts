@@ -15,6 +15,7 @@ import { Image, dockerfileContent } from "../src/image.js";
 describe("sandbox image helpers", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
@@ -141,12 +142,94 @@ describe("sandbox image helpers", () => {
     ]);
   });
 
-  it("createSandboxImage registers snapshot from Dockerfile", async () => {
+  function makeSandbox(metadata: Record<string, unknown>) {
+    return {
+      sandboxId: "sbx-1",
+      run: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" })),
+      startProcess: vi.fn(async () => ({ pid: 1 })),
+      getStdout: vi.fn(async () => ({ pid: 1, lines: [], lineCount: 0 })),
+      getStderr: vi.fn(async () => ({ pid: 1, lines: [], lineCount: 0 })),
+      getProcess: vi.fn(async () => ({
+        pid: 1,
+        status: "exited",
+        stdinWritable: false,
+        command: "tl-rootfs-build",
+        args: [],
+        startedAt: new Date(),
+        exitCode: 0,
+      })),
+      writeFile: vi.fn(async () => {}),
+      readFile: vi.fn(async () =>
+        new TextEncoder().encode(JSON.stringify(metadata)),
+      ),
+      terminate: vi.fn(async () => {}),
+    };
+  }
+
+  function stubRootfsBuildFetch(
+    preparedOverrides: Record<string, unknown> = {},
+  ) {
+    const prepared = {
+      buildId: "build-1",
+      snapshotId: "snap-1",
+      snapshotUri: "s3://snapshots/snap-1.tlsnap",
+      rootfsNodeKind: "base",
+      builder: {
+        image: "tensorlake/rootfs-builder",
+        command: "tl-rootfs-build",
+        cpus: 2,
+        memoryMb: 4096,
+        diskMb: 8192,
+      },
+      ...preparedOverrides,
+    };
+    const completeBodies: Record<string, unknown>[] = [];
+    const fetchMock = vi.fn(async (url: string | URL, init?: RequestInit) => {
+      const urlString = String(url);
+      if (urlString.endsWith("/platform/v1/keys/introspect")) {
+        return new Response(
+          JSON.stringify({
+            organizationId: "org_introspected",
+            projectId: "proj_introspected",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (urlString.endsWith("/sandbox-template-builds")) {
+        return new Response(JSON.stringify(prepared), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (urlString.endsWith("/sandbox-template-builds/build-1/complete")) {
+        completeBodies.push(
+          JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+        );
+        return new Response(
+          JSON.stringify({ id: "tpl-1", snapshot_id: "snap-1" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(`unexpected URL ${urlString}`, { status: 500 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return { fetchMock, completeBodies, prepared };
+  }
+
+  const rootfsMetadata = {
+    snapshot_id: "snap-1",
+    snapshot_uri: "s3://snapshots/snap-1.tlsnap",
+    snapshot_format_version: "durable_archive_v1",
+    snapshot_size_bytes: 123,
+    rootfs_disk_bytes: 10 * 1024 * 1024 * 1024,
+    rootfs_node_kind: "base",
+  };
+
+  it("createSandboxImage builds with the rootfs-builder path from Dockerfile", async () => {
     vi.stubEnv("TENSORLAKE_API_URL", "https://api.tensorlake.ai");
     vi.stubEnv("TENSORLAKE_API_KEY", "tl_key_test");
     vi.stubEnv("INDEXIFY_NAMESPACE", "default");
-    vi.stubEnv("TENSORLAKE_ORGANIZATION_ID", "org_123");
-    vi.stubEnv("TENSORLAKE_PROJECT_ID", "proj_123");
+    const { fetchMock, completeBodies } = stubRootfsBuildFetch();
 
     const tempDir = await mkdir(path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-create`), {
       recursive: true,
@@ -161,40 +244,11 @@ describe("sandbox image helpers", () => {
     await writeFile(dockerfilePath, `${dockerfileText}\n`, "utf8");
     await writeFile(path.join(tempDir, "hello.txt"), "hi", "utf8");
 
-    const writeFileMock = vi.fn(async () => {});
-    const sandbox = {
-      sandboxId: "sbx-1",
-      run: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" })),
-      startProcess: vi.fn(async () => ({ pid: 1 })),
-      getStdout: vi.fn(async () => ({ pid: 1, lines: [], lineCount: 0 })),
-      getStderr: vi.fn(async () => ({ pid: 1, lines: [], lineCount: 0 })),
-      getProcess: vi.fn(async () => ({
-        pid: 1,
-        status: "exited",
-        stdinWritable: false,
-        command: "sh",
-        args: [],
-        startedAt: new Date(),
-        exitCode: 0,
-      })),
-      writeFile: writeFileMock,
-      terminate: vi.fn(async () => {}),
-    };
-
+    const sandbox = makeSandbox(rootfsMetadata);
     const client = {
       createAndConnect: vi.fn(async () => sandbox),
-      snapshotAndWait: vi.fn(async () => ({
-        snapshotId: "snap-1",
-        sandboxId: "sbx-source-1",
-        snapshotUri: "s3://snapshots/snap-1.tar.zst",
-        snapshotFormatVersion: "durable_archive_v1",
-        sizeBytes: 123,
-        rootfsDiskBytes: 10 * 1024 * 1024 * 1024,
-      })),
       close: vi.fn(() => {}),
     };
-
-    const registerImage = vi.fn(async () => ({ id: "tpl-1" }));
 
     await createSandboxImage(
       dockerfilePath,
@@ -202,50 +256,61 @@ describe("sandbox image helpers", () => {
       {
         emit: () => {},
         createClient: () => client as never,
-        registerImage,
         sleep: async () => {},
       },
     );
 
     expect(client.createAndConnect).toHaveBeenCalledWith({
-      image: "python:3.12-slim",
-      cpus: 2.0,
+      image: "tensorlake/rootfs-builder",
+      cpus: 2,
       memoryMb: 4096,
+      diskMb: 10 * 1024,
     });
-    // Regression: sandbox image builds MUST request a filesystem-only
-    // snapshot so restored sandboxes cold-boot (see PR #583).
-    expect(client.snapshotAndWait).toHaveBeenCalledWith(
-      "sbx-1",
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.tensorlake.ai/platform/v1/organizations/org_introspected/projects/proj_introspected/sandbox-template-builds",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(sandbox.startProcess).toHaveBeenCalledWith(
+      "/usr/local/bin/tl-rootfs-build",
       expect.objectContaining({
-        snapshotType: "filesystem",
-        waitUntil: "completed",
+        args: [
+          "--spec",
+          "/var/lib/tensorlake/rootfs-builder/build/spec.json",
+          "--metadata-out",
+          "/var/lib/tensorlake/rootfs-builder/build/metadata.json",
+        ],
+        env: { PATH: "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" },
+        workingDir: "/var/lib/tensorlake/rootfs-builder/build",
       }),
     );
-    expect(registerImage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        organizationId: "org_123",
-        projectId: "proj_123",
-      }),
-      "sandbox-image",
-      `${dockerfileText}\n`,
-      "snap-1",
-      "sbx-source-1",
-      "s3://snapshots/snap-1.tar.zst",
-      123,
-      10 * 1024 * 1024 * 1024,
-      false,
-      "durable_archive_v1",
+    const specCall = sandbox.writeFile.mock.calls.find(
+      ([remotePath]) =>
+        remotePath === "/var/lib/tensorlake/rootfs-builder/build/spec.json",
     );
+    expect(specCall).toBeDefined();
+    const spec = JSON.parse(new TextDecoder().decode(specCall?.[1] as Uint8Array));
+    expect(spec).toMatchObject({
+      dockerfile: `${dockerfileText}\n`,
+      contextDir: "/var/lib/tensorlake/rootfs-builder/build/context",
+      baseImage: "python:3.12-slim",
+      rootfsDiskBytes: 10 * 1024 * 1024 * 1024,
+    });
+    expect(completeBodies[0]).toEqual({
+      snapshotId: "snap-1",
+      snapshotUri: "s3://snapshots/snap-1.tlsnap",
+      snapshotFormatVersion: "durable_archive_v1",
+      snapshotSizeBytes: 123,
+      rootfsDiskBytes: 10 * 1024 * 1024 * 1024,
+      rootfsNodeKind: "base",
+    });
     expect(sandbox.terminate).toHaveBeenCalled();
-    expect(writeFileMock).toHaveBeenCalled();
   });
 
   it("createSandboxImage accepts an Image DSL definition", async () => {
     vi.stubEnv("TENSORLAKE_API_URL", "https://api.tensorlake.ai");
     vi.stubEnv("TENSORLAKE_API_KEY", "tl_key_test");
     vi.stubEnv("INDEXIFY_NAMESPACE", "default");
-    vi.stubEnv("TENSORLAKE_ORGANIZATION_ID", "org_123");
-    vi.stubEnv("TENSORLAKE_PROJECT_ID", "proj_123");
+    stubRootfsBuildFetch();
 
     const tempDir = await mkdir(path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-dsl`), {
       recursive: true,
@@ -260,40 +325,11 @@ describe("sandbox image helpers", () => {
       .copy("hello.txt", "/workspace/hello.txt")
       .run("cat /workspace/hello.txt");
 
-    const writeFileMock = vi.fn(async () => {});
-    const sandbox = {
-      sandboxId: "sbx-1",
-      run: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" })),
-      startProcess: vi.fn(async () => ({ pid: 1 })),
-      getStdout: vi.fn(async () => ({ pid: 1, lines: [], lineCount: 0 })),
-      getStderr: vi.fn(async () => ({ pid: 1, lines: [], lineCount: 0 })),
-      getProcess: vi.fn(async () => ({
-        pid: 1,
-        status: "exited",
-        stdinWritable: false,
-        command: "sh",
-        args: [],
-        startedAt: new Date(),
-        exitCode: 0,
-      })),
-      writeFile: writeFileMock,
-      terminate: vi.fn(async () => {}),
-    };
-
+    const sandbox = makeSandbox(rootfsMetadata);
     const client = {
       createAndConnect: vi.fn(async () => sandbox),
-      snapshotAndWait: vi.fn(async () => ({
-        snapshotId: "snap-1",
-        sandboxId: "sbx-source-1",
-        snapshotUri: "s3://snapshots/snap-1.tar.zst",
-        snapshotFormatVersion: "durable_archive_v1",
-        sizeBytes: 123,
-        rootfsDiskBytes: 10 * 1024 * 1024 * 1024,
-      })),
       close: vi.fn(() => {}),
     };
-
-    const registerImage = vi.fn(async () => ({ id: "tpl-1" }));
 
     await createSandboxImage(
       image,
@@ -301,56 +337,38 @@ describe("sandbox image helpers", () => {
       {
         emit: () => {},
         createClient: () => client as never,
-        registerImage,
         sleep: async () => {},
       },
     );
 
     expect(client.createAndConnect).toHaveBeenCalledWith({
-      image: "tensorlake/ubuntu-systemd",
-      cpus: 2.0,
+      image: "tensorlake/rootfs-builder",
+      cpus: 2,
       memoryMb: 4096,
+      diskMb: 10 * 1024,
     });
-    expect(client.snapshotAndWait).toHaveBeenCalledWith(
-      "sbx-1",
-      expect.objectContaining({
-        snapshotType: "filesystem",
-        waitUntil: "completed",
-      }),
+    const specCall = sandbox.writeFile.mock.calls.find(
+      ([remotePath]) =>
+        remotePath === "/var/lib/tensorlake/rootfs-builder/build/spec.json",
     );
-    expect(writeFileMock).toHaveBeenCalledWith(
-      "/workspace/hello.txt",
-      expect.any(Uint8Array),
-    );
-    expect(registerImage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        organizationId: "org_123",
-        projectId: "proj_123",
-      }),
-      "dsl-image",
-      [
+    const spec = JSON.parse(new TextDecoder().decode(specCall?.[1] as Uint8Array));
+    expect(spec).toMatchObject({
+      dockerfile: [
         "FROM tensorlake/ubuntu-systemd",
         "WORKDIR /workspace",
         "COPY hello.txt /workspace/hello.txt",
         "RUN cat /workspace/hello.txt",
       ].join("\n"),
-      "snap-1",
-      "sbx-source-1",
-      "s3://snapshots/snap-1.tar.zst",
-      123,
-      10 * 1024 * 1024 * 1024,
-      false,
-      "durable_archive_v1",
-    );
+      baseImage: "tensorlake/ubuntu-systemd",
+    });
     expect(sandbox.terminate).toHaveBeenCalled();
   });
 
-  it("createSandboxImage forwards custom disk size to the build sandbox", async () => {
+  it("createSandboxImage uses builderDiskMb separately from generated rootfs disk size", async () => {
     vi.stubEnv("TENSORLAKE_API_URL", "https://api.tensorlake.ai");
     vi.stubEnv("TENSORLAKE_API_KEY", "tl_key_test");
     vi.stubEnv("INDEXIFY_NAMESPACE", "default");
-    vi.stubEnv("TENSORLAKE_ORGANIZATION_ID", "org_123");
-    vi.stubEnv("TENSORLAKE_PROJECT_ID", "proj_123");
+    const { completeBodies } = stubRootfsBuildFetch();
 
     const tempDir = await mkdir(path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-disk`), {
       recursive: true,
@@ -358,211 +376,88 @@ describe("sandbox image helpers", () => {
     const dockerfilePath = path.join(tempDir, "Dockerfile");
     await writeFile(dockerfilePath, "FROM python:3.12-slim\nRUN echo hi\n", "utf8");
 
-    const sandbox = {
-      sandboxId: "sbx-1",
-      run: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" })),
-      startProcess: vi.fn(async () => ({ pid: 1 })),
-      getStdout: vi.fn(async () => ({ pid: 1, lines: [], lineCount: 0 })),
-      getStderr: vi.fn(async () => ({ pid: 1, lines: [], lineCount: 0 })),
-      getProcess: vi.fn(async () => ({
-        pid: 1,
-        status: "exited",
-        stdinWritable: false,
-        command: "sh",
-        args: [],
-        startedAt: new Date(),
-        exitCode: 0,
-      })),
-      writeFile: vi.fn(async () => {}),
-      terminate: vi.fn(async () => {}),
-    };
-
+    const sandbox = makeSandbox({
+      ...rootfsMetadata,
+      rootfs_disk_bytes: 25 * 1024 * 1024 * 1024,
+    });
     const client = {
       createAndConnect: vi.fn(async () => sandbox),
-      snapshotAndWait: vi.fn(async () => ({
-        snapshotId: "snap-1",
-        sandboxId: "sbx-source-1",
-        snapshotUri: "s3://snapshots/snap-1.tar.zst",
-        snapshotFormatVersion: "durable_archive_v1",
-        sizeBytes: 123,
-        rootfsDiskBytes: 10 * 1024 * 1024 * 1024,
-      })),
       close: vi.fn(() => {}),
     };
 
     await createSandboxImage(
       dockerfilePath,
-      { diskMb: 25 * 1024 },
+      { diskMb: 25 * 1024, builderDiskMb: 32 * 1024 },
       {
         emit: () => {},
         createClient: () => client as never,
-        registerImage: async () => ({ id: "tpl-1" }),
         sleep: async () => {},
       },
     );
 
     expect(client.createAndConnect).toHaveBeenCalledWith({
-      image: "python:3.12-slim",
-      cpus: 2.0,
+      image: "tensorlake/rootfs-builder",
+      cpus: 2,
       memoryMb: 4096,
-      diskMb: 25 * 1024,
+      diskMb: 32 * 1024,
     });
+    expect(completeBodies[0].rootfsDiskBytes).toBe(25 * 1024 * 1024 * 1024);
   });
 
-  it("createSandboxImage lets the server choose the base image when the Image DSL omits one", async () => {
+  it("createSandboxImage rejects Image DSL definitions without a base image", async () => {
     vi.stubEnv("TENSORLAKE_API_URL", "https://api.tensorlake.ai");
     vi.stubEnv("TENSORLAKE_API_KEY", "tl_key_test");
     vi.stubEnv("INDEXIFY_NAMESPACE", "default");
-    vi.stubEnv("TENSORLAKE_ORGANIZATION_ID", "org_123");
-    vi.stubEnv("TENSORLAKE_PROJECT_ID", "proj_123");
+    stubRootfsBuildFetch();
 
-    const tempDir = await mkdir(path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-default`), {
+    const contextDir = await mkdir(path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-default`), {
       recursive: true,
     });
-
     const image = new Image({ name: "default-build" })
       .workdir("/workspace")
       .run("echo ready");
 
-    const sandbox = {
-      sandboxId: "sbx-1",
-      run: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" })),
-      startProcess: vi.fn(async () => ({ pid: 1 })),
-      getStdout: vi.fn(async () => ({ pid: 1, lines: [], lineCount: 0 })),
-      getStderr: vi.fn(async () => ({ pid: 1, lines: [], lineCount: 0 })),
-      getProcess: vi.fn(async () => ({
-        pid: 1,
-        status: "exited",
-        stdinWritable: false,
-        command: "sh",
-        args: [],
-        startedAt: new Date(),
-        exitCode: 0,
-      })),
-      writeFile: vi.fn(async () => {}),
-      terminate: vi.fn(async () => {}),
-    };
-
-    const client = {
-      createAndConnect: vi.fn(async () => sandbox),
-      snapshotAndWait: vi.fn(async () => ({
-        snapshotId: "snap-1",
-        sandboxId: "sbx-source-1",
-        snapshotUri: "s3://snapshots/snap-1.tar.zst",
-        snapshotFormatVersion: "durable_archive_v1",
-        sizeBytes: 123,
-        rootfsDiskBytes: 10 * 1024 * 1024 * 1024,
-      })),
-      close: vi.fn(() => {}),
-    };
-
-    const registerImage = vi.fn(async () => ({ id: "tpl-1" }));
-
-    await createSandboxImage(
-      image,
-      { contextDir: tempDir },
-      {
-        emit: () => {},
-        createClient: () => client as never,
-        registerImage,
-        sleep: async () => {},
-      },
-    );
-
-    expect(client.createAndConnect).toHaveBeenCalledWith({
-      cpus: 2.0,
-      memoryMb: 4096,
-    });
-    expect(client.snapshotAndWait).toHaveBeenCalledWith(
-      "sbx-1",
-      expect.objectContaining({
-        snapshotType: "filesystem",
-        waitUntil: "completed",
-      }),
-    );
-    expect(registerImage).toHaveBeenCalledWith(
-      expect.anything(),
-      "default-build",
-      [
-        "WORKDIR /workspace",
-        "RUN echo ready",
-      ].join("\n"),
-      "snap-1",
-      "sbx-source-1",
-      "s3://snapshots/snap-1.tar.zst",
-      123,
-      10 * 1024 * 1024 * 1024,
-      false,
-      "durable_archive_v1",
-    );
+    await expect(
+      createSandboxImage(image, { contextDir }, { emit: () => {} }),
+    ).rejects.toThrow(/FROM image or Image baseImage/);
   });
 
-  it("rejects COPY paths that escape the declared build context", async () => {
+  it("createSandboxImage completes diff builds with prepared parent lineage", async () => {
     vi.stubEnv("TENSORLAKE_API_URL", "https://api.tensorlake.ai");
     vi.stubEnv("TENSORLAKE_API_KEY", "tl_key_test");
     vi.stubEnv("INDEXIFY_NAMESPACE", "default");
-    vi.stubEnv("TENSORLAKE_ORGANIZATION_ID", "org_123");
-    vi.stubEnv("TENSORLAKE_PROJECT_ID", "proj_123");
+    const { completeBodies } = stubRootfsBuildFetch({
+      rootfsNodeKind: "diff",
+      parent: {
+        parentManifestUri: "s3://snapshots/parent.tlsnap",
+        rootfsDiskBytes: 10 * 1024 * 1024 * 1024,
+      },
+    });
 
-    const rootDir = await mkdir(path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-escape`), {
+    const tempDir = await mkdir(path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-diff`), {
       recursive: true,
     });
-    const contextDir = path.join(rootDir, "context");
-    await mkdir(contextDir, { recursive: true });
-    await writeFile(path.join(rootDir, "secret.txt"), "top-secret", "utf8");
-
-    const image = new Image({ name: "escape-build", baseImage: "tensorlake/ubuntu-systemd" })
-      .copy("../secret.txt", "/workspace/secret.txt");
-
-    const sandbox = {
-      sandboxId: "sbx-1",
-      run: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" })),
-      startProcess: vi.fn(async () => ({ pid: 1 })),
-      getStdout: vi.fn(async () => ({ pid: 1, lines: [], lineCount: 0 })),
-      getStderr: vi.fn(async () => ({ pid: 1, lines: [], lineCount: 0 })),
-      getProcess: vi.fn(async () => ({
-        pid: 1,
-        status: "exited",
-        stdinWritable: false,
-        command: "sh",
-        args: [],
-        startedAt: new Date(),
-        exitCode: 0,
-      })),
-      writeFile: vi.fn(async () => {}),
-      terminate: vi.fn(async () => {}),
-    };
-
+    const dockerfilePath = path.join(tempDir, "Dockerfile");
+    await writeFile(dockerfilePath, "FROM tensorlake/ubuntu-minimal\nRUN echo hi\n", "utf8");
+    const sandbox = makeSandbox({
+      ...rootfsMetadata,
+      rootfs_node_kind: "diff",
+    });
     const client = {
       createAndConnect: vi.fn(async () => sandbox),
-      snapshotAndWait: vi.fn(async () => ({
-        snapshotId: "snap-1",
-        sandboxId: "sbx-source-1",
-        snapshotUri: "s3://snapshots/snap-1.tar.zst",
-        sizeBytes: 123,
-        rootfsDiskBytes: 10 * 1024 * 1024 * 1024,
-      })),
       close: vi.fn(() => {}),
     };
 
-    const registerImage = vi.fn(async () => ({ id: "tpl-1" }));
+    await createSandboxImage(dockerfilePath, {}, {
+      emit: () => {},
+      createClient: () => client as never,
+      sleep: async () => {},
+    });
 
-    await expect(
-      createSandboxImage(
-        image,
-        { contextDir },
-        {
-          emit: () => {},
-          createClient: () => client as never,
-          registerImage,
-          sleep: async () => {},
-        },
-      ),
-    ).rejects.toThrow(/escapes the build context/);
-
-    expect(sandbox.writeFile).not.toHaveBeenCalled();
-    expect(registerImage).not.toHaveBeenCalled();
-    expect(sandbox.terminate).toHaveBeenCalled();
+    expect(completeBodies[0]).toMatchObject({
+      rootfsNodeKind: "diff",
+      parentManifestUri: "s3://snapshots/parent.tlsnap",
+    });
   });
 });
 

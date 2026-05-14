@@ -840,6 +840,78 @@ def _run_plan(
                 pass
 
 
+def _rust_build_sandbox_image(*args, **kwargs) -> str:
+    try:
+        from tensorlake._cloud_sdk import (
+            build_sandbox_image as rust_build_sandbox_image,
+        )
+    except ImportError:
+        from _cloud_sdk import build_sandbox_image as rust_build_sandbox_image
+
+    return rust_build_sandbox_image(*args, **kwargs)
+
+
+def _run_rust_image_create(
+    dockerfile_path: str,
+    registered_name: str,
+    *,
+    dockerfile_text: str | None,
+    context_dir: str | None,
+    cpus: float,
+    memory_mb: int,
+    disk_mb: int | None,
+    builder_disk_mb: int | None,
+    is_public: bool,
+    emit: EmitFn,
+) -> dict:
+    ctx = _build_context_from_env()
+    token = ctx.api_key or ctx.personal_access_token
+    if not token:
+        raise SandboxImageBuildError(
+            "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials."
+        )
+
+    emit({"type": "status", "message": f"Building image '{registered_name}'..."})
+
+    def forward_event(event: dict) -> None:
+        emit(dict(event))
+
+    result_json = _rust_build_sandbox_image(
+        ctx.api_url,
+        token,
+        dockerfile_path,
+        registered_name,
+        disk_mb,
+        builder_disk_mb,
+        cpus,
+        memory_mb,
+        is_public,
+        ctx.organization_id,
+        ctx.project_id,
+        ctx.namespace,
+        ctx.personal_access_token is not None and ctx.api_key is None,
+        USER_AGENT,
+        dockerfile_text,
+        context_dir,
+        forward_event,
+    )
+    try:
+        result = json.loads(result_json) if result_json.strip() else {}
+    except json.JSONDecodeError as exc:
+        raise SandboxImageBuildError(
+            f"Rust image builder returned invalid JSON: {result_json.strip()}"
+        ) from exc
+    emit(
+        {
+            "type": "image_registered",
+            "image_id": result.get("id", ""),
+            "name": registered_name,
+            "snapshot_id": result.get("snapshot_id", ""),
+        }
+    )
+    return result
+
+
 # --- Public API -----------------------------------------------------------
 
 
@@ -850,6 +922,7 @@ def build_sandbox_image(
     cpus: float = 2.0,
     memory_mb: int = 4096,
     disk_mb: int | None = None,
+    builder_disk_mb: int | None = None,
     is_public: bool = False,
     context_dir: str | None = None,
     verbose: bool = False,
@@ -857,8 +930,9 @@ def build_sandbox_image(
 ) -> dict:
     """Build a sandbox image from an :class:`Image` or a Dockerfile path.
 
-    Materializes the image inside a build sandbox, snapshots the filesystem,
-    and registers the snapshot as a named sandbox template.
+    Delegates to the Rust image-builder orchestration used by ``tl sbx image
+    create`` so Python SDK builds use the same rootfs-builder path and
+    registration semantics as the CLI.
 
     Args:
         source: An :class:`Image` instance or a path to a Dockerfile.
@@ -866,7 +940,8 @@ def build_sandbox_image(
             image's ``name`` or the Dockerfile stem.
         cpus: CPUs for the build sandbox.
         memory_mb: Memory for the build sandbox in MB.
-        disk_mb: Root disk size for the build sandbox in MB.
+        disk_mb: Root disk size for the generated sandbox image in MB.
+        builder_disk_mb: Root disk size for the temporary builder sandbox in MB.
         is_public: Make the registered image publicly accessible.
         context_dir: Directory used to resolve relative COPY/ADD sources.
             Ignored when ``source`` is a Dockerfile path (the Dockerfile's
@@ -912,10 +987,25 @@ def build_sandbox_image(
             stacklevel=2,
         )
 
-    ctx = _build_context_from_env()
+    dockerfile_text = None
+    rust_context_dir = None
     try:
-        return _run_plan(
-            plan, ctx, cpus, memory_mb, is_public, emit=emit, disk_mb=disk_mb
+        if isinstance(source, Image):
+            dockerfile_text = plan.dockerfile_text
+            if not dockerfile_text.endswith("\n"):
+                dockerfile_text += "\n"
+            rust_context_dir = plan.context_dir
+        return _run_rust_image_create(
+            plan.dockerfile_path,
+            plan.registered_name,
+            dockerfile_text=dockerfile_text,
+            context_dir=rust_context_dir,
+            cpus=cpus,
+            memory_mb=memory_mb,
+            disk_mb=disk_mb,
+            builder_disk_mb=builder_disk_mb,
+            is_public=is_public,
+            emit=emit,
         )
     except SandboxImageError:
         raise
