@@ -308,21 +308,27 @@ def _prepare_images_sandbox(functions: list[Function]) -> dict[str, ImageRef]:
                 )
                 sys.exit(1)
 
-            template_id = result.get("id")
-            if not template_id:
+            # Carry the template *name*, not the public id — the dataplane
+            # resolves function images through the existing internal
+            # `/projects/{ns}/sandbox-templates/by-name/{name}` endpoint, the
+            # same path sandbox allocations already use. Falling back to
+            # `image.name` keeps the contract stable if the platform stops
+            # echoing the name in its create response.
+            template_name = result.get("name") or image.name
+            if not template_name:
                 _emit(
                     {
                         "type": "build_failed",
                         "image": image.name,
                         "error": (
-                            f"image '{image.name}' built but the platform did not "
-                            "return a template id"
+                            f"image '{image.name}' built but neither the platform "
+                            "response nor the Image carried a template name"
                         ),
                     }
                 )
                 sys.exit(1)
             image_refs[image._id] = ImageRef(
-                kind="sandbox_template", id=template_id
+                kind="sandbox_template", id=template_name
             )
 
     _emit({"type": "build_done"})
