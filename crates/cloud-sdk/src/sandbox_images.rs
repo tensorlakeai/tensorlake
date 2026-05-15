@@ -28,6 +28,19 @@ type Result<T> = std::result::Result<T, SandboxImageBuildError>;
 const DEFAULT_ROOTFS_DISK_MB: u64 = 10 * 1024;
 const DEFAULT_SANDBOX_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 const SANDBOX_WAIT_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// Lifetime budget requested for the temporary rootfs-builder sandbox. The
+/// builder is short-lived (Dockerfile-defined RUN steps), but it has to outlive
+/// long single steps like `dd if=/dev/urandom ...` or large `apt install` runs
+/// that produce no client traffic. Setting an explicit value here makes the
+/// CLI's behavior independent of whatever default the Platform API hands back
+/// today. Paired with the keepalive loop below, which renews this budget while
+/// the build is in flight.
+const BUILDER_SANDBOX_TIMEOUT_SECS: i64 = 300;
+/// Cadence at which the SDK pings the builder sandbox while the offline
+/// rootfs builder is running, to keep it from being suspended due to
+/// inactivity / lifetime expiry mid-build. Must be shorter than
+/// `BUILDER_SANDBOX_TIMEOUT_SECS`.
+const BUILDER_SANDBOX_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(300);
 const PROCESS_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const PROCESS_EXIT_POLL_ATTEMPTS: usize = 10;
@@ -223,7 +236,7 @@ where
             image: Some(prepared.builder.image.clone()),
             resources,
             secret_names: None,
-            timeout_secs: None,
+            timeout_secs: Some(BUILDER_SANDBOX_TIMEOUT_SECS),
             entrypoint: None,
             network: None,
             snapshot_id: None,
@@ -260,7 +273,16 @@ where
         emit(SandboxImageBuildEvent::Status(
             "Running offline rootfs builder...".to_string(),
         ));
-        run_rootfs_builder(&proxy, &prepared.builder.command, &mut emit).await?;
+        // The rootfs builder runs entirely inside the sandbox and can stay
+        // silent for minutes at a time (e.g. a single large `RUN dd ...` step
+        // in the user's Dockerfile produces no client traffic). Keep the
+        // sandbox visibly alive while that step is in flight so the Platform
+        // doesn't suspend it out from under us. Aborted as soon as the
+        // builder returns, regardless of outcome.
+        let keepalive_task = spawn_builder_keepalive(proxy.clone());
+        let builder_result = run_rootfs_builder(&proxy, &prepared.builder.command, &mut emit).await;
+        keepalive_task.abort();
+        builder_result?;
 
         let metadata = read_build_metadata(&proxy).await?;
         let complete_request = complete_request_from_metadata(&prepared, &metadata)?;
@@ -702,6 +724,29 @@ fn docker_config_json_from_credentials(
     }
 
     serde_json::to_string(&json!({ "auths": auths }))
+}
+
+/// Spawn a background task that pings the builder sandbox at a fixed cadence
+/// to keep it from being suspended due to inactivity / lifetime expiry. The
+/// caller MUST `.abort()` the returned handle when the build phase finishes
+/// (success or failure) — otherwise the task would outlive the build and keep
+/// poking a sandbox we're about to delete.
+fn spawn_builder_keepalive(proxy: SandboxProxyClient) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(BUILDER_SANDBOX_KEEPALIVE_INTERVAL);
+        // The first tick fires immediately; skip it — we don't need a ping
+        // right after the build kicks off, since the upload that just ran
+        // already counts as activity.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            // Best-effort: a transient error here is uninteresting. If the
+            // sandbox is genuinely gone, run_rootfs_builder's streaming
+            // process call will surface the real error.
+            let _ = proxy.health().await;
+        }
+    })
 }
 
 async fn run_rootfs_builder(
