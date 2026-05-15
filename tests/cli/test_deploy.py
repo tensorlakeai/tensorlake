@@ -126,7 +126,9 @@ class TestPrepareImages(unittest.TestCase):
                 return {"name": f"{image.name}-template"}
 
             with (
-                patch.object(deploy_module, "build_sandbox_image", side_effect=fake_build) as build,
+                patch.object(
+                    deploy_module, "build_sandbox_image", side_effect=fake_build
+                ) as build,
                 patch.object(deploy_module, "_emit"),
             ):
                 refs = deploy_module._prepare_images(functions)
@@ -138,9 +140,7 @@ class TestPrepareImages(unittest.TestCase):
             {ref.id for ref in refs.values()},
             {"image-a-template", "image-b-template"},
         )
-        self.assertTrue(
-            all(ref.kind == "sandbox_template" for ref in refs.values())
-        )
+        self.assertTrue(all(ref.kind == "sandbox_template" for ref in refs.values()))
         self.assertIn(image_a._id, refs)
         self.assertIn(image_b._id, refs)
 
@@ -166,7 +166,9 @@ class TestPrepareImages(unittest.TestCase):
             ):
                 refs = deploy_module._prepare_images(functions)
 
-        self.assertEqual(refs[image._id], ImageRef(kind="sandbox_template", id="my-fn-image"))
+        self.assertEqual(
+            refs[image._id], ImageRef(kind="sandbox_template", id="my-fn-image")
+        )
 
     def test_sandbox_build_failure_emits_build_failed_and_exits(self):
         image = Image(name="broken-image")
@@ -286,13 +288,21 @@ class TestDeployEntrypoint(unittest.TestCase):
             }
 
             with (
-                patch.object(deploy_module, "_build_context_from_env", return_value=auth),
+                patch.object(
+                    deploy_module, "_build_context_from_env", return_value=auth
+                ),
                 patch.object(deploy_module, "load_code"),
-                patch.object(deploy_module, "validate_loaded_applications", return_value=[]),
-                patch.object(deploy_module, "format_validation_messages", return_value=[]),
+                patch.object(
+                    deploy_module, "validate_loaded_applications", return_value=[]
+                ),
+                patch.object(
+                    deploy_module, "format_validation_messages", return_value=[]
+                ),
                 patch.object(deploy_module, "has_error_message", return_value=False),
                 patch.object(deploy_module, "list_secret_names", return_value=[]),
-                patch.object(deploy_module, "_warning_missing_secrets", return_value=[]),
+                patch.object(
+                    deploy_module, "_warning_missing_secrets", return_value=[]
+                ),
                 patch.object(deploy_module, "get_functions", return_value=functions),
                 patch.object(
                     deploy_module, "_prepare_images", return_value=image_refs

@@ -244,9 +244,7 @@ def _prepare_images(functions: list[Function]) -> dict[str, ImageRef]:
                     }
                 )
                 sys.exit(1)
-            image_refs[image._id] = ImageRef(
-                kind="sandbox_template", id=template_name
-            )
+            image_refs[image._id] = ImageRef(kind="sandbox_template", id=template_name)
 
     _emit({"type": "build_done"})
     return image_refs
