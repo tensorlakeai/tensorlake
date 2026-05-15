@@ -111,7 +111,7 @@ enum Commands {
 
     /// Deploy applications to Tensorlake Cloud
     Deploy {
-        /// Arguments passed to the deploy Python module (use --build-env KEY=VALUE to inject ENV directives into generated Dockerfiles)
+        /// Arguments passed to the deploy Python module
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },

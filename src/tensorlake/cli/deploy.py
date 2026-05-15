@@ -1,10 +1,8 @@
 import argparse
-import asyncio
 import json
 import os
 import sys
 import traceback
-from urllib.parse import urlparse
 
 from tensorlake.applications import Function, SDKUsageError, TensorlakeError
 from tensorlake.applications.applications import (
@@ -23,12 +21,6 @@ from tensorlake.applications.validation import (
     has_error_message,
     validate_loaded_applications,
 )
-from tensorlake.builder import collect_application_build_request
-from tensorlake.builder.client_v2 import (
-    ApplicationImageBuildError,
-    ImageBuilderV2Client,
-)
-from tensorlake.builder.client_v3 import ImageBuilderV3Client
 from tensorlake.cli._common import Context
 from tensorlake.image.sandbox_builder import (
     SandboxImageError,
@@ -108,18 +100,6 @@ def _warning_missing_secrets(auth: Context, secrets: list[str]) -> list[str]:
     return [s for s in secrets if s not in existing]
 
 
-def _parse_build_envs(build_envs: list[str]) -> list[tuple[str, str]]:
-    parsed_build_envs: list[tuple[str, str]] = []
-    for build_env in build_envs:
-        key, separator, value = build_env.partition("=")
-        if separator != "=" or not key:
-            raise ValueError(
-                f"invalid --build-env value '{build_env}'; expected KEY=VALUE"
-            )
-        parsed_build_envs.append((key, value))
-    return parsed_build_envs
-
-
 def _onprem_enabled() -> bool:
     return os.environ.get("TENSORLAKE_ONPREM", "").lower() in {
         "1",
@@ -129,35 +109,9 @@ def _onprem_enabled() -> bool:
     }
 
 
-def mk_builder(version: str, auth: Context):
-    default_build_service_path = (
-        "/images/v3/applications" if version == "v3" else "/images/v2"
-    )
-    build_service = (
-        os.getenv("TENSORLAKE_BUILD_SERVICE")
-        or f"{auth.api_url}{default_build_service_path}"
-    )
-    parsed = urlparse(build_service)
-    build_service_path = parsed.path.rstrip("/") or default_build_service_path
-    if version == "v3":
-        return ImageBuilderV3Client(
-            cloud_client=auth.cloud_client,
-            build_service_path=build_service_path,
-        )
-    return ImageBuilderV2Client(
-        cloud_client=auth.cloud_client,
-        build_service_path=build_service_path,
-        on_build_start=lambda image, _function_name: _emit(
-            {"type": "build_start", "image": image.name}
-        ),
-    )
-
-
 def deploy(
     application_file_path: str,
     upgrade_running_requests: bool,
-    image_builder_version: str = "v3",
-    build_envs: list[tuple[str, str]] | None = None,
 ) -> None:
     """Deploys applications to Tensorlake Cloud, emitting NDJSON events to stdout."""
     _emit(
@@ -222,13 +176,8 @@ def deploy(
     if missing:
         _emit({"type": "missing_secrets", "count": len(missing), "names": missing})
 
-    image_refs: dict[str, ImageRef] | None = None
     try:
-        if image_builder_version == "sandbox":
-            image_refs = _prepare_images_sandbox(functions)
-        else:
-            builder = mk_builder(image_builder_version, auth)
-            asyncio.run(_prepare_images(builder, functions, build_envs))
+        image_refs = _prepare_images(functions)
     except KeyboardInterrupt:
         _emit({"type": "error", "message": "build cancelled by user"})
         sys.exit(1)
@@ -246,45 +195,13 @@ def deploy(
     )
 
 
-async def _prepare_images(
-    builder,
-    functions: list[Function],
-    build_envs: list[tuple[str, str]] | None = None,
-):
-    for application in filter_applications(functions):
-        try:
-            await builder.build(
-                collect_application_build_request(
-                    application,
-                    functions,
-                    build_env_vars=build_envs,
-                )
-            )
-        except (asyncio.CancelledError, KeyboardInterrupt) as error:
-            raise error
-        except ApplicationImageBuildError as error:
-            _emit(
-                {
-                    "type": "build_failed",
-                    "image": error.image_name,
-                    "error": _format_build_failure_message(
-                        error.image_name, error.error
-                    ),
-                }
-            )
-            sys.exit(1)
-
-    _emit({"type": "build_done"})
-
-
-def _prepare_images_sandbox(functions: list[Function]) -> dict[str, ImageRef]:
+def _prepare_images(functions: list[Function]) -> dict[str, ImageRef]:
     """Build every unique function image through the sandbox image builder.
 
-    Returns a `{Image._id: ImageRef(kind="sandbox_template", id=template_id)}`
-    map that the deploy step plumbs into each function's manifest. The
-    platform reads `image_ref` to skip its legacy Image-Builder-Service
-    lookup and boot the function directly from the registered sandbox-template
-    filesystem snapshot.
+    Returns a `{Image._id: ImageRef(kind="sandbox_template", id=template_name)}`
+    map that the deploy step plumbs into each function's manifest. The platform
+    reads `image_ref` and the dataplane resolves the function's image directly
+    to the registered sandbox-template filesystem snapshot.
     """
     image_refs: dict[str, ImageRef] = {}
     seen: set[str] = set()
@@ -402,32 +319,12 @@ def deploy_entrypoint():
         default=False,
         help="Upgrade requests that are already queued or running",
     )
-    parser.add_argument(
-        "--image-builder-version",
-        choices=["v2", "v3", "sandbox"],
-        default="v3",
-        help=(
-            "Select image builder version. `v2` and `v3` go through the "
-            "Image Builder Service. `sandbox` builds each function image "
-            "through the SDK's sandbox image builder and ships a "
-            "sandbox-template reference in the manifest."
-        ),
-    )
-    parser.add_argument(
-        "--build-env",
-        action="append",
-        default=[],
-        metavar="KEY=VALUE",
-        help="Environment variable to inject into generated Dockerfiles (repeatable)",
-    )
     args = parser.parse_args()
 
     try:
         deploy(
             application_file_path=args.application_file_path,
             upgrade_running_requests=args.upgrade_running_requests,
-            image_builder_version=args.image_builder_version,
-            build_envs=_parse_build_envs(args.build_env),
         )
     except SystemExit:
         raise
