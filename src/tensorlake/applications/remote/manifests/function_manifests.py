@@ -2,6 +2,7 @@ from typing import (
     Any,
     Dict,
     List,
+    Literal,
     Union,
 )
 
@@ -108,3 +109,22 @@ class RetryPolicyManifest(BaseModel):
 
 class PlacementConstraintsManifest(BaseModel):
     filter_expressions: List[str]
+
+
+class ImageRef(BaseModel):
+    """Reference to a pre-built image for a function executor.
+
+    `kind == "sandbox_template"` points at a sandbox template registered via
+    the SDK's sandbox image builder; the dataplane resolves it to an ext4
+    filesystem snapshot and boots a Firecracker VM directly from that rootfs.
+
+    `kind == "oci"` points at an OCI image (e.g. from the Image Builder
+    Service); the dataplane imports the rootfs at runtime. This is the legacy
+    path and is the implicit shape when `image_ref` is absent on a function
+    manifest.
+    """
+
+    kind: Literal["sandbox_template", "oci"]
+    # For `sandbox_template`: the platform sandbox-template id. For `oci`:
+    # the image URI (e.g., `registry/path@digest`).
+    id: str

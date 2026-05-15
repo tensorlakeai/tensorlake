@@ -7,11 +7,15 @@ import traceback
 from urllib.parse import urlparse
 
 from tensorlake.applications import Function, SDKUsageError, TensorlakeError
-from tensorlake.applications.applications import filter_applications
+from tensorlake.applications.applications import (
+    filter_applications,
+    functions_for_application,
+)
 from tensorlake.applications.registry import get_functions
 from tensorlake.applications.remote.code.loader import load_code
 from tensorlake.applications.remote.curl_command import example_application_curl_command
 from tensorlake.applications.remote.deploy import deploy_applications
+from tensorlake.applications.remote.manifests.function_manifests import ImageRef
 from tensorlake.applications.secrets import list_secret_names
 from tensorlake.applications.validation import (
     ValidationMessage,
@@ -26,6 +30,10 @@ from tensorlake.builder.client_v2 import (
 )
 from tensorlake.builder.client_v3 import ImageBuilderV3Client
 from tensorlake.cli._common import Context
+from tensorlake.image.sandbox_builder import (
+    SandboxImageError,
+    build_sandbox_image,
+)
 
 
 def _emit(obj):
@@ -150,7 +158,7 @@ def deploy(
     upgrade_running_requests: bool,
     image_builder_version: str = "v3",
     build_envs: list[tuple[str, str]] | None = None,
-):
+) -> None:
     """Deploys applications to Tensorlake Cloud, emitting NDJSON events to stdout."""
     _emit(
         {
@@ -214,9 +222,13 @@ def deploy(
     if missing:
         _emit({"type": "missing_secrets", "count": len(missing), "names": missing})
 
-    builder = mk_builder(image_builder_version, auth)
+    image_refs: dict[str, ImageRef] | None = None
     try:
-        asyncio.run(_prepare_images(builder, functions, build_envs))
+        if image_builder_version == "sandbox":
+            image_refs = _prepare_images_sandbox(functions)
+        else:
+            builder = mk_builder(image_builder_version, auth)
+            asyncio.run(_prepare_images(builder, functions, build_envs))
     except KeyboardInterrupt:
         _emit({"type": "error", "message": "build cancelled by user"})
         sys.exit(1)
@@ -230,6 +242,7 @@ def deploy(
         application_file_path=application_file_path,
         upgrade_running_requests=upgrade_running_requests,
         functions=functions,
+        image_refs=image_refs,
     )
 
 
@@ -264,12 +277,65 @@ async def _prepare_images(
     _emit({"type": "build_done"})
 
 
+def _prepare_images_sandbox(functions: list[Function]) -> dict[str, ImageRef]:
+    """Build every unique function image through the sandbox image builder.
+
+    Returns a `{Image._id: ImageRef(kind="sandbox_template", id=template_id)}`
+    map that the deploy step plumbs into each function's manifest. The
+    platform reads `image_ref` to skip its legacy Image-Builder-Service
+    lookup and boot the function directly from the registered sandbox-template
+    filesystem snapshot.
+    """
+    image_refs: dict[str, ImageRef] = {}
+    seen: set[str] = set()
+    for application in filter_applications(functions):
+        for fn in functions_for_application(application, functions):
+            image = fn._function_config.image
+            if image._id in seen:
+                continue
+            seen.add(image._id)
+
+            _emit({"type": "build_start", "image": image.name})
+            try:
+                result = build_sandbox_image(image, emit=_emit)
+            except SandboxImageError as error:
+                _emit(
+                    {
+                        "type": "build_failed",
+                        "image": image.name,
+                        "error": _format_build_failure_message(image.name, error),
+                    }
+                )
+                sys.exit(1)
+
+            template_id = result.get("id")
+            if not template_id:
+                _emit(
+                    {
+                        "type": "build_failed",
+                        "image": image.name,
+                        "error": (
+                            f"image '{image.name}' built but the platform did not "
+                            "return a template id"
+                        ),
+                    }
+                )
+                sys.exit(1)
+            image_refs[image._id] = ImageRef(
+                kind="sandbox_template", id=template_id
+            )
+
+    _emit({"type": "build_done"})
+    return image_refs
+
+
 def _deploy_applications(
     api_client,
     api_url: str,
     application_file_path: str,
     upgrade_running_requests: bool,
     functions: list[Function],
+    image_refs: dict[str, ImageRef] | None = None,
 ):
     _emit({"type": "status", "message": "Deploying applications..."})
 
@@ -279,6 +345,7 @@ def _deploy_applications(
             upgrade_running_requests=upgrade_running_requests,
             load_source_dir_modules=False,
             api_client=api_client,
+            image_refs=image_refs,
         )
 
         for application_function in filter_applications(functions):
@@ -331,9 +398,14 @@ def deploy_entrypoint():
     )
     parser.add_argument(
         "--image-builder-version",
-        choices=["v2", "v3"],
+        choices=["v2", "v3", "sandbox"],
         default="v3",
-        help="Select image builder version",
+        help=(
+            "Select image builder version. `v2` and `v3` go through the "
+            "Image Builder Service. `sandbox` builds each function image "
+            "through the SDK's sandbox image builder and ships a "
+            "sandbox-template reference in the manifest."
+        ),
     )
     parser.add_argument(
         "--build-env",

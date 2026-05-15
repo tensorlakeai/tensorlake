@@ -419,6 +419,7 @@ class TestDeployEntrypoints(unittest.TestCase):
             upgrade_running_requests=True,
             load_source_dir_modules=False,
             api_client=auth.cloud_client,
+            image_refs=None,
         )
         deployed_event = next(
             call.args[0]

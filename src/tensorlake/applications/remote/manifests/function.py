@@ -32,6 +32,7 @@ from .docstring import (
 )
 from .function_manifests import (
     FunctionResourcesManifest,
+    ImageRef,
     JSONSchema,
     ParameterManifest,
     PlacementConstraintsManifest,
@@ -60,6 +61,10 @@ class FunctionManifest(pydantic.BaseModel):
     warm_containers: int | None = None
     min_containers: int | None = None
     max_containers: int | None = None
+    # Reference to the pre-built image the platform should run this function
+    # on. When None, the platform looks the image up through its legacy
+    # Image-Builder-Service-keyed path (function namespace/app/name/version).
+    image_ref: ImageRef | None = None
 
 
 @dataclass
@@ -208,9 +213,17 @@ def _function_return_type_schema(
 
 
 def create_function_manifest(
-    application_function: Function, application_version: str, function: Function
+    application_function: Function,
+    application_version: str,
+    function: Function,
+    image_ref: ImageRef | None = None,
 ) -> FunctionManifest:
     """Creates FunctionManifest for the supplied function.
+
+    `image_ref` is the pre-built image reference the platform should use to
+    run this function. Pass it when the deploy flow built the function's
+    image through the sandbox-template path; leave None to fall through to
+    the platform's legacy image-builder-service lookup.
 
     Raises TensorlakeError on error.
     """
@@ -286,6 +299,7 @@ def create_function_manifest(
         description=function._function_config.description,
         docstring=docstring,
         is_api=function._application_config is not None,
+        image_ref=image_ref,
         secret_names=function._function_config.secrets,
         # When a function doesn't have a class_init_timeout set it means it's not a class method.
         # In this case FE initialization timeout should be the same as function timeout.
