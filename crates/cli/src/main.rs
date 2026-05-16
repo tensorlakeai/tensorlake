@@ -287,6 +287,10 @@ enum SbxCommands {
         #[arg(short, long)]
         running: bool,
 
+        /// Show only sandboxes with status `suspended`
+        #[arg(short, long)]
+        suspended: bool,
+
         /// Only print sandbox IDs, one per line (no table formatting)
         #[arg(short, long)]
         quiet: bool,
@@ -879,9 +883,10 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 SbxCommands::Ls {
                     all,
                     running,
+                    suspended,
                     quiet,
                     archived,
-                } => commands::sbx::ls::run(ctx, running, all, quiet, archived).await,
+                } => commands::sbx::ls::run(ctx, running, suspended, all, quiet, archived).await,
                 SbxCommands::Describe { sandbox_id } => {
                     commands::sbx::describe::run(ctx, &sandbox_id).await
                 }

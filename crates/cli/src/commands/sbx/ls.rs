@@ -10,6 +10,7 @@ use crate::output::table::new_table;
 pub async fn run(
     ctx: &CliContext,
     running_only: bool,
+    suspended_only: bool,
     include_terminated: bool,
     quiet: bool,
     archived: bool,
@@ -56,6 +57,10 @@ pub async fn run(
 
     if running_only {
         sandboxes.retain(is_running_sandbox);
+    }
+
+    if suspended_only {
+        sandboxes.retain(is_suspended_sandbox);
     }
 
     sandboxes.sort_by(|a, b| {
@@ -266,6 +271,13 @@ fn is_running_sandbox(sandbox: &serde_json::Value) -> bool {
         .is_some_and(|status| status.eq_ignore_ascii_case("running"))
 }
 
+fn is_suspended_sandbox(sandbox: &serde_json::Value) -> bool {
+    sandbox
+        .get("status")
+        .and_then(|v| v.as_str())
+        .is_some_and(|status| status.eq_ignore_ascii_case("suspended"))
+}
+
 fn is_non_terminated_sandbox(sandbox: &serde_json::Value) -> bool {
     !is_terminated_sandbox(sandbox)
 }
@@ -279,7 +291,9 @@ fn is_terminated_sandbox(sandbox: &serde_json::Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_non_terminated_sandbox, is_running_sandbox, is_terminated_sandbox};
+    use super::{
+        is_non_terminated_sandbox, is_running_sandbox, is_suspended_sandbox, is_terminated_sandbox,
+    };
 
     #[test]
     fn running_filter_matches_only_running_status() {
@@ -290,6 +304,17 @@ mod tests {
         assert!(is_running_sandbox(&running));
         assert!(!is_running_sandbox(&terminated));
         assert!(!is_running_sandbox(&pending));
+    }
+
+    #[test]
+    fn suspended_filter_matches_only_suspended_status() {
+        let suspended = serde_json::json!({ "status": "suspended" });
+        let running = serde_json::json!({ "status": "running" });
+        let suspending = serde_json::json!({ "status": "suspending" });
+
+        assert!(is_suspended_sandbox(&suspended));
+        assert!(!is_suspended_sandbox(&running));
+        assert!(!is_suspended_sandbox(&suspending));
     }
 
     #[test]
