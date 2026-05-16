@@ -1,7 +1,9 @@
 use comfy_table::Cell;
 
 use crate::auth::context::CliContext;
-use crate::commands::sbx::{created_at_sort_key, format_created_at, sandbox_endpoint};
+use crate::commands::sbx::{
+    DEFAULT_SANDBOX_IMAGE_DISPLAY_NAME, created_at_sort_key, format_created_at, sandbox_endpoint,
+};
 use crate::error::{CliError, Result};
 use crate::output::table::new_table;
 
@@ -102,7 +104,7 @@ pub async fn run(
             .get("image")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .unwrap_or("ubuntu-minimal");
+            .unwrap_or(DEFAULT_SANDBOX_IMAGE_DISPLAY_NAME);
 
         let resources = s.get("resources");
         let cpus = resources
@@ -214,7 +216,7 @@ async fn run_archived(ctx: &CliContext, quiet: bool) -> Result<()> {
             .get("image")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .unwrap_or("ubuntu-minimal");
+            .unwrap_or(DEFAULT_SANDBOX_IMAGE_DISPLAY_NAME);
 
         let resources = s.get("resources");
         let cpus = resources

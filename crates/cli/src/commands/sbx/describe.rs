@@ -1,5 +1,7 @@
 use crate::auth::context::CliContext;
-use crate::commands::sbx::{format_created_at, sandbox_endpoint};
+use crate::commands::sbx::{
+    DEFAULT_SANDBOX_IMAGE_DISPLAY_NAME, format_created_at, sandbox_endpoint,
+};
 use crate::error::{CliError, Result};
 
 pub async fn run(ctx: &CliContext, sandbox_id: &str) -> Result<()> {
@@ -85,7 +87,7 @@ fn print_sandbox_details(item: &serde_json::Value) {
         .get("image")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .unwrap_or("ubuntu-minimal");
+        .unwrap_or(DEFAULT_SANDBOX_IMAGE_DISPLAY_NAME);
     let namespace = item
         .get("namespace")
         .and_then(|v| v.as_str())
