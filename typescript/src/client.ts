@@ -2,6 +2,7 @@ import * as defaults from "./defaults.js";
 import { SandboxError } from "./errors.js";
 import { type Traced, HttpClient } from "./http.js";
 import {
+  type ArchivedSandboxInfo,
   type CheckpointOptions,
   type ConnectOptions,
   type CreateAndConnectOptions,
@@ -10,6 +11,8 @@ import {
   type CreateSandboxPoolResponse,
   type CreateSandboxResponse,
   type CreateSnapshotResponse,
+  type ListArchivedSandboxesOptions,
+  type ListArchivedSandboxesResponse,
   type SandboxClientOptions,
   type SandboxInfo,
   type SandboxPortAccess,
@@ -163,6 +166,54 @@ export class SandboxClient {
       (s) => fromSnakeKeys(s, "sandboxId") as SandboxInfo,
     );
     return Object.assign(sandboxes, { traceId: raw.traceId });
+  }
+
+  /**
+   * List archived (terminated) sandboxes in the namespace.
+   *
+   * Archived sandboxes are terminated sandboxes parked in the server's
+   * archived sandboxes store until the server-configured TTL expires.
+   */
+  async listArchived(
+    options?: ListArchivedSandboxesOptions,
+  ): Promise<Traced<ListArchivedSandboxesResponse>> {
+    const query: string[] = [];
+    if (options?.limit != null) {
+      query.push(`limit=${encodeURIComponent(String(options.limit))}`);
+    }
+    if (options?.cursor != null) {
+      query.push(`cursor=${encodeURIComponent(options.cursor)}`);
+    }
+    if (options?.direction != null) {
+      query.push(`direction=${encodeURIComponent(options.direction)}`);
+    }
+    const suffix = query.length ? `?${query.join("&")}` : "";
+    const raw = await this.http.requestJson<{
+      sandboxes?: Record<string, unknown>[];
+      prev_cursor?: string;
+      next_cursor?: string;
+    }>("GET", this.path(`archived-sandboxes${suffix}`));
+    const sandboxes = (raw.sandboxes ?? []).map(
+      (s) => fromSnakeKeys(s, "sandboxId") as ArchivedSandboxInfo,
+    );
+    const response: ListArchivedSandboxesResponse = {
+      sandboxes,
+      prevCursor: raw.prev_cursor,
+      nextCursor: raw.next_cursor,
+    };
+    return Object.assign(response, { traceId: raw.traceId });
+  }
+
+  /** Get a single archived sandbox by id. */
+  async getArchived(sandboxId: string): Promise<Traced<ArchivedSandboxInfo>> {
+    const raw = await this.http.requestJson<Record<string, unknown>>(
+      "GET",
+      this.path(`archived-sandboxes/${encodeURIComponent(sandboxId)}`),
+    );
+    return Object.assign(
+      fromSnakeKeys(raw, "sandboxId") as ArchivedSandboxInfo,
+      { traceId: raw.traceId },
+    );
   }
 
   /** Update sandbox properties such as name, exposed ports, and proxy auth settings. */

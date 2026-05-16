@@ -37,12 +37,14 @@ from .exceptions import (
     SandboxNotFoundError,
 )
 from .models import (
+    ArchivedSandboxInfo,
     ContainerResourcesInfo,
     CreateSandboxPoolResponse,
     CreateSandboxRequest,
     CreateSandboxResources,
     CreateSandboxResponse,
     CreateSnapshotResponse,
+    ListArchivedSandboxesResponse,
     ListSandboxesResponse,
     ListSandboxPoolsResponse,
     ListSnapshotsResponse,
@@ -236,6 +238,43 @@ class AsyncSandboxClient:
             data = ListSandboxesResponse.model_validate(json.loads(response_json))
             return TracedIterator(trace_id, data.sandboxes)
         except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    async def list_archived(
+        self,
+        *,
+        limit: int | None = None,
+        cursor: str | None = None,
+        direction: str | None = None,
+    ) -> Traced[ListArchivedSandboxesResponse]:
+        try:
+            trace_id, response_json = (
+                await self._rust_client.list_archived_sandboxes_json_async(
+                    limit=limit,
+                    cursor=cursor,
+                    direction=direction,
+                )
+            )
+            return Traced(
+                trace_id,
+                ListArchivedSandboxesResponse.model_validate_json(response_json),
+            )
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    async def get_archived(self, sandbox_id: str) -> Traced[ArchivedSandboxInfo]:
+        try:
+            trace_id, response_json = (
+                await self._rust_client.get_archived_sandbox_json_async(
+                    sandbox_id=sandbox_id
+                )
+            )
+            return Traced(
+                trace_id, ArchivedSandboxInfo.model_validate_json(response_json)
+            )
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
 
     async def update_sandbox(

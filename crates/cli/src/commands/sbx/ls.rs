@@ -1,16 +1,24 @@
 use comfy_table::Cell;
 
 use crate::auth::context::CliContext;
-use crate::commands::sbx::{created_at_sort_key, format_created_at, sandbox_endpoint};
+use crate::commands::sbx::{
+    DEFAULT_SANDBOX_IMAGE_DISPLAY_NAME, created_at_sort_key, format_created_at, sandbox_endpoint,
+};
 use crate::error::{CliError, Result};
 use crate::output::table::new_table;
 
 pub async fn run(
     ctx: &CliContext,
     running_only: bool,
+    suspended_only: bool,
     include_terminated: bool,
     quiet: bool,
+    archived: bool,
 ) -> Result<()> {
+    if archived {
+        return run_archived(ctx, quiet).await;
+    }
+
     let client = ctx.client()?;
     let url = sandbox_endpoint(ctx, "sandboxes");
 
@@ -49,6 +57,10 @@ pub async fn run(
 
     if running_only {
         sandboxes.retain(is_running_sandbox);
+    }
+
+    if suspended_only {
+        sandboxes.retain(is_suspended_sandbox);
     }
 
     sandboxes.sort_by(|a, b| {
@@ -93,7 +105,11 @@ pub async fn run(
             .unwrap_or("-");
         let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let status = s.get("status").and_then(|v| v.as_str()).unwrap_or("-");
-        let image = s.get("image").and_then(|v| v.as_str()).unwrap_or("-");
+        let image = s
+            .get("image")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_SANDBOX_IMAGE_DISPLAY_NAME);
 
         let resources = s.get("resources");
         let cpus = resources
@@ -138,11 +154,128 @@ pub async fn run(
     Ok(())
 }
 
+async fn run_archived(ctx: &CliContext, quiet: bool) -> Result<()> {
+    let client = ctx.client()?;
+    let url = sandbox_endpoint(ctx, "archived-sandboxes");
+
+    let resp = client.get(&url).send().await.map_err(CliError::Http)?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(CliError::Other(anyhow::anyhow!(
+            "failed to list archived sandboxes (HTTP {}): {}",
+            status,
+            body
+        )));
+    }
+
+    let body: serde_json::Value = resp.json().await.map_err(CliError::Http)?;
+    let mut sandboxes = body
+        .get("sandboxes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    sandboxes.sort_by(|a, b| {
+        let a_archived_at = created_at_sort_key(a.get("archived_at"));
+        let b_archived_at = created_at_sort_key(b.get("archived_at"));
+        b_archived_at.cmp(&a_archived_at)
+    });
+
+    if quiet {
+        for s in &sandboxes {
+            let id = s
+                .get("sandbox_id")
+                .or_else(|| s.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("-");
+            println!("{}", id);
+        }
+        return Ok(());
+    }
+
+    if sandboxes.is_empty() {
+        println!("No archived sandboxes found.");
+        return Ok(());
+    }
+
+    let mut table = new_table(&[
+        "ID",
+        "Name",
+        "Image",
+        "CPUs",
+        "Memory",
+        "Disk",
+        "Archived At",
+    ]);
+
+    for s in &sandboxes {
+        let id = s
+            .get("sandbox_id")
+            .or_else(|| s.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("-");
+        let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let image = s
+            .get("image")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_SANDBOX_IMAGE_DISPLAY_NAME);
+
+        let resources = s.get("resources");
+        let cpus = resources
+            .and_then(|r| r.get("cpus"))
+            .and_then(|v| v.as_f64())
+            .map(|v| format!("{}", v))
+            .unwrap_or_else(|| "-".to_string());
+        let memory = resources
+            .and_then(|r| r.get("memory_mb"))
+            .and_then(|v| v.as_i64())
+            .map(|v| format!("{} MB", v))
+            .unwrap_or_else(|| "-".to_string());
+        let disk = resources
+            .and_then(|r| r.get("disk_mb").or_else(|| r.get("ephemeral_disk_mb")))
+            .and_then(|v| v.as_i64())
+            .map(|v| format!("{} MB", v))
+            .unwrap_or_else(|| "-".to_string());
+
+        let archived_at = format_created_at(s.get("archived_at"));
+
+        table.add_row(vec![
+            Cell::new(id),
+            Cell::new(name),
+            Cell::new(image),
+            Cell::new(&cpus),
+            Cell::new(&memory),
+            Cell::new(&disk),
+            Cell::new(archived_at),
+        ]);
+    }
+
+    println!("{table}");
+    let count = sandboxes.len();
+    println!(
+        "{} archived sandbox{}",
+        count,
+        if count != 1 { "es" } else { "" },
+    );
+
+    Ok(())
+}
+
 fn is_running_sandbox(sandbox: &serde_json::Value) -> bool {
     sandbox
         .get("status")
         .and_then(|v| v.as_str())
         .is_some_and(|status| status.eq_ignore_ascii_case("running"))
+}
+
+fn is_suspended_sandbox(sandbox: &serde_json::Value) -> bool {
+    sandbox
+        .get("status")
+        .and_then(|v| v.as_str())
+        .is_some_and(|status| status.eq_ignore_ascii_case("suspended"))
 }
 
 fn is_non_terminated_sandbox(sandbox: &serde_json::Value) -> bool {
@@ -158,7 +291,9 @@ fn is_terminated_sandbox(sandbox: &serde_json::Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_non_terminated_sandbox, is_running_sandbox, is_terminated_sandbox};
+    use super::{
+        is_non_terminated_sandbox, is_running_sandbox, is_suspended_sandbox, is_terminated_sandbox,
+    };
 
     #[test]
     fn running_filter_matches_only_running_status() {
@@ -169,6 +304,17 @@ mod tests {
         assert!(is_running_sandbox(&running));
         assert!(!is_running_sandbox(&terminated));
         assert!(!is_running_sandbox(&pending));
+    }
+
+    #[test]
+    fn suspended_filter_matches_only_suspended_status() {
+        let suspended = serde_json::json!({ "status": "suspended" });
+        let running = serde_json::json!({ "status": "running" });
+        let suspending = serde_json::json!({ "status": "suspending" });
+
+        assert!(is_suspended_sandbox(&suspended));
+        assert!(!is_suspended_sandbox(&running));
+        assert!(!is_suspended_sandbox(&suspending));
     }
 
     #[test]

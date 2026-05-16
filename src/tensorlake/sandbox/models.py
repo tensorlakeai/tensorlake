@@ -250,6 +250,24 @@ class ListSandboxesResponse(BaseModel):
     sandboxes: list[SandboxInfo]
 
 
+class ArchivedSandboxInfo(SandboxInfo):
+    """A terminated sandbox parked in the server's archived sandboxes store.
+
+    Inherits every field from :class:`SandboxInfo` and adds the archival
+    timestamp.
+    """
+
+    archived_at: Timestamp
+
+
+class ListArchivedSandboxesResponse(BaseModel):
+    """Response from listing archived sandboxes (internal use)."""
+
+    sandboxes: list[ArchivedSandboxInfo]
+    prev_cursor: str | None = None
+    next_cursor: str | None = None
+
+
 class CreateSandboxPoolResponse(BaseModel):
     """Response from creating a sandbox pool."""
 

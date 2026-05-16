@@ -280,16 +280,25 @@ enum SbxCommands {
     /// List all sandboxes
     Ls {
         /// Include sandboxes with status `terminated`
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with_all = ["running", "suspended", "archived"])]
         all: bool,
 
         /// Show only sandboxes with status `running`
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with_all = ["all", "suspended", "archived"])]
         running: bool,
+
+        /// Show only sandboxes with status `suspended`
+        #[arg(short, long, conflicts_with_all = ["all", "running", "archived"])]
+        suspended: bool,
 
         /// Only print sandbox IDs, one per line (no table formatting)
         #[arg(short, long)]
         quiet: bool,
+
+        /// List archived (terminated) sandboxes from the server's archive
+        /// store instead of the live sandbox list.
+        #[arg(short = 't', long = "archived", conflicts_with_all = ["all", "running", "suspended"])]
+        archived: bool,
     },
 
     /// Show detailed information for a sandbox
@@ -874,8 +883,10 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 SbxCommands::Ls {
                     all,
                     running,
+                    suspended,
                     quiet,
-                } => commands::sbx::ls::run(ctx, running, all, quiet).await,
+                    archived,
+                } => commands::sbx::ls::run(ctx, running, suspended, all, quiet, archived).await,
                 SbxCommands::Describe { sandbox_id } => {
                     commands::sbx::describe::run(ctx, &sandbox_id).await
                 }
@@ -1150,6 +1161,26 @@ mod tests {
         let result = Cli::try_parse_from(["tl", "sbx", "clone", "sbx-123", "--times", "0"]);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn sbx_ls_rejects_conflicting_status_filters() {
+        for pair in [
+            ["-a", "-r"],
+            ["-a", "-s"],
+            ["-a", "-t"],
+            ["-r", "-s"],
+            ["-r", "-t"],
+            ["-s", "-t"],
+        ] {
+            let result = Cli::try_parse_from(["tl", "sbx", "ls", pair[0], pair[1]]);
+            assert!(
+                result.is_err(),
+                "expected {} {} to conflict",
+                pair[0],
+                pair[1]
+            );
+        }
     }
 
     #[test]

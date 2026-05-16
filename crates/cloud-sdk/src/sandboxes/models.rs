@@ -137,6 +137,42 @@ pub struct ListSandboxesResponse {
     pub sandboxes: Vec<SandboxInfo>,
 }
 
+/// Sandbox information plus the archival timestamp. Returned by
+/// `list_archived_sandboxes` and `get_archived_sandbox`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ArchivedSandboxInfo {
+    #[serde(flatten)]
+    pub sandbox: SandboxInfo,
+    /// Wall-clock milliseconds when the sandbox was archived.
+    pub archived_at: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ListArchivedSandboxesResponse {
+    pub sandboxes: Vec<ArchivedSandboxInfo>,
+    #[serde(default)]
+    pub prev_cursor: Option<String>,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchivedSandboxesPaginationDirection {
+    Forward,
+    Backward,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ListArchivedSandboxesParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<ArchivedSandboxesPaginationDirection>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CreateSandboxPoolResponse {
     pub pool_id: String,
