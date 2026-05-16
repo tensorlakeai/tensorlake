@@ -290,6 +290,11 @@ enum SbxCommands {
         /// Only print sandbox IDs, one per line (no table formatting)
         #[arg(short, long)]
         quiet: bool,
+
+        /// List archived (terminated) sandboxes from the server's archive
+        /// store instead of the live sandbox list.
+        #[arg(short = 't', long = "archived")]
+        archived: bool,
     },
 
     /// Show detailed information for a sandbox
@@ -875,7 +880,8 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     all,
                     running,
                     quiet,
-                } => commands::sbx::ls::run(ctx, running, all, quiet).await,
+                    archived,
+                } => commands::sbx::ls::run(ctx, running, all, quiet, archived).await,
                 SbxCommands::Describe { sandbox_id } => {
                     commands::sbx::describe::run(ctx, &sandbox_id).await
                 }

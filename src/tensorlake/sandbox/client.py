@@ -20,12 +20,14 @@ from .exceptions import (
     SandboxNotFoundError,
 )
 from .models import (
+    ArchivedSandboxInfo,
     ContainerResourcesInfo,
     CreateSandboxPoolResponse,
     CreateSandboxRequest,
     CreateSandboxResources,
     CreateSandboxResponse,
     CreateSnapshotResponse,
+    ListArchivedSandboxesResponse,
     ListSandboxesResponse,
     ListSandboxPoolsResponse,
     ListSnapshotsResponse,
@@ -471,6 +473,69 @@ class SandboxClient:
             data = ListSandboxesResponse.model_validate(json.loads(response_json))
             return TracedIterator(trace_id, data.sandboxes)
         except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    def list_archived(
+        self,
+        *,
+        limit: int | None = None,
+        cursor: str | None = None,
+        direction: str | None = None,
+    ) -> Traced[ListArchivedSandboxesResponse]:
+        """List archived (terminated) sandboxes in the namespace.
+
+        Archived sandboxes are terminated sandboxes parked in the server's
+        archived sandboxes store until the server-configured TTL expires.
+
+        Args:
+            limit: Maximum number of archived sandboxes to return.
+            cursor: Base64-encoded pagination cursor returned by a prior call.
+            direction: Pagination direction, ``"forward"`` or ``"backward"``.
+
+        Returns:
+            Traced[ListArchivedSandboxesResponse] with paginated results.
+
+        Raises:
+            RemoteAPIError: If the API request fails
+            SandboxConnectionError: If the server is unreachable
+        """
+        try:
+            trace_id, response_json = self._rust_client.list_archived_sandboxes_json(
+                limit=limit,
+                cursor=cursor,
+                direction=direction,
+            )
+            return Traced(
+                trace_id,
+                ListArchivedSandboxesResponse.model_validate_json(response_json),
+            )
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    def get_archived(self, sandbox_id: str) -> Traced[ArchivedSandboxInfo]:
+        """Get a single archived sandbox by id.
+
+        Args:
+            sandbox_id: ID of the archived sandbox.
+
+        Returns:
+            Traced[ArchivedSandboxInfo] with the archived sandbox details.
+
+        Raises:
+            SandboxNotFoundError: If no archived sandbox with the given id exists.
+            RemoteAPIError: If the API request fails
+            SandboxConnectionError: If the server is unreachable
+        """
+        try:
+            trace_id, response_json = self._rust_client.get_archived_sandbox_json(
+                sandbox_id=sandbox_id
+            )
+            return Traced(
+                trace_id, ArchivedSandboxInfo.model_validate_json(response_json)
+            )
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
 
     def update_sandbox(

@@ -25,7 +25,8 @@ use tensorlake::images::ImagesClient;
 use tensorlake::images::models::{ApplicationBuildContext, CreateApplicationBuildRequest};
 use tensorlake::sandbox_images::SandboxImageBuildEvent;
 use tensorlake::sandboxes::models::{
-    CreateSandboxRequest, SandboxPoolRequest, SnapshotType, UpdateSandboxRequest,
+    ArchivedSandboxesPaginationDirection, CreateSandboxRequest, ListArchivedSandboxesParams,
+    SandboxPoolRequest, SnapshotType, UpdateSandboxRequest,
 };
 use tensorlake::sandboxes::{
     SandboxDesktopClient as RustSandboxDesktopClient, SandboxProxyClient, SandboxesClient,
@@ -626,6 +627,37 @@ impl CloudSandboxClient {
         })
     }
 
+    #[pyo3(signature = (limit=None, cursor=None, direction=None))]
+    fn list_archived_sandboxes_json(
+        &self,
+        limit: Option<usize>,
+        cursor: Option<String>,
+        direction: Option<String>,
+    ) -> PyResult<(String, String)> {
+        let params = parse_archived_sandboxes_params(limit, cursor, direction)?;
+        self.run_with_retry(5, move |client| {
+            let params = params.clone();
+            async move {
+                let traced = client.list_archived(&params).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
+            }
+        })
+    }
+
+    fn get_archived_sandbox_json(&self, sandbox_id: String) -> PyResult<(String, String)> {
+        self.run_with_retry(5, move |client| {
+            let sandbox_id = sandbox_id.clone();
+            async move {
+                let traced = client.get_archived(&sandbox_id).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
+            }
+        })
+    }
+
     fn update_sandbox(
         &self,
         sandbox_id: String,
@@ -851,6 +883,48 @@ impl CloudSandboxClient {
             let trace_id = traced.trace_id.clone();
             let response = serde_json::json!({ "sandboxes": *traced });
             let json = serde_json::to_string(&response).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    #[pyo3(signature = (limit=None, cursor=None, direction=None))]
+    fn list_archived_sandboxes_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        limit: Option<usize>,
+        cursor: Option<String>,
+        direction: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let params = parse_archived_sandboxes_params(limit, cursor, direction)?;
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| {
+                let params = params.clone();
+                async move { c.list_archived(&params).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn get_archived_sandbox_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        sandbox_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| {
+                let sandbox_id = sandbox_id.clone();
+                async move { c.get_archived(&sandbox_id).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
             Ok((trace_id, json))
         })
     }
@@ -2495,6 +2569,30 @@ fn parse_json_payload<T: DeserializeOwned>(request_json: &str) -> PyResult<T> {
             Option::<u16>::None,
             format!("invalid JSON payload: {error}"),
         ))
+    })
+}
+
+fn parse_archived_sandboxes_params(
+    limit: Option<usize>,
+    cursor: Option<String>,
+    direction: Option<String>,
+) -> PyResult<ListArchivedSandboxesParams> {
+    let direction = match direction.as_deref() {
+        None => None,
+        Some("forward") => Some(ArchivedSandboxesPaginationDirection::Forward),
+        Some("backward") => Some(ArchivedSandboxesPaginationDirection::Backward),
+        Some(other) => {
+            return Err(CloudSandboxClientError::new_err((
+                "sdk_usage",
+                Option::<u16>::None,
+                format!("invalid direction '{other}': expected 'forward' or 'backward'"),
+            )));
+        }
+    };
+    Ok(ListArchivedSandboxesParams {
+        limit,
+        cursor,
+        direction,
     })
 }
 
