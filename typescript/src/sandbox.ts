@@ -49,10 +49,10 @@ function processUserPayload(
   if (user == null || user === "sandbox") {
     return undefined;
   }
-  if (user === "root") {
-    return user;
+  if (typeof user === "string" && user.trim() === "") {
+    throw new SandboxError("process user must not be empty");
   }
-  throw new SandboxError("process user must be 'sandbox' or 'root'");
+  return user;
 }
 
 const PTY_OP_DATA = 0x00;

@@ -7,7 +7,7 @@ from tensorlake.sandbox import Sandbox, SandboxConnectionError
 from tensorlake.sandbox.exceptions import SandboxError
 from tensorlake.sandbox.models import (
     ContainerResourcesInfo,
-    ProcessUser,
+    ProcessUserSpec,
     SandboxInfo,
     SandboxStatus,
     StdinMode,
@@ -133,7 +133,7 @@ class TestSandboxRustBackend(unittest.TestCase):
             command="echo",
             args=["hello"],
             stdin_mode=StdinMode.PIPE,
-            user=ProcessUser.ROOT,
+            user="root",
         )
 
         self.assertEqual(process.pid, 101)
@@ -142,6 +142,17 @@ class TestSandboxRustBackend(unittest.TestCase):
         self.assertEqual(payload["args"], ["hello"])
         self.assertEqual(payload["stdin_mode"], "pipe")
         self.assertEqual(payload["user"], "root")
+
+    def test_start_process_serializes_uid_gid_user_spec(self):
+        sandbox, fake = _make_sandbox()
+
+        sandbox.start_process(
+            command="echo",
+            user=ProcessUserSpec(uid=1000, gid=1000),
+        )
+
+        payload = json.loads(fake.start_payload_json)
+        self.assertEqual(payload["user"], {"uid": 1000, "gid": 1000})
 
     def test_start_process_omits_default_user_from_payload(self):
         sandbox, fake = _make_sandbox()

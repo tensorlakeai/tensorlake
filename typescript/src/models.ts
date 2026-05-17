@@ -259,7 +259,13 @@ export interface SandboxPoolInfo {
 
 // --- Process management ---
 
-export type ProcessUser = "sandbox" | "root";
+export interface ProcessUserSpec {
+  name?: string;
+  uid?: number;
+  gid?: number;
+}
+
+export type ProcessUser = string | ProcessUserSpec;
 
 export interface StartProcessOptions {
   args?: string[];

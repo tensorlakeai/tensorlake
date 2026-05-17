@@ -8,7 +8,7 @@ mod output;
 mod project;
 mod python_ast;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use std::num::NonZeroUsize;
 
 use auth::context::CliContext;
@@ -427,9 +427,9 @@ enum SbxCommands {
         #[arg(short, long)]
         env: Vec<String>,
 
-        /// Process user to run as
-        #[arg(long, value_enum, default_value_t = ProcessUserArg::Sandbox)]
-        user: ProcessUserArg,
+        /// Process user to run as: sandbox, username, uid, or uid:gid
+        #[arg(long, default_value = "sandbox")]
+        user: String,
     },
 
     /// Copy files between local and sandbox
@@ -500,9 +500,9 @@ enum SbxCommands {
         #[arg(short, long)]
         env: Vec<String>,
 
-        /// Process user to run as
-        #[arg(long, value_enum, default_value_t = ProcessUserArg::Sandbox)]
-        user: ProcessUserArg,
+        /// Process user to run as: sandbox, username, uid, or uid:gid
+        #[arg(long, default_value = "sandbox")]
+        user: String,
 
         /// Keep sandbox after command exits
         #[arg(short, long)]
@@ -579,21 +579,6 @@ enum SbxCommands {
     /// Manage sandbox images
     #[command(subcommand)]
     Image(ImageCommands),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum ProcessUserArg {
-    Sandbox,
-    Root,
-}
-
-impl ProcessUserArg {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Sandbox => "sandbox",
-            Self::Root => "root",
-        }
-    }
 }
 
 #[derive(Subcommand)]
@@ -1280,25 +1265,26 @@ mod tests {
     }
 
     #[test]
-    fn sbx_exec_parses_root_process_user() {
+    fn sbx_exec_parses_process_user() {
         let cli =
-            Cli::try_parse_from(["tl", "sbx", "exec", "--user", "root", "sbx-123", "id"]).unwrap();
+            Cli::try_parse_from(["tl", "sbx", "exec", "--user", "1000:1000", "sbx-123", "id"])
+                .unwrap();
 
         match cli.command {
             Commands::Sbx(SbxCommands::Exec { user, .. }) => {
-                assert_eq!(user, ProcessUserArg::Root);
+                assert_eq!(user, "1000:1000");
             }
             _ => panic!("expected sbx exec command"),
         }
     }
 
     #[test]
-    fn sbx_run_parses_root_process_user() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "run", "--user", "root", "id"]).unwrap();
+    fn sbx_run_parses_process_user() {
+        let cli = Cli::try_parse_from(["tl", "sbx", "run", "--user", "ubuntu", "id"]).unwrap();
 
         match cli.command {
             Commands::Sbx(SbxCommands::Run { user, .. }) => {
-                assert_eq!(user, ProcessUserArg::Root);
+                assert_eq!(user, "ubuntu");
             }
             _ => panic!("expected sbx run command"),
         }

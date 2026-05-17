@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import TYPE_CHECKING
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import httpx
@@ -30,6 +31,7 @@ from .models import (
     OutputResponse,
     ProcessInfo,
     ProcessUser,
+    ProcessUserSpec,
     SandboxInfo,
     SandboxStatus,
     SendSignalResponse,
@@ -707,11 +709,35 @@ class Sandbox:
         return payload
 
     @staticmethod
-    def _normalize_process_user(user: ProcessUser | str) -> ProcessUser:
-        try:
-            return user if isinstance(user, ProcessUser) else ProcessUser(user)
-        except ValueError as e:
-            raise SandboxError("process user must be 'sandbox' or 'root'") from e
+    def _normalize_process_user(
+        user: ProcessUser,
+    ) -> str | dict[str, Any] | None:
+        if isinstance(user, str):
+            value = user
+        elif isinstance(user, ProcessUserSpec):
+            spec = user
+            value = None
+        elif isinstance(user, Mapping):
+            spec = ProcessUserSpec.model_validate(dict(user))
+            value = None
+        else:
+            raise SandboxError("process user must be a string or ProcessUserSpec")
+
+        if value is not None:
+            if value == "sandbox":
+                return None
+            if not value.strip():
+                raise SandboxError("process user must not be empty")
+            return value
+
+        if spec.name is not None and spec.uid is not None:
+            raise SandboxError("process user must not set both name and uid")
+        if spec.name is None and spec.uid is None:
+            raise SandboxError("process user must include name or uid")
+        payload = spec.model_dump(exclude_none=True)
+        if payload.get("name") == "":
+            raise SandboxError("process user name must not be empty")
+        return payload
 
     # --- High-level convenience ---
 
@@ -722,7 +748,7 @@ class Sandbox:
         env: dict[str, str] | None = None,
         working_dir: str | None = None,
         timeout: float | None = None,
-        user: ProcessUser | str = ProcessUser.SANDBOX,
+        user: ProcessUser = "sandbox",
     ) -> Traced[CommandResult]:
         """Run a command to completion and return its output.
 
@@ -736,8 +762,9 @@ class Sandbox:
             env: Environment variables
             working_dir: Working directory
             timeout: Maximum seconds to wait (enforced server-side; None = no limit)
-            user: Process user mode, either ``ProcessUser.SANDBOX``/``"sandbox"``
-                or ``ProcessUser.ROOT``/``"root"``
+            user: Process user. Defaults to ``"sandbox"``. Pass a username
+                such as ``"root"``, a Docker-style id string like ``"1000:1000"``,
+                or ``ProcessUserSpec(uid=1000, gid=1000)``.
 
         Returns:
             Traced[CommandResult] — access ``.trace_id`` for the W3C trace ID
@@ -751,7 +778,7 @@ class Sandbox:
             env,
             working_dir,
             timeout=timeout,
-            user=process_user.value if process_user != ProcessUser.SANDBOX else None,
+            user=process_user,
         )
 
         try:
@@ -803,7 +830,7 @@ class Sandbox:
         stdin_mode: StdinMode = StdinMode.CLOSED,
         stdout_mode: OutputMode = OutputMode.CAPTURE,
         stderr_mode: OutputMode = OutputMode.CAPTURE,
-        user: ProcessUser | str = ProcessUser.SANDBOX,
+        user: ProcessUser = "sandbox",
     ) -> Traced[ProcessInfo]:
         """Start a new process in the sandbox.
 
@@ -815,8 +842,9 @@ class Sandbox:
             stdin_mode: StdinMode.CLOSED or StdinMode.PIPE
             stdout_mode: OutputMode.CAPTURE or OutputMode.DISCARD
             stderr_mode: OutputMode.CAPTURE or OutputMode.DISCARD
-            user: Process user mode, either ``ProcessUser.SANDBOX``/``"sandbox"``
-                or ``ProcessUser.ROOT``/``"root"``
+            user: Process user. Defaults to ``"sandbox"``. Pass a username
+                such as ``"root"``, a Docker-style id string like ``"1000:1000"``,
+                or ``ProcessUserSpec(uid=1000, gid=1000)``.
 
         Returns:
             Traced[ProcessInfo] — access ``.trace_id`` for the W3C trace ID
@@ -831,7 +859,7 @@ class Sandbox:
             stdin_mode=stdin_mode if stdin_mode != StdinMode.CLOSED else None,
             stdout_mode=stdout_mode if stdout_mode != OutputMode.CAPTURE else None,
             stderr_mode=stderr_mode if stderr_mode != OutputMode.CAPTURE else None,
-            user=process_user.value if process_user != ProcessUser.SANDBOX else None,
+            user=process_user,
         )
 
         try:

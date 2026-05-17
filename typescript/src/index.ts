@@ -102,6 +102,7 @@ export type {
   SandboxPoolInfo,
   StartProcessOptions,
   ProcessUser,
+  ProcessUserSpec,
   ProcessInfo,
   SendSignalResponse,
   OutputResponse,
