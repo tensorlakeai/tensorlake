@@ -260,6 +260,12 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("stderr_mode", payload)
         self.assertEqual(payload["user"], "tl-user")
 
+    async def test_start_process_rejects_invalid_user_spec_mapping(self):
+        sandbox, _ = _make_async_sandbox()
+
+        with self.assertRaisesRegex(SandboxError, "invalid process user spec"):
+            await sandbox.start_process(command="echo", user={"uid": "not-an-int"})
+
     async def test_start_process_serializes_non_default_output_modes(self):
         sandbox, fake = _make_async_sandbox()
 

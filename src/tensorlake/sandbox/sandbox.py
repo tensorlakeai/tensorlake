@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import httpx
+from pydantic import ValidationError
 
 from tensorlake._tracing import USER_AGENT, Traced, TracedIterator, inject_traceparent
 
@@ -718,7 +719,10 @@ class Sandbox:
             spec = user
             value = None
         elif isinstance(user, Mapping):
-            spec = ProcessUserSpec.model_validate(dict(user))
+            try:
+                spec = ProcessUserSpec.model_validate(dict(user))
+            except ValidationError as exc:
+                raise SandboxError(f"invalid process user spec: {exc}") from exc
             value = None
         else:
             raise SandboxError("process user must be a string or ProcessUserSpec")

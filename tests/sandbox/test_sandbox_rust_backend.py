@@ -162,6 +162,12 @@ class TestSandboxRustBackend(unittest.TestCase):
         payload = json.loads(fake.start_payload_json)
         self.assertEqual(payload["user"], "tl-user")
 
+    def test_start_process_rejects_invalid_user_spec_mapping(self):
+        sandbox, _ = _make_sandbox()
+
+        with self.assertRaisesRegex(SandboxError, "invalid process user spec"):
+            sandbox.start_process(command="echo", user={"uid": "not-an-int"})
+
     def test_list_processes_uses_rust_backend(self):
         sandbox, _ = _make_sandbox()
 
