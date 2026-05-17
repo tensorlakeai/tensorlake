@@ -101,6 +101,8 @@ export type {
   PoolContainerInfo,
   SandboxPoolInfo,
   StartProcessOptions,
+  ProcessUser,
+  ProcessUserSpec,
   ProcessInfo,
   SendSignalResponse,
   OutputResponse,

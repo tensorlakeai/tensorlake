@@ -2,7 +2,11 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { type CommandResult, type ProcessInfo } from "./models.js";
+import {
+  type CommandResult,
+  type ProcessInfo,
+  type ProcessUser,
+} from "./models.js";
 import { type OutputResponse, ProcessStatus } from "./models.js";
 import { SandboxClient } from "./client.js";
 import { Image, dockerfileContent } from "./image.js";
@@ -15,6 +19,7 @@ const REMOTE_METADATA_PATH = "/var/lib/tensorlake/rootfs-builder/build/metadata.
 const ROOTFS_BUILDER_BIN_DIR = "/usr/local/bin";
 const ROOTFS_BUILDER_PATH = "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const ROOTFS_BUILDER_COMMAND = "tl-rootfs-build";
+const ROOTFS_BUILDER_PROCESS_USER: ProcessUser = "root";
 const UNSUPPORTED_DOCKERFILE_INSTRUCTIONS = new Set([
   "ARG",
   "ONBUILD",
@@ -74,6 +79,7 @@ interface BuildSandbox {
       env?: Record<string, string>;
       workingDir?: string;
       timeout?: number;
+      user?: ProcessUser;
     },
   ): Promise<CommandResult>;
   startProcess(
@@ -82,6 +88,7 @@ interface BuildSandbox {
       args?: string[];
       env?: Record<string, string>;
       workingDir?: string;
+      user?: ProcessUser;
     },
   ): Promise<ProcessInfo>;
   getStdout(pid: number): Promise<OutputResponse>;
@@ -867,6 +874,7 @@ async function runChecked(
     args,
     env,
     workingDir,
+    user: ROOTFS_BUILDER_PROCESS_USER,
   });
   if (result.exitCode !== 0) {
     throw new Error(
@@ -889,6 +897,7 @@ async function runStreaming(
     args,
     env,
     workingDir,
+    user: ROOTFS_BUILDER_PROCESS_USER,
   });
 
   let stdoutSeen = 0;

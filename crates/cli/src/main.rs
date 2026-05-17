@@ -426,6 +426,10 @@ enum SbxCommands {
         /// Environment variable (KEY=VALUE)
         #[arg(short, long)]
         env: Vec<String>,
+
+        /// Process user to run as: username, uid, or uid:gid
+        #[arg(long, default_value = "tl-user")]
+        user: String,
     },
 
     /// Copy files between local and sandbox
@@ -495,6 +499,10 @@ enum SbxCommands {
         /// Environment variable (KEY=VALUE)
         #[arg(short, long)]
         env: Vec<String>,
+
+        /// Process user to run as: username, uid, or uid:gid
+        #[arg(long, default_value = "tl-user")]
+        user: String,
 
         /// Keep sandbox after command exits
         #[arg(short, long)]
@@ -961,6 +969,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     timeout,
                     workdir,
                     env,
+                    user,
                 } => {
                     commands::sbx::exec::run(
                         ctx,
@@ -970,6 +979,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         timeout,
                         workdir.as_deref(),
                         &env,
+                        Some(user.as_str()),
                     )
                     .await
                 }
@@ -1022,6 +1032,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     timeout,
                     workdir,
                     env,
+                    user,
                     keep,
                     ports,
                     allow_unauthenticated_access,
@@ -1040,6 +1051,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         timeout,
                         workdir.as_deref(),
                         &env,
+                        Some(user.as_str()),
                         keep,
                         &ports,
                         allow_unauthenticated_access,
@@ -1247,6 +1259,32 @@ mod tests {
         match cli.command {
             Commands::Sbx(SbxCommands::Run { disk_mb, .. }) => {
                 assert_eq!(disk_mb, Some(30720));
+            }
+            _ => panic!("expected sbx run command"),
+        }
+    }
+
+    #[test]
+    fn sbx_exec_parses_process_user() {
+        let cli =
+            Cli::try_parse_from(["tl", "sbx", "exec", "--user", "1000:1000", "sbx-123", "id"])
+                .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Exec { user, .. }) => {
+                assert_eq!(user, "1000:1000");
+            }
+            _ => panic!("expected sbx exec command"),
+        }
+    }
+
+    #[test]
+    fn sbx_run_parses_process_user() {
+        let cli = Cli::try_parse_from(["tl", "sbx", "run", "--user", "ubuntu", "id"]).unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Run { user, .. }) => {
+                assert_eq!(user, "ubuntu");
             }
             _ => panic!("expected sbx run command"),
         }

@@ -416,6 +416,7 @@ def _run_streaming(
         args=args or [],
         env=env,
         working_dir=working_dir,
+        user="root",
     )
 
     stdout_seen = 0

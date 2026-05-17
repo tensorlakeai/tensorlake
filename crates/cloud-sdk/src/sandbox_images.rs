@@ -53,6 +53,7 @@ const REMOTE_METADATA_PATH: &str = "/var/lib/tensorlake/rootfs-builder/build/met
 const ROOTFS_BUILDER_BIN_DIR: &str = "/usr/local/bin";
 const ROOTFS_BUILDER_PATH: &str = "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const ROOTFS_BUILDER_COMMAND: &str = "tl-rootfs-build";
+const ROOTFS_BUILDER_PROCESS_USER: &str = "root";
 
 #[derive(Debug, Error)]
 pub enum SandboxImageBuildError {
@@ -891,20 +892,8 @@ async fn run_streaming_process(
     working_dir: Option<String>,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<()> {
-    let mut payload = Map::new();
-    payload.insert("command".to_string(), Value::String(command.to_string()));
-    payload.insert(
-        "args".to_string(),
-        Value::Array(args.into_iter().map(Value::String).collect()),
-    );
-    if let Some(env) = env {
-        payload.insert("env".to_string(), Value::Object(env));
-    }
-    if let Some(working_dir) = working_dir {
-        payload.insert("working_dir".to_string(), Value::String(working_dir));
-    }
-
-    let started = proxy.start_process(&Value::Object(payload)).await?;
+    let payload = streaming_process_payload(command, args, env, working_dir);
+    let started = proxy.start_process(&payload).await?;
     let pid = started.pid;
     let mut stdout_seen = 0usize;
     let mut stderr_seen = 0usize;
@@ -961,6 +950,32 @@ async fn run_streaming_process(
     }
 
     Ok(())
+}
+
+fn streaming_process_payload(
+    command: &str,
+    args: Vec<String>,
+    env: Option<Map<String, Value>>,
+    working_dir: Option<String>,
+) -> Value {
+    let mut payload = Map::new();
+    payload.insert("command".to_string(), Value::String(command.to_string()));
+    payload.insert(
+        "args".to_string(),
+        Value::Array(args.into_iter().map(Value::String).collect()),
+    );
+    if let Some(env) = env {
+        payload.insert("env".to_string(), Value::Object(env));
+    }
+    if let Some(working_dir) = working_dir {
+        payload.insert("working_dir".to_string(), Value::String(working_dir));
+    }
+    payload.insert(
+        "user".to_string(),
+        Value::String(ROOTFS_BUILDER_PROCESS_USER.to_string()),
+    );
+
+    Value::Object(payload)
 }
 
 async fn copy_local_path(
@@ -1341,6 +1356,7 @@ mod tests {
         complete_request_from_metadata, default_registered_name, load_dockerfile_plan,
         load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix, rootfs_builder_env,
         rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
+        streaming_process_payload,
     };
     use serde_json::{Value, json};
     use std::io::Write;
@@ -1534,6 +1550,22 @@ mod tests {
             env.get("PATH").and_then(Value::as_str),
             Some("/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
         );
+    }
+
+    #[test]
+    fn streaming_process_payload_runs_as_root() {
+        let payload = streaming_process_payload(
+            "mkdir",
+            vec![
+                "-p".to_string(),
+                "/var/lib/tensorlake/rootfs-builder".to_string(),
+            ],
+            None,
+            None,
+        );
+
+        assert_eq!(payload["command"], "mkdir");
+        assert_eq!(payload["user"], "root");
     }
 
     #[test]

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated, Any
 
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 
 def _parse_timestamp(v: int | float | datetime | None) -> datetime | None:
@@ -379,6 +379,19 @@ class OutputMode(str, Enum):
 
     CAPTURE = "capture"
     DISCARD = "discard"
+
+
+class ProcessUserSpec(BaseModel):
+    """Structured POSIX user identity for process execution inside a sandbox."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    uid: int | None = None
+    gid: int | None = None
+
+
+ProcessUser = str | ProcessUserSpec | dict[str, str | int | None]
 
 
 class ProcessInfo(BaseModel):

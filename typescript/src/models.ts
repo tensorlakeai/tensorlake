@@ -259,6 +259,14 @@ export interface SandboxPoolInfo {
 
 // --- Process management ---
 
+export interface ProcessUserSpec {
+  name?: string;
+  uid?: number;
+  gid?: number;
+}
+
+export type ProcessUser = string | ProcessUserSpec;
+
 export interface StartProcessOptions {
   args?: string[];
   env?: Record<string, string>;
@@ -266,6 +274,7 @@ export interface StartProcessOptions {
   stdinMode?: StdinMode;
   stdoutMode?: OutputMode;
   stderrMode?: OutputMode;
+  user?: ProcessUser;
 }
 
 export interface ProcessInfo {
@@ -303,6 +312,7 @@ export interface RunOptions {
   env?: Record<string, string>;
   workingDir?: string;
   timeout?: number;
+  user?: ProcessUser;
 }
 
 export interface CommandResult {

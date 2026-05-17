@@ -9,6 +9,7 @@ from tensorlake.sandbox.models import (
     ContainerResourcesInfo,
     OutputMode,
     ProcessStatus,
+    ProcessUserSpec,
     SandboxInfo,
     SandboxStatus,
     StdinMode,
@@ -226,6 +227,7 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
             command="echo",
             args=["hello"],
             stdin_mode=StdinMode.PIPE,
+            user="root",
         )
 
         self.assertEqual(process.pid, 101)
@@ -234,8 +236,20 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["command"], "echo")
         self.assertEqual(payload["args"], ["hello"])
         self.assertEqual(payload["stdin_mode"], StdinMode.PIPE.value)
+        self.assertEqual(payload["user"], "root")
 
-    async def test_start_process_omits_default_modes_from_payload(self):
+    async def test_start_process_serializes_uid_gid_user_spec(self):
+        sandbox, fake = _make_async_sandbox()
+
+        await sandbox.start_process(
+            command="echo",
+            user=ProcessUserSpec(uid=1000, gid=1000),
+        )
+
+        payload = json.loads(fake.start_payload_json)
+        self.assertEqual(payload["user"], {"uid": 1000, "gid": 1000})
+
+    async def test_start_process_omits_default_modes_and_serializes_default_user(self):
         sandbox, fake = _make_async_sandbox()
 
         await sandbox.start_process(command="echo")
@@ -244,6 +258,13 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("stdin_mode", payload)
         self.assertNotIn("stdout_mode", payload)
         self.assertNotIn("stderr_mode", payload)
+        self.assertEqual(payload["user"], "tl-user")
+
+    async def test_start_process_rejects_invalid_user_spec_mapping(self):
+        sandbox, _ = _make_async_sandbox()
+
+        with self.assertRaisesRegex(SandboxError, "invalid process user spec"):
+            await sandbox.start_process(command="echo", user={"uid": "not-an-int"})
 
     async def test_start_process_serializes_non_default_output_modes(self):
         sandbox, fake = _make_async_sandbox()
@@ -279,11 +300,12 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
     async def test_run_uses_streaming_endpoint(self):
         sandbox, fake = _make_async_sandbox()
 
-        result = await sandbox.run("echo", args=["hello"])
+        result = await sandbox.run("echo", args=["hello"], user="root")
 
         payload = json.loads(fake.run_payload_json)
         self.assertEqual(payload["command"], "echo")
         self.assertEqual(payload["args"], ["hello"])
+        self.assertEqual(payload["user"], "root")
 
         self.assertEqual(result.stdout, "out1\nout2")
         self.assertEqual(result.stderr, "err1")
