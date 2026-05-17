@@ -46,7 +46,7 @@ import WebSocket, { type RawData } from "ws";
 function processUserPayload(
   user: ProcessUser | undefined,
 ): ProcessUser | undefined {
-  if (user == null || user === "sandbox") {
+  if (user == null) {
     return undefined;
   }
   if (typeof user === "string" && user.trim() === "") {

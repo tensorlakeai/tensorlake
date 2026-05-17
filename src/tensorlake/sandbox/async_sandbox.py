@@ -369,7 +369,7 @@ class AsyncSandbox:
         env: dict[str, str] | None = None,
         working_dir: str | None = None,
         timeout: float | None = None,
-        user: ProcessUser = "sandbox",
+        user: ProcessUser = "tl-user",
     ) -> Traced[CommandResult]:
         process_user = Sandbox._normalize_process_user(user)
         payload = Sandbox._build_command_payload(
@@ -426,7 +426,7 @@ class AsyncSandbox:
         stdin_mode: StdinMode = StdinMode.CLOSED,
         stdout_mode: OutputMode = OutputMode.CAPTURE,
         stderr_mode: OutputMode = OutputMode.CAPTURE,
-        user: ProcessUser = "sandbox",
+        user: ProcessUser = "tl-user",
     ) -> Traced[ProcessInfo]:
         process_user = Sandbox._normalize_process_user(user)
         payload = Sandbox._build_command_payload(

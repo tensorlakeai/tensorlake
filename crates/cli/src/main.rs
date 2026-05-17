@@ -427,8 +427,8 @@ enum SbxCommands {
         #[arg(short, long)]
         env: Vec<String>,
 
-        /// Process user to run as: sandbox, username, uid, or uid:gid
-        #[arg(long, default_value = "sandbox")]
+        /// Process user to run as: username, uid, or uid:gid
+        #[arg(long, default_value = "tl-user")]
         user: String,
     },
 
@@ -500,8 +500,8 @@ enum SbxCommands {
         #[arg(short, long)]
         env: Vec<String>,
 
-        /// Process user to run as: sandbox, username, uid, or uid:gid
-        #[arg(long, default_value = "sandbox")]
+        /// Process user to run as: username, uid, or uid:gid
+        #[arg(long, default_value = "tl-user")]
         user: String,
 
         /// Keep sandbox after command exits

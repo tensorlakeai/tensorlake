@@ -154,13 +154,13 @@ class TestSandboxRustBackend(unittest.TestCase):
         payload = json.loads(fake.start_payload_json)
         self.assertEqual(payload["user"], {"uid": 1000, "gid": 1000})
 
-    def test_start_process_omits_default_user_from_payload(self):
+    def test_start_process_serializes_default_user(self):
         sandbox, fake = _make_sandbox()
 
         sandbox.start_process(command="echo")
 
         payload = json.loads(fake.start_payload_json)
-        self.assertNotIn("user", payload)
+        self.assertEqual(payload["user"], "tl-user")
 
     def test_list_processes_uses_rust_backend(self):
         sandbox, _ = _make_sandbox()

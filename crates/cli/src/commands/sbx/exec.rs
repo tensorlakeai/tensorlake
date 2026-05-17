@@ -37,7 +37,7 @@ pub async fn run(
     if let Some(t) = timeout {
         body["timeout"] = serde_json::json!(t);
     }
-    if let Some(user) = user.filter(|value| *value != "sandbox") {
+    if let Some(user) = user {
         body["user"] = serde_json::Value::String(user.to_string());
     }
 

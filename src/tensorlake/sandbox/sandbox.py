@@ -724,8 +724,6 @@ class Sandbox:
             raise SandboxError("process user must be a string or ProcessUserSpec")
 
         if value is not None:
-            if value == "sandbox":
-                return None
             if not value.strip():
                 raise SandboxError("process user must not be empty")
             return value
@@ -748,7 +746,7 @@ class Sandbox:
         env: dict[str, str] | None = None,
         working_dir: str | None = None,
         timeout: float | None = None,
-        user: ProcessUser = "sandbox",
+        user: ProcessUser = "tl-user",
     ) -> Traced[CommandResult]:
         """Run a command to completion and return its output.
 
@@ -762,7 +760,7 @@ class Sandbox:
             env: Environment variables
             working_dir: Working directory
             timeout: Maximum seconds to wait (enforced server-side; None = no limit)
-            user: Process user. Defaults to ``"sandbox"``. Pass a username
+            user: Process user. Defaults to ``"tl-user"``. Pass a username
                 such as ``"root"``, a Docker-style id string like ``"1000:1000"``,
                 or ``ProcessUserSpec(uid=1000, gid=1000)``.
 
@@ -830,7 +828,7 @@ class Sandbox:
         stdin_mode: StdinMode = StdinMode.CLOSED,
         stdout_mode: OutputMode = OutputMode.CAPTURE,
         stderr_mode: OutputMode = OutputMode.CAPTURE,
-        user: ProcessUser = "sandbox",
+        user: ProcessUser = "tl-user",
     ) -> Traced[ProcessInfo]:
         """Start a new process in the sandbox.
 
@@ -842,7 +840,7 @@ class Sandbox:
             stdin_mode: StdinMode.CLOSED or StdinMode.PIPE
             stdout_mode: OutputMode.CAPTURE or OutputMode.DISCARD
             stderr_mode: OutputMode.CAPTURE or OutputMode.DISCARD
-            user: Process user. Defaults to ``"sandbox"``. Pass a username
+            user: Process user. Defaults to ``"tl-user"``. Pass a username
                 such as ``"root"``, a Docker-style id string like ``"1000:1000"``,
                 or ``ProcessUserSpec(uid=1000, gid=1000)``.
 
