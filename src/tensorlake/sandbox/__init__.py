@@ -14,6 +14,7 @@ from .exceptions import (
     SandboxNotFoundError,
 )
 from .models import (
+    ArchivedSandboxInfo,
     CheckpointType,
     CommandResult,
     ContainerResourcesInfo,
@@ -23,6 +24,7 @@ from .models import (
     DaemonInfo,
     DirectoryEntry,
     HealthResponse,
+    ListArchivedSandboxesResponse,
     ListDirectoryResponse,
     NetworkConfig,
     OutputEvent,
@@ -31,6 +33,7 @@ from .models import (
     PoolContainerInfo,
     ProcessInfo,
     ProcessStatus,
+    ProcessUser,
     SandboxInfo,
     SandboxPoolInfo,
     SandboxPortAccess,
@@ -64,6 +67,8 @@ __all__ = [
     "CreateSandboxPoolResponse",
     "ContainerResourcesInfo",
     "NetworkConfig",
+    "ArchivedSandboxInfo",
+    "ListArchivedSandboxesResponse",
     # Snapshot models
     "SnapshotStatus",
     "SnapshotType",
@@ -78,6 +83,7 @@ __all__ = [
     "ProcessInfo",
     "StdinMode",
     "OutputMode",
+    "ProcessUser",
     "SendSignalResponse",
     "OutputResponse",
     "OutputEvent",

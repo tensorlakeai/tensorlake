@@ -143,6 +143,26 @@ export interface SandboxPortAccess {
   sandboxUrl?: string;
 }
 
+/** Sandbox information plus the archival timestamp. */
+export interface ArchivedSandboxInfo extends SandboxInfo {
+  archivedAt: Date;
+}
+
+/** Pagination params for `listArchivedSandboxes`. */
+export interface ListArchivedSandboxesOptions {
+  limit?: number;
+  /** Base64-encoded pagination cursor returned by a prior call. */
+  cursor?: string;
+  /** Pagination direction. */
+  direction?: "forward" | "backward";
+}
+
+export interface ListArchivedSandboxesResponse {
+  sandboxes: ArchivedSandboxInfo[];
+  prevCursor?: string;
+  nextCursor?: string;
+}
+
 // --- Snapshots ---
 
 export interface CreateSnapshotResponse {
@@ -239,6 +259,8 @@ export interface SandboxPoolInfo {
 
 // --- Process management ---
 
+export type ProcessUser = "sandbox" | "root";
+
 export interface StartProcessOptions {
   args?: string[];
   env?: Record<string, string>;
@@ -246,6 +268,7 @@ export interface StartProcessOptions {
   stdinMode?: StdinMode;
   stdoutMode?: OutputMode;
   stderrMode?: OutputMode;
+  user?: ProcessUser;
 }
 
 export interface ProcessInfo {
@@ -283,6 +306,7 @@ export interface RunOptions {
   env?: Record<string, string>;
   workingDir?: string;
   timeout?: number;
+  user?: ProcessUser;
 }
 
 export interface CommandResult {

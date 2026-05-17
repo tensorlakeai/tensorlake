@@ -27,6 +27,7 @@ from .models import (
     OutputMode,
     OutputResponse,
     ProcessInfo,
+    ProcessUser,
     SandboxInfo,
     SandboxStatus,
     SendSignalResponse,
@@ -368,9 +369,16 @@ class AsyncSandbox:
         env: dict[str, str] | None = None,
         working_dir: str | None = None,
         timeout: float | None = None,
+        user: ProcessUser | str = ProcessUser.SANDBOX,
     ) -> Traced[CommandResult]:
+        process_user = Sandbox._normalize_process_user(user)
         payload = Sandbox._build_command_payload(
-            command, args, env, working_dir, timeout=timeout
+            command,
+            args,
+            env,
+            working_dir,
+            timeout=timeout,
+            user=process_user.value if process_user != ProcessUser.SANDBOX else None,
         )
         try:
             trace_id, events_json = await self._rust_client.run_process_json_async(
@@ -418,7 +426,9 @@ class AsyncSandbox:
         stdin_mode: StdinMode = StdinMode.CLOSED,
         stdout_mode: OutputMode = OutputMode.CAPTURE,
         stderr_mode: OutputMode = OutputMode.CAPTURE,
+        user: ProcessUser | str = ProcessUser.SANDBOX,
     ) -> Traced[ProcessInfo]:
+        process_user = Sandbox._normalize_process_user(user)
         payload = Sandbox._build_command_payload(
             command,
             args,
@@ -427,6 +437,7 @@ class AsyncSandbox:
             stdin_mode=stdin_mode if stdin_mode != StdinMode.CLOSED else None,
             stdout_mode=stdout_mode if stdout_mode != OutputMode.CAPTURE else None,
             stderr_mode=stderr_mode if stderr_mode != OutputMode.CAPTURE else None,
+            user=process_user.value if process_user != ProcessUser.SANDBOX else None,
         )
         try:
             trace_id, response_json = await self._rust_client.start_process_json_async(

@@ -7,6 +7,7 @@ from tensorlake.sandbox import Sandbox, SandboxConnectionError
 from tensorlake.sandbox.exceptions import SandboxError
 from tensorlake.sandbox.models import (
     ContainerResourcesInfo,
+    ProcessUser,
     SandboxInfo,
     SandboxStatus,
     StdinMode,
@@ -132,6 +133,7 @@ class TestSandboxRustBackend(unittest.TestCase):
             command="echo",
             args=["hello"],
             stdin_mode=StdinMode.PIPE,
+            user=ProcessUser.ROOT,
         )
 
         self.assertEqual(process.pid, 101)
@@ -139,6 +141,15 @@ class TestSandboxRustBackend(unittest.TestCase):
         self.assertEqual(payload["command"], "echo")
         self.assertEqual(payload["args"], ["hello"])
         self.assertEqual(payload["stdin_mode"], "pipe")
+        self.assertEqual(payload["user"], "root")
+
+    def test_start_process_omits_default_user_from_payload(self):
+        sandbox, fake = _make_sandbox()
+
+        sandbox.start_process(command="echo")
+
+        payload = json.loads(fake.start_payload_json)
+        self.assertNotIn("user", payload)
 
     def test_list_processes_uses_rust_backend(self):
         sandbox, _ = _make_sandbox()
@@ -186,11 +197,12 @@ class TestSandboxRustBackend(unittest.TestCase):
     def test_run_uses_streaming_endpoint(self):
         sandbox, fake = _make_sandbox()
 
-        result = sandbox.run("echo", args=["hello"])
+        result = sandbox.run("echo", args=["hello"], user="root")
 
         payload = json.loads(fake.run_payload_json)
         self.assertEqual(payload["command"], "echo")
         self.assertEqual(payload["args"], ["hello"])
+        self.assertEqual(payload["user"], "root")
 
         self.assertEqual(result.stdout, "out1\nout2")
         self.assertEqual(result.stderr, "err1")

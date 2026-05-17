@@ -1,5 +1,7 @@
 use crate::auth::context::CliContext;
-use crate::commands::sbx::{format_created_at, sandbox_endpoint};
+use crate::commands::sbx::{
+    DEFAULT_SANDBOX_IMAGE_DISPLAY_NAME, format_created_at, sandbox_endpoint,
+};
 use crate::error::{CliError, Result};
 
 pub async fn run(ctx: &CliContext, sandbox_id: &str) -> Result<()> {
@@ -7,6 +9,10 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str) -> Result<()> {
     let url = sandbox_endpoint(ctx, &format!("sandboxes/{sandbox_id}"));
 
     let resp = client.get(&url).send().await.map_err(CliError::Http)?;
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return run_archived(ctx, sandbox_id).await;
+    }
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -27,6 +33,48 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str) -> Result<()> {
     Ok(())
 }
 
+async fn run_archived(ctx: &CliContext, sandbox_id: &str) -> Result<()> {
+    let client = ctx.client()?;
+    let url = sandbox_endpoint(ctx, &format!("archived-sandboxes/{sandbox_id}"));
+
+    let resp = client.get(&url).send().await.map_err(CliError::Http)?;
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(CliError::Other(anyhow::anyhow!(
+            "sandbox '{}' not found",
+            sandbox_id
+        )));
+    }
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(CliError::Other(anyhow::anyhow!(
+            "failed to fetch archived sandbox '{}' (HTTP {}): {}",
+            sandbox_id,
+            status,
+            body
+        )));
+    }
+
+    let item = resp
+        .json::<serde_json::Value>()
+        .await
+        .map_err(CliError::Http)?;
+    print_archived_sandbox_details(&item);
+    Ok(())
+}
+
+fn print_archived_sandbox_details(item: &serde_json::Value) {
+    print_sandbox_details(item);
+    let archived_at = item
+        .get("archived_at")
+        .filter(|v| !v.is_null())
+        .map(|v| format_created_at(Some(v)))
+        .unwrap_or_default();
+    println!("Archived:        {}", archived_at);
+}
+
 fn print_sandbox_details(item: &serde_json::Value) {
     let id = item
         .get("sandbox_id")
@@ -39,7 +87,7 @@ fn print_sandbox_details(item: &serde_json::Value) {
         .get("image")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .unwrap_or("ubuntu-minimal");
+        .unwrap_or(DEFAULT_SANDBOX_IMAGE_DISPLAY_NAME);
     let namespace = item
         .get("namespace")
         .and_then(|v| v.as_str())

@@ -9,6 +9,7 @@ use crate::{
     error::{CliError, Result},
 };
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     ctx: &CliContext,
     dockerfile_path: &str,

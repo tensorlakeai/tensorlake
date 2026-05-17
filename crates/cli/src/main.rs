@@ -8,7 +8,7 @@ mod output;
 mod project;
 mod python_ast;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::num::NonZeroUsize;
 
 use auth::context::CliContext;
@@ -280,16 +280,25 @@ enum SbxCommands {
     /// List all sandboxes
     Ls {
         /// Include sandboxes with status `terminated`
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with_all = ["running", "suspended", "archived"])]
         all: bool,
 
         /// Show only sandboxes with status `running`
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with_all = ["all", "suspended", "archived"])]
         running: bool,
+
+        /// Show only sandboxes with status `suspended`
+        #[arg(short, long, conflicts_with_all = ["all", "running", "archived"])]
+        suspended: bool,
 
         /// Only print sandbox IDs, one per line (no table formatting)
         #[arg(short, long)]
         quiet: bool,
+
+        /// List archived (terminated) sandboxes from the server's archive
+        /// store instead of the live sandbox list.
+        #[arg(short = 't', long = "archived", conflicts_with_all = ["all", "running", "suspended"])]
+        archived: bool,
     },
 
     /// Show detailed information for a sandbox
@@ -417,6 +426,10 @@ enum SbxCommands {
         /// Environment variable (KEY=VALUE)
         #[arg(short, long)]
         env: Vec<String>,
+
+        /// Process user to run as
+        #[arg(long, value_enum, default_value_t = ProcessUserArg::Sandbox)]
+        user: ProcessUserArg,
     },
 
     /// Copy files between local and sandbox
@@ -486,6 +499,10 @@ enum SbxCommands {
         /// Environment variable (KEY=VALUE)
         #[arg(short, long)]
         env: Vec<String>,
+
+        /// Process user to run as
+        #[arg(long, value_enum, default_value_t = ProcessUserArg::Sandbox)]
+        user: ProcessUserArg,
 
         /// Keep sandbox after command exits
         #[arg(short, long)]
@@ -562,6 +579,21 @@ enum SbxCommands {
     /// Manage sandbox images
     #[command(subcommand)]
     Image(ImageCommands),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ProcessUserArg {
+    Sandbox,
+    Root,
+}
+
+impl ProcessUserArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Sandbox => "sandbox",
+            Self::Root => "root",
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -874,8 +906,10 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 SbxCommands::Ls {
                     all,
                     running,
+                    suspended,
                     quiet,
-                } => commands::sbx::ls::run(ctx, running, all, quiet).await,
+                    archived,
+                } => commands::sbx::ls::run(ctx, running, suspended, all, quiet, archived).await,
                 SbxCommands::Describe { sandbox_id } => {
                     commands::sbx::describe::run(ctx, &sandbox_id).await
                 }
@@ -950,6 +984,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     timeout,
                     workdir,
                     env,
+                    user,
                 } => {
                     commands::sbx::exec::run(
                         ctx,
@@ -959,6 +994,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         timeout,
                         workdir.as_deref(),
                         &env,
+                        Some(user.as_str()),
                     )
                     .await
                 }
@@ -1011,6 +1047,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     timeout,
                     workdir,
                     env,
+                    user,
                     keep,
                     ports,
                     allow_unauthenticated_access,
@@ -1029,6 +1066,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         timeout,
                         workdir.as_deref(),
                         &env,
+                        Some(user.as_str()),
                         keep,
                         &ports,
                         allow_unauthenticated_access,
@@ -1153,6 +1191,26 @@ mod tests {
     }
 
     #[test]
+    fn sbx_ls_rejects_conflicting_status_filters() {
+        for pair in [
+            ["-a", "-r"],
+            ["-a", "-s"],
+            ["-a", "-t"],
+            ["-r", "-s"],
+            ["-r", "-t"],
+            ["-s", "-t"],
+        ] {
+            let result = Cli::try_parse_from(["tl", "sbx", "ls", pair[0], pair[1]]);
+            assert!(
+                result.is_err(),
+                "expected {} {} to conflict",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
     fn checkpoint_type_maps_to_wire_values() {
         assert_eq!(SnapshotTypeArg::Memory.as_wire_value(), "memory");
         assert_eq!(SnapshotTypeArg::Filesystem.as_wire_value(), "filesystem");
@@ -1216,6 +1274,31 @@ mod tests {
         match cli.command {
             Commands::Sbx(SbxCommands::Run { disk_mb, .. }) => {
                 assert_eq!(disk_mb, Some(30720));
+            }
+            _ => panic!("expected sbx run command"),
+        }
+    }
+
+    #[test]
+    fn sbx_exec_parses_root_process_user() {
+        let cli =
+            Cli::try_parse_from(["tl", "sbx", "exec", "--user", "root", "sbx-123", "id"]).unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Exec { user, .. }) => {
+                assert_eq!(user, ProcessUserArg::Root);
+            }
+            _ => panic!("expected sbx exec command"),
+        }
+    }
+
+    #[test]
+    fn sbx_run_parses_root_process_user() {
+        let cli = Cli::try_parse_from(["tl", "sbx", "run", "--user", "root", "id"]).unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Run { user, .. }) => {
+                assert_eq!(user, ProcessUserArg::Root);
             }
             _ => panic!("expected sbx run command"),
         }

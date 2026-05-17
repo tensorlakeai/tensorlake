@@ -281,6 +281,7 @@ describe("sandbox image helpers", () => {
         ],
         env: { PATH: "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" },
         workingDir: "/var/lib/tensorlake/rootfs-builder/build",
+        user: "root",
       }),
     );
     const specCall = sandbox.writeFile.mock.calls.find(

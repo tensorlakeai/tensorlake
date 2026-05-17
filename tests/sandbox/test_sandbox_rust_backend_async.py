@@ -9,6 +9,7 @@ from tensorlake.sandbox.models import (
     ContainerResourcesInfo,
     OutputMode,
     ProcessStatus,
+    ProcessUser,
     SandboxInfo,
     SandboxStatus,
     StdinMode,
@@ -226,6 +227,7 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
             command="echo",
             args=["hello"],
             stdin_mode=StdinMode.PIPE,
+            user=ProcessUser.ROOT,
         )
 
         self.assertEqual(process.pid, 101)
@@ -234,6 +236,7 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["command"], "echo")
         self.assertEqual(payload["args"], ["hello"])
         self.assertEqual(payload["stdin_mode"], StdinMode.PIPE.value)
+        self.assertEqual(payload["user"], ProcessUser.ROOT.value)
 
     async def test_start_process_omits_default_modes_from_payload(self):
         sandbox, fake = _make_async_sandbox()
@@ -244,6 +247,7 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("stdin_mode", payload)
         self.assertNotIn("stdout_mode", payload)
         self.assertNotIn("stderr_mode", payload)
+        self.assertNotIn("user", payload)
 
     async def test_start_process_serializes_non_default_output_modes(self):
         sandbox, fake = _make_async_sandbox()
@@ -279,11 +283,12 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
     async def test_run_uses_streaming_endpoint(self):
         sandbox, fake = _make_async_sandbox()
 
-        result = await sandbox.run("echo", args=["hello"])
+        result = await sandbox.run("echo", args=["hello"], user="root")
 
         payload = json.loads(fake.run_payload_json)
         self.assertEqual(payload["command"], "echo")
         self.assertEqual(payload["args"], ["hello"])
+        self.assertEqual(payload["user"], "root")
 
         self.assertEqual(result.stdout, "out1\nout2")
         self.assertEqual(result.stderr, "err1")

@@ -20,6 +20,7 @@ import {
   type OutputResponse,
   OutputMode,
   type ProcessInfo,
+  type ProcessUser,
   type PtySessionInfo,
   type RunOptions,
   type SandboxClientOptions,
@@ -41,6 +42,18 @@ import {
 import { parseSSEStream } from "./sse.js";
 import { resolveProxyTarget } from "./url.js";
 import WebSocket, { type RawData } from "ws";
+
+function processUserPayload(
+  user: ProcessUser | undefined,
+): ProcessUser | undefined {
+  if (user == null || user === "sandbox") {
+    return undefined;
+  }
+  if (user === "root") {
+    return user;
+  }
+  throw new SandboxError("process user must be 'sandbox' or 'root'");
+}
 
 const PTY_OP_DATA = 0x00;
 const PTY_OP_RESIZE = 0x01;
@@ -567,6 +580,8 @@ export class Sandbox {
     if (options?.env) body.env = options.env;
     if (options?.workingDir) body.working_dir = options.workingDir;
     if (options?.timeout != null) body.timeout = options.timeout;
+    const user = processUserPayload(options?.user);
+    if (user != null) body.user = user;
 
     const sseStream = await this.http.requestStream(
       "POST",
@@ -619,6 +634,8 @@ export class Sandbox {
     if (options?.args != null) payload.args = options.args;
     if (options?.env != null) payload.env = options.env;
     if (options?.workingDir != null) payload.working_dir = options.workingDir;
+    const user = processUserPayload(options?.user);
+    if (user != null) payload.user = user;
     if (options?.stdinMode != null && options.stdinMode !== StdinMode.CLOSED) {
       payload.stdin_mode = options.stdinMode;
     }

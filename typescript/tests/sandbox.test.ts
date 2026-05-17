@@ -51,6 +51,8 @@ describe("Sandbox", () => {
     it("runs a command and returns result", async () => {
       mockFetch((url, init) => {
         if (url.includes("/api/v1/processes/run") && init?.method === "POST") {
+          const body = JSON.parse(init.body as string);
+          expect(body.user).toBe("root");
           return sseResponse([
             { pid: 42, started_at: 1700000000 },
             { line: "hello", timestamp: 1700000000.1, stream: "stdout" },
@@ -61,7 +63,7 @@ describe("Sandbox", () => {
       });
 
       const sbx = makeSandbox();
-      const result = await sbx.run("echo", { args: ["hello"] });
+      const result = await sbx.run("echo", { args: ["hello"], user: "root" });
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toBe("hello");
       expect(result.stderr).toBe("");
@@ -132,6 +134,7 @@ describe("Sandbox", () => {
         expect(body.command).toBe("bash");
         expect(body.args).toEqual(["-c", "ls"]);
         expect(body.working_dir).toBe("/tmp");
+        expect(body.user).toBe("root");
         return new Response(
           JSON.stringify({
             pid: 1,
@@ -149,6 +152,7 @@ describe("Sandbox", () => {
       const proc = await sbx.startProcess("bash", {
         args: ["-c", "ls"],
         workingDir: "/tmp",
+        user: "root",
       });
       expect(proc.pid).toBe(1);
       expect(proc.status).toBe(ProcessStatus.RUNNING);

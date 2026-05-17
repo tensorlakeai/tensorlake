@@ -29,6 +29,7 @@ from .models import (
     OutputMode,
     OutputResponse,
     ProcessInfo,
+    ProcessUser,
     SandboxInfo,
     SandboxStatus,
     SendSignalResponse,
@@ -705,6 +706,13 @@ class Sandbox:
                 payload[key] = value
         return payload
 
+    @staticmethod
+    def _normalize_process_user(user: ProcessUser | str) -> ProcessUser:
+        try:
+            return user if isinstance(user, ProcessUser) else ProcessUser(user)
+        except ValueError as e:
+            raise SandboxError("process user must be 'sandbox' or 'root'") from e
+
     # --- High-level convenience ---
 
     def run(
@@ -714,6 +722,7 @@ class Sandbox:
         env: dict[str, str] | None = None,
         working_dir: str | None = None,
         timeout: float | None = None,
+        user: ProcessUser | str = ProcessUser.SANDBOX,
     ) -> Traced[CommandResult]:
         """Run a command to completion and return its output.
 
@@ -727,18 +736,22 @@ class Sandbox:
             env: Environment variables
             working_dir: Working directory
             timeout: Maximum seconds to wait (enforced server-side; None = no limit)
+            user: Process user mode, either ``ProcessUser.SANDBOX``/``"sandbox"``
+                or ``ProcessUser.ROOT``/``"root"``
 
         Returns:
             Traced[CommandResult] — access ``.trace_id`` for the W3C trace ID
             and ``.exit_code`` / ``.stdout`` / ``.stderr`` directly (or via
             ``.value``).
         """
+        process_user = self._normalize_process_user(user)
         payload = self._build_command_payload(
             command,
             args,
             env,
             working_dir,
             timeout=timeout,
+            user=process_user.value if process_user != ProcessUser.SANDBOX else None,
         )
 
         try:
@@ -790,6 +803,7 @@ class Sandbox:
         stdin_mode: StdinMode = StdinMode.CLOSED,
         stdout_mode: OutputMode = OutputMode.CAPTURE,
         stderr_mode: OutputMode = OutputMode.CAPTURE,
+        user: ProcessUser | str = ProcessUser.SANDBOX,
     ) -> Traced[ProcessInfo]:
         """Start a new process in the sandbox.
 
@@ -801,11 +815,14 @@ class Sandbox:
             stdin_mode: StdinMode.CLOSED or StdinMode.PIPE
             stdout_mode: OutputMode.CAPTURE or OutputMode.DISCARD
             stderr_mode: OutputMode.CAPTURE or OutputMode.DISCARD
+            user: Process user mode, either ``ProcessUser.SANDBOX``/``"sandbox"``
+                or ``ProcessUser.ROOT``/``"root"``
 
         Returns:
             Traced[ProcessInfo] — access ``.trace_id`` for the W3C trace ID
             and ``.pid`` / ``.status`` directly (or via ``.value``).
         """
+        process_user = self._normalize_process_user(user)
         payload = self._build_command_payload(
             command,
             args,
@@ -814,6 +831,7 @@ class Sandbox:
             stdin_mode=stdin_mode if stdin_mode != StdinMode.CLOSED else None,
             stdout_mode=stdout_mode if stdout_mode != OutputMode.CAPTURE else None,
             stderr_mode=stderr_mode if stderr_mode != OutputMode.CAPTURE else None,
+            user=process_user.value if process_user != ProcessUser.SANDBOX else None,
         )
 
         try:

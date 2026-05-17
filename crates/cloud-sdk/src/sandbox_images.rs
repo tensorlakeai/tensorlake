@@ -28,6 +28,19 @@ type Result<T> = std::result::Result<T, SandboxImageBuildError>;
 const DEFAULT_ROOTFS_DISK_MB: u64 = 10 * 1024;
 const DEFAULT_SANDBOX_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 const SANDBOX_WAIT_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// Lifetime budget requested for the temporary rootfs-builder sandbox. The
+/// builder is short-lived (Dockerfile-defined RUN steps), but it has to outlive
+/// long single steps like `dd if=/dev/urandom ...` or large `apt install` runs
+/// that produce no client traffic. Setting an explicit value here makes the
+/// CLI's behavior independent of whatever default the Platform API hands back
+/// today. Paired with the keepalive loop below, which renews this budget while
+/// the build is in flight.
+const BUILDER_SANDBOX_TIMEOUT_SECS: i64 = 300;
+/// Cadence at which the SDK pings the builder sandbox while the offline
+/// rootfs builder is running, to keep it from being suspended due to
+/// inactivity / lifetime expiry mid-build. Must be shorter than
+/// `BUILDER_SANDBOX_TIMEOUT_SECS`.
+const BUILDER_SANDBOX_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(300);
 const PROCESS_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const PROCESS_EXIT_POLL_ATTEMPTS: usize = 10;
@@ -40,6 +53,7 @@ const REMOTE_METADATA_PATH: &str = "/var/lib/tensorlake/rootfs-builder/build/met
 const ROOTFS_BUILDER_BIN_DIR: &str = "/usr/local/bin";
 const ROOTFS_BUILDER_PATH: &str = "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const ROOTFS_BUILDER_COMMAND: &str = "tl-rootfs-build";
+const ROOTFS_BUILDER_PROCESS_USER: &str = "root";
 
 #[derive(Debug, Error)]
 pub enum SandboxImageBuildError {
@@ -223,7 +237,7 @@ where
             image: Some(prepared.builder.image.clone()),
             resources,
             secret_names: None,
-            timeout_secs: None,
+            timeout_secs: Some(BUILDER_SANDBOX_TIMEOUT_SECS),
             entrypoint: None,
             network: None,
             snapshot_id: None,
@@ -260,7 +274,16 @@ where
         emit(SandboxImageBuildEvent::Status(
             "Running offline rootfs builder...".to_string(),
         ));
-        run_rootfs_builder(&proxy, &prepared.builder.command, &mut emit).await?;
+        // The rootfs builder runs entirely inside the sandbox and can stay
+        // silent for minutes at a time (e.g. a single large `RUN dd ...` step
+        // in the user's Dockerfile produces no client traffic). Keep the
+        // sandbox visibly alive while that step is in flight so the Platform
+        // doesn't suspend it out from under us. Aborted as soon as the
+        // builder returns, regardless of outcome.
+        let keepalive_task = spawn_builder_keepalive(proxy.clone());
+        let builder_result = run_rootfs_builder(&proxy, &prepared.builder.command, &mut emit).await;
+        keepalive_task.abort();
+        builder_result?;
 
         let metadata = read_build_metadata(&proxy).await?;
         let complete_request = complete_request_from_metadata(&prepared, &metadata)?;
@@ -704,6 +727,29 @@ fn docker_config_json_from_credentials(
     serde_json::to_string(&json!({ "auths": auths }))
 }
 
+/// Spawn a background task that pings the builder sandbox at a fixed cadence
+/// to keep it from being suspended due to inactivity / lifetime expiry. The
+/// caller MUST `.abort()` the returned handle when the build phase finishes
+/// (success or failure) — otherwise the task would outlive the build and keep
+/// poking a sandbox we're about to delete.
+fn spawn_builder_keepalive(proxy: SandboxProxyClient) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(BUILDER_SANDBOX_KEEPALIVE_INTERVAL);
+        // The first tick fires immediately; skip it — we don't need a ping
+        // right after the build kicks off, since the upload that just ran
+        // already counts as activity.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            // Best-effort: a transient error here is uninteresting. If the
+            // sandbox is genuinely gone, run_rootfs_builder's streaming
+            // process call will surface the real error.
+            let _ = proxy.health().await;
+        }
+    })
+}
+
 async fn run_rootfs_builder(
     proxy: &SandboxProxyClient,
     command: &str,
@@ -846,20 +892,8 @@ async fn run_streaming_process(
     working_dir: Option<String>,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<()> {
-    let mut payload = Map::new();
-    payload.insert("command".to_string(), Value::String(command.to_string()));
-    payload.insert(
-        "args".to_string(),
-        Value::Array(args.into_iter().map(Value::String).collect()),
-    );
-    if let Some(env) = env {
-        payload.insert("env".to_string(), Value::Object(env));
-    }
-    if let Some(working_dir) = working_dir {
-        payload.insert("working_dir".to_string(), Value::String(working_dir));
-    }
-
-    let started = proxy.start_process(&Value::Object(payload)).await?;
+    let payload = streaming_process_payload(command, args, env, working_dir);
+    let started = proxy.start_process(&payload).await?;
     let pid = started.pid;
     let mut stdout_seen = 0usize;
     let mut stderr_seen = 0usize;
@@ -916,6 +950,32 @@ async fn run_streaming_process(
     }
 
     Ok(())
+}
+
+fn streaming_process_payload(
+    command: &str,
+    args: Vec<String>,
+    env: Option<Map<String, Value>>,
+    working_dir: Option<String>,
+) -> Value {
+    let mut payload = Map::new();
+    payload.insert("command".to_string(), Value::String(command.to_string()));
+    payload.insert(
+        "args".to_string(),
+        Value::Array(args.into_iter().map(Value::String).collect()),
+    );
+    if let Some(env) = env {
+        payload.insert("env".to_string(), Value::Object(env));
+    }
+    if let Some(working_dir) = working_dir {
+        payload.insert("working_dir".to_string(), Value::String(working_dir));
+    }
+    payload.insert(
+        "user".to_string(),
+        Value::String(ROOTFS_BUILDER_PROCESS_USER.to_string()),
+    );
+
+    Value::Object(payload)
 }
 
 async fn copy_local_path(
@@ -1296,6 +1356,7 @@ mod tests {
         complete_request_from_metadata, default_registered_name, load_dockerfile_plan,
         load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix, rootfs_builder_env,
         rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
+        streaming_process_payload,
     };
     use serde_json::{Value, json};
     use std::io::Write;
@@ -1489,6 +1550,22 @@ mod tests {
             env.get("PATH").and_then(Value::as_str),
             Some("/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
         );
+    }
+
+    #[test]
+    fn streaming_process_payload_runs_as_root() {
+        let payload = streaming_process_payload(
+            "mkdir",
+            vec![
+                "-p".to_string(),
+                "/var/lib/tensorlake/rootfs-builder".to_string(),
+            ],
+            None,
+            None,
+        );
+
+        assert_eq!(payload["command"], "mkdir");
+        assert_eq!(payload["user"], "root");
     }
 
     #[test]

@@ -55,6 +55,10 @@ pub fn apply_proxy_access_settings(
     }
 }
 
+/// Image name displayed when a sandbox carries no explicit image (i.e. it
+/// was created from the managed default environment).
+pub const DEFAULT_SANDBOX_IMAGE_DISPLAY_NAME: &str = "tensorlake/ubuntu-minimal";
+
 pub const DEFAULT_SANDBOX_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 const SANDBOX_WAIT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 

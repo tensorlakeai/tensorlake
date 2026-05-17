@@ -14,6 +14,7 @@ pub async fn run(
     timeout: Option<f64>,
     workdir: Option<&str>,
     env: &[String],
+    user: Option<&str>,
     keep: bool,
     ports: &[u16],
     allow_unauthenticated_access: bool,
@@ -93,9 +94,17 @@ pub async fn run(
     .await?;
 
     // Run exec (proxy API)
-    let result =
-        crate::commands::sbx::exec::run(ctx, &sandbox_id, command, args, timeout, workdir, env)
-            .await;
+    let result = crate::commands::sbx::exec::run(
+        ctx,
+        &sandbox_id,
+        command,
+        args,
+        timeout,
+        workdir,
+        env,
+        user,
+    )
+    .await;
 
     // Cleanup (lifecycle API)
     if keep {

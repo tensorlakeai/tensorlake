@@ -6,6 +6,7 @@ use crate::auth::context::CliContext;
 use crate::commands::sbx::{parse_env_vars, sandbox_proxy_base, with_sandbox_headers};
 use crate::error::{CliError, Result};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     ctx: &CliContext,
     sandbox_id: &str,
@@ -14,6 +15,7 @@ pub async fn run(
     timeout: Option<f64>,
     workdir: Option<&str>,
     env: &[String],
+    user: Option<&str>,
 ) -> Result<()> {
     let env_dict = parse_env_vars(env)?;
     let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
@@ -34,6 +36,9 @@ pub async fn run(
     }
     if let Some(t) = timeout {
         body["timeout"] = serde_json::json!(t);
+    }
+    if let Some(user) = user.filter(|value| *value != "sandbox") {
+        body["user"] = serde_json::Value::String(user.to_string());
     }
 
     // Single streaming POST: start process + stream output + get exit code

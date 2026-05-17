@@ -17,11 +17,13 @@ use crate::{
 pub use desktop::SandboxDesktopClient;
 
 use models::{
-    CreateSandboxPoolResponse, CreateSandboxRequest, CreateSandboxResponse, CreateSnapshotRequest,
-    CreateSnapshotResponse, DaemonInfo, HealthResponse, ListDirectoryResponse,
-    ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse,
-    OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo, SandboxPoolInfo,
-    SandboxPoolRequest, SendSignalResponse, SnapshotInfo, SnapshotType, UpdateSandboxRequest,
+    ArchivedSandboxInfo, ArchivedSandboxesPaginationDirection, CreateSandboxPoolResponse,
+    CreateSandboxRequest, CreateSandboxResponse, CreateSnapshotRequest, CreateSnapshotResponse,
+    DaemonInfo, HealthResponse, ListArchivedSandboxesParams, ListArchivedSandboxesResponse,
+    ListDirectoryResponse, ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse,
+    ListSnapshotsResponse, OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo,
+    SandboxPoolInfo, SandboxPoolRequest, SendSignalResponse, SnapshotInfo, SnapshotType,
+    UpdateSandboxRequest,
 };
 
 /// A client for managing sandbox lifecycle, pool, and snapshot APIs.
@@ -92,6 +94,44 @@ impl SandboxesClient {
             .execute_json::<ListSandboxesResponse>(req)
             .await?
             .map(|r| r.sandboxes))
+    }
+
+    /// List archived (terminated) sandboxes in the namespace. Archived sandboxes
+    /// live in their own column family until the server-configured TTL expires.
+    pub async fn list_archived(
+        &self,
+        params: &ListArchivedSandboxesParams,
+    ) -> Result<Traced<ListArchivedSandboxesResponse>, SdkError> {
+        let uri = self.endpoint("archived-sandboxes");
+        let mut request_builder = self.client.request(Method::GET, &uri);
+        let mut query: Vec<(&str, String)> = Vec::new();
+        if let Some(limit) = params.limit {
+            query.push(("limit", limit.to_string()));
+        }
+        if let Some(cursor) = params.cursor.as_deref() {
+            query.push(("cursor", cursor.to_string()));
+        }
+        if let Some(direction) = params.direction {
+            let value = match direction {
+                ArchivedSandboxesPaginationDirection::Forward => "forward",
+                ArchivedSandboxesPaginationDirection::Backward => "backward",
+            };
+            query.push(("direction", value.to_string()));
+        }
+        if !query.is_empty() {
+            request_builder = request_builder.query(&query);
+        }
+        let req = request_builder.build()?;
+        self.client.execute_json(req).await
+    }
+
+    pub async fn get_archived(
+        &self,
+        sandbox_id: &str,
+    ) -> Result<Traced<ArchivedSandboxInfo>, SdkError> {
+        let uri = self.endpoint(&format!("archived-sandboxes/{sandbox_id}"));
+        let req = self.client.request(Method::GET, &uri).build()?;
+        self.client.execute_json(req).await
     }
 
     pub async fn update(
