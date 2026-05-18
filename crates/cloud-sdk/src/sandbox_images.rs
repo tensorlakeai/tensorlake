@@ -618,6 +618,15 @@ async fn upload_build_inputs(
     emit(SandboxImageBuildEvent::Status(
         "Uploading build context...".to_string(),
     ));
+    // Pre-create REMOTE_BUILD_DIR with permissive mode as root so the
+    // sandbox-user file API can write into it. The path lives under
+    // /var/lib/tensorlake/ which is root-owned in the rootfs-builder image,
+    // so a plain `mkdir -p` issued as the sandbox user can't traverse and
+    // create the leaf. Once the build root is world-writable, the per-file
+    // `mkdir -p`s inside `copy_local_path` and the subsequent
+    // `PUT /api/v1/files` calls (both running as the sandbox user) succeed
+    // without further root involvement.
+    ensure_remote_build_root(proxy).await?;
     copy_local_path(proxy, &plan.context_dir, REMOTE_CONTEXT_DIR).await?;
 
     let docker_config_json = resolved_docker_config_json().await?;
@@ -1021,6 +1030,39 @@ async fn copy_local_path(
         "Local path not found: {}",
         local_path.display()
     )))
+}
+
+/// Create `REMOTE_BUILD_DIR` as root and chmod it 0777 so subsequent
+/// uploads — which run via the file API with the sandbox user's fsuid —
+/// can write inside. Must be called once before any per-file
+/// `ensure_remote_parent_dir` for paths under `REMOTE_BUILD_DIR`.
+async fn ensure_remote_build_root(proxy: &SandboxProxyClient) -> Result<()> {
+    let mut emit = |_| {};
+    // mkdir as root: needed to traverse the root-owned ancestor
+    // /var/lib/tensorlake/rootfs-builder/.
+    run_streaming_process(
+        proxy,
+        "mkdir",
+        vec!["-p".to_string(), REMOTE_BUILD_DIR.to_string()],
+        None,
+        None,
+        true,
+        &mut emit,
+    )
+    .await?;
+    // chmod as root: open it up so the sandbox user can create the
+    // upload-temp files the file API needs. Mode 0777 is fine here because
+    // the builder sandbox is single-tenant and ephemeral.
+    run_streaming_process(
+        proxy,
+        "chmod",
+        vec!["0777".to_string(), REMOTE_BUILD_DIR.to_string()],
+        None,
+        None,
+        true,
+        &mut emit,
+    )
+    .await
 }
 
 async fn ensure_remote_parent_dir(proxy: &SandboxProxyClient, remote_path: &str) -> Result<()> {
