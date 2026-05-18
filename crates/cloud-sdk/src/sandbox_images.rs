@@ -575,7 +575,9 @@ async fn wait_for_proxy_ready(proxy: &SandboxProxyClient) -> Result<()> {
     let deadline = tokio::time::Instant::now() + PROXY_READY_TIMEOUT;
     loop {
         let mut emit = |_| {};
-        match run_streaming_process(proxy, "/bin/true", Vec::new(), None, None, &mut emit).await {
+        match run_streaming_process(proxy, "/bin/true", Vec::new(), None, None, false, &mut emit)
+            .await
+        {
             Ok(()) => return Ok(()),
             Err(error) if is_transient_proxy_error(&error) => {
                 if tokio::time::Instant::now() > deadline {
@@ -775,12 +777,17 @@ async fn run_rootfs_builder(
     ]);
 
     let executable = rootfs_builder_executable(executable);
+    // The rootfs builder needs root inside the VM to run `docker build`,
+    // mount loop devices, write to /var/lib/docker, etc. Everything else
+    // (proxy probes, upload-prep `mkdir`) stays on the sandbox user so the
+    // file API can write into the directories it creates.
     run_streaming_process(
         proxy,
         &executable,
         args,
         Some(rootfs_builder_env()),
         Some(REMOTE_BUILD_DIR.to_string()),
+        true,
         emit,
     )
     .await
@@ -890,9 +897,10 @@ async fn run_streaming_process(
     args: Vec<String>,
     env: Option<Map<String, Value>>,
     working_dir: Option<String>,
+    run_as_root: bool,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<()> {
-    let payload = streaming_process_payload(command, args, env, working_dir);
+    let payload = streaming_process_payload(command, args, env, working_dir, run_as_root);
     let started = proxy.start_process(&payload).await?;
     let pid = started.pid;
     let mut stdout_seen = 0usize;
@@ -957,6 +965,7 @@ fn streaming_process_payload(
     args: Vec<String>,
     env: Option<Map<String, Value>>,
     working_dir: Option<String>,
+    run_as_root: bool,
 ) -> Value {
     let mut payload = Map::new();
     payload.insert("command".to_string(), Value::String(command.to_string()));
@@ -970,10 +979,20 @@ fn streaming_process_payload(
     if let Some(working_dir) = working_dir {
         payload.insert("working_dir".to_string(), Value::String(working_dir));
     }
-    payload.insert(
-        "user".to_string(),
-        Value::String(ROOTFS_BUILDER_PROCESS_USER.to_string()),
-    );
+    // Only opt into root for the actual rootfs build command. Daemon-side, the
+    // process API runs as the sandbox user by default while the file API
+    // performs writes with the sandbox user's fsuid/fsgid (setfsuid/setfsgid
+    // in container-daemon's file_manager). If we ran the upload-prep `mkdir`
+    // as root we'd end up with directories the file API can't write into
+    // and the very first `PUT /api/v1/files` would fail with EACCES (surfaced
+    // as 500 "Failed to create file: …"). See the SDK PR description for the
+    // dataplane log trace.
+    if run_as_root {
+        payload.insert(
+            "user".to_string(),
+            Value::String(ROOTFS_BUILDER_PROCESS_USER.to_string()),
+        );
+    }
 
     Value::Object(payload)
 }
@@ -1007,12 +1026,17 @@ async fn copy_local_path(
 async fn ensure_remote_parent_dir(proxy: &SandboxProxyClient, remote_path: &str) -> Result<()> {
     let parent_dir = parent_posix(remote_path);
     let mut emit = |_| {};
+    // Stay on the sandbox user. The follow-up `PUT /api/v1/files` writes via
+    // the file API, which the container-daemon executes with sandbox fsuid;
+    // running `mkdir` as root here would create root-owned directories the
+    // file API can't write into.
     run_streaming_process(
         proxy,
         "mkdir",
         vec!["-p".to_string(), parent_dir],
         None,
         None,
+        false,
         &mut emit,
     )
     .await
@@ -1553,7 +1577,27 @@ mod tests {
     }
 
     #[test]
-    fn streaming_process_payload_runs_as_root() {
+    fn streaming_process_payload_runs_as_root_when_requested() {
+        let payload = streaming_process_payload(
+            "tl-rootfs-build",
+            vec!["--spec".to_string(), "/tmp/spec.json".to_string()],
+            None,
+            None,
+            true,
+        );
+
+        assert_eq!(payload["command"], "tl-rootfs-build");
+        assert_eq!(payload["user"], "root");
+    }
+
+    #[test]
+    fn streaming_process_payload_omits_user_when_not_root() {
+        // Upload-prep helpers (mkdir, /bin/true) must NOT request root,
+        // otherwise the container-daemon's file API — which writes with the
+        // sandbox user's fsuid — can't create temp files inside the resulting
+        // root-owned directories. The absence of a `user` field lets the
+        // daemon fall back to its default (sandbox user) so the dir and the
+        // subsequent uploads share the same fsuid.
         let payload = streaming_process_payload(
             "mkdir",
             vec![
@@ -1562,10 +1606,15 @@ mod tests {
             ],
             None,
             None,
+            false,
         );
 
         assert_eq!(payload["command"], "mkdir");
-        assert_eq!(payload["user"], "root");
+        assert!(
+            payload.get("user").is_none(),
+            "non-root callers must not pin a user; got {:?}",
+            payload.get("user")
+        );
     }
 
     #[test]
