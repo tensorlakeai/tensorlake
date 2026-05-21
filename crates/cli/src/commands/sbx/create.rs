@@ -128,7 +128,7 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
     let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
     let display_id = name.unwrap_or(&sandbox_id);
     if is_tty {
-        eprintln!("Sandbox {} is ready.", display_id);
+        eprint!("{}", format_ready_message(name, &sandbox_id));
     }
     if !is_tty {
         println!("{}", sandbox_id);
@@ -137,6 +137,13 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
         print_post_create_tip(ctx, &sandbox_id, display_id, name.is_none());
     }
     Ok(())
+}
+
+fn format_ready_message(name: Option<&str>, sandbox_id: &str) -> String {
+    match name.filter(|name| !name.is_empty()) {
+        Some(name) => format!("Sandbox {name} is ready.\nID: {sandbox_id}\n"),
+        None => format!("Sandbox {sandbox_id} is ready.\n"),
+    }
 }
 
 fn print_post_create_tip(ctx: &CliContext, sandbox_id: &str, display_id: &str, is_ephemeral: bool) {
@@ -257,7 +264,7 @@ fn build_create_request_body(
 
 #[cfg(test)]
 mod tests {
-    use super::build_create_request_body;
+    use super::{build_create_request_body, format_ready_message};
 
     #[test]
     fn create_body_uses_defaults_without_snapshot() {
@@ -322,5 +329,19 @@ mod tests {
         assert_eq!(body["image"], "tensorlake/ubuntu-minimal");
         assert_eq!(body["resources"]["disk_mb"], 25 * 1024);
         assert!(body.get("snapshot_id").is_none());
+    }
+
+    #[test]
+    fn ready_message_includes_labeled_id_for_named_sandbox() {
+        let output = format_ready_message(Some("stable-name"), "sbx-123");
+
+        assert_eq!(output, "Sandbox stable-name is ready.\nID: sbx-123\n");
+    }
+
+    #[test]
+    fn ready_message_falls_back_to_id_for_unnamed_sandbox() {
+        let output = format_ready_message(None, "sbx-123");
+
+        assert_eq!(output, "Sandbox sbx-123 is ready.\n");
     }
 }
