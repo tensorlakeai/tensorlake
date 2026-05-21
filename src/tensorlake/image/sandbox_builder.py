@@ -46,7 +46,6 @@ _UNSUPPORTED_DOCKERFILE_INSTRUCTIONS = {
     "ARG",
     "ONBUILD",
     "SHELL",
-    "USER",
 }
 
 _DEFAULT_IMAGE_NAME = "default"

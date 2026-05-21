@@ -53,6 +53,63 @@ describe("sandbox image helpers", () => {
     ]);
   });
 
+  it("loadDockerfilePlan accepts USER instructions", async () => {
+    const tempDir = await mkdir(path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-user`), {
+      recursive: true,
+    });
+    const dockerfilePath = path.join(tempDir, "Dockerfile");
+    await writeFile(
+      dockerfilePath,
+      "FROM python:3.12-slim\nRUN useradd -m appuser\nUSER appuser\n",
+      "utf8",
+    );
+
+    const plan = await loadDockerfilePlan(dockerfilePath);
+    expect(plan.instructions).toEqual([
+      { keyword: "RUN", value: "useradd -m appuser", lineNumber: 2 },
+      { keyword: "USER", value: "appuser", lineNumber: 3 },
+    ]);
+  });
+
+  it("Image.user() renders USER lines into the Dockerfile", () => {
+    const single = new Image({ name: "u", baseImage: "python:3.12-slim" })
+      .run("useradd -m appuser")
+      .user("appuser");
+    expect(dockerfileContent(single)).toBe(
+      ["FROM python:3.12-slim", "RUN useradd -m appuser", "USER appuser"].join("\n"),
+    );
+
+    const withGroup = new Image({ name: "ug", baseImage: "python:3.12-slim" }).user(
+      "appuser",
+      "appgroup",
+    );
+    expect(dockerfileContent(withGroup)).toBe(
+      ["FROM python:3.12-slim", "USER appuser:appgroup"].join("\n"),
+    );
+
+    const numeric = new Image({ name: "n", baseImage: "python:3.12-slim" }).user(
+      1000,
+      1000,
+    );
+    expect(dockerfileContent(numeric)).toBe(
+      ["FROM python:3.12-slim", "USER 1000:1000"].join("\n"),
+    );
+  });
+
+  it("dockerfileContent strips USER ops when includeUser is false", () => {
+    const image = new Image({ name: "strip", baseImage: "python:3.12-slim" })
+      .run("useradd -m appuser")
+      .user("appuser")
+      .run("echo done");
+    expect(dockerfileContent(image, { includeUser: false })).toBe(
+      [
+        "FROM python:3.12-slim",
+        "RUN useradd -m appuser",
+        "RUN echo done",
+      ].join("\n"),
+    );
+  });
+
   it("loadDockerfilePlan rejects multistage Dockerfiles", async () => {
     const tempDir = await mkdir(path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-multi`), {
       recursive: true,

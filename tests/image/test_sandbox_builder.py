@@ -72,6 +72,28 @@ class TestDockerfileParsing(unittest.TestCase):
             ):
                 sbm._load_dockerfile_plan(str(dockerfile_path), None)
 
+    def test_load_dockerfile_plan_accepts_user(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dockerfile_path = Path(tmpdir) / "Dockerfile"
+            dockerfile_path.write_text(
+                "FROM python:3.12-slim\nRUN useradd -m appuser\nUSER appuser\n",
+                encoding="utf-8",
+            )
+
+            plan = sbm._load_dockerfile_plan(str(dockerfile_path), None)
+
+        self.assertEqual(
+            plan.instructions,
+            [
+                sbm.DockerfileInstruction(
+                    keyword="RUN", value="useradd -m appuser", line_number=2
+                ),
+                sbm.DockerfileInstruction(
+                    keyword="USER", value="appuser", line_number=3
+                ),
+            ],
+        )
+
 
 def _make_ctx(**overrides):
     defaults = dict(
@@ -301,6 +323,77 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
     def test_rejects_unknown_source_type(self):
         with self.assertRaises(TypeError):
             sbm.build_sandbox_image(12345)  # type: ignore[arg-type]
+
+    def test_user_op_renders_into_sandbox_dockerfile(self):
+        image = (
+            Image(name="user-image", base_image="python:3.12-slim")
+            .run("useradd -m appuser")
+            .user("appuser")
+        )
+
+        _, _, _, captured = self._run_build(image)
+
+        expected_dockerfile = "\n".join(
+            [
+                "FROM python:3.12-slim",
+                "RUN useradd -m appuser",
+                "USER appuser",
+            ]
+        )
+        self.assertEqual(captured["dockerfile_text"], expected_dockerfile + "\n")
+
+    def test_user_op_with_group_renders_name_colon_group(self):
+        image = Image(name="ug", base_image="python:3.12-slim").user(
+            "appuser", "appgroup"
+        )
+        _, _, _, captured = self._run_build(image)
+        self.assertIn("USER appuser:appgroup", captured["dockerfile_text"])
+
+    def test_user_op_with_numeric_uid_gid(self):
+        image = Image(name="numeric", base_image="python:3.12-slim").user(1000, 1000)
+        _, _, _, captured = self._run_build(image)
+        self.assertIn("USER 1000:1000", captured["dockerfile_text"])
+
+
+class TestApplicationsDockerfileRendering(unittest.TestCase):
+    """USER ops on the shared Image class must NOT appear in Applications
+    Dockerfiles — the trailing `pip install tensorlake` step runs as root.
+    """
+
+    def test_user_op_stripped_from_applications_dockerfile(self):
+        from tensorlake.image.utils import dockerfile_content
+
+        image = (
+            Image(name="app", base_image="python:3.12-slim")
+            .run("useradd -m appuser")
+            .user("appuser")
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            rendered = dockerfile_content(image)
+
+        self.assertNotIn("USER appuser", rendered)
+        self.assertIn("RUN useradd -m appuser", rendered)
+        self.assertIn("RUN pip install tensorlake==", rendered)
+        self.assertTrue(
+            any("Image.user()" in str(w.message) for w in caught),
+            "Expected a warning that Image.user() has no effect on Applications",
+        )
+
+    def test_no_warning_when_user_not_used(self):
+        from tensorlake.image.utils import dockerfile_content
+
+        image = Image(name="app", base_image="python:3.12-slim").run("echo hi")
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            dockerfile_content(image)
+
+        self.assertFalse(
+            any("Image.user()" in str(w.message) for w in caught),
+            "Did not expect a USER-related warning when .user() was not called",
+        )
 
 
 class TestRegisterImage(unittest.TestCase):

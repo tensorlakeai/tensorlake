@@ -15,6 +15,7 @@ class _ImageBuildOperationType(Enum):
     ENV = 3
     RUN = 4
     WORKDIR = 5
+    USER = 6
 
 
 @dataclass
@@ -93,6 +94,16 @@ class Image:
             _ImageBuildOperation(
                 type=_ImageBuildOperationType.WORKDIR,
                 args=[directory],
+                options={},
+            )
+        )
+
+    def user(self, name: str | int, group: str | int | None = None) -> "Image":
+        rendered = f"{name}:{group}" if group is not None else f"{name}"
+        return self._add_operation(
+            _ImageBuildOperation(
+                type=_ImageBuildOperationType.USER,
+                args=[rendered],
                 options={},
             )
         )

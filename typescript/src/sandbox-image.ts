@@ -24,7 +24,6 @@ const UNSUPPORTED_DOCKERFILE_INSTRUCTIONS = new Set([
   "ARG",
   "ONBUILD",
   "SHELL",
-  "USER",
 ]);
 
 export interface DockerfileInstruction {

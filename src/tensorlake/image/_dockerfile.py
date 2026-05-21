@@ -23,15 +23,20 @@ def render_op_line(op: _ImageBuildOperation) -> str:
     return f"{op.type.name}{options_str} {' '.join(op.args)}"
 
 
-def image_to_dockerfile(image: Image) -> str:
+def image_to_dockerfile(image: Image, *, include_user: bool = True) -> str:
     """Render a plain Dockerfile string from an :class:`Image`.
 
     Mirrors the TypeScript ``dockerfileContent`` exactly.
+
+    When ``include_user`` is False, ``USER`` ops are skipped. Applications
+    image builds use this to keep the trailing SDK install step as root.
     """
     lines: list[str] = []
     if image._base_image:
         lines.append(f"FROM {image._base_image}")
     for op in image._build_operations:
+        if not include_user and op.type == _ImageBuildOperationType.USER:
+            continue
         lines.append(render_op_line(op))
     return "\n".join(lines)
 

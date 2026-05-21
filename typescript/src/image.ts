@@ -12,6 +12,7 @@ export const ImageBuildOperationType = {
   ENV: "ENV",
   RUN: "RUN",
   WORKDIR: "WORKDIR",
+  USER: "USER",
 } as const;
 
 export type ImageBuildOperationType =
@@ -134,6 +135,16 @@ export class Image {
     });
   }
 
+  user(name: string | number, group?: string | number | null): this {
+    const rendered =
+      group == null ? `${name}` : `${name}:${group}`;
+    return this._addOperation({
+      type: ImageBuildOperationType.USER,
+      args: [rendered],
+      options: {},
+    });
+  }
+
   /**
    * Build this image as a sandbox template and register it.
    *
@@ -177,8 +188,26 @@ function renderBuildOp(op: ImageBuildOperation): string {
   return `${op.type}${options} ${op.args.join(" ")}`;
 }
 
-export function dockerfileContent(image: Image): string {
+export interface DockerfileContentOptions {
+  /**
+   * When false, USER ops are dropped from the rendered Dockerfile. Used by
+   * Applications image rendering, where the trailing `pip install tensorlake`
+   * must run as root.
+   */
+  includeUser?: boolean;
+}
+
+export function dockerfileContent(
+  image: Image,
+  options: DockerfileContentOptions = {},
+): string {
+  const includeUser = options.includeUser ?? true;
   const lines = image.baseImage == null ? [] : [`FROM ${image.baseImage}`];
-  lines.push(...image.buildOperations.map((op) => renderBuildOp(op)));
+  for (const op of image.buildOperations) {
+    if (!includeUser && op.type === ImageBuildOperationType.USER) {
+      continue;
+    }
+    lines.push(renderBuildOp(op));
+  }
   return lines.join("\n");
 }
