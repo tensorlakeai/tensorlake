@@ -225,25 +225,36 @@ enum SshKeysCommands {
     },
 }
 
+#[derive(Parser)]
+struct SshArgs {
+    #[command(subcommand)]
+    command: Option<SshCommands>,
+
+    /// Sandbox ID or name
+    sandbox_id: Option<String>,
+
+    /// Shell to use
+    #[arg(short, long, default_value = "/bin/bash", requires = "sandbox_id")]
+    shell: String,
+
+    /// Shell argument (repeatable)
+    #[arg(long = "shell-arg", allow_hyphen_values = true, requires = "sandbox_id")]
+    shell_args: Vec<String>,
+
+    /// Working directory
+    #[arg(short, long, requires = "sandbox_id")]
+    workdir: Option<String>,
+
+    /// Environment variable (KEY=VALUE)
+    #[arg(short, long, requires = "sandbox_id")]
+    env: Vec<String>,
+}
+
 #[derive(Subcommand)]
-enum NativeSshCommands {
-    /// Manage SSH public keys for native SSH access
+enum SshCommands {
+    /// Manage native SSH public keys
     #[command(subcommand)]
     Keys(SshKeysCommands),
-
-    /// Print an OpenSSH config block for a sandbox
-    PrintConfig {
-        /// Sandbox ID or name
-        sandbox_id: String,
-
-        /// Host alias to emit in the config block
-        #[arg(long = "host")]
-        host_alias: Option<String>,
-
-        /// Local private key path to include in IdentityFile
-        #[arg(long)]
-        identity_file: Option<String>,
-    },
 }
 
 #[derive(Subcommand)]
@@ -561,27 +572,8 @@ enum SbxCommands {
         new_name: String,
     },
 
-    /// Interactive shell in a sandbox
-    Ssh {
-        /// Sandbox ID or name
-        sandbox_id: String,
-
-        /// Shell to use
-        #[arg(short, long, default_value = "/bin/bash")]
-        shell: String,
-
-        /// Shell argument (repeatable)
-        #[arg(long = "shell-arg", allow_hyphen_values = true)]
-        shell_args: Vec<String>,
-
-        /// Working directory
-        #[arg(short, long)]
-        workdir: Option<String>,
-
-        /// Environment variable (KEY=VALUE)
-        #[arg(short, long)]
-        env: Vec<String>,
-    },
+    /// Interactive shell in a sandbox, or manage native SSH keys
+    Ssh(SshArgs),
 
     /// Tunnel a local TCP port into a sandbox over WebSocket
     Tunnel {
@@ -596,10 +588,6 @@ enum SbxCommands {
         #[arg(short, long, value_parser = parse_tcp_port)]
         listen_port: Option<u16>,
     },
-
-    /// Connect with ssh, scp, VS Code Remote-SSH, and any other tool that speaks SSH
-    #[command(subcommand, name = "native-ssh")]
-    NativeSsh(NativeSshCommands),
 
     /// Manage sandbox images
     #[command(subcommand)]
@@ -905,9 +893,12 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             }
         }
         Commands::Sbx(subcmd) => match subcmd {
-            SbxCommands::NativeSsh(NativeSshCommands::Keys(keys_cmd)) => {
+            SbxCommands::Ssh(ssh_args) if matches!(ssh_args.command, Some(SshCommands::Keys(_))) => {
                 ensure_auth(ctx).await?;
-                run_ssh_keys_command(ctx, keys_cmd).await
+                match ssh_args.command {
+                    Some(SshCommands::Keys(keys_cmd)) => run_ssh_keys_command(ctx, keys_cmd).await,
+                    None => unreachable!(),
+                }
             }
             other => {
                 ensure_auth_and_project(ctx).await?;
@@ -1087,20 +1078,19 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         )
                         .await
                     }
-                    SbxCommands::Ssh {
-                        sandbox_id,
-                        shell,
-                        shell_args,
-                        workdir,
-                        env,
-                    } => {
+                    SbxCommands::Ssh(ssh_args) => {
+                        let sandbox_id = ssh_args.sandbox_id.ok_or_else(|| {
+                            CliError::usage(
+                                "ssh requires a sandbox ID or name, or the 'keys' subcommand",
+                            )
+                        })?;
                         commands::sbx::ssh::run(
                             ctx,
                             &sandbox_id,
-                            &shell,
-                            &shell_args,
-                            workdir.as_deref(),
-                            &env,
+                            &ssh_args.shell,
+                            &ssh_args.shell_args,
+                            ssh_args.workdir.as_deref(),
+                            &ssh_args.env,
                         )
                         .await
                     }
@@ -1167,20 +1157,6 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     } => {
                         commands::sbx::tunnel::run(ctx, &sandbox_id, remote_port, listen_port).await
                     }
-                    SbxCommands::NativeSsh(NativeSshCommands::PrintConfig {
-                        sandbox_id,
-                        host_alias,
-                        identity_file,
-                    }) => {
-                        commands::sbx::native_ssh::print_config(
-                            ctx,
-                            &sandbox_id,
-                            host_alias.as_deref(),
-                            identity_file.as_deref(),
-                        )
-                        .await
-                    }
-                    SbxCommands::NativeSsh(NativeSshCommands::Keys(_)) => unreachable!(),
                 }
             }
         },
@@ -1563,14 +1539,16 @@ mod tests {
         .unwrap();
 
         match cli.command {
-            Commands::Sbx(SbxCommands::Ssh {
+            Commands::Sbx(SbxCommands::Ssh(SshArgs {
+                command,
                 sandbox_id,
                 shell,
                 shell_args,
                 workdir,
                 env,
-            }) => {
-                assert_eq!(sandbox_id, "sbx-123");
+            })) => {
+                assert!(command.is_none());
+                assert_eq!(sandbox_id.as_deref(), Some("sbx-123"));
                 assert_eq!(shell, "/bin/zsh");
                 assert_eq!(shell_args, vec!["-l", "-c"]);
                 assert_eq!(workdir, Some("/tmp/work".to_string()));
@@ -1581,34 +1559,16 @@ mod tests {
     }
 
     #[test]
-    fn sbx_native_ssh_print_config_parses_optional_flags() {
-        let cli = Cli::try_parse_from([
-            "tl",
-            "sbx",
-            "native-ssh",
-            "print-config",
-            "my-sandbox",
-            "--host",
-            "tl-my-sandbox",
-            "--identity-file",
-            "~/.ssh/id_ed25519_tensorlake",
-        ])
-        .unwrap();
+    fn sbx_ssh_keys_ls_parses() {
+        let cli = Cli::try_parse_from(["tl", "sbx", "ssh", "keys", "ls"]).unwrap();
 
         match cli.command {
-            Commands::Sbx(SbxCommands::NativeSsh(NativeSshCommands::PrintConfig {
-                sandbox_id,
-                host_alias,
-                identity_file,
-            })) => {
-                assert_eq!(sandbox_id, "my-sandbox");
-                assert_eq!(host_alias.as_deref(), Some("tl-my-sandbox"));
-                assert_eq!(
-                    identity_file.as_deref(),
-                    Some("~/.ssh/id_ed25519_tensorlake")
-                );
-            }
-            _ => panic!("expected sbx native-ssh print-config command"),
+            Commands::Sbx(SbxCommands::Ssh(SshArgs {
+                command: Some(SshCommands::Keys(SshKeysCommands::Ls)),
+                sandbox_id: None,
+                ..
+            })) => {}
+            _ => panic!("expected sbx ssh keys ls command"),
         }
     }
 

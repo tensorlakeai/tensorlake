@@ -158,7 +158,6 @@ fn print_post_create_tip(ctx: &CliContext, sandbox_id: &str, display_id: &str, i
     eprintln!();
     eprintln!("Get started:");
     eprintln!("  tl sbx ssh {display_id}");
-    eprintln!("  ssh {sandbox_id}@sandbox.tensorlake.ai  # native SSH with a registered key");
     eprintln!("  tl sbx exec {display_id} -- bash -c \"echo Hello, World!\"");
     if is_ephemeral {
         eprintln!("  tl sbx name {display_id} <name>  # make persistent (enables suspend/resume)");

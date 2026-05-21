@@ -1,6 +1,6 @@
 use crate::auth::context::CliContext;
 use crate::commands::sbx::{
-    DEFAULT_SANDBOX_IMAGE_DISPLAY_NAME, format_created_at, sandbox_endpoint,
+    DEFAULT_SANDBOX_IMAGE_DISPLAY_NAME, format_created_at, native_ssh, sandbox_endpoint,
 };
 use crate::error::{CliError, Result};
 
@@ -30,6 +30,7 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str) -> Result<()> {
         .await
         .map_err(CliError::Http)?;
     print_sandbox_details(&item);
+    print_ssh_config_details(&item)?;
     Ok(())
 }
 
@@ -62,6 +63,7 @@ async fn run_archived(ctx: &CliContext, sandbox_id: &str) -> Result<()> {
         .await
         .map_err(CliError::Http)?;
     print_archived_sandbox_details(&item);
+    print_ssh_config_details(&item)?;
     Ok(())
 }
 
@@ -243,4 +245,20 @@ fn print_sandbox_details(item: &serde_json::Value) {
         let outcome = item.get("outcome").and_then(|v| v.as_str()).unwrap_or("");
         println!("Outcome:         {}", outcome);
     }
+}
+
+fn print_ssh_config_details(item: &serde_json::Value) -> Result<()> {
+    let id = item
+        .get("sandbox_id")
+        .or_else(|| item.get("id"))
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("-");
+    let name = item.get("name").and_then(|v| v.as_str());
+    let sandbox = native_ssh::ResolvedSandbox::new(id, name);
+    let config = native_ssh::format_ssh_config(&sandbox, None, None)?;
+
+    println!("SSH Config:");
+    print!("{config}");
+    Ok(())
 }
