@@ -151,6 +151,13 @@ jobs:
       - name: Verify package contents
         run: npm pack --dry-run --ignore-scripts
 
+      - name: Verify npm publish identity
+        run: |
+          npm whoami
+          npm owner ls tensorlake
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Publish to npm
         run: npm publish --provenance --access public --ignore-scripts
         env:
