@@ -869,13 +869,23 @@ async function runChecked(
   args: string[],
   env?: Record<string, string>,
   workingDir?: string,
+  user?: ProcessUser,
 ): Promise<CommandResult> {
-  const result = await sandbox.run(command, {
+  const options: {
+    args: string[];
+    env?: Record<string, string>;
+    workingDir?: string;
+    user?: ProcessUser;
+  } = {
     args,
     env,
     workingDir,
-    user: ROOTFS_BUILDER_PROCESS_USER,
-  });
+  };
+  if (user != null) {
+    options.user = user;
+  }
+
+  const result = await sandbox.run(command, options);
   if (result.exitCode !== 0) {
     throw new Error(
       `Command '${command} ${args.join(" ")}' failed with exit code ${result.exitCode}`,
@@ -955,6 +965,33 @@ function emitOutputLines(
   }
 }
 
+async function ensureRemoteBuildRoot(sandbox: BuildSandbox) {
+  await runChecked(
+    sandbox,
+    "mkdir",
+    ["-p", REMOTE_BUILD_DIR],
+    undefined,
+    undefined,
+    ROOTFS_BUILDER_PROCESS_USER,
+  );
+  await runChecked(
+    sandbox,
+    "chmod",
+    ["0777", REMOTE_BUILD_DIR],
+    undefined,
+    undefined,
+    ROOTFS_BUILDER_PROCESS_USER,
+  );
+}
+
+async function ensureRemoteDirectory(sandbox: BuildSandbox, remotePath: string) {
+  await runChecked(sandbox, "mkdir", ["-p", remotePath]);
+}
+
+async function ensureRemoteParentDir(sandbox: BuildSandbox, remotePath: string) {
+  await ensureRemoteDirectory(sandbox, path.posix.dirname(remotePath));
+}
+
 async function copyLocalPathToSandbox(
   sandbox: BuildSandbox,
   localPath: string,
@@ -966,7 +1003,7 @@ async function copyLocalPathToSandbox(
   }
 
   if (fileStats.isFile()) {
-    await runChecked(sandbox, "mkdir", ["-p", path.posix.dirname(remotePath)]);
+    await ensureRemoteParentDir(sandbox, remotePath);
     await sandbox.writeFile(remotePath, await readFile(localPath));
     return;
   }
@@ -980,14 +1017,10 @@ async function copyLocalPathToSandbox(
     const sourcePath = path.join(localPath, entry.name);
     const destinationPath = path.posix.join(remotePath, entry.name);
     if (entry.isDirectory()) {
-      await runChecked(sandbox, "mkdir", ["-p", destinationPath]);
+      await ensureRemoteDirectory(sandbox, destinationPath);
       await copyLocalPathToSandbox(sandbox, sourcePath, destinationPath);
     } else if (entry.isFile()) {
-      await runChecked(
-        sandbox,
-        "mkdir",
-        ["-p", path.posix.dirname(destinationPath)],
-      );
+      await ensureRemoteParentDir(sandbox, destinationPath);
       await sandbox.writeFile(destinationPath, await readFile(sourcePath));
     }
   }
@@ -1129,6 +1162,7 @@ export async function createSandboxImage(
       message: `Rootfs builder sandbox ${sandbox.sandboxId} is running`,
     });
     emit({ type: "status", message: "Uploading build context..." });
+    await ensureRemoteBuildRoot(sandbox);
     await copyLocalPathToSandbox(sandbox, plan.contextDir, REMOTE_CONTEXT_DIR);
     const spec = await buildRootfsSpec(
       preparedSpec,
@@ -1136,7 +1170,7 @@ export async function createSandboxImage(
       plan,
       options.diskMb,
     );
-    await runChecked(sandbox, "mkdir", ["-p", path.posix.dirname(REMOTE_SPEC_PATH)]);
+    await ensureRemoteParentDir(sandbox, REMOTE_SPEC_PATH);
     await sandbox.writeFile(
       REMOTE_SPEC_PATH,
       new TextEncoder().encode(JSON.stringify(spec, null, 2)),

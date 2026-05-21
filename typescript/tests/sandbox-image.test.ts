@@ -266,6 +266,30 @@ describe("sandbox image helpers", () => {
       memoryMb: 4096,
       diskMb: 10 * 1024,
     });
+    expect(sandbox.run).toHaveBeenCalledWith(
+      "mkdir",
+      expect.objectContaining({
+        args: ["-p", "/var/lib/tensorlake/rootfs-builder/build"],
+        user: "root",
+      }),
+    );
+    expect(sandbox.run).toHaveBeenCalledWith(
+      "chmod",
+      expect.objectContaining({
+        args: ["0777", "/var/lib/tensorlake/rootfs-builder/build"],
+        user: "root",
+      }),
+    );
+    const contextMkdirCall = sandbox.run.mock.calls.find(
+      ([command, options]) =>
+        command === "mkdir" &&
+        options?.args?.[1] ===
+          "/var/lib/tensorlake/rootfs-builder/build/context",
+    );
+    expect(contextMkdirCall?.[1]).toMatchObject({
+      args: ["-p", "/var/lib/tensorlake/rootfs-builder/build/context"],
+    });
+    expect(contextMkdirCall?.[1]?.user).toBeUndefined();
     expect(fetchMock).toHaveBeenCalledWith(
       "https://api.tensorlake.ai/platform/v1/organizations/org_introspected/projects/proj_introspected/sandbox-template-builds",
       expect.objectContaining({ method: "POST" }),
