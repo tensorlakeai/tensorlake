@@ -1,6 +1,6 @@
 {
   "name": "tensorlake",
-  "version": "0.5.15",
+  "version": "0.5.16",
   "description": "TensorLake SDK and CLI for applications, sandboxes, and cloud services",
   "type": "module",
   "main": "./dist/index.cjs",
