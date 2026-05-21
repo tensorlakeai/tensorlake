@@ -174,7 +174,7 @@ enum Commands {
     Secrets(SecretsCommands),
 
     /// Manage SSH public keys for sandbox SSH access
-    #[command(subcommand, name = "ssh-keys", alias = "ssh-key")]
+    #[command(subcommand, name = "ssh-keys", alias = "ssh-key", hide = true)]
     SshKeys(SshKeysCommands),
 
     /// List applications
@@ -222,6 +222,27 @@ enum SshKeysCommands {
         /// Key ids (`ssh_key_…`) or unique names to remove
         #[arg(required = true)]
         keys: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum NativeSshCommands {
+    /// Manage SSH public keys for native SSH access
+    #[command(subcommand)]
+    Keys(SshKeysCommands),
+
+    /// Print an OpenSSH config block for a sandbox
+    PrintConfig {
+        /// Sandbox ID or name
+        sandbox_id: String,
+
+        /// Host alias to emit in the config block
+        #[arg(long = "host")]
+        host_alias: Option<String>,
+
+        /// Local private key path to include in IdentityFile
+        #[arg(long)]
+        identity_file: Option<String>,
     },
 }
 
@@ -576,6 +597,10 @@ enum SbxCommands {
         listen_port: Option<u16>,
     },
 
+    /// Connect with ssh, scp, VS Code Remote-SSH, and any other tool that speaks SSH
+    #[command(subcommand, name = "native-ssh")]
+    NativeSsh(NativeSshCommands),
+
     /// Manage sandbox images
     #[command(subcommand)]
     Image(ImageCommands),
@@ -871,13 +896,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             // SSH keys live on the user, not on a project — only auth (PAT or
             // logged-in session) is required, no org/project context.
             ensure_auth(ctx).await?;
-            match subcmd {
-                SshKeysCommands::Ls => commands::ssh_keys::list(ctx).await,
-                SshKeysCommands::Add { name, public_key } => {
-                    commands::ssh_keys::add(ctx, &name, &public_key).await
-                }
-                SshKeysCommands::Rm { keys } => commands::ssh_keys::remove(ctx, &keys).await,
-            }
+            run_ssh_keys_command(ctx, subcmd).await
         }
         Commands::Applications(app_args) => {
             ensure_auth_and_project(ctx).await?;
@@ -885,225 +904,45 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 Some(ApplicationsCommands::Ls) | None => commands::applications::ls(ctx).await,
             }
         }
-        Commands::Sbx(subcmd) => {
-            ensure_auth_and_project(ctx).await?;
-            match subcmd {
-                SbxCommands::Ls {
-                    all,
-                    running,
-                    suspended,
-                    quiet,
-                    archived,
-                } => commands::sbx::ls::run(ctx, running, suspended, all, quiet, archived).await,
-                SbxCommands::Describe { sandbox_id } => {
-                    commands::sbx::describe::run(ctx, &sandbox_id).await
-                }
-                SbxCommands::Terminate { sandbox_ids } => {
-                    commands::sbx::terminate::run(ctx, &sandbox_ids).await
-                }
-                SbxCommands::Create {
-                    name,
-                    cpus,
-                    memory,
-                    disk_mb,
-                    disk_gb,
-                    timeout,
-                    entrypoint,
-                    snapshot,
-                    image,
-                    no_wait,
-                    ports,
-                    allow_unauthenticated_access,
-                    no_internet,
-                    network_allow,
-                    network_deny,
-                } => {
-                    let disk_mb = if let Some(value) = disk_mb {
-                        Some(value)
-                    } else {
-                        disk_gb
-                            .map(|value| {
-                                value.checked_mul(1024).ok_or_else(|| {
-                                    CliError::usage("--disk is too large to convert to MiB")
-                                })
-                            })
-                            .transpose()?
-                    };
-                    commands::sbx::create::run(
-                        ctx,
-                        commands::sbx::create::CreateArgs {
-                            name: name.as_deref(),
-                            cpus,
-                            memory,
-                            disk_mb,
-                            timeout,
-                            entrypoint: &entrypoint,
-                            snapshot_id: snapshot.as_deref(),
-                            image_name: image.as_deref(),
-                            wait: !no_wait,
-                            ports: &ports,
-                            allow_unauthenticated_access,
-                            no_internet,
-                            network_allow: &network_allow,
-                            network_deny: &network_deny,
-                        },
-                    )
-                    .await
-                }
-                SbxCommands::Name {
-                    sandbox_id,
-                    new_name,
-                } => commands::sbx::name::run(ctx, &sandbox_id, &new_name).await,
-                SbxCommands::Suspend {
-                    sandbox_id,
-                    no_wait,
-                } => commands::sbx::suspend::run(ctx, &sandbox_id, !no_wait).await,
-                SbxCommands::Resume {
-                    sandbox_id,
-                    no_wait,
-                } => commands::sbx::resume::run(ctx, &sandbox_id, !no_wait).await,
-                SbxCommands::Exec {
-                    sandbox_id,
-                    command,
-                    args,
-                    timeout,
-                    workdir,
-                    env,
-                    user,
-                } => {
-                    commands::sbx::exec::run(
-                        ctx,
-                        &sandbox_id,
-                        &command,
-                        &args,
-                        timeout,
-                        workdir.as_deref(),
-                        &env,
-                        Some(user.as_str()),
-                    )
-                    .await
-                }
-                SbxCommands::Cp { src, dest } => commands::sbx::cp::run(ctx, &src, &dest).await,
-                SbxCommands::Checkpoint(snapshot_args) => match snapshot_args.command {
-                    Some(SnapshotCommands::Ls) => commands::sbx::snapshot_ls::run(ctx).await,
-                    Some(SnapshotCommands::Rm { snapshot_ids }) => {
-                        commands::sbx::snapshot_rm::run(ctx, &snapshot_ids).await
+        Commands::Sbx(subcmd) => match subcmd {
+            SbxCommands::NativeSsh(NativeSshCommands::Keys(keys_cmd)) => {
+                ensure_auth(ctx).await?;
+                run_ssh_keys_command(ctx, keys_cmd).await
+            }
+            other => {
+                ensure_auth_and_project(ctx).await?;
+                match other {
+                    SbxCommands::Ls {
+                        all,
+                        running,
+                        suspended,
+                        quiet,
+                        archived,
+                    } => {
+                        commands::sbx::ls::run(ctx, running, suspended, all, quiet, archived).await
                     }
-                    None => {
-                        let sandbox_id = snapshot_args.sandbox_id.ok_or_else(|| {
-                            CliError::usage(
-                                "checkpoint requires a sandbox ID or the 'ls' subcommand",
-                            )
-                        })?;
-                        commands::sbx::snapshot::run(
-                            ctx,
-                            &sandbox_id,
-                            snapshot_args.timeout,
-                            snapshot_args
-                                .checkpoint_type
-                                .map(SnapshotTypeArg::as_wire_value),
-                        )
-                        .await
+                    SbxCommands::Describe { sandbox_id } => {
+                        commands::sbx::describe::run(ctx, &sandbox_id).await
                     }
-                },
-                SbxCommands::Clone {
-                    sandbox_id,
-                    timeout,
-                    times,
-                } => commands::sbx::clone::run(ctx, &sandbox_id, timeout, times.get()).await,
-                SbxCommands::Port(port_cmd) => match port_cmd {
-                    PortCommands::Ls { sandbox_id } => {
-                        commands::sbx::port::list(ctx, &sandbox_id).await
+                    SbxCommands::Terminate { sandbox_ids } => {
+                        commands::sbx::terminate::run(ctx, &sandbox_ids).await
                     }
-                    PortCommands::Expose { sandbox_id, ports } => {
-                        commands::sbx::port::expose(ctx, &sandbox_id, &ports).await
-                    }
-                    PortCommands::Rm { sandbox_id, ports } => {
-                        commands::sbx::port::remove(ctx, &sandbox_id, &ports).await
-                    }
-                },
-                SbxCommands::Run {
-                    command,
-                    args,
-                    image,
-                    cpus,
-                    memory,
-                    disk_mb,
-                    timeout,
-                    workdir,
-                    env,
-                    user,
-                    keep,
-                    ports,
-                    allow_unauthenticated_access,
-                    no_internet,
-                    network_allow,
-                    network_deny,
-                } => {
-                    commands::sbx::run::run(
-                        ctx,
-                        &command,
-                        &args,
-                        image.as_deref(),
+                    SbxCommands::Create {
+                        name,
                         cpus,
                         memory,
                         disk_mb,
+                        disk_gb,
                         timeout,
-                        workdir.as_deref(),
-                        &env,
-                        Some(user.as_str()),
-                        keep,
-                        &ports,
+                        entrypoint,
+                        snapshot,
+                        image,
+                        no_wait,
+                        ports,
                         allow_unauthenticated_access,
                         no_internet,
-                        &network_allow,
-                        &network_deny,
-                    )
-                    .await
-                }
-                SbxCommands::Ssh {
-                    sandbox_id,
-                    shell,
-                    shell_args,
-                    workdir,
-                    env,
-                } => {
-                    commands::sbx::ssh::run(
-                        ctx,
-                        &sandbox_id,
-                        &shell,
-                        &shell_args,
-                        workdir.as_deref(),
-                        &env,
-                    )
-                    .await
-                }
-                SbxCommands::Image(image_cmd) => match image_cmd {
-                    ImageCommands::Register {
-                        image_name,
-                        snapshot_id,
-                        dockerfile_path,
-                        public,
-                    } => {
-                        commands::sbx::image::register::run(
-                            ctx,
-                            &image_name,
-                            &snapshot_id,
-                            &dockerfile_path,
-                            public,
-                        )
-                        .await
-                    }
-                    ImageCommands::Create {
-                        dockerfile_path,
-                        registered_name,
-                        disk_mb,
-                        builder_disk_mb,
-                        disk_gb,
-                        cpus,
-                        memory,
-                        public,
-                        json,
+                        network_allow,
+                        network_deny,
                     } => {
                         let disk_mb = if let Some(value) = disk_mb {
                             Some(value)
@@ -1116,31 +955,245 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 })
                                 .transpose()?
                         };
-                        commands::sbx::image::create::run(
+                        commands::sbx::create::run(
                             ctx,
-                            &dockerfile_path,
-                            registered_name.as_deref(),
+                            commands::sbx::create::CreateArgs {
+                                name: name.as_deref(),
+                                cpus,
+                                memory,
+                                disk_mb,
+                                timeout,
+                                entrypoint: &entrypoint,
+                                snapshot_id: snapshot.as_deref(),
+                                image_name: image.as_deref(),
+                                wait: !no_wait,
+                                ports: &ports,
+                                allow_unauthenticated_access,
+                                no_internet,
+                                network_allow: &network_allow,
+                                network_deny: &network_deny,
+                            },
+                        )
+                        .await
+                    }
+                    SbxCommands::Name {
+                        sandbox_id,
+                        new_name,
+                    } => commands::sbx::name::run(ctx, &sandbox_id, &new_name).await,
+                    SbxCommands::Suspend {
+                        sandbox_id,
+                        no_wait,
+                    } => commands::sbx::suspend::run(ctx, &sandbox_id, !no_wait).await,
+                    SbxCommands::Resume {
+                        sandbox_id,
+                        no_wait,
+                    } => commands::sbx::resume::run(ctx, &sandbox_id, !no_wait).await,
+                    SbxCommands::Exec {
+                        sandbox_id,
+                        command,
+                        args,
+                        timeout,
+                        workdir,
+                        env,
+                        user,
+                    } => {
+                        commands::sbx::exec::run(
+                            ctx,
+                            &sandbox_id,
+                            &command,
+                            &args,
+                            timeout,
+                            workdir.as_deref(),
+                            &env,
+                            Some(user.as_str()),
+                        )
+                        .await
+                    }
+                    SbxCommands::Cp { src, dest } => commands::sbx::cp::run(ctx, &src, &dest).await,
+                    SbxCommands::Checkpoint(snapshot_args) => match snapshot_args.command {
+                        Some(SnapshotCommands::Ls) => commands::sbx::snapshot_ls::run(ctx).await,
+                        Some(SnapshotCommands::Rm { snapshot_ids }) => {
+                            commands::sbx::snapshot_rm::run(ctx, &snapshot_ids).await
+                        }
+                        None => {
+                            let sandbox_id = snapshot_args.sandbox_id.ok_or_else(|| {
+                                CliError::usage(
+                                    "checkpoint requires a sandbox ID or the 'ls' subcommand",
+                                )
+                            })?;
+                            commands::sbx::snapshot::run(
+                                ctx,
+                                &sandbox_id,
+                                snapshot_args.timeout,
+                                snapshot_args
+                                    .checkpoint_type
+                                    .map(SnapshotTypeArg::as_wire_value),
+                            )
+                            .await
+                        }
+                    },
+                    SbxCommands::Clone {
+                        sandbox_id,
+                        timeout,
+                        times,
+                    } => commands::sbx::clone::run(ctx, &sandbox_id, timeout, times.get()).await,
+                    SbxCommands::Port(port_cmd) => match port_cmd {
+                        PortCommands::Ls { sandbox_id } => {
+                            commands::sbx::port::list(ctx, &sandbox_id).await
+                        }
+                        PortCommands::Expose { sandbox_id, ports } => {
+                            commands::sbx::port::expose(ctx, &sandbox_id, &ports).await
+                        }
+                        PortCommands::Rm { sandbox_id, ports } => {
+                            commands::sbx::port::remove(ctx, &sandbox_id, &ports).await
+                        }
+                    },
+                    SbxCommands::Run {
+                        command,
+                        args,
+                        image,
+                        cpus,
+                        memory,
+                        disk_mb,
+                        timeout,
+                        workdir,
+                        env,
+                        user,
+                        keep,
+                        ports,
+                        allow_unauthenticated_access,
+                        no_internet,
+                        network_allow,
+                        network_deny,
+                    } => {
+                        commands::sbx::run::run(
+                            ctx,
+                            &command,
+                            &args,
+                            image.as_deref(),
+                            cpus,
+                            memory,
+                            disk_mb,
+                            timeout,
+                            workdir.as_deref(),
+                            &env,
+                            Some(user.as_str()),
+                            keep,
+                            &ports,
+                            allow_unauthenticated_access,
+                            no_internet,
+                            &network_allow,
+                            &network_deny,
+                        )
+                        .await
+                    }
+                    SbxCommands::Ssh {
+                        sandbox_id,
+                        shell,
+                        shell_args,
+                        workdir,
+                        env,
+                    } => {
+                        commands::sbx::ssh::run(
+                            ctx,
+                            &sandbox_id,
+                            &shell,
+                            &shell_args,
+                            workdir.as_deref(),
+                            &env,
+                        )
+                        .await
+                    }
+                    SbxCommands::Image(image_cmd) => match image_cmd {
+                        ImageCommands::Register {
+                            image_name,
+                            snapshot_id,
+                            dockerfile_path,
+                            public,
+                        } => {
+                            commands::sbx::image::register::run(
+                                ctx,
+                                &image_name,
+                                &snapshot_id,
+                                &dockerfile_path,
+                                public,
+                            )
+                            .await
+                        }
+                        ImageCommands::Create {
+                            dockerfile_path,
+                            registered_name,
                             disk_mb,
                             builder_disk_mb,
+                            disk_gb,
                             cpus,
                             memory,
                             public,
                             json,
+                        } => {
+                            let disk_mb = if let Some(value) = disk_mb {
+                                Some(value)
+                            } else {
+                                disk_gb
+                                    .map(|value| {
+                                        value.checked_mul(1024).ok_or_else(|| {
+                                            CliError::usage("--disk is too large to convert to MiB")
+                                        })
+                                    })
+                                    .transpose()?
+                            };
+                            commands::sbx::image::create::run(
+                                ctx,
+                                &dockerfile_path,
+                                registered_name.as_deref(),
+                                disk_mb,
+                                builder_disk_mb,
+                                cpus,
+                                memory,
+                                public,
+                                json,
+                            )
+                            .await
+                        }
+                        ImageCommands::Ls => commands::sbx::image::ls::run(ctx).await,
+                        ImageCommands::Describe { name_or_id } => {
+                            commands::sbx::image::describe::run(ctx, &name_or_id).await
+                        }
+                    },
+                    SbxCommands::Tunnel {
+                        sandbox_id,
+                        remote_port,
+                        listen_port,
+                    } => {
+                        commands::sbx::tunnel::run(ctx, &sandbox_id, remote_port, listen_port).await
+                    }
+                    SbxCommands::NativeSsh(NativeSshCommands::PrintConfig {
+                        sandbox_id,
+                        host_alias,
+                        identity_file,
+                    }) => {
+                        commands::sbx::native_ssh::print_config(
+                            ctx,
+                            &sandbox_id,
+                            host_alias.as_deref(),
+                            identity_file.as_deref(),
                         )
                         .await
                     }
-                    ImageCommands::Ls => commands::sbx::image::ls::run(ctx).await,
-                    ImageCommands::Describe { name_or_id } => {
-                        commands::sbx::image::describe::run(ctx, &name_or_id).await
-                    }
-                },
-                SbxCommands::Tunnel {
-                    sandbox_id,
-                    remote_port,
-                    listen_port,
-                } => commands::sbx::tunnel::run(ctx, &sandbox_id, remote_port, listen_port).await,
+                    SbxCommands::NativeSsh(NativeSshCommands::Keys(_)) => unreachable!(),
+                }
             }
+        },
+    }
+}
+
+async fn run_ssh_keys_command(ctx: &CliContext, subcmd: SshKeysCommands) -> error::Result<()> {
+    match subcmd {
+        SshKeysCommands::Ls => commands::ssh_keys::list(ctx).await,
+        SshKeysCommands::Add { name, public_key } => {
+            commands::ssh_keys::add(ctx, &name, &public_key).await
         }
+        SshKeysCommands::Rm { keys } => commands::ssh_keys::remove(ctx, &keys).await,
     }
 }
 
@@ -1524,6 +1577,38 @@ mod tests {
                 assert_eq!(env, vec!["FOO=bar", "TERM=screen-256color"]);
             }
             _ => panic!("expected sbx ssh command"),
+        }
+    }
+
+    #[test]
+    fn sbx_native_ssh_print_config_parses_optional_flags() {
+        let cli = Cli::try_parse_from([
+            "tl",
+            "sbx",
+            "native-ssh",
+            "print-config",
+            "my-sandbox",
+            "--host",
+            "tl-my-sandbox",
+            "--identity-file",
+            "~/.ssh/id_ed25519_tensorlake",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::NativeSsh(NativeSshCommands::PrintConfig {
+                sandbox_id,
+                host_alias,
+                identity_file,
+            })) => {
+                assert_eq!(sandbox_id, "my-sandbox");
+                assert_eq!(host_alias.as_deref(), Some("tl-my-sandbox"));
+                assert_eq!(
+                    identity_file.as_deref(),
+                    Some("~/.ssh/id_ed25519_tensorlake")
+                );
+            }
+            _ => panic!("expected sbx native-ssh print-config command"),
         }
     }
 
