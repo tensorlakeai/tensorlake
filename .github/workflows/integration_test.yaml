@@ -90,9 +90,7 @@ jobs:
                 --build-env PIP_EXTRA_INDEX_URL=https://pypi.org/simple/
 
               echo "--- 2. Deploy ---"
-              tl deploy /tmp/test_app.py \
-                --build-env PIP_INDEX_URL=https://test.pypi.org/simple/ \
-                --build-env PIP_EXTRA_INDEX_URL=https://pypi.org/simple/
+              tl deploy /tmp/test_app.py
 
               echo "--- All integration tests passed ---"
             '

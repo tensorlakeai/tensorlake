@@ -1,5 +1,5 @@
 import os
-from typing import List, Set
+from typing import Dict, List, Set
 
 from ..applications import filter_applications
 from ..interface.function import Function
@@ -8,6 +8,7 @@ from ..remote.manifests.application import (
     ApplicationManifest,
     create_application_manifest,
 )
+from ..remote.manifests.function_manifests import ImageRef
 from .code.ignored_code_paths import ignored_code_paths
 from .code.loader import load_code
 from .code.zip import zip_code
@@ -18,6 +19,7 @@ def deploy_applications(
     upgrade_running_requests: bool = True,
     load_source_dir_modules: bool = False,
     api_client=None,
+    image_refs: Dict[str, ImageRef] | None = None,
 ) -> None:
     """Deploys all applications in the supplied .py file so they are runnable in remote mode (i.e. on Tensorlake Cloud).
 
@@ -61,7 +63,9 @@ def deploy_applications(
     try:
         for application in filter_applications(functions):
             app_manifest: ApplicationManifest = create_application_manifest(
-                application_function=application, all_functions=functions
+                application_function=application,
+                all_functions=functions,
+                image_refs=image_refs,
             )
             api_client.upsert_application(
                 manifest_json=app_manifest.model_dump_json(),

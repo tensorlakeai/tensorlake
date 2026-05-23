@@ -18,6 +18,7 @@ from ...function.user_data_serializer import (
 )
 from ...interface.function import Function, _ApplicationConfiguration
 from .function import FunctionManifest, create_function_manifest
+from .function_manifests import ImageRef
 
 
 class EntryPointInputManifest(BaseModel):
@@ -63,18 +64,29 @@ class ApplicationManifest(BaseModel):
 
 
 def create_application_manifest(
-    application_function: Function, all_functions: List[Function]
+    application_function: Function,
+    all_functions: List[Function],
+    image_refs: Dict[str, ImageRef] | None = None,
 ) -> ApplicationManifest:
     """Creates ApplicationManifest for the supplied application function.
+
+    `image_refs` maps `Image._id` to the pre-built image reference for any
+    function whose image was built up-front (e.g. through the sandbox-template
+    builder). Functions without a mapped image get `image_ref=None` and the
+    platform falls through to the legacy image lookup.
 
     Raises TensorlakeError on error.
     """
     app_config: _ApplicationConfiguration = application_function._application_config
     app_signature: inspect.Signature = function_signature(application_function)
 
+    image_refs = image_refs or {}
     function_manifests: Dict[str, FunctionManifest] = {
         fn._function_config.function_name: create_function_manifest(
-            application_function, app_config.version, fn
+            application_function,
+            app_config.version,
+            fn,
+            image_ref=image_refs.get(fn._function_config.image._id),
         )
         for fn in all_functions
     }
