@@ -26,6 +26,7 @@ const SANDBOX_IMAGE = "tensorlake/ubuntu-minimal";
 const SANDBOX_CPUS = 1.0;
 const SANDBOX_MEMORY_MB = 1024;
 const SANDBOX_DISK_MB = 10240;
+const SANDBOX_TEST_TIMEOUT_MS = 180_000;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -200,7 +201,7 @@ describe(
       ).rejects.toThrow(SandboxNotFoundError);
     });
   },
-  { timeout: 120_000 },
+  { timeout: SANDBOX_TEST_TIMEOUT_MS },
 );
 
 describe(
@@ -229,7 +230,7 @@ describe(
         poolId,
         startupTimeout: 120,
       }, 5);
-    });
+    }, SANDBOX_TEST_TIMEOUT_MS);
 
     afterAll(async () => {
       if (sandbox) {
