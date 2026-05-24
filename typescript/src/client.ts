@@ -216,10 +216,9 @@ export class SandboxClient {
     );
   }
 
-  /** Update sandbox properties such as name, exposed ports, and proxy auth settings. */
+  /** Update mutable sandbox proxy settings. Sandbox names are immutable after creation. */
   async update(sandboxId: string, options: UpdateSandboxOptions): Promise<Traced<SandboxInfo>> {
     const body: Record<string, unknown> = {};
-    if (options.name != null) body.name = options.name;
     if (options.allowUnauthenticatedAccess != null) {
       body.allow_unauthenticated_access = options.allowUnauthenticatedAccess;
     }

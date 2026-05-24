@@ -241,7 +241,8 @@ class Sandbox:
             snapshot_id: Restore from this snapshot ID.
             proxy_url: Override the sandbox proxy URL.
             startup_timeout: Max seconds to wait for Running status (default 60).
-            name: Optional name; named sandboxes support suspend/resume.
+            name: Optional create-time name; named sandboxes support
+                suspend/resume. Names are immutable after creation.
             api_key: Tensorlake API key (defaults to TENSORLAKE_API_KEY env var).
             api_url: API server URL (defaults to TENSORLAKE_API_URL env var).
             organization_id: Organization ID for multi-tenant access.
@@ -610,11 +611,11 @@ class Sandbox:
         return self._fetch_info().name
 
     @name.setter
-    def name(self, value: str) -> None:
-        """Assign or change this sandbox's name. Equivalent to ``self.update(name=value)``."""
-        if not value:
-            raise SandboxError("sandbox name must be a non-empty string")
-        self.update(name=value)
+    def name(self, _value: str) -> None:
+        """Sandbox names are immutable after creation."""
+        raise SandboxError(
+            "sandbox names are immutable; set name when creating the sandbox"
+        )
 
     @property
     def status(self) -> SandboxStatus:
@@ -627,19 +628,16 @@ class Sandbox:
 
     def update(
         self,
-        name: str | None = None,
         *,
         allow_unauthenticated_access: bool | None = None,
         exposed_ports: list[int] | None = None,
     ) -> Traced[SandboxInfo]:
-        """Update this sandbox's properties.
+        """Update mutable sandbox proxy settings.
 
-        Supports updating the sandbox name and sandbox proxy access settings.
-        Naming an ephemeral sandbox makes it non-ephemeral and enables
-        suspend/resume.
+        Sandbox names are immutable after creation. Pass ``name=`` when creating
+        the sandbox if it needs a stable name.
 
         Args:
-            name: New name for the sandbox.
             allow_unauthenticated_access: Whether exposed user ports should be
                 reachable without TensorLake auth.
             exposed_ports: User ports that should be routable through the
@@ -651,7 +649,6 @@ class Sandbox:
         self._require_lifecycle_client("update")
         traced = self._lifecycle_client.update_sandbox(
             self._lifecycle_identifier(),
-            name=name,
             allow_unauthenticated_access=allow_unauthenticated_access,
             exposed_ports=exposed_ports,
         )

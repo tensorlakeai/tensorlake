@@ -280,7 +280,6 @@ class AsyncSandboxClient:
     async def update_sandbox(
         self,
         sandbox_id: str,
-        name: str | None = None,
         *,
         allow_unauthenticated_access: bool | None = None,
         exposed_ports: list[int] | None = None,
@@ -288,14 +287,9 @@ class AsyncSandboxClient:
         normalized_ports = (
             _normalize_user_ports(exposed_ports) if exposed_ports is not None else None
         )
-        if (
-            name is None
-            and allow_unauthenticated_access is None
-            and normalized_ports is None
-        ):
+        if allow_unauthenticated_access is None and normalized_ports is None:
             raise SandboxError("At least one sandbox update field must be provided.")
         request = UpdateSandboxRequest(
-            name=name,
             allow_unauthenticated_access=allow_unauthenticated_access,
             exposed_ports=normalized_ports,
         )

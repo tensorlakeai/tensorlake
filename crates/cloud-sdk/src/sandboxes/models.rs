@@ -45,16 +45,16 @@ pub struct CreateSandboxRequest {
     pub network: Option<NetworkConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
-    /// Optional name for the sandbox. Named sandboxes support suspend/resume.
-    /// When absent the sandbox is ephemeral.
+    /// Optional create-time name for the sandbox. Named sandboxes support
+    /// suspend/resume. When absent the sandbox is ephemeral. Names are
+    /// immutable after creation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateSandboxRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_unauthenticated_access: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -362,6 +362,25 @@ pub struct ListDirectoryResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_sandbox_request_rejects_name() {
+        let err =
+            serde_json::from_str::<UpdateSandboxRequest>(r#"{"name":"new-name"}"#).unwrap_err();
+        assert!(err.to_string().contains("unknown field `name`"));
+    }
+
+    #[test]
+    fn update_sandbox_request_serializes_only_mutable_fields() {
+        let body = UpdateSandboxRequest {
+            allow_unauthenticated_access: Some(true),
+            exposed_ports: Some(vec![8080]),
+        };
+        assert_eq!(
+            serde_json::to_string(&body).unwrap(),
+            r#"{"allow_unauthenticated_access":true,"exposed_ports":[8080]}"#
+        );
+    }
 
     #[test]
     fn snapshot_type_serializes_as_snake_case() {

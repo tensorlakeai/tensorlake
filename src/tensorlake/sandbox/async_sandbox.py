@@ -323,7 +323,6 @@ class AsyncSandbox:
 
     async def update(
         self,
-        name: str | None = None,
         *,
         allow_unauthenticated_access: bool | None = None,
         exposed_ports: list[int] | None = None,
@@ -331,7 +330,6 @@ class AsyncSandbox:
         self._require_lifecycle_client("update")
         traced = await self._lifecycle_client.update_sandbox(
             self._lifecycle_identifier(),
-            name=name,
             allow_unauthenticated_access=allow_unauthenticated_access,
             exposed_ports=exposed_ports,
         )
