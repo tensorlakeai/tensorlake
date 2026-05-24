@@ -68,6 +68,7 @@ export class SandboxClient {
       projectId: this.projectId,
       maxRetries: options?.maxRetries ?? defaults.MAX_RETRIES,
       retryBackoffMs: options?.retryBackoffMs ?? defaults.RETRY_BACKOFF_MS,
+      timeoutMs: options?.timeoutMs,
     });
   }
 

@@ -26,7 +26,9 @@ const SANDBOX_IMAGE = "tensorlake/ubuntu-minimal";
 const SANDBOX_CPUS = 1.0;
 const SANDBOX_MEMORY_MB = 1024;
 const SANDBOX_DISK_MB = 10240;
-const SANDBOX_TEST_TIMEOUT_MS = 180_000;
+const SANDBOX_LIFECYCLE_TIMEOUT_MS = 240_000;
+const SANDBOX_CREATE_TIMEOUT_MS = 180_000;
+const SANDBOX_SETUP_TIMEOUT_MS = 180_000;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -125,6 +127,8 @@ describe(
       client = new SandboxClient({
         apiUrl: process.env.TENSORLAKE_API_URL ?? "https://api.tensorlake.ai",
         apiKey: process.env.TENSORLAKE_API_KEY,
+        maxRetries: 0,
+        timeoutMs: SANDBOX_CREATE_TIMEOUT_MS,
       });
     });
 
@@ -201,7 +205,7 @@ describe(
       ).rejects.toThrow(SandboxNotFoundError);
     });
   },
-  { timeout: SANDBOX_TEST_TIMEOUT_MS },
+  { timeout: SANDBOX_LIFECYCLE_TIMEOUT_MS },
 );
 
 describe(
@@ -230,7 +234,7 @@ describe(
         poolId,
         startupTimeout: 120,
       }, 5);
-    }, SANDBOX_TEST_TIMEOUT_MS);
+    }, SANDBOX_SETUP_TIMEOUT_MS);
 
     afterAll(async () => {
       if (sandbox) {

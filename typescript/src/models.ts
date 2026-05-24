@@ -372,6 +372,7 @@ export interface SandboxClientOptions {
   namespace?: string;
   maxRetries?: number;
   retryBackoffMs?: number;
+  timeoutMs?: number;
 }
 
 export interface SandboxOptions {
