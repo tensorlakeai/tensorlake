@@ -74,6 +74,7 @@ interface NativeBinding {
 // `require` exists in the CJS bundle but not in ESM; declared here so the
 // runtime check below typechecks under "module": "esnext".
 declare const require: NodeRequire | undefined;
+declare const module: { exports?: unknown } | undefined;
 
 let cachedNativeBinding: NativeBinding | undefined;
 let cachedNativeBindingError: Error | undefined;
@@ -84,7 +85,13 @@ function resolveRequire(): NodeRequire {
   // throws if called at all in CJS. CJS bundles get the real `require`
   // injected at runtime; prefer it. ESM bundles fall back to the createRequire
   // path, which only runs when `import.meta.url` is a real file URL.
-  if (typeof require !== "undefined") return require;
+  if (
+    typeof module !== "undefined" &&
+    module.exports != null &&
+    typeof require !== "undefined"
+  ) {
+    return require;
+  }
   return createRequire(import.meta.url);
 }
 
