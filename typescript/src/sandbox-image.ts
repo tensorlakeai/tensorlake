@@ -71,15 +71,30 @@ interface NativeBinding {
   ): Promise<string>;
 }
 
-const nodeRequire = createRequire(import.meta.url);
+// `require` exists in the CJS bundle but not in ESM; declared here so the
+// runtime check below typechecks under "module": "esnext".
+declare const require: NodeRequire | undefined;
+
 let cachedNativeBinding: NativeBinding | undefined;
 let cachedNativeBindingError: Error | undefined;
+
+function resolveRequire(): NodeRequire {
+  // tsup rewrites `import.meta.url` to `import_meta.url` (where
+  // `import_meta = {}`) in the CJS output, so `createRequire(import.meta.url)`
+  // throws if called at all in CJS. CJS bundles get the real `require`
+  // injected at runtime; prefer it. ESM bundles fall back to the createRequire
+  // path, which only runs when `import.meta.url` is a real file URL.
+  if (typeof require !== "undefined") return require;
+  return createRequire(import.meta.url);
+}
 
 function loadNativeBinding(): NativeBinding {
   if (cachedNativeBinding) return cachedNativeBinding;
   if (cachedNativeBindingError) throw cachedNativeBindingError;
   try {
-    cachedNativeBinding = nodeRequire("@tensorlake/native") as NativeBinding;
+    cachedNativeBinding = resolveRequire()(
+      "@tensorlake/native",
+    ) as NativeBinding;
     return cachedNativeBinding;
   } catch (error) {
     cachedNativeBindingError =
