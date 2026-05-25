@@ -75,8 +75,9 @@ fn event_to_js(event: SandboxImageBuildEvent) -> SandboxImageBuildEventJs {
 /// Build a sandbox image. Returns a JSON-encoded string with the registered
 /// sandbox-template metadata; the TS SDK is expected to parse it.
 ///
-/// `emit`, if provided, is invoked for each progress event. Errors thrown
-/// from inside the callback are swallowed (`ErrorStrategy::Fatal`).
+/// `emit`, if provided, is invoked for each progress event. The TypeScript
+/// wrapper must catch user callback exceptions before they cross this napi
+/// threadsafe callback boundary.
 #[napi]
 pub async fn build_sandbox_image(
     options: SandboxImageBuildOptionsJs,

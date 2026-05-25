@@ -49,6 +49,7 @@ describe("createSandboxImage", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     __setNativeBindingForTest(undefined);
+    vi.restoreAllMocks();
   });
 
   it("delegates a Dockerfile-path source to the native binding", async () => {
@@ -139,6 +140,45 @@ describe("createSandboxImage", () => {
     ]);
   });
 
+  it("rejects with a user emit error after native event forwarding without emitting completion", async () => {
+    const tempDir = await mkdir(
+      path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-emit-error`),
+      { recursive: true },
+    );
+    const dockerfilePath = path.join(tempDir, "my-img.Dockerfile");
+    await writeFile(
+      dockerfilePath,
+      "FROM python:3.12-slim\nRUN echo hi\n",
+      "utf8",
+    );
+
+    makeFakeBinding({
+      events: [
+        { eventType: "status", message: "Preparing rootfs build..." },
+        { eventType: "build_log", stream: "stdout", message: "build line" },
+      ],
+    });
+
+    const emitError = new Error("emit failed");
+    const events: Array<Record<string, unknown>> = [];
+    await expect(
+      createSandboxImage(dockerfilePath, {}, {
+        emit: (event) => {
+          events.push(event);
+          if (event.type === "status" && event.message === "Preparing rootfs build...") {
+            throw emitError;
+          }
+        },
+      }),
+    ).rejects.toBe(emitError);
+
+    expect(events).toEqual([
+      { type: "status", message: "Building image 'my-img'..." },
+      { type: "status", message: "Preparing rootfs build..." },
+      { type: "build_log", stream: "stdout", message: "build line" },
+    ]);
+  });
+
   it("derives the registered name from the parent dir when the file is named Dockerfile", async () => {
     const baseDir = await mkdir(
       path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-parent`),
@@ -178,6 +218,16 @@ describe("createSandboxImage", () => {
 
   it("throws when the Dockerfile path does not exist", async () => {
     makeFakeBinding();
+    await expect(createSandboxImage("/nonexistent/Dockerfile")).rejects.toThrow(
+      /Dockerfile not found/,
+    );
+  });
+
+  it("validates a missing Dockerfile before checking credentials", async () => {
+    vi.stubEnv("TENSORLAKE_API_KEY", "");
+    vi.stubEnv("TENSORLAKE_PAT", "");
+    makeFakeBinding();
+
     await expect(createSandboxImage("/nonexistent/Dockerfile")).rejects.toThrow(
       /Dockerfile not found/,
     );
@@ -227,6 +277,39 @@ describe("createSandboxImage", () => {
       // @ts-expect-error - intentionally invalid input
       createSandboxImage(12345),
     ).rejects.toThrow(TypeError);
+  });
+
+  it("validates an unknown source type before checking credentials", async () => {
+    vi.stubEnv("TENSORLAKE_API_KEY", "");
+    vi.stubEnv("TENSORLAKE_PAT", "");
+    makeFakeBinding();
+
+    await expect(
+      // @ts-expect-error - intentionally invalid input
+      createSandboxImage(12345),
+    ).rejects.toThrow(TypeError);
+  });
+
+  it("warns once for default-named Image.build", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const image = new Image({ baseImage: "python:3.12-slim" });
+    makeFakeBinding();
+
+    await image.build();
+
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0]?.[0]).toMatch(/default name/);
+  });
+
+  it("warns once for direct createSandboxImage with a default-named Image", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const image = new Image({ baseImage: "python:3.12-slim" });
+    makeFakeBinding();
+
+    await createSandboxImage(image);
+
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0]?.[0]).toMatch(/default name/);
   });
 });
 

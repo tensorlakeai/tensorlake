@@ -195,10 +195,6 @@ export async function createSandboxImage(
 ): Promise<Record<string, unknown>> {
   const emit = deps.emit ?? (options.verbose ? stderrEmit : noopEmit);
   const context = buildContextFromEnv();
-  const bearerToken = context.apiKey ?? context.personalAccessToken;
-  if (!bearerToken) {
-    throw new Error("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.");
-  }
 
   let dockerfilePath: string;
   let dockerfileText: string | undefined;
@@ -241,9 +237,15 @@ export async function createSandboxImage(
     );
   }
 
+  const bearerToken = context.apiKey ?? context.personalAccessToken;
+  if (!bearerToken) {
+    throw new Error("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.");
+  }
+
   emit({ type: "status", message: `Building image '${effectiveName}'...` });
 
   const binding = loadNativeBinding();
+  let emitError: unknown;
   const resultJson = await binding.buildSandboxImage(
     {
       apiUrl: context.apiUrl,
@@ -264,8 +266,18 @@ export async function createSandboxImage(
       dockerfileText,
       contextDir: nativeContextDir,
     },
-    (event) => emit(eventToEmitDict(event)),
+    (event) => {
+      try {
+        emit(eventToEmitDict(event));
+      } catch (error) {
+        emitError ??= error;
+      }
+    },
   );
+
+  if (emitError != null) {
+    throw emitError;
+  }
 
   let result: Record<string, unknown> = {};
   if (resultJson.trim().length > 0) {

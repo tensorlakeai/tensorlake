@@ -143,14 +143,6 @@ export class Image {
   async build(
     options: CreateSandboxImageOptions = {},
   ): Promise<Record<string, unknown>> {
-    if ((options.registeredName ?? this._name) === DEFAULT_IMAGE_NAME) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `Building sandbox image with the default name "${DEFAULT_IMAGE_NAME}". ` +
-          "Pass `registeredName` or `Image({ name })` to avoid collisions " +
-          "with other default-named images in this project.",
-      );
-    }
     const { createSandboxImage } = await import("./sandbox-image.js");
     return createSandboxImage(this, options);
   }
