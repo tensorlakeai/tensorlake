@@ -20,6 +20,23 @@ function binaryPath(binaryName, options = {}) {
   return path.join(root, "dist", "bin", binaryTargetId(platform, arch), `${binaryName}${extension}`);
 }
 
+function nativeBindingPath(options = {}) {
+  const platform = options.platform ?? process.platform;
+  const arch = options.arch ?? process.arch;
+  const root = options.packageRoot ?? packageRoot();
+  return path.join(root, "dist", "native", binaryTargetId(platform, arch), "tensorlake-node.node");
+}
+
+function loadNative() {
+  const bindingPath = nativeBindingPath();
+  if (!fs.existsSync(bindingPath)) {
+    throw new Error(
+      `Missing native binding for ${binaryTargetId()}. Run 'npm run build' in tensorlake before packaging or install a package published with support for your platform.`,
+    );
+  }
+  return require(bindingPath);
+}
+
 function exitWithSpawnResult(result) {
   if (result.error) {
     console.error(result.error.message);
@@ -90,6 +107,8 @@ function runPythonModule(moduleName, helpText) {
 module.exports = {
   binaryPath,
   binaryTargetId,
+  loadNative,
+  nativeBindingPath,
   runBinary,
   runPythonModule,
 };

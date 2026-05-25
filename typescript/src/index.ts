@@ -124,8 +124,6 @@ export type {
 } from "./models.js";
 
 export type {
-  DockerfileInstruction,
-  DockerfileBuildPlan,
   CreateSandboxImageOptions,
   SandboxImageSource,
 } from "./sandbox-image.js";

@@ -1,9 +1,14 @@
 [workspace]
-members = ["crates/cloud-sdk", "crates/cli", "crates/rust-cloud-sdk-py"]
+members = [
+    "crates/cloud-sdk",
+    "crates/cli",
+    "crates/rust-cloud-sdk-node",
+    "crates/rust-cloud-sdk-py",
+]
 resolver = "3"
 
 [workspace.package]
-version = "0.5.17"
+version = "0.5.18"
 authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
 edition = "2024"
 license = "Apache-2.0"
@@ -87,6 +92,11 @@ gethostname = "0.5"
 # Python bindings
 pyo3 = { version = "0.28.2", features = ["abi3-py310", "extension-module"] }
 pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
+
+# Node.js bindings (napi-rs)
+napi = { version = "2", default-features = false, features = ["napi6", "async", "tokio_rt", "serde-json"] }
+napi-derive = "2"
+napi-build = "2"
 
 [profile.release]
 codegen-units = 1

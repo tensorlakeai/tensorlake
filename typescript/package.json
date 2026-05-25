@@ -1,6 +1,6 @@
 {
   "name": "tensorlake",
-  "version": "0.5.17",
+  "version": "0.5.18",
   "description": "TensorLake SDK and CLI for applications, sandboxes, and cloud services",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -33,7 +33,8 @@
   "scripts": {
     "build:sdk": "tsup",
     "build:cli": "node ./scripts/prepare-package.mjs",
-    "build": "npm run build:sdk && npm run build:cli",
+    "build:native": "node ./scripts/build-native.mjs",
+    "build": "npm run build:sdk && npm run build:cli && npm run build:native",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --exclude tests/integration.test.ts",
     "test:integration": "vitest run tests/integration.test.ts",

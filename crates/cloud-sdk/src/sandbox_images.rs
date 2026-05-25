@@ -55,6 +55,26 @@ const ROOTFS_BUILDER_PATH: &str = "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 const ROOTFS_BUILDER_COMMAND: &str = "tl-rootfs-build";
 const ROOTFS_BUILDER_PROCESS_USER: &str = "root";
 
+/// Dockerfile instructions rejected during sandbox-image build. The rootfs
+/// builder hands the Dockerfile to `docker build` verbatim, so without this
+/// allowlist these instructions would silently take effect inside the
+/// resulting rootfs. Mirrors the historical Python/TS SDK behavior.
+const UNSUPPORTED_DOCKERFILE_INSTRUCTIONS: &[&str] = &["ARG", "ONBUILD", "SHELL", "USER"];
+
+/// Dockerfile instructions that affect image config (CMD, ENTRYPOINT, etc.)
+/// rather than the filesystem. `docker build --output type=tar` discards the
+/// image config, so these are effectively no-ops on the rootfs path — we warn
+/// to surface that to the user and pass them through to the builder.
+const IGNORED_DOCKERFILE_INSTRUCTIONS: &[&str] = &[
+    "CMD",
+    "ENTRYPOINT",
+    "EXPOSE",
+    "HEALTHCHECK",
+    "LABEL",
+    "STOPSIGNAL",
+    "VOLUME",
+];
+
 #[derive(Debug, Error)]
 pub enum SandboxImageBuildError {
     #[error("{0}")]
@@ -131,6 +151,10 @@ struct DockerfileBuildPlan {
     registered_name: String,
     dockerfile_text: String,
     base_image: String,
+    /// Instructions that hit `IGNORED_DOCKERFILE_INSTRUCTIONS` during parse.
+    /// Surfaced as warnings by the caller; preserved in `dockerfile_text` and
+    /// forwarded to `docker build`.
+    ignored_instructions: Vec<(usize, String)>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -196,6 +220,14 @@ where
         "Selected image name: {}",
         plan.registered_name
     )));
+
+    for (_line_number, keyword) in &plan.ignored_instructions {
+        emit(SandboxImageBuildEvent::Warning(format!(
+            "Skipping Dockerfile instruction '{}' during snapshot materialization. \
+             It is still preserved in the registered Dockerfile.",
+            keyword
+        )));
+    }
 
     let ctx = resolve_build_context(options.clone()).await?;
 
@@ -1135,6 +1167,7 @@ fn load_dockerfile_text_plan(
             .to_path_buf()
     };
     let mut base_image: Option<String> = None;
+    let mut ignored_instructions: Vec<(usize, String)> = Vec::new();
 
     for (line_number, line) in logical_dockerfile_lines(&dockerfile_text) {
         let (keyword, value) = split_instruction(&line, line_number)?;
@@ -1146,7 +1179,18 @@ fn load_dockerfile_text_plan(
                 )));
             }
             base_image = Some(parse_from_value(&value, line_number)?);
+            continue;
         }
+        if UNSUPPORTED_DOCKERFILE_INSTRUCTIONS.contains(&keyword.as_str()) {
+            return Err(SandboxImageBuildError::other(format!(
+                "line {}: Dockerfile instruction '{}' is not supported for sandbox image creation",
+                line_number, keyword
+            )));
+        }
+        if IGNORED_DOCKERFILE_INSTRUCTIONS.contains(&keyword.as_str()) {
+            ignored_instructions.push((line_number, keyword));
+        }
+        let _ = value;
     }
 
     let base_image = base_image.ok_or_else(|| {
@@ -1160,6 +1204,7 @@ fn load_dockerfile_text_plan(
             .unwrap_or_else(|| default_registered_name(&absolute_path)),
         dockerfile_text,
         base_image,
+        ignored_instructions,
     })
 }
 
@@ -1450,7 +1495,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let dockerfile_path = temp_dir.path().join("Dockerfile");
         let mut file = std::fs::File::create(&dockerfile_path).unwrap();
-        writeln!(file, "FROM python:3.12-slim\nUSER app\nRUN echo hi").unwrap();
+        writeln!(file, "FROM python:3.12-slim\nWORKDIR /app\nRUN echo hi").unwrap();
 
         let plan = load_dockerfile_plan(&dockerfile_path, None).unwrap();
         assert_eq!(plan.base_image, "python:3.12-slim");
@@ -1458,6 +1503,72 @@ mod tests {
             plan.registered_name,
             temp_dir.path().file_name().unwrap().to_string_lossy()
         );
+        assert!(plan.ignored_instructions.is_empty());
+    }
+
+    #[test]
+    fn load_dockerfile_plan_rejects_unsupported_instructions() {
+        for instruction in ["ARG FOO=1", "ONBUILD RUN echo", "SHELL [\"/bin/bash\"]", "USER app"] {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let dockerfile_path = temp_dir.path().join("Dockerfile");
+            std::fs::write(
+                &dockerfile_path,
+                format!("FROM python:3.12-slim\n{}\n", instruction),
+            )
+            .unwrap();
+
+            let error = load_dockerfile_plan(&dockerfile_path, None).unwrap_err();
+            let keyword = instruction.split_whitespace().next().unwrap();
+            let expected = format!(
+                "line 2: Dockerfile instruction '{}' is not supported for sandbox image creation",
+                keyword
+            );
+            assert!(
+                error.to_string().contains(&expected),
+                "instruction {instruction}: expected {expected:?} in {error}",
+            );
+        }
+    }
+
+    #[test]
+    fn load_dockerfile_plan_collects_ignored_instructions() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dockerfile_path = temp_dir.path().join("Dockerfile");
+        std::fs::write(
+            &dockerfile_path,
+            "FROM python:3.12-slim\n\
+             LABEL maintainer=alice\n\
+             EXPOSE 8080\n\
+             CMD [\"python\", \"-m\", \"http.server\"]\n\
+             ENTRYPOINT [\"/usr/bin/env\"]\n\
+             HEALTHCHECK CMD echo ok\n\
+             STOPSIGNAL SIGTERM\n\
+             VOLUME /data\n\
+             RUN echo hi\n",
+        )
+        .unwrap();
+
+        let plan = load_dockerfile_plan(&dockerfile_path, None).unwrap();
+        let keywords: Vec<&str> = plan
+            .ignored_instructions
+            .iter()
+            .map(|(_, kw)| kw.as_str())
+            .collect();
+        assert_eq!(
+            keywords,
+            vec![
+                "LABEL",
+                "EXPOSE",
+                "CMD",
+                "ENTRYPOINT",
+                "HEALTHCHECK",
+                "STOPSIGNAL",
+                "VOLUME",
+            ]
+        );
+        // Dockerfile text is preserved verbatim so the rootfs builder still
+        // sees the same instructions.
+        assert!(plan.dockerfile_text.contains("EXPOSE 8080"));
     }
 
     #[test]
@@ -1566,6 +1677,7 @@ mod tests {
             registered_name: "child".to_string(),
             dockerfile_text: "FROM alpine\nRUN echo hi\n".to_string(),
             base_image: "alpine".to_string(),
+            ignored_instructions: Vec::new(),
         };
 
         let spec = build_rootfs_spec(
@@ -1594,6 +1706,7 @@ mod tests {
             registered_name: "child".to_string(),
             dockerfile_text: "FROM parent\nRUN echo hi\n".to_string(),
             base_image: "parent".to_string(),
+            ignored_instructions: Vec::new(),
         };
 
         let spec = build_rootfs_spec(&prepared_spec, &prepared, &plan, None, None).unwrap();
