@@ -1,5 +1,0 @@
-# Native binaries produced by `napi build`.
-# These are published from CI into per-platform subpackages under npm/.
-*.node
-node_modules/
-npm/*/*.node

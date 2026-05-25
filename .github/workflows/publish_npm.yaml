@@ -95,11 +95,56 @@ jobs:
           name: cli-${{ matrix.target_id }}
           path: typescript/dist/bin/${{ matrix.target_id }}
 
+  build-native-binaries:
+    name: Build native binding (${{ matrix.target_id }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target_id: linux-x64
+          - os: macos-14
+            target_id: darwin-arm64
+          - os: windows-latest
+            target_id: win32-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: typescript/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust-no-bin
+          cache-bin: false
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build native binding
+        run: npm run build:native
+
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.target_id }}
+          path: typescript/dist/native/${{ matrix.target_id }}
+
   publish:
     name: Publish to npm
     needs:
       - build-sdk-and-test
       - build-cli-binaries
+      - build-native-binaries
     runs-on: ubuntu-latest
     environment:
       name: npm
@@ -143,6 +188,24 @@ jobs:
         with:
           name: cli-win32-x64
           path: typescript/dist/bin/win32-x64
+
+      - name: Download Linux native artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: native-linux-x64
+          path: typescript/dist/native/linux-x64
+
+      - name: Download macOS arm64 native artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: native-darwin-arm64
+          path: typescript/dist/native/darwin-arm64
+
+      - name: Download Windows x64 native artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: native-win32-x64
+          path: typescript/dist/native/win32-x64
 
       - name: Restore executable bits for Unix CLI binaries
         run: find dist/bin -type f ! -name "*.exe" -exec chmod 755 {} +

@@ -92,6 +92,11 @@ jobs:
         run: |
           python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy tensorlake.cli.build_images
 
+      - name: Build Node.js native binding
+        env:
+          CARGO_TARGET_DIR: target
+        run: cargo build --release -p tensorlake-rust-cloud-sdk-node --target x86_64-pc-windows-msvc
+
   run_tests:
     name: Lint and test
     runs-on: ubuntu-latest-xlarge

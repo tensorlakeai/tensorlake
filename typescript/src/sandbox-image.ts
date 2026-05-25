@@ -92,9 +92,15 @@ function loadNativeBinding(): NativeBinding {
   if (cachedNativeBinding) return cachedNativeBinding;
   if (cachedNativeBindingError) throw cachedNativeBindingError;
   try {
-    cachedNativeBinding = resolveRequire()(
-      "@tensorlake/native",
-    ) as NativeBinding;
+    // The native binding is staged per-platform under
+    // `typescript/dist/native/<triple>/tensorlake-node.node`. Loading goes
+    // through the same helper the CLI binaries use so platform detection
+    // stays in one place (`typescript/lib/runtime.cjs`). Deferred require so
+    // the CJS bundle doesn't trip the `import.meta.url` → undefined fallback.
+    const { loadNative } = resolveRequire()("../lib/runtime.cjs") as {
+      loadNative: () => NativeBinding;
+    };
+    cachedNativeBinding = loadNative();
     return cachedNativeBinding;
   } catch (error) {
     cachedNativeBindingError =
