@@ -1,0 +1,20 @@
+[package]
+name = "tensorlake-rust-cloud-sdk-node"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+description = "napi-rs bindings for the Tensorlake Rust cloud SDK (Node.js consumers)"
+
+[lib]
+name = "tensorlake_node"
+crate-type = ["cdylib"]
+
+[dependencies]
+tensorlake = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+napi = { workspace = true }
+napi-derive = { workspace = true }
+
+[build-dependencies]
+napi-build = { workspace = true }

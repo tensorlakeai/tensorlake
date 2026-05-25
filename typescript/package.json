@@ -67,6 +67,7 @@
     "vitest": "^2.0.0"
   },
   "dependencies": {
+    "@tensorlake/native": "0.5.17",
     "undici": "^8.1.0",
     "ws": "^8.20.0"
   }
