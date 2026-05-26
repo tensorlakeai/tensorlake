@@ -208,7 +208,15 @@ enum UnresolvableImageReferenceReason {
 struct PreparedSandboxTemplateBuild {
     build_id: String,
     snapshot_id: String,
-    snapshot_uri: String,
+    /// Optional during and after the versioned-response rollout: platform-api
+    /// is moving the snapshot location off of a pre-baked `snapshotUri` and
+    /// onto `snapshotRelPath` (resolved client-side via
+    /// `SandboxProxyClient::sign_blob`). When absent here, the in-sandbox
+    /// builder's `metadata.json` carries the final URI it uploaded to, which
+    /// `complete_request_from_metadata` forwards to platform-api on
+    /// completion.
+    #[serde(default)]
+    snapshot_uri: Option<String>,
     rootfs_node_kind: String,
     builder: PreparedRootfsBuilder,
     parent: Option<PreparedRootfsParent>,
@@ -1126,8 +1134,20 @@ fn complete_request_from_metadata(
     Ok(CompleteSandboxTemplateBuildRequest {
         snapshot_id: metadata_string(metadata, "snapshot_id", "snapshotId")
             .unwrap_or_else(|| prepared.snapshot_id.clone()),
+        // `prepared.snapshot_uri` is optional on the new path (platform-api
+        // ships `snapshotRelPath` instead). The in-sandbox builder always
+        // knows where it landed the upload, so its metadata.json is the
+        // authoritative source post-build; the prepared value is just a
+        // fallback for the legacy path. If neither has it, that's a real
+        // bug — surface it clearly instead of POSTing an empty string.
         snapshot_uri: metadata_string(metadata, "snapshot_uri", "snapshotUri")
-            .unwrap_or_else(|| prepared.snapshot_uri.clone()),
+            .or_else(|| prepared.snapshot_uri.clone())
+            .ok_or_else(|| {
+                SandboxImageBuildError::other(
+                    "rootfs build completed without snapshot_uri (missing from both \
+                     platform-api prepared spec and in-sandbox builder metadata)",
+                )
+            })?,
         snapshot_format_version: required_metadata_string(
             metadata,
             "snapshot_format_version",
@@ -2273,6 +2293,37 @@ mod tests {
         }))
         .unwrap();
         assert!(without_rel_path.snapshot_rel_path.is_none());
+        assert_eq!(
+            without_rel_path.snapshot_uri.as_deref(),
+            Some("s3://bucket/snapshot.tlsnap")
+        );
+    }
+
+    #[test]
+    fn prepared_deserializes_without_snapshot_uri() {
+        // Forward-compat with platform-api dropping `snapshotUri` once the
+        // versioned-response rollout finishes: the CLI must still accept
+        // the response and rely on the in-sandbox builder's metadata.json
+        // for the final URI.
+        let prepared: PreparedSandboxTemplateBuild = serde_json::from_value(json!({
+            "buildId": "build-1",
+            "snapshotId": "snapshot-1",
+            "snapshotRelPath": "snapshots/abc.tlsnap",
+            "rootfsNodeKind": "base",
+            "builder": {
+                "image": "tensorlake/rootfs-builder",
+                "command": "tl-rootfs-build",
+                "cpus": 2,
+                "memoryMb": 4096,
+                "diskMb": 30720
+            }
+        }))
+        .unwrap();
+        assert!(prepared.snapshot_uri.is_none());
+        assert_eq!(
+            prepared.snapshot_rel_path.as_deref(),
+            Some("snapshots/abc.tlsnap")
+        );
     }
 
     #[test]
@@ -2434,6 +2485,44 @@ mod tests {
     }
 
     #[test]
+    fn complete_request_uses_metadata_snapshot_uri_when_prepared_omits_it() {
+        // On the new (snapshotRelPath) path platform-api will stop emitting
+        // `snapshotUri` on the prepared response. The in-sandbox builder's
+        // metadata.json then becomes the authoritative source for the URI
+        // we forward to platform-api on completion.
+        let mut prepared = prepared_build("base");
+        prepared.parent = None;
+        prepared.snapshot_uri = None;
+        let metadata = json!({
+            "snapshot_uri": "s3://bucket/from-metadata.tlsnap",
+            "snapshot_format_version": "durable_archive_v1",
+            "snapshot_size_bytes": 1234,
+            "rootfs_disk_bytes": 10 * 1024 * 1024 * 1024_u64
+        });
+
+        let request = complete_request_from_metadata(&prepared, &metadata).unwrap();
+        assert_eq!(request.snapshot_uri, "s3://bucket/from-metadata.tlsnap");
+    }
+
+    #[test]
+    fn complete_request_errors_when_snapshot_uri_missing_from_both_sources() {
+        let mut prepared = prepared_build("base");
+        prepared.parent = None;
+        prepared.snapshot_uri = None;
+        let metadata = json!({
+            "snapshot_format_version": "durable_archive_v1",
+            "snapshot_size_bytes": 1234,
+            "rootfs_disk_bytes": 10 * 1024 * 1024 * 1024_u64
+        });
+
+        let error = complete_request_from_metadata(&prepared, &metadata).unwrap_err();
+        assert!(
+            error.to_string().contains("snapshot_uri"),
+            "expected snapshot_uri error, got: {error}"
+        );
+    }
+
+    #[test]
     fn complete_request_uses_prepared_parent_for_diff_when_metadata_omits_it() {
         let prepared = prepared_build("diff");
         let metadata = json!({
@@ -2484,7 +2573,7 @@ mod tests {
         PreparedSandboxTemplateBuild {
             build_id: "build-1".to_string(),
             snapshot_id: "snapshot-prepared".to_string(),
-            snapshot_uri: "s3://bucket/prepared.tlsnap".to_string(),
+            snapshot_uri: Some("s3://bucket/prepared.tlsnap".to_string()),
             rootfs_node_kind: rootfs_node_kind.to_string(),
             builder: PreparedRootfsBuilder {
                 image: "tensorlake/rootfs-builder".to_string(),
