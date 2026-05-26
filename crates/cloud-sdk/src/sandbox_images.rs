@@ -1003,7 +1003,9 @@ fn rootfs_disk_bytes_to_mb(rootfs_disk_bytes: u64) -> Result<u64> {
 const MULTIPART_PART_SIZE_MB: u64 = 64;
 const MULTIPART_PART_SIZE_BYTES: u64 = MULTIPART_PART_SIZE_MB * 1024 * 1024;
 
-/// S3 caps a multipart upload at 10,000 parts.
+/// S3 caps a multipart upload at 10,000 parts. The dataplane's `sign_blob`
+/// endpoint enforces the same ceiling (`MAX_MULTIPART_PARTS` in
+/// `indexify/crates/dataplane/src/sign_blob.rs`); keep these in sync.
 const MULTIPART_MAX_PARTS: u32 = 10_000;
 
 async fn resolved_docker_config_json() -> Result<Option<String>> {
