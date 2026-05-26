@@ -390,10 +390,13 @@ where
         // produced it — preserving the platform-api ↔ in-sandbox-builder
         // passthrough property.
         //
-        // The op is always multipart per the rollout design decision; the
-        // part count comes from the rootfs disk budget, clamped to
-        // [1, MULTIPART_MAX_PARTS] so a 0 MB hint still produces a valid
-        // op and absurd inputs don't blow past S3's 10,000-part ceiling.
+        // The op is always multipart per the rollout design decision. We
+        // don't know the final snapshot file size until the in-sandbox
+        // builder finishes and writes metadata.json, so the part count uses
+        // the rootfs disk budget (`rootfsDiskBytes`) as a pre-build upper
+        // bound. Clamp to [1, MULTIPART_MAX_PARTS] so a 0 MB hint still
+        // produces a valid op and absurd inputs don't blow past S3's
+        // 10,000-part ceiling.
         //
         // Legacy path: `snapshot_rel_path` is absent, the upload block is
         // already in `prepared_spec`, and we do nothing here.
