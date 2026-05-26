@@ -653,7 +653,11 @@ enum ImageCommands {
     },
 
     /// List all sandbox images
-    Ls,
+    Ls {
+        /// Print the sandbox image list as JSON to stdout
+        #[arg(long = "json", hide = true)]
+        json: bool,
+    },
 
     /// Show details for a sandbox image
     Describe {
@@ -1145,7 +1149,9 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             )
                             .await
                         }
-                        ImageCommands::Ls => commands::sbx::image::ls::run(ctx).await,
+                        ImageCommands::Ls { json } => {
+                            commands::sbx::image::ls::run(ctx, json).await
+                        }
                         ImageCommands::Describe { name_or_id } => {
                             commands::sbx::image::describe::run(ctx, &name_or_id).await
                         }

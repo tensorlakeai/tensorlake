@@ -4,11 +4,16 @@ use crate::auth::context::CliContext;
 use crate::error::Result;
 use crate::output::table::new_table;
 
-pub async fn run(ctx: &CliContext) -> Result<()> {
+pub async fn run(ctx: &CliContext, output_json: bool) -> Result<()> {
     let (base_url, _, _) = super::templates_base_url(ctx)?;
     let client = ctx.client()?;
 
     let items = super::list_all_images(ctx, &client, &base_url).await?;
+
+    if output_json {
+        println!("{}", serde_json::to_string_pretty(&items)?);
+        return Ok(());
+    }
 
     if items.is_empty() {
         println!("No images found.");
