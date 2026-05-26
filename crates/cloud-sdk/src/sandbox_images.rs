@@ -407,7 +407,8 @@ where
                 .clamp(1, MULTIPART_MAX_PARTS as u64) as u32;
             let signed = proxy
                 .sign_blob(&SignBlobRequest {
-                    rel_path,
+                    rel_path: Some(rel_path),
+                    uri: None,
                     op: BlobOp::MultipartPut {
                         parts,
                         part_size_bytes: MULTIPART_PART_SIZE_BYTES,
@@ -420,6 +421,29 @@ where
                 .as_object_mut()
                 .ok_or_else(|| SandboxImageBuildError::other("prepared spec is not a JSON object"))?
                 .insert("upload".to_string(), signed);
+
+            if let Some(parent) = prepared.parent.as_ref() {
+                let signed = proxy
+                    .sign_blob(&SignBlobRequest {
+                        rel_path: None,
+                        uri: Some(parent.parent_manifest_uri.clone()),
+                        op: BlobOp::SingleGet,
+                    })
+                    .await
+                    .map_err(SandboxImageBuildError::Sdk)?
+                    .into_inner();
+                prepared_spec
+                    .as_object_mut()
+                    .ok_or_else(|| {
+                        SandboxImageBuildError::other("prepared spec is not a JSON object")
+                    })?
+                    .get_mut("parent")
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(|| {
+                        SandboxImageBuildError::other("prepared parent is not a JSON object")
+                    })?
+                    .insert("download".to_string(), signed);
+            }
         }
 
         upload_build_inputs(

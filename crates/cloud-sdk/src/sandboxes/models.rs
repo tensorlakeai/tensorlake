@@ -363,24 +363,25 @@ pub struct ListDirectoryResponse {
     pub entries: Vec<DirectoryEntry>,
 }
 
-/// Request body for `POST /api/v1/blob/sign`. The proxy converts the
-/// `rel_path` returned by platform-api into a concrete upload spec (single-PUT
-/// presigned URL or multipart parts), keeping the platform-api ↔ in-sandbox
+/// Request body for `POST /api/v1/blob/sign`. The proxy converts either the
+/// `rel_path` returned by platform-api or a full parent snapshot URI into a
+/// concrete upload/download spec, keeping the platform-api ↔ in-sandbox
 /// builder contract opaque to the SDK.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SignBlobRequest {
-    pub rel_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rel_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
     pub op: BlobOp,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BlobOp {
+    SingleGet,
     SinglePut,
-    MultipartPut {
-        parts: u32,
-        part_size_bytes: u64,
-    },
+    MultipartPut { parts: u32, part_size_bytes: u64 },
 }
 
 #[cfg(test)]
