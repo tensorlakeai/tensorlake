@@ -391,9 +391,9 @@ where
         // passthrough property.
         //
         // The op is always multipart per the rollout design decision; the
-        // part count comes from the rootfs disk budget (clamped to ≥ 1 so
-        // a 0 MB hint still produces a valid op, saturated at u32::MAX so
-        // we never silently truncate on absurd inputs).
+        // part count comes from the rootfs disk budget, clamped to
+        // [1, MULTIPART_MAX_PARTS] so a 0 MB hint still produces a valid
+        // op and absurd inputs don't blow past S3's 10,000-part ceiling.
         //
         // Legacy path: `snapshot_rel_path` is absent, the upload block is
         // already in `prepared_spec`, and we do nothing here.
@@ -401,9 +401,7 @@ where
             let disk_mb = rootfs_disk_bytes_to_mb(rootfs_disk_bytes)?;
             let parts: u32 = disk_mb
                 .div_ceil(MULTIPART_PART_SIZE_MB)
-                .max(1)
-                .try_into()
-                .unwrap_or(u32::MAX);
+                .clamp(1, MULTIPART_MAX_PARTS as u64) as u32;
             let signed = proxy
                 .sign_blob(&SignBlobRequest {
                     rel_path,
@@ -971,10 +969,11 @@ fn rootfs_disk_bytes_to_mb(rootfs_disk_bytes: u64) -> Result<u64> {
 }
 
 /// Part size used when the new-path `sign_blob` flow asks the proxy for a
-/// multipart upload. Picked to keep part count low for typical rootfs sizes
-/// (a 10 GB rootfs → 103 parts) while staying well under the 5 GB per-part
-/// S3 ceiling. Used directly by the splice in `build_sandbox_image`.
-const MULTIPART_PART_SIZE_MB: u64 = 100;
+/// multipart upload. Used directly by the splice in `build_sandbox_image`.
+const MULTIPART_PART_SIZE_MB: u64 = 64;
+
+/// S3 caps a multipart upload at 10,000 parts.
+const MULTIPART_MAX_PARTS: u32 = 10_000;
 
 async fn resolved_docker_config_json() -> Result<Option<String>> {
     let docker_config = DockerConfig::load().await.map_err(|error| {
