@@ -368,7 +368,6 @@ pub struct ListDirectoryResponse {
 /// presigned URL or multipart parts), keeping the platform-api ↔ in-sandbox
 /// builder contract opaque to the SDK.
 #[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct SignBlobRequest {
     pub rel_path: String,
     pub op: BlobOp,
