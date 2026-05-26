@@ -390,12 +390,25 @@ where
         // produced it — preserving the platform-api ↔ in-sandbox-builder
         // passthrough property.
         //
+        // The op is always multipart per the rollout design decision; the
+        // part count comes from the rootfs disk budget (clamped to ≥ 1 so
+        // a 0 MB hint still produces a valid op, saturated at u32::MAX so
+        // we never silently truncate on absurd inputs).
+        //
         // Legacy path: `snapshot_rel_path` is absent, the upload block is
         // already in `prepared_spec`, and we do nothing here.
         if let Some(rel_path) = prepared.snapshot_rel_path.clone() {
-            let op = pick_upload_op(disk_mb_for_upload(&prepared, options.disk_mb)?);
+            let disk_mb = rootfs_disk_bytes_to_mb(rootfs_disk_bytes)?;
+            let parts: u32 = disk_mb
+                .div_ceil(MULTIPART_PART_SIZE_MB)
+                .max(1)
+                .try_into()
+                .unwrap_or(u32::MAX);
             let signed = proxy
-                .sign_blob(&SignBlobRequest { rel_path, op })
+                .sign_blob(&SignBlobRequest {
+                    rel_path,
+                    op: BlobOp::MultipartPut { parts },
+                })
                 .await
                 .map_err(SandboxImageBuildError::Sdk)?
                 .into_inner();
@@ -960,31 +973,8 @@ fn rootfs_disk_bytes_to_mb(rootfs_disk_bytes: u64) -> Result<u64> {
 /// Part size used when the new-path `sign_blob` flow asks the proxy for a
 /// multipart upload. Picked to keep part count low for typical rootfs sizes
 /// (a 10 GB rootfs → 103 parts) while staying well under the 5 GB per-part
-/// S3 ceiling.
+/// S3 ceiling. Used directly by the splice in `build_sandbox_image`.
 const MULTIPART_PART_SIZE_MB: u64 = 100;
-
-/// Map a rootfs disk budget (in MB) to an upload op for `sign_blob`. We
-/// always pick multipart on the new path — even small rootfs builds benefit
-/// from parallel uploads, and the proxy/handler can degenerate a 1-part
-/// multipart into the simple case if it wants. The part count is clamped to
-/// at least 1 (so a 0 MB hint still produces a valid op) and saturates at
-/// `u32::MAX` (so we never silently truncate on absurd inputs).
-fn pick_upload_op(disk_mb: u64) -> BlobOp {
-    let parts = disk_mb.div_ceil(MULTIPART_PART_SIZE_MB).max(1);
-    BlobOp::MultipartPut {
-        parts: parts.try_into().unwrap_or(u32::MAX),
-    }
-}
-
-/// Size hint passed to `pick_upload_op`. Mirrors the same precedence
-/// `rootfs_disk_bytes` already encodes (explicit `--disk_mb` → parent's
-/// `rootfs_disk_bytes` for diff builds → default), then rounds up to MB.
-fn disk_mb_for_upload(
-    prepared: &PreparedSandboxTemplateBuild,
-    disk_mb: Option<u64>,
-) -> Result<u64> {
-    rootfs_disk_bytes_to_mb(rootfs_disk_bytes(disk_mb, prepared)?)
-}
 
 async fn resolved_docker_config_json() -> Result<Option<String>> {
     let docker_config = DockerConfig::load().await.map_err(|error| {
@@ -1914,11 +1904,11 @@ fn is_dockerignored(
 #[cfg(test)]
 mod tests {
     use super::{
-        BlobOp, CompleteSandboxTemplateBuildRequest, MULTIPART_PART_SIZE_MB, PreparedRootfsBuilder,
-        PreparedRootfsParent, PreparedSandboxTemplateBuild, build_rootfs_spec, collect_dir_files,
+        CompleteSandboxTemplateBuildRequest, PreparedRootfsBuilder, PreparedRootfsParent,
+        PreparedSandboxTemplateBuild, build_rootfs_spec, collect_dir_files,
         complete_request_from_metadata, default_registered_name, load_dockerfile_plan,
-        load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix, pick_upload_op,
-        rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
+        load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix, rootfs_builder_env,
+        rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
         streaming_process_payload,
     };
     use serde_json::{Value, json};
@@ -2219,38 +2209,6 @@ mod tests {
     fn rootfs_disk_bytes_to_mb_rounds_up() {
         assert_eq!(rootfs_disk_bytes_to_mb(1024 * 1024).unwrap(), 1);
         assert_eq!(rootfs_disk_bytes_to_mb((1024 * 1024) + 1).unwrap(), 2);
-    }
-
-    #[test]
-    fn pick_upload_op_clamps_zero_to_single_part() {
-        match pick_upload_op(0) {
-            BlobOp::MultipartPut { parts } => assert_eq!(parts, 1),
-            other => panic!("expected MultipartPut, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pick_upload_op_uses_one_part_at_exact_boundary() {
-        match pick_upload_op(MULTIPART_PART_SIZE_MB) {
-            BlobOp::MultipartPut { parts } => assert_eq!(parts, 1),
-            other => panic!("expected MultipartPut, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pick_upload_op_rolls_over_to_two_parts() {
-        match pick_upload_op(MULTIPART_PART_SIZE_MB + 1) {
-            BlobOp::MultipartPut { parts } => assert_eq!(parts, 2),
-            other => panic!("expected MultipartPut, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pick_upload_op_saturates_at_u32_max() {
-        match pick_upload_op(u64::MAX) {
-            BlobOp::MultipartPut { parts } => assert_eq!(parts, u32::MAX),
-            other => panic!("expected MultipartPut, got {other:?}"),
-        }
     }
 
     #[test]
