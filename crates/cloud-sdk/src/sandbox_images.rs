@@ -19,7 +19,10 @@ use crate::{
     resolve_sandbox_lifecycle_url,
     sandboxes::{
         SandboxProxyClient, SandboxesClient,
-        models::{CreateSandboxRequest, CreateSandboxResources, ProcessInfo, SandboxInfo},
+        models::{
+            BlobOp, CreateSandboxRequest, CreateSandboxResources, ProcessInfo, SandboxInfo,
+            SignBlobRequest,
+        },
     },
 };
 
@@ -209,6 +212,14 @@ struct PreparedSandboxTemplateBuild {
     rootfs_node_kind: String,
     builder: PreparedRootfsBuilder,
     parent: Option<PreparedRootfsParent>,
+    /// New-path marker: when present, platform-api stopped pre-signing S3 and
+    /// the CLI must call `SandboxProxyClient::sign_blob` to mint the upload
+    /// spec. When absent, the response carries an embedded `upload` block in
+    /// the raw passthrough `Value` (legacy path). Everything else about the
+    /// prepared spec stays opaque to the SDK to preserve the
+    /// platform-api ↔ in-sandbox-builder forward-compat property.
+    #[serde(default)]
+    snapshot_rel_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -295,7 +306,7 @@ where
         "Preparing rootfs build...".to_string(),
     ));
     let platform_client = platform_client(&ctx)?;
-    let (prepared, prepared_spec) =
+    let (prepared, mut prepared_spec) =
         prepare_rootfs_build(&ctx, &platform_client, &plan, options.is_public).await?;
     emit(SandboxImageBuildEvent::Status(format!(
         "Build mode: Rootfs{}",
@@ -362,6 +373,30 @@ where
             routing_hint,
         )?;
         wait_for_proxy_ready(&proxy).await?;
+
+        // Versioned-response bridge: on the new path, platform-api returns
+        // `snapshotRelPath` instead of a pre-signed `upload` block, and we
+        // ask the sandbox proxy to mint the upload spec. Splice the result
+        // into the raw prepared spec so `upload_build_inputs` /
+        // `build_rootfs_spec` see an `upload` key regardless of which path
+        // produced it — preserving the platform-api ↔ in-sandbox-builder
+        // passthrough property.
+        //
+        // Legacy path: `snapshot_rel_path` is absent, the upload block is
+        // already in `prepared_spec`, and we do nothing here.
+        if let Some(rel_path) = prepared.snapshot_rel_path.clone() {
+            let op = pick_upload_op(disk_mb_for_upload(&prepared, options.disk_mb)?);
+            let signed = proxy
+                .sign_blob(&SignBlobRequest { rel_path, op })
+                .await
+                .map_err(SandboxImageBuildError::Sdk)?
+                .into_inner();
+            prepared_spec
+                .as_object_mut()
+                .ok_or_else(|| SandboxImageBuildError::other("prepared spec is not a JSON object"))?
+                .insert("upload".to_string(), signed);
+        }
+
         upload_build_inputs(
             &proxy,
             &plan,
@@ -912,6 +947,35 @@ fn rootfs_disk_bytes_to_mb(rootfs_disk_bytes: u64) -> Result<u64> {
             SandboxImageBuildError::usage("rootfsDiskBytes is too large to convert to megabytes")
         })
         .map(|bytes| bytes / (1024 * 1024))
+}
+
+/// Part size used when the new-path `sign_blob` flow asks the proxy for a
+/// multipart upload. Picked to keep part count low for typical rootfs sizes
+/// (a 10 GB rootfs → 103 parts) while staying well under the 5 GB per-part
+/// S3 ceiling.
+const MULTIPART_PART_SIZE_MB: u64 = 100;
+
+/// Map a rootfs disk budget (in MB) to an upload op for `sign_blob`. We
+/// always pick multipart on the new path — even small rootfs builds benefit
+/// from parallel uploads, and the proxy/handler can degenerate a 1-part
+/// multipart into the simple case if it wants. The part count is clamped to
+/// at least 1 (so a 0 MB hint still produces a valid op) and saturates at
+/// `u32::MAX` (so we never silently truncate on absurd inputs).
+fn pick_upload_op(disk_mb: u64) -> BlobOp {
+    let parts = disk_mb.div_ceil(MULTIPART_PART_SIZE_MB).max(1);
+    BlobOp::MultipartPut {
+        parts: parts.try_into().unwrap_or(u32::MAX),
+    }
+}
+
+/// Size hint passed to `pick_upload_op`. Mirrors the same precedence
+/// `rootfs_disk_bytes` already encodes (explicit `--disk_mb` → parent's
+/// `rootfs_disk_bytes` for diff builds → default), then rounds up to MB.
+fn disk_mb_for_upload(
+    prepared: &PreparedSandboxTemplateBuild,
+    disk_mb: Option<u64>,
+) -> Result<u64> {
+    rootfs_disk_bytes_to_mb(rootfs_disk_bytes(disk_mb, prepared)?)
 }
 
 async fn resolved_docker_config_json() -> Result<Option<String>> {
@@ -1830,11 +1894,11 @@ fn is_dockerignored(
 #[cfg(test)]
 mod tests {
     use super::{
-        CompleteSandboxTemplateBuildRequest, PreparedRootfsBuilder, PreparedRootfsParent,
-        PreparedSandboxTemplateBuild, build_rootfs_spec, collect_dir_files,
+        BlobOp, CompleteSandboxTemplateBuildRequest, MULTIPART_PART_SIZE_MB, PreparedRootfsBuilder,
+        PreparedRootfsParent, PreparedSandboxTemplateBuild, build_rootfs_spec, collect_dir_files,
         complete_request_from_metadata, default_registered_name, load_dockerfile_plan,
-        load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix, rootfs_builder_env,
-        rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
+        load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix, pick_upload_op,
+        rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
         streaming_process_payload,
     };
     use serde_json::{Value, json};
@@ -2138,6 +2202,80 @@ mod tests {
     }
 
     #[test]
+    fn pick_upload_op_clamps_zero_to_single_part() {
+        match pick_upload_op(0) {
+            BlobOp::MultipartPut { parts } => assert_eq!(parts, 1),
+            other => panic!("expected MultipartPut, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pick_upload_op_uses_one_part_at_exact_boundary() {
+        match pick_upload_op(MULTIPART_PART_SIZE_MB) {
+            BlobOp::MultipartPut { parts } => assert_eq!(parts, 1),
+            other => panic!("expected MultipartPut, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pick_upload_op_rolls_over_to_two_parts() {
+        match pick_upload_op(MULTIPART_PART_SIZE_MB + 1) {
+            BlobOp::MultipartPut { parts } => assert_eq!(parts, 2),
+            other => panic!("expected MultipartPut, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pick_upload_op_saturates_at_u32_max() {
+        match pick_upload_op(u64::MAX) {
+            BlobOp::MultipartPut { parts } => assert_eq!(parts, u32::MAX),
+            other => panic!("expected MultipartPut, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prepared_deserializes_snapshot_rel_path() {
+        let with_rel_path: PreparedSandboxTemplateBuild = serde_json::from_value(json!({
+            "buildId": "build-1",
+            "snapshotId": "snapshot-1",
+            "snapshotUri": "s3://bucket/snapshot.tlsnap",
+            "snapshotRelPath": "snapshots/abc.tlsnap",
+            "rootfsNodeKind": "base",
+            "builder": {
+                "image": "tensorlake/rootfs-builder",
+                "command": "tl-rootfs-build",
+                "cpus": 2,
+                "memoryMb": 4096,
+                "diskMb": 30720
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            with_rel_path.snapshot_rel_path.as_deref(),
+            Some("snapshots/abc.tlsnap")
+        );
+
+        // Legacy-shape fixture (no snapshotRelPath) must still deserialize
+        // and default to None — that's how the CLI tells the two paths
+        // apart at runtime.
+        let without_rel_path: PreparedSandboxTemplateBuild = serde_json::from_value(json!({
+            "buildId": "build-1",
+            "snapshotId": "snapshot-1",
+            "snapshotUri": "s3://bucket/snapshot.tlsnap",
+            "rootfsNodeKind": "base",
+            "builder": {
+                "image": "tensorlake/rootfs-builder",
+                "command": "tl-rootfs-build",
+                "cpus": 2,
+                "memoryMb": 4096,
+                "diskMb": 30720
+            }
+        }))
+        .unwrap();
+        assert!(without_rel_path.snapshot_rel_path.is_none());
+    }
+
+    #[test]
     fn build_rootfs_spec_adds_builder_inputs() {
         let prepared_spec = json!({
             "buildId": "build-1",
@@ -2359,6 +2497,7 @@ mod tests {
                 parent_manifest_uri: "s3://bucket/parent.tlsnap".to_string(),
                 rootfs_disk_bytes: Some(20 * 1024 * 1024 * 1024),
             }),
+            snapshot_rel_path: None,
         }
     }
 
