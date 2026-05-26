@@ -238,7 +238,11 @@ struct SshArgs {
     shell: String,
 
     /// Shell argument (repeatable)
-    #[arg(long = "shell-arg", allow_hyphen_values = true, requires = "sandbox_id")]
+    #[arg(
+        long = "shell-arg",
+        allow_hyphen_values = true,
+        requires = "sandbox_id"
+    )]
     shell_args: Vec<String>,
 
     /// Working directory
@@ -575,6 +579,10 @@ enum SbxCommands {
     /// Interactive shell in a sandbox, or manage native SSH keys
     Ssh(SshArgs),
 
+    /// Manage PTY sessions for a sandbox
+    #[command(subcommand)]
+    Pty(PtyCommands),
+
     /// Tunnel a local TCP port into a sandbox over WebSocket
     Tunnel {
         /// Sandbox ID
@@ -736,6 +744,48 @@ enum PortCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum PtyCommands {
+    /// List PTY sessions for a sandbox
+    #[command(name = "ls")]
+    Ls {
+        /// Sandbox ID or name
+        sandbox_id: String,
+
+        /// Show the full PTY token instead of a masked token
+        #[arg(long)]
+        show_token: bool,
+
+        /// Emit JSON suitable for scripting. Includes the full token.
+        #[arg(long = "json")]
+        output_json: bool,
+    },
+
+    /// Attach to an existing PTY session
+    Attach {
+        /// Sandbox ID or name
+        sandbox_id: String,
+
+        /// PTY session ID
+        session_id: String,
+
+        /// PTY token returned when the session was created
+        #[arg(long)]
+        token: String,
+    },
+
+    /// Remove one or more PTY sessions
+    #[command(name = "rm")]
+    Rm {
+        /// Sandbox ID or name
+        sandbox_id: String,
+
+        /// PTY session IDs
+        #[arg(required = true)]
+        session_ids: Vec<String>,
+    },
+}
+
 fn parse_user_port(value: &str) -> std::result::Result<u16, String> {
     let port = parse_tcp_port(value)?;
 
@@ -893,7 +943,9 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             }
         }
         Commands::Sbx(subcmd) => match subcmd {
-            SbxCommands::Ssh(ssh_args) if matches!(ssh_args.command, Some(SshCommands::Keys(_))) => {
+            SbxCommands::Ssh(ssh_args)
+                if matches!(ssh_args.command, Some(SshCommands::Keys(_))) =>
+            {
                 ensure_auth(ctx).await?;
                 match ssh_args.command {
                     Some(SshCommands::Keys(keys_cmd)) => run_ssh_keys_command(ctx, keys_cmd).await,
@@ -1094,6 +1146,27 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         )
                         .await
                     }
+                    SbxCommands::Pty(pty_cmd) => match pty_cmd {
+                        PtyCommands::Ls {
+                            sandbox_id,
+                            show_token,
+                            output_json,
+                        } => {
+                            commands::sbx::pty::list(ctx, &sandbox_id, show_token, output_json)
+                                .await
+                        }
+                        PtyCommands::Attach {
+                            sandbox_id,
+                            session_id,
+                            token,
+                        } => {
+                            commands::sbx::pty::attach(ctx, &sandbox_id, &session_id, &token).await
+                        }
+                        PtyCommands::Rm {
+                            sandbox_id,
+                            session_ids,
+                        } => commands::sbx::pty::remove(ctx, &sandbox_id, &session_ids).await,
+                    },
                     SbxCommands::Image(image_cmd) => match image_cmd {
                         ImageCommands::Register {
                             image_name,
@@ -1569,6 +1642,89 @@ mod tests {
                 ..
             })) => {}
             _ => panic!("expected sbx ssh keys ls command"),
+        }
+    }
+
+    #[test]
+    fn sbx_pty_ls_parses() {
+        let cli = Cli::try_parse_from(["tl", "sbx", "pty", "ls", "sbx-123"]).unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Pty(PtyCommands::Ls {
+                sandbox_id,
+                show_token,
+                output_json,
+            })) => {
+                assert_eq!(sandbox_id, "sbx-123");
+                assert!(!show_token);
+                assert!(!output_json);
+            }
+            _ => panic!("expected sbx pty ls command"),
+        }
+    }
+
+    #[test]
+    fn sbx_pty_ls_with_token_flags_parses() {
+        let cli = Cli::try_parse_from([
+            "tl",
+            "sbx",
+            "pty",
+            "ls",
+            "sbx-123",
+            "--show-token",
+            "--json",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Pty(PtyCommands::Ls {
+                sandbox_id,
+                show_token,
+                output_json,
+            })) => {
+                assert_eq!(sandbox_id, "sbx-123");
+                assert!(show_token);
+                assert!(output_json);
+            }
+            _ => panic!("expected sbx pty ls command"),
+        }
+    }
+
+    #[test]
+    fn sbx_pty_attach_parses() {
+        let cli = Cli::try_parse_from([
+            "tl", "sbx", "pty", "attach", "sbx-123", "sess-1", "--token", "tok-1",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Pty(PtyCommands::Attach {
+                sandbox_id,
+                session_id,
+                token,
+            })) => {
+                assert_eq!(sandbox_id, "sbx-123");
+                assert_eq!(session_id, "sess-1");
+                assert_eq!(token, "tok-1");
+            }
+            _ => panic!("expected sbx pty attach command"),
+        }
+    }
+
+    #[test]
+    fn sbx_pty_rm_parses_multiple_session_ids() {
+        let cli =
+            Cli::try_parse_from(["tl", "sbx", "pty", "rm", "sbx-123", "sess-1", "sess-2"]).unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Pty(PtyCommands::Rm {
+                sandbox_id,
+                session_ids,
+            })) => {
+                assert_eq!(sandbox_id, "sbx-123");
+                assert_eq!(session_ids, vec!["sess-1", "sess-2"]);
+            }
+            _ => panic!("expected sbx pty rm command"),
         }
     }
 
