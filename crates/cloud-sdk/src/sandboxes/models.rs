@@ -377,7 +377,10 @@ pub struct SignBlobRequest {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BlobOp {
     SinglePut,
-    MultipartPut { parts: u32 },
+    MultipartPut {
+        parts: u32,
+        part_size_bytes: u64,
+    },
 }
 
 #[cfg(test)]

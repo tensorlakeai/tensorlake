@@ -408,7 +408,10 @@ where
             let signed = proxy
                 .sign_blob(&SignBlobRequest {
                     rel_path,
-                    op: BlobOp::MultipartPut { parts },
+                    op: BlobOp::MultipartPut {
+                        parts,
+                        part_size_bytes: MULTIPART_PART_SIZE_BYTES,
+                    },
                 })
                 .await
                 .map_err(SandboxImageBuildError::Sdk)?
@@ -974,6 +977,7 @@ fn rootfs_disk_bytes_to_mb(rootfs_disk_bytes: u64) -> Result<u64> {
 /// Part size used when the new-path `sign_blob` flow asks the proxy for a
 /// multipart upload. Used directly by the splice in `build_sandbox_image`.
 const MULTIPART_PART_SIZE_MB: u64 = 64;
+const MULTIPART_PART_SIZE_BYTES: u64 = MULTIPART_PART_SIZE_MB * 1024 * 1024;
 
 /// S3 caps a multipart upload at 10,000 parts.
 const MULTIPART_MAX_PARTS: u32 = 10_000;
