@@ -46,7 +46,7 @@ from .models import (
     SnapshotWaitCondition,
     StdinMode,
 )
-from .pty import Pty
+from .pty import AsyncPty, Pty
 from .sandbox import Sandbox
 
 __all__ = [
@@ -57,6 +57,7 @@ __all__ = [
     "Sandbox",
     "AsyncSandbox",
     "Pty",
+    "AsyncPty",
     "Desktop",
     # Lifecycle models
     "SandboxStatus",

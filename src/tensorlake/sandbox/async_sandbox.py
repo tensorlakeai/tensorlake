@@ -12,10 +12,12 @@ import os
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
-from tensorlake._tracing import USER_AGENT, Traced, TracedIterator
+import httpx
+
+from tensorlake._tracing import USER_AGENT, Traced, TracedIterator, inject_traceparent
 
 from . import _defaults
-from .exceptions import SandboxConnectionError, SandboxError
+from .exceptions import RemoteAPIError, SandboxConnectionError, SandboxError
 from .models import (
     CheckpointType,
     CommandResult,
@@ -606,6 +608,135 @@ class AsyncSandbox:
             )
         except Exception as e:
             _raise_as_sandbox_error(e)
+
+    # --- PTY sessions ---
+
+    async def create_pty_session(
+        self,
+        command: str,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        working_dir: str | None = None,
+        rows: int = 24,
+        cols: int = 80,
+    ) -> Traced[dict]:
+        """Create an interactive PTY session.
+
+        Returns a Traced dict with ``session_id`` and ``token`` for WebSocket
+        connection via :meth:`pty_ws_url`.
+        """
+        payload: dict = {"command": command, "rows": rows, "cols": cols}
+        if args is not None:
+            payload["args"] = args
+        if env is not None:
+            payload["env"] = env
+        if working_dir is not None:
+            payload["working_dir"] = working_dir
+
+        try:
+            trace_id, response_json = (
+                await self._rust_client.create_pty_session_json_async(
+                    json.dumps(payload)
+                )
+            )
+            return Traced(trace_id, json.loads(response_json))
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    def pty_ws_url(self, session_id: str, token: str) -> str:
+        """Construct the WebSocket URL for a PTY session.
+
+        The token is NOT included in the URL query string to avoid leaking it
+        into proxy/CDN access logs. Callers should send the token via the
+        ``X-PTY-Token`` header on the WebSocket upgrade request instead.
+        """
+        base = self._base_url.rstrip("/")
+        if base.startswith("https://"):
+            ws_base = "wss://" + base[8:]
+        elif base.startswith("http://"):
+            ws_base = "ws://" + base[7:]
+        else:
+            ws_base = base
+        return f"{ws_base}/api/v1/pty/{session_id}/ws"
+
+    async def connect_pty(
+        self,
+        session_id: str,
+        token: str,
+        *,
+        on_data=None,
+        on_exit=None,
+        connect_timeout: float = 10.0,
+    ):
+        """Attach to an existing PTY session and return a connected async handle."""
+        from .pty import build_async_pty_connection
+
+        pty = build_async_pty_connection(
+            session_id=session_id,
+            token=token,
+            ws_url=self.pty_ws_url(session_id, token),
+            http_url=f"{self._base_url.rstrip('/')}/api/v1/pty/{session_id}",
+            ws_headers=self._proxy_headers,
+            http_headers=self._proxy_headers,
+            connect_timeout=connect_timeout,
+        )
+        if on_data is not None:
+            pty.on_data(on_data)
+        if on_exit is not None:
+            pty.on_exit(on_exit)
+        return await pty.connect()
+
+    async def _delete_pty_session(
+        self, session_id: str, *, timeout: float = 10.0
+    ) -> None:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.delete(
+                f"{self._base_url.rstrip('/')}/api/v1/pty/{session_id}",
+                headers=inject_traceparent(self._proxy_headers),
+            )
+        if response.is_success or response.status_code == 404:
+            return
+        raise RemoteAPIError(response.status_code, response.text)
+
+    async def create_pty(
+        self,
+        command: str,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        working_dir: str | None = None,
+        rows: int = 24,
+        cols: int = 80,
+        *,
+        on_data=None,
+        on_exit=None,
+        connect_timeout: float = 10.0,
+    ):
+        """Create a PTY session, connect immediately, and return its handle."""
+        traced_session = await self.create_pty_session(
+            command=command,
+            args=args,
+            env=env,
+            working_dir=working_dir,
+            rows=rows,
+            cols=cols,
+        )
+        session = traced_session.value
+        try:
+            return await self.connect_pty(
+                session["session_id"],
+                session["token"],
+                on_data=on_data,
+                on_exit=on_exit,
+                connect_timeout=connect_timeout,
+            )
+        except Exception:
+            try:
+                await self._delete_pty_session(
+                    session["session_id"], timeout=connect_timeout
+                )
+            except Exception:
+                pass
+            raise
 
     # --- Health and info ---
 
