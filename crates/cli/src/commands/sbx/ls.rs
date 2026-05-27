@@ -51,10 +51,8 @@ pub async fn run(
 
     if !quiet {
         println!(
-            "{} sandbox{}, {} terminated hidden (use --all to show)",
-            count,
-            if count != 1 { "es" } else { "" },
-            terminated_hidden
+            "{}",
+            sandbox_summary(count, terminated_hidden, running_only, suspended_only)
         );
     }
 
@@ -374,11 +372,36 @@ fn is_terminated_sandbox(sandbox: &serde_json::Value) -> bool {
         .is_some_and(|status| status.eq_ignore_ascii_case("terminated"))
 }
 
+fn sandbox_summary(
+    count: usize,
+    terminated_hidden: usize,
+    running_only: bool,
+    suspended_only: bool,
+) -> String {
+    let noun = if count == 1 { "sandbox" } else { "sandboxes" };
+    let scope = if running_only {
+        "running "
+    } else if suspended_only {
+        "suspended "
+    } else {
+        ""
+    };
+    let mut summary = format!("{count} {scope}{noun}");
+
+    if terminated_hidden > 0 && !running_only && !suspended_only {
+        summary.push_str(&format!(
+            ", {terminated_hidden} terminated hidden (use --all to show them all)"
+        ));
+    }
+
+    summary
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         is_non_terminated_sandbox, is_running_sandbox, is_suspended_sandbox, is_terminated_sandbox,
-        next_sandbox_list_url,
+        next_sandbox_list_url, sandbox_summary,
     };
     use serde_json::json;
 
@@ -424,6 +447,29 @@ mod tests {
         assert!(!is_terminated_sandbox(&running));
         assert!(is_terminated_sandbox(&terminated));
         assert!(!is_terminated_sandbox(&pending));
+    }
+
+    #[test]
+    fn summary_mentions_hidden_terminated_for_default_listing() {
+        assert_eq!(
+            sandbox_summary(2, 3, false, false),
+            "2 sandboxes, 3 terminated hidden (use --all to show them all)"
+        );
+    }
+
+    #[test]
+    fn summary_omits_hidden_terminated_when_none_are_hidden() {
+        assert_eq!(sandbox_summary(1, 0, false, false), "1 sandbox");
+    }
+
+    #[test]
+    fn summary_describes_running_filter_without_hidden_terminated_hint() {
+        assert_eq!(sandbox_summary(2, 3, true, false), "2 running sandboxes");
+    }
+
+    #[test]
+    fn summary_describes_suspended_filter_without_hidden_terminated_hint() {
+        assert_eq!(sandbox_summary(1, 3, false, true), "1 suspended sandbox");
     }
 
     #[test]
