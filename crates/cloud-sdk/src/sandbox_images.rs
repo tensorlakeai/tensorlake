@@ -55,12 +55,6 @@ const ROOTFS_BUILDER_PATH: &str = "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 const ROOTFS_BUILDER_COMMAND: &str = "tl-rootfs-build";
 const ROOTFS_BUILDER_PROCESS_USER: &str = "root";
 
-/// Dockerfile instructions rejected during sandbox-image build. The rootfs
-/// builder hands the Dockerfile to `docker build` verbatim, so without this
-/// allowlist these instructions would silently take effect inside the
-/// resulting rootfs. Mirrors the historical Python/TS SDK behavior.
-const UNSUPPORTED_DOCKERFILE_INSTRUCTIONS: &[&str] = &["ARG", "ONBUILD", "SHELL", "USER"];
-
 /// Dockerfile instructions that affect image config (CMD, ENTRYPOINT, etc.)
 /// rather than the filesystem. `docker build --output type=tar` discards the
 /// image config, so these are effectively no-ops on the rootfs path — we warn
@@ -1181,12 +1175,6 @@ fn load_dockerfile_text_plan(
             base_image = Some(parse_from_value(&value, line_number)?);
             continue;
         }
-        if UNSUPPORTED_DOCKERFILE_INSTRUCTIONS.contains(&keyword.as_str()) {
-            return Err(SandboxImageBuildError::other(format!(
-                "line {}: Dockerfile instruction '{}' is not supported for sandbox image creation",
-                line_number, keyword
-            )));
-        }
         if IGNORED_DOCKERFILE_INSTRUCTIONS.contains(&keyword.as_str()) {
             ignored_instructions.push((line_number, keyword));
         }
@@ -1507,32 +1495,22 @@ mod tests {
     }
 
     #[test]
-    fn load_dockerfile_plan_rejects_unsupported_instructions() {
-        for instruction in [
-            "ARG FOO=1",
-            "ONBUILD RUN echo",
-            "SHELL [\"/bin/bash\"]",
-            "USER app",
-        ] {
-            let temp_dir = tempfile::tempdir().unwrap();
-            let dockerfile_path = temp_dir.path().join("Dockerfile");
-            std::fs::write(
-                &dockerfile_path,
-                format!("FROM python:3.12-slim\n{}\n", instruction),
-            )
-            .unwrap();
+    fn load_dockerfile_plan_preserves_builder_interpreted_instructions() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dockerfile_path = temp_dir.path().join("Dockerfile");
+        let dockerfile_text = "FROM python:3.12-slim\n\
+             ARG FOO=1\n\
+             SHELL [\"/bin/bash\", \"-lc\"]\n\
+             RUN echo \"$FOO\"\n\
+             USER app\n\
+             ONBUILD RUN echo child\n";
+        std::fs::write(&dockerfile_path, dockerfile_text).unwrap();
 
-            let error = load_dockerfile_plan(&dockerfile_path, None).unwrap_err();
-            let keyword = instruction.split_whitespace().next().unwrap();
-            let expected = format!(
-                "line 2: Dockerfile instruction '{}' is not supported for sandbox image creation",
-                keyword
-            );
-            assert!(
-                error.to_string().contains(&expected),
-                "instruction {instruction}: expected {expected:?} in {error}",
-            );
-        }
+        let plan = load_dockerfile_plan(&dockerfile_path, None).unwrap();
+
+        assert_eq!(plan.base_image, "python:3.12-slim");
+        assert_eq!(plan.dockerfile_text, dockerfile_text);
+        assert!(plan.ignored_instructions.is_empty());
     }
 
     #[test]
