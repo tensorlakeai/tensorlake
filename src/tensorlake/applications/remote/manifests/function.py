@@ -60,6 +60,7 @@ class FunctionManifest(pydantic.BaseModel):
     warm_containers: int | None = None
     min_containers: int | None = None
     max_containers: int | None = None
+    image: str | None = None
 
 
 @dataclass
@@ -305,4 +306,5 @@ def create_function_manifest(
         warm_containers=function._function_config.warm_containers,
         min_containers=function._function_config.min_containers,
         max_containers=function._function_config.max_containers,
+        image=function._function_config.image.name,
     )

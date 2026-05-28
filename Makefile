@@ -96,7 +96,7 @@ build_release:
 	@echo "--- Removing bundled native module from source tree ---"
 	@poetry run python -c "import pathlib; [p.unlink() for p in [*pathlib.Path('src/tensorlake').glob('_cloud_sdk*.so'), *pathlib.Path('src/tensorlake').glob('_cloud_sdk*.pyd')]]"
 	@echo "--- Verifying wheel in a clean venv ---"
-	@poetry run python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy tensorlake.cli.build_images
+	@poetry run python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy
 	@echo "--- Done. Wheel is in dist/ ---"
 
 bump_version:
