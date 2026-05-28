@@ -72,6 +72,19 @@ Two execution modes:
 - **Pydantic v2** for data models throughout.
 - **gRPC stubs** are generated with grpcio-tools 1.60.0 (pinned old version for forward compatibility) and reformatted with Black/isort after generation.
 
+## Releasing / version bumps
+
+**IMPORTANT: After finishing code changes on a branch, before handing back to the user, remind them to bump the version for whatever they touched.** Look at the diff: if Python/Rust files changed, prompt for a Python-SDK bump; if `typescript/` changed, prompt for a TypeScript bump; if both, prompt for both. Don't bump untouched packages — the Python and TypeScript SDKs version independently.
+
+How to bump:
+
+- **Python SDK / CLI release** (Rust workspace + Python wheels): run `python .github/scripts/bump_version.py <new-version>`. It updates the three files used by the PyPI / crates.io / CLI release workflows:
+  - `pyproject.toml` (root, `tensorlake` PyPI package)
+  - `Cargo.toml` (root, workspace version — all crates inherit via `version.workspace = true`)
+  - `crates/rust-cloud-sdk-py/pyproject.toml`
+- **TypeScript SDK release** (npm): manually bump `typescript/package.json`. The `publish_npm.yaml` workflow reads the version from this file. The bump script does NOT touch it.
+- `Cargo.lock` and `typescript/package-lock.json` regenerate on build/install — commit them after they refresh, don't hand-edit.
+
 ## Running Applications tests
 
 **CRITICAL: Always run tests in BOTH local and remote modes.** Do NOT skip remote mode or run only local mode unless the user explicitly says to run local or remote only.
@@ -82,6 +95,7 @@ Most test files use `@parameterized` to run each test case in both modes.
 ### Running remote mode tests
 
 **Before running a test in remote mode you MUST first ensure all remote mode dependencies are available:**
+
 1. Check if indexify-server is running (HTTP ping `http://localhost:8900`)
 2. If not then **stop immediately** and ask the user to run it. **Do not try to run local mode tests to proceed faster**.
 3. Ask user for the command that runs indexify-dataplane. Do not assume that indexify-dataplane is running or not running.

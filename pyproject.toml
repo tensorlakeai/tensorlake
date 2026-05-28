@@ -1,6 +1,6 @@
 [project]
 name = "tensorlake"
-version = "0.5.22"
+version = "0.5.23"
 description = "Tensorlake SDK for agent sandboxes and sandbox-native orchestration"
 readme = "README.md"
 authors = [{ name = "Tensorlake Inc.", email = "support@tensorlake.ai" }]
@@ -8,6 +8,7 @@ requires-python = ">=3.10"
 dependencies = [
     "httpx[http2]>=0.27.2,<1.0",
     "websocket-client>=1.8.0,<2.0",
+    "websockets>=13.0,<14.0",
     "pydantic>=2.0,<3.0",
     "grpcio>=1.76.0,<2.0.0",
     "protobuf>=6.31.1,<7.0.0",
