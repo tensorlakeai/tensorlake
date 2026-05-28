@@ -1,12 +1,10 @@
-import sys
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List
 
 from tensorlake.vendor.nanoid.nanoid import generate as nanoid_generate
 
-_LOCAL_PYTHON_VERSION = f"{sys.version_info.major}.{sys.version_info.minor}"
-_DEFAULT_BASE_IMAGE_NAME = f"python:{_LOCAL_PYTHON_VERSION}-slim-bookworm"
+_DEFAULT_BASE_IMAGE_NAME = "tensorlake/ubuntu-minimal"
 
 
 class _ImageBuildOperationType(Enum):

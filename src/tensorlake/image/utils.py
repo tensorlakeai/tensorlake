@@ -1,4 +1,4 @@
-import importlib
+import importlib.metadata
 from typing import List
 
 from ._dockerfile import image_has_workdir, render_op_line
@@ -13,8 +13,8 @@ def dockerfile_content(img: Image, extra_env_vars: List[tuple] | None = None) ->
     Wraps the plain image rendering with the extras the Applications image
     builder expects: a default ``WORKDIR /app`` (skipped when the image
     declares its own WORKDIR), ``PIP_BREAK_SYSTEM_PACKAGES=1`` for PEP 668
-    Linux distros, and a trailing ``pip install tensorlake`` so the SDK is
-    available at runtime.
+    Linux distros, and a trailing ``python3 -m pip install`` so the SDK is
+    available at runtime on the default Ubuntu base image.
     """
     dockerfile_lines: List[str] = [f"FROM {img._base_image}"]
     if not image_has_workdir(img):
@@ -34,6 +34,8 @@ def dockerfile_content(img: Image, extra_env_vars: List[tuple] | None = None) ->
 
     # Run tensorlake install after all user commands. There's implicit dependency
     # of tensorlake install success on user commands right now.
-    dockerfile_lines.append(f"RUN pip install tensorlake=={_SDK_VERSION}")
+    dockerfile_lines.append(
+        f"RUN python3 -m pip install --break-system-packages tensorlake=={_SDK_VERSION}"
+    )
 
     return "\n".join(dockerfile_lines)

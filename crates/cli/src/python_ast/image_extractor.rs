@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use rustpython_parser::{Parse, ast};
 
 /// Default base image when `base_image` is not specified in `Image(...)`.
-pub const DEFAULT_BASE_IMAGE: &str = "python:3.12-slim-bookworm";
+pub const DEFAULT_BASE_IMAGE: &str = "tensorlake/ubuntu-minimal";
 const DEFAULT_IMAGE_NAME: &str = "default";
 const DEFAULT_IMAGE_TAG: &str = "latest";
 

@@ -399,16 +399,17 @@ impl Image {
             lines.push(render_build_operation(op));
         }
 
-        if sdk_version.starts_with("~=")
+        let install_command = if sdk_version.starts_with("~=")
             || sdk_version.starts_with(">=")
             || sdk_version.starts_with("<=")
             || sdk_version.starts_with("!=")
             || sdk_version.starts_with("==")
         {
-            lines.push(format!("RUN pip install tensorlake{}", sdk_version));
+            format!("RUN python3 -m pip install --break-system-packages tensorlake{sdk_version}")
         } else {
-            lines.push(format!("RUN pip install tensorlake=={}", sdk_version));
-        }
+            format!("RUN python3 -m pip install --break-system-packages tensorlake=={sdk_version}")
+        };
+        lines.push(install_command);
 
         lines.join("\n")
     }
@@ -662,6 +663,26 @@ mod tests {
         assert_eq!(
             rendered,
             "COPY --chmod=755 --chown=1000:1000 --from=builder src/ /app/"
+        );
+    }
+
+    #[test]
+    fn test_dockerfile_installs_sdk_with_python3_module_pip() {
+        let image = Image::builder()
+            .name("test")
+            .base_image("tensorlake/ubuntu-minimal")
+            .build()
+            .unwrap();
+
+        assert!(
+            image
+                .dockerfile_content("1.2.3", None)
+                .contains("RUN python3 -m pip install --break-system-packages tensorlake==1.2.3")
+        );
+        assert!(
+            image
+                .dockerfile_content(">=1.2.3", None)
+                .contains("RUN python3 -m pip install --break-system-packages tensorlake>=1.2.3")
         );
     }
 
