@@ -401,8 +401,8 @@ class AsyncPty:
                 return self
 
             try:
-                ws_url, additional_headers, connect_kwargs = (
-                    _prepare_async_ws_connect(self._ws_url, self._ws_headers)
+                ws_url, additional_headers, connect_kwargs = _prepare_async_ws_connect(
+                    self._ws_url, self._ws_headers
                 )
                 ws = await asyncio.wait_for(
                     _async_ws_client.connect(

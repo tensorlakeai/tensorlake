@@ -377,9 +377,7 @@ class TestAsyncPty(unittest.IsolatedAsyncioTestCase):
             await fake_ws._frames.put(b"\x03\x00\x00\x00\x00")
             self.assertEqual(await pty.wait(timeout=1), 0)
 
-            with self.assertRaisesRegex(
-                SandboxError, "PTY session has already exited"
-            ):
+            with self.assertRaisesRegex(SandboxError, "PTY session has already exited"):
                 await pty.connect()
 
     async def test_connect_without_websockets_library_raises_install_hint(self):
@@ -443,9 +441,7 @@ class TestAsyncPty(unittest.IsolatedAsyncioTestCase):
         await sandbox.create_pty_session(command="/bin/sh")
 
         payload = json.loads(fake_rust.start_payload_json)
-        self.assertEqual(
-            set(payload.keys()), {"command", "rows", "cols"}
-        )
+        self.assertEqual(set(payload.keys()), {"command", "rows", "cols"})
 
 
 class TestPtyWsUrl(unittest.TestCase):
@@ -493,9 +489,7 @@ class TestPrepareAsyncWsConnect(unittest.TestCase):
             "wss://sandbox.example.com:9443/api/v1/pty/sess-1/ws",
             {"X-PTY-Token": "tok"},
         )
-        self.assertEqual(
-            ws_url, "wss://sandbox.example.com:9443/api/v1/pty/sess-1/ws"
-        )
+        self.assertEqual(ws_url, "wss://sandbox.example.com:9443/api/v1/pty/sess-1/ws")
         self.assertEqual(headers, [("X-PTY-Token", "tok")])
         self.assertEqual(kwargs, {})
 
@@ -504,9 +498,7 @@ class TestPrepareAsyncWsConnect(unittest.TestCase):
             "wss://10.0.0.5:9443/api/v1/pty/sess-1/ws",
             {"Host": "sandbox.example.com", "X-PTY-Token": "tok"},
         )
-        self.assertEqual(
-            ws_url, "wss://sandbox.example.com/api/v1/pty/sess-1/ws"
-        )
+        self.assertEqual(ws_url, "wss://sandbox.example.com/api/v1/pty/sess-1/ws")
         # Host header must be stripped — websockets builds it from the URI.
         self.assertEqual(headers, [("X-PTY-Token", "tok")])
         # TCP target stays pinned to the original host & port.
@@ -517,9 +509,7 @@ class TestPrepareAsyncWsConnect(unittest.TestCase):
             "wss://10.0.0.5/api/v1/pty/sess-1/ws",
             {"Host": "sandbox.example.com"},
         )
-        self.assertEqual(
-            ws_url, "wss://sandbox.example.com/api/v1/pty/sess-1/ws"
-        )
+        self.assertEqual(ws_url, "wss://sandbox.example.com/api/v1/pty/sess-1/ws")
         self.assertEqual(headers, [])
         self.assertEqual(kwargs, {"host": "10.0.0.5"})
 
