@@ -4,10 +4,13 @@ import json
 import os
 import sys
 import traceback
-from urllib.parse import urlparse
+from pathlib import Path
 
 from tensorlake.applications import Function, SDKUsageError, TensorlakeError
-from tensorlake.applications.applications import filter_applications
+from tensorlake.applications.applications import (
+    filter_applications,
+    functions_for_application,
+)
 from tensorlake.applications.registry import get_functions
 from tensorlake.applications.remote.code.loader import load_code
 from tensorlake.applications.remote.curl_command import example_application_curl_command
@@ -19,12 +22,10 @@ from tensorlake.applications.validation import (
     has_error_message,
     validate_loaded_applications,
 )
-from tensorlake.builder import collect_application_build_request
-from tensorlake.builder.client_v2 import (
-    ApplicationImageBuildError,
-    ImageBuilderV2Client,
+from tensorlake.image.sandbox_builder import (
+    SandboxImageBuildError,
+    build_sandbox_application_image,
 )
-from tensorlake.builder.client_v3 import ImageBuilderV3Client
 from tensorlake.cli._common import Context
 
 
@@ -121,34 +122,10 @@ def _onprem_enabled() -> bool:
     }
 
 
-def mk_builder(version: str, auth: Context):
-    default_build_service_path = (
-        "/images/v3/applications" if version == "v3" else "/images/v2"
-    )
-    build_service = (
-        os.getenv("TENSORLAKE_BUILD_SERVICE")
-        or f"{auth.api_url}{default_build_service_path}"
-    )
-    parsed = urlparse(build_service)
-    build_service_path = parsed.path.rstrip("/") or default_build_service_path
-    if version == "v3":
-        return ImageBuilderV3Client(
-            cloud_client=auth.cloud_client,
-            build_service_path=build_service_path,
-        )
-    return ImageBuilderV2Client(
-        cloud_client=auth.cloud_client,
-        build_service_path=build_service_path,
-        on_build_start=lambda image, _function_name: _emit(
-            {"type": "build_start", "image": image.name}
-        ),
-    )
-
-
 def deploy(
     application_file_path: str,
     upgrade_running_requests: bool,
-    image_builder_version: str = "v3",
+    image_builder_version: str = "sandbox",
     build_envs: list[tuple[str, str]] | None = None,
 ):
     """Deploys applications to Tensorlake Cloud, emitting NDJSON events to stdout."""
@@ -214,9 +191,25 @@ def deploy(
     if missing:
         _emit({"type": "missing_secrets", "count": len(missing), "names": missing})
 
-    builder = mk_builder(image_builder_version, auth)
+    if image_builder_version in {"v2", "v3"}:
+        _emit(
+            {
+                "type": "warning",
+                "message": (
+                    f"--image-builder-version {image_builder_version} is deprecated; "
+                    "using the sandbox rootfs builder."
+                ),
+            }
+        )
+
     try:
-        asyncio.run(_prepare_images(builder, functions, build_envs))
+        asyncio.run(
+            _prepare_images(
+                functions,
+                context_dir=str(Path(application_file_path).parent),
+                build_envs=build_envs,
+            )
+        )
     except KeyboardInterrupt:
         _emit({"type": "error", "message": "build cancelled by user"})
         sys.exit(1)
@@ -234,34 +227,58 @@ def deploy(
 
 
 async def _prepare_images(
-    builder,
     functions: list[Function],
+    context_dir: str,
     build_envs: list[tuple[str, str]] | None = None,
 ):
-    for application in filter_applications(functions):
+    images = _application_images(functions)
+    for image in images:
+        image_name = image.name
+        _emit({"type": "build_start", "image": image_name})
         try:
-            await builder.build(
-                collect_application_build_request(
-                    application,
-                    functions,
-                    build_env_vars=build_envs,
-                )
+            await asyncio.to_thread(
+                build_sandbox_application_image,
+                image,
+                registered_name=image_name,
+                build_env_vars=build_envs,
+                context_dir=context_dir,
+                emit=_emit,
             )
         except (asyncio.CancelledError, KeyboardInterrupt) as error:
             raise error
-        except ApplicationImageBuildError as error:
+        except SandboxImageBuildError as error:
             _emit(
                 {
                     "type": "build_failed",
-                    "image": error.image_name,
-                    "error": _format_build_failure_message(
-                        error.image_name, error.error
-                    ),
+                    "image": image_name,
+                    "error": _format_build_failure_message(image_name, error),
                 }
             )
             sys.exit(1)
 
     _emit({"type": "build_done"})
+
+
+def _application_images(functions: list[Function]):
+    images = []
+    seen_image_ids: set[str] = set()
+    seen_image_names: dict[str, str] = {}
+    for application in filter_applications(functions):
+        for function in functions_for_application(application, functions):
+            image = function._function_config.image
+            previous_image_id = seen_image_names.get(image.name)
+            if previous_image_id is not None and previous_image_id != image._id:
+                raise SDKUsageError(
+                    f"multiple different Image objects use the name '{image.name}'. "
+                    "Use unique Image(name=...) values so each function resolves "
+                    "to the intended sandbox image."
+                )
+            seen_image_names[image.name] = image._id
+            if image._id in seen_image_ids:
+                continue
+            seen_image_ids.add(image._id)
+            images.append(image)
+    return images
 
 
 def _deploy_applications(
@@ -331,9 +348,12 @@ def deploy_entrypoint():
     )
     parser.add_argument(
         "--image-builder-version",
-        choices=["v2", "v3"],
-        default="v3",
-        help="Select image builder version",
+        choices=["sandbox", "v2", "v3"],
+        default="sandbox",
+        help=(
+            "Deprecated compatibility flag; deploys always use the sandbox "
+            "rootfs builder"
+        ),
     )
     parser.add_argument(
         "--build-env",

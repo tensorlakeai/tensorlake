@@ -26,6 +26,7 @@ from tensorlake.cli._common import Context
 
 from ._dockerfile import image_to_dockerfile
 from .image import Image
+from .utils import dockerfile_content
 
 EmitFn = Callable[[dict], None]
 
@@ -251,6 +252,66 @@ def build_sandbox_image(
             "with other default-named images in this project.",
             stacklevel=2,
         )
+
+    try:
+        return _run_rust_image_create(
+            rust_dockerfile_path,
+            effective_registered_name,
+            dockerfile_text=dockerfile_text,
+            context_dir=rust_context_dir,
+            cpus=cpus,
+            memory_mb=memory_mb,
+            disk_mb=disk_mb,
+            builder_disk_mb=builder_disk_mb,
+            is_public=is_public,
+            emit=emit,
+        )
+    except SandboxImageError:
+        raise
+    except Exception as e:
+        raise SandboxImageBuildError(f"{type(e).__name__}: {e}") from e
+
+
+def build_sandbox_application_image(
+    image: Image,
+    *,
+    registered_name: str | None = None,
+    build_env_vars: list[tuple[str, str]] | None = None,
+    cpus: float = 2.0,
+    memory_mb: int = 4096,
+    disk_mb: int | None = None,
+    builder_disk_mb: int | None = None,
+    is_public: bool = False,
+    context_dir: str | None = None,
+    verbose: bool = False,
+    emit: EmitFn | None = None,
+) -> dict:
+    """Build an Applications runtime image as a registered sandbox template.
+
+    Unlike :func:`build_sandbox_image`, this uses the Applications Dockerfile
+    wrapper so deployed functions get the SDK runtime, default workdir, and
+    deploy-time build environment variables.
+    """
+    if emit is None:
+        emit = _stderr_emit if verbose else _noop_emit
+
+    if not image._base_image:
+        raise SandboxImageLoadError("Image must have a base_image to build")
+
+    effective_registered_name = registered_name or image.name
+    if effective_registered_name == _DEFAULT_IMAGE_NAME:
+        warnings.warn(
+            f"Building sandbox image with the default name {_DEFAULT_IMAGE_NAME!r}. "
+            "Pass `registered_name=...` or `Image(name=...)` to avoid collisions "
+            "with other default-named images in this project.",
+            stacklevel=2,
+        )
+
+    rust_context_dir = str(Path(context_dir or os.getcwd()).resolve())
+    rust_dockerfile_path = str(Path(rust_context_dir) / "Dockerfile")
+    dockerfile_text = dockerfile_content(image, extra_env_vars=build_env_vars)
+    if not dockerfile_text.endswith("\n"):
+        dockerfile_text += "\n"
 
     try:
         return _run_rust_image_create(
