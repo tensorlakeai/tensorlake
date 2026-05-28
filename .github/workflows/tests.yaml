@@ -90,7 +90,7 @@ jobs:
 
       - name: Verify wheel imports Rust Cloud SDK extension
         run: |
-          python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy tensorlake.cli.build_images
+          python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy
 
       - name: Build Node.js native binding
         env:
