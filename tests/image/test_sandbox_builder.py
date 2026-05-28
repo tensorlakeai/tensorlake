@@ -7,6 +7,7 @@ from unittest.mock import ANY, patch
 
 from tensorlake.image import Image
 from tensorlake.image import sandbox_builder as sbm
+from tensorlake.image.utils import dockerfile_content
 
 BUILD_CPUS = 2.0
 BUILD_MEMORY_MB = 4096
@@ -242,6 +243,19 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
     def test_rejects_unknown_source_type(self):
         with self.assertRaises(TypeError):
             sbm.build_sandbox_image(12345)  # type: ignore[arg-type]
+
+
+class TestApplicationDockerfileContent(unittest.TestCase):
+    def test_default_image_uses_ubuntu_minimal_base(self):
+        dockerfile = dockerfile_content(Image(name="default-base"))
+        self.assertTrue(dockerfile.startswith("FROM tensorlake/ubuntu-minimal\n"))
+
+    def test_sdk_install_uses_python3_module_pip(self):
+        dockerfile = dockerfile_content(Image(name="install-command"))
+        self.assertIn(
+            "RUN python3 -m pip install --break-system-packages tensorlake==",
+            dockerfile,
+        )
 
 
 if __name__ == "__main__":
