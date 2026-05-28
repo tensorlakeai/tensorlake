@@ -17,7 +17,8 @@ use napi::{
 };
 use napi_derive::napi;
 use tensorlake::sandbox_images::{
-    SandboxImageBuildEvent, SandboxImageBuildOptions, build_sandbox_image as rust_build_sandbox_image,
+    SandboxImageBuildEvent, SandboxImageBuildOptions,
+    build_sandbox_image as rust_build_sandbox_image,
 };
 
 #[napi(object)]

@@ -1508,7 +1508,12 @@ mod tests {
 
     #[test]
     fn load_dockerfile_plan_rejects_unsupported_instructions() {
-        for instruction in ["ARG FOO=1", "ONBUILD RUN echo", "SHELL [\"/bin/bash\"]", "USER app"] {
+        for instruction in [
+            "ARG FOO=1",
+            "ONBUILD RUN echo",
+            "SHELL [\"/bin/bash\"]",
+            "USER app",
+        ] {
             let temp_dir = tempfile::tempdir().unwrap();
             let dockerfile_path = temp_dir.path().join("Dockerfile");
             std::fs::write(
