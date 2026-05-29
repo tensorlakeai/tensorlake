@@ -172,7 +172,7 @@ _DEFAULT_CPU: float = 1.0
 # So we need a large enough minimal memory limit to ensure stability while running customer
 # functions that consume memory too.
 _DEFAULT_MEMORY_GB: float = 1.0
-_DEFAULT_EPHEMERAL_DISK_GB: float = 2.0  # 2 GB
+_DEFAULT_EPHEMERAL_DISK_GB: float = 10.0  # 10 GB
 _DEFAULT_GPU = None  # No GPU by default
 _DEFAULT_MAX_CONCURRENCY = 1  # No concurrent threads running the function by default
 
