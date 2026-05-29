@@ -23,6 +23,7 @@ from tensorlake.applications.user_data_serializer import (
     create_type_adapter,
     generate_json_schema,
 )
+from tensorlake.image import Image
 
 from .docstring import (
     DocstringStyle,
@@ -38,6 +39,10 @@ from .function_manifests import (
     RetryPolicyManifest,
 )
 from .function_resources import resources_for_function
+
+_DEFAULT_FUNCTION_IMAGE_NAME = "default"
+_DEFAULT_FUNCTION_IMAGE_TAG = "latest"
+_DEFAULT_RUNTIME_IMAGE_NAME = "tensorlake/ubuntu-minimal"
 
 
 class FunctionManifest(pydantic.BaseModel):
@@ -306,5 +311,16 @@ def create_function_manifest(
         warm_containers=function._function_config.warm_containers,
         min_containers=function._function_config.min_containers,
         max_containers=function._function_config.max_containers,
-        image=function._function_config.image.name,
+        image=_runtime_image_name(function._function_config.image),
     )
+
+
+def _runtime_image_name(image: Image) -> str:
+    is_default_image = (
+        image.name == _DEFAULT_FUNCTION_IMAGE_NAME
+        and image.tag == _DEFAULT_FUNCTION_IMAGE_TAG
+        and not image._build_operations
+    )
+    if is_default_image:
+        return _DEFAULT_RUNTIME_IMAGE_NAME
+    return image.name
