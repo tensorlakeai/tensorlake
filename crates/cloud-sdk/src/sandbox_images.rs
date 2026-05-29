@@ -59,7 +59,11 @@ const ROOTFS_BUILDER_PROCESS_USER: &str = "root";
 /// builder hands the Dockerfile to `docker build` verbatim, so without this
 /// allowlist these instructions would silently take effect inside the
 /// resulting rootfs. Mirrors the historical Python/TS SDK behavior.
-const UNSUPPORTED_DOCKERFILE_INSTRUCTIONS: &[&str] = &["ARG", "ONBUILD", "SHELL", "USER"];
+// Instructions the SDK refuses to forward to the rootfs builder. ARG used to
+// be in this list; it is accepted at top-level scope so a Dockerfile can
+// declare global defaults that Docker resolves at build time, but the SDK
+// does not substitute ARG values at parse time.
+const UNSUPPORTED_DOCKERFILE_INSTRUCTIONS: &[&str] = &["ONBUILD", "SHELL", "USER"];
 
 /// Dockerfile instructions that affect image config (CMD, ENTRYPOINT, etc.)
 /// rather than the filesystem. `docker build --output type=tar` discards the
@@ -150,11 +154,50 @@ struct DockerfileBuildPlan {
     context_dir: PathBuf,
     registered_name: String,
     dockerfile_text: String,
+    /// The final-stage FROM image reference — the exact string the user wrote.
+    /// Determines the snapshot's lineage parent when it resolves to a
+    /// registered Tensorlake template.
     base_image: String,
+    /// True when `base_image` matches a stage alias defined earlier in the
+    /// Dockerfile (`FROM ubuntu AS base; FROM base`). In that case the
+    /// final FROM is an internal reference to an earlier stage and we do
+    /// not look it up as an external template.
+    base_image_is_internal_stage: bool,
+    /// Every external image reference encountered in the Dockerfile other
+    /// than `base_image`: earlier-stage FROMs, `COPY --from=<image>`, and
+    /// `RUN --mount=type=cache,from=<image>`. Excludes `scratch`, internal
+    /// stage names defined by `FROM ... AS <name>` clauses, references
+    /// containing `$` variable expansions or `@` digest pins, and the
+    /// final-stage FROM itself (which lives in `base_image`). Deduped, in
+    /// first-seen order.
+    additional_image_references: Vec<String>,
+    /// References the SDK could not resolve at planning time and forwarded
+    /// to Docker for registry pull at build time. Tagged with a reason so
+    /// the caller can emit an appropriate warning.
+    unresolvable_image_references: Vec<UnresolvableImageReference>,
     /// Instructions that hit `IGNORED_DOCKERFILE_INSTRUCTIONS` during parse.
     /// Surfaced as warnings by the caller; preserved in `dockerfile_text` and
     /// forwarded to `docker build`.
     ignored_instructions: Vec<(usize, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnresolvableImageReference {
+    line_number: usize,
+    reference: String,
+    reason: UnresolvableImageReferenceReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnresolvableImageReferenceReason {
+    /// Reference contained `$VAR` / `${VAR}` expansion. The SDK does not
+    /// resolve build-args at planning time.
+    BuildArgExpansion,
+    /// Reference carried an `@<digest>` suffix (e.g. `@sha256:...`).
+    /// Locally-loaded images cannot match a user-supplied digest, so even if
+    /// the name matches a registered template the reference falls through
+    /// to a registry pull.
+    DigestPin,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -226,6 +269,23 @@ where
             "Skipping Dockerfile instruction '{}' during snapshot materialization. \
              It is still preserved in the registered Dockerfile.",
             keyword
+        )));
+    }
+    for unresolvable in &plan.unresolvable_image_references {
+        let detail = match unresolvable.reason {
+            UnresolvableImageReferenceReason::BuildArgExpansion => {
+                "contains a build-arg expansion that the SDK does not resolve at planning time"
+            }
+            UnresolvableImageReferenceReason::DigestPin => {
+                "is pinned to a content digest, which cannot be matched by a locally-loaded image"
+            }
+        };
+        emit(SandboxImageBuildEvent::Warning(format!(
+            "line {}: image reference '{}' {}. The build will pull this image from the configured \
+             registry instead of using a Tensorlake template. If '{}' was meant to resolve to a \
+             Tensorlake template, the resulting build image will be larger than a diff against \
+             that template.",
+            unresolvable.line_number, unresolvable.reference, detail, unresolvable.reference,
         )));
     }
 
@@ -492,12 +552,111 @@ async fn wait_for_sandbox_status(
     }
 }
 
+/// Look up `reference` as a registered sandbox template and return the
+/// JSON entry the prepare endpoint expects for that local-image slot, or
+/// `None` if the lookup did not resolve.
+///
+/// References that resolve but are not usable as a build image (only
+/// `durable_archive_v1` base templates are supported by the rootfs builder
+/// today) fail with a clear message tied to the offending reference so the
+/// user gets feedback on the exact image string that's incompatible.
+async fn resolve_template_payload(
+    templates: &crate::sandbox_templates::SandboxTemplatesClient,
+    reference: &str,
+) -> Result<Option<Value>> {
+    let Some(found) = templates.find_by_name(reference).await? else {
+        return Ok(None);
+    };
+    let template = found.into_inner();
+    let template_id = template.id.clone().ok_or_else(|| {
+        SandboxImageBuildError::other(format!(
+            "platform returned a template lookup for '{}' without an id",
+            reference
+        ))
+    })?;
+    let name = template.name.clone().ok_or_else(|| {
+        SandboxImageBuildError::other(format!(
+            "platform returned a template lookup for '{}' without a name",
+            reference
+        ))
+    })?;
+    let snapshot_id = template.snapshot_id.clone().ok_or_else(|| {
+        SandboxImageBuildError::other(format!(
+            "platform returned a template lookup for '{}' without a snapshot id",
+            reference
+        ))
+    })?;
+    let is_public = template.public.unwrap_or(false);
+    if let Some(kind) = template.rootfs_node_kind.as_deref() {
+        if kind != "base" {
+            return Err(SandboxImageBuildError::other(format!(
+                "template '{}' cannot be used as a build image (only base templates are supported, got rootfsNodeKind='{}'). \
+                 Build a base image from this template first.",
+                reference, kind
+            )));
+        }
+    }
+    if let Some(fmt) = template.snapshot_format_version.as_deref() {
+        if fmt != "durable_archive_v1" {
+            return Err(SandboxImageBuildError::other(format!(
+                "template '{}' uses snapshot format '{}', which the rootfs builder cannot materialize. \
+                 Re-register the template with durable_archive_v1.",
+                reference, fmt
+            )));
+        }
+    }
+    Ok(Some(json!({
+        "templateId": template_id,
+        "name": name,
+        "reference": reference,
+        "snapshotId": snapshot_id,
+        "public": is_public,
+    })))
+}
+
 async fn prepare_rootfs_build(
     ctx: &ResolvedBuildContext,
     client: &Client,
     plan: &DockerfileBuildPlan,
     is_public: bool,
 ) -> Result<(PreparedSandboxTemplateBuild, Value)> {
+    // Resolve every external image reference against the platform's template
+    // registry. The final-stage FROM is treated separately so its resolution
+    // becomes the lineage parent; the additional references (earlier stages,
+    // COPY --from, RUN --mount=,from) become preload-only local images.
+    let templates = crate::sandbox_templates::SandboxTemplatesClient::new(
+        client.clone(),
+        ctx.organization_id.clone(),
+        ctx.project_id.clone(),
+    );
+
+    // Skip the lookup when the final-stage FROM is `FROM <stage-alias>` —
+    // the value is an internal reference to an earlier-defined stage, not
+    // an external image we should resolve as a template. Also skip when
+    // the base image contains `$` (build-arg) or `@` (digest pin); those
+    // were already recorded as unresolvable and warned about.
+    let parent_template_payload = if plan.base_image_is_internal_stage
+        || plan.base_image.contains('$')
+        || plan.base_image.contains('@')
+    {
+        None
+    } else {
+        resolve_template_payload(&templates, &plan.base_image).await?
+    };
+    let mut additional_payload: Vec<Value> =
+        Vec::with_capacity(plan.additional_image_references.len());
+    for reference in &plan.additional_image_references {
+        if let Some(payload) = resolve_template_payload(&templates, reference).await? {
+            additional_payload.push(payload);
+        }
+    }
+    let rootfs_node_kind = if parent_template_payload.is_some() {
+        "diff"
+    } else {
+        "base"
+    };
+    let parent_template_json = parent_template_payload.unwrap_or(Value::Null);
+
     let request = client
         .request(Method::POST, &sandbox_template_builds_path(ctx))
         .json(&json!({
@@ -505,6 +664,9 @@ async fn prepare_rootfs_build(
             "dockerfile": plan.dockerfile_text,
             "baseImage": plan.base_image,
             "public": is_public,
+            "rootfsNodeKind": rootfs_node_kind,
+            "parentTemplate": parent_template_json,
+            "additionalLocalImages": additional_payload,
         }))
         .build()?;
     let response = client.execute_raw(request).await?;
@@ -1166,19 +1328,90 @@ fn load_dockerfile_text_plan(
             .unwrap_or(Path::new("."))
             .to_path_buf()
     };
-    let mut base_image: Option<String> = None;
+    // Track stage aliases (`FROM ... AS <name>`) so we can distinguish
+    // `COPY --from=<stage>` (internal reference, skip lookup) from
+    // `COPY --from=<image>` (external reference, look up as template).
+    let mut stage_aliases: Vec<String> = Vec::new();
+    // Final-stage FROM image. Each new FROM overwrites this so the last one
+    // wins — matches Docker's "the final stage is the resulting image"
+    // semantics.
+    let mut final_from_image: Option<String> = None;
+    // Order-preserving deduped set of additional external image references.
+    // We keep insertion order via a separate Vec while tracking membership
+    // in a HashSet for O(1) dedup.
+    let mut additional_refs: Vec<String> = Vec::new();
+    let mut additional_refs_seen: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut unresolvable_image_references: Vec<UnresolvableImageReference> = Vec::new();
     let mut ignored_instructions: Vec<(usize, String)> = Vec::new();
 
     for (line_number, line) in logical_dockerfile_lines(&dockerfile_text) {
         let (keyword, value) = split_instruction(&line, line_number)?;
         if keyword == "FROM" {
-            if base_image.is_some() {
-                return Err(SandboxImageBuildError::other(format!(
-                    "line {}: multi-stage Dockerfiles are not supported for sandbox image creation",
-                    line_number
-                )));
+            let (image, alias) = parse_from_value_with_alias(&value, line_number)?;
+            // If a prior FROM had set the "final image" candidate, demote it
+            // now — it's actually an earlier-stage FROM. Push it to the
+            // additional-refs set so the rootfs builder still loads it
+            // locally (e.g., for COPY --from referring to it by image name).
+            // Skip the demotion when the prior image equals the new final
+            // FROM (would duplicate the entry) or is itself unresolvable.
+            if let Some(prior) = final_from_image.take() {
+                if prior != image
+                    && !prior.eq_ignore_ascii_case("scratch")
+                    && !prior.contains('$')
+                    && !prior.contains('@')
+                    && !stage_aliases.iter().any(|alias| alias == prior.as_str())
+                    && additional_refs_seen.insert(prior.clone())
+                {
+                    additional_refs.push(prior);
+                }
             }
-            base_image = Some(parse_from_value(&value, line_number)?);
+            if image.contains('$') {
+                unresolvable_image_references.push(UnresolvableImageReference {
+                    line_number,
+                    reference: image.clone(),
+                    reason: UnresolvableImageReferenceReason::BuildArgExpansion,
+                });
+            } else if image.contains('@') {
+                unresolvable_image_references.push(UnresolvableImageReference {
+                    line_number,
+                    reference: image.clone(),
+                    reason: UnresolvableImageReferenceReason::DigestPin,
+                });
+            }
+            // `scratch`, variable references, and digest-pinned references are
+            // tracked but never put in additional_refs — they're either
+            // built-ins or unresolvable.
+            final_from_image = Some(image);
+            if let Some(alias) = alias {
+                stage_aliases.push(alias);
+            }
+            continue;
+        }
+        if keyword == "COPY" {
+            for from_value in copy_from_values(&value) {
+                accumulate_side_reference(
+                    line_number,
+                    from_value,
+                    &stage_aliases,
+                    &mut additional_refs,
+                    &mut additional_refs_seen,
+                    &mut unresolvable_image_references,
+                );
+            }
+            continue;
+        }
+        if keyword == "RUN" {
+            for from_value in run_mount_from_values(&value) {
+                accumulate_side_reference(
+                    line_number,
+                    from_value,
+                    &stage_aliases,
+                    &mut additional_refs,
+                    &mut additional_refs_seen,
+                    &mut unresolvable_image_references,
+                );
+            }
             continue;
         }
         if UNSUPPORTED_DOCKERFILE_INSTRUCTIONS.contains(&keyword.as_str()) {
@@ -1193,9 +1426,22 @@ fn load_dockerfile_text_plan(
         let _ = value;
     }
 
-    let base_image = base_image.ok_or_else(|| {
+    let base_image = final_from_image.ok_or_else(|| {
         SandboxImageBuildError::other("Dockerfile must contain a FROM instruction")
     })?;
+    // Final pass: a side-channel reference (COPY --from / RUN --mount=,from)
+    // that happens to name the final-stage image must not appear in both
+    // `base_image` and `additional_image_references`. Filter here rather
+    // than in the inner loop because the final base isn't known until every
+    // FROM has been seen.
+    additional_refs.retain(|reference| reference != &base_image);
+    // Detect `FROM <stage-alias>` in the final stage. When the final FROM
+    // matches an earlier-defined stage alias the value is an internal
+    // reference rather than an external image, so we must not look it up
+    // as a template.
+    let base_image_is_internal_stage = stage_aliases
+        .iter()
+        .any(|alias| alias == base_image.as_str());
 
     Ok(DockerfileBuildPlan {
         context_dir,
@@ -1204,6 +1450,9 @@ fn load_dockerfile_text_plan(
             .unwrap_or_else(|| default_registered_name(&absolute_path)),
         dockerfile_text,
         base_image,
+        base_image_is_internal_stage,
+        additional_image_references: additional_refs,
+        unresolvable_image_references,
         ignored_instructions,
     })
 }
@@ -1292,7 +1541,15 @@ fn split_instruction(line: &str, line_number: usize) -> Result<(String, String)>
     }
 }
 
-fn parse_from_value(value: &str, line_number: usize) -> Result<String> {
+/// Parse a FROM instruction value into `(image, alias)`.
+///
+/// `value` is the text after the `FROM` keyword (e.g.
+/// `--platform=linux/amd64 python:3.12-slim AS builder`). Returns the image
+/// reference exactly as the user wrote it, plus any `AS <alias>` stage name.
+fn parse_from_value_with_alias(
+    value: &str,
+    line_number: usize,
+) -> Result<(String, Option<String>)> {
     let (_, remainder) = strip_leading_flags(value)?;
     let tokens = shlex_split(&remainder).ok_or_else(|| {
         SandboxImageBuildError::other(format!(
@@ -1306,13 +1563,108 @@ fn parse_from_value(value: &str, line_number: usize) -> Result<String> {
             line_number
         )));
     }
-    if tokens.len() > 1 && !tokens[1].eq_ignore_ascii_case("as") {
+    let image = tokens[0].clone();
+    if tokens.len() == 1 {
+        return Ok((image, None));
+    }
+    if !tokens[1].eq_ignore_ascii_case("as") {
         return Err(SandboxImageBuildError::other(format!(
             "line {}: unsupported FROM syntax '{}'",
             line_number, value
         )));
     }
-    Ok(tokens[0].clone())
+    if tokens.len() < 3 {
+        return Err(SandboxImageBuildError::other(format!(
+            "line {}: FROM ... AS must include a stage name",
+            line_number
+        )));
+    }
+    Ok((image, Some(tokens[2].clone())))
+}
+
+/// Classify a side-channel image reference (COPY --from / RUN --mount=,from)
+/// and either accumulate it into the additional-references list or record
+/// it as unresolvable (variable / digest-pin / built-in / stage alias).
+fn accumulate_side_reference(
+    line_number: usize,
+    value: String,
+    stage_aliases: &[String],
+    additional_refs: &mut Vec<String>,
+    additional_refs_seen: &mut std::collections::HashSet<String>,
+    unresolvable_image_references: &mut Vec<UnresolvableImageReference>,
+) {
+    if value.eq_ignore_ascii_case("scratch") {
+        return;
+    }
+    if value.contains('$') {
+        unresolvable_image_references.push(UnresolvableImageReference {
+            line_number,
+            reference: value,
+            reason: UnresolvableImageReferenceReason::BuildArgExpansion,
+        });
+        return;
+    }
+    if value.contains('@') {
+        unresolvable_image_references.push(UnresolvableImageReference {
+            line_number,
+            reference: value,
+            reason: UnresolvableImageReferenceReason::DigestPin,
+        });
+        return;
+    }
+    if stage_aliases.iter().any(|alias| alias == value.as_str()) {
+        return;
+    }
+    if additional_refs_seen.insert(value.clone()) {
+        additional_refs.push(value);
+    }
+}
+
+/// Extract `--from=<value>` arguments from a COPY instruction's tail.
+///
+/// COPY supports at most one `--from` flag per instruction. The flag can be
+/// written as `--from=<value>` or `--from <value>`. Anything else (the source
+/// paths, the destination, other flags) is ignored.
+fn copy_from_values(value: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut tokens = value.split_whitespace();
+    while let Some(token) = tokens.next() {
+        if let Some(v) = token.strip_prefix("--from=") {
+            if !v.is_empty() {
+                out.push(v.to_string());
+            }
+        } else if token == "--from" {
+            if let Some(next) = tokens.next() {
+                out.push(next.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Extract image references from `RUN --mount=type=cache,from=<value>` and
+/// `RUN --mount=type=bind,from=<value>` flags.
+///
+/// BuildKit's mount syntax uses comma-separated key/value pairs after
+/// `--mount=`. We pick out the `from=` element and, for the cases where it
+/// names an image (rather than a stage), the rootfs builder will need to
+/// have that image loaded locally.
+fn run_mount_from_values(value: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in value.split_whitespace() {
+        let body = match token.strip_prefix("--mount=") {
+            Some(body) => body,
+            None => continue,
+        };
+        for entry in body.split(',') {
+            if let Some(v) = entry.strip_prefix("from=") {
+                if !v.is_empty() {
+                    out.push(v.to_string());
+                }
+            }
+        }
+    }
+    out
 }
 
 fn strip_leading_flags(value: &str) -> Result<(Vec<(String, String)>, String)> {
@@ -1508,12 +1860,7 @@ mod tests {
 
     #[test]
     fn load_dockerfile_plan_rejects_unsupported_instructions() {
-        for instruction in [
-            "ARG FOO=1",
-            "ONBUILD RUN echo",
-            "SHELL [\"/bin/bash\"]",
-            "USER app",
-        ] {
+        for instruction in ["ONBUILD RUN echo", "SHELL [\"/bin/bash\"]", "USER app"] {
             let temp_dir = tempfile::tempdir().unwrap();
             let dockerfile_path = temp_dir.path().join("Dockerfile");
             std::fs::write(
@@ -1533,6 +1880,64 @@ mod tests {
                 "instruction {instruction}: expected {expected:?} in {error}",
             );
         }
+    }
+
+    #[test]
+    fn load_dockerfile_plan_accepts_arg_at_top_level() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dockerfile_path = temp_dir.path().join("Dockerfile");
+        std::fs::write(
+            &dockerfile_path,
+            "ARG PY_TAG=3.12-slim\nFROM python:${PY_TAG}\nRUN echo hi\n",
+        )
+        .unwrap();
+
+        // ARG no longer rejects the build; the variable-bearing FROM is
+        // recorded for the warning channel and the lookup is skipped.
+        let plan = load_dockerfile_plan(&dockerfile_path, None).unwrap();
+        assert_eq!(plan.base_image, "python:${PY_TAG}");
+        assert_eq!(plan.unresolvable_image_references.len(), 1);
+        assert!(matches!(
+            plan.unresolvable_image_references[0].reason,
+            super::UnresolvableImageReferenceReason::BuildArgExpansion
+        ));
+    }
+
+    #[test]
+    fn load_dockerfile_plan_warns_on_digest_pinned_from() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dockerfile_path = temp_dir.path().join("Dockerfile");
+        std::fs::write(
+            &dockerfile_path,
+            "FROM python:3.12-slim@sha256:abc\nRUN echo hi\n",
+        )
+        .unwrap();
+
+        let plan = load_dockerfile_plan(&dockerfile_path, None).unwrap();
+        assert_eq!(plan.base_image, "python:3.12-slim@sha256:abc");
+        assert_eq!(plan.unresolvable_image_references.len(), 1);
+        assert!(matches!(
+            plan.unresolvable_image_references[0].reason,
+            super::UnresolvableImageReferenceReason::DigestPin
+        ));
+    }
+
+    #[test]
+    fn load_dockerfile_plan_flags_final_from_stage_alias() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dockerfile_path = temp_dir.path().join("Dockerfile");
+        std::fs::write(
+            &dockerfile_path,
+            "FROM ubuntu:24.04 AS base\nRUN make\nFROM base\nRUN ls\n",
+        )
+        .unwrap();
+
+        let plan = load_dockerfile_plan(&dockerfile_path, None).unwrap();
+        // The final FROM is `FROM base`, an internal alias — flagged so
+        // it is not looked up as an external template.
+        assert_eq!(plan.base_image, "base");
+        assert!(plan.base_image_is_internal_stage);
+        assert_eq!(plan.additional_image_references, vec!["ubuntu:24.04"]);
     }
 
     #[test]
@@ -1577,15 +1982,83 @@ mod tests {
     }
 
     #[test]
-    fn load_dockerfile_plan_rejects_multistage_builds() {
+    fn load_dockerfile_plan_accepts_multistage_builds() {
         let temp_dir = tempfile::tempdir().unwrap();
         let dockerfile_path = temp_dir.path().join("Dockerfile");
-        std::fs::write(&dockerfile_path, "FROM alpine AS build\nFROM scratch\n").unwrap();
+        std::fs::write(
+            &dockerfile_path,
+            "FROM ubuntu:24.04 AS build\n\
+             RUN make\n\
+             FROM python:3.12-slim\n\
+             COPY --from=build /artifact /artifact\n",
+        )
+        .unwrap();
 
-        let error = load_dockerfile_plan(&dockerfile_path, None).unwrap_err();
+        let plan = load_dockerfile_plan(&dockerfile_path, None).unwrap();
+        assert_eq!(plan.base_image, "python:3.12-slim");
+        assert_eq!(plan.additional_image_references, vec!["ubuntu:24.04"]);
+    }
+
+    #[test]
+    fn load_dockerfile_plan_collects_copy_from_image_references() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dockerfile_path = temp_dir.path().join("Dockerfile");
+        std::fs::write(
+            &dockerfile_path,
+            "FROM python:3.12-slim\n\
+             COPY --from=tensorlake/utility:1.0 /bin/foo /usr/local/bin/foo\n\
+             COPY src/ /app/\n",
+        )
+        .unwrap();
+
+        let plan = load_dockerfile_plan(&dockerfile_path, None).unwrap();
+        assert_eq!(plan.base_image, "python:3.12-slim");
+        assert_eq!(
+            plan.additional_image_references,
+            vec!["tensorlake/utility:1.0"]
+        );
+    }
+
+    #[test]
+    fn load_dockerfile_plan_treats_copy_from_stage_as_internal() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dockerfile_path = temp_dir.path().join("Dockerfile");
+        std::fs::write(
+            &dockerfile_path,
+            "FROM ubuntu:24.04 AS build\n\
+             FROM python:3.12-slim\n\
+             COPY --from=build /artifact /artifact\n",
+        )
+        .unwrap();
+
+        let plan = load_dockerfile_plan(&dockerfile_path, None).unwrap();
+        // `build` matches an earlier stage alias, so the COPY --from is
+        // internal; only the demoted earlier-FROM ends up in the additional
+        // references list.
+        assert_eq!(plan.base_image, "python:3.12-slim");
+        assert_eq!(plan.additional_image_references, vec!["ubuntu:24.04"]);
+    }
+
+    #[test]
+    fn load_dockerfile_plan_dedupes_image_references_across_stages() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dockerfile_path = temp_dir.path().join("Dockerfile");
+        std::fs::write(
+            &dockerfile_path,
+            "FROM python:3.12-slim AS prep\n\
+             FROM python:3.12-slim\n\
+             COPY --from=python:3.12-slim /tmp/x /tmp/x\n",
+        )
+        .unwrap();
+
+        let plan = load_dockerfile_plan(&dockerfile_path, None).unwrap();
+        // The first FROM and the COPY --from both reference the same image
+        // as the final-stage FROM, so additional_image_references is empty.
+        assert_eq!(plan.base_image, "python:3.12-slim");
         assert!(
-            error.to_string().contains("multi-stage Dockerfiles"),
-            "{error}"
+            plan.additional_image_references.is_empty(),
+            "got {:?}",
+            plan.additional_image_references
         );
     }
 
@@ -1682,6 +2155,9 @@ mod tests {
             registered_name: "child".to_string(),
             dockerfile_text: "FROM alpine\nRUN echo hi\n".to_string(),
             base_image: "alpine".to_string(),
+            additional_image_references: Vec::new(),
+            base_image_is_internal_stage: false,
+            unresolvable_image_references: Vec::new(),
             ignored_instructions: Vec::new(),
         };
 
@@ -1711,6 +2187,9 @@ mod tests {
             registered_name: "child".to_string(),
             dockerfile_text: "FROM parent\nRUN echo hi\n".to_string(),
             base_image: "parent".to_string(),
+            additional_image_references: Vec::new(),
+            base_image_is_internal_stage: false,
+            unresolvable_image_references: Vec::new(),
             ignored_instructions: Vec::new(),
         };
 

@@ -123,6 +123,13 @@ pub async fn run(
             snapshot_size_bytes: snapshot.snapshot_size_bytes,
             rootfs_disk_bytes: snapshot.rootfs_disk_bytes,
             public: is_public,
+            // The CLI register flow targets base snapshots; the server
+            // defaults to "base" when these fields are absent. Registering
+            // a diff snapshot via the CLI would require the user to
+            // supply parent metadata, which is out of scope here.
+            rootfs_node_kind: None,
+            parent_template: None,
+            additional_local_images: None,
         })
         .await?;
 
