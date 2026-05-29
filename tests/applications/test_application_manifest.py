@@ -2,7 +2,7 @@ import unittest
 
 import validate_all_applications
 
-from tensorlake.applications import Retries, application, cls, function
+from tensorlake.applications import Image, Retries, application, cls, function
 from tensorlake.applications.registry import get_functions
 from tensorlake.applications.remote.manifests.application import (
     ApplicationManifest,
@@ -246,6 +246,40 @@ class TestFunctionManifestResources(unittest.TestCase):
         self.assertEqual(resource_metadata.gpus[1].model, "H100")
         self.assertEqual(resource_metadata.gpus[2].count, 1)
         self.assertEqual(resource_metadata.gpus[2].model, "A100-80GB")
+
+
+@function()
+def function_with_default_image(x: int) -> str:
+    return "success"
+
+
+@function(image=Image(name="custom-runtime-image"))
+def function_with_custom_image(x: int) -> str:
+    return "success"
+
+
+class TestFunctionManifestImages(unittest.TestCase):
+    def test_default_function_image_uses_registered_runtime_image(self):
+        app_manifest: ApplicationManifest = create_application_manifest(
+            application_function=default_application_function,
+            all_functions=get_functions(),
+        )
+
+        self.assertEqual(
+            app_manifest.functions["function_with_default_image"].image,
+            "tensorlake/ubuntu-minimal",
+        )
+
+    def test_custom_function_image_is_preserved(self):
+        app_manifest: ApplicationManifest = create_application_manifest(
+            application_function=default_application_function,
+            all_functions=get_functions(),
+        )
+
+        self.assertEqual(
+            app_manifest.functions["function_with_custom_image"].image,
+            "custom-runtime-image",
+        )
 
 
 # This test is commented out because right now we don't provide max_concurrency feature in SDK interface.
