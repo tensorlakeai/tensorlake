@@ -189,7 +189,7 @@ class TestFunctionManifestResources(unittest.TestCase):
         self.assertIsNotNone(resource_metadata)
         self.assertEqual(resource_metadata.cpus, 1.0)
         self.assertEqual(resource_metadata.memory_mb, 1024)
-        self.assertEqual(resource_metadata.ephemeral_disk_mb, 2 * 1024)
+        self.assertEqual(resource_metadata.ephemeral_disk_mb, 10 * 1024)
         self.assertEqual(resource_metadata.gpus, [])
 
     def test_custom_function_resources(self):
@@ -221,7 +221,7 @@ class TestFunctionManifestResources(unittest.TestCase):
         self.assertIsNotNone(resource_metadata)
         self.assertEqual(resource_metadata.cpus, 1.0)
         self.assertEqual(resource_metadata.memory_mb, 1024)
-        self.assertEqual(resource_metadata.ephemeral_disk_mb, 2 * 1024)
+        self.assertEqual(resource_metadata.ephemeral_disk_mb, 10 * 1024)
         self.assertEqual(len(resource_metadata.gpus), 1)
         self.assertEqual(resource_metadata.gpus[0].count, 4)
         self.assertEqual(resource_metadata.gpus[0].model, "A100-40GB")
@@ -238,7 +238,7 @@ class TestFunctionManifestResources(unittest.TestCase):
         self.assertIsNotNone(resource_metadata)
         self.assertEqual(resource_metadata.cpus, 1.0)
         self.assertEqual(resource_metadata.memory_mb, 1024)
-        self.assertEqual(resource_metadata.ephemeral_disk_mb, 2 * 1024)
+        self.assertEqual(resource_metadata.ephemeral_disk_mb, 10 * 1024)
         self.assertEqual(len(resource_metadata.gpus), 3)
         self.assertEqual(resource_metadata.gpus[0].count, 4)
         self.assertEqual(resource_metadata.gpus[0].model, "A100-40GB")
