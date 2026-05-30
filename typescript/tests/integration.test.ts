@@ -154,6 +154,7 @@ async function ensureSandboxImage(): Promise<void> {
     new Image({ name: imageName, baseImage: TEST_IMAGE_BASE }),
     {
       registeredName: imageName,
+      cpus: SANDBOX_CPUS,
       diskMb: SANDBOX_DISK_MB,
     },
     {
