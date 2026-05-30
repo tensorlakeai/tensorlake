@@ -485,12 +485,7 @@ export class Sandbox {
     return info.status;
   }
 
-  /**
-   * Update this sandbox's properties (name, exposed ports, proxy auth).
-   *
-   * Naming an ephemeral sandbox makes it non-ephemeral and enables
-   * suspend/resume.
-   */
+  /** Update mutable sandbox proxy settings. Sandbox names are immutable after creation. */
   async update(options: UpdateSandboxOptions): Promise<Traced<SandboxInfo>> {
     const client = this.requireLifecycleClient("update");
     const info = await client.update(this.lifecycleIdentifier, options);

@@ -176,9 +176,10 @@ class CreateSandboxRequest(BaseModel):
 
 
 class UpdateSandboxRequest(BaseModel):
-    """Request payload for updating a sandbox."""
+    """Request payload for updating mutable sandbox proxy settings."""
 
-    name: str | None = None
+    model_config = ConfigDict(extra="forbid")
+
     allow_unauthenticated_access: bool | None = None
     exposed_ports: list[int] | None = None
 

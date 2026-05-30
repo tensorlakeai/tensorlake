@@ -355,8 +355,8 @@ enum SbxCommands {
     /// Create a new sandbox
     #[command(alias = "new")]
     Create {
-        /// Optional name for the sandbox. Named sandboxes support suspend/resume.
-        /// Omit to create an ephemeral sandbox (no suspend/resume). When provided, must start
+        /// Optional create-time name for the sandbox. Named sandboxes support suspend/resume.
+        /// Names are immutable after creation. Omit to create an ephemeral sandbox (no suspend/resume). When provided, must start
         /// with a lowercase letter, contain only lowercase letters, digits, and hyphens, not end
         /// with a hyphen, max 63 chars. Names that are exactly 21 lowercase alphanumeric
         /// characters are rejected (ambiguous with sandbox IDs).
@@ -563,17 +563,6 @@ enum SbxCommands {
         /// Deny outbound traffic to this IP or CIDR (can be repeated)
         #[arg(short = 'D', long = "network-deny")]
         network_deny: Vec<String>,
-    },
-
-    /// Set or update the name of a sandbox
-    Name {
-        /// Sandbox ID or current name
-        sandbox_id: String,
-
-        /// New name to assign. Rules: start with a lowercase letter, contain only lowercase
-        /// letters, digits, and hyphens, not end with a hyphen, max 63 chars. Names that are
-        /// exactly 21 lowercase alphanumeric characters are rejected (ambiguous with sandbox IDs).
-        new_name: String,
     },
 
     /// Interactive shell in a sandbox, or manage native SSH keys
@@ -1019,10 +1008,6 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         )
                         .await
                     }
-                    SbxCommands::Name {
-                        sandbox_id,
-                        new_name,
-                    } => commands::sbx::name::run(ctx, &sandbox_id, &new_name).await,
                     SbxCommands::Suspend {
                         sandbox_id,
                         no_wait,
@@ -1544,6 +1529,13 @@ mod tests {
     #[test]
     fn sbx_port_rm_requires_ports() {
         let result = Cli::try_parse_from(["tl", "sbx", "port", "rm", "sbx-123"]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sbx_name_command_is_not_available() {
+        let result = Cli::try_parse_from(["tl", "sbx", "name", "sbx-123", "my-name"]);
 
         assert!(result.is_err());
     }

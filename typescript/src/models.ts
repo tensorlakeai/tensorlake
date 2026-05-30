@@ -91,13 +91,11 @@ export interface CreateSandboxOptions {
   allowOut?: string[];
   denyOut?: string[];
   snapshotId?: string;
-  /** Optional name for the sandbox. Named sandboxes support suspend/resume. When absent the sandbox is ephemeral. */
+  /** Optional create-time name for the sandbox. Named sandboxes support suspend/resume. When absent the sandbox is ephemeral. Names are immutable after creation. */
   name?: string;
 }
 
 export interface UpdateSandboxOptions {
-  /** New name for the sandbox. Naming an ephemeral sandbox enables suspend/resume. */
-  name?: string;
   /** Whether exposed user ports should be reachable without TensorLake auth. */
   allowUnauthenticatedAccess?: boolean;
   /** User ports that should be routable through the sandbox proxy. Port 9501 is reserved. */
@@ -374,6 +372,7 @@ export interface SandboxClientOptions {
   namespace?: string;
   maxRetries?: number;
   retryBackoffMs?: number;
+  timeoutMs?: number;
 }
 
 export interface SandboxOptions {

@@ -213,13 +213,12 @@ class TestSandboxClientRustBackend(unittest.TestCase):
 
         info = client.update_sandbox(
             "sbx-1",
-            name="renamed",
             allow_unauthenticated_access=True,
             exposed_ports=[8081, 8080, 8081],
         )
 
         request_json = json.loads(fake.update_request_json)
-        self.assertEqual(request_json["name"], "renamed")
+        self.assertNotIn("name", request_json)
         self.assertTrue(request_json["allow_unauthenticated_access"])
         self.assertEqual(request_json["exposed_ports"], [8080, 8081])
         self.assertTrue(info.allow_unauthenticated_access)

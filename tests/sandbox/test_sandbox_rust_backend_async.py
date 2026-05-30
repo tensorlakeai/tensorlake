@@ -535,7 +535,7 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
             return_value=Traced(
                 _TRACE_ID,
                 _sandbox_info(
-                    name="renamed",
+                    name="stable-name",
                     exposed_ports=[8080],
                     allow_unauthenticated_access=True,
                 ),
@@ -543,23 +543,23 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
         )
 
         traced = await sandbox.update(
-            name="renamed",
             allow_unauthenticated_access=True,
             exposed_ports=[8080],
         )
 
         sandbox._lifecycle_client.update_sandbox.assert_awaited_once_with(
             "sbx-1",
-            name="renamed",
             allow_unauthenticated_access=True,
             exposed_ports=[8080],
         )
-        self.assertEqual(traced.name, "renamed")
+        self.assertEqual(traced.name, "stable-name")
+        self.assertTrue(traced.allow_unauthenticated_access)
+        self.assertEqual(traced.exposed_ports, [8080])
 
     async def test_update_requires_lifecycle_client(self):
         sandbox, _ = _make_async_sandbox()
         with self.assertRaises(SandboxError):
-            await sandbox.update(name="anything")
+            await sandbox.update(exposed_ports=[8080])
 
     async def test_terminate_closes_proxy_and_deletes_via_lifecycle(self):
         sandbox, _ = _make_async_sandbox()

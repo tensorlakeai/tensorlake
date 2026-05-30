@@ -367,8 +367,9 @@ class SandboxClient:
                 When set, image, resources, entrypoint, and secrets
                 are inherited from the snapshot unless explicitly
                 overridden.
-            name: Optional name for the sandbox. Named sandboxes support
-                suspend/resume. When absent the sandbox is ephemeral.
+            name: Optional create-time name for the sandbox. Named sandboxes
+                support suspend/resume. When absent the sandbox is ephemeral.
+                Names are immutable after creation.
 
         Returns:
             Traced[CreateSandboxResponse] with sandbox_id, status, and trace_id
@@ -541,19 +542,17 @@ class SandboxClient:
     def update_sandbox(
         self,
         sandbox_id: str,
-        name: str | None = None,
         *,
         allow_unauthenticated_access: bool | None = None,
         exposed_ports: list[int] | None = None,
     ) -> Traced[SandboxInfo]:
-        """Update a sandbox's properties.
+        """Update mutable sandbox proxy settings.
 
-        Supports updating the sandbox name and sandbox proxy access settings.
+        Sandbox names are immutable after creation. Pass ``name=`` to
+        :meth:`create` when a named sandbox is needed.
 
         Args:
             sandbox_id: ID or name of the sandbox to update
-            name: New name for the sandbox. Naming an ephemeral sandbox makes it
-                non-ephemeral and enables suspend/resume.
             allow_unauthenticated_access: Whether exposed user ports should be
                 reachable without TensorLake auth.
             exposed_ports: User ports that should be routable through the sandbox
@@ -571,15 +570,10 @@ class SandboxClient:
         normalized_ports = (
             _normalize_user_ports(exposed_ports) if exposed_ports is not None else None
         )
-        if (
-            name is None
-            and allow_unauthenticated_access is None
-            and normalized_ports is None
-        ):
+        if allow_unauthenticated_access is None and normalized_ports is None:
             raise SandboxError("At least one sandbox update field must be provided.")
 
         request = UpdateSandboxRequest(
-            name=name,
             allow_unauthenticated_access=allow_unauthenticated_access,
             exposed_ports=normalized_ports,
         )
@@ -1174,8 +1168,9 @@ class SandboxClient:
             snapshot_id: ID of a completed snapshot to restore from
             proxy_url: Override the sandbox proxy URL
             startup_timeout: Max seconds to wait for Running status (default 60)
-            name: Optional name for the sandbox. Named sandboxes support
-                suspend/resume. When absent the sandbox is ephemeral.
+            name: Optional create-time name for the sandbox. Named sandboxes
+                support suspend/resume. When absent the sandbox is ephemeral.
+                Names are immutable after creation.
 
         Returns:
             Connected Sandbox instance (auto-terminates in context manager)

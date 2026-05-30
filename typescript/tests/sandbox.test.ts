@@ -350,7 +350,7 @@ describe("Sandbox", () => {
       sbx.close();
     });
 
-    it("update() PATCHes the sandbox and refreshes the local name", async () => {
+    it("update() PATCHes mutable settings and refreshes cached info", async () => {
       let patchBody: Record<string, unknown> | null = null;
       let patchUrl = "";
       mockFetch((url, init) => {
@@ -358,7 +358,7 @@ describe("Sandbox", () => {
           patchUrl = url;
           patchBody = JSON.parse(init.body as string);
           return new Response(
-            sandboxInfoBody({ name: "renamed", exposed_ports: [8080] }),
+            sandboxInfoBody({ name: "stable-name", exposed_ports: [8080] }),
             { status: 200 },
           );
         }
@@ -371,20 +371,20 @@ describe("Sandbox", () => {
       });
       expect(sbx.name).toBeNull(); // lazy connect: no initial GET
 
-      const info = await sbx.update({ name: "renamed", exposedPorts: [8080] });
+      const info = await sbx.update({ exposedPorts: [8080] });
 
       expect(patchUrl).toContain("/sandboxes/sbx-1");
       expect(patchBody).not.toBeNull();
-      expect(patchBody!.name).toBe("renamed");
+      expect(patchBody!.name).toBeUndefined();
       expect(patchBody!.exposed_ports).toEqual([8080]);
-      expect(info.name).toBe("renamed");
-      expect(sbx.name).toBe("renamed");
+      expect(info.name).toBe("stable-name");
+      expect(sbx.name).toBe("stable-name");
       sbx.close();
     });
 
     it("update() throws when no lifecycle client is wired", async () => {
       const sbx = makeSandbox();
-      await expect(sbx.update({ name: "x" })).rejects.toThrow(SandboxError);
+      await expect(sbx.update({ exposedPorts: [8080] })).rejects.toThrow(SandboxError);
       sbx.close();
     });
 
@@ -395,17 +395,16 @@ describe("Sandbox", () => {
         calls.push(`${method} ${url}`);
 
         if (method === "PATCH") {
-          // First mutating call uses the name; response reveals the canonical UUID.
           expect(url).toContain("/sandboxes/my-original-name");
           return new Response(
-            sandboxInfoBody({ id: "sbx-1", name: "renamed-by-handle" }),
+            sandboxInfoBody({ id: "sbx-1", name: "my-original-name", exposed_ports: [8080] }),
             { status: 200 },
           );
         }
 
         if (url.includes("/sandboxes/sbx-1")) {
           return new Response(
-            sandboxInfoBody({ id: "sbx-1", name: "renamed-by-handle", status: "running" }),
+            sandboxInfoBody({ id: "sbx-1", name: "my-original-name", status: "running" }),
             { status: 200 },
           );
         }
@@ -417,9 +416,9 @@ describe("Sandbox", () => {
         sandboxId: "my-original-name",
         apiUrl: "http://localhost:8900",
       });
-      await sbx.update({ name: "renamed-by-handle" });
+      await sbx.update({ exposedPorts: [8080] });
       expect(await sbx.status()).toBe(SandboxStatus.RUNNING);
-      expect(sbx.name).toBe("renamed-by-handle");
+      expect(sbx.name).toBe("my-original-name");
 
       const patchCalls = calls.filter((line) => line.startsWith("PATCH "));
       expect(patchCalls).toHaveLength(1);
@@ -429,7 +428,7 @@ describe("Sandbox", () => {
       sbx.close();
     });
 
-    it("checkpoint() uses canonical sandbox ID after renaming a SandboxClient.connect(name) handle", async () => {
+    it("checkpoint() uses canonical sandbox ID after a SandboxClient.connect(name) handle resolves", async () => {
       const calls: string[] = [];
       mockFetch((url, init) => {
         const method = init?.method ?? "GET";
@@ -438,7 +437,7 @@ describe("Sandbox", () => {
         if (method === "PATCH") {
           expect(url).toContain("/sandboxes/my-original-name");
           return new Response(
-            sandboxInfoBody({ id: "sbx-1", name: "renamed-by-handle" }),
+            sandboxInfoBody({ id: "sbx-1", name: "my-original-name", exposed_ports: [8080] }),
             { status: 200 },
           );
         }
@@ -458,7 +457,7 @@ describe("Sandbox", () => {
       const sbx = client.connect("my-original-name");
       sbx._setOwner(client);
 
-      await sbx.update({ name: "renamed-by-handle" });
+      await sbx.update({ exposedPorts: [8080] });
       await sbx.checkpoint({ wait: false });
 
       expect(calls.some((line) => line.startsWith("POST ") && line.includes("/sandboxes/sbx-1/snapshot"))).toBe(true);
@@ -466,14 +465,14 @@ describe("Sandbox", () => {
       client.close();
     });
 
-    it("listSnapshots() filters by canonical sandbox ID after renaming a SandboxClient.connect(name) handle", async () => {
+    it("listSnapshots() filters by canonical sandbox ID after a SandboxClient.connect(name) handle resolves", async () => {
       mockFetch((url, init) => {
         const method = init?.method ?? "GET";
 
         if (method === "PATCH") {
           expect(url).toContain("/sandboxes/my-original-name");
           return new Response(
-            sandboxInfoBody({ id: "sbx-1", name: "renamed-by-handle" }),
+            sandboxInfoBody({ id: "sbx-1", name: "my-original-name", exposed_ports: [8080] }),
             { status: 200 },
           );
         }
@@ -497,7 +496,7 @@ describe("Sandbox", () => {
       const sbx = client.connect("my-original-name");
       sbx._setOwner(client);
 
-      await sbx.update({ name: "renamed-by-handle" });
+      await sbx.update({ exposedPorts: [8080] });
       const snaps = await sbx.listSnapshots();
 
       expect(snaps).toHaveLength(1);

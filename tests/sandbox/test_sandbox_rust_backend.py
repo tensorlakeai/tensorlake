@@ -293,33 +293,33 @@ class TestSandboxRustBackend(unittest.TestCase):
         self.assertEqual(sandbox.status, SandboxStatus.RUNNING)
         sandbox._lifecycle_client.get.assert_called_once_with("sbx-1")
 
-    def test_update_calls_lifecycle_client_and_refreshes_name(self):
+    def test_update_calls_lifecycle_client_and_refreshes_cached_info(self):
         sandbox, _ = _make_sandbox()
         sandbox._cached_info = _sandbox_info(name="old-name")
         sandbox._lifecycle_client = MagicMock()
         sandbox._lifecycle_client.update_sandbox.return_value = Traced(
             _TRACE_ID,
             _sandbox_info(
-                name="renamed",
+                name="old-name",
                 exposed_ports=[8080],
                 allow_unauthenticated_access=True,
             ),
         )
 
         traced = sandbox.update(
-            name="renamed",
             allow_unauthenticated_access=True,
             exposed_ports=[8080],
         )
 
         sandbox._lifecycle_client.update_sandbox.assert_called_once_with(
             "sbx-1",
-            name="renamed",
             allow_unauthenticated_access=True,
             exposed_ports=[8080],
         )
-        self.assertEqual(traced.name, "renamed")
-        self.assertEqual(sandbox.name, "renamed")
+        self.assertEqual(traced.name, "old-name")
+        self.assertEqual(sandbox.name, "old-name")
+        self.assertTrue(sandbox._cached_info.allow_unauthenticated_access)
+        self.assertEqual(sandbox._cached_info.exposed_ports, [8080])
 
     def test_update_prefers_canonical_sandbox_id_over_original_identifier(self):
         sandbox, _ = _make_sandbox()
@@ -328,45 +328,37 @@ class TestSandboxRustBackend(unittest.TestCase):
         sandbox._cached_info = _sandbox_info(name="old-name")
         sandbox._lifecycle_client = MagicMock()
         sandbox._lifecycle_client.update_sandbox.return_value = Traced(
-            _TRACE_ID, _sandbox_info(name="new-name")
+            _TRACE_ID, _sandbox_info(name="old-name", exposed_ports=[8080])
         )
 
-        sandbox.update(name="new-name")
+        sandbox.update(exposed_ports=[8080])
 
         sandbox._lifecycle_client.update_sandbox.assert_called_once_with(
             "sbx-1",
-            name="new-name",
             allow_unauthenticated_access=None,
-            exposed_ports=None,
+            exposed_ports=[8080],
         )
 
     def test_update_raises_without_lifecycle_client(self):
         sandbox, _ = _make_sandbox()
         with self.assertRaises(SandboxError):
-            sandbox.update(name="anything")
+            sandbox.update(exposed_ports=[8080])
 
-    def test_name_setter_delegates_to_update(self):
+    def test_name_setter_rejects_renames(self):
         sandbox, _ = _make_sandbox()
         sandbox._cached_info = _sandbox_info(name="old-env")
         sandbox._lifecycle_client = MagicMock()
-        sandbox._lifecycle_client.update_sandbox.return_value = Traced(
-            _TRACE_ID, _sandbox_info(name="new-env")
-        )
 
-        sandbox.name = "new-env"
+        with self.assertRaisesRegex(SandboxError, "immutable"):
+            sandbox.name = "new-env"
 
-        sandbox._lifecycle_client.update_sandbox.assert_called_once_with(
-            "sbx-1",
-            name="new-env",
-            allow_unauthenticated_access=None,
-            exposed_ports=None,
-        )
-        self.assertEqual(sandbox.name, "new-env")
+        sandbox._lifecycle_client.update_sandbox.assert_not_called()
+        self.assertEqual(sandbox.name, "old-env")
 
     def test_name_setter_rejects_empty_string(self):
         sandbox, _ = _make_sandbox()
         sandbox._lifecycle_client = MagicMock()
-        with self.assertRaises(SandboxError):
+        with self.assertRaisesRegex(SandboxError, "immutable"):
             sandbox.name = ""
         sandbox._lifecycle_client.update_sandbox.assert_not_called()
 

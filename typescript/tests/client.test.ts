@@ -260,32 +260,6 @@ describe("SandboxClient", () => {
   });
 
   describe("update", () => {
-    it("updates an unnamed sandbox with a new name", async () => {
-      mockFetch((url, init) => {
-        expect(url).toContain("/sandboxes/sbx-1");
-        expect(init?.method).toBe("PATCH");
-        const body = JSON.parse(init?.body as string);
-        expect(body.name).toBe("my-new-name");
-        return new Response(
-          JSON.stringify({
-            id: "sbx-1",
-            namespace: "default",
-            status: "running",
-            resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
-            secret_names: [],
-            name: "my-new-name",
-          }),
-          { status: 200 },
-        );
-      });
-
-      const client = SandboxClient.forLocalhost();
-      const info = await client.update("sbx-1", { name: "my-new-name" });
-      expect(info.sandboxId).toBe("sbx-1");
-      expect(info.name).toBe("my-new-name");
-      client.close();
-    });
-
     it("updates sandbox port access settings", async () => {
       mockFetch((url, init) => {
         expect(url).toContain("/sandboxes/sbx-1");
