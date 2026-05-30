@@ -1,3 +1,4 @@
+import json
 import unittest
 
 import validate_all_applications
@@ -259,16 +260,13 @@ def function_with_custom_image(x: int) -> str:
 
 
 class TestFunctionManifestImages(unittest.TestCase):
-    def test_default_function_image_uses_registered_build_image(self):
+    def test_default_function_image_is_omitted(self):
         app_manifest: ApplicationManifest = create_application_manifest(
             application_function=default_application_function,
             all_functions=get_functions(),
         )
 
-        self.assertEqual(
-            app_manifest.functions["function_with_default_image"].image,
-            "default",
-        )
+        self.assertIsNone(app_manifest.functions["function_with_default_image"].image)
 
     def test_custom_function_image_is_preserved(self):
         app_manifest: ApplicationManifest = create_application_manifest(
@@ -281,17 +279,21 @@ class TestFunctionManifestImages(unittest.TestCase):
             "custom-runtime-image",
         )
 
-    def test_serialized_manifest_includes_function_image_names(self):
+    def test_serialized_manifest_omits_default_function_image(self):
         app_manifest: ApplicationManifest = create_application_manifest(
             application_function=default_application_function,
             all_functions=get_functions(),
         )
 
         manifest_json = app_manifest.model_dump_json()
+        manifest = json.loads(manifest_json)
 
         self.assertIn('"function_with_default_image"', manifest_json)
-        self.assertIn('"image":"default"', manifest_json)
-        self.assertIn('"image":"custom-runtime-image"', manifest_json)
+        self.assertNotIn("image", manifest["functions"]["function_with_default_image"])
+        self.assertEqual(
+            manifest["functions"]["function_with_custom_image"]["image"],
+            "custom-runtime-image",
+        )
 
 
 # This test is commented out because right now we don't provide max_concurrency feature in SDK interface.

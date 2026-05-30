@@ -60,7 +60,7 @@ class FunctionManifest(pydantic.BaseModel):
     warm_containers: int | None = None
     min_containers: int | None = None
     max_containers: int | None = None
-    image: str
+    image: str | None = None
 
 
 @dataclass
@@ -282,29 +282,32 @@ def create_function_manifest(
         )
     )
 
-    return FunctionManifest(
-        name=function._function_config.function_name,
-        description=function._function_config.description,
-        docstring=docstring,
-        is_api=function._application_config is not None,
-        secret_names=function._function_config.secrets,
+    manifest_kwargs: dict[str, Any] = {
+        "name": function._function_config.function_name,
+        "description": function._function_config.description,
+        "docstring": docstring,
+        "is_api": function._application_config is not None,
+        "secret_names": function._function_config.secrets,
         # When a function doesn't have a class_init_timeout set it means it's not a class method.
         # In this case FE initialization timeout should be the same as function timeout.
-        initialization_timeout_sec=(
+        "initialization_timeout_sec": (
             function._function_config.timeout
             if function._function_config.class_init_timeout is None
             else function._function_config.class_init_timeout
         ),
-        timeout_sec=function._function_config.timeout,
-        resources=resources_for_function(function),
-        retry_policy=retry_policy,
-        cache_key=cache_key,
-        parameters=parameters,
-        return_type=return_type,
-        placement_constraints=placement_constraints,
-        max_concurrency=function._function_config.max_concurrency,
-        warm_containers=function._function_config.warm_containers,
-        min_containers=function._function_config.min_containers,
-        max_containers=function._function_config.max_containers,
-        image=function._function_config.image.name,
-    )
+        "timeout_sec": function._function_config.timeout,
+        "resources": resources_for_function(function),
+        "retry_policy": retry_policy,
+        "cache_key": cache_key,
+        "parameters": parameters,
+        "return_type": return_type,
+        "placement_constraints": placement_constraints,
+        "max_concurrency": function._function_config.max_concurrency,
+        "warm_containers": function._function_config.warm_containers,
+        "min_containers": function._function_config.min_containers,
+        "max_containers": function._function_config.max_containers,
+    }
+    if function._function_config.image is not None:
+        manifest_kwargs["image"] = function._function_config.image.name
+
+    return FunctionManifest(**manifest_kwargs)

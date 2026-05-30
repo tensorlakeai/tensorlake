@@ -1,13 +1,10 @@
 import asyncio
-import hashlib
-import json
 import os
 import unittest
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from tensorlake import builder as builder_module
 from tensorlake.applications import Image, application, function
 from tensorlake.applications import registry as registry_module
 from tensorlake.cli import deploy as deploy_module
@@ -23,175 +20,7 @@ def isolated_registry():
         yield
 
 
-def fake_create_image_context_file(image, file_path, extra_env_vars=None):
-    with open(file_path, "wb") as handle:
-        handle.write(f"context:{image._id}".encode())
-
-
-def expected_context_sha(image):
-    return hashlib.sha256(f"context:{image._id}".encode()).hexdigest()
-
-
-class FakeV3CloudClient:
-    def __init__(self):
-        self.calls = []
-        self.application_build_info_calls = []
-        self.stream_calls = []
-        self.create_responses = {}
-        self._responses = {}
-
-    def create_application_build(
-        self,
-        build_service_path: str,
-        request_json: str,
-        image_contexts: list[tuple[str, bytes]],
-    ) -> str:
-        request = json.loads(request_json)
-        self.calls.append((build_service_path, request_json, image_contexts))
-        app_build_id = f"app-build-{len(self.calls)}"
-        image_builds = [
-            {
-                "id": f"img-build-{app_build_id}-{image['key']}",
-                "app_version_id": app_build_id,
-                "key": image["key"],
-                "name": image.get("name"),
-                "context_sha256": image["context_sha256"],
-                "status": "pending",
-                "created_at": "2026-03-10T10:00:00Z",
-                "updated_at": "2026-03-10T10:00:00Z",
-                "function_names": image["function_names"],
-            }
-            for image in request["images"]
-        ]
-        create_response = {
-            "id": app_build_id,
-            "organization_id": "org-1",
-            "project_id": "proj-1",
-            "name": request["name"],
-            "version": request["version"],
-            "status": "building",
-            "image_builds": image_builds,
-        }
-        self.create_responses[app_build_id] = create_response
-        self._responses[app_build_id] = {
-            "id": app_build_id,
-            "organization_id": "org-1",
-            "project_id": "proj-1",
-            "name": request["name"],
-            "version": request["version"],
-            "status": "succeeded",
-            "created_at": "2026-03-10T10:00:00Z",
-            "updated_at": "2026-03-10T10:01:00Z",
-            "finished_at": "2026-03-10T10:01:00Z",
-            "image_builds": [
-                {
-                    **image_build,
-                    "status": "succeeded",
-                    "image_uri": f"registry.example.com/{request['name']}/{image_build['key']}:latest",
-                    "image_digest": f"sha256:{image_build['key']}",
-                    "finished_at": "2026-03-10T10:01:00Z",
-                }
-                for image_build in image_builds
-            ],
-        }
-        return json.dumps(create_response)
-
-    def application_build_info_json(
-        self,
-        build_service_path: str,
-        application_build_id: str,
-    ) -> str:
-        self.application_build_info_calls.append(
-            (build_service_path, application_build_id)
-        )
-        return json.dumps(self._responses[application_build_id])
-
-    def stream_build_logs_to_stderr_prefixed(
-        self,
-        build_service_path: str,
-        build_id: str,
-        prefix: str,
-        color: str | None = None,
-    ) -> None:
-        self.stream_calls.append((build_service_path, build_id, prefix, color))
-        return None
-
-
 class TestDeployHelpers(unittest.TestCase):
-    def test_collect_application_build_request_groups_functions_using_default_image(
-        self,
-    ):
-        with isolated_registry():
-            custom_image = Image(name="custom-image")
-
-            @function()
-            def default_helper(payload):
-                return payload
-
-            @function(image=custom_image)
-            def custom_helper(payload):
-                return payload
-
-            @application()
-            @function()
-            def default_image_app(payload):
-                payload = default_helper(payload)
-                return custom_helper(payload)
-
-            all_functions = [default_helper, custom_helper, default_image_app]
-
-            image_context_calls = []
-
-            def fake_build_image_context(image, extra_env_vars=None):
-                image_context_calls.append((image, extra_env_vars))
-                return f"context:{image._id}".encode()
-
-            with patch.object(
-                builder_module,
-                "build_image_context",
-                side_effect=fake_build_image_context,
-            ):
-                request = builder_module.collect_application_build_request(
-                    default_image_app,
-                    all_functions,
-                    build_env_vars=[("PIP_INDEX_URL", "https://test.pypi.org/simple/")],
-                )
-
-        images = {image.key: image for image in request.images}
-        self.assertEqual(
-            image_context_calls,
-            [
-                (
-                    default_helper._function_config.image,
-                    [("PIP_INDEX_URL", "https://test.pypi.org/simple/")],
-                ),
-                (
-                    custom_image,
-                    [("PIP_INDEX_URL", "https://test.pypi.org/simple/")],
-                ),
-            ],
-        )
-        self.assertEqual(
-            set(images), {default_helper._function_config.image._id, custom_image._id}
-        )
-
-        default_image_request = images[default_helper._function_config.image._id]
-        self.assertEqual(default_image_request.name, "default")
-        self.assertEqual(
-            set(default_image_request.function_names),
-            {
-                default_helper._function_config.function_name,
-                default_image_app._function_config.function_name,
-            },
-        )
-
-        custom_image_request = images[custom_image._id]
-        self.assertEqual(custom_image_request.name, "custom-image")
-        self.assertEqual(
-            custom_image_request.function_names,
-            [custom_helper._function_config.function_name],
-        )
-
     def test_format_error_message_does_not_include_exception_payload(self):
         message = deploy_module._format_error_message(
             "build failed", RuntimeError("secret")
@@ -202,11 +31,11 @@ class TestDeployHelpers(unittest.TestCase):
     def test_format_build_failure_message_includes_inner_error(self):
         message = deploy_module._format_build_failure_message(
             "parser-image",
-            RuntimeError("404 Not Found: POST /images/v3/applications"),
+            RuntimeError("rootfs builder failed"),
         )
         self.assertEqual(
             message,
-            "image 'parser-image' build failed: 404 Not Found: POST /images/v3/applications. check your Image() configuration and try again.",
+            "image 'parser-image' build failed: rootfs builder failed. check your Image() configuration and try again.",
         )
 
     def test_build_context_from_env_passes_expected_values(self):
@@ -459,7 +288,7 @@ class TestDeployEntrypoints(unittest.TestCase):
         self.assertEqual(missing_event["count"], 2)
         self.assertEqual(missing_event["names"], ["MISSING_ONE", "MISSING_TWO"])
 
-    def test_deploy_compat_v3_builds_each_application_image_as_sandbox_template(self):
+    def test_deploy_builds_each_explicit_application_image_as_sandbox_template(self):
         auth = self._make_auth_context()
         with isolated_registry():
             parser_image = Image(name="parser-image")
@@ -517,9 +346,6 @@ class TestDeployEntrypoints(unittest.TestCase):
                 finance_analyzer,
                 finance_query,
             ]
-
-            default_image = get_extraction_schema._function_config.image
-
             with (
                 self._successful_deploy_patches(auth, functions),
                 patch.object(
@@ -533,26 +359,19 @@ class TestDeployEntrypoints(unittest.TestCase):
                 deploy_module.deploy(
                     application_file_path="my_app.py",
                     upgrade_running_requests=False,
-                    image_builder_version="v3",
                 )
 
         self.assertEqual(
             [call.kwargs["registered_name"] for call in build_image.call_args_list],
-            ["default", "parser-image", "agent-image", "code-exec-image"],
+            ["parser-image", "agent-image", "code-exec-image"],
         )
         self.assertEqual(
             [call.args[0] for call in build_image.call_args_list],
-            [default_image, parser_image, agent_image, code_exec_image],
+            [parser_image, agent_image, code_exec_image],
         )
-        self.assertTrue(
-            any(
-                call.args[0]["type"] == "warning"
-                and "using the sandbox rootfs builder" in call.args[0]["message"]
-                for call in emit.call_args_list
-            )
-        )
+        emit.assert_any_call({"type": "build_done"})
 
-    def test_deploy_compat_v2_uses_sandbox_builder_once_per_image(self):
+    def test_deploy_builds_shared_explicit_image_once(self):
         auth = self._make_auth_context()
         shared_image = Image(name="shared-image")
 
@@ -595,7 +414,6 @@ class TestDeployEntrypoints(unittest.TestCase):
             deploy_module.deploy(
                 application_file_path="my_app.py",
                 upgrade_running_requests=False,
-                image_builder_version="v2",
             )
 
         build_image.assert_called_once()
@@ -630,15 +448,13 @@ class TestDeployEntrypoints(unittest.TestCase):
         self.assertEqual(event["message"], "deploy failed (RuntimeError)")
         self.assertEqual(event["details"], "RuntimeError: boom")
 
-    def test_deploy_entrypoint_passes_image_builder_version(self):
+    def test_deploy_entrypoint_passes_build_envs(self):
         with (
             patch(
                 "sys.argv",
                 [
                     "tensorlake-deploy",
                     "my_app.py",
-                    "--image-builder-version",
-                    "v3",
                     "--build-env",
                     "PIP_INDEX_URL=https://test.pypi.org/simple/",
                     "--build-env",
@@ -649,7 +465,6 @@ class TestDeployEntrypoints(unittest.TestCase):
         ):
             deploy_module.deploy_entrypoint()
 
-        self.assertEqual(deploy.call_args.kwargs["image_builder_version"], "v3")
         self.assertEqual(
             deploy.call_args.kwargs["build_envs"],
             [
@@ -657,15 +472,6 @@ class TestDeployEntrypoints(unittest.TestCase):
                 ("PIP_EXTRA_INDEX_URL", "https://pypi.org/simple/"),
             ],
         )
-
-    def test_deploy_entrypoint_defaults_to_sandbox_image_builder(self):
-        with (
-            patch("sys.argv", ["tensorlake-deploy", "my_app.py"]),
-            patch.object(deploy_module, "deploy") as deploy,
-        ):
-            deploy_module.deploy_entrypoint()
-
-        self.assertEqual(deploy.call_args.kwargs["image_builder_version"], "sandbox")
 
     def test_prepare_images_emits_inner_build_error_message(self):
         image = Image(name="parser-image")

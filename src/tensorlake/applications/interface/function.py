@@ -31,7 +31,7 @@ class _FunctionConfiguration:
     class_init_timeout: int | None
     function_name: str
     description: str
-    image: Image
+    image: Image | None
     secrets: List[str]
     retries: Retries | None  # Uses application retry policy if None
     timeout: int
