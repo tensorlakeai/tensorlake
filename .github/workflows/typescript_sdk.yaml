@@ -26,6 +26,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 defaults:
   run:
@@ -84,8 +85,49 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Wait for Python sandbox integration
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          deadline=$((SECONDS + 1800))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            run_id=$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow tests.yaml \
+              --json databaseId,headSha \
+              --limit 20 \
+              --jq ".[] | select(.headSha == \"$HEAD_SHA\") | .databaseId" \
+              | head -n 1)
+
+            if [ -n "$run_id" ]; then
+              job=$(gh run view "$run_id" \
+                --repo "$GITHUB_REPOSITORY" \
+                --json jobs \
+                --jq '.jobs[] | select(.name == "Sandbox integration tests") | "\(.status)\t\(.conclusion // "")"')
+              status=$(printf '%s' "$job" | cut -f 1)
+              conclusion=$(printf '%s' "$job" | cut -f 2)
+
+              if [ "$status" = "completed" ] && [ "$conclusion" = "success" ]; then
+                exit 0
+              fi
+              if [ "$status" = "completed" ]; then
+                echo "Sandbox integration tests completed with conclusion: $conclusion"
+                exit 1
+              fi
+            fi
+
+            sleep 15
+          done
+
+          echo "Timed out waiting for Sandbox integration tests"
+          exit 1
+
       - name: Run integration tests
         run: npm run test:integration
         env:
           TENSORLAKE_API_URL: ${{ secrets.TENSORLAKE_API_URL }}
           TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
+          TENSORLAKE_TEST_CLEANUP_ALL: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment == 'dev') && '1' || '0' }}
+          TENSORLAKE_TEST_CLEANUP_GRACE_SECS: "60"

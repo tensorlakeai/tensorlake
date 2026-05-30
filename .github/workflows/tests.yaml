@@ -260,4 +260,5 @@ jobs:
         env:
           TENSORLAKE_API_URL: ${{ secrets.TENSORLAKE_API_URL }}
           TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
-          TENSORLAKE_SANDBOX_IMAGE: tensorlake/ubuntu-minimal
+          TENSORLAKE_TEST_CLEANUP_ALL: ${{ (github.event_name != 'workflow_dispatch' || inputs.environment == 'dev') && '1' || '0' }}
+          TENSORLAKE_TEST_CLEANUP_GRACE_SECS: "60"

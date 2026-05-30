@@ -11,6 +11,7 @@ Usage:
 import os
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from tensorlake.sandbox import (
     PoolContainerInfo,
@@ -22,12 +23,16 @@ from tensorlake.sandbox import (
     SandboxStatus,
 )
 
-_SANDBOX_IMAGE = os.environ.get(
-    "TENSORLAKE_SANDBOX_IMAGE", "docker.io/library/alpine:latest"
-)
+_SANDBOX_IMAGE = os.environ.get("TENSORLAKE_SANDBOX_IMAGE", "tensorlake/ubuntu-minimal")
 _SANDBOX_CPUS = 1.0
 _SANDBOX_MEMORY_MB = 1024
 _SANDBOX_DISK_MB = 10240
+_STALE_RESOURCE_GRACE_SECS = int(
+    os.environ.get("TENSORLAKE_TEST_CLEANUP_GRACE_SECS", "60")
+)
+_CLEANUP_ALL_TEST_RESOURCES = os.environ.get(
+    "TENSORLAKE_TEST_CLEANUP_ALL", ""
+).lower() in {"1", "true", "yes"}
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +44,7 @@ def _poll_sandbox_status(
     client: SandboxClient,
     sandbox_id: str,
     target: SandboxStatus,
-    timeout: float = 60.0,
+    timeout: float = 120.0,
     interval: float = 1.0,
 ) -> SandboxStatus:
     """Poll until the sandbox reaches *target* status or times out."""
@@ -61,7 +66,7 @@ def _poll_pool_containers(
     client: SandboxClient,
     pool_id: str,
     min_count: int,
-    timeout: float = 60.0,
+    timeout: float = 120.0,
     interval: float = 1.0,
 ) -> list[PoolContainerInfo]:
     """Poll until the pool has at least *min_count* containers or times out."""
@@ -95,6 +100,90 @@ def _warm_containers(containers: list[PoolContainerInfo]) -> list[PoolContainerI
 def _claimed_containers(containers: list[PoolContainerInfo]) -> list[PoolContainerInfo]:
     """Filter to claimed (sandbox-assigned) containers."""
     return [c for c in containers if c.sandbox_id is not None]
+
+
+def _is_stale(created_at: datetime | None, cutoff: datetime) -> bool:
+    return created_at is None or created_at < cutoff
+
+
+def _is_older_than_cleanup_grace(created_at: datetime | None, cutoff: datetime) -> bool:
+    return created_at is not None and created_at < cutoff
+
+
+def _is_test_sandbox(info) -> bool:
+    return (
+        bool(_SANDBOX_IMAGE)
+        and info.image == _SANDBOX_IMAGE
+        and info.entrypoint == ["sleep", "300"]
+        and info.resources.memory_mb == _SANDBOX_MEMORY_MB
+    )
+
+
+def _is_test_pool(info) -> bool:
+    return (
+        bool(_SANDBOX_IMAGE)
+        and info.image == _SANDBOX_IMAGE
+        and info.entrypoint == ["sleep", "300"]
+        and info.resources.memory_mb == _SANDBOX_MEMORY_MB
+    )
+
+
+def _cleanup_stale_test_resources(client: SandboxClient) -> None:
+    """Remove old integration-test resources left by interrupted CI runs."""
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=_STALE_RESOURCE_GRACE_SECS)
+    pool_ids: set[str] = set()
+
+    try:
+        for sandbox in client.list():
+            if sandbox.status != SandboxStatus.TERMINATED and (
+                (
+                    _CLEANUP_ALL_TEST_RESOURCES
+                    and _is_older_than_cleanup_grace(sandbox.created_at, cutoff)
+                )
+                or (_is_test_sandbox(sandbox) and _is_stale(sandbox.created_at, cutoff))
+            ):
+                try:
+                    client.delete(sandbox.sandbox_id)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    try:
+        for pool in client.list_pools():
+            if (
+                _CLEANUP_ALL_TEST_RESOURCES
+                and _is_older_than_cleanup_grace(pool.created_at, cutoff)
+            ) or (_is_test_pool(pool) and _is_stale(pool.created_at, cutoff)):
+                pool_ids.add(pool.pool_id)
+    except Exception:
+        pass
+
+    if not pool_ids:
+        return
+
+    # Give sandbox deletes a short chance to release pool claims, then remove
+    # stale pools that may still be holding warm containers against quota.
+    for _ in range(5):
+        if not pool_ids:
+            break
+        time.sleep(2)
+        remaining_pool_ids: set[str] = set()
+        for pool_id in pool_ids:
+            try:
+                client.delete_pool(pool_id)
+            except Exception:
+                remaining_pool_ids.add(pool_id)
+        pool_ids = remaining_pool_ids
+
+
+def setUpModule():
+    api_url = os.environ.get("TENSORLAKE_API_URL", "http://localhost:8900")
+    client = SandboxClient(api_url=api_url)
+    try:
+        _cleanup_stale_test_resources(client)
+    finally:
+        client.close()
 
 
 # ---------------------------------------------------------------------------

@@ -4,9 +4,10 @@ import json
 import os
 import sys
 import traceback
+from dataclasses import dataclass
 from pathlib import Path
 
-from tensorlake.applications import Function, SDKUsageError, TensorlakeError
+from tensorlake.applications import Function, Image, SDKUsageError, TensorlakeError
 from tensorlake.applications.applications import (
     filter_applications,
     functions_for_application,
@@ -27,6 +28,14 @@ from tensorlake.image.sandbox_builder import (
     SandboxImageBuildError,
     build_sandbox_application_image,
 )
+
+_DEFAULT_APPLICATION_IMAGE_NAME = "default"
+
+
+@dataclass(frozen=True)
+class _ApplicationImageBuild:
+    image: Image
+    registered_name: str
 
 
 def _emit(obj):
@@ -219,9 +228,10 @@ async def _prepare_images(
     context_dir: str,
     build_envs: list[tuple[str, str]] | None = None,
 ):
-    images = _application_images(functions)
-    for image in images:
-        image_name = image.name
+    image_builds = _application_images(functions)
+    for image_build in image_builds:
+        image = image_build.image
+        image_name = image_build.registered_name
         _emit({"type": "build_start", "image": image_name})
         try:
             await asyncio.to_thread(
@@ -247,28 +257,66 @@ async def _prepare_images(
     _emit({"type": "build_done"})
 
 
-def _application_images(functions: list[Function]):
-    images = []
+def default_application_image_name(
+    application_name: str, application_version: str
+) -> str:
+    return f"applications/{application_name}/versions/{application_version}/default"
+
+
+def _append_image_build(
+    image_builds: list[_ApplicationImageBuild],
+    seen_image_ids: set[str],
+    seen_registered_names: dict[str, str],
+    image: Image,
+    registered_name: str,
+) -> None:
+    previous_image_id = seen_registered_names.get(registered_name)
+    if previous_image_id is not None and previous_image_id != image._id:
+        raise SDKUsageError(
+            f"multiple different Image objects use the name '{registered_name}'. "
+            "Use unique Image(name=...) values so each function resolves "
+            "to the intended sandbox image."
+        )
+    seen_registered_names[registered_name] = image._id
+    if image._id in seen_image_ids:
+        return
+    seen_image_ids.add(image._id)
+    image_builds.append(
+        _ApplicationImageBuild(image=image, registered_name=registered_name)
+    )
+
+
+def _application_images(functions: list[Function]) -> list[_ApplicationImageBuild]:
+    image_builds: list[_ApplicationImageBuild] = []
     seen_image_ids: set[str] = set()
     seen_image_names: dict[str, str] = {}
     for application in filter_applications(functions):
+        default_image: Image | None = None
+        default_registered_name = default_application_image_name(
+            application._function_config.function_name,
+            application._application_config.version,
+        )
         for function in functions_for_application(application, functions):
             image = function._function_config.image
             if image is None:
-                continue
-            previous_image_id = seen_image_names.get(image.name)
-            if previous_image_id is not None and previous_image_id != image._id:
-                raise SDKUsageError(
-                    f"multiple different Image objects use the name '{image.name}'. "
-                    "Use unique Image(name=...) values so each function resolves "
-                    "to the intended sandbox image."
+                if default_image is None:
+                    default_image = Image(name=_DEFAULT_APPLICATION_IMAGE_NAME)
+                _append_image_build(
+                    image_builds,
+                    seen_image_ids,
+                    seen_image_names,
+                    default_image,
+                    default_registered_name,
                 )
-            seen_image_names[image.name] = image._id
-            if image._id in seen_image_ids:
                 continue
-            seen_image_ids.add(image._id)
-            images.append(image)
-    return images
+            _append_image_build(
+                image_builds,
+                seen_image_ids,
+                seen_image_names,
+                image,
+                image.name,
+            )
+    return image_builds
 
 
 def _deploy_applications(
