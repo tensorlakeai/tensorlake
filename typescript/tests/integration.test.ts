@@ -10,8 +10,6 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  createSandboxImage,
-  Image,
   PoolInUseError,
   PoolNotFoundError,
   SandboxClient,
@@ -24,10 +22,8 @@ import {
 } from "../src/index.js";
 import { Sandbox } from "../src/sandbox.js";
 
-let sandboxImage = process.env.TENSORLAKE_SANDBOX_IMAGE ?? "";
-const TEST_IMAGE_BASE =
-  process.env.TENSORLAKE_TEST_SANDBOX_IMAGE_BASE ??
-  "tensorlake/ubuntu-minimal";
+const sandboxImage =
+  process.env.TENSORLAKE_SANDBOX_IMAGE ?? "tensorlake/ubuntu-minimal";
 const SANDBOX_CPUS = 1.0;
 const SANDBOX_MEMORY_MB = 1024;
 const SANDBOX_DISK_MB = 10240;
@@ -120,54 +116,6 @@ function claimedContainers(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function slug(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9_.-]+/g, "-")
-    .replace(/^-|-$/g, "");
-}
-
-function defaultTestImageName(): string {
-  const runId = process.env.GITHUB_RUN_ID;
-  const parts = runId
-    ? [
-        "tl-sdk-integration",
-        runId,
-        process.env.GITHUB_JOB ?? "typescript",
-        process.env.GITHUB_RUN_ATTEMPT ?? "1",
-      ]
-    : ["tl-sdk-integration", "local", String(process.pid)];
-  return slug(parts.join("-"));
-}
-
-async function ensureSandboxImage(): Promise<void> {
-  if (sandboxImage) return;
-
-  const imageName =
-    process.env.TENSORLAKE_TEST_SANDBOX_IMAGE_NAME ?? defaultTestImageName();
-  process.stderr.write(
-    `Building sandbox integration image '${imageName}' from base '${TEST_IMAGE_BASE}'...\n`,
-  );
-  await createSandboxImage(
-    new Image({ name: imageName, baseImage: TEST_IMAGE_BASE }),
-    {
-      registeredName: imageName,
-      cpus: SANDBOX_CPUS,
-      memoryMb: 2048,
-      diskMb: SANDBOX_DISK_MB,
-    },
-    {
-      emit: (event) => {
-        const type = typeof event.type === "string" ? event.type : "event";
-        const message = typeof event.message === "string" ? event.message : "";
-        if (message) process.stderr.write(`[${type}] ${message}\n`);
-      },
-    },
-  );
-  sandboxImage = imageName;
-  process.stderr.write(`Using sandbox integration image '${sandboxImage}'.\n`);
 }
 
 function isStale(createdAt: Date | undefined, cutoff: Date): boolean {
@@ -266,8 +214,7 @@ beforeAll(async () => {
   } finally {
     client.close();
   }
-  await ensureSandboxImage();
-}, 600_000);
+}, 120_000);
 
 // ---------------------------------------------------------------------------
 // Tests
