@@ -27,6 +27,12 @@ const sandboxImage =
 const SANDBOX_CPUS = 1.0;
 const SANDBOX_MEMORY_MB = 1024;
 const SANDBOX_DISK_MB = 10240;
+const SANDBOX_STATUS_TIMEOUT_SEC = 120;
+const SANDBOX_POOL_TIMEOUT_SEC = 120;
+const SANDBOX_LIFECYCLE_TIMEOUT_MS = 360_000;
+const SANDBOX_CREATE_TIMEOUT_MS = 180_000;
+const SANDBOX_SETUP_TIMEOUT_MS = 300_000;
+const SANDBOX_SUITE_TIMEOUT_MS = 420_000;
 const STALE_RESOURCE_GRACE_MS =
   Number(process.env.TENSORLAKE_TEST_CLEANUP_GRACE_SECS ?? "60") * 1000;
 const CLEANUP_ALL_TEST_RESOURCES = ["1", "true", "yes"].includes(
@@ -41,7 +47,7 @@ async function pollSandboxStatus(
   client: SandboxClient,
   sandboxId: string,
   target: SandboxStatus | SandboxStatus[],
-  timeoutSec = 60,
+  timeoutSec = SANDBOX_STATUS_TIMEOUT_SEC,
   intervalMs = 1000,
 ): Promise<SandboxStatus> {
   const targets = Array.isArray(target) ? target : [target];
@@ -88,7 +94,7 @@ async function pollPoolContainers(
   client: SandboxClient,
   poolId: string,
   minCount: number,
-  timeoutSec = 60,
+  timeoutSec = SANDBOX_POOL_TIMEOUT_SEC,
   intervalMs = 1000,
 ): Promise<PoolContainerInfo[]> {
   const deadline = Date.now() + timeoutSec * 1000;
@@ -116,6 +122,15 @@ function claimedContainers(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function createTestClient(): SandboxClient {
+  return new SandboxClient({
+    apiUrl: process.env.TENSORLAKE_API_URL ?? "https://api.tensorlake.ai",
+    apiKey: process.env.TENSORLAKE_API_KEY,
+    maxRetries: 0,
+    timeoutMs: SANDBOX_CREATE_TIMEOUT_MS,
+  });
 }
 
 function isStale(createdAt: Date | undefined, cutoff: Date): boolean {
@@ -205,16 +220,13 @@ async function cleanupStaleTestResources(client: SandboxClient): Promise<void> {
 }
 
 beforeAll(async () => {
-  const client = new SandboxClient({
-    apiUrl: process.env.TENSORLAKE_API_URL ?? "https://api.tensorlake.ai",
-    apiKey: process.env.TENSORLAKE_API_KEY,
-  });
+  const client = createTestClient();
   try {
     await cleanupStaleTestResources(client);
   } finally {
     client.close();
   }
-}, 120_000);
+}, SANDBOX_SETUP_TIMEOUT_MS);
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -227,10 +239,7 @@ describe(
     let sandboxId: string;
 
     beforeAll(() => {
-      client = new SandboxClient({
-        apiUrl: process.env.TENSORLAKE_API_URL ?? "https://api.tensorlake.ai",
-        apiKey: process.env.TENSORLAKE_API_KEY,
-      });
+      client = createTestClient();
     });
 
     afterAll(async () => {
@@ -315,7 +324,7 @@ describe(
       );
     });
   },
-  { timeout: 120_000 },
+  { timeout: SANDBOX_LIFECYCLE_TIMEOUT_MS },
 );
 
 describe(
@@ -326,10 +335,7 @@ describe(
     let poolId: string;
 
     beforeAll(async () => {
-      client = new SandboxClient({
-        apiUrl: process.env.TENSORLAKE_API_URL ?? "https://api.tensorlake.ai",
-        apiKey: process.env.TENSORLAKE_API_KEY,
-      });
+      client = createTestClient();
       const pool = await client.createPool({
         image: sandboxImage,
         cpus: SANDBOX_CPUS,
@@ -348,7 +354,7 @@ describe(
         },
         5,
       );
-    });
+    }, SANDBOX_SETUP_TIMEOUT_MS);
 
     afterAll(async () => {
       if (sandbox) {
@@ -503,7 +509,7 @@ describe(
       ).toBeGreaterThanOrEqual(0);
     });
   },
-  { timeout: 180_000 },
+  { timeout: SANDBOX_SUITE_TIMEOUT_MS },
 );
 
 describe(
@@ -513,10 +519,7 @@ describe(
     let poolId: string;
 
     beforeAll(() => {
-      client = new SandboxClient({
-        apiUrl: process.env.TENSORLAKE_API_URL ?? "https://api.tensorlake.ai",
-        apiKey: process.env.TENSORLAKE_API_KEY,
-      });
+      client = createTestClient();
     });
 
     afterAll(async () => {
@@ -576,7 +579,7 @@ describe(
       ).rejects.toThrow(PoolNotFoundError);
     });
   },
-  { timeout: 120_000 },
+  { timeout: SANDBOX_LIFECYCLE_TIMEOUT_MS },
 );
 
 describe(
@@ -587,10 +590,7 @@ describe(
     let sandboxId: string;
 
     beforeAll(() => {
-      client = new SandboxClient({
-        apiUrl: process.env.TENSORLAKE_API_URL ?? "https://api.tensorlake.ai",
-        apiKey: process.env.TENSORLAKE_API_KEY,
-      });
+      client = createTestClient();
     });
 
     afterAll(async () => {
@@ -652,7 +652,7 @@ describe(
       poolId = undefined!;
     });
   },
-  { timeout: 120_000 },
+  { timeout: SANDBOX_LIFECYCLE_TIMEOUT_MS },
 );
 
 describe(
@@ -664,10 +664,7 @@ describe(
     let warmContainerId: string;
 
     beforeAll(() => {
-      client = new SandboxClient({
-        apiUrl: process.env.TENSORLAKE_API_URL ?? "https://api.tensorlake.ai",
-        apiKey: process.env.TENSORLAKE_API_KEY,
-      });
+      client = createTestClient();
     });
 
     afterAll(async () => {
@@ -767,7 +764,7 @@ describe(
       }
     });
   },
-  { timeout: 180_000 },
+  { timeout: SANDBOX_SUITE_TIMEOUT_MS },
 );
 
 describe(
@@ -778,10 +775,7 @@ describe(
     let sandboxId: string;
 
     beforeAll(() => {
-      client = new SandboxClient({
-        apiUrl: process.env.TENSORLAKE_API_URL ?? "https://api.tensorlake.ai",
-        apiKey: process.env.TENSORLAKE_API_KEY,
-      });
+      client = createTestClient();
     });
 
     afterAll(async () => {
@@ -873,5 +867,5 @@ describe(
       }
     });
   },
-  { timeout: 180_000 },
+  { timeout: SANDBOX_SUITE_TIMEOUT_MS },
 );

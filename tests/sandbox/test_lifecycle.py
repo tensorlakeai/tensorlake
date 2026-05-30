@@ -44,7 +44,7 @@ def _poll_sandbox_status(
     client: SandboxClient,
     sandbox_id: str,
     target: SandboxStatus,
-    timeout: float = 60.0,
+    timeout: float = 120.0,
     interval: float = 1.0,
 ) -> SandboxStatus:
     """Poll until the sandbox reaches *target* status or times out."""
@@ -66,7 +66,7 @@ def _poll_pool_containers(
     client: SandboxClient,
     pool_id: str,
     min_count: int,
-    timeout: float = 60.0,
+    timeout: float = 120.0,
     interval: float = 1.0,
 ) -> list[PoolContainerInfo]:
     """Poll until the pool has at least *min_count* containers or times out."""
