@@ -22,12 +22,16 @@ import {
 } from "../src/index.js";
 import { Sandbox } from "../src/sandbox.js";
 
-const SANDBOX_IMAGE = "tensorlake/ubuntu-minimal";
+const SANDBOX_IMAGE =
+  process.env.TENSORLAKE_SANDBOX_IMAGE ?? "docker.io/library/alpine:latest";
 const SANDBOX_CPUS = 1.0;
 const SANDBOX_MEMORY_MB = 1024;
 const SANDBOX_DISK_MB = 10240;
 const STALE_RESOURCE_GRACE_MS =
   Number(process.env.TENSORLAKE_TEST_CLEANUP_GRACE_SECS ?? "60") * 1000;
+const CLEANUP_ALL_TEST_RESOURCES = ["1", "true", "yes"].includes(
+  (process.env.TENSORLAKE_TEST_CLEANUP_ALL ?? "").toLowerCase(),
+);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -115,6 +119,13 @@ function sleep(ms: number): Promise<void> {
 }
 
 function isStale(createdAt: Date | undefined, cutoff: Date): boolean {
+  return createdAt == null || createdAt.getTime() < cutoff.getTime();
+}
+
+function isOlderThanCleanupGrace(
+  createdAt: Date | undefined,
+  cutoff: Date,
+): boolean {
   return createdAt != null && createdAt.getTime() < cutoff.getTime();
 }
 
@@ -149,8 +160,9 @@ async function cleanupStaleTestResources(client: SandboxClient): Promise<void> {
         .filter(
           (sandbox) =>
             sandbox.status !== SandboxStatus.TERMINATED &&
-            isTestSandbox(sandbox) &&
-            isStale(sandbox.createdAt, cutoff),
+            ((CLEANUP_ALL_TEST_RESOURCES &&
+              isOlderThanCleanupGrace(sandbox.createdAt, cutoff)) ||
+              (isTestSandbox(sandbox) && isStale(sandbox.createdAt, cutoff))),
         )
         .map((sandbox) => client.delete(sandbox.sandboxId).catch(() => {})),
     );
@@ -159,7 +171,11 @@ async function cleanupStaleTestResources(client: SandboxClient): Promise<void> {
   try {
     const pools = await client.listPools();
     for (const pool of pools) {
-      if (isTestPool(pool) && isStale(pool.createdAt, cutoff)) {
+      if (
+        (CLEANUP_ALL_TEST_RESOURCES &&
+          isOlderThanCleanupGrace(pool.createdAt, cutoff)) ||
+        (isTestPool(pool) && isStale(pool.createdAt, cutoff))
+      ) {
         poolIds.add(pool.poolId);
       }
     }
@@ -169,10 +185,21 @@ async function cleanupStaleTestResources(client: SandboxClient): Promise<void> {
 
   // Give sandbox deletes a short chance to release pool claims, then remove
   // stale pools that may still be holding warm containers against quota.
-  await sleep(2000);
-  await Promise.all(
-    [...poolIds].map((poolId) => client.deletePool(poolId).catch(() => {})),
-  );
+  for (let attempt = 0; attempt < 5 && poolIds.size > 0; attempt++) {
+    await sleep(2000);
+    const remainingPoolIds = new Set<string>();
+    await Promise.all(
+      [...poolIds].map(async (poolId) => {
+        try {
+          await client.deletePool(poolId);
+        } catch {
+          remainingPoolIds.add(poolId);
+        }
+      }),
+    );
+    poolIds.clear();
+    for (const poolId of remainingPoolIds) poolIds.add(poolId);
+  }
 }
 
 beforeAll(async () => {

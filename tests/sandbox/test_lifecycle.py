@@ -32,6 +32,9 @@ _SANDBOX_DISK_MB = 10240
 _STALE_RESOURCE_GRACE_SECS = int(
     os.environ.get("TENSORLAKE_TEST_CLEANUP_GRACE_SECS", "60")
 )
+_CLEANUP_ALL_TEST_RESOURCES = os.environ.get(
+    "TENSORLAKE_TEST_CLEANUP_ALL", ""
+).lower() in {"1", "true", "yes"}
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +105,10 @@ def _claimed_containers(containers: list[PoolContainerInfo]) -> list[PoolContain
 
 
 def _is_stale(created_at: datetime | None, cutoff: datetime) -> bool:
+    return created_at is None or created_at < cutoff
+
+
+def _is_older_than_cleanup_grace(created_at: datetime | None, cutoff: datetime) -> bool:
     return created_at is not None and created_at < cutoff
 
 
@@ -128,10 +135,12 @@ def _cleanup_stale_test_resources(client: SandboxClient) -> None:
 
     try:
         for sandbox in client.list():
-            if (
-                sandbox.status != SandboxStatus.TERMINATED
-                and _is_test_sandbox(sandbox)
-                and _is_stale(sandbox.created_at, cutoff)
+            if sandbox.status != SandboxStatus.TERMINATED and (
+                (
+                    _CLEANUP_ALL_TEST_RESOURCES
+                    and _is_older_than_cleanup_grace(sandbox.created_at, cutoff)
+                )
+                or (_is_test_sandbox(sandbox) and _is_stale(sandbox.created_at, cutoff))
             ):
                 try:
                     client.delete(sandbox.sandbox_id)
@@ -142,7 +151,10 @@ def _cleanup_stale_test_resources(client: SandboxClient) -> None:
 
     try:
         for pool in client.list_pools():
-            if _is_test_pool(pool) and _is_stale(pool.created_at, cutoff):
+            if (
+                _CLEANUP_ALL_TEST_RESOURCES
+                and _is_older_than_cleanup_grace(pool.created_at, cutoff)
+            ) or (_is_test_pool(pool) and _is_stale(pool.created_at, cutoff)):
                 pool_ids.add(pool.pool_id)
     except Exception:
         pass
@@ -152,12 +164,17 @@ def _cleanup_stale_test_resources(client: SandboxClient) -> None:
 
     # Give sandbox deletes a short chance to release pool claims, then remove
     # stale pools that may still be holding warm containers against quota.
-    time.sleep(2)
-    for pool_id in pool_ids:
-        try:
-            client.delete_pool(pool_id)
-        except Exception:
-            pass
+    for _ in range(5):
+        if not pool_ids:
+            break
+        time.sleep(2)
+        remaining_pool_ids: set[str] = set()
+        for pool_id in pool_ids:
+            try:
+                client.delete_pool(pool_id)
+            except Exception:
+                remaining_pool_ids.add(pool_id)
+        pool_ids = remaining_pool_ids
 
 
 def setUpModule():
