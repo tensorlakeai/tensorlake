@@ -125,7 +125,6 @@ def _onprem_enabled() -> bool:
 def deploy(
     application_file_path: str,
     upgrade_running_requests: bool,
-    image_builder_version: str = "sandbox",
     build_envs: list[tuple[str, str]] | None = None,
 ):
     """Deploys applications to Tensorlake Cloud, emitting NDJSON events to stdout."""
@@ -191,17 +190,6 @@ def deploy(
     if missing:
         _emit({"type": "missing_secrets", "count": len(missing), "names": missing})
 
-    if image_builder_version in {"v2", "v3"}:
-        _emit(
-            {
-                "type": "warning",
-                "message": (
-                    f"--image-builder-version {image_builder_version} is deprecated; "
-                    "using the sandbox rootfs builder."
-                ),
-            }
-        )
-
     try:
         asyncio.run(
             _prepare_images(
@@ -266,6 +254,8 @@ def _application_images(functions: list[Function]):
     for application in filter_applications(functions):
         for function in functions_for_application(application, functions):
             image = function._function_config.image
+            if image is None:
+                continue
             previous_image_id = seen_image_names.get(image.name)
             if previous_image_id is not None and previous_image_id != image._id:
                 raise SDKUsageError(
@@ -347,15 +337,6 @@ def deploy_entrypoint():
         help="Upgrade requests that are already queued or running",
     )
     parser.add_argument(
-        "--image-builder-version",
-        choices=["sandbox", "v2", "v3"],
-        default="sandbox",
-        help=(
-            "Deprecated compatibility flag; deploys always use the sandbox "
-            "rootfs builder"
-        ),
-    )
-    parser.add_argument(
         "--build-env",
         action="append",
         default=[],
@@ -368,7 +349,6 @@ def deploy_entrypoint():
         deploy(
             application_file_path=args.application_file_path,
             upgrade_running_requests=args.upgrade_running_requests,
-            image_builder_version=args.image_builder_version,
             build_envs=_parse_build_envs(args.build_env),
         )
     except SystemExit:
