@@ -227,9 +227,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'dev' }}
-    concurrency:
-      group: sandbox-integration-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'dev' }}
-      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
