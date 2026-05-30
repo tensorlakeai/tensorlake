@@ -26,6 +26,8 @@ const SANDBOX_IMAGE = "tensorlake/ubuntu-minimal";
 const SANDBOX_CPUS = 1.0;
 const SANDBOX_MEMORY_MB = 1024;
 const SANDBOX_DISK_MB = 10240;
+const STALE_RESOURCE_GRACE_MS =
+  Number(process.env.TENSORLAKE_TEST_CLEANUP_GRACE_SECS ?? "60") * 1000;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -102,13 +104,88 @@ function warmContainers(containers: PoolContainerInfo[]): PoolContainerInfo[] {
   return containers.filter((c) => c.sandboxId == null);
 }
 
-function claimedContainers(containers: PoolContainerInfo[]): PoolContainerInfo[] {
+function claimedContainers(
+  containers: PoolContainerInfo[],
+): PoolContainerInfo[] {
   return containers.filter((c) => c.sandboxId != null);
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+function isStale(createdAt: Date | undefined, cutoff: Date): boolean {
+  return createdAt != null && createdAt.getTime() < cutoff.getTime();
+}
+
+function isTestSandbox(info: SandboxInfo): boolean {
+  return (
+    info.image === SANDBOX_IMAGE &&
+    info.entrypoint?.length === 2 &&
+    info.entrypoint[0] === "sleep" &&
+    info.entrypoint[1] === "300" &&
+    info.resources.memoryMb === SANDBOX_MEMORY_MB
+  );
+}
+
+function isTestPool(info: SandboxPoolInfo): boolean {
+  return (
+    info.image === SANDBOX_IMAGE &&
+    info.entrypoint?.length === 2 &&
+    info.entrypoint[0] === "sleep" &&
+    info.entrypoint[1] === "300" &&
+    info.resources.memoryMb === SANDBOX_MEMORY_MB
+  );
+}
+
+async function cleanupStaleTestResources(client: SandboxClient): Promise<void> {
+  const cutoff = new Date(Date.now() - STALE_RESOURCE_GRACE_MS);
+  const poolIds = new Set<string>();
+
+  try {
+    const sandboxes = await client.list();
+    await Promise.all(
+      sandboxes
+        .filter(
+          (sandbox) =>
+            sandbox.status !== SandboxStatus.TERMINATED &&
+            isTestSandbox(sandbox) &&
+            isStale(sandbox.createdAt, cutoff),
+        )
+        .map((sandbox) => client.delete(sandbox.sandboxId).catch(() => {})),
+    );
+  } catch {}
+
+  try {
+    const pools = await client.listPools();
+    for (const pool of pools) {
+      if (isTestPool(pool) && isStale(pool.createdAt, cutoff)) {
+        poolIds.add(pool.poolId);
+      }
+    }
+  } catch {}
+
+  if (poolIds.size === 0) return;
+
+  // Give sandbox deletes a short chance to release pool claims, then remove
+  // stale pools that may still be holding warm containers against quota.
+  await sleep(2000);
+  await Promise.all(
+    [...poolIds].map((poolId) => client.deletePool(poolId).catch(() => {})),
+  );
+}
+
+beforeAll(async () => {
+  const client = new SandboxClient({
+    apiUrl: process.env.TENSORLAKE_API_URL ?? "https://api.tensorlake.ai",
+    apiKey: process.env.TENSORLAKE_API_KEY,
+  });
+  try {
+    await cleanupStaleTestResources(client);
+  } finally {
+    client.close();
+  }
+}, 30_000);
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -146,7 +223,11 @@ describe(
       });
       expect(resp.sandboxId).toBeTruthy();
       expect(
-        [SandboxStatus.PENDING, SandboxStatus.RUNNING, SandboxStatus.TERMINATED],
+        [
+          SandboxStatus.PENDING,
+          SandboxStatus.RUNNING,
+          SandboxStatus.TERMINATED,
+        ],
         `sandbox ${resp.sandboxId}`,
       ).toContain(resp.status);
       sandboxId = resp.sandboxId;
@@ -156,7 +237,11 @@ describe(
       const info = await client.get(sandboxId);
       expect(info.sandboxId, `sandbox ${sandboxId}`).toBe(sandboxId);
       expect(
-        [SandboxStatus.PENDING, SandboxStatus.RUNNING, SandboxStatus.TERMINATED],
+        [
+          SandboxStatus.PENDING,
+          SandboxStatus.RUNNING,
+          SandboxStatus.TERMINATED,
+        ],
         `sandbox ${sandboxId}`,
       ).toContain(info.status);
     });
@@ -164,15 +249,16 @@ describe(
     it("lists sandboxes", async () => {
       const list = await client.list();
       const ids = list.map((s) => s.sandboxId);
-      expect(ids, `sandbox ${sandboxId} not found in list`).toContain(sandboxId);
+      expect(ids, `sandbox ${sandboxId} not found in list`).toContain(
+        sandboxId,
+      );
     });
 
     it("transitions out of pending", async () => {
-      const status = await pollSandboxStatus(
-        client,
-        sandboxId,
-        [SandboxStatus.RUNNING, SandboxStatus.TERMINATED],
-      );
+      const status = await pollSandboxStatus(client, sandboxId, [
+        SandboxStatus.RUNNING,
+        SandboxStatus.TERMINATED,
+      ]);
       expect(
         [SandboxStatus.RUNNING, SandboxStatus.TERMINATED],
         `sandbox ${sandboxId}`,
@@ -195,9 +281,9 @@ describe(
     });
 
     it("throws SandboxNotFoundError for non-existent sandbox", async () => {
-      await expect(
-        client.delete("nonexistent-sandbox-id-000"),
-      ).rejects.toThrow(SandboxNotFoundError);
+      await expect(client.delete("nonexistent-sandbox-id-000")).rejects.toThrow(
+        SandboxNotFoundError,
+      );
     });
   },
   { timeout: 120_000 },
@@ -225,10 +311,14 @@ describe(
       });
       poolId = pool.poolId;
       await pollPoolContainers(client, poolId, 1);
-      sandbox = await createAndConnectWithStartupRetry(client, {
-        poolId,
-        startupTimeout: 120,
-      }, 5);
+      sandbox = await createAndConnectWithStartupRetry(
+        client,
+        {
+          poolId,
+          startupTimeout: 120,
+        },
+        5,
+      );
     });
 
     afterAll(async () => {
@@ -236,7 +326,12 @@ describe(
         try {
           const sandboxId = sandbox.sandboxId;
           await sandbox.terminate();
-          await pollSandboxStatus(client, sandboxId, SandboxStatus.TERMINATED, 30);
+          await pollSandboxStatus(
+            client,
+            sandboxId,
+            SandboxStatus.TERMINATED,
+            30,
+          );
         } catch {}
       }
       if (poolId) {
@@ -251,7 +346,9 @@ describe(
     it("runs a command and captures stdout", async () => {
       const result = await sandbox.run("echo", { args: ["hello world"] });
       expect(result.exitCode, `sandbox ${sandbox.sandboxId}: exitCode`).toBe(0);
-      expect(result.stdout, `sandbox ${sandbox.sandboxId}: stdout`).toContain("hello world");
+      expect(result.stdout, `sandbox ${sandbox.sandboxId}: stdout`).toContain(
+        "hello world",
+      );
     });
 
     it("captures stderr", async () => {
@@ -259,7 +356,9 @@ describe(
         args: ["-c", "echo error >&2"],
       });
       expect(result.exitCode, `sandbox ${sandbox.sandboxId}: exitCode`).toBe(0);
-      expect(result.stderr, `sandbox ${sandbox.sandboxId}: stderr`).toContain("error");
+      expect(result.stderr, `sandbox ${sandbox.sandboxId}: stderr`).toContain(
+        "error",
+      );
     });
 
     it("returns non-zero exit code", async () => {
@@ -273,13 +372,17 @@ describe(
         env: { MY_VAR: "test-value" },
       });
       expect(result.exitCode, `sandbox ${sandbox.sandboxId}: exitCode`).toBe(0);
-      expect(result.stdout, `sandbox ${sandbox.sandboxId}: stdout`).toContain("test-value");
+      expect(result.stdout, `sandbox ${sandbox.sandboxId}: stdout`).toContain(
+        "test-value",
+      );
     });
 
     it("runs command with working directory", async () => {
       const result = await sandbox.run("pwd", { workingDir: "/tmp" });
       expect(result.exitCode, `sandbox ${sandbox.sandboxId}: exitCode`).toBe(0);
-      expect(result.stdout, `sandbox ${sandbox.sandboxId}: stdout`).toContain("/tmp");
+      expect(result.stdout, `sandbox ${sandbox.sandboxId}: stdout`).toContain(
+        "/tmp",
+      );
     });
 
     it("writes and reads a file", async () => {
@@ -288,7 +391,9 @@ describe(
 
       const data = await sandbox.readFile("/tmp/test-ts-sdk.txt");
       const text = new TextDecoder().decode(data);
-      expect(text, `sandbox ${sandbox.sandboxId}`).toBe("hello from typescript sdk");
+      expect(text, `sandbox ${sandbox.sandboxId}`).toBe(
+        "hello from typescript sdk",
+      );
     });
 
     it("lists a directory", async () => {
@@ -300,9 +405,15 @@ describe(
 
       const listing = await sandbox.listDirectory("/tmp");
       expect(listing.path, `sandbox ${sandbox.sandboxId}: path`).toBe("/tmp");
-      expect(listing.entries.length, `sandbox ${sandbox.sandboxId}: entries`).toBeGreaterThan(0);
+      expect(
+        listing.entries.length,
+        `sandbox ${sandbox.sandboxId}: entries`,
+      ).toBeGreaterThan(0);
       const names = listing.entries.map((e) => e.name);
-      expect(names, `sandbox ${sandbox.sandboxId}: list-test.txt not found`).toContain("list-test.txt");
+      expect(
+        names,
+        `sandbox ${sandbox.sandboxId}: list-test.txt not found`,
+      ).toContain("list-test.txt");
     });
 
     it("deletes a file", async () => {
@@ -315,24 +426,35 @@ describe(
       // Verify the file is gone by listing the directory
       const listing = await sandbox.listDirectory("/tmp");
       const names = listing.entries.map((e) => e.name);
-      expect(names, `sandbox ${sandbox.sandboxId}: to-delete.txt still present`).not.toContain("to-delete.txt");
+      expect(
+        names,
+        `sandbox ${sandbox.sandboxId}: to-delete.txt still present`,
+      ).not.toContain("to-delete.txt");
     });
 
     it("starts and manages processes", async () => {
       const proc = await sandbox.startProcess("sleep", { args: ["10"] });
       expect(proc.pid, `sandbox ${sandbox.sandboxId}: pid`).toBeGreaterThan(0);
-      expect(proc.status, `sandbox ${sandbox.sandboxId}: status`).toBe("running");
+      expect(proc.status, `sandbox ${sandbox.sandboxId}: status`).toBe(
+        "running",
+      );
 
       const processes = await sandbox.listProcesses();
       const pids = processes.map((p) => p.pid);
-      expect(pids, `sandbox ${sandbox.sandboxId}: pid ${proc.pid} not in list`).toContain(proc.pid);
+      expect(
+        pids,
+        `sandbox ${sandbox.sandboxId}: pid ${proc.pid} not in list`,
+      ).toContain(proc.pid);
 
       await sandbox.killProcess(proc.pid);
 
       // Wait for process to exit
       await sleep(500);
       const info = await sandbox.getProcess(proc.pid);
-      expect(info.status, `sandbox ${sandbox.sandboxId}: process ${proc.pid} still running`).not.toBe("running");
+      expect(
+        info.status,
+        `sandbox ${sandbox.sandboxId}: process ${proc.pid} still running`,
+      ).not.toBe("running");
     });
 
     it("checks health", async () => {
@@ -342,8 +464,14 @@ describe(
 
     it("gets daemon info", async () => {
       const info = await sandbox.daemonInfo();
-      expect(info.version, `sandbox ${sandbox.sandboxId}: version`).toBeTruthy();
-      expect(info.uptimeSecs, `sandbox ${sandbox.sandboxId}: uptimeSecs`).toBeGreaterThanOrEqual(0);
+      expect(
+        info.version,
+        `sandbox ${sandbox.sandboxId}: version`,
+      ).toBeTruthy();
+      expect(
+        info.uptimeSecs,
+        `sandbox ${sandbox.sandboxId}: uptimeSecs`,
+      ).toBeGreaterThanOrEqual(0);
     });
   },
   { timeout: 180_000 },
@@ -474,7 +602,11 @@ describe(
     });
 
     it("sandbox from pool reaches running", async () => {
-      const status = await pollSandboxStatus(client, sandboxId, SandboxStatus.RUNNING);
+      const status = await pollSandboxStatus(
+        client,
+        sandboxId,
+        SandboxStatus.RUNNING,
+      );
       expect(status, `sandbox ${sandboxId}`).toBe(SandboxStatus.RUNNING);
     });
 
@@ -553,15 +685,24 @@ describe(
       const claimed = (detail.containers ?? []).filter(
         (c) => c.id === warmContainerId,
       );
-      expect(claimed, `sandbox ${sandboxId}: warm container not claimed`).toHaveLength(1);
+      expect(
+        claimed,
+        `sandbox ${sandboxId}: warm container not claimed`,
+      ).toHaveLength(1);
       expect(claimed[0].sandboxId, `sandbox ${sandboxId}`).toBe(sandboxId);
     });
 
     it("replacement warm container is created", async () => {
       const containers = await pollPoolContainers(client, poolId, 2);
       const warm = warmContainers(containers);
-      expect(warm.length, `sandbox ${sandboxId}: no replacement warm container`).toBeGreaterThanOrEqual(1);
-      expect(warm[0].id, `sandbox ${sandboxId}: replacement has same id`).not.toBe(warmContainerId);
+      expect(
+        warm.length,
+        `sandbox ${sandboxId}: no replacement warm container`,
+      ).toBeGreaterThanOrEqual(1);
+      expect(
+        warm[0].id,
+        `sandbox ${sandboxId}: replacement has same id`,
+      ).not.toBe(warmContainerId);
     });
 
     it("deleting sandbox removes claimed container", async () => {
@@ -649,7 +790,11 @@ describe(
     });
 
     it("sandbox reaches running", async () => {
-      const status = await pollSandboxStatus(client, sandboxId, SandboxStatus.RUNNING);
+      const status = await pollSandboxStatus(
+        client,
+        sandboxId,
+        SandboxStatus.RUNNING,
+      );
       expect(status, `sandbox ${sandboxId}`).toBe(SandboxStatus.RUNNING);
     });
 
@@ -683,7 +828,12 @@ describe(
       if (sandboxId) {
         try {
           await client.delete(sandboxId);
-          await pollSandboxStatus(client, sandboxId, SandboxStatus.TERMINATED, 30);
+          await pollSandboxStatus(
+            client,
+            sandboxId,
+            SandboxStatus.TERMINATED,
+            30,
+          );
         } catch {}
         sandboxId = undefined!;
       }
