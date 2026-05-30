@@ -288,7 +288,9 @@ class TestDeployEntrypoints(unittest.TestCase):
         self.assertEqual(missing_event["count"], 2)
         self.assertEqual(missing_event["names"], ["MISSING_ONE", "MISSING_TWO"])
 
-    def test_deploy_builds_each_explicit_application_image_as_sandbox_template(self):
+    def test_deploy_builds_default_and_explicit_application_images_as_sandbox_templates(
+        self,
+    ):
         auth = self._make_auth_context()
         with isolated_registry():
             parser_image = Image(name="parser-image")
@@ -361,15 +363,76 @@ class TestDeployEntrypoints(unittest.TestCase):
                     upgrade_running_requests=False,
                 )
 
-        self.assertEqual(
-            [call.kwargs["registered_name"] for call in build_image.call_args_list],
-            ["parser-image", "agent-image", "code-exec-image"],
+        finance_analyzer_default = deploy_module.default_application_image_name(
+            finance_analyzer._function_config.function_name,
+            finance_analyzer._application_config.version,
+        )
+        finance_query_default = deploy_module.default_application_image_name(
+            finance_query._function_config.function_name,
+            finance_query._application_config.version,
         )
         self.assertEqual(
-            [call.args[0] for call in build_image.call_args_list],
+            [call.kwargs["registered_name"] for call in build_image.call_args_list],
+            [
+                finance_analyzer_default,
+                "parser-image",
+                "agent-image",
+                "code-exec-image",
+                finance_query_default,
+            ],
+        )
+        self.assertEqual(
+            [
+                call.args[0]
+                for call in build_image.call_args_list
+                if call.kwargs["registered_name"]
+                in {"parser-image", "agent-image", "code-exec-image"}
+            ],
             [parser_image, agent_image, code_exec_image],
         )
         emit.assert_any_call({"type": "build_done"})
+
+    def test_deploy_builds_default_application_image_for_functions_without_explicit_image(
+        self,
+    ):
+        auth = self._make_auth_context()
+        with isolated_registry():
+
+            @function()
+            def helper(payload):
+                return payload
+
+            @application()
+            @function()
+            def default_image_app(payload):
+                return helper(payload)
+
+            functions = [helper, default_image_app]
+            with (
+                self._successful_deploy_patches(auth, functions),
+                patch.object(
+                    deploy_module,
+                    "build_sandbox_application_image",
+                    return_value={},
+                ) as build_image,
+                patch.object(deploy_module, "_deploy_applications"),
+                patch.object(deploy_module, "_emit") as emit,
+            ):
+                deploy_module.deploy(
+                    application_file_path="my_app.py",
+                    upgrade_running_requests=False,
+                )
+
+        registered_name = deploy_module.default_application_image_name(
+            default_image_app._function_config.function_name,
+            default_image_app._application_config.version,
+        )
+        build_image.assert_called_once()
+        self.assertEqual(build_image.call_args.args[0].name, "default")
+        self.assertEqual(
+            build_image.call_args.kwargs["registered_name"], registered_name
+        )
+        emit.assert_any_call({"type": "build_start", "image": registered_name})
 
     def test_deploy_builds_shared_explicit_image_once(self):
         auth = self._make_auth_context()
@@ -476,7 +539,11 @@ class TestDeployEntrypoints(unittest.TestCase):
     def test_prepare_images_emits_inner_build_error_message(self):
         image = Image(name="parser-image")
         application = SimpleNamespace(
-            _function_config=SimpleNamespace(image=image),
+            _function_config=SimpleNamespace(
+                function_name="app",
+                image=image,
+            ),
+            _application_config=SimpleNamespace(version="v1"),
         )
 
         with (
