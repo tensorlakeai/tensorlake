@@ -151,6 +151,7 @@ def _ensure_sandbox_image() -> None:
         Image(name=image_name, base_image=_TEST_IMAGE_BASE),
         registered_name=image_name,
         cpus=_SANDBOX_CPUS,
+        memory_mb=2048,
         disk_mb=_SANDBOX_DISK_MB,
         verbose=True,
     )
