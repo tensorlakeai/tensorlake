@@ -10,6 +10,8 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  createSandboxImage,
+  Image,
   PoolInUseError,
   PoolNotFoundError,
   SandboxClient,
@@ -22,8 +24,10 @@ import {
 } from "../src/index.js";
 import { Sandbox } from "../src/sandbox.js";
 
-const SANDBOX_IMAGE =
-  process.env.TENSORLAKE_SANDBOX_IMAGE ?? "docker.io/library/alpine:latest";
+let sandboxImage = process.env.TENSORLAKE_SANDBOX_IMAGE ?? "";
+const TEST_IMAGE_BASE =
+  process.env.TENSORLAKE_TEST_SANDBOX_IMAGE_BASE ??
+  "tensorlake/ubuntu-minimal";
 const SANDBOX_CPUS = 1.0;
 const SANDBOX_MEMORY_MB = 1024;
 const SANDBOX_DISK_MB = 10240;
@@ -118,6 +122,52 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function slug(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+function defaultTestImageName(): string {
+  const runId = process.env.GITHUB_RUN_ID;
+  const parts = runId
+    ? [
+        "tl-sdk-integration",
+        runId,
+        process.env.GITHUB_JOB ?? "typescript",
+        process.env.GITHUB_RUN_ATTEMPT ?? "1",
+      ]
+    : ["tl-sdk-integration", "local", String(process.pid)];
+  return slug(parts.join("-"));
+}
+
+async function ensureSandboxImage(): Promise<void> {
+  if (sandboxImage) return;
+
+  const imageName =
+    process.env.TENSORLAKE_TEST_SANDBOX_IMAGE_NAME ?? defaultTestImageName();
+  process.stderr.write(
+    `Building sandbox integration image '${imageName}' from base '${TEST_IMAGE_BASE}'...\n`,
+  );
+  await createSandboxImage(
+    new Image({ name: imageName, baseImage: TEST_IMAGE_BASE }),
+    {
+      registeredName: imageName,
+      diskMb: SANDBOX_DISK_MB,
+    },
+    {
+      emit: (event) => {
+        const type = typeof event.type === "string" ? event.type : "event";
+        const message = typeof event.message === "string" ? event.message : "";
+        if (message) process.stderr.write(`[${type}] ${message}\n`);
+      },
+    },
+  );
+  sandboxImage = imageName;
+  process.stderr.write(`Using sandbox integration image '${sandboxImage}'.\n`);
+}
+
 function isStale(createdAt: Date | undefined, cutoff: Date): boolean {
   return createdAt == null || createdAt.getTime() < cutoff.getTime();
 }
@@ -131,7 +181,8 @@ function isOlderThanCleanupGrace(
 
 function isTestSandbox(info: SandboxInfo): boolean {
   return (
-    info.image === SANDBOX_IMAGE &&
+    sandboxImage.length > 0 &&
+    info.image === sandboxImage &&
     info.entrypoint?.length === 2 &&
     info.entrypoint[0] === "sleep" &&
     info.entrypoint[1] === "300" &&
@@ -141,7 +192,8 @@ function isTestSandbox(info: SandboxInfo): boolean {
 
 function isTestPool(info: SandboxPoolInfo): boolean {
   return (
-    info.image === SANDBOX_IMAGE &&
+    sandboxImage.length > 0 &&
+    info.image === sandboxImage &&
     info.entrypoint?.length === 2 &&
     info.entrypoint[0] === "sleep" &&
     info.entrypoint[1] === "300" &&
@@ -212,7 +264,8 @@ beforeAll(async () => {
   } finally {
     client.close();
   }
-}, 30_000);
+  await ensureSandboxImage();
+}, 600_000);
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -242,7 +295,7 @@ describe(
 
     it("creates a sandbox", async () => {
       const resp = await client.create({
-        image: SANDBOX_IMAGE,
+        image: sandboxImage,
         cpus: SANDBOX_CPUS,
         memoryMb: SANDBOX_MEMORY_MB,
         diskMb: SANDBOX_DISK_MB,
@@ -329,7 +382,7 @@ describe(
         apiKey: process.env.TENSORLAKE_API_KEY,
       });
       const pool = await client.createPool({
-        image: SANDBOX_IMAGE,
+        image: sandboxImage,
         cpus: SANDBOX_CPUS,
         memoryMb: SANDBOX_MEMORY_MB,
         ephemeralDiskMb: SANDBOX_DISK_MB,
@@ -528,7 +581,7 @@ describe(
 
     it("creates a pool", async () => {
       const resp = await client.createPool({
-        image: SANDBOX_IMAGE,
+        image: sandboxImage,
         cpus: SANDBOX_CPUS,
         memoryMb: SANDBOX_MEMORY_MB,
         ephemeralDiskMb: SANDBOX_DISK_MB,
@@ -541,7 +594,7 @@ describe(
     it("gets pool details", async () => {
       const info = await client.getPool(poolId);
       expect(info.poolId).toBe(poolId);
-      expect(info.image).toBe(SANDBOX_IMAGE);
+      expect(info.image).toBe(sandboxImage);
       expect(info.resources.memoryMb).toBe(SANDBOX_MEMORY_MB);
     });
 
@@ -553,7 +606,7 @@ describe(
 
     it("updates a pool", async () => {
       const updated = await client.updatePool(poolId, {
-        image: SANDBOX_IMAGE,
+        image: sandboxImage,
         cpus: SANDBOX_CPUS,
         memoryMb: 2048,
         ephemeralDiskMb: SANDBOX_DISK_MB,
@@ -608,7 +661,7 @@ describe(
 
     it("creates a pool with warm containers", async () => {
       const resp = await client.createPool({
-        image: SANDBOX_IMAGE,
+        image: sandboxImage,
         cpus: SANDBOX_CPUS,
         memoryMb: SANDBOX_MEMORY_MB,
         ephemeralDiskMb: SANDBOX_DISK_MB,
@@ -685,7 +738,7 @@ describe(
 
     it("creates pool with one warm container", async () => {
       const resp = await client.createPool({
-        image: SANDBOX_IMAGE,
+        image: sandboxImage,
         cpus: SANDBOX_CPUS,
         memoryMb: SANDBOX_MEMORY_MB,
         ephemeralDiskMb: SANDBOX_DISK_MB,
@@ -799,7 +852,7 @@ describe(
 
     it("creates pool with timeout", async () => {
       const resp = await client.createPool({
-        image: SANDBOX_IMAGE,
+        image: sandboxImage,
         cpus: SANDBOX_CPUS,
         memoryMb: SANDBOX_MEMORY_MB,
         ephemeralDiskMb: SANDBOX_DISK_MB,

@@ -9,10 +9,13 @@ Usage:
 """
 
 import os
+import re
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
 
+from tensorlake.image import Image
+from tensorlake.image.sandbox_builder import build_sandbox_image
 from tensorlake.sandbox import (
     PoolContainerInfo,
     PoolInUseError,
@@ -23,8 +26,9 @@ from tensorlake.sandbox import (
     SandboxStatus,
 )
 
-_SANDBOX_IMAGE = os.environ.get(
-    "TENSORLAKE_SANDBOX_IMAGE", "docker.io/library/alpine:latest"
+_SANDBOX_IMAGE = os.environ.get("TENSORLAKE_SANDBOX_IMAGE", "")
+_TEST_IMAGE_BASE = os.environ.get(
+    "TENSORLAKE_TEST_SANDBOX_IMAGE_BASE", "tensorlake/ubuntu-minimal"
 )
 _SANDBOX_CPUS = 1.0
 _SANDBOX_MEMORY_MB = 1024
@@ -112,9 +116,51 @@ def _is_older_than_cleanup_grace(created_at: datetime | None, cutoff: datetime) 
     return created_at is not None and created_at < cutoff
 
 
+def _slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9_.-]+", "-", value.lower()).strip("-")
+
+
+def _default_test_image_name() -> str:
+    run_id = os.environ.get("GITHUB_RUN_ID")
+    if run_id:
+        parts = [
+            "tl-sdk-integration",
+            run_id,
+            os.environ.get("GITHUB_JOB", "python"),
+            os.environ.get("GITHUB_RUN_ATTEMPT", "1"),
+        ]
+    else:
+        parts = ["tl-sdk-integration", "local", str(os.getpid())]
+    return _slug("-".join(parts))
+
+
+def _ensure_sandbox_image() -> None:
+    global _SANDBOX_IMAGE
+
+    if _SANDBOX_IMAGE:
+        return
+
+    image_name = os.environ.get(
+        "TENSORLAKE_TEST_SANDBOX_IMAGE_NAME", _default_test_image_name()
+    )
+    print(
+        f"Building sandbox integration image {image_name!r} "
+        f"from base {_TEST_IMAGE_BASE!r}..."
+    )
+    build_sandbox_image(
+        Image(name=image_name, base_image=_TEST_IMAGE_BASE),
+        registered_name=image_name,
+        disk_mb=_SANDBOX_DISK_MB,
+        verbose=True,
+    )
+    _SANDBOX_IMAGE = image_name
+    print(f"Using sandbox integration image {_SANDBOX_IMAGE!r}.")
+
+
 def _is_test_sandbox(info) -> bool:
     return (
-        info.image == _SANDBOX_IMAGE
+        bool(_SANDBOX_IMAGE)
+        and info.image == _SANDBOX_IMAGE
         and info.entrypoint == ["sleep", "300"]
         and info.resources.memory_mb == _SANDBOX_MEMORY_MB
     )
@@ -122,7 +168,8 @@ def _is_test_sandbox(info) -> bool:
 
 def _is_test_pool(info) -> bool:
     return (
-        info.image == _SANDBOX_IMAGE
+        bool(_SANDBOX_IMAGE)
+        and info.image == _SANDBOX_IMAGE
         and info.entrypoint == ["sleep", "300"]
         and info.resources.memory_mb == _SANDBOX_MEMORY_MB
     )
@@ -184,6 +231,7 @@ def setUpModule():
         _cleanup_stale_test_resources(client)
     finally:
         client.close()
+    _ensure_sandbox_image()
 
 
 # ---------------------------------------------------------------------------
