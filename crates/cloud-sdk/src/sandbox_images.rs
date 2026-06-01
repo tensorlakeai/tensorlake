@@ -629,7 +629,23 @@ async fn wait_for_sandbox_status(
             )));
         }
 
-        let info = sandboxes.get(sandbox_id).await?;
+        // A sandbox that is still `pending` isn't routable yet, so the
+        // lifecycle gateway can return a transient proxy error (502 /
+        // "Failed to proxy request") until it starts — in slower environments
+        // that window is a minute or two. Treat those as retryable, the same
+        // way `wait_for_proxy_ready` does, and let the deadline above bound
+        // the total wait. Non-transient errors still fail the build.
+        let info = match sandboxes.get(sandbox_id).await {
+            Ok(info) => info,
+            Err(error) => {
+                let error = SandboxImageBuildError::from(error);
+                if is_transient_proxy_error(&error) {
+                    tokio::time::sleep(SANDBOX_WAIT_POLL_INTERVAL).await;
+                    continue;
+                }
+                return Err(error);
+            }
+        };
         let current_status = info.status.clone();
         if current_status == target_status {
             return Ok(info.into_inner());
