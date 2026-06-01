@@ -236,6 +236,7 @@ class SandboxClient:
                 project_id=self._project_id,
                 namespace=self._namespace,
                 user_agent=USER_AGENT,
+                request_timeout_sec=_defaults.DEFAULT_HTTP_TIMEOUT_SEC,
             )
         except Exception as e:
             _raise_as_sandbox_error(e)

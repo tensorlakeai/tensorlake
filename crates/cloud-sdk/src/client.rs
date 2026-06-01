@@ -12,6 +12,7 @@ use std::{
     pin::Pin,
     result::Result,
     sync::{Arc, Once},
+    time::Duration,
 };
 
 use crate::error::SdkError;
@@ -91,6 +92,7 @@ pub struct ClientBuilder {
     organization_id: Option<String>,
     project_id: Option<String>,
     user_agent: Option<String>,
+    timeout: Option<Duration>,
 }
 
 impl ClientBuilder {
@@ -111,6 +113,7 @@ impl ClientBuilder {
             organization_id: None,
             project_id: None,
             user_agent: None,
+            timeout: None,
         }
     }
 
@@ -122,6 +125,12 @@ impl ClientBuilder {
     /// by SDK language.
     pub fn user_agent(mut self, ua: &str) -> Self {
         self.user_agent = Some(ua.to_string());
+        self
+    }
+
+    /// Set the total timeout for each HTTP request.
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
         self
     }
 
@@ -178,7 +187,7 @@ impl ClientBuilder {
             .user_agent
             .as_deref()
             .unwrap_or(concat!("tensorlake-rust-sdk/", env!("CARGO_PKG_VERSION")));
-        let base_client = new_base_client(&default_headers, ua)?;
+        let base_client = new_base_client(&default_headers, ua, self.timeout)?;
         let mut builder = ReqwestClientBuilder::new(base_client.clone());
 
         for middleware in &self.middlewares {
@@ -418,13 +427,20 @@ fn ensure_rustls_provider() {
     });
 }
 
-fn new_base_client(headers: &HeaderMap, user_agent: &str) -> Result<reqwest::Client, SdkError> {
+fn new_base_client(
+    headers: &HeaderMap,
+    user_agent: &str,
+    timeout: Option<Duration>,
+) -> Result<reqwest::Client, SdkError> {
     ensure_rustls_provider();
 
-    let client = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .user_agent(user_agent)
-        .default_headers(headers.clone())
-        .build()?;
+        .default_headers(headers.clone());
+    if let Some(timeout) = timeout {
+        builder = builder.timeout(timeout);
+    }
+    let client = builder.build()?;
     Ok(client)
 }
 

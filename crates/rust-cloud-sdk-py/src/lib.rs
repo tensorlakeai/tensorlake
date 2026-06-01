@@ -38,7 +38,7 @@ create_exception!(_cloud_sdk, CloudApiClientError, PyException);
 create_exception!(_cloud_sdk, CloudSandboxClientError, PyException);
 create_exception!(_cloud_sdk, CloudDocumentAIClientError, PyException);
 
-const DEFAULT_HTTP_REQUEST_TIMEOUT_SEC: f64 = 5.0;
+const DEFAULT_HTTP_REQUEST_TIMEOUT_SEC: f64 = 300.0;
 
 // Single tokio runtime for the whole process: pyo3-async-runtimes' runtime,
 // which `future_into_py` already drives. Routing sync `block_on` through here
@@ -538,7 +538,7 @@ pub struct CloudSandboxClient {
 #[pymethods]
 impl CloudSandboxClient {
     #[new]
-    #[pyo3(signature = (api_url, api_key=None, organization_id=None, project_id=None, namespace=None, user_agent=None))]
+    #[pyo3(signature = (api_url, api_key=None, organization_id=None, project_id=None, namespace=None, user_agent=None, request_timeout_sec=None))]
     fn new(
         api_url: String,
         api_key: Option<String>,
@@ -546,6 +546,7 @@ impl CloudSandboxClient {
         project_id: Option<String>,
         namespace: Option<String>,
         user_agent: Option<String>,
+        request_timeout_sec: Option<f64>,
     ) -> PyResult<Self> {
         let lifecycle_url = resolve_sandbox_lifecycle_url(&api_url);
         let mut builder = ClientBuilder::new(&lifecycle_url);
@@ -561,6 +562,9 @@ impl CloudSandboxClient {
 
         if let Some(ua) = user_agent.as_deref() {
             builder = builder.user_agent(ua);
+        }
+        if let Some(seconds) = request_timeout_sec {
+            builder = builder.timeout(duration_from_seconds("request_timeout_sec", seconds)?);
         }
 
         let client = builder.build().map_err(into_sandbox_py_error)?;
