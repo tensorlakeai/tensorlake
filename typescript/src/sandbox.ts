@@ -5,7 +5,7 @@ import {
 } from "./desktop.js";
 import * as defaults from "./defaults.js";
 import { SandboxError } from "./errors.js";
-import { type Traced, HttpClient } from "./http.js";
+import { type HttpRequestOptions, type Traced, HttpClient } from "./http.js";
 import {
   type CheckpointOptions,
   type CommandResult,
@@ -44,6 +44,146 @@ import { resolveProxyTarget } from "./url.js";
 import WebSocket, { type RawData } from "ws";
 
 const DEFAULT_PROCESS_USER = "tl-user";
+
+class SandboxProxyConnection {
+  baseUrl = "";
+  wsHeaders: Record<string, string> = {};
+
+  private http: HttpClient;
+  private resolveProxyInfo?: (
+    identifier: string,
+  ) => Promise<Traced<SandboxInfo>>;
+  private resolvePromise: Promise<void> | null = null;
+  private routingHint?: string;
+
+  constructor(
+    private readonly sandbox: Sandbox,
+    private readonly options: SandboxOptions,
+  ) {
+    this.routingHint = options.routingHint;
+    this.http = this.configureProxy(
+      options.proxyUrl ?? defaults.SANDBOX_PROXY_URL,
+      options.sandboxId,
+      options.routingHint,
+    );
+    this.resolveProxyInfo = options.resolveProxyInfo;
+  }
+
+  async ensureResolved(): Promise<void> {
+    if (this.resolveProxyInfo == null) {
+      return;
+    }
+    if (this.resolvePromise != null) {
+      return this.resolvePromise;
+    }
+
+    this.resolvePromise = this.resolveProxyInfo(this.sandbox._getLifecycleIdentifier())
+      .then((info) => {
+        this.resolveProxyInfo = undefined;
+        this.sandbox.traceId = info.traceId;
+        this.sandbox._setLifecycleIdentifier(info.sandboxId);
+        this.sandbox._setName(info.name ?? null);
+        this.routingHint = this.routingHint ?? info.routingHint;
+        const proxyUrl =
+          info.ingressEndpoint ?? this.options.proxyUrl ?? defaults.SANDBOX_PROXY_URL;
+        const nextHttp = this.configureProxy(proxyUrl, info.sandboxId, this.routingHint);
+        this.http.close();
+        this.http = nextHttp;
+      })
+      .finally(() => {
+        this.resolvePromise = null;
+      });
+
+    return this.resolvePromise;
+  }
+
+  async requestJson<T>(
+    method: string,
+    path: string,
+    options?: {
+      body?: unknown;
+      headers?: Record<string, string>;
+      signal?: AbortSignal;
+    },
+  ): Promise<Traced<T>> {
+    await this.ensureResolved();
+    return this.http.requestJson<T>(method, path, options);
+  }
+
+  async requestBytes(
+    method: string,
+    path: string,
+    options?: {
+      body?: BodyInit | Uint8Array | ArrayBuffer | null;
+      contentType?: string;
+      headers?: Record<string, string>;
+      signal?: AbortSignal;
+    },
+  ): Promise<Traced<Uint8Array>> {
+    await this.ensureResolved();
+    return this.http.requestBytes(method, path, options);
+  }
+
+  async requestStream(
+    method: string,
+    path: string,
+    options?: { signal?: AbortSignal; json?: unknown },
+  ): Promise<Traced<ReadableStream<Uint8Array>>> {
+    await this.ensureResolved();
+    return this.http.requestStream(method, path, options);
+  }
+
+  async requestResponse(
+    method: string,
+    path: string,
+    options?: HttpRequestOptions,
+  ): Promise<Traced<Response>> {
+    await this.ensureResolved();
+    return this.http.requestResponse(method, path, options);
+  }
+
+  close(): void {
+    this.http.close();
+  }
+
+  private configureProxy(
+    proxyUrl: string,
+    sandboxId: string,
+    routingHint?: string,
+  ): HttpClient {
+    const { baseUrl, hostHeader, sandboxIdHeader } = resolveProxyTarget(
+      proxyUrl,
+      sandboxId,
+    );
+    this.baseUrl = baseUrl;
+    this.wsHeaders = {};
+    if (this.options.apiKey) {
+      this.wsHeaders.Authorization = `Bearer ${this.options.apiKey}`;
+    }
+    if (this.options.organizationId) {
+      this.wsHeaders["X-Forwarded-Organization-Id"] = this.options.organizationId;
+    }
+    if (this.options.projectId) {
+      this.wsHeaders["X-Forwarded-Project-Id"] = this.options.projectId;
+    }
+    if (hostHeader) {
+      this.wsHeaders.Host = hostHeader;
+    }
+    if (sandboxIdHeader) {
+      this.wsHeaders["X-Tensorlake-Sandbox-Id"] = sandboxIdHeader;
+    }
+
+    return new HttpClient({
+      baseUrl,
+      apiKey: this.options.apiKey,
+      organizationId: this.options.organizationId,
+      projectId: this.options.projectId,
+      hostHeader,
+      sandboxIdHeader,
+      routingHint,
+    });
+  }
+}
 
 function processUserPayload(
   user: ProcessUser | undefined,
@@ -307,9 +447,8 @@ function sendPtyFrame(socket: WebSocket, frame: Buffer): Promise<void> {
 export class Sandbox {
   readonly sandboxId: string;
   traceId: string | null = null;
-  private readonly http: HttpClient;
-  private readonly baseUrl: string;
-  private readonly wsHeaders: Record<string, string>;
+  private readonly proxy: SandboxProxyConnection;
+  private readonly http: SandboxProxyConnection;
   private ownsSandbox = false;
   private lifecycleClient: SandboxClient | null = null;
   private lifecycleIdentifier: string;
@@ -318,36 +457,16 @@ export class Sandbox {
   constructor(options: SandboxOptions) {
     this.sandboxId = options.sandboxId;
     this.lifecycleIdentifier = options.sandboxId;
+    this.proxy = new SandboxProxyConnection(this, options);
+    this.http = this.proxy;
+  }
 
-    const proxyUrl = options.proxyUrl ?? defaults.SANDBOX_PROXY_URL;
-    const { baseUrl, hostHeader, sandboxIdHeader } = resolveProxyTarget(proxyUrl, options.sandboxId);
-    this.baseUrl = baseUrl;
-    this.wsHeaders = {};
-    if (options.apiKey) {
-      this.wsHeaders.Authorization = `Bearer ${options.apiKey}`;
-    }
-    if (options.organizationId) {
-      this.wsHeaders["X-Forwarded-Organization-Id"] = options.organizationId;
-    }
-    if (options.projectId) {
-      this.wsHeaders["X-Forwarded-Project-Id"] = options.projectId;
-    }
-    if (hostHeader) {
-      this.wsHeaders.Host = hostHeader;
-    }
-    if (sandboxIdHeader) {
-      this.wsHeaders["X-Tensorlake-Sandbox-Id"] = sandboxIdHeader;
-    }
+  private get baseUrl(): string {
+    return this.proxy.baseUrl;
+  }
 
-    this.http = new HttpClient({
-      baseUrl,
-      apiKey: options.apiKey,
-      organizationId: options.organizationId,
-      projectId: options.projectId,
-      hostHeader,
-      sandboxIdHeader,
-      routingHint: options.routingHint,
-    });
+  private get wsHeaders(): Record<string, string> {
+    return this.proxy.wsHeaders;
   }
 
   get name(): string | null {
@@ -362,6 +481,11 @@ export class Sandbox {
   /** @internal Used by lifecycle operations to pin to canonical sandbox ID. */
   _setLifecycleIdentifier(identifier: string): void {
     this.lifecycleIdentifier = identifier;
+  }
+
+  /** @internal Used by the lazy proxy resolver. */
+  _getLifecycleIdentifier(): string {
+    return this.lifecycleIdentifier;
   }
 
   /** @internal Used by SandboxClient.createAndConnect to set ownership. */
@@ -392,9 +516,9 @@ export class Sandbox {
   /**
    * Attach to an existing sandbox and return a connected handle.
    *
-   * Returns immediately without contacting the server. Call `sandbox.info()`
-   * to fetch the current state on demand. Does **not** auto-resume a suspended
-   * sandbox — call `sandbox.resume()` explicitly.
+   * When `proxyUrl` is omitted, resolves the sandbox first so the handle uses
+   * the correct cloud/region ingress endpoint. Does **not** auto-resume a
+   * suspended sandbox — call `sandbox.resume()` explicitly.
    */
   static async connect(
     options: ConnectOptions & Partial<SandboxClientOptions>,
@@ -867,6 +991,7 @@ export class Sandbox {
     token: string,
     options?: PtyConnectionOptions,
   ): Promise<Pty> {
+    await this.proxy.ensureResolved();
     const wsUrl = new URL(this.ptyWsUrl(sessionId, token));
     const authToken = wsUrl.searchParams.get("token") ?? token;
 
@@ -899,6 +1024,7 @@ export class Sandbox {
     remotePort: number,
     options?: CreateTunnelOptions,
   ): Promise<TcpTunnel> {
+    await this.proxy.ensureResolved();
     return TcpTunnel.listen({
       baseUrl: this.baseUrl,
       wsHeaders: this.wsHeaders,
@@ -911,6 +1037,7 @@ export class Sandbox {
 
   /** Connect to a sandbox VNC session for programmatic desktop control. */
   async connectDesktop(options?: ConnectDesktopOptions): Promise<Desktop> {
+    await this.proxy.ensureResolved();
     const port = options?.port ?? 5901;
     const connectTimeout = options?.connectTimeout ?? 10;
 

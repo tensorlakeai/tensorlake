@@ -297,9 +297,9 @@ class Sandbox:
     ) -> "Sandbox":
         """Attach to an existing sandbox and return a connected handle.
 
-        Returns immediately without contacting the server. Call ``sandbox.info()``
-        to fetch the current state on demand.  Does **not** auto-resume a
-        suspended sandbox — call ``sandbox.resume()`` explicitly.
+        When ``proxy_url`` is omitted, resolves the sandbox first so the handle
+        uses the correct cloud/region ingress endpoint. Does **not** auto-resume
+        a suspended sandbox — call ``sandbox.resume()`` explicitly.
 
         Args:
             sandbox_id: ID or name of the sandbox to attach to.

@@ -2604,7 +2604,7 @@ fn parse_archived_sandboxes_params(
 ///
 /// Returns `(base_url, host_override, sandbox_id_header)`:
 /// - localhost: `base_url` = proxy URL as-is; `host_override` = `{sandbox_id}.local`; no sandbox_id header
-/// - cloud: `base_url` = apex proxy domain (no sandbox subdomain); `sandbox_id_header` = sandbox_id for `X-Tensorlake-Sandbox-Id` header
+/// - cloud: `base_url` = the server-selected ingress endpoint; `sandbox_id_header` = sandbox_id for `X-Tensorlake-Sandbox-Id` header
 fn resolve_proxy_target(
     proxy_url: &str,
     sandbox_id: &str,

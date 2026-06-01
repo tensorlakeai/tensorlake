@@ -8,6 +8,7 @@ export { CloudClient } from "./cloud-client.js";
 export { APIClient } from "./api-client.js";
 export { createSandboxImage } from "./sandbox-image.js";
 export { Image, dockerfileContent, ImageBuildOperationType } from "./image.js";
+export { sandboxUrlFromIngressEndpoint } from "./url.js";
 
 export type {
   PtyDataHandler,

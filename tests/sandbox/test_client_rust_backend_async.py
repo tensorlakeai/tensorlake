@@ -14,6 +14,14 @@ from tensorlake.sandbox.async_client import AsyncSandboxClient
 from tensorlake.sandbox.exceptions import SandboxError
 
 
+class _FakeAsyncRustProxyClient:
+    def __init__(self, base_url: str):
+        self._base_url = base_url
+
+    def base_url(self):
+        return self._base_url
+
+
 class _FakeAsyncRustClient:
     def __init__(self):
         self.create_request_json: str = ""
@@ -35,7 +43,7 @@ class _FakeAsyncRustClient:
                 "routing_hint": routing_hint,
             }
         )
-        return None
+        return _FakeAsyncRustProxyClient(proxy_url)
 
     async def suspend_sandbox_async(self, *, sandbox_id):
         self.suspend_calls.append(sandbox_id)
@@ -107,6 +115,7 @@ class _FakeAsyncRustClient:
   "secret_names": [],
   "allow_unauthenticated_access": false,
   "exposed_ports": [8080],
+  "ingress_endpoint": "https://sandbox.us-east-1.aws.tensorlake.ai",
   "sandbox_url": "https://sbx-1.sandbox.tensorlake.ai"
 }
 """,
@@ -131,6 +140,7 @@ class _FakeAsyncRustClient:
                 "allow_unauthenticated_access", False
             ),
             "exposed_ports": payload.get("exposed_ports", []),
+            "ingress_endpoint": "https://sandbox.us-east-1.aws.tensorlake.ai",
             "sandbox_url": f"https://{sandbox_id}.sandbox.tensorlake.ai",
         }
         return ("trace-update-sandbox", json.dumps(response))
@@ -219,6 +229,25 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(SandboxError, "Provide only one of"):
             await client.connect("stable-name", sandbox_id="sbx-123")
 
+    async def test_connect_resolves_ingress_endpoint_when_proxy_url_omitted(self):
+        fake = _FakeAsyncRustClient()
+        client = _make_client(fake)
+
+        sandbox = await client.connect("stable-name")
+
+        self.assertEqual(fake.last_get_sandbox_id, "stable-name")
+        self.assertEqual(
+            fake.connect_proxy_calls,
+            [
+                {
+                    "proxy_url": "https://sandbox.us-east-1.aws.tensorlake.ai",
+                    "sandbox_id": "sbx-1",
+                    "routing_hint": None,
+                }
+            ],
+        )
+        self.assertEqual(sandbox.sandbox_id, "sbx-1")
+
     async def test_create_uses_rust_backend(self):
         fake = _FakeAsyncRustClient()
         client = _make_client(fake)
@@ -276,6 +305,39 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         ):
             await client.create_and_connect(image="tensorlake/missing-image")
 
+    async def test_create_and_connect_uses_ingress_endpoint_from_running_response(self):
+        class _RunningRustClient(_FakeAsyncRustClient):
+            async def create_sandbox_async(self, *, request_json):
+                self.create_request_json = request_json
+                return (
+                    "trace-create-sandbox",
+                    json.dumps(
+                        {
+                            "sandbox_id": "sbx-1",
+                            "status": "running",
+                            "routing_hint": "hint-1",
+                            "ingress_endpoint": "https://sandbox.us-east-1.aws.tensorlake.ai",
+                        }
+                    ),
+                )
+
+        fake = _RunningRustClient()
+        client = _make_client(fake)
+
+        sandbox = await client.create_and_connect(image="python:3.11")
+
+        self.assertEqual(sandbox.sandbox_id, "sbx-1")
+        self.assertEqual(
+            fake.connect_proxy_calls,
+            [
+                {
+                    "proxy_url": "https://sandbox.us-east-1.aws.tensorlake.ai",
+                    "sandbox_id": "sbx-1",
+                    "routing_hint": "hint-1",
+                }
+            ],
+        )
+
     async def test_create_and_connect_polls_until_running(self):
         fake = _StatusSequenceRustClient(["pending", "running"])
         client = _make_client(fake)
@@ -326,6 +388,10 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(access.allow_unauthenticated_access)
         self.assertEqual(access.exposed_ports, [8080])
+        self.assertEqual(
+            access.ingress_endpoint,
+            "https://sandbox.us-east-1.aws.tensorlake.ai",
+        )
         self.assertEqual(access.sandbox_url, "https://sbx-1.sandbox.tensorlake.ai")
 
     async def test_expose_ports_merges_existing_ports(self):

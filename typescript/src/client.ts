@@ -243,6 +243,7 @@ export class SandboxClient {
     return {
       allowUnauthenticatedAccess: info.allowUnauthenticatedAccess ?? false,
       exposedPorts: dedupeAndSortPorts(info.exposedPorts ?? []),
+      ingressEndpoint: info.ingressEndpoint,
       sandboxUrl: info.sandboxUrl,
     };
   }
@@ -568,6 +569,9 @@ export class SandboxClient {
       organizationId: this.organizationId,
       projectId: this.projectId,
       routingHint,
+      resolveProxyInfo: proxyUrl == null
+        ? async (currentIdentifier) => this.get(currentIdentifier)
+        : undefined,
     });
   }
 
@@ -592,8 +596,16 @@ export class SandboxClient {
       : await this.create(options);
     const requestedName = options?.poolId != null ? null : options?.name ?? null;
 
-    const finishConnect = (routingHint: string | undefined, name: string | null | undefined) => {
-      const sandbox = this.connect(result.sandboxId, options?.proxyUrl, routingHint);
+    const finishConnect = (
+      routingHint: string | undefined,
+      name: string | null | undefined,
+      ingressEndpoint: string | undefined,
+    ) => {
+      const sandbox = this.connect(
+        result.sandboxId,
+        options?.proxyUrl ?? ingressEndpoint,
+        routingHint,
+      );
       sandbox._setOwner(this);
       sandbox.traceId = result.traceId;
       sandbox._setLifecycleIdentifier(result.sandboxId);
@@ -605,7 +617,7 @@ export class SandboxClient {
     // and a short-lived routing hint. Use it immediately to skip an extra poll RTT
     // and let the proxy route the first request without a placement lookup.
     if (result.status === SandboxStatus.RUNNING) {
-      return finishConnect(result.routingHint, result.name);
+      return finishConnect(result.routingHint, result.name, result.ingressEndpoint);
     }
     if (
       result.status === SandboxStatus.SUSPENDED ||
@@ -624,7 +636,7 @@ export class SandboxClient {
     while (Date.now() < deadline) {
       const info = await this.get(result.sandboxId);
       if (info.status === SandboxStatus.RUNNING) {
-        return finishConnect(info.routingHint, info.name);
+        return finishConnect(info.routingHint, info.name, info.ingressEndpoint);
       }
       if (
         info.status === SandboxStatus.SUSPENDED ||

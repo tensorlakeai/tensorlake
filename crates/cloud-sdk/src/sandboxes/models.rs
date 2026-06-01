@@ -85,6 +85,8 @@ pub struct CreateSandboxResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub termination_reason: Option<String>,
@@ -128,6 +130,8 @@ pub struct SandboxInfo {
     pub allow_unauthenticated_access: bool,
     #[serde(default)]
     pub exposed_ports: Option<Vec<u16>>,
+    #[serde(default)]
+    pub ingress_endpoint: Option<String>,
     #[serde(default)]
     pub sandbox_url: Option<String>,
 }

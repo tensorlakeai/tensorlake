@@ -179,6 +179,7 @@ describe("SandboxClient", () => {
             secret_names: [],
             allow_unauthenticated_access: true,
             exposed_ports: [8080, 3000],
+            ingress_endpoint: "https://sandbox.us-east-1.aws.tensorlake.ai",
             sandbox_url: "https://sbx-ports.sandbox.tensorlake.ai",
           }),
           { status: 200 },
@@ -189,6 +190,7 @@ describe("SandboxClient", () => {
       const info = await client.get("sbx-ports");
       expect(info.allowUnauthenticatedAccess).toBe(true);
       expect(info.exposedPorts).toEqual([8080, 3000]);
+      expect(info.ingressEndpoint).toBe("https://sandbox.us-east-1.aws.tensorlake.ai");
       expect(info.sandboxUrl).toBe("https://sbx-ports.sandbox.tensorlake.ai");
       client.close();
     });
@@ -338,6 +340,7 @@ describe("SandboxClient", () => {
             secret_names: [],
             allow_unauthenticated_access: false,
             exposed_ports: [8080],
+            ingress_endpoint: "https://sandbox.us-east-1.aws.tensorlake.ai",
             sandbox_url: "https://sbx-1.sandbox.tensorlake.ai",
           }),
           { status: 200 },
@@ -348,6 +351,7 @@ describe("SandboxClient", () => {
       const access = await client.getPortAccess("sbx-1");
       expect(access.allowUnauthenticatedAccess).toBe(false);
       expect(access.exposedPorts).toEqual([8080]);
+      expect(access.ingressEndpoint).toBe("https://sandbox.us-east-1.aws.tensorlake.ai");
       expect(access.sandboxUrl).toBe("https://sbx-1.sandbox.tensorlake.ai");
       client.close();
     });
@@ -552,6 +556,29 @@ describe("SandboxClient", () => {
   });
 
   describe("createAndConnect", () => {
+    it("uses ingress endpoint from running create response", async () => {
+      mockFetch(() =>
+        new Response(
+          JSON.stringify({
+            sandbox_id: "sbx-1",
+            status: "running",
+            routing_hint: "hint-1",
+            ingress_endpoint: "https://sandbox.us-east-1.aws.tensorlake.ai",
+          }),
+          { status: 200 },
+        ),
+      );
+
+      const client = SandboxClient.forCloud({ apiKey: "key" });
+      const sandbox = await client.createAndConnect();
+      expect(sandbox.sandboxId).toBe("sbx-1");
+      expect((sandbox as unknown as { baseUrl: string }).baseUrl).toBe(
+        "https://sandbox.us-east-1.aws.tensorlake.ai",
+      );
+      sandbox.close();
+      client.close();
+    });
+
     it("includes sandbox errorDetails in startup failures", async () => {
       vi.mocked(undici.fetch)
         .mockResolvedValueOnce(
@@ -837,6 +864,49 @@ describe("SandboxClient", () => {
       const client = SandboxClient.forLocalhost();
       const sandbox = client.connect("sbx-1");
       expect(sandbox.sandboxId).toBe("sbx-1");
+      sandbox.close();
+      client.close();
+    });
+
+    it("resolves ingress endpoint before first proxy request", async () => {
+      const calls: string[] = [];
+      mockFetch((url, init) => {
+        calls.push(url);
+        if (url.includes("/sandboxes/stable-name")) {
+          return new Response(
+            JSON.stringify({
+              sandbox_id: "sbx-1",
+              status: "running",
+              ingress_endpoint: "https://sandbox.us-east-1.aws.tensorlake.ai",
+              routing_hint: "hint-1",
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/api/v1/health")) {
+          expect(url).toBe(
+            "https://sandbox.us-east-1.aws.tensorlake.ai/api/v1/health",
+          );
+          expect(
+            (init?.headers as Record<string, string>)["X-Tensorlake-Sandbox-Id"],
+          ).toBe("sbx-1");
+          expect(
+            (init?.headers as Record<string, string>)["X-Tensorlake-Route-Hint"],
+          ).toBe("hint-1");
+          return new Response(JSON.stringify({ healthy: true }), { status: 200 });
+        }
+        return new Response("", { status: 404 });
+      });
+
+      const client = SandboxClient.forCloud({ apiKey: "key" });
+      const sandbox = client.connect("stable-name");
+      const health = await sandbox.health();
+
+      expect(health.healthy).toBe(true);
+      expect(calls[0]).toContain("/sandboxes/stable-name");
+      expect(calls[1]).toBe(
+        "https://sandbox.us-east-1.aws.tensorlake.ai/api/v1/health",
+      );
       sandbox.close();
       client.close();
     });

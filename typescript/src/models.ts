@@ -108,6 +108,7 @@ export interface CreateSandboxResponse {
   sandboxId: string;
   status: SandboxStatus;
   routingHint?: string;
+  ingressEndpoint?: string;
   name?: string | null;
   terminationReason?: string;
   errorDetails?: unknown;
@@ -133,6 +134,7 @@ export interface SandboxInfo {
   name?: string;
   allowUnauthenticatedAccess?: boolean;
   exposedPorts?: number[];
+  ingressEndpoint?: string;
   sandboxUrl?: string;
   routingHint?: string;
 }
@@ -140,6 +142,7 @@ export interface SandboxInfo {
 export interface SandboxPortAccess {
   allowUnauthenticatedAccess: boolean;
   exposedPorts: number[];
+  ingressEndpoint?: string;
   sandboxUrl?: string;
 }
 
@@ -383,6 +386,9 @@ export interface SandboxOptions {
   organizationId?: string;
   projectId?: string;
   routingHint?: string;
+  resolveProxyInfo?: (
+    identifier: string,
+  ) => Promise<SandboxInfo & { readonly traceId: string }>;
 }
 
 export interface CreateAndConnectOptions extends CreateSandboxOptions {
