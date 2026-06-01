@@ -211,10 +211,9 @@ struct PreparedSandboxTemplateBuild {
     /// Optional during and after the versioned-response rollout: platform-api
     /// is moving the snapshot location off of a pre-baked `snapshotUri` and
     /// onto `snapshotRelPath` (resolved client-side via
-    /// `SandboxProxyClient::sign_blob`). When absent here, the in-sandbox
-    /// builder's `metadata.json` carries the final URI it uploaded to, which
-    /// `complete_request_from_metadata` forwards to platform-api on
-    /// completion.
+    /// `SandboxProxyClient::sign_blob`). On that new path, the signed upload
+    /// response carries the final URI and the CLI copies it into the build
+    /// spec before the in-sandbox builder writes `metadata.json`.
     #[serde(default)]
     snapshot_uri: Option<String>,
     rootfs_node_kind: String,
@@ -223,8 +222,8 @@ struct PreparedSandboxTemplateBuild {
     /// New-path marker: when present, platform-api stopped pre-signing S3 and
     /// the CLI must call `SandboxProxyClient::sign_blob` to mint the upload
     /// spec. When absent, the response carries an embedded `upload` block in
-    /// the raw passthrough `Value` (legacy path). Everything else about the
-    /// prepared spec stays opaque to the SDK to preserve the
+    /// the raw passthrough `Value` (legacy path). Apart from the top-level
+    /// `snapshotUri` handoff, the prepared spec stays opaque to preserve the
     /// platform-api ↔ in-sandbox-builder forward-compat property.
     #[serde(default)]
     snapshot_rel_path: Option<String>,
@@ -417,10 +416,7 @@ where
                 .await
                 .map_err(SandboxImageBuildError::Sdk)?
                 .into_inner();
-            prepared_spec
-                .as_object_mut()
-                .ok_or_else(|| SandboxImageBuildError::other("prepared spec is not a JSON object"))?
-                .insert("upload".to_string(), signed);
+            splice_signed_upload(&mut prepared_spec, signed)?;
 
             if let Some(parent) = prepared.parent.as_ref() {
                 let signed = proxy
@@ -986,6 +982,23 @@ fn build_rootfs_spec(
     Ok(spec)
 }
 
+fn splice_signed_upload(prepared_spec: &mut Value, signed_upload: Value) -> Result<()> {
+    let snapshot_uri = signed_upload
+        .get("uri")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            SandboxImageBuildError::other("dataplane signed upload response is missing uri")
+        })?
+        .to_string();
+
+    let object = prepared_spec
+        .as_object_mut()
+        .ok_or_else(|| SandboxImageBuildError::other("prepared spec is not a JSON object"))?;
+    object.insert("snapshotUri".to_string(), Value::String(snapshot_uri));
+    object.insert("upload".to_string(), signed_upload);
+    Ok(())
+}
+
 fn rootfs_disk_bytes(disk_mb: Option<u64>, prepared: &PreparedSandboxTemplateBuild) -> Result<u64> {
     if let Some(disk_mb) = disk_mb {
         return disk_mb.checked_mul(1024 * 1024).ok_or_else(|| {
@@ -1171,20 +1184,7 @@ fn complete_request_from_metadata(
     Ok(CompleteSandboxTemplateBuildRequest {
         snapshot_id: metadata_string(metadata, "snapshot_id", "snapshotId")
             .unwrap_or_else(|| prepared.snapshot_id.clone()),
-        // `prepared.snapshot_uri` is optional on the new path (platform-api
-        // ships `snapshotRelPath` instead). The in-sandbox builder always
-        // knows where it landed the upload, so its metadata.json is the
-        // authoritative source post-build; the prepared value is just a
-        // fallback for the legacy path. If neither has it, that's a real
-        // bug — surface it clearly instead of POSTing an empty string.
-        snapshot_uri: metadata_string(metadata, "snapshot_uri", "snapshotUri")
-            .or_else(|| prepared.snapshot_uri.clone())
-            .ok_or_else(|| {
-                SandboxImageBuildError::other(
-                    "rootfs build completed without snapshot_uri (missing from both \
-                     platform-api prepared spec and in-sandbox builder metadata)",
-                )
-            })?,
+        snapshot_uri: completion_snapshot_uri(prepared, metadata)?,
         snapshot_format_version: required_metadata_string(
             metadata,
             "snapshot_format_version",
@@ -1199,6 +1199,25 @@ fn complete_request_from_metadata(
         rootfs_node_kind,
         parent_manifest_uri,
     })
+}
+
+fn completion_snapshot_uri(
+    prepared: &PreparedSandboxTemplateBuild,
+    metadata: &Value,
+) -> Result<String> {
+    if let Some(snapshot_uri) = metadata_string(metadata, "snapshot_uri", "snapshotUri") {
+        return Ok(snapshot_uri);
+    }
+
+    if prepared.snapshot_rel_path.is_none() {
+        if let Some(snapshot_uri) = prepared.snapshot_uri.clone() {
+            return Ok(snapshot_uri);
+        }
+    }
+
+    Err(SandboxImageBuildError::other(
+        "rootfs build completed without snapshot_uri",
+    ))
 }
 
 fn required_metadata_string(metadata: &Value, snake_key: &str, camel_key: &str) -> Result<String> {
@@ -1956,7 +1975,7 @@ mod tests {
         complete_request_from_metadata, default_registered_name, load_dockerfile_plan,
         load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix, rootfs_builder_env,
         rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
-        streaming_process_payload,
+        splice_signed_upload, streaming_process_payload,
     };
     use serde_json::{Value, json};
     use std::io::Write;
@@ -2308,8 +2327,7 @@ mod tests {
     fn prepared_deserializes_without_snapshot_uri() {
         // Forward-compat with platform-api dropping `snapshotUri` once the
         // versioned-response rollout finishes: the CLI must still accept
-        // the response and rely on the in-sandbox builder's metadata.json
-        // for the final URI.
+        // the response and fill the final URI from dataplane signing.
         let prepared: PreparedSandboxTemplateBuild = serde_json::from_value(json!({
             "buildId": "build-1",
             "snapshotId": "snapshot-1",
@@ -2408,6 +2426,53 @@ mod tests {
     }
 
     #[test]
+    fn splice_signed_upload_uses_dataplane_uri_for_snapshot_uri() {
+        let mut prepared_spec = json!({
+            "buildId": "build-1",
+            "snapshotId": "snapshot-1",
+            "snapshotUri": "s3://platform/stale.tlsnap",
+            "rootfsNodeKind": "base",
+        });
+        let signed_upload = json!({
+            "kind": "s3_multipart",
+            "uri": "s3://dataplane/final.tlsnap",
+            "uploadId": "upload-1",
+            "partSizeBytes": 67_108_864,
+            "partUrls": []
+        });
+
+        splice_signed_upload(&mut prepared_spec, signed_upload).unwrap();
+
+        assert_eq!(prepared_spec["snapshotUri"], "s3://dataplane/final.tlsnap");
+        assert_eq!(
+            prepared_spec["upload"]["uri"],
+            "s3://dataplane/final.tlsnap"
+        );
+        assert_eq!(prepared_spec["upload"]["uploadId"], "upload-1");
+    }
+
+    #[test]
+    fn splice_signed_upload_requires_dataplane_uri() {
+        let mut prepared_spec = json!({
+            "buildId": "build-1",
+            "snapshotId": "snapshot-1",
+            "rootfsNodeKind": "base",
+        });
+        let signed_upload = json!({
+            "kind": "s3_multipart",
+            "uploadId": "upload-1",
+            "partSizeBytes": 67_108_864,
+            "partUrls": []
+        });
+
+        let error = splice_signed_upload(&mut prepared_spec, signed_upload).unwrap_err();
+        assert!(
+            error.to_string().contains("missing uri"),
+            "expected signed upload uri error, got: {error}"
+        );
+    }
+
+    #[test]
     fn rootfs_builder_command_uses_installed_path_and_tool_path() {
         assert_eq!(
             rootfs_builder_executable("tl-rootfs-build"),
@@ -2491,13 +2556,14 @@ mod tests {
 
     #[test]
     fn complete_request_uses_metadata_snapshot_uri_when_prepared_omits_it() {
-        // On the new (snapshotRelPath) path platform-api will stop emitting
-        // `snapshotUri` on the prepared response. The in-sandbox builder's
-        // metadata.json then becomes the authoritative source for the URI
-        // we forward to platform-api on completion.
+        // On the new (snapshotRelPath) path, the CLI copies dataplane's
+        // signed `uri` into the builder spec. The builder then writes that
+        // value into metadata.json, which becomes authoritative for
+        // completion.
         let mut prepared = prepared_build("base");
         prepared.parent = None;
         prepared.snapshot_uri = None;
+        prepared.snapshot_rel_path = Some("snapshots/final.tlsnap".to_string());
         let metadata = json!({
             "snapshot_uri": "s3://bucket/from-metadata.tlsnap",
             "snapshot_format_version": "durable_archive_v1",
@@ -2507,6 +2573,25 @@ mod tests {
 
         let request = complete_request_from_metadata(&prepared, &metadata).unwrap();
         assert_eq!(request.snapshot_uri, "s3://bucket/from-metadata.tlsnap");
+    }
+
+    #[test]
+    fn complete_request_does_not_fallback_to_prepared_uri_on_rel_path_flow() {
+        let mut prepared = prepared_build("base");
+        prepared.parent = None;
+        prepared.snapshot_uri = Some("s3://bucket/stale-prepared.tlsnap".to_string());
+        prepared.snapshot_rel_path = Some("snapshots/final.tlsnap".to_string());
+        let metadata = json!({
+            "snapshot_format_version": "durable_archive_v1",
+            "snapshot_size_bytes": 1234,
+            "rootfs_disk_bytes": 10 * 1024 * 1024 * 1024_u64
+        });
+
+        let error = complete_request_from_metadata(&prepared, &metadata).unwrap_err();
+        assert!(
+            error.to_string().contains("snapshot_uri"),
+            "expected snapshot_uri error, got: {error}"
+        );
     }
 
     #[test]

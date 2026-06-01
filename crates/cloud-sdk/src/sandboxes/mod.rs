@@ -599,10 +599,9 @@ impl SandboxProxyClient {
     /// Used during the versioned-response rollout: platform-api now returns
     /// `snapshotRelPath` instead of a pre-signed `upload` block, and the CLI
     /// calls this endpoint to resolve the rel-path into a concrete upload
-    /// spec (single-PUT presigned URL or multipart parts). The response is
-    /// returned as an opaque `serde_json::Value` because it splices verbatim
-    /// into the rootfs build spec consumed by the in-sandbox builder — the
-    /// SDK intentionally does not reach into that contract.
+    /// spec (single-PUT presigned URL or multipart parts). The response is a
+    /// `serde_json::Value` because most fields splice verbatim into the
+    /// rootfs build spec consumed by the in-sandbox builder.
     pub async fn sign_blob(&self, request: &SignBlobRequest) -> Result<Traced<Value>, SdkError> {
         let req = self
             .request(Method::POST, "/api/v1/blob/sign")

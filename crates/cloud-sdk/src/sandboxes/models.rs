@@ -365,8 +365,7 @@ pub struct ListDirectoryResponse {
 
 /// Request body for `POST /api/v1/blob/sign`. The proxy converts either the
 /// `rel_path` returned by platform-api or a full parent snapshot URI into a
-/// concrete upload/download spec, keeping the platform-api ↔ in-sandbox
-/// builder contract opaque to the SDK.
+/// concrete upload/download spec.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SignBlobRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
