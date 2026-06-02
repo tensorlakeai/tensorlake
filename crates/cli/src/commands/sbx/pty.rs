@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use crate::auth::context::CliContext;
 use crate::cache::KvCache;
-use crate::commands::sbx::{sandbox_proxy_base, with_sandbox_headers};
+use crate::commands::sbx::{resolve_sandbox_proxy_target, with_sandbox_headers};
 use crate::config::files::normalize_api_url;
 use crate::error::{CliError, Result};
 use crate::output::table::new_table;
@@ -27,11 +27,10 @@ pub async fn list(
     output_json: bool,
 ) -> Result<()> {
     let client = ctx.client()?;
-    let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
+    let target = resolve_sandbox_proxy_target(ctx, sandbox_id).await?;
     let resp = with_sandbox_headers(
-        client.get(format!("{proxy_base}/api/v1/pty")),
-        sandbox_id,
-        host_override,
+        client.get(format!("{}/api/v1/pty", target.proxy_base)),
+        &target,
     )
     .send()
     .await
@@ -50,7 +49,7 @@ pub async fn list(
     let response: Value = resp.json().await.map_err(CliError::Http)?;
     let mut sessions = parse_session_listing(&response)?;
 
-    hydrate_session_tokens(ctx, sandbox_id, &mut sessions).await;
+    hydrate_session_tokens(ctx, &target.sandbox_id, &mut sessions).await;
 
     if sessions.is_empty() {
         if output_json {
@@ -98,19 +97,19 @@ pub async fn attach(
     session_id: &str,
     token: &str,
 ) -> Result<()> {
-    cache_pty_token(ctx, sandbox_id, session_id, token).await;
-    super::ssh::attach_to_session(ctx, sandbox_id, session_id, token, "pty attach").await
+    let target = resolve_sandbox_proxy_target(ctx, sandbox_id).await?;
+    cache_pty_token(ctx, &target.sandbox_id, session_id, token).await;
+    super::ssh::attach_to_session(ctx, &target.sandbox_id, session_id, token, "pty attach").await
 }
 
 pub async fn remove(ctx: &CliContext, sandbox_id: &str, session_ids: &[String]) -> Result<()> {
     let client = ctx.client()?;
-    let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
+    let target = resolve_sandbox_proxy_target(ctx, sandbox_id).await?;
 
     for session_id in session_ids {
         let resp = with_sandbox_headers(
-            client.delete(format!("{proxy_base}/api/v1/pty/{session_id}")),
-            sandbox_id,
-            host_override.clone(),
+            client.delete(format!("{}/api/v1/pty/{session_id}", target.proxy_base)),
+            &target,
         )
         .send()
         .await
@@ -127,7 +126,7 @@ pub async fn remove(ctx: &CliContext, sandbox_id: &str, session_ids: &[String]) 
             )));
         }
 
-        delete_cached_pty_token(ctx, sandbox_id, session_id).await;
+        delete_cached_pty_token(ctx, &target.sandbox_id, session_id).await;
     }
 
     if session_ids.len() == 1 {
