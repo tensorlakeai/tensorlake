@@ -3,7 +3,10 @@ use std::time::Duration;
 
 use crate::auth::context::CliContext;
 use crate::commands::sbx::pty::cache_pty_token;
-use crate::commands::sbx::{parse_env_vars, sandbox_proxy_base, with_sandbox_headers};
+use crate::commands::sbx::{
+    ResolvedSandboxProxyTarget, parse_env_vars, resolve_sandbox_proxy_target,
+    with_sandbox_headers,
+};
 use crate::error::{CliError, Result};
 use reqwest::header::{AUTHORIZATION, HOST, HeaderMap, HeaderName, HeaderValue};
 use tokio::sync::mpsc;
@@ -31,7 +34,7 @@ pub async fn run(
     ensure_interactive_terminal("ssh")?;
 
     let env_dict = parse_env_vars(env)?;
-    let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
+    let target = resolve_sandbox_proxy_target(ctx, sandbox_id).await?;
     let client = ctx.client()?;
 
     // Get terminal size
@@ -73,10 +76,9 @@ pub async fn run(
 
     let pty_resp = with_sandbox_headers(
         client
-            .post(format!("{}/api/v1/pty", proxy_base))
+            .post(format!("{}/api/v1/pty", target.proxy_base))
             .json(&pty_payload),
-        sandbox_id,
-        host_override.clone(),
+        &target,
     )
     .send()
     .await
@@ -102,15 +104,17 @@ pub async fn run(
         .and_then(|v| v.as_str())
         .ok_or_else(|| CliError::Other(anyhow::anyhow!("missing token in PTY response")))?;
 
-    cache_pty_token(ctx, sandbox_id, session_id, token).await;
+    cache_pty_token(ctx, &target.sandbox_id, session_id, token).await;
+
+    let resolved_sandbox_id = target.sandbox_id.clone();
 
     attach_to_session_unchecked(
         ctx,
-        sandbox_id,
+        &resolved_sandbox_id,
         session_id,
         token,
         "ssh",
-        Some((proxy_base, host_override)),
+        Some(target),
     )
     .await
 }
@@ -138,8 +142,7 @@ fn ensure_interactive_terminal(command_name: &str) -> Result<()> {
 
 fn build_ws_headers(
     ctx: &CliContext,
-    sandbox_id: &str,
-    host_override: Option<&str>,
+    target: &ResolvedSandboxProxyTarget,
 ) -> Result<HeaderMap> {
     let mut ws_headers = HeaderMap::new();
 
@@ -167,7 +170,7 @@ fn build_ws_headers(
             })?,
         );
     }
-    if let Some(host) = host_override {
+    if let Some(host) = target.host_override.as_deref() {
         ws_headers.insert(
             HOST,
             HeaderValue::from_str(host)
@@ -176,8 +179,16 @@ fn build_ws_headers(
     } else {
         ws_headers.insert(
             HeaderName::from_static("x-tensorlake-sandbox-id"),
-            HeaderValue::from_str(sandbox_id).map_err(|e| {
+            HeaderValue::from_str(&target.sandbox_id).map_err(|e| {
                 CliError::Other(anyhow::anyhow!("invalid sandbox id header: {}", e))
+            })?,
+        );
+    }
+    if let Some(hint) = target.routing_hint.as_deref() {
+        ws_headers.insert(
+            HeaderName::from_static("x-tensorlake-route-hint"),
+            HeaderValue::from_str(hint).map_err(|e| {
+                CliError::Other(anyhow::anyhow!("invalid route hint header: {}", e))
             })?,
         );
     }
@@ -201,12 +212,14 @@ async fn attach_to_session_unchecked(
     session_id: &str,
     token: &str,
     _command_name: &str,
-    proxy_details: Option<(String, Option<String>)>,
+    target: Option<ResolvedSandboxProxyTarget>,
 ) -> Result<()> {
-    let (proxy_base, host_override) =
-        proxy_details.unwrap_or_else(|| sandbox_proxy_base(ctx, sandbox_id));
-    let ws_headers = build_ws_headers(ctx, sandbox_id, host_override.as_deref())?;
-    let ws_url = build_ws_url(&proxy_base, session_id, token);
+    let target = match target {
+        Some(target) => target,
+        None => resolve_sandbox_proxy_target(ctx, sandbox_id).await?,
+    };
+    let ws_headers = build_ws_headers(ctx, &target)?;
+    let ws_url = build_ws_url(&target.proxy_base, session_id, token);
 
     // Connect WebSocket
     use tokio_tungstenite::tungstenite;

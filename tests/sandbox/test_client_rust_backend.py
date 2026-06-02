@@ -14,6 +14,14 @@ from tensorlake.sandbox.client import SandboxClient
 from tensorlake.sandbox.exceptions import SandboxError
 
 
+class _FakeRustProxyClient:
+    def __init__(self, base_url: str):
+        self._base_url = base_url
+
+    def base_url(self):
+        return self._base_url
+
+
 class _FakeRustClient:
     def __init__(self):
         self.create_request_json = None
@@ -22,6 +30,7 @@ class _FakeRustClient:
         self.create_snapshot_calls: list[tuple[str, str | None]] = []
         self.suspend_calls: list[str] = []
         self.resume_calls: list[str] = []
+        self.connect_proxy_calls: list[dict] = []
 
     def close(self):
         return None
@@ -31,6 +40,16 @@ class _FakeRustClient:
 
     def resume_sandbox(self, sandbox_id):
         self.resume_calls.append(sandbox_id)
+
+    def connect_proxy(self, *, proxy_url, sandbox_id, routing_hint=None):
+        self.connect_proxy_calls.append(
+            {
+                "proxy_url": proxy_url,
+                "sandbox_id": sandbox_id,
+                "routing_hint": routing_hint,
+            }
+        )
+        return _FakeRustProxyClient(proxy_url)
 
     def create_snapshot(self, sandbox_id, snapshot_type=None):
         self.create_snapshot_calls.append((sandbox_id, snapshot_type))
@@ -91,6 +110,7 @@ class _FakeRustClient:
   "secret_names": [],
   "allow_unauthenticated_access": false,
   "exposed_ports": [8080],
+  "ingress_endpoint": "https://sandbox.us-east-1.aws.tensorlake.ai",
   "sandbox_url": "https://sbx-1.sandbox.tensorlake.ai"
 }
 """,
@@ -115,6 +135,7 @@ class _FakeRustClient:
                 "allow_unauthenticated_access", False
             ),
             "exposed_ports": payload.get("exposed_ports", []),
+            "ingress_endpoint": "https://sandbox.us-east-1.aws.tensorlake.ai",
             "sandbox_url": f"https://{sandbox_id}.sandbox.tensorlake.ai",
         }
         return ("trace-update-sandbox", json.dumps(response))
@@ -159,6 +180,26 @@ class TestSandboxClientRustBackend(unittest.TestCase):
 
         with self.assertRaisesRegex(SandboxError, "Provide only one of"):
             client.connect("stable-name", sandbox_id="sbx-123")
+
+    def test_connect_resolves_ingress_endpoint_when_proxy_url_omitted(self):
+        client = SandboxClient(api_url="https://api.tensorlake.ai", api_key="k")
+        fake = _FakeRustClient()
+        client._rust_client = fake
+
+        sandbox = client.connect("stable-name")
+
+        self.assertEqual(fake.last_get_sandbox_id, "stable-name")
+        self.assertEqual(
+            fake.connect_proxy_calls,
+            [
+                {
+                    "proxy_url": "https://sandbox.us-east-1.aws.tensorlake.ai",
+                    "sandbox_id": "sbx-1",
+                    "routing_hint": None,
+                }
+            ],
+        )
+        self.assertEqual(sandbox.sandbox_id, "sbx-1")
 
     def test_create_uses_rust_backend(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
@@ -217,6 +258,40 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         ):
             client.create_and_connect(image="tensorlake/missing-image")
 
+    def test_create_and_connect_uses_ingress_endpoint_from_running_response(self):
+        class _RunningRustClient(_FakeRustClient):
+            def create_sandbox(self, request_json):
+                self.create_request_json = request_json
+                return (
+                    "trace-create-sandbox",
+                    json.dumps(
+                        {
+                            "sandbox_id": "sbx-1",
+                            "status": "running",
+                            "routing_hint": "hint-1",
+                            "ingress_endpoint": "https://sandbox.us-east-1.aws.tensorlake.ai",
+                        }
+                    ),
+                )
+
+        client = SandboxClient(api_url="https://api.tensorlake.ai", api_key="k")
+        fake = _RunningRustClient()
+        client._rust_client = fake
+
+        sandbox = client.create_and_connect(image="python:3.11")
+
+        self.assertEqual(sandbox.sandbox_id, "sbx-1")
+        self.assertEqual(
+            fake.connect_proxy_calls,
+            [
+                {
+                    "proxy_url": "https://sandbox.us-east-1.aws.tensorlake.ai",
+                    "sandbox_id": "sbx-1",
+                    "routing_hint": "hint-1",
+                }
+            ],
+        )
+
     def test_list_uses_rust_backend(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
         client._rust_client = _FakeRustClient()
@@ -255,6 +330,10 @@ class TestSandboxClientRustBackend(unittest.TestCase):
 
         self.assertFalse(access.allow_unauthenticated_access)
         self.assertEqual(access.exposed_ports, [8080])
+        self.assertEqual(
+            access.ingress_endpoint,
+            "https://sandbox.us-east-1.aws.tensorlake.ai",
+        )
         self.assertEqual(access.sandbox_url, "https://sbx-1.sandbox.tensorlake.ai")
 
     def test_expose_ports_merges_existing_ports(self):

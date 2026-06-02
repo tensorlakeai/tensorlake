@@ -45,6 +45,7 @@ from .models import (
     SnapshotType,
     SnapshotWaitCondition,
     StdinMode,
+    sandbox_url_from_ingress_endpoint,
 )
 from .pty import AsyncPty, Pty
 from .sandbox import Sandbox
@@ -71,6 +72,7 @@ __all__ = [
     "NetworkConfig",
     "ArchivedSandboxInfo",
     "ListArchivedSandboxesResponse",
+    "sandbox_url_from_ingress_endpoint",
     # Snapshot models
     "SnapshotStatus",
     "SnapshotType",

@@ -84,6 +84,26 @@ export function resolveProxyTarget(
 }
 
 /**
+ * Build a public sandbox URL from a server-provided ingress endpoint.
+ *
+ * `port` omitted or `9501` returns the management URL:
+ * `https://<sandbox-id>.<ingress-host>`. User ports use the public
+ * `<port>-<sandbox-id>.<ingress-host>` form.
+ */
+export function sandboxUrlFromIngressEndpoint(
+  ingressEndpoint: string,
+  sandboxId: string,
+  port = 9501,
+): string {
+  const parsed = new URL(ingressEndpoint);
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("ingressEndpoint must be an absolute http(s) URL");
+  }
+  const label = port === 9501 ? sandboxId : `${port}-${sandboxId}`;
+  return `${parsed.protocol}//${label}.${parsed.host}`;
+}
+
+/**
  * Derive the sandbox lifecycle URL from the API URL.
  *
  * Transforms `api.X` → `sandbox.X` for cloud. Returns the URL unchanged for

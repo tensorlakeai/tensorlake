@@ -1,5 +1,11 @@
 import { describe, expect, it, afterEach, vi } from "vitest";
-import { isLocalhost, resolveProxyUrl, resolveProxyTarget, lifecyclePath } from "../src/url.js";
+import {
+  isLocalhost,
+  resolveProxyUrl,
+  resolveProxyTarget,
+  lifecyclePath,
+  sandboxUrlFromIngressEndpoint,
+} from "../src/url.js";
 
 describe("isLocalhost", () => {
   it("returns true for localhost", () => {
@@ -87,6 +93,36 @@ describe("resolveProxyTarget", () => {
   it("strips trailing slash from localhost", () => {
     const result = resolveProxyTarget("http://localhost:9443/", "sbx-123");
     expect(result.baseUrl).toBe("http://localhost:9443");
+  });
+});
+
+describe("sandboxUrlFromIngressEndpoint", () => {
+  it("builds management URL from ingress endpoint", () => {
+    expect(
+      sandboxUrlFromIngressEndpoint(
+        "https://sandbox.us-east-1.aws.tensorlake.ai",
+        "sbx-123",
+      ),
+    ).toBe("https://sbx-123.sandbox.us-east-1.aws.tensorlake.ai");
+  });
+
+  it("builds user port URL from ingress endpoint", () => {
+    expect(
+      sandboxUrlFromIngressEndpoint(
+        "https://sandbox.us-east-1.aws.tensorlake.ai",
+        "sbx-123",
+        8080,
+      ),
+    ).toBe("https://8080-sbx-123.sandbox.us-east-1.aws.tensorlake.ai");
+  });
+
+  it("preserves ingress endpoint port", () => {
+    expect(
+      sandboxUrlFromIngressEndpoint(
+        "https://sandbox.us-east-1.aws.tensorlake.ai:9443",
+        "sbx-123",
+      ),
+    ).toBe("https://sbx-123.sandbox.us-east-1.aws.tensorlake.ai:9443");
   });
 });
 

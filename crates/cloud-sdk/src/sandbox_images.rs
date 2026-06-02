@@ -19,7 +19,7 @@ use crate::{
     resolve_sandbox_lifecycle_url,
     sandboxes::{
         SandboxProxyClient, SandboxesClient,
-        models::{CreateSandboxRequest, CreateSandboxResources, ProcessInfo},
+        models::{CreateSandboxRequest, CreateSandboxResources, ProcessInfo, SandboxInfo},
     },
 };
 
@@ -340,18 +340,28 @@ where
     let routing_hint = created.routing_hint.clone();
 
     let result = async {
-        wait_for_sandbox_status(
+        let running_info = wait_for_sandbox_status(
             &sandboxes,
             &sandbox_id,
             "running",
             DEFAULT_SANDBOX_WAIT_TIMEOUT,
         )
         .await?;
+        let ingress_endpoint = created
+            .ingress_endpoint
+            .clone()
+            .or_else(|| running_info.ingress_endpoint.clone());
         emit(SandboxImageBuildEvent::Status(format!(
             "Rootfs builder sandbox {sandbox_id} is running"
         )));
 
-        let proxy = sandbox_proxy_client(&ctx, &client, &sandbox_id, routing_hint)?;
+        let proxy = sandbox_proxy_client(
+            &ctx,
+            &client,
+            &sandbox_id,
+            ingress_endpoint.as_deref(),
+            routing_hint,
+        )?;
         wait_for_proxy_ready(&proxy).await?;
         upload_build_inputs(
             &proxy,
@@ -524,7 +534,7 @@ async fn wait_for_sandbox_status(
     sandbox_id: &str,
     target_status: &str,
     timeout: Duration,
-) -> Result<String> {
+) -> Result<SandboxInfo> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if tokio::time::Instant::now() > deadline {
@@ -539,7 +549,7 @@ async fn wait_for_sandbox_status(
         let info = sandboxes.get(sandbox_id).await?;
         let current_status = info.status.clone();
         if current_status == target_status {
-            return Ok(current_status);
+            return Ok(info.into_inner());
         }
         if current_status == "terminated" && target_status != "terminated" {
             return Err(SandboxImageBuildError::other(format!(
@@ -718,8 +728,14 @@ fn sandbox_template_builds_path(ctx: &ResolvedBuildContext) -> String {
     )
 }
 
-fn sandbox_proxy_base(api_url: &str, sandbox_id: &str) -> (String, Option<String>) {
-    let proxy_url = resolve_proxy_url(api_url);
+fn sandbox_proxy_base(
+    api_url: &str,
+    sandbox_id: &str,
+    ingress_endpoint: Option<&str>,
+) -> (String, Option<String>) {
+    let proxy_url = ingress_endpoint
+        .map(str::to_string)
+        .unwrap_or_else(|| resolve_proxy_url(api_url));
 
     if let Ok(parsed) = url::Url::parse(&proxy_url) {
         let host = parsed.host_str().unwrap_or("");
@@ -754,9 +770,11 @@ fn sandbox_proxy_client(
     ctx: &ResolvedBuildContext,
     client: &Client,
     sandbox_id: &str,
+    ingress_endpoint: Option<&str>,
     routing_hint: Option<String>,
 ) -> Result<SandboxProxyClient> {
-    let (proxy_base, host_override) = sandbox_proxy_base(&ctx.api_url, sandbox_id);
+    let (proxy_base, host_override) =
+        sandbox_proxy_base(&ctx.api_url, sandbox_id, ingress_endpoint);
     let sandbox_id_header = host_override.is_none().then(|| sandbox_id.to_string());
     Ok(
         SandboxProxyClient::new(client.with_base_url(&proxy_base), host_override)

@@ -3,8 +3,41 @@
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated, Any
+from urllib.parse import urlparse, urlunparse
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+
+_SANDBOX_MANAGEMENT_PORT = 9501
+
+
+def sandbox_url_from_ingress_endpoint(
+    ingress_endpoint: str,
+    sandbox_id: str,
+    port: int | None = None,
+) -> str:
+    """Build a public sandbox URL from a server-provided ingress endpoint.
+
+    ``port`` omitted or ``9501`` returns the sandbox management URL:
+    ``https://<sandbox-id>.<ingress-host>``. User ports use the public
+    ``<port>-<sandbox-id>.<ingress-host>`` form.
+    """
+
+    parsed = urlparse(ingress_endpoint)
+    if parsed.scheme not in ("http", "https") or parsed.hostname is None:
+        raise ValueError("ingress_endpoint must be an absolute http(s) URL")
+
+    label = (
+        sandbox_id
+        if port is None or port == _SANDBOX_MANAGEMENT_PORT
+        else f"{port}-{sandbox_id}"
+    )
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = f"{label}.{host}"
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return urlunparse((parsed.scheme, netloc, "", "", "", ""))
 
 
 def _parse_timestamp(v: int | float | datetime | None) -> datetime | None:
@@ -204,6 +237,7 @@ class CreateSandboxResponse(BaseModel):
     sandbox_id: str
     status: SandboxStatus
     routing_hint: str | None = None
+    ingress_endpoint: str | None = None
     name: str | None = None
     termination_reason: str | None = None
     error_details: Any | None = None
@@ -230,10 +264,24 @@ class SandboxInfo(BaseModel):
     name: str | None = None
     allow_unauthenticated_access: bool = False
     exposed_ports: list[int] | None = None
+    ingress_endpoint: str | None = None
     sandbox_url: str | None = None
     routing_hint: str | None = None
 
     model_config = {"populate_by_name": True}
+
+    def url_for_port(self, port: int = _SANDBOX_MANAGEMENT_PORT) -> str | None:
+        """Return the public URL for the management API or an exposed user port."""
+
+        if self.ingress_endpoint is not None:
+            return sandbox_url_from_ingress_endpoint(
+                self.ingress_endpoint,
+                self.sandbox_id,
+                port,
+            )
+        if port == _SANDBOX_MANAGEMENT_PORT:
+            return self.sandbox_url
+        return None
 
 
 class SandboxPortAccess(BaseModel):
@@ -241,6 +289,7 @@ class SandboxPortAccess(BaseModel):
 
     allow_unauthenticated_access: bool = False
     exposed_ports: list[int] = Field(default_factory=list)
+    ingress_endpoint: str | None = None
     sandbox_url: str | None = None
 
 

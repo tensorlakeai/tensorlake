@@ -601,6 +601,7 @@ class SandboxClient:
         port_access = SandboxPortAccess(
             allow_unauthenticated_access=traced.allow_unauthenticated_access,
             exposed_ports=sorted(set(traced.exposed_ports or [])),
+            ingress_endpoint=traced.ingress_endpoint,
             sandbox_url=traced.sandbox_url,
         )
         return Traced(traced.trace_id, port_access)
@@ -1107,17 +1108,22 @@ class SandboxClient:
             parameter_name="identifier",
         )
 
+        info: Traced[SandboxInfo] | None = None
+        proxy_sandbox_id = sandbox_identifier
         if proxy_url is None:
-            proxy_url = self._resolve_proxy_url()
+            info = self.get(sandbox_identifier)
+            proxy_url = info.ingress_endpoint or self._resolve_proxy_url()
+            proxy_sandbox_id = info.sandbox_id
+            routing_hint = routing_hint or info.routing_hint
 
         proxy_rust_client = self._rust_client.connect_proxy(
             proxy_url=proxy_url,
-            sandbox_id=sandbox_identifier,
+            sandbox_id=proxy_sandbox_id,
             routing_hint=routing_hint,
         )
 
         sandbox = Sandbox(
-            identifier=sandbox_identifier,
+            identifier=proxy_sandbox_id,
             proxy_url=proxy_url,
             api_key=self._api_key,
             organization_id=self._organization_id,
@@ -1126,6 +1132,10 @@ class SandboxClient:
             _proxy_rust_client=proxy_rust_client,
         )
         sandbox._lifecycle_client = self
+        if info is not None:
+            sandbox._sandbox_id = info.sandbox_id
+            sandbox._cached_info = info.value
+            sandbox._trace_id = info.trace_id
         return sandbox
 
     def create_and_connect(
@@ -1212,7 +1222,9 @@ class SandboxClient:
         if result.status == SandboxStatus.RUNNING:
             sandbox = self.connect(
                 result.sandbox_id,
-                proxy_url=proxy_url,
+                proxy_url=proxy_url
+                or result.ingress_endpoint
+                or self._resolve_proxy_url(),
                 routing_hint=result.routing_hint,
             )
             sandbox._sandbox_id = result.sandbox_id
@@ -1222,6 +1234,7 @@ class SandboxClient:
             sandbox._cached_info = SandboxInfo.model_construct(
                 sandbox_id=result.sandbox_id,
                 status=result.status,
+                ingress_endpoint=result.ingress_endpoint,
                 name=result.name or requested_name,
             )
             return sandbox
@@ -1241,11 +1254,13 @@ class SandboxClient:
             if info.status == SandboxStatus.RUNNING:
                 sandbox = self.connect(
                     result.sandbox_id,
-                    proxy_url=proxy_url,
+                    proxy_url=proxy_url
+                    or info.ingress_endpoint
+                    or self._resolve_proxy_url(),
                     routing_hint=info.routing_hint,
                 )
                 sandbox._sandbox_id = info.sandbox_id
-                sandbox._cached_info = info
+                sandbox._cached_info = info.value
                 sandbox._owns_sandbox = True
                 sandbox._lifecycle_client = self
                 sandbox._trace_id = result.trace_id

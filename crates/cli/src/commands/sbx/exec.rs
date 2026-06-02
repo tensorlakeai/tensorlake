@@ -3,7 +3,7 @@ use futures::StreamExt;
 use reqwest::header::ACCEPT;
 
 use crate::auth::context::CliContext;
-use crate::commands::sbx::{parse_env_vars, sandbox_proxy_base, with_sandbox_headers};
+use crate::commands::sbx::{parse_env_vars, resolve_sandbox_proxy_target, with_sandbox_headers};
 use crate::error::{CliError, Result};
 
 #[allow(clippy::too_many_arguments)]
@@ -18,7 +18,7 @@ pub async fn run(
     user: Option<&str>,
 ) -> Result<()> {
     let env_dict = parse_env_vars(env)?;
-    let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
+    let target = resolve_sandbox_proxy_target(ctx, sandbox_id).await?;
     let client = ctx.client()?;
 
     // Build request body
@@ -44,11 +44,10 @@ pub async fn run(
     // Single streaming POST: start process + stream output + get exit code
     let resp = with_sandbox_headers(
         client
-            .post(format!("{}/api/v1/processes/run", proxy_base))
+            .post(format!("{}/api/v1/processes/run", target.proxy_base))
             .header(ACCEPT, "text/event-stream")
             .json(&body),
-        sandbox_id,
-        host_override,
+        &target,
     )
     .send()
     .await
