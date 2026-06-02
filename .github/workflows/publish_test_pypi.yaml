@@ -26,7 +26,10 @@ jobs:
         id: version
         run: |
           base=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
-          echo "version=${base}-dev$(date +%s)" >> $GITHUB_OUTPUT
+          version="${base}-dev$(date +%s)"
+          echo "version=${version}" >> $GITHUB_OUTPUT
+          echo "## TestPyPI release version" >> $GITHUB_STEP_SUMMARY
+          echo "\`${version}\`" >> $GITHUB_STEP_SUMMARY
 
   build-sdist:
     needs: [prepare]
