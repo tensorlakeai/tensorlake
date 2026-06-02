@@ -3,12 +3,12 @@ import unittest
 from unittest.mock import patch
 
 from tensorlake.sandbox import (
-    _defaults,
     PoolInUseError,
     SandboxNotFoundError,
     SnapshotStatus,
     SnapshotType,
     SnapshotWaitCondition,
+    _defaults,
 )
 from tensorlake.sandbox.client import SandboxClient
 from tensorlake.sandbox.exceptions import SandboxError
